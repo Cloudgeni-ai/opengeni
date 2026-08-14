@@ -405,6 +405,7 @@ import {
 } from "../observability-metrics";
 import {
   buildCompanyBrainContributionReceipt,
+  modelVisibleCompanyBrainSkillActivations,
   summarizeCompanyBrainContributions,
 } from "../model-context-contributions";
 import {
@@ -7842,9 +7843,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           reason: "attached to session",
         })),
       ];
+      const modelVisibleRuntimeSkillActivations = modelVisibleCompanyBrainSkillActivations(
+        modelRunSettings.sandboxBackend,
+        runtimeSkillActivations,
+      );
       try {
         companyBrainContextContributions = summarizeCompanyBrainContributions(
-          buildCompanyBrainContributionReceiptFor(runtimeSkillActivations),
+          buildCompanyBrainContributionReceiptFor(modelVisibleRuntimeSkillActivations),
         );
       } catch {
         // Contribution telemetry must never change model execution semantics.
@@ -8271,8 +8276,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (companyBrainContributionReceiptRecorded) return;
         companyBrainContributionReceiptRecorded = true;
         try {
-          const companyBrainContributionReceipt =
-            buildCompanyBrainContributionReceiptFor(runtimeSkillActivations);
+          const companyBrainContributionReceipt = buildCompanyBrainContributionReceiptFor(
+            modelVisibleRuntimeSkillActivations,
+          );
           companyBrainContextContributions = summarizeCompanyBrainContributions(
             companyBrainContributionReceipt,
           );

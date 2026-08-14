@@ -2686,13 +2686,32 @@ export const ModelContextContributionSource = z.enum([
 export type ModelContextContributionSource = z.infer<typeof ModelContextContributionSource>;
 
 /** Content-free per-call summary of model-visible Company Brain material. */
-export const ModelContextContributionSummary = z.object({
-  source: ModelContextContributionSource,
-  items: z.number().int().nonnegative(),
-  utf8Bytes: z.number().int().nonnegative(),
-  estimatedTokens: z.number().int().nonnegative(),
-});
+export const ModelContextContributionSummary = z
+  .object({
+    source: ModelContextContributionSource,
+    items: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    utf8Bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    estimatedTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
 export type ModelContextContributionSummary = z.infer<typeof ModelContextContributionSummary>;
+
+export const ModelContextContributionSummaries = z
+  .array(ModelContextContributionSummary)
+  .max(6)
+  .superRefine((summaries, context) => {
+    const seen = new Set<ModelContextContributionSource>();
+    for (const [index, summary] of summaries.entries()) {
+      if (seen.has(summary.source)) {
+        context.addIssue({
+          code: "custom",
+          message: "Model context contribution sources must be unique",
+          path: [index, "source"],
+        });
+      }
+      seen.add(summary.source);
+    }
+  });
 
 export const InsightsPromptContributionRow = ModelContextContributionSummary.extend({
   calls: z.number().int().nonnegative(),

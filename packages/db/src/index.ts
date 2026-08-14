@@ -4,6 +4,7 @@ import {
   SESSION_GOAL_RATIONALE_MAX_BYTES,
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
+  ModelContextContributionSummaries,
   SessionGoalSnapshot,
   sessionGoalUtf8Bytes,
 } from "@opengeni/contracts";
@@ -3322,6 +3323,10 @@ export async function recordModelCallFact(
       "recordModelCallFact: estimatedProviderCostMicros and pricingSource must be present together",
     );
   }
+  const contextContributions =
+    input.contextContributions == null
+      ? null
+      : ModelContextContributionSummaries.parse(input.contextContributions);
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -3375,7 +3380,7 @@ export async function recordModelCallFact(
           pricedCostMicros: input.pricedCostMicros,
           estimatedProviderCostMicros: input.estimatedProviderCostMicros ?? null,
           pricingSource: input.pricingSource ?? null,
-          contextContributions: input.contextContributions ?? null,
+          contextContributions,
           occurredAt,
         })
         .onConflictDoUpdate({

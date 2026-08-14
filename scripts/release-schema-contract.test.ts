@@ -198,7 +198,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0245_model_context_contribution_facts.sql",
       ),
     ).toMatchObject({
-      sha256: "f7178be69ea94a5c3aeae7f17c6c896c3ea4bf892715e47de7f6fb95fc7fcf4d",
+      sha256: "656fc9634bb969903a27a7d1d8e4caed961324a0e2df27fa0a3aeeb88198ba7e",
       deploymentMode: "rolling",
     });
     const migrations = new Map(
@@ -211,8 +211,8 @@ describe("release schema contract", () => {
         migrations.has("0244_slack_app_home_refresh_queue.sql")
       ) {
         return includesActivation
-          ? "494b0de9dbb02f8886ff1802738474a8c3e9d81a8df1be1f24ddefc6d7520db7"
-          : "ddefaf2878cce02dd50b8c915803a099ed931707ff7fcdbfe2b9f91090a9dc39";
+          ? "f36e3e9319cbe1cb51cb27fc60f23f1e7be7613e596fcdbda0c079ddd8c990b9"
+          : "5d33463b1805e94ae3f34b488682b25d75b775c4ef136878903887562b56ad44";
       }
       if (migrations.has("0244_slack_app_home_refresh_queue.sql")) {
         return includesActivation
@@ -331,13 +331,16 @@ describe("release schema contract", () => {
         deploymentMode: "rolling",
       });
 
+      const contractWithoutActivation = await contractWithoutMigrations([
+        ...forwardMigrationPaths,
+        "0225_session_visibility_fork_activation.sql",
+      ]);
+      expect(contractWithoutActivation.sha256).toBe(sessionVisibilityContractHash(false));
       migrations.delete("0225_session_visibility_fork_activation.sql");
-      sourceContract.migrations = sourceContract.migrations.filter(
-        (migration) => migration.path !== "0225_session_visibility_fork_activation.sql",
-      );
-      sourceContract.fileCount -= 1;
-      sourceContract.latestMigration = sourceContract.migrations.at(-1)?.path ?? null;
-      sourceContract.sha256 = sessionVisibilityContractHash(false)!;
+      sourceContract.migrations = contractWithoutActivation.migrations;
+      sourceContract.fileCount = contractWithoutActivation.fileCount;
+      sourceContract.latestMigration = contractWithoutActivation.latestMigration;
+      sourceContract.sha256 = contractWithoutActivation.sha256;
     }
     expect(sourceContract.sha256).toBe(
       sessionVisibilityContractHash(false) ?? currentMainContractHash,
@@ -765,7 +768,7 @@ describe("release schema contract", () => {
     }
     if (migrations.has("0245_model_context_contribution_facts.sql")) {
       expect(migrations.get("0245_model_context_contribution_facts.sql")).toMatchObject({
-        sha256: "f7178be69ea94a5c3aeae7f17c6c896c3ea4bf892715e47de7f6fb95fc7fcf4d",
+        sha256: "656fc9634bb969903a27a7d1d8e4caed961324a0e2df27fa0a3aeeb88198ba7e",
         deploymentMode: "rolling",
       });
     }

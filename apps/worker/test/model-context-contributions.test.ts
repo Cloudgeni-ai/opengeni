@@ -6,6 +6,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   buildCompanyBrainContributionReceipt,
+  modelVisibleCompanyBrainSkillActivations,
   summarizeCompanyBrainContributions,
 } from "../src/model-context-contributions";
 
@@ -104,6 +105,24 @@ function preferences(): PreferenceRegistrySnapshot {
 }
 
 describe("Company Brain model contribution receipts", () => {
+  test("omits skill descriptors when the none backend cannot expose runtime skills", () => {
+    const activations = [
+      {
+        source: "session" as const,
+        id: "session:review",
+        reason: "attached to session",
+        artifact: {
+          name: "review",
+          description: "Use for repository reviews.",
+          files: [{ path: "SKILL.md", content: "# Review" }],
+        },
+      },
+    ];
+
+    expect(modelVisibleCompanyBrainSkillActivations("none", activations)).toEqual([]);
+    expect(modelVisibleCompanyBrainSkillActivations("modal", activations)).toBe(activations);
+  });
+
   test("contained children retain rules and guide catalogs but omit standing knowledge", () => {
     const receipt = buildCompanyBrainContributionReceipt({
       attemptId: identity(),

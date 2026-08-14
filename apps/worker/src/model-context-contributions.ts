@@ -4,6 +4,7 @@ import type {
   PreferenceRegistrySnapshot,
   ResolvedCompanyProfileSnapshot,
   ResolvedWorkspaceInstructionPolicySnapshot,
+  SandboxBackend,
   WorkspaceMemoryPromptMode,
 } from "@opengeni/contracts";
 import { composeRuntimeSkills, type RuntimeSkillActivation } from "@opengeni/runtime";
@@ -43,6 +44,13 @@ export function summarizeCompanyBrainContributions(
     });
   }
   return Object.freeze([...bySource.values()].map((summary) => Object.freeze(summary)));
+}
+
+export function modelVisibleCompanyBrainSkillActivations(
+  sandboxBackend: SandboxBackend,
+  skillActivations: readonly RuntimeSkillActivation[],
+): readonly RuntimeSkillActivation[] {
+  return sandboxBackend === "none" ? [] : skillActivations;
 }
 
 export type CompanyBrainContributionReceipt = Readonly<{
