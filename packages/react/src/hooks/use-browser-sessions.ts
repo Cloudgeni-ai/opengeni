@@ -60,6 +60,7 @@ export function useBrowserSessions(
   const enabled = options.enabled ?? true;
   const [state, setState] = useState<{
     workspaceId: string;
+    active: boolean;
     revision: number;
     sessions: BrowserSession[];
     loading: boolean;
@@ -89,6 +90,7 @@ export function useBrowserSessions(
       requestRef.current = { id, controller };
       setState((current) => ({
         ...(current.workspaceId === workspaceId ? current : emptyState(workspaceId, true)),
+        active: true,
         loading: foreground,
         refreshing: !foreground,
         error: foreground || current.workspaceId !== workspaceId ? null : current.error,
@@ -100,6 +102,7 @@ export function useBrowserSessions(
         if (!mountedRef.current || requestRef.current.id !== id) return;
         setState({
           workspaceId,
+          active: true,
           revision: response.revision,
           sessions: sortBrowserSessions(response.sessions),
           loading: false,
@@ -229,7 +232,9 @@ export function useBrowserSessions(
     revision: visibleState.revision,
     sessions: visibleState.sessions,
     relevantSessions,
-    loading: visibleState.loading,
+    // A disabled registry is deliberately empty. Expose the first re-enabled
+    // render as loading so consumers do not reconcile against that empty gap.
+    loading: enabled ? !visibleState.active || visibleState.loading : false,
     refreshing: visibleState.refreshing,
     error: visibleState.error,
     refresh,
@@ -243,6 +248,7 @@ export function useBrowserSessions(
 function emptyState(workspaceId: string, loading: boolean) {
   return {
     workspaceId,
+    active: false,
     revision: 0,
     sessions: [] as BrowserSession[],
     loading,

@@ -57,6 +57,34 @@ type PersistableMutationAdmission = {
   > | null;
 };
 
+type DirectRetainedProcessRoute = {
+  providerSessionId: number;
+  providerBackend: string;
+  providerInstanceId: string;
+  leaseEpoch: number;
+  routeKind: "home" | "active";
+  routeTargetId: string | null;
+  routeEpoch: number;
+};
+
+/** API-direct requests always use active-route authority. The default active
+ * pointer is represented by a null target id; it is not a home-route write. */
+export function directRetainedProcessMatchesBackend(
+  durable: DirectRetainedProcessRoute,
+  process: RoutingRetainedProcess,
+  backend: ResolvedActiveBackend,
+): boolean {
+  return (
+    durable.providerSessionId === process.providerSessionId &&
+    durable.providerBackend === backend.kind &&
+    durable.providerInstanceId === backend.providerInstanceId &&
+    durable.leaseEpoch === backend.leaseEpoch &&
+    durable.routeKind === "active" &&
+    durable.routeTargetId === backend.sandboxId &&
+    durable.routeEpoch === backend.activeEpoch
+  );
+}
+
 export type ChannelARoutingServices = {
   db: Database;
   settings: Settings;
@@ -384,16 +412,7 @@ export function wrapChannelABoxWithRouting(
           sessionId: ids.sessionId,
           processId: process.id,
         });
-        if (
-          !durable ||
-          durable.providerSessionId !== process.providerSessionId ||
-          durable.providerBackend !== backend.kind ||
-          durable.providerInstanceId !== backend.providerInstanceId ||
-          durable.leaseEpoch !== backend.leaseEpoch ||
-          durable.routeKind !== (backend.sandboxId === null ? "home" : "active") ||
-          durable.routeTargetId !== backend.sandboxId ||
-          durable.routeEpoch !== backend.activeEpoch
-        ) {
+        if (!durable || !directRetainedProcessMatchesBackend(durable, process, backend)) {
           throw new Error(
             "API retained-process settlement lost its exact durable backend identity",
           );

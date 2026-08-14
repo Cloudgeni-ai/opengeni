@@ -63,6 +63,9 @@ export type ComputerViewerProps = EmbeddedComputerInteractionClientOverride & {
   /** Host navigation request for one exact ComputerSession. */
   requestedComputerSessionId?: string | null | undefined;
   requestedComputerRequestId?: string | number | null | undefined;
+  /** Restore and report the Desktop session selected in this task's dock. */
+  initialComputerSessionId?: string | null | undefined;
+  onComputerSessionIdChange?: ((computerSessionId: string | null) => void) | undefined;
 };
 
 type ComputerSelection = { sessionId: string; pinned: boolean } | null;
@@ -79,6 +82,8 @@ export function ComputerViewer({
   renderEmpty,
   requestedComputerSessionId,
   requestedComputerRequestId,
+  initialComputerSessionId,
+  onComputerSessionIdChange,
   ...override
 }: ComputerViewerProps) {
   const registry = useComputerSessions({ ...override, sessionId, enabled });
@@ -106,7 +111,16 @@ export function ComputerViewer({
       liveRelevant.length > 0 ? liveRelevant : recentRelevantFailure ? [recentRelevantFailure] : [],
     [liveRelevant, recentRelevantFailure],
   );
-  const [selection, setSelection] = useState<ComputerSelection>(null);
+  const [selection, setSelection] = useState<ComputerSelection>(() =>
+    initialComputerSessionId ? { sessionId: initialComputerSessionId, pinned: true } : null,
+  );
+  const selectComputerSession = useCallback(
+    (next: ComputerSelection) => {
+      setSelection(next);
+      onComputerSessionIdChange?.(next?.sessionId ?? null);
+    },
+    [onComputerSessionIdChange],
+  );
   const interventions = useInteractionInterventions({
     ...override,
     enabled,
@@ -120,6 +134,7 @@ export function ComputerViewer({
   const seenInterventionIdsRef = useRef(new Set<string>());
   const createInFlightRef = useRef(false);
   const autoCreateSessionRef = useRef<string | null>(null);
+  const emptyCatalogConfirmationRef = useRef<string | null>(null);
 
   const notifyError = useCallback(
     (cause: unknown, fallback: string) => {
@@ -136,11 +151,15 @@ export function ComputerViewer({
     previousSessionIdRef.current = sessionId;
     handledRequestRef.current = null;
     autoCreateSessionRef.current = null;
+    emptyCatalogConfirmationRef.current = null;
     setCreateError(null);
-    setSelection(null);
-  }, [sessionId]);
+    setSelection(
+      initialComputerSessionId ? { sessionId: initialComputerSessionId, pinned: true } : null,
+    );
+  }, [initialComputerSessionId, sessionId]);
 
   useEffect(() => {
+    if (!enabled || registry.loading) return;
     const requested = requestedComputerSessionId
       ? (liveSessions.find((session) => session.id === requestedComputerSessionId) ?? null)
       : null;
@@ -149,7 +168,7 @@ export function ComputerViewer({
       : null;
     if (requested && requestKey && handledRequestRef.current !== requestKey) {
       handledRequestRef.current = requestKey;
-      setSelection({ sessionId: requested.id, pinned: true });
+      selectComputerSession({ sessionId: requested.id, pinned: true });
       return;
     }
 
@@ -160,15 +179,24 @@ export function ComputerViewer({
     if (selection?.pinned && selectedStillLive) return;
     const preferred = relevant[0] ?? null;
     if (!preferred) {
-      if (selection) setSelection(null);
+      if (selection) selectComputerSession(null);
       return;
     }
     if (!selectedStillLive || !selection?.pinned) {
       if (selection?.sessionId !== preferred.id || selection.pinned) {
-        setSelection({ sessionId: preferred.id, pinned: false });
+        selectComputerSession({ sessionId: preferred.id, pinned: false });
       }
     }
-  }, [liveSessions, relevant, requestedComputerRequestId, requestedComputerSessionId, selection]);
+  }, [
+    liveSessions,
+    enabled,
+    registry.loading,
+    relevant,
+    requestedComputerRequestId,
+    requestedComputerSessionId,
+    selectComputerSession,
+    selection,
+  ]);
 
   const selectedRegistrySession = useMemo(
     () => liveSessions.find((session) => session.id === selection?.sessionId) ?? null,
@@ -268,7 +296,7 @@ export function ComputerViewer({
               outcome === "completed" ? "Agent notified. Continuing work." : "Request cancelled.",
           });
         })
-        .catch((cause) => notifyError(cause, "Could not update the computer request."));
+        .catch((cause) => notifyError(cause, "Could not update the desktop request."));
     },
     [interventions, notifyError, onNotify],
   );
@@ -278,39 +306,71 @@ export function ComputerViewer({
     createInFlightRef.current = true;
     setCreateError(null);
     setCreating(true);
-    void createSession({ sessionId, name: "Computer" })
+    void createSession({ sessionId, name: "Desktop" })
       .then((response) => {
-        setSelection({ sessionId: response.session.id, pinned: false });
+        selectComputerSession({ sessionId: response.session.id, pinned: false });
       })
       .catch((cause) => {
-        const error = cause instanceof Error ? cause : new Error("Could not open a computer.");
+        const error = cause instanceof Error ? cause : new Error("Could not open a desktop.");
         setCreateError(error);
-        notifyError(error, "Could not open a computer.");
+        notifyError(error, "Could not open a desktop.");
       })
       .finally(() => {
         createInFlightRef.current = false;
         setCreating(false);
       });
-  }, [createSession, notifyError, sessionId]);
+  }, [createSession, notifyError, selectComputerSession, sessionId]);
+
+  useEffect(() => {
+    // Once this task's Desktop has been observed, a later transient empty
+    // registry snapshot must not create a second one. This can happen while the
+    // lazy surface is disabled/re-enabled or while an invalidation refresh
+    // briefly races the association projection. The existing Desktop remains
+    // the task's authority; explicit New desktop is still available.
+    if (relevant.length > 0) {
+      autoCreateSessionRef.current = sessionId;
+      emptyCatalogConfirmationRef.current = null;
+    }
+  }, [relevant.length, sessionId]);
 
   useEffect(() => {
     if (
       !enabled ||
       registry.loading ||
+      registry.refreshing ||
       registry.error ||
       relevant.length > 0 ||
       autoCreateSessionRef.current === sessionId
     ) {
       return;
     }
+    // A lazy surface can momentarily publish an empty settled projection while
+    // its initial catalog and a workspace invalidation cross. Confirm the empty
+    // result with one authoritative refresh before creating anything. A real
+    // empty catalog creates on the following render; an existing association
+    // appears and cancels this path.
+    if (emptyCatalogConfirmationRef.current !== sessionId) {
+      emptyCatalogConfirmationRef.current = sessionId;
+      void refreshRegistry();
+      return;
+    }
     autoCreateSessionRef.current = sessionId;
     createComputer();
-  }, [createComputer, enabled, registry.error, registry.loading, relevant.length, sessionId]);
+  }, [
+    createComputer,
+    enabled,
+    refreshRegistry,
+    registry.error,
+    registry.loading,
+    registry.refreshing,
+    relevant.length,
+    sessionId,
+  ]);
 
   const perform = useCallback(
     async (action: ComputerAction, frame: ComputerFrame | null): Promise<void> => {
       if (action.type === "pointer") {
-        if (!frame) throw new Error("Computer view is not ready for pointer input.");
+        if (!frame) throw new Error("Desktop view is not ready for pointer input.");
         await actFromFrame(action, frame);
       } else {
         await act(action);
@@ -328,10 +388,10 @@ export function ComputerViewer({
         .then(() => computer.readClipboard())
         .then(async (clipboard) => {
           if (clipboard.text && !(await copyTextToClipboard(clipboard.text))) {
-            throw new Error("Computer text could not be copied to the local clipboard");
+            throw new Error("Desktop text could not be copied to the local clipboard");
           }
         })
-        .catch((cause) => notifyError(cause, "Could not copy from the computer."));
+        .catch((cause) => notifyError(cause, "Could not copy from the desktop."));
     },
     [computer, notifyError, perform, rfbStream],
   );
@@ -350,7 +410,7 @@ export function ComputerViewer({
         await perform({ type: "clipboard", operation: "write", text }, null);
         assertExactComputerClipboard(await computer.readClipboard(), text);
         await perform({ type: "clipboard", operation: "paste" }, null);
-      })().catch((cause) => notifyError(cause, "Could not paste into the computer."));
+      })().catch((cause) => notifyError(cause, "Could not paste into the desktop."));
       return true;
     },
     [computer, notifyError, perform, rfbStream],
@@ -361,7 +421,7 @@ export function ComputerViewer({
     return (
       <ComputerNotice
         icon={<LoaderCircleIcon className="size-4 animate-spin" />}
-        text="Finding workspace computers…"
+        text="Finding workspace desktops…"
         {...(className ? { className } : {})}
       />
     );
@@ -380,7 +440,7 @@ export function ComputerViewer({
             )}
           </span>
           <p className="mt-3 text-og-menu font-medium text-og-fg">
-            {error ? "Computer didn’t open" : "Opening computer…"}
+            {error ? "Desktop didn’t open" : "Opening desktop…"}
           </p>
           <p className="mt-1 text-og-control leading-5 text-og-muted">
             {error?.message ?? "Preparing this agent’s desktop. It will appear here when ready."}
@@ -415,10 +475,10 @@ export function ComputerViewer({
         refreshing={registry.refreshing}
         interventionCounts={interventionCounts}
         onSelect={(computerSessionId) =>
-          setSelection({ sessionId: computerSessionId, pinned: true })
+          selectComputerSession({ sessionId: computerSessionId, pinned: true })
         }
         onFollow={() => {
-          if (relevant[0]) setSelection({ sessionId: relevant[0].id, pinned: false });
+          if (relevant[0]) selectComputerSession({ sessionId: relevant[0].id, pinned: false });
         }}
         onCreate={createComputer}
         onRefresh={() => void Promise.all([refreshRegistry(), refreshComputer()])}
@@ -430,7 +490,7 @@ export function ComputerViewer({
         onOpen={(intervention) =>
           void computer
             .selectTarget(intervention.targetId)
-            .catch((cause) => notifyError(cause, "Could not open the requested computer view."))
+            .catch((cause) => notifyError(cause, "Could not open the requested desktop view."))
         }
         onResolve={resolveIntervention}
       />
@@ -457,7 +517,7 @@ export function ComputerViewer({
             onSelect={(targetId) =>
               void computer
                 .selectTarget(targetId)
-                .catch((cause) => notifyError(cause, "Could not switch computer views."))
+                .catch((cause) => notifyError(cause, "Could not switch desktop views."))
             }
           />
           <div className="flex min-h-0 flex-1">
@@ -487,7 +547,7 @@ export function ComputerViewer({
                 onAction={perform}
                 onReadClipboard={computer.readClipboard}
                 onReconnect={frames.reconnect}
-                onError={(cause) => notifyError(cause, "Computer input failed.")}
+                onError={(cause) => notifyError(cause, "Desktop input failed.")}
               />
             )}
             {showControls ? (
@@ -496,7 +556,7 @@ export function ComputerViewer({
                 mutating={computer.mutating}
                 onAction={(action) =>
                   void perform(action, null).catch((cause) =>
-                    notifyError(cause, "Computer action failed."),
+                    notifyError(cause, "Desktop action failed."),
                   )
                 }
               />
@@ -534,13 +594,13 @@ function ComputerUnselectedPanel(props: {
           )}
         </span>
         <p className="mt-3 text-og-menu font-medium text-og-fg">
-          {props.error ? "Computer didn’t open" : "Opening computer…"}
+          {props.error ? "Desktop didn’t open" : "Opening desktop…"}
         </p>
         <p className="mt-1 text-og-control leading-5 text-og-muted">
           {props.error?.message ??
             (props.peerCount === 1
-              ? "Preparing this agent’s desktop. One peer computer remains available from the menu."
-              : `Preparing this agent’s desktop. ${props.peerCount} peer computers remain available from the menu.`)}
+              ? "Preparing this agent’s desktop. One peer desktop remains available from the menu."
+              : `Preparing this agent’s desktop. ${props.peerCount} peer desktops remain available from the menu.`)}
         </p>
         {props.error ? (
           <button
@@ -587,7 +647,9 @@ function ComputerToolbar(props: {
       <details ref={detailsRef} className="relative min-w-0">
         <summary className="flex h-7 max-w-52 cursor-pointer list-none items-center gap-2 rounded-og-sm px-2 text-og-control text-og-fg transition hover:bg-og-surface-2 [&::-webkit-details-marker]:hidden">
           <MonitorIcon className="size-3.5 shrink-0 text-og-muted" />
-          <span className="truncate font-medium">{selected?.name ?? "Computer"}</span>
+          <span className="truncate font-medium">
+            {selected?.name === "Computer" ? "Desktop" : (selected?.name ?? "Desktop")}
+          </span>
           {(props.interventionCounts.get(selected?.id ?? "") ?? 0) > 0 ? (
             <span className="size-1.5 shrink-0 rounded-full bg-og-status-waiting" />
           ) : null}
@@ -613,7 +675,7 @@ function ComputerToolbar(props: {
               <MenuButton onClick={props.onFollow}>Follow agent</MenuButton>
             ) : null}
             <MenuButton onClick={props.onCreate} disabled={props.creating}>
-              <PlusIcon className="size-3.5" /> New computer
+              <PlusIcon className="size-3.5" /> New desktop
             </MenuButton>
           </div>
         </div>
@@ -625,7 +687,7 @@ function ComputerToolbar(props: {
         type="button"
         onClick={props.onRefresh}
         className="grid size-7 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg"
-        aria-label="Refresh computers"
+        aria-label="Refresh desktops"
       >
         <RefreshCwIcon className={cn("size-3.5", props.refreshing && "animate-spin")} />
       </button>
@@ -634,7 +696,7 @@ function ComputerToolbar(props: {
         onClick={props.onCreate}
         disabled={props.creating}
         className="grid size-7 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
-        aria-label="Open a new computer"
+        aria-label="Open a new desktop"
       >
         {props.creating ? (
           <LoaderCircleIcon className="size-3.5 animate-spin" />
@@ -718,7 +780,7 @@ function ComputerTargetRail(props: {
   return (
     <div
       className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b border-og-border bg-og-surface-0 px-2"
-      aria-label="Computer views"
+      aria-label="Desktop views"
     >
       {visualTargets.map((target) => (
         <button
@@ -787,11 +849,11 @@ function ComputerLifecyclePanel(props: {
           <LoaderCircleIcon className="mx-auto size-5 animate-spin text-og-muted" />
         )}
         <p className="mt-3 text-og-menu font-medium text-og-fg">
-          {failed ? "Computer needs attention" : lifecycleLabel(props.session.lifecycle)}
+          {failed ? "Desktop needs attention" : lifecycleLabel(props.session.lifecycle)}
         </p>
         <p className="mt-1 text-og-control leading-5 text-og-muted">
           {computerFailureMessage(props.session) ??
-            "The computer is being prepared on its placement. It will appear here when ready."}
+            "The desktop is being prepared on its placement. It will appear here when ready."}
         </p>
         {failed ? (
           <button
@@ -1141,7 +1203,7 @@ function ComputerViewport(props: {
       const clipboard = await readClipboardRef.current();
       if (!clipboard.text) return;
       if (!(await copyTextToClipboard(clipboard.text))) {
-        throw new Error("Computer text could not be copied to the local clipboard");
+        throw new Error("Desktop text could not be copied to the local clipboard");
       }
     });
   };
@@ -1192,7 +1254,7 @@ function ComputerViewport(props: {
         }}
         onContextMenu={contextMenu}
         onWheel={wheel}
-        aria-label={`Interactive ${props.target?.kind ?? "computer"} view`}
+        aria-label={`Interactive ${props.target?.kind ?? "desktop"} view`}
       />
       <textarea
         ref={inputRef}
@@ -1202,7 +1264,7 @@ function ComputerViewport(props: {
         onCopy={copy}
         onPaste={paste}
         className="pointer-events-none absolute left-1/2 top-1/2 size-px resize-none overflow-hidden opacity-0"
-        aria-label="Computer keyboard input"
+        aria-label="Desktop keyboard input"
         autoCapitalize="off"
         autoCorrect="off"
         spellCheck={false}
@@ -1244,7 +1306,7 @@ function ComputerViewport(props: {
 
 function assertExactComputerClipboard(clipboard: ComputerClipboard, expected: string): void {
   if (clipboard.truncated || clipboard.text !== expected) {
-    throw new Error("Computer clipboard did not accept the exact pasted text");
+    throw new Error("Desktop clipboard did not accept the exact pasted text");
   }
 }
 
@@ -1453,7 +1515,7 @@ function ComputerStatusBar(props: {
           ? "Full screen · input may move pointer and focus"
           : props.session?.capabilities?.backgroundActions
             ? "Window · semantic controls stay in the background"
-            : (props.target?.kind ?? "Computer")}
+            : (props.target?.kind ?? "Desktop")}
       </span>
       {screen ? <MousePointer2Icon className="size-3" aria-hidden /> : null}
       {props.refreshing ? <LoaderCircleIcon className="size-3 animate-spin" /> : null}
@@ -1527,7 +1589,7 @@ function paintCanvas(
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext("2d", { alpha: false });
-  if (!context) throw new Error("Computer canvas is unavailable.");
+  if (!context) throw new Error("Desktop canvas is unavailable.");
   context.drawImage(image, 0, 0, width, height);
 }
 
@@ -1535,7 +1597,7 @@ function loadImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const image = new Image();
     image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error("Computer frame image could not be decoded."));
+    image.onerror = () => reject(new Error("Desktop frame image could not be decoded."));
     image.src = url;
   });
 }
@@ -1606,11 +1668,11 @@ function computerFailureMessage(session: ComputerSession): string | null {
     case "machine_locked":
       return "Unlock the connected Mac, then try again.";
     case "controller_heartbeat_expired":
-      return "The computer connection was lost. Try opening it again.";
+      return "The desktop connection was lost. Try opening it again.";
     case null:
       return null;
     default:
-      return "The computer could not be opened. Try again.";
+      return "The desktop could not be opened. Try again.";
   }
 }
 
@@ -1634,7 +1696,7 @@ function interventionTitle(intervention: InteractionIntervention): string {
     case "confirmation":
       return "Action needed";
     case "other":
-      return "Computer needs your help";
+      return "Desktop needs your help";
   }
 }
 
@@ -1647,7 +1709,7 @@ function platformLabel(session: ComputerSession): string {
     case "windows":
       return "Windows";
     default:
-      return "Computer";
+      return "Desktop";
   }
 }
 
@@ -1660,31 +1722,31 @@ function placementLabel(session: ComputerSession): string {
     case "attached_device":
       return "Your machine";
     case "external_provider":
-      return "Cloud computer";
+      return "Cloud desktop";
   }
 }
 
 function lifecycleLabel(lifecycle: ComputerSession["lifecycle"]): string {
   switch (lifecycle) {
     case "starting":
-      return "Opening computer…";
+      return "Opening desktop…";
     case "suspending":
-      return "Pausing computer…";
+      return "Pausing desktop…";
     case "suspended":
-      return "Computer paused";
+      return "Desktop paused";
     case "restoring":
-      return "Restoring computer…";
+      return "Restoring desktop…";
     case "ending":
-      return "Closing computer…";
+      return "Closing desktop…";
     default:
-      return "Connecting to computer…";
+      return "Connecting to desktop…";
   }
 }
 
 function computerConnectionLabel(state: string): string {
   switch (state) {
     case "attaching":
-      return "Opening computer view…";
+      return "Opening desktop view…";
     case "connecting":
       return "Connecting…";
     case "reconnecting":
@@ -1692,6 +1754,6 @@ function computerConnectionLabel(state: string): string {
     case "error":
       return "Disconnected";
     default:
-      return "Waiting for computer…";
+      return "Waiting for desktop…";
   }
 }

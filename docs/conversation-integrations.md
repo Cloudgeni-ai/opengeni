@@ -47,6 +47,12 @@ Raw bytes, credentials, object-store keys, signed URLs, private provider URLs,
 and provider-specific fields are not part of the contract. Absolute URLs are
 also rejected as opaque attachment pointers.
 
+This inbound conversation metadata is distinct from the tool-time connector
+attachment transfer contract. An authorized connection-backed MCP tool may
+later materialize exact bytes through the private versioned envelope documented
+in [`mcp-response-contracts.md`](mcp-response-contracts.md), but adapters must
+not promote a conversation attachment reference itself into download authority.
+
 ## Outbound delivery
 
 `ConversationDeliveryCommand` has three operations: `post`, `update`, and

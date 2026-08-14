@@ -32,6 +32,7 @@ import {
   getSandboxSessionEnvelope,
   getLiveEnrollmentConnection,
   getSandbox,
+  touchLeaseHolder,
   loadWorkspaceEnvironmentForRun,
   markWarmLeaseInstanceLost,
   readActiveSandbox,
@@ -780,6 +781,22 @@ async function withChannelAOperation<T>(
     throw mapChannelAError(error, ctx.waitSignal);
   }
 
+  // Keep the exact direct-request owner visible for the full operation. A
+  // yielded command is also tracked by a non-TTL process holder, but the
+  // retained-process reconciler must not poll that provider session while this
+  // request is still its active owner. Stale direct holders remain crash-
+  // recoverable through the ordinary holder TTL reaper.
+  const directHolderHeartbeat = setInterval(() => {
+    void touchLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId,
+      kind: "direct",
+      holderId,
+    }).catch(() => undefined);
+  }, 10_000);
+  directHolderHeartbeat.unref?.();
+
   let established: EstablishedSandboxSession | undefined;
   let leaseSnapshot: LeaseSnapshot = acquired.lease;
   let establishedCacheKey: string | null = null;
@@ -1041,6 +1058,7 @@ async function withChannelAOperation<T>(
     });
     throw mapChannelAError(error, ctx.waitSignal);
   } finally {
+    clearInterval(directHolderHeartbeat);
     await release();
     await dropEstablishedHandle(established);
   }

@@ -43,6 +43,7 @@ export type McpRequestReplayInfo = {
   method?: string;
   id?: McpJsonRpcId;
   toolName?: string;
+  operationId?: string;
 };
 
 type ClassifiedMcpJsonRpcRequest = {
@@ -50,6 +51,7 @@ type ClassifiedMcpJsonRpcRequest = {
   method?: string;
   id?: McpJsonRpcId;
   toolName?: string;
+  operationId?: string;
 };
 
 const MCP_REPLAY_SAFE_METHOD_SET = new Set<string>(MCP_REPLAY_SAFE_METHODS);
@@ -74,11 +76,18 @@ function classifyMcpJsonRpcRequest(value: unknown): ClassifiedMcpJsonRpcRequest 
   const params = isJsonObject(value.params) ? value.params : undefined;
   const toolName =
     valid && method === "tools/call" && typeof params?.name === "string" ? params.name : undefined;
+  const meta =
+    valid && method === "tools/call" && isJsonObject(params?._meta) ? params._meta : null;
+  const operationId =
+    meta && typeof meta.opengeniOperationId === "string" && meta.opengeniOperationId.length > 0
+      ? meta.opengeniOperationId
+      : undefined;
   return {
     valid,
     ...(valid && method ? { method } : {}),
     ...(hasId && id !== undefined ? { id } : {}),
     ...(toolName ? { toolName } : {}),
+    ...(operationId ? { operationId } : {}),
   };
 }
 
@@ -159,6 +168,7 @@ export async function mcpRequestReplayInfo(
     method: request.method,
     ...(request.id !== undefined ? { id: request.id } : {}),
     ...(request.toolName ? { toolName: request.toolName } : {}),
+    ...(request.operationId ? { operationId: request.operationId } : {}),
   };
 }
 

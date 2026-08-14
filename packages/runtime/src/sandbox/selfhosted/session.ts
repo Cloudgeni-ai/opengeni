@@ -64,6 +64,8 @@ const encoder = new TextEncoder();
 // Keep one RPC reply comfortably below the agent's negotiated 1 MiB payload
 // ceiling. `fsRead` is ranged, so larger logical reads are assembled here.
 const SELFHOSTED_FS_READ_CHUNK_BYTES = 512 * 1024;
+const SELFHOSTED_PLACEMENT_PRIVATE_PREFIX = "/tmp/opengeni-private/";
+const SELFHOSTED_PLACEMENT_PRIVATE_MAX_BYTES = 128 * 1024;
 
 /**
  * The SDK's VIRTUAL sandbox root. The `@openai/agents` agent loop presents the
@@ -1180,6 +1182,56 @@ export class SelfhostedSession {
     return Number(result.fsWrite.bytesWritten);
   }
 
+  /** Stage one bounded controller-owned authority file outside the workspace.
+   * The exact private path is deliberately narrower than the ordinary fs
+   * surface, and the explicit wire mode keeps the file private even when the
+   * Connected Machine agent was launched under a permissive umask. */
+  async writePlacementPrivate(args: {
+    path: string;
+    content: string | Uint8Array;
+    createParents?: boolean;
+    runAs?: string;
+  }): Promise<number> {
+    const path = selfhostedPlacementPrivatePath(args.path);
+    const content = typeof args.content === "string" ? encoder.encode(args.content) : args.content;
+    if (content.byteLength > SELFHOSTED_PLACEMENT_PRIVATE_MAX_BYTES) {
+      throw new TypeError("selfhosted placement-private content is invalid");
+    }
+    const result = await this.call({
+      $case: "fsWrite",
+      fsWrite: {
+        path,
+        content,
+        createParents: args.createParents ?? true,
+        append: false,
+        mode: 0o600,
+      },
+    });
+    if (result.$case !== "fsWrite") {
+      throw new Error(`selfhosted writePlacementPrivate: unexpected result ${result.$case}`);
+    }
+    return Number(result.fsWrite.bytesWritten);
+  }
+
+  /** Idempotently remove only an OpenGeni placement-private authority file.
+   * This uses the filesystem control op rather than exec, so cleanup still
+   * runs when the consuming command fails before a child process starts. */
+  async deletePlacementPrivate(path: string, _runAs?: string): Promise<void> {
+    const privatePath = selfhostedPlacementPrivatePath(path);
+    try {
+      const result = await this.call({
+        $case: "fsRemove",
+        fsRemove: { path: privatePath, recursive: false },
+      });
+      if (result.$case !== "fsRemove") {
+        throw new Error(`selfhosted deletePlacementPrivate: unexpected result ${result.$case}`);
+      }
+    } catch (error) {
+      if (error instanceof SelfhostedControlError && error.osNotFound) return;
+      throw error;
+    }
+  }
+
   /** List a directory on the machine. */
   async listFiles(args: {
     path: string;
@@ -1739,6 +1791,20 @@ function safeWireSize(value: string, label: string): number {
     throw new Error(`${label} is outside the supported range`);
   }
   return parsed;
+}
+
+function selfhostedPlacementPrivatePath(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length < `${SELFHOSTED_PLACEMENT_PRIVATE_PREFIX}x`.length ||
+    value.length > 4_096 ||
+    !value.startsWith(SELFHOSTED_PLACEMENT_PRIVATE_PREFIX) ||
+    /[\u0000-\u001f\u007f]/u.test(value) ||
+    value.split("/").some((segment) => segment === "." || segment === "..")
+  ) {
+    throw new TypeError("selfhosted placement-private path is invalid");
+  }
+  return value;
 }
 
 function execResultToChannelA(res: ExecResponse, execDeadlineMs: number): SelfhostedExecResult {

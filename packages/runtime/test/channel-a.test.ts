@@ -1244,6 +1244,70 @@ describe("Workspace file import (real local box)", () => {
   });
 });
 
+describe("Workspace file import (Connected Machine private staging)", () => {
+  test("removes mode-0600 signed authority when exec fails before the command starts", async () => {
+    const privateUrl = "https://files.example.test/download?signature=must-not-remain";
+    const execStartFailure = new Error("connected machine exec did not start");
+    const mock = new MockAgentResponder({
+      exec: (request) => {
+        if (request.command.join(" ").includes("__OPENGENI_FS_CONFINED_OK__")) {
+          return {
+            exitCode: 0,
+            stdout: new TextEncoder().encode("__OPENGENI_FS_CONFINED_OK__"),
+            stderr: new Uint8Array(0),
+            timedOut: false,
+            durationMs: "1",
+          };
+        }
+        throw execStartFailure;
+      },
+    });
+    const session = new SelfhostedSession({
+      workspaceId: "11111111-1111-1111-1111-111111111111",
+      agentId: "agent-private-import",
+      controlRpc: mock,
+      relay: { host: "relay.test", port: 443, tls: true },
+      workingDir: "/home/u/project",
+    });
+    const service = new SandboxChannelAService({ session });
+
+    await expect(
+      service.importWorkspaceFile({
+        operationId: "00000000-0000-4000-8000-000000000085",
+        destinationPath: ".opengeni/connector-attachments/example/digest/payload.bin",
+        overwrite: false,
+        mayReplaceExisting: false,
+        createParents: true,
+        sizeBytes: 6,
+        sha256: "a".repeat(64),
+        source: { url: privateUrl, expiresAt: "2030-01-02T03:04:05.000Z" },
+      }),
+    ).rejects.toBe(execStartFailure);
+
+    const privateWrite = mock.requests
+      .map(({ req }) => req.op)
+      .find((op) => op?.$case === "fsWrite" && op.fsWrite.path.includes("workspace-imports"));
+    if (privateWrite?.$case !== "fsWrite") throw new Error("expected private staging write");
+    expect(privateWrite.fsWrite.mode).toBe(0o600);
+    expect(new TextDecoder().decode(privateWrite.fsWrite.content)).toContain(privateUrl);
+    const configPath = privateWrite.fsWrite.path;
+    expect(mock.fileText(configPath)).toBeUndefined();
+    expect(
+      mock.requests.some(
+        ({ req }) => req.op?.$case === "fsRemove" && req.op.fsRemove.path === configPath,
+      ),
+    ).toBeTrue();
+    expect(
+      mock.requests
+        .filter(({ req }) => req.op?.$case === "exec")
+        .some(
+          ({ req }) =>
+            req.op?.$case === "exec" && req.op.exec.command.join(" ").includes(privateUrl),
+        ),
+    ).toBeFalse();
+  });
+});
+
 describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
   async function makeRepoWithStagedChange(): Promise<{
     svc: SandboxChannelAService;

@@ -211,9 +211,35 @@ test.skipIf(!enabled)(
       };
       first = await ComputerNativeClient.open(options);
       second = await ComputerNativeClient.open(options);
+      expect(first.handshake.capabilities.appLaunch).toBe(true);
       const firstScreen = (await first.targets()).find((target) => target.kind === "screen");
       const secondScreen = (await second.targets()).find((target) => target.kind === "screen");
       if (!firstScreen || !secondScreen) throw new Error("shared Linux screen target is missing");
+      const processIdsBeforeLaunch = new Set(
+        (await first.targets()).flatMap((target) =>
+          target.processId === null ? [] : [target.processId],
+        ),
+      );
+      await first.dispatch({
+        targetId: firstScreen.id,
+        expectedTargetGeneration: firstScreen.targetGeneration,
+        expectedObservationId: null,
+        expectedFrameId: null,
+        action: { type: "launch", applicationId: "xfce4-terminal.desktop" },
+      });
+      const launchDeadline = Date.now() + 10_000;
+      let launchedWindow: Awaited<ReturnType<ComputerNativeClient["targets"]>>[number] | undefined;
+      do {
+        launchedWindow = (await first.targets()).find(
+          (target) =>
+            target.kind === "window" &&
+            target.processId !== null &&
+            !processIdsBeforeLaunch.has(target.processId),
+        );
+        if (launchedWindow) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      } while (Date.now() < launchDeadline);
+      expect(launchedWindow?.title).toBeTruthy();
       await first.dispatch({
         targetId: firstScreen.id,
         expectedTargetGeneration: firstScreen.targetGeneration,
@@ -303,6 +329,11 @@ test.skipIf(!enabled)(
       expect(digest(frameAfter.data)).not.toBe(digest(frameBefore.data));
 
       const nativeObservation = await computer.observe(computerReference, nativeAfter.id);
+      expect(
+        semanticNames(nativeObservation).some((name) =>
+          name.includes("unsupported command-line flag"),
+        ),
+      ).toBe(false);
       expect(
         semanticNames(nativeObservation).some((name) =>
           name.includes("OpenGeni linked Chromium proof changed"),

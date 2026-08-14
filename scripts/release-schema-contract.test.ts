@@ -134,7 +134,8 @@ describe("release schema contract", () => {
       "0239_supergrok_video_funding.sql",
       "0240_model_context_user_messages.sql",
       "0249_personal_resource_delegation_authority_correction.sql",
-      "0250_connected_machine_operation_policy.sql",
+      "0250_direct_retained_process_owner_liveness.sql",
+      "0251_connected_machine_operation_policy.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -173,7 +174,7 @@ describe("release schema contract", () => {
     }
     expect(
       completeSourceContract.migrations.find(
-        (migration) => migration.path === "0250_connected_machine_operation_policy.sql",
+        (migration) => migration.path === "0251_connected_machine_operation_policy.sql",
       ),
     ).toMatchObject({
       sha256: "a37e307de730bc47ccf4ed6bf517427ebb0d20199640f54e8e525ae1ce046663",
@@ -226,6 +227,14 @@ describe("release schema contract", () => {
       ),
     ).toMatchObject({
       sha256: "98b1e6059e955b7a8022ff45f977b44075a7f854828422e06d9879a8487d62f7",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0250_direct_retained_process_owner_liveness.sql",
+      ),
+    ).toMatchObject({
+      sha256: "8ae147f5de31c4173758e8e64bbb2597e8a3fc49d983a7a518f229fb95ef90f5",
       deploymentMode: "rolling",
     });
     const migrations = new Map(

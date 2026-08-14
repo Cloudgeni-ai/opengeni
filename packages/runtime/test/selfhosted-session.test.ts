@@ -814,6 +814,40 @@ describe("virtual-root → machine-frame path translation (the live-swap exec EN
     if (rop?.$case !== "fsRead") throw new Error("expected fsRead");
     expect(rop.fsRead.path).toBe("notes.md");
   });
+
+  test("placement-private staging uses mode 0600 and idempotent host-side removal", async () => {
+    const privatePath = "/tmp/opengeni-private/workspace-imports/authority.curl";
+    const signedUrl = "https://files.example.test/download?signature=private";
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock);
+
+    await session.writePlacementPrivate({
+      path: privatePath,
+      content: signedUrl,
+      createParents: true,
+    });
+    const write = mock.requests[0]?.req.op;
+    if (write?.$case !== "fsWrite") throw new Error("expected private fsWrite");
+    expect(write.fsWrite).toMatchObject({
+      path: privatePath,
+      createParents: true,
+      append: false,
+      mode: 0o600,
+    });
+    expect(new TextDecoder().decode(write.fsWrite.content)).toBe(signedUrl);
+    expect(mock.fileText(privatePath)).toBe(signedUrl);
+
+    await session.deletePlacementPrivate(privatePath);
+    expect(mock.requests[1]?.req.op).toMatchObject({
+      $case: "fsRemove",
+      fsRemove: { path: privatePath, recursive: false },
+    });
+    expect(mock.fileText(privatePath)).toBeUndefined();
+    await expect(session.deletePlacementPrivate(privatePath)).resolves.toBeUndefined();
+    await expect(
+      session.writePlacementPrivate({ path: "/workspace/not-private", content: signedUrl }),
+    ).rejects.toThrow(/placement-private path/);
+  });
 });
 
 describe("per-session workingDir → the toMachinePath frame BASE (create-time machine targeting)", () => {

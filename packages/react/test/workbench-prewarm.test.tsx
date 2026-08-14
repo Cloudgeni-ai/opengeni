@@ -1334,6 +1334,37 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
     await rendered.unmount();
   });
 
+  test("restores a host-selected tab and reports later navigation", async () => {
+    const selected: string[] = [];
+    const { client } = coldClient({
+      getWorkspaceCapture: async () => captureAvailable(fakeManifest(2)),
+    });
+    const rendered = await renderComponent(
+      withProvider(
+        client,
+        <SandboxWorkspace
+          sessionId={SESSION_ID}
+          events={[]}
+          primary={<div>chat</div>}
+          initialTab="files"
+          onActiveTabChange={(tab) => selected.push(tab)}
+          autoSaveId="og.test.prewarm.restored-tab"
+        />,
+      ),
+    );
+    await flush();
+    expect(selectedTabText(rendered.container)).toContain("Files");
+
+    const changesTab = [...rendered.container.querySelectorAll<HTMLElement>('[role="tab"]')].find(
+      (element) => element.textContent?.includes("Changes"),
+    );
+    await act(async () => {
+      changesTab?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(selected).toEqual(["changes"]);
+    await rendered.unmount();
+  });
+
   test("warm provider failure keeps captured Changes visible with an accessible retry state", async () => {
     const { client } = coldClient({
       getStreamCapabilities: async () => fakeCapabilities(),
