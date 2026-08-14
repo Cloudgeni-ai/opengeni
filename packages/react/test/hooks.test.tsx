@@ -233,11 +233,20 @@ describe("useWorkspaceSessions", () => {
 
   test("does not report a query transition as loading while disabled", async () => {
     const client = fakeClient({
-      listSessionPage: async () => ({ pinned: [], sessions: [], nextCursor: null }),
+      listSessionPage: async () => ({
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+      }),
     });
     const hook = await renderHook(
       (search: string) =>
-        useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID, search, enabled: false }),
+        useWorkspaceSessions({
+          client,
+          workspaceId: WORKSPACE_ID,
+          search,
+          enabled: false,
+        }),
       "" as string,
     );
     await flush();
@@ -919,6 +928,7 @@ describe("useGoal", () => {
     const client = fakeClient({
       getGoal: async () => fakeGoal(),
       updateGoal: async (_ws, _session, request) => {
+        if (!("status" in request)) throw new Error("expected status mutation");
         calls.push({ status: request.status, rationale: request.rationale });
         return fakeGoal({
           status: request.status === "paused" ? "paused" : "active",
@@ -1720,7 +1730,11 @@ describe("useComposer queue-vs-steer", () => {
     type Props = { events: SessionEvent[] };
     const hook = await renderHook(
       (props: Props) =>
-        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: props.events }),
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: props.events,
+        }),
       { events: [] as SessionEvent[] },
     );
     await flush();
@@ -1918,7 +1932,9 @@ describe("useComposer queue-vs-steer", () => {
           ? [
               accepted,
               {
-                ...makeEvent(21, "turn.started", { triggerEventId: accepted.id }),
+                ...makeEvent(21, "turn.started", {
+                  triggerEventId: accepted.id,
+                }),
                 turnId: turn.id,
               },
             ]
@@ -2125,7 +2141,11 @@ describe("useComposer durable draft and control binding", () => {
         useComposer(SESSION_ID, {
           client,
           workspaceId: WORKSPACE_ID,
-          sendExtras: { model: "model-x", reasoningEffort: "medium", latencyMode },
+          sendExtras: {
+            model: "model-x",
+            reasoningEffort: "medium",
+            latencyMode,
+          },
           onDraftApplied: (draft) => applied.push(draft),
         }),
       "standard",
@@ -2223,8 +2243,16 @@ describe("useComposer durable draft and control binding", () => {
     expect(reads).toEqual([SESSION_ID]);
     expect(applied).toEqual([`0:${SESSION_ID}:read-1`]);
 
-    await hook.rerender({ sessionId: SESSION_ID, policyVersion: 1, events: noEvents });
-    await hook.rerender({ sessionId: SESSION_ID, policyVersion: 2, events: noEvents });
+    await hook.rerender({
+      sessionId: SESSION_ID,
+      policyVersion: 1,
+      events: noEvents,
+    });
+    await hook.rerender({
+      sessionId: SESSION_ID,
+      policyVersion: 2,
+      events: noEvents,
+    });
     await flush();
     expect(reads).toEqual([SESSION_ID]);
 
@@ -2241,7 +2269,11 @@ describe("useComposer durable draft and control binding", () => {
     expect(reads).toEqual([SESSION_ID, SESSION_ID, SESSION_ID]);
     expect(applied.at(-1)).toBe(`3:${SESSION_ID}:read-3`);
 
-    await hook.rerender({ sessionId: sessionB, policyVersion: 4, events: noEvents });
+    await hook.rerender({
+      sessionId: sessionB,
+      policyVersion: 4,
+      events: noEvents,
+    });
     await flush();
     expect(reads).toEqual([SESSION_ID, SESSION_ID, SESSION_ID, sessionB]);
     expect(applied.at(-1)).toBe(`4:${sessionB}:read-4`);
@@ -2328,7 +2360,11 @@ describe("useComposer durable draft and control binding", () => {
           client,
           workspaceId: WORKSPACE_ID,
           effectiveControl: queueSnapshot([]).effectiveControl,
-          sendExtras: { model: "model-x", reasoningEffort: "medium", latencyMode: "fast" },
+          sendExtras: {
+            model: "model-x",
+            reasoningEffort: "medium",
+            latencyMode: "fast",
+          },
         }),
       undefined,
     );
@@ -2717,7 +2753,11 @@ describe("useComposer durable draft and control binding", () => {
               message.resources[0]?.kind === "file" &&
               message.resources[0].fileId === resource.fileId,
           ),
-        ).toMatchObject({ state: "failed", resources: [resource], outcomeUnknown: false });
+        ).toMatchObject({
+          state: "failed",
+          resources: [resource],
+          outcomeUnknown: false,
+        });
       } else {
         expect(hook.result.current.error).toMatchObject({
           status: 402,
@@ -2814,7 +2854,9 @@ describe("useComposer durable draft and control binding", () => {
       } else {
         expect(hook.result.current.value).toBe(initial.text);
         expect(hook.result.current.restoredResources).toEqual([resource]);
-        expect(hook.result.current.error).toMatchObject({ outcomeUnknown: true });
+        expect(hook.result.current.error).toMatchObject({
+          outcomeUnknown: true,
+        });
         await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
       }
       expect(attempts).toHaveLength(2);
@@ -2991,7 +3033,10 @@ describe("useComposer durable draft and control binding", () => {
         // the server revision — surfaces the keep_mine / use_remote banner.
         throw new OpenGeniApiError(
           409,
-          JSON.stringify({ code: "DRAFT_CHANGED", message: "Composer draft changed" }),
+          JSON.stringify({
+            code: "DRAFT_CHANGED",
+            message: "Composer draft changed",
+          }),
         );
       },
     });
@@ -3033,7 +3078,10 @@ describe("useComposer durable draft and control binding", () => {
         if (request.expectedRevision === 1) {
           throw new OpenGeniApiError(
             409,
-            JSON.stringify({ code: "DRAFT_CHANGED", message: "Composer draft changed" }),
+            JSON.stringify({
+              code: "DRAFT_CHANGED",
+              message: "Composer draft changed",
+            }),
           );
         }
         return {
@@ -3453,7 +3501,9 @@ describe("useComposer file-only send", () => {
         useComposer(SESSION_ID, {
           client,
           workspaceId: WORKSPACE_ID,
-          sendExtras: () => ({ resources: [{ kind: "file", fileId: "ready-file" }] }),
+          sendExtras: () => ({
+            resources: [{ kind: "file", fileId: "ready-file" }],
+          }),
           sendBlocked: () => blocked,
         }),
       true as boolean,
@@ -3523,7 +3573,9 @@ describe("useComposer file-only send", () => {
         useComposer(SESSION_ID, {
           client,
           workspaceId: WORKSPACE_ID,
-          sendExtras: () => ({ resources: [{ kind: "file", fileId: currentFileId }] }),
+          sendExtras: () => ({
+            resources: [{ kind: "file", fileId: currentFileId }],
+          }),
           onSent: (_text, input) => {
             accepted = input;
           },
@@ -3563,7 +3615,11 @@ describe("useComposer file-only send", () => {
       getComposerDraft: async () => initial,
       saveComposerDraft: async (_ws, _session, request) => {
         saved.push(request);
-        return { ...initial, ...request, revision: request.expectedRevision + 1 };
+        return {
+          ...initial,
+          ...request,
+          revision: request.expectedRevision + 1,
+        };
       },
       sendMessage: async (_ws, _session, message) => {
         sent.push(message);
@@ -3575,7 +3631,9 @@ describe("useComposer file-only send", () => {
         useComposer(SESSION_ID, {
           client,
           workspaceId: WORKSPACE_ID,
-          sendExtras: () => ({ resources: [{ kind: "file", fileId: "file-1" }] }),
+          sendExtras: () => ({
+            resources: [{ kind: "file", fileId: "file-1" }],
+          }),
         }),
       undefined,
     );

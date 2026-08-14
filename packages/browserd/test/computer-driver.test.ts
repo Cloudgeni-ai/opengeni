@@ -4,6 +4,7 @@ import { ComputerInteractionController } from "@opengeni/interaction";
 import {
   NativeComputerDriver,
   NativeComputerError,
+  type NativeComputerCaptureOptions,
   type ComputerNativeTransport,
   type NativeComputerActionCommand,
   type NativeComputerHandshake,
@@ -74,6 +75,7 @@ describe("NativeComputerDriver", () => {
       await driver.close();
     }
     expect(transport.closed).toBe(true);
+    expect(transport.stoppedCaptures).toBe(1);
   });
 
   test("preserves definite native lock failures in public receipts", async () => {
@@ -100,6 +102,84 @@ describe("NativeComputerDriver", () => {
         dispatchedAt: null,
         error: { code: "machine_locked", retryable: true },
       });
+    } finally {
+      await driver.close();
+    }
+  });
+
+  test("primes one frame fence for a cold visual target and reuses warm observations", async () => {
+    const transport = new FixtureNativeTransport();
+    transport.observationFrameId = null;
+    const driver = new NativeComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    try {
+      await expect(driver.observe("window-1")).resolves.toMatchObject({ frameId: "frame-2" });
+      expect(transport.captures).toBe(1);
+
+      transport.observationFrameId = "frame-2";
+      await expect(driver.observe("window-1")).resolves.toMatchObject({ frameId: "frame-2" });
+      expect(transport.captures).toBe(1);
+    } finally {
+      await driver.close();
+    }
+  });
+
+  test("preserves a typed native diagnosis when dispatch outcome is unknown", async () => {
+    const transport = new FixtureNativeTransport();
+    transport.dispatchError = new NativeComputerError(
+      "outcome_unknown",
+      "The exact macOS window did not confirm focus",
+      false,
+      true,
+    );
+    const driver = new NativeComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    const controller = new ComputerInteractionController({
+      computerSessionId,
+      controllerGeneration,
+      driver,
+    });
+    try {
+      expect(await controller.run(command())).toMatchObject({
+        state: "outcome_unknown",
+        dispatchedAt: expect.any(String),
+        error: {
+          code: "outcome_unknown",
+          message: "The exact macOS window did not confirm focus",
+          retryable: false,
+        },
+      });
+    } finally {
+      await driver.close();
+    }
+  });
+
+  test("settles a successful target-replacing action without fabricating an observation", async () => {
+    const transport = new FixtureNativeTransport();
+    transport.dispatchObservation = null;
+    const driver = new NativeComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    const controller = new ComputerInteractionController({
+      computerSessionId,
+      controllerGeneration,
+      driver,
+    });
+    try {
+      expect(await controller.run(command())).toMatchObject({
+        state: "completed",
+        observation: null,
+        error: null,
+      });
+      expect(transport.dispatched).toEqual(transport.validated);
     } finally {
       await driver.close();
     }
@@ -137,6 +217,79 @@ describe("NativeComputerDriver", () => {
       await driver.close();
     }
   });
+
+  test("replaces a poisoned native helper once for safe target reads", async () => {
+    const poisoned = new FixtureNativeTransport();
+    poisoned.targetsError = new Error("native computer helper returned a malformed response");
+    const replacement = new FixtureNativeTransport();
+    let recoveries = 0;
+    const driver = new NativeComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: poisoned,
+      clientFactory: async () => {
+        recoveries += 1;
+        return replacement;
+      },
+    });
+    try {
+      await expect(driver.listTargets()).resolves.toMatchObject([
+        { id: "window-1", computerSessionId, controllerGeneration },
+      ]);
+      expect(recoveries).toBe(1);
+      expect(poisoned.closed).toBe(true);
+    } finally {
+      await driver.close();
+    }
+  });
+
+  test("fans one native source out to independent concurrent frame profiles", async () => {
+    const transport = new FixtureNativeTransport();
+    const driver = new NativeComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    try {
+      const full = await driver.subscribeFrames("window-1", {
+        format: "png",
+        maxWidth: 100,
+        maxHeight: 100,
+      });
+      const compact = await driver.subscribeFrames("window-1", {
+        format: "jpeg",
+        quality: 55,
+        maxWidth: 10,
+        maxHeight: 10,
+        everyNthFrame: 2,
+      });
+      const [fullFrame, compactFrame] = await Promise.all([
+        full[Symbol.asyncIterator]().next(),
+        compact[Symbol.asyncIterator]().next(),
+      ]);
+      expect(fullFrame).toMatchObject({
+        done: false,
+        value: { mediaType: "image/png", width: 20, height: 10, sequence: 1 },
+      });
+      expect(compactFrame).toMatchObject({
+        done: false,
+        value: { mediaType: "image/jpeg", width: 10, height: 5, sequence: 1 },
+      });
+      expect(transport.startedCaptureOptions).toEqual([
+        { format: "png", quality: 100, maxWidth: 100, maxHeight: 100 },
+      ]);
+
+      await compact.close();
+      await expect(full[Symbol.asyncIterator]().next()).resolves.toMatchObject({
+        done: false,
+        value: { mediaType: "image/png", sequence: 2 },
+      });
+      await full.close();
+    } finally {
+      await driver.close();
+    }
+    expect(transport.stoppedCaptures).toBe(1);
+  });
 });
 
 class FixtureNativeTransport implements ComputerNativeTransport {
@@ -150,38 +303,53 @@ class FixtureNativeTransport implements ComputerNativeTransport {
   dispatched: NativeComputerActionCommand | null = null;
   validateError: Error | null = null;
   startCaptureError: Error | null = null;
+  targetsError: Error | null = null;
+  dispatchObservation: ReturnType<typeof observation> | null = observation("observation-2");
+  dispatchError: Error | null = null;
   closed = false;
+  stoppedCaptures = 0;
+  startedCaptureOptions: NativeComputerCaptureOptions[] = [];
+  observationFrameId: string | null = "frame-1";
+  captures = 0;
 
   async capabilities(): Promise<ComputerSessionCapabilities> {
     return this.handshake.capabilities;
   }
 
   async targets() {
+    if (this.targetsError) throw this.targetsError;
     return [target()];
   }
 
   async observe() {
-    return observation("observation-1");
+    return { ...observation("observation-1"), frameId: this.observationFrameId };
   }
 
-  async capture() {
+  async capture(_targetId: string, options?: NativeComputerCaptureOptions) {
+    this.captures += 1;
+    const width = Math.min(20, options?.maxWidth ?? 20);
+    const height = Math.min(10, Math.max(1, Math.floor((width / 20) * 10)));
+    const jpeg = options?.format === "jpeg";
     return {
       frameId: "frame-2",
       targetId: "window-1",
       targetGeneration: "target-generation-1",
-      width: 20,
-      height: 10,
-      mimeType: "image/png" as const,
+      width,
+      height,
+      mimeType: jpeg ? ("image/jpeg" as const) : ("image/png" as const),
       sha256: "a".repeat(64),
       data: new Uint8Array([1, 2, 3]),
     };
   }
 
-  async startCapture(): Promise<void> {
+  async startCapture(_targetId: string, options: NativeComputerCaptureOptions): Promise<void> {
     if (this.startCaptureError) throw this.startCaptureError;
+    this.startedCaptureOptions.push(options);
   }
 
-  async stopCapture(): Promise<void> {}
+  async stopCapture(): Promise<void> {
+    this.stoppedCaptures += 1;
+  }
 
   async clipboard() {
     return { text: "fixture clipboard", truncated: false };
@@ -194,7 +362,8 @@ class FixtureNativeTransport implements ComputerNativeTransport {
 
   async dispatch(nativeCommand: NativeComputerActionCommand) {
     this.dispatched = nativeCommand;
-    return observation("observation-2");
+    if (this.dispatchError) throw this.dispatchError;
+    return this.dispatchObservation;
   }
 
   async close(): Promise<void> {

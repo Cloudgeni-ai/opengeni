@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { StreamFrame, StreamOpen, StreamOpenAck } from "@opengeni/agent-proto";
 import { actRun, flush, registerDom, renderHook } from "./render-hook";
 import {
   MAX_PENDING_TERMINAL_INPUT_CODE_UNITS,
@@ -52,6 +53,19 @@ const capability = (url: string | null) => ({
   token: "scoped",
   expiresAt: null,
 });
+const relayCapability = (url: string) => ({
+  transport: "relay-pty" as const,
+  url,
+  token: "relay-scoped",
+  expiresAt: null,
+});
+
+function relayDatagram(tag: number, body: Uint8Array): ArrayBuffer {
+  const bytes = new Uint8Array(body.length + 1);
+  bytes[0] = tag;
+  bytes.set(body, 1);
+  return bytes.buffer;
+}
 
 beforeEach(() => {
   FakeWebSocket.instances = [];
@@ -63,6 +77,23 @@ afterEach(() => {
 });
 
 describe("useTerminalStream connection boundary", () => {
+  test("keeps command callbacks stable while connection status changes", async () => {
+    const hook = await renderHook(
+      () => useTerminalStream({ capability: capability("https://terminal.example/stable") }),
+      undefined,
+    );
+    await flush();
+    const before = hook.result.current;
+    const socket = FakeWebSocket.instances[0]!;
+    await actRun(() => socket.open());
+    await flush();
+    expect(hook.result.current.status).toBe("open");
+    expect(hook.result.current.write).toBe(before.write);
+    expect(hook.result.current.resize).toBe(before.resize);
+    expect(hook.result.current.disconnect).toBe(before.disconnect);
+    await hook.unmount();
+  });
+
   test("buffers pre-open input and flushes it only after ttyd auth and resize", async () => {
     const hook = await renderHook(
       () => useTerminalStream({ capability: capability("https://terminal.example/one") }),
@@ -171,7 +202,7 @@ describe("useTerminalStream connection boundary", () => {
     await hook.unmount();
   });
 
-  test("requests one fresh grant after an unexpected socket failure", async () => {
+  test("reconnects the same transport before requesting a fresh grant", async () => {
     let reconnects = 0;
     const hook = await renderHook(
       () =>
@@ -188,8 +219,44 @@ describe("useTerminalStream connection boundary", () => {
     await actRun(() => socket.open());
     await actRun(() => {
       socket.onerror?.();
-      socket.close();
     });
+    await actRun(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 125));
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(FakeWebSocket.instances[1]?.url).toBe(socket.url);
+    expect(reconnects).toBe(0);
+    await hook.unmount();
+  });
+
+  test("requests one fresh grant when the relay rejects the credential", async () => {
+    let reconnects = 0;
+    const url = "wss://relay.example/stream?ws=ws&agent=ag&port=7681&channel=pty-1";
+    const hook = await renderHook(
+      () =>
+        useTerminalStream({
+          capability: relayCapability(url),
+          onReconnectNeeded: () => {
+            reconnects += 1;
+          },
+        }),
+      undefined,
+    );
+    await flush();
+    const socket = FakeWebSocket.instances[0]!;
+    await actRun(() => socket.open());
+    await actRun(() =>
+      socket.onmessage?.({
+        data: relayDatagram(
+          2,
+          StreamOpenAck.encode({
+            accepted: false,
+            error: undefined,
+            resumeFromSeq: "0",
+          }).finish(),
+        ),
+      }),
+    );
     await flush();
     expect(reconnects).toBe(1);
     await hook.unmount();
@@ -259,6 +326,89 @@ describe("useTerminalStream connection boundary", () => {
     expect(hook.result.current.status).toBe("error");
     expect(socket.readyState).toBe(FakeWebSocket.CLOSED);
     expect(socket.sent).toEqual([]);
+    await hook.unmount();
+  });
+
+  test("relay PTY preserves directional cursors across credential rotation", async () => {
+    const output: string[] = [];
+    const oldUrl = "wss://relay.example/stream?ws=ws&agent=ag&port=7681&channel=pty-1&grant=old";
+    const freshUrl =
+      "wss://relay.example/stream?ws=ws&agent=ag&port=7681&channel=pty-1&grant=fresh";
+    const hook = await renderHook(
+      (props: { url: string }) =>
+        useTerminalStream({
+          capability: relayCapability(props.url),
+          onOutput: (chunk) => output.push(chunk),
+        }),
+      { url: oldUrl },
+    );
+    await flush();
+    const old = FakeWebSocket.instances[0]!;
+    await actRun(() => old.open());
+    const firstOpen = new Uint8Array(old.sent[0] as unknown as ArrayBuffer);
+    expect(StreamOpen.decode(firstOpen.subarray(1)).resumeFromSeq).toBe("0");
+    await actRun(() =>
+      old.onmessage?.({
+        data: relayDatagram(
+          2,
+          StreamOpenAck.encode({ accepted: true, error: undefined, resumeFromSeq: "0" }).finish(),
+        ),
+      }),
+    );
+    await actRun(() =>
+      old.onmessage?.({
+        data: relayDatagram(
+          3,
+          StreamFrame.encode({
+            channelId: "pty-1",
+            seq: "0",
+            data: new TextEncoder().encode("first"),
+            producedAtMs: "0",
+          }).finish(),
+        ),
+      }),
+    );
+    await actRun(() => hook.result.current.write("input-one"));
+    const firstInput = new Uint8Array(old.sent.at(-1) as unknown as ArrayBuffer);
+    expect(StreamFrame.decode(firstInput.subarray(1)).seq).toBe("0");
+
+    await hook.rerender({ url: freshUrl });
+    await flush();
+    const fresh = FakeWebSocket.instances[1]!;
+    await actRun(() => fresh.open());
+    const resumedOpen = new Uint8Array(fresh.sent[0] as unknown as ArrayBuffer);
+    expect(StreamOpen.decode(resumedOpen.subarray(1)).resumeFromSeq).toBe("1");
+    await actRun(() =>
+      fresh.onmessage?.({
+        data: relayDatagram(
+          2,
+          StreamOpenAck.encode({ accepted: true, error: undefined, resumeFromSeq: "1" }).finish(),
+        ),
+      }),
+    );
+    // An overlapping replay must not print twice; the next unseen frame must.
+    for (const [seq, data] of [
+      ["0", "duplicate"],
+      ["1", "second"],
+    ] as const) {
+      await actRun(() =>
+        fresh.onmessage?.({
+          data: relayDatagram(
+            3,
+            StreamFrame.encode({
+              channelId: "pty-1",
+              seq,
+              data: new TextEncoder().encode(data),
+              producedAtMs: "0",
+            }).finish(),
+          ),
+        }),
+      );
+    }
+    expect(output).toEqual(["first", "second"]);
+    await actRun(() => hook.result.current.write("input-two"));
+    const secondInput = new Uint8Array(fresh.sent.at(-1) as unknown as ArrayBuffer);
+    expect(StreamFrame.decode(secondInput.subarray(1)).seq).toBe("1");
     await hook.unmount();
   });
 });

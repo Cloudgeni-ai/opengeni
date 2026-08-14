@@ -649,6 +649,7 @@ const defaultModalLoader: ModalModuleLoader = () => import("modal");
 const resolvedRegistryImages = new Map<string, unknown>();
 /** In-flight resolutions, for cross-call de-duplication. */
 const inFlightRegistryImages = new Map<string, Promise<void>>();
+const MODAL_AUTHENTICATED_REGISTRY_LABEL = "LABEL io.opengeni.registry-import=authenticated";
 
 function registryImageCacheKey(settings: Settings): string {
   return [
@@ -697,10 +698,35 @@ export async function ensureModalRegistryImage(
         settings.modalImageRegistrySecret!,
         settings.modalEnvironment ? { environment: settings.modalEnvironment } : undefined,
       );
-      // fromRegistry is synchronous and returns a lazy image definition (built
-      // server-side at sandbox create); the resolved secretId travels with it.
-      const image = client.images.fromRegistry(settings.modalImageRef!, secret);
-      resolvedRegistryImages.set(key, image);
+      // fromRegistry is synchronous and returns a lazy image definition. Build it
+      // here with the same authenticated client that resolved the registry Secret.
+      // Passing the lazy definition into ModalSandboxClient crosses a ModalClient
+      // boundary and makes every sandbox creation hydrate/import it again; registry
+      // auth can then be lost and failed imports become sticky image builds. A built
+      // provider-native Image is immutable, reusable, and contains no registry
+      // credential boundary for the sandbox client to reconstruct.
+      const app = await client.apps.fromName(settings.modalAppName, {
+        ...(settings.modalEnvironment ? { environment: settings.modalEnvironment } : {}),
+        createIfMissing: true,
+      });
+      const registryImage = (forceBuild: boolean) =>
+        client.images
+          .fromRegistry(settings.modalImageRef!, secret)
+          .dockerfileCommands([MODAL_AUTHENTICATED_REGISTRY_LABEL], {
+            ...(forceBuild ? { forceBuild: true } : {}),
+          });
+      let builtImage;
+      try {
+        builtImage = await registryImage(false).build(app);
+      } catch {
+        // Modal memoizes registry-import failures by image definition. A
+        // corrected/rotated Secret would otherwise receive the same stale
+        // failed Image forever. Retry exactly once with the same deterministic
+        // definition and Modal's explicit force-build bit; successful imports
+        // remain cached normally on later worker starts.
+        builtImage = await registryImage(true).build(app);
+      }
+      resolvedRegistryImages.set(key, builtImage);
     })().finally(() => {
       inFlightRegistryImages.delete(key);
     });
@@ -1109,10 +1135,20 @@ export async function sweepModalOrphanSandboxes(
   const ownedClient = options.client ? null : await createModalClient(settings);
   const modal = (options.client ?? ownedClient)! as ModalCpListClient;
   try {
-    const app = await modal.apps.fromName(settings.modalAppName, {
-      createIfMissing: false,
-      ...(settings.modalEnvironment ? { environment: settings.modalEnvironment } : {}),
-    });
+    let app: Awaited<ReturnType<typeof modal.apps.fromName>>;
+    try {
+      app = await modal.apps.fromName(settings.modalAppName, {
+        createIfMissing: false,
+        ...(settings.modalEnvironment ? { environment: settings.modalEnvironment } : {}),
+      });
+    } catch (error) {
+      // A new deployment has no Modal app until its first sandbox is created.
+      // That is an empty provider inventory, not a failed orphan sweep.
+      if (isModalNotFoundError(error)) {
+        return { examined: 0, terminated: [], skipped: 0 };
+      }
+      throw error;
+    }
     const appId = app.appId;
     if (!appId) {
       return { examined: 0, terminated: [], skipped: 0 };

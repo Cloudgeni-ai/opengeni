@@ -3,7 +3,8 @@
 A dev-only, deterministic **load + chaos harness** for the `opengeni-agent`
 control-plane surface. It drives the **real** agent binary against a **real**
 local `nats-server`, speaking the exact prost `ControlRequest`/`ControlResponse`
-request/reply the control plane speaks (`agent.<ws>.<id>.rpc`), and emits
+request/reply the control plane speaks
+(`agent.<ws>.<id>.connection.<instance>.rpc`), and emits
 machine-readable JSON plus a human summary.
 
 It is the instrument every subsequent reliability change is measured against:

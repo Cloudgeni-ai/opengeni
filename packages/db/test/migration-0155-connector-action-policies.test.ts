@@ -4,6 +4,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import {
   createDb,
+  ensureConnectorActionPolicyDefault,
   migrate,
   provisionRoles,
   upsertConnectorActionPolicy,
@@ -198,5 +199,46 @@ describe("0155 connector action policy migration contract", () => {
        where connection_id = ${scope.connectionId}`;
     expect(rows).toHaveLength(2);
     expect(rows).toEqual(expect.arrayContaining([legitimateTenant, unrelatedTenant]));
+  }, 180_000);
+
+  test("installs a default only when no explicit connector policy exists", async () => {
+    if (!available) return;
+    const tenant = await freshWorkspace(`default-${crypto.randomUUID()}`);
+    const scope = {
+      accountId: tenant.accountId,
+      workspaceId: tenant.workspaceId,
+      subjectId: "policy-owner",
+      connectionId: `connection-${crypto.randomUUID()}`,
+      serverId: "google-drive-publishing",
+      toolName: "google_drive_publish_file",
+      actionName: "create",
+    };
+    const installed = await Promise.all([
+      ensureConnectorActionPolicyDefault(client.db, { ...scope, policy: "ask" }),
+      ensureConnectorActionPolicyDefault(client.db, {
+        ...scope,
+        subjectId: "concurrent-activation",
+        policy: "ask",
+      }),
+    ]);
+    expect(installed.map((result) => result.changed).sort()).toEqual([false, true]);
+    expect(installed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ policy: expect.objectContaining({ policy: "ask", version: 1 }) }),
+      ]),
+    );
+
+    const explicit = await upsertConnectorActionPolicy(client.db, {
+      ...scope,
+      policy: "block",
+    });
+    expect(explicit).toMatchObject({ changed: true, policy: { policy: "block", version: 2 } });
+
+    const preserved = await ensureConnectorActionPolicyDefault(client.db, {
+      ...scope,
+      subjectId: "later-activation",
+      policy: "ask",
+    });
+    expect(preserved).toMatchObject({ changed: false, policy: { policy: "block", version: 2 } });
   }, 180_000);
 });

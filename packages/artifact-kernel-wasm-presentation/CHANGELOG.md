@@ -1,5 +1,15 @@
 # @opengeni/artifact-kernel-wasm-presentation
 
+## 0.2.10
+
+## 0.2.9
+
+## 0.2.8
+
+## 0.2.7
+
+## 0.2.6
+
 ## 0.2.5
 
 ## 0.2.4

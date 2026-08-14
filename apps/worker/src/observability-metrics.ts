@@ -3,6 +3,7 @@ import { errorCodeToJSON } from "@opengeni/agent-proto";
 import { SandboxBackend, type SessionEventType } from "@opengeni/contracts";
 import type { EventLogger } from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
+import type { CompanyBrainContributionReceipt } from "./model-context-contributions";
 import {
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
   modelUsageTokenCountOrNull,
@@ -175,7 +176,12 @@ export function selfhostedOpObserverForMetrics(hooks: RuntimeMetricsHooks): Self
 /** A session-scoped `machine.op.*` event mapped from a completed-op observation. */
 export type MachineOpSessionEvent = {
   type: "machine.op.failed" | "machine.op.recovered";
-  payload: { op: string; faultClass: string; attempts: number; machineId?: string };
+  payload: {
+    op: string;
+    faultClass: string;
+    attempts: number;
+    machineId?: string;
+  };
 };
 
 /** Map an observation to a `machine.op.*` session event, or null if it is not
@@ -248,24 +254,34 @@ export function turnLifecycleMetricsFor(observability: Observability): TurnLifec
 }
 
 export class TurnLifecycleMetrics {
-  private readonly startedTurns = new Map<string, number>();
+  private readonly turns = new Map<string, { startedAt: number; lastProgressAt: number }>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly observability: Observability,
-    private readonly options: { now?: () => number; refreshIntervalMs?: number } = {},
+    private readonly options: {
+      now?: () => number;
+      refreshIntervalMs?: number;
+    } = {},
   ) {}
 
   start(turnId: string): void {
-    this.startedTurns.set(turnId, this.now());
+    const now = this.now();
+    this.turns.set(turnId, { startedAt: now, lastProgressAt: now });
     this.ensureTimer();
     this.refreshGauges();
   }
 
+  progress(turnId: string): void {
+    const turn = this.turns.get(turnId);
+    if (!turn) return;
+    turn.lastProgressAt = this.now();
+  }
+
   finish(turnId: string, outcome: TurnOutcome | null, durationSeconds?: number): void {
-    const startedAt = this.startedTurns.get(turnId);
+    const startedAt = this.turns.get(turnId)?.startedAt;
     if (startedAt !== undefined) {
-      this.startedTurns.delete(turnId);
+      this.turns.delete(turnId);
     }
     if (outcome) {
       const observedDuration =
@@ -284,7 +300,7 @@ export class TurnLifecycleMetrics {
       });
     }
     this.refreshGauges();
-    if (this.startedTurns.size === 0) {
+    if (this.turns.size === 0) {
       this.stopTimer();
     }
   }
@@ -293,30 +309,44 @@ export class TurnLifecycleMetrics {
     this.observability.setGauge({
       name: "opengeni_turns_inflight",
       help: "Current number of in-flight agent turns in this worker process.",
-      value: this.startedTurns.size,
+      value: this.turns.size,
     });
     this.observability.setGauge({
       name: "opengeni_turn_oldest_inflight_age_seconds",
       help: "Age in seconds of the oldest in-flight agent turn in this worker process.",
       value: this.oldestInflightAgeSeconds(),
     });
+    this.observability.setGauge({
+      name: "opengeni_turn_oldest_no_progress_age_seconds",
+      help: "Seconds since durable progress for the least recently progressing in-flight turn.",
+      value: this.oldestNoProgressAgeSeconds(),
+    });
   }
 
   stop(): void {
-    this.startedTurns.clear();
+    this.turns.clear();
     this.refreshGauges();
     this.stopTimer();
   }
 
   private oldestInflightAgeSeconds(): number {
-    if (this.startedTurns.size === 0) {
+    if (this.turns.size === 0) {
       return 0;
     }
     let oldest = Number.POSITIVE_INFINITY;
-    for (const startedAt of this.startedTurns.values()) {
+    for (const { startedAt } of this.turns.values()) {
       oldest = Math.min(oldest, startedAt);
     }
     return Math.max(0, (this.now() - oldest) / 1000);
+  }
+
+  private oldestNoProgressAgeSeconds(): number {
+    if (this.turns.size === 0) return 0;
+    let leastRecentProgress = Number.POSITIVE_INFINITY;
+    for (const { lastProgressAt } of this.turns.values()) {
+      leastRecentProgress = Math.min(leastRecentProgress, lastProgressAt);
+    }
+    return Math.max(0, (this.now() - leastRecentProgress) / 1000);
   }
 
   private ensureTimer(): void {
@@ -693,7 +723,11 @@ const RETAINED_PROCESS_OWNER_STATE_SET = new Set<string>(RETAINED_PROCESS_OWNER_
 
 export function recordRetainedProcessInventoryGauges(
   observability: Observability,
-  counts: Array<{ ownerState: string; activeCount: number; terminalOwnerCount: number }>,
+  counts: Array<{
+    ownerState: string;
+    activeCount: number;
+    terminalOwnerCount: number;
+  }>,
 ): void {
   const normalized = new Map<string, { active: number; terminal: number }>();
   for (const ownerState of RETAINED_PROCESS_OWNER_STATES) {
@@ -835,6 +869,175 @@ export function recordModelRequestPhase(
     help: "Monotonic seconds from provider dispatch to a model-request lifecycle phase.",
     buckets: MODEL_REQUEST_PHASE_BUCKETS,
     labels: { provider: input.provider, phase: input.phase },
+    value: Math.max(0, input.durationSeconds),
+  });
+}
+
+export type TurnStartupPhase =
+  | "claim_and_policy"
+  | "turn_start_settlement"
+  | "credential_selection"
+  | "runtime_preparation"
+  | "sandbox_establish"
+  | "file_resolution"
+  | "tool_context_preparation"
+  | "tool_preparation"
+  | "tool_server_construction"
+  | "tool_required_connect"
+  | "tool_optional_connect"
+  | "tool_attempt_catalog_build"
+  | "tool_attempt_catalog_persist"
+  | "post_tool_preparation"
+  | "agent_construction"
+  | "post_agent_preparation"
+  | "file_materialization"
+  | "history_preparation"
+  | "history_system_update_load"
+  | "history_current_attachment_resolution"
+  | "history_durable_history_load"
+  | "history_sandbox_envelope_load"
+  | "history_canonical_projection"
+  | "history_provider_projection"
+  | "history_attachment_ref_projection"
+  | "history_screenshot_materialization"
+  | "history_model_attachment_projection"
+  | "history_runtime_input_assembly"
+  | "history_artifact_candidate_scan"
+  | "history_generated_image_materialization"
+  | "history_position_load"
+  | "owned_sandbox_setup"
+  | "provider_dispatch"
+  | "model_request_preparation"
+  | "model_sdk_serialization"
+  | "model_prepare_sandbox_agent_preparation"
+  | "model_prepare_sandbox_agent_manifest_inventory"
+  | "model_prepare_sandbox_session_manifest_inventory"
+  | "model_prepare_sandbox_manifest_apply"
+  | "model_prepare_sandbox_entry_materialization"
+  | "model_prepare_sandbox_running_check"
+  | "model_prepare_sandbox_start"
+  | "model_prepare_sandbox_client_create"
+  | "model_prepare_sandbox_client_resume"
+  | "model_prepare_sandbox_client_delete"
+  | "model_prepare_sandbox_client_state_serialize"
+  | "model_prepare_sandbox_client_reuse_check"
+  | "model_prepare_runner_before_mcp_tools"
+  | "model_prepare_mcp_tools_snapshot"
+  | "model_prepare_mcp_tools_before_input_filter"
+  | "model_prepare_input_filter_base"
+  | "model_prepare_input_filter_genesis"
+  | "model_prepare_input_filter_host"
+  | "model_prepare_input_filter_tool_output"
+  | "model_prepare_input_filter_modality"
+  | "model_prepare_input_filter_context"
+  | "model_prepare_responses_input_conversion"
+  | "model_prepare_responses_request_build"
+  | "model_credential_resolution"
+  | "model_wire_normalization"
+  | "model_request_audit"
+  | "stream_bootstrap";
+
+export type TurnStartupOutcome = "completed" | "failed";
+export type TurnStartupCache = "hit" | "miss" | "disabled" | "none";
+export type TurnStartupCountBucket = "0" | "1" | "2-5" | "6-20" | "21+" | "unknown";
+export type TurnSandboxEstablishPolicy = "eager" | "on-demand";
+export type TurnSandboxEstablishReason =
+  | "eligible"
+  | "lazy_disabled"
+  | "machine_primary"
+  | "backend_none"
+  | "initial_run_credentials"
+  | "generated_video_files"
+  | "signed_file_resources";
+
+const TURN_STARTUP_PHASE_BUCKETS = [
+  0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120,
+];
+
+export function turnStartupCountBucket(count: number | null): TurnStartupCountBucket {
+  if (count === null || !Number.isFinite(count) || count < 0) return "unknown";
+  if (count === 0) return "0";
+  if (count === 1) return "1";
+  if (count <= 5) return "2-5";
+  if (count <= 20) return "6-20";
+  return "21+";
+}
+
+/**
+ * Measure the critical path from a durable turn start to provider dispatch.
+ * Every label is a closed or configuration-derived enum; high-cardinality turn,
+ * session, credential, connection, file, and model identifiers are forbidden.
+ */
+export function recordTurnStartupPhase(
+  observability: Observability,
+  input: {
+    phase: TurnStartupPhase;
+    provider: string;
+    backend: string;
+    outcome: TurnStartupOutcome;
+    durationSeconds: number;
+    count?: number | null;
+    cache?: TurnStartupCache;
+  },
+): void {
+  observability.observeHistogram({
+    name: "opengeni_turn_startup_phase_duration_seconds",
+    help: "Turn startup phase duration before the model response stream begins.",
+    buckets: TURN_STARTUP_PHASE_BUCKETS,
+    labels: {
+      phase: input.phase,
+      provider: input.provider,
+      backend: input.backend,
+      outcome: input.outcome,
+      count_bucket: turnStartupCountBucket(input.count ?? null),
+      cache: input.cache ?? "none",
+    },
+    value: Math.max(0, input.durationSeconds),
+  });
+}
+
+/**
+ * Explain why a turn did or did not keep provider sandbox work off the
+ * pre-model critical path. The reason is a closed enum: never attach session,
+ * sandbox, credential, or file identifiers here.
+ */
+export function recordTurnSandboxEstablishPolicy(
+  observability: Observability,
+  input: {
+    policy: TurnSandboxEstablishPolicy;
+    reason: TurnSandboxEstablishReason;
+    backend: string;
+  },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_turn_sandbox_establish_policy_total",
+    help: "Turn sandbox establish policy decisions by bounded reason.",
+    labels: {
+      policy: input.policy,
+      reason: input.reason,
+      backend: input.backend,
+    },
+  });
+}
+
+export function recordTurnWorkerPreparationTotal(
+  observability: Observability,
+  input: {
+    provider: string;
+    backend: string;
+    outcome: TurnStartupOutcome;
+    durationSeconds: number;
+  },
+): void {
+  observability.observeHistogram({
+    name: "opengeni_turn_worker_preparation_duration_seconds",
+    help: "Worker preparation from the durable turn-start boundary until entering the runtime; lazy SDK request preparation and model-request audit are separate phases.",
+    buckets: TURN_STARTUP_PHASE_BUCKETS,
+    labels: {
+      provider: input.provider,
+      backend: input.backend,
+      outcome: input.outcome,
+    },
     value: Math.max(0, input.durationSeconds),
   });
 }
@@ -1023,6 +1226,40 @@ export function recordContextCompaction(observability: Observability, trigger: s
     help: "Total context compactions performed, by trigger.",
     labels: { trigger },
   });
+}
+
+const MODEL_CONTEXT_CONTRIBUTION_TOKEN_BUCKETS = [1, 8, 32, 128, 512, 2_048, 8_192];
+
+/**
+ * Metadata-only Company Brain exposure telemetry. Labels are closed enums and
+ * never include tenant ids, record ids, titles, descriptions, or content.
+ */
+export function recordCompanyBrainContributions(
+  observability: Observability,
+  receipt: CompanyBrainContributionReceipt,
+): void {
+  for (const contribution of receipt.contributions) {
+    const labels = {
+      category: contribution.category,
+      source: contribution.source,
+      inclusion_reason: contribution.inclusionReason,
+      authority_scope: contribution.authorityScope,
+      session_role: receipt.sessionRole,
+      memory_prompt_mode: receipt.memoryPromptMode,
+    };
+    observability.incrementCounter({
+      name: "opengeni_model_context_contributions_total",
+      help: "Company Brain contributions exposed to a model, by bounded reason and authority.",
+      labels,
+    });
+    observability.observeHistogram({
+      name: "opengeni_model_context_contribution_estimated_tokens",
+      help: "Estimated tokens per model-visible Company Brain contribution.",
+      buckets: MODEL_CONTEXT_CONTRIBUTION_TOKEN_BUCKETS,
+      labels,
+      value: contribution.estimatedTokens,
+    });
+  }
 }
 
 // ── Prompt-cache efficiency ─────────────────────────────────────────────────

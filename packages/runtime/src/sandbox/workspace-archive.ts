@@ -54,9 +54,9 @@ export class WorkspaceArchiveIntegrityError extends Error {
   constructor(
     public readonly code: WorkspaceArchiveIntegrityCode,
     message: string,
-    options: { retryable?: boolean } = {},
+    options: { retryable?: boolean; cause?: unknown } = {},
   ) {
-    super(message);
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.retryable = options.retryable ?? false;
   }
 }

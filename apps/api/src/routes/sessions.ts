@@ -1,5 +1,6 @@
 import {
   AcknowledgeStreamRequest,
+  ApplySessionGoalRevisionRequest,
   ActivateCodexRealtimeConnectionRequest,
   AttachViewerRequest,
   BeginSessionRealtimeRequest,
@@ -61,6 +62,7 @@ import {
   type SandboxBackend,
   type LineageNode,
   type Session,
+  type SessionGoalRevision,
   type AgentTopologyPageResponse,
   type ErrorCode,
   type SessionAuthorizationOperation,
@@ -76,6 +78,8 @@ import {
   clearSessionGoal,
   clearSessionContext,
   getOpenPtySession,
+  getEnrollment,
+  getLiveEnrollmentConnection,
   getRetainedProcess,
   getSandbox,
   getSession,
@@ -84,11 +88,13 @@ import {
   getSessionGoal,
   getSessionHumanInputRequest,
   getSessionGoalWithContinuation,
+  getSessionGoalRevision,
   getSessionQueueSnapshot,
   getStreamAcknowledgment,
   insertPtySession,
   listSessionEventPage,
   listSessionHumanInputRequests,
+  listSessionGoalRevisions,
   listSessionIdsInGroup,
   listSessionDiscoverySummaries,
   listSessionDiscoveryAncestorPaths,
@@ -113,6 +119,7 @@ import {
   decodeSessionListCursor,
   revokeViewer,
   setSessionGoalStatusWithEvent,
+  upsertSessionGoalWithEvent,
   updatePtySessionActivity,
   QueueCommandConflictError,
   beginSessionRealtimeInTransaction,
@@ -153,6 +160,7 @@ import {
   createGatewayRealtimeConnectionSecret,
   GatewayRealtimeBrokerError,
 } from "../gateway-realtime";
+import { createXaiRealtimeConnectionSecret, XaiRealtimeBrokerError } from "../xai-realtime";
 import { z, ZodError } from "zod";
 import {
   runConcurrentChannelAReads,
@@ -162,7 +170,12 @@ import {
   type ChannelAHandle,
   type ChannelAOperation,
 } from "../sandbox/channel-a";
-import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
+import {
+  NatsControlRpc,
+  negotiateCapabilities,
+  negotiateSelfhostedCapabilities,
+  SelfhostedSession,
+} from "@opengeni/runtime/sandbox";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -215,6 +228,7 @@ import {
   sessionWithEffectiveToolPolicy,
   workspaceSessionToolPolicyDefaultServerIds,
   workspaceSessionToolPolicyServerIds,
+  relayConfigFromSettings,
 } from "@opengeni/core";
 import { assertSessionExists, boundedLimit } from "../http/common";
 import { sseSessionStream } from "../http/sse";
@@ -241,7 +255,12 @@ function requireViewerLifecyclePermission(grant: AccessGrant): void {
 
 export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
-  const channelAServices = { db, settings, bus, observability: deps.observability };
+  const channelAServices = {
+    db,
+    settings,
+    bus,
+    observability: deps.observability,
+  };
   const workspaceCaptureManifestCache = new WorkspaceCaptureManifestCache();
   const ptyIdentity = (pty: SandboxOpenPtySessionRow): SandboxPtyProcessIdentity => ({
     leaseId: pty.leaseId,
@@ -696,7 +715,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     const parsed = BeginSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid session realtime request" });
+      throw new HTTPException(400, {
+        message: "invalid session realtime request",
+      });
     }
     try {
       const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
@@ -727,11 +748,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         !z.string().uuid().safeParse(sessionId).success ||
         !z.string().uuid().safeParse(realtimeId).success
       ) {
-        throw new HTTPException(400, { message: "invalid realtime lifecycle id" });
+        throw new HTTPException(400, {
+          message: "invalid realtime lifecycle id",
+        });
       }
       const parsed = RenewSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
       if (!parsed.success) {
-        throw new HTTPException(400, { message: "invalid realtime heartbeat request" });
+        throw new HTTPException(400, {
+          message: "invalid realtime heartbeat request",
+        });
       }
       try {
         const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
@@ -761,11 +786,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       !z.string().uuid().safeParse(sessionId).success ||
       !z.string().uuid().safeParse(realtimeId).success
     ) {
-      throw new HTTPException(400, { message: "invalid realtime lifecycle id" });
+      throw new HTTPException(400, {
+        message: "invalid realtime lifecycle id",
+      });
     }
     const parsed = EndSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid realtime end request" });
+      throw new HTTPException(400, {
+        message: "invalid realtime end request",
+      });
     }
     try {
       const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
@@ -878,7 +907,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         deps.codexFetch,
       );
       try {
-        const answer = await broker({ request: providerRequest, signal: c.req.raw.signal });
+        const answer = await broker({
+          request: providerRequest,
+          signal: c.req.raw.signal,
+        });
         const completed = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
           scopedDb.transaction(async (tx) =>
             completeSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
@@ -971,7 +1003,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     const parsed = GatewayRealtimeConnectRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      throw new HTTPException(422, { message: "invalid Gateway realtime request" });
+      throw new HTTPException(422, {
+        message: "invalid Gateway realtime request",
+      });
     }
     c.header("cache-control", "private, no-store");
     const {
@@ -1076,6 +1110,121 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/supergrok", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const parsed = GatewayRealtimeConnectRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(422, { message: "invalid SuperGrok realtime request" });
+    }
+    c.header("cache-control", "private, no-store");
+    const {
+      realtimeId,
+      operationId,
+      browserInstanceId,
+      ownerKey,
+      expectedVersion,
+      expectedConnectionEpoch,
+      rotate,
+    } = parsed.data;
+    let claim: Awaited<ReturnType<typeof claimSessionRealtimeConnectionInTransaction>> | null =
+      null;
+    let connectionCompleted = false;
+    try {
+      claim = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+        scopedDb.transaction(async (tx) =>
+          claimSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+            workspaceId,
+            sessionId,
+            realtimeId,
+            operationId,
+            ownerSubjectId: grant.subjectId,
+            browserInstanceId,
+            ownerKey,
+            expectedVersion,
+            expectedConnectionEpoch,
+            rotate,
+            promotionMode: "staged",
+          }),
+        ),
+      );
+      if (claim.replay) {
+        throw new SessionRealtimeConflictError(
+          "REALTIME_CONNECTION_STATE_CHANGED",
+          "SuperGrok realtime tokens are single-use; reconnect with a new operation",
+        );
+      }
+      const secret = await createXaiRealtimeConnectionSecret({
+        db,
+        settings,
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        sessionId,
+        model: claim.mode.model,
+        fetchImpl: deps.xaiFetch ?? fetch,
+      });
+      const claimed = claim;
+      const completed = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+        scopedDb.transaction(async (tx) =>
+          completeSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+            workspaceId,
+            sessionId,
+            realtimeId,
+            connectionId: claimed.connection.id,
+            operationId,
+            connectionEpoch: claimed.connection.connectionEpoch,
+            sdpAnswer: "supergrok-client-secret-minted",
+          }),
+        ),
+      );
+      connectionCompleted = true;
+      return c.json({
+        ...secret,
+        connectionId: completed.connection.id,
+        connectionEpoch: completed.connection.connectionEpoch,
+        startupFenceSequence: completed.connection.startupFenceSequence,
+        modeVersion: claimed.modeVersion,
+        replay: false as const,
+      });
+    } catch (error) {
+      if (claim !== null && !claim.replay && !connectionCompleted) {
+        const claimed = claim;
+        await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+          scopedDb.transaction(async (tx) =>
+            failSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+              workspaceId,
+              sessionId,
+              realtimeId,
+              connectionId: claimed.connection.id,
+              operationId,
+              connectionEpoch: claimed.connection.connectionEpoch,
+              failureCode: error instanceof XaiRealtimeBrokerError ? error.code : "supergrok_error",
+            }),
+          ),
+        ).catch(() => undefined);
+      }
+      if (error instanceof SessionRealtimeConflictError) throw sessionRealtimeHttpError(error);
+      if (!(error instanceof XaiRealtimeBrokerError)) throw error;
+      const status = error.code === "credential_unavailable" ? 409 : 502;
+      return c.json(
+        {
+          error: {
+            status,
+            code: `SUPERGROK_REALTIME_${error.code.toUpperCase()}`,
+            message: error.message,
+            retryable: error.code === "provider_error",
+          },
+        },
+        status,
+      );
+    }
+  });
+
   app.post(
     "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/:realtimeId/connections/:connectionId/activate",
     async (c) => {
@@ -1089,13 +1238,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         !z.string().uuid().safeParse(realtimeId).success ||
         !z.string().uuid().safeParse(connectionId).success
       ) {
-        throw new HTTPException(400, { message: "invalid realtime connection id" });
+        throw new HTTPException(400, {
+          message: "invalid realtime connection id",
+        });
       }
       const parsed = ActivateCodexRealtimeConnectionRequest.safeParse(
         await c.req.json().catch(() => null),
       );
       if (!parsed.success) {
-        throw new HTTPException(422, { message: "invalid realtime connection activation" });
+        throw new HTTPException(422, {
+          message: "invalid realtime connection activation",
+        });
       }
       try {
         const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
@@ -1135,7 +1288,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         await c.req.json().catch(() => null),
       );
       if (!parsed.success) {
-        throw new HTTPException(422, { message: "invalid realtime ledger sync request" });
+        throw new HTTPException(422, {
+          message: "invalid realtime ledger sync request",
+        });
       }
       try {
         const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
@@ -1414,6 +1569,77 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(goal);
   });
 
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/goal/revisions", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    return c.json(await listSessionGoalRevisions(db, workspaceId, sessionId));
+  });
+
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/goal/revisions/:revisionId/apply",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      const sessionId = c.req.param("sessionId");
+      await assertSessionExists(db, workspaceId, sessionId);
+      const payload = ApplySessionGoalRevisionRequest.parse(await c.req.json());
+      const revision = await getSessionGoalRevision(
+        db,
+        workspaceId,
+        sessionId,
+        c.req.param("revisionId"),
+      );
+      if (!revision || revision.disposition !== "proposed") {
+        throw new HTTPException(404, {
+          message: "goal rewrite proposal not found",
+        });
+      }
+      if (!goalProposalMatchesExpectedRevision(revision, payload.expectedObjectiveRevision)) {
+        throw new HTTPException(409, {
+          message: `goal proposal was based on objective revision ${revision.baseObjectiveRevision}; requested fence ${payload.expectedObjectiveRevision} cannot apply it`,
+        });
+      }
+      try {
+        const { goal, workflowWakeRevision, events } = await upsertSessionGoalWithEvent(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          text: revision.text,
+          successCriteria: revision.successCriteria,
+          mutationPolicy: revision.mutationPolicy,
+          expectedObjectiveRevision: payload.expectedObjectiveRevision,
+          expectedGoalId: revision.goalId,
+          changeKind: revision.changeKind,
+          changeRationale: payload.rationale ?? `Applied goal proposal ${revision.id}`,
+          sourceProposalId: revision.id,
+          createdBy: "api",
+          actor: "api",
+        });
+        await publishDurableSessionEvents(bus, workspaceId, sessionId, events);
+        if (workflowWakeRevision !== null) {
+          await workflowClient.wakeSessionWorkflow({
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            workflowId: workflowIdForSession(sessionId),
+            wakeRevision: workflowWakeRevision,
+          });
+        }
+        return c.json((await getSessionGoalWithContinuation(db, workspaceId, sessionId)) ?? goal);
+      } catch (error) {
+        if (error instanceof SessionControlConflictError) {
+          throw new HTTPException(409, {
+            message: error.message,
+            cause: error,
+          });
+        }
+        throw error;
+      }
+    },
+  );
+
   app.patch("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
@@ -1423,6 +1649,48 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const existing = await getSessionGoal(db, workspaceId, sessionId);
     if (!existing) {
       throw new HTTPException(404, { message: "session goal not found" });
+    }
+    if (!("status" in payload)) {
+      try {
+        const { goal, workflowWakeRevision, events } = await upsertSessionGoalWithEvent(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          text: payload.text,
+          successCriteria:
+            payload.successCriteria !== undefined
+              ? payload.successCriteria
+              : existing.successCriteria,
+          maxAutoContinuations: existing.maxAutoContinuations,
+          mutationPolicy: payload.mutationPolicy ?? existing.mutationPolicy,
+          expectedObjectiveRevision: payload.expectedObjectiveRevision,
+          changeKind: "replacement",
+          changeRationale: payload.rationale,
+          createdBy: "api",
+          actor: "api",
+        });
+        if (events.length > 0) {
+          await bus.publish(workspaceId, sessionId, events);
+        }
+        if (workflowWakeRevision !== null) {
+          await workflowClient.wakeSessionWorkflow({
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            workflowId: workflowIdForSession(sessionId),
+            wakeRevision: workflowWakeRevision,
+          });
+        }
+        return c.json((await getSessionGoalWithContinuation(db, workspaceId, sessionId)) ?? goal);
+      } catch (error) {
+        if (error instanceof SessionControlConflictError) {
+          throw new HTTPException(409, {
+            message: error.message,
+            cause: error,
+          });
+        }
+        throw error;
+      }
     }
     if (existing.status === "completed") {
       throw new HTTPException(409, {
@@ -1990,7 +2258,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
       text: payload.text,
       annotations: payload.annotations,
-      turnInstructions: payload.turnInstructions ?? null,
+      modelContext: payload.modelContext ?? null,
       resources: payload.resources,
       model: payload.model ?? null,
       reasoningEffort: payload.reasoningEffort ?? null,
@@ -2033,7 +2301,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const { accepted } = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
         text: event.payload.text,
         annotations: event.payload.annotations,
-        turnInstructions: event.payload.turnInstructions ?? null,
+        modelContext: event.payload.modelContext ?? null,
         resources: event.payload.resources ?? [],
         model: event.payload.model ?? null,
         reasoningEffort: event.payload.reasoningEffort ?? null,
@@ -2208,6 +2476,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
+    // Capability truth follows the ACTIVE placement, not the session's managed
+    // home lease. A connected machine has no Modal group lease; treating that
+    // absence as `cold` makes the client suppress the very viewer attach that
+    // would mint its relay terminal/desktop cells. Resolve the active target once
+    // and use the selfhosted liveness probe when it is a connected machine.
+    const activeSandbox = session.activeSandboxId
+      ? await getSandbox(db, workspaceId, session.activeSandboxId)
+      : null;
+    const selfhostedActive = activeSandbox?.kind === "selfhosted";
     const lease = await readGroupLease(
       { db, settings },
       { workspaceId, sandboxGroupId: session.sandboxGroupId },
@@ -2231,36 +2508,68 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // startup, port exposure, or short-lived bearer mint. Besides enforcing least
     // privilege, that keeps the 120-second stream credentials from aging before a
     // user opens their surface. POST /viewers is the sole credential grant.
-    const capabilities = negotiateCapabilities({
+    const commonNegotiation = {
       sessionId,
-      backend: session.sandboxBackend as SandboxBackend,
-      os: session.sandboxOs,
-      liveness: lease?.liveness ?? "cold",
-      leaseEpoch: lease?.leaseEpoch ?? 0,
-      workspaceGeneration: lease?.workspaceGeneration ?? null,
-      archiveGeneration: lease?.archiveGeneration ?? null,
-      archiveComplete: lease?.archiveComplete ?? false,
       desktopEnabled: settings.sandboxDesktopEnabled,
       // Human take-control: when the desktop is available + this policy is on
       // (default), the cell is mode "interactive" — the noVNC viewer drives :0
       // (x11vnc runs without -viewonly). Off → mode "read-only" (client disables
       // take-control). Independent of the agent's computerUseReadOnly.
       desktopInteractive: settings.sandboxDesktopInteractive,
-      // P4.3 computer-use: the agent drives :0 (xdotool/scrot); availability
+      // P4.3 computer-use: the agent drives the active display; availability
       // tracks the desktop tier + a desktop-capable backend.
       computerUseEnabled: settings.computerUseEnabled,
       computerUseReadOnly: settings.computerUseReadOnly,
-      // Graceful degrade (stream-token availability contract): if desktop is enabled but no stream-token
-      // secret is resolvable, the desktop cell reports transport:null rather
-      // than advertising a plane we can never authorize.
+      // Graceful degrade when scoped stream credentials cannot be minted.
       streamTokenSecretAvailable: !streamTokenDegraded(settings),
       desktopAcknowledged: acknowledged,
       shared,
       sharedSessionIds: visibleSharedSessionIds,
-      // Plane policy only. Live addresses are intentionally absent on a
-      // descriptor read and arrive from an authorized viewer grant.
       terminalEnabled: settings.sandboxTerminalEnabled,
-    });
+    } as const;
+
+    let capabilities;
+    if (selfhostedActive && activeSandbox.enrollmentId) {
+      const [enrollment, liveConnection] = await Promise.all([
+        getEnrollment(db, workspaceId, activeSandbox.enrollmentId),
+        getLiveEnrollmentConnection(db, workspaceId, activeSandbox.enrollmentId),
+      ]);
+      let probeResponded = false;
+      if (liveConnection?.connectionInstanceId) {
+        const machine = new SelfhostedSession({
+          workspaceId,
+          agentId: liveConnection.id,
+          connectionInstanceId: liveConnection.connectionInstanceId,
+          controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
+          relay: relayConfigFromSettings(settings),
+          epoch: session.activeEpoch,
+          timeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
+        });
+        try {
+          probeResponded = await machine.ping();
+        } catch {
+          probeResponded = false;
+        }
+      }
+      capabilities = await negotiateSelfhostedCapabilities({
+        ...commonNegotiation,
+        os: enrollment?.os ?? session.sandboxOs,
+        leaseEpoch: session.activeEpoch,
+        enrollment,
+        probeResponded,
+      });
+    } else {
+      capabilities = negotiateCapabilities({
+        ...commonNegotiation,
+        backend: session.sandboxBackend as SandboxBackend,
+        os: session.sandboxOs,
+        liveness: lease?.liveness ?? "cold",
+        leaseEpoch: lease?.leaseEpoch ?? 0,
+        workspaceGeneration: lease?.workspaceGeneration ?? null,
+        archiveGeneration: lease?.archiveGeneration ?? null,
+        archiveComplete: lease?.archiveComplete ?? false,
+      });
+    }
 
     const repositoryRoots = [
       ...new Set(
@@ -2299,11 +2608,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       },
     };
     if (capabilities.DesktopStream.transport !== null) {
-      const activeSandbox = session.activeSandboxId
-        ? await getSandbox(db, workspaceId, session.activeSandboxId)
-        : null;
       const wire = resolveActiveDesktopTransport(
-        activeSandbox?.kind === "selfhosted",
+        selfhostedActive,
         settings.sandboxDesktopInteractive !== false,
       );
       responseCapabilities = {
@@ -2389,7 +2695,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // v2 flag switches to exact-plane semantics.
     const wantTerminal = parsed.data.terminal ?? (!hasExactPlaneSet && !wantDesktop);
     if (!wantDesktop && !wantTerminal && !wantFiles) {
-      throw new HTTPException(400, { message: "viewer attach requires a live plane" });
+      throw new HTTPException(400, {
+        message: "viewer attach requires a live plane",
+      });
     }
     if (wantDesktop) requirePermission(grant, "stream:view");
     if (wantTerminal) requirePermission(grant, "terminal:attach");
@@ -3134,6 +3442,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 }
 
+export function goalProposalMatchesExpectedRevision(
+  revision: Pick<SessionGoalRevision, "baseObjectiveRevision">,
+  expectedObjectiveRevision: number,
+): boolean {
+  return revision.baseObjectiveRevision === expectedObjectiveRevision;
+}
+
 function eventListLimit(raw: string | undefined, max = 2000, fallback = 500): number {
   const limit = Number(raw ?? fallback);
   if (!Number.isFinite(limit)) {
@@ -3218,6 +3533,9 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/realtime/gateway" && verb === "POST") {
     return "session.realtime.start";
   }
+  if (suffix === "/realtime/supergrok" && verb === "POST") {
+    return "session.realtime.start";
+  }
   if (suffix === "/realtime" && verb === "POST") {
     return "session.realtime.start";
   }
@@ -3239,6 +3557,10 @@ export function sessionAuthorizationOperationForHttp(
       : ["PATCH", "DELETE"].includes(verb)
         ? "session.goal.write"
         : null;
+  }
+  if (suffix === "/goal/revisions" && verb === "GET") return "session.goal.read";
+  if (/^\/goal\/revisions\/[^/]+\/apply$/.test(suffix) && verb === "POST") {
+    return "session.goal.write";
   }
   if (suffix === "/context/clear" || suffix === "/context/compact") {
     return verb === "POST" ? "session.context.write" : null;
@@ -3430,7 +3752,9 @@ export function encodeAgentTopologyCursor(value: AgentTopologyCursorEnvelope): s
 
 function decodeAgentTopologyCursor(value: string): AgentTopologyCursorEnvelope {
   if (value.length > 2_048) {
-    throw new HTTPException(400, { message: "agent topology cursor is invalid" });
+    throw new HTTPException(400, {
+      message: "agent topology cursor is invalid",
+    });
   }
   try {
     const parsed = z
@@ -3463,7 +3787,9 @@ function decodeAgentTopologyCursor(value: string): AgentTopologyCursorEnvelope {
     }
     return parsed;
   } catch {
-    throw new HTTPException(400, { message: "agent topology cursor is invalid" });
+    throw new HTTPException(400, {
+      message: "agent topology cursor is invalid",
+    });
   }
 }
 
@@ -3476,7 +3802,9 @@ export function agentTopologyQuery(query: Record<string, string>): {
   const rawLimit = query.limit;
   const limit = rawLimit === undefined ? 25 : Number(rawLimit);
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
-    throw new HTTPException(400, { message: "limit must be an integer between 1 and 100" });
+    throw new HTTPException(400, {
+      message: "limit must be an integer between 1 and 100",
+    });
   }
   const rawParent = query.parentSessionId;
   if (
@@ -3491,17 +3819,23 @@ export function agentTopologyQuery(query: Record<string, string>): {
   const parentSessionId = rawParent === undefined || rawParent === "null" ? null : rawParent;
   const search = query.search?.trim();
   if (search && search.length > 200) {
-    throw new HTTPException(400, { message: "search must be at most 200 characters" });
+    throw new HTTPException(400, {
+      message: "search must be at most 200 characters",
+    });
   }
   if (search && rawParent !== undefined) {
-    throw new HTTPException(400, { message: "search cannot be combined with parentSessionId" });
+    throw new HTTPException(400, {
+      message: "search cannot be combined with parentSessionId",
+    });
   }
   const envelope = query.cursor ? decodeAgentTopologyCursor(query.cursor) : undefined;
   if (
     envelope &&
     (envelope.parentSessionId !== parentSessionId || envelope.search !== (search || null))
   ) {
-    throw new HTTPException(400, { message: "agent topology cursor does not match its filters" });
+    throw new HTTPException(400, {
+      message: "agent topology cursor does not match its filters",
+    });
   }
   return {
     limit,

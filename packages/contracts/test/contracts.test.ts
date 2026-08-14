@@ -31,8 +31,11 @@ import {
   gitRemotePathAliases,
   gitRemoteUriAliases,
   KnowledgeMemorySearchRequest,
+  KnowledgeSearchResponse,
   MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
+  MODEL_CONTEXT_LABEL,
+  ModelContextContributionSummaries,
   McpServerConnectionRef,
   ModelBillingAttributionV1,
   ModelCredentialReadinessV1,
@@ -50,6 +53,7 @@ import {
   SESSION_MCP_SERVERS_MAX,
   Session,
   SessionGoal,
+  SessionRealtimeInboundEntry,
   SessionMcpServerMetadata,
   SteerSessionMessageRequest,
   SubmitHumanInputResponseRequest,
@@ -58,6 +62,7 @@ import {
   DraftTimelineAnnotations,
   SubmittedTimelineAnnotations,
   renderTimelineAnnotationsForModel,
+  renderUserMessageContentForModel,
   numberTimelineAnnotations,
   UpdateSessionMcpApprovalPolicyRequest,
   CLEARED_RUN_STATE_BLOB,
@@ -78,9 +83,47 @@ import {
   turnExecutionPolicyAuditMetadata,
   TurnExecutionPolicyV1,
   UpdateScheduledTaskRequest,
+  GoalSpec,
+  UpdateSessionGoalRequest,
+  SESSION_GOAL_TEXT_MAX_BYTES,
 } from "../src";
 
 describe("contracts", () => {
+  test("keeps model context contribution summaries content-free and uniquely keyed", () => {
+    const valid = {
+      source: "workspace_instruction_policy",
+      items: 1,
+      utf8Bytes: 40,
+      estimatedTokens: 10,
+    } as const;
+    expect(ModelContextContributionSummaries.parse([valid])).toEqual([valid]);
+    expect(
+      ModelContextContributionSummaries.safeParse([{ ...valid, content: "secret" }]).success,
+    ).toBe(false);
+    expect(ModelContextContributionSummaries.safeParse([valid, valid]).success).toBe(false);
+    expect(
+      ModelContextContributionSummaries.safeParse([{ ...valid, estimatedTokens: -1 }]).success,
+    ).toBe(false);
+    expect(
+      ModelContextContributionSummaries.safeParse([
+        { ...valid, estimatedTokens: Number.MAX_SAFE_INTEGER + 1 },
+      ]).success,
+    ).toBe(false);
+  });
+
+  test("goal write bounds count UTF-8 bytes rather than JavaScript characters", () => {
+    const exact = "é".repeat(SESSION_GOAL_TEXT_MAX_BYTES / 2);
+    expect(GoalSpec.safeParse({ text: exact }).success).toBe(true);
+    expect(GoalSpec.safeParse({ text: `${exact}é` }).success).toBe(false);
+    expect(
+      UpdateSessionGoalRequest.safeParse({
+        text: "bounded",
+        rationale: "🙂".repeat(513),
+        expectedObjectiveRevision: 1,
+      }).success,
+    ).toBe(false);
+  });
+
   const turnExecutionPolicy = TurnExecutionPolicyV1.parse({
     schemaVersion: 1,
     productModelId: "xai/grok-4.5",
@@ -104,6 +147,7 @@ describe("contracts", () => {
           code: "upstream_unavailable",
           message: "OpenGeni is temporarily unavailable — retry.",
           retryable: true,
+          outcomeUnknown: true,
           requestId: "edge-503-safe",
         },
       }),
@@ -113,6 +157,7 @@ describe("contracts", () => {
         code: "upstream_unavailable",
         message: "OpenGeni is temporarily unavailable — retry.",
         retryable: true,
+        outcomeUnknown: true,
         requestId: "edge-503-safe",
       },
     });
@@ -149,7 +194,9 @@ describe("contracts", () => {
 
   test("reads and merges a strict secret-safe turn execution policy without disturbing metadata", () => {
     expect(readTurnExecutionPolicyV1(null)).toEqual({ kind: "absent" });
-    expect(readTurnExecutionPolicyV1({ dispatchRevision: 3 })).toEqual({ kind: "absent" });
+    expect(readTurnExecutionPolicyV1({ dispatchRevision: 3 })).toEqual({
+      kind: "absent",
+    });
 
     const metadata = metadataWithTurnExecutionPolicyV1(
       { dispatchRevision: 3, recovery: { generation: 2 } },
@@ -323,7 +370,10 @@ describe("contracts", () => {
 
   test("projects bounded terminal, checkpoint, failure, and receipt facts without inference", () => {
     const completion = compactSessionEventResult(
-      sessionEventFixture("agent.message.completed", { text: "done", output: "" }),
+      sessionEventFixture("agent.message.completed", {
+        text: "done",
+        output: "",
+      }),
       "terminal",
     );
     expect(completion).toMatchObject({
@@ -350,13 +400,18 @@ describe("contracts", () => {
     });
 
     const checkpoint = compactSessionEventResult(
-      sessionEventFixture("session.context.compacted", { revision: 9, retained: true }),
+      sessionEventFixture("session.context.compacted", {
+        revision: 9,
+        retained: true,
+      }),
       "checkpoint",
     );
     expect(checkpoint.checkpoint).toEqual({ revision: 9, retained: true });
 
     const receipt = compactSessionEventResult(
-      sessionEventFixture("artifact.created", { receipt: { status: "ready", value: "done" } }),
+      sessionEventFixture("artifact.created", {
+        receipt: { status: "ready", value: "done" },
+      }),
       "tool_receipt",
     );
     expect(receipt).toMatchObject({
@@ -477,6 +532,8 @@ describe("contracts", () => {
       pausedReason: null,
       createdBy: "api" as const,
       version: 1,
+      objectiveRevision: 1,
+      mutationPolicy: "preserve_intent" as const,
       autoContinuations: 0,
       noProgressStreak: 0,
       maxAutoContinuations: null,
@@ -522,7 +579,9 @@ describe("contracts", () => {
   });
 
   test("accepts create session defaults", () => {
-    const payload = CreateSessionRequest.parse({ initialMessage: "inspect repo" });
+    const payload = CreateSessionRequest.parse({
+      initialMessage: "inspect repo",
+    });
     expect(payload.resources).toEqual([]);
     expect(payload.skills).toEqual([]);
     expect(payload.tools).toEqual([]);
@@ -604,8 +663,14 @@ describe("contracts", () => {
       CreateSessionRequest.parse({
         initialMessage: "prepare release",
         skills: [
-          { name: "release", files: [{ path: "SKILL.md", content: "# One\n" }] },
-          { name: "RELEASE", files: [{ path: "SKILL.md", content: "# Two\n" }] },
+          {
+            name: "release",
+            files: [{ path: "SKILL.md", content: "# One\n" }],
+          },
+          {
+            name: "RELEASE",
+            files: [{ path: "SKILL.md", content: "# Two\n" }],
+          },
         ],
       }),
     ).toThrow("conflicting session skill definitions");
@@ -707,9 +772,13 @@ describe("contracts", () => {
 
   test("keeps uploaded files in the private OpenGeni workspace directory by default", () => {
     expect(resourceMountPath({ kind: "file", fileId: "file-1" })).toBe(".opengeni/files/file-1");
-    expect(resourceMountPath({ kind: "file", fileId: "file-1", mountPath: "inputs/current" })).toBe(
-      "inputs/current",
-    );
+    expect(
+      resourceMountPath({
+        kind: "file",
+        fileId: "file-1",
+        mountPath: "inputs/current",
+      }),
+    ).toBe("inputs/current");
   });
 
   test("rejects non-portable and traversal mount paths", () => {
@@ -828,7 +897,9 @@ describe("contracts", () => {
         },
       ],
     });
-    expect(payload.mcpServers[0]?.headers).toEqual({ Authorization: "Bearer create-secret" });
+    expect(payload.mcpServers[0]?.headers).toEqual({
+      Authorization: "Bearer create-secret",
+    });
     const hostPayload = CreateSessionRequest.parse({
       initialMessage: "inspect host repo",
       tools: [{ kind: "mcp", id: "host_gitlab" }],
@@ -961,12 +1032,20 @@ describe("contracts", () => {
     const payload = CreateSessionRequest.parse({
       initialMessage: "inspect resources",
       resources: [
-        { kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" },
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/app.git",
+          ref: "main",
+        },
         { kind: "file", fileId },
       ],
     });
     expect(payload.resources).toEqual([
-      { kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" },
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/app.git",
+        ref: "main",
+      },
       { kind: "file", fileId },
     ]);
   });
@@ -1009,7 +1088,9 @@ describe("contracts", () => {
   });
 
   test("omitting per-session instructions leaves it undefined (byte-identical to today)", () => {
-    const payload = CreateSessionRequest.parse({ initialMessage: "inspect repo" });
+    const payload = CreateSessionRequest.parse({
+      initialMessage: "inspect repo",
+    });
     expect(payload.instructions).toBeUndefined();
   });
 
@@ -1043,12 +1124,45 @@ describe("contracts", () => {
     expect(payload.instructions?.length).toBe(32768);
   });
 
-  test("accepts trimmed system instructions scoped to only the initial turn", () => {
+  test("rejects the removed turnInstructions request field", () => {
+    expect(
+      CreateSessionRequest.safeParse({
+        initialMessage: "inspect repo",
+        turnInstructions: "legacy system-prefix input",
+      }).success,
+    ).toBe(false);
+    expect(
+      ClientSessionEvent.safeParse({
+        type: "user.message",
+        payload: { text: "inspect repo", turnInstructions: "legacy input" },
+      }).success,
+    ).toBe(false);
+  });
+
+  test("accepts trimmed application context scoped to the initial user message", () => {
     const payload = CreateSessionRequest.parse({
       initialMessage: "inspect repo",
-      turnInstructions: "  Current host context: record 42 is selected.  ",
+      modelContext: "  Current host context: record 42 is selected.  ",
     });
-    expect(payload.turnInstructions).toBe("Current host context: record 42 is selected.");
+    expect(payload.modelContext).toBe("Current host context: record 42 is selected.");
+    expect(
+      CreateSessionRequest.safeParse({
+        startMode: "realtime",
+        modelContext: "orphaned context",
+      }).success,
+    ).toBe(false);
+  });
+
+  test("renders application context as a separate part of the same user message", () => {
+    expect(renderUserMessageContentForModel("Visible request", [], undefined)).toBe(
+      "Visible request",
+    );
+    expect(
+      renderUserMessageContentForModel("Visible request", [], "  selected record 42  "),
+    ).toEqual([
+      { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\nselected record 42` },
+      { type: "input_text", text: "Visible request" },
+    ]);
   });
 
   test("accepts client config payloads", () => {
@@ -1283,7 +1397,10 @@ describe("contracts", () => {
     });
 
     expect(() =>
-      ModelCredentialReadinessV1.parse({ ...ready, reason: "missing_credential" }),
+      ModelCredentialReadinessV1.parse({
+        ...ready,
+        reason: "missing_credential",
+      }),
     ).toThrow();
     expect(() => ModelCredentialReadinessV1.parse({ ...ready, status: "not_ready" })).toThrow();
     expect(() => ModelCredentialReadinessV1.parse({ ...ready, basis: "resolver" })).toThrow();
@@ -1338,12 +1455,23 @@ describe("contracts", () => {
   test("accepts structured scheduled task definitions", () => {
     const payload = CreateScheduledTaskRequest.parse({
       name: "Daily check",
-      schedule: { type: "calendar", timeZone: "Europe/Oslo", hour: 9, minute: 30 },
+      schedule: {
+        type: "calendar",
+        timeZone: "Europe/Oslo",
+        hour: 9,
+        minute: 30,
+      },
       runMode: "reusable_session",
       overlapPolicy: "allow_concurrent",
       agentConfig: {
         prompt: "Check repository health",
-        resources: [{ kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" }],
+        resources: [
+          {
+            kind: "repository",
+            uri: "https://github.com/acme/app.git",
+            ref: "main",
+          },
+        ],
         tools: [{ kind: "mcp", id: "opengeni" }],
       },
     });
@@ -1366,7 +1494,10 @@ describe("contracts", () => {
       }),
     ).toMatchObject({ runMode: "existing_session", targetSessionId });
     expect(() =>
-      CreateScheduledTaskRequest.parse({ ...base, runMode: "existing_session" }),
+      CreateScheduledTaskRequest.parse({
+        ...base,
+        runMode: "existing_session",
+      }),
     ).toThrow();
     expect(() =>
       CreateScheduledTaskRequest.parse({
@@ -1380,7 +1511,10 @@ describe("contracts", () => {
         ...base,
         runMode: "existing_session",
         targetSessionId,
-        agentConfig: { prompt: "Continue", goal: { text: "Replace the current goal" } },
+        agentConfig: {
+          prompt: "Continue",
+          goal: { text: "Replace the current goal" },
+        },
       }),
     ).toThrow();
     expect(
@@ -1390,7 +1524,10 @@ describe("contracts", () => {
       }),
     ).toEqual({ runMode: "existing_session", targetSessionId });
     expect(() =>
-      UpdateScheduledTaskRequest.parse({ runMode: "new_session_per_run", targetSessionId }),
+      UpdateScheduledTaskRequest.parse({
+        runMode: "new_session_per_run",
+        targetSessionId,
+      }),
     ).toThrow();
   });
 
@@ -1442,7 +1579,11 @@ describe("contracts", () => {
           source: "public_registry",
           name: "Example MCP",
           endpointUrl: "https://example.com/mcp",
-          runtime: { available: true, mcpServerId: "example", transport: "streamable-http" },
+          runtime: {
+            available: true,
+            mcpServerId: "example",
+            transport: "streamable-http",
+          },
         },
       ],
       installations: [],
@@ -1542,7 +1683,10 @@ describe("contracts", () => {
       allowSkip: true,
       expiresInSeconds: 300,
     });
-    expect(input.questions[0]).toMatchObject({ required: true, allowOther: false });
+    expect(input.questions[0]).toMatchObject({
+      required: true,
+      allowOther: false,
+    });
     expect(input.questions[1]?.options).toEqual([]);
 
     // Agent-invented text char bounds are not in the contract — strip on parse.
@@ -1608,7 +1752,7 @@ describe("contracts", () => {
       type: "user.message",
       payload: {
         text: "use this too",
-        turnInstructions: "  Current host context: record 42 is selected.  ",
+        modelContext: "  Current host context: record 42 is selected.  ",
         resources: [{ kind: "file", fileId }],
         model: "gpt-5.6-sol",
         reasoningEffort: "xhigh",
@@ -1619,7 +1763,28 @@ describe("contracts", () => {
     expect(payload.payload.resources).toEqual([{ kind: "file", fileId }]);
     expect(payload.payload.model).toBe("gpt-5.6-sol");
     expect(payload.payload.reasoningEffort).toBe("xhigh");
-    expect(payload.payload.turnInstructions).toBe("Current host context: record 42 is selected.");
+    expect(payload.payload.modelContext).toBe("Current host context: record 42 is selected.");
+  });
+
+  test("accepts model context only on realtime entries that can become user messages", () => {
+    const operationId = "00000000-0000-4000-8000-000000000011";
+    expect(
+      SessionRealtimeInboundEntry.parse({
+        operationId,
+        kind: "user_transcript",
+        role: "user",
+        text: "finalized transcript",
+        payload: { turnId: "provider-turn-1" },
+        modelContext: "  selected record 42  ",
+      }).modelContext,
+    ).toBe("selected record 42");
+    expect(
+      SessionRealtimeInboundEntry.safeParse({
+        operationId,
+        kind: "interruption",
+        modelContext: "not message-bearing",
+      }).success,
+    ).toBe(false);
   });
 
   test("keeps text-only user messages compatible", () => {
@@ -1668,7 +1833,12 @@ describe("contracts", () => {
 
   test("accepts document service request contracts", () => {
     const fileId = "00000000-0000-4000-8000-000000000010";
-    expect(CreateDocumentBaseRequest.parse({ name: "Runbooks", description: "Ops docs" })).toEqual({
+    expect(
+      CreateDocumentBaseRequest.parse({
+        name: "Runbooks",
+        description: "Ops docs",
+      }),
+    ).toEqual({
       name: "Runbooks",
       description: "Ops docs",
     });
@@ -1723,6 +1893,63 @@ describe("contracts", () => {
       authorityKind: "personal",
       authoritySubjectId: "user:initiator",
     });
+
+    const knowledge = KnowledgeSearchResponse.parse({
+      results: [
+        {
+          record: {
+            id: "document_chunk:00000000-0000-4000-8000-000000000011",
+            kind: "document_chunk",
+            title: "Network policy",
+            content: {
+              format: "markdown",
+              body: "Private endpoints require the approved policy.",
+              summary: null,
+              topics: ["platform"],
+              metadata: { chunkIndex: 0 },
+            },
+            authority: { kind: "personal", subjectId: "must-not-project" },
+            provenance: {
+              source: {
+                kind: "repository",
+                uri: "https://example.test/runbook",
+                externalId: "runbook-1",
+                title: "Network policy",
+                author: "Platform",
+                createdAt: null,
+                updatedAt: null,
+                version: "v1",
+              },
+              indexedAt: "2026-08-13T10:00:00.000Z",
+            },
+            lifecycle: { state: "active", updatedAt: "2026-08-13T10:00:00.000Z" },
+            quality: {
+              trust: "sourced",
+              freshnessAt: "2026-08-13T10:00:00.000Z",
+              conflict: "not_evaluated",
+              correction: "current_source_version",
+            },
+            links: [
+              {
+                relation: "parent",
+                target: {
+                  kind: "knowledge",
+                  id: "document:00000000-0000-4000-8000-000000000013",
+                },
+              },
+            ],
+            projection: { truncated: false, fields: [] },
+          },
+          retrieval: {
+            score: 0.75,
+            matchType: "keyword",
+            vectorScore: null,
+            keywordScore: 0.75,
+          },
+        },
+      ],
+    });
+    expect(knowledge.results[0]?.record.authority).toEqual({ kind: "personal" });
   });
 
   test("accepts knowledge memory contracts", () => {
@@ -1855,7 +2082,10 @@ describe("capability pack runtime manifest fields", () => {
       CapabilityPack.parse({
         ...baseManifest,
         skills: [
-          { name: "infra-ops", files: [{ path: "references/runbook.md", content: "Runbook." }] },
+          {
+            name: "infra-ops",
+            files: [{ path: "references/runbook.md", content: "Runbook." }],
+          },
         ],
       }),
     ).toThrow();
@@ -1941,7 +2171,10 @@ describe("capability pack runtime manifest fields", () => {
           required: false,
         },
       ],
-      rig: { rigId: "11111111-1111-4111-8111-111111111111", requireVerified: true },
+      rig: {
+        rigId: "11111111-1111-4111-8111-111111111111",
+        requireVerified: true,
+      },
     });
     expect(pack.components.map((component) => component.required)).toEqual([true, false]);
     expect(pack.rig).toEqual({
@@ -2024,7 +2257,11 @@ describe("cleared run-state sentinel", () => {
     // A real Agents-SDK serialized run state (carries $schemaVersion/history).
     expect(
       isClearedRunStateBlob(
-        JSON.stringify({ $schemaVersion: "1.11", currentTurn: 1, generatedItems: [] }),
+        JSON.stringify({
+          $schemaVersion: "1.11",
+          currentTurn: 1,
+          generatedItems: [],
+        }),
       ),
     ).toBe(false);
     expect(isClearedRunStateBlob(null)).toBe(false);
@@ -2041,7 +2278,10 @@ describe("cleared run-state sentinel", () => {
 describe("evaluateWorkspaceModelPolicy", () => {
   test("no policy allows everything", () => {
     expect(
-      evaluateWorkspaceModelPolicy(null, { providerId: "azure", modelId: "gpt-5.6-sol" }),
+      evaluateWorkspaceModelPolicy(null, {
+        providerId: "azure",
+        modelId: "gpt-5.6-sol",
+      }),
     ).toEqual({ allowed: true });
   });
 
@@ -2055,9 +2295,15 @@ describe("evaluateWorkspaceModelPolicy", () => {
   });
 
   test("provider allowlist blocks a non-listed provider (the codex-only posture)", () => {
-    const policy = { allowedProviders: ["codex-subscription"], allowedModels: null };
+    const policy = {
+      allowedProviders: ["codex-subscription"],
+      allowedModels: null,
+    };
     expect(
-      evaluateWorkspaceModelPolicy(policy, { providerId: "azure", modelId: "gpt-5.6-sol" }),
+      evaluateWorkspaceModelPolicy(policy, {
+        providerId: "azure",
+        modelId: "gpt-5.6-sol",
+      }),
     ).toEqual({ allowed: false, reason: "provider" });
     expect(
       evaluateWorkspaceModelPolicy(policy, {

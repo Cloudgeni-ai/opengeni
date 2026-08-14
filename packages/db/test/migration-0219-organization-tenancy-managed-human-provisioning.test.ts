@@ -2,13 +2,16 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Permission } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
   createDb,
   ensureManagedAccessForUser,
+  ensureManagedAccessForUserWithOrganizationMemberships,
   listWorkspacesForSubject,
+  managedPersonalWorkspacePermissions,
   nestedPostgresSqlState,
   setRlsContext,
   type DbClient,
@@ -27,6 +30,36 @@ const tenancyTables = [
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
 ] as const;
+const expectedManagedPersonalWorkspacePermissions: Permission[] = [
+  "workspace:read",
+  "sessions:create",
+  "sessions:read",
+  "sessions:control",
+  "files:upload",
+  "files:read",
+  "documents:manage",
+  "documents:search",
+  "scheduled_tasks:manage",
+  "scheduled_tasks:run",
+  "github:manage",
+  "github:use",
+  "connections:read",
+  "connections:write",
+  "variable-sets:list",
+  "variable-sets:read",
+  "variable-sets:write",
+  "variable-sets:manage",
+  "variable-sets:use",
+  "secrets:list",
+  "secrets:read",
+  "secrets:write",
+  "mcp_servers:attach",
+  "goals:manage",
+  "enrollments:read",
+  "enrollments:manage",
+  "artifacts:read",
+  "artifacts:publish",
+];
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -96,6 +129,15 @@ async function callLifecycle(
 }
 
 describe("migration 0219 managed-human organization provisioning", () => {
+  test("pins the personal workspace projection to a closed permission allowlist", () => {
+    expect(managedPersonalWorkspacePermissions).toEqual(
+      expectedManagedPersonalWorkspacePermissions,
+    );
+    expect(managedPersonalWorkspacePermissions).not.toContain("workspace:admin");
+    expect(managedPersonalWorkspacePermissions).not.toContain("members:manage");
+    expect(managedPersonalWorkspacePermissions).not.toContain("api_keys:manage");
+  });
+
   test("pins the rolling lifecycle capability, posture contract, and exact role grant", async () => {
     const [migration, posture, provisioner] = await Promise.all([
       readFile(migrationPath, "utf8"),
@@ -131,7 +173,7 @@ describe("migration 0219 managed-human organization provisioning", () => {
     );
   });
 
-  test("converges one membership and one private-by-lifecycle workspace without legacy access changes", async () => {
+  test("converges one membership and projects owner-only personal runtime access", async () => {
     if (!shared || !client) return;
 
     const userId = `slice-b-${crypto.randomUUID()}`;
@@ -142,14 +184,19 @@ describe("migration 0219 managed-human organization provisioning", () => {
       name: "Slice B managed human",
     };
     const first = await ensureManagedAccessForUser(client.db, input);
+    const provisioned = await ensureManagedAccessForUserWithOrganizationMemberships(
+      client.db,
+      input,
+    );
     const repeated = await ensureManagedAccessForUser(client.db, input);
     const concurrent = await Promise.all(
       Array.from({ length: 6 }, () => ensureManagedAccessForUser(client!.db, input)),
     );
 
     expect(repeated).toEqual(first);
+    expect(provisioned.accessContext).toEqual(first);
     expect(concurrent).toEqual(Array.from({ length: 6 }, () => first));
-    expect(first.workspaceGrants).toHaveLength(1);
+    expect(first.workspaceGrants).toHaveLength(2);
     expect((await listWorkspacesForSubject(client.db, subjectId)).map((row) => row.id)).toEqual([
       first.defaultWorkspaceId!,
     ]);
@@ -240,15 +287,32 @@ describe("migration 0219 managed-human organization provisioning", () => {
       externalSource: "opengeni:organization-membership",
       externalId: `${account!.id}:${subjectId}`,
     });
-    expect(first.workspaceGrants.map(({ workspaceId }) => workspaceId)).not.toContain(
-      personalWorkspace!.id,
-    );
+    expect(first.workspaceGrants[0]?.workspaceId).toBe(first.defaultWorkspaceId!);
+    expect(first.workspaceGrants[1]).toEqual({
+      workspaceId: personalWorkspace!.id,
+      accountId: account!.id,
+      subjectId,
+      subjectLabel: input.email,
+      permissions: expectedManagedPersonalWorkspacePermissions,
+      principalKind: "human_session",
+    });
+    expect(first.workspaceGrants[1]?.permissions).not.toContain("workspace:admin");
+    expect(first.workspaceGrants[1]?.permissions).not.toContain("members:manage");
+    expect(first.workspaceGrants[1]?.permissions).not.toContain("api_keys:manage");
     expect(membership).toMatchObject({
       accountId: account!.id,
       subjectId,
       status: "active",
       personalWorkspaceId: personalWorkspace!.id,
     });
+    expect(provisioned.organizationMemberships).toEqual([
+      {
+        id: membership!.id,
+        organizationId: account!.id,
+        status: "active",
+        personalWorkspaceId: personalWorkspace!.id,
+      },
+    ]);
     expect(control).toEqual({ accountId: account!.id });
     expect(personalAccess).toEqual({ count: 0 });
     expect(defaultAccess).toEqual({ count: 1 });
@@ -353,7 +417,27 @@ describe("migration 0219 managed-human organization provisioning", () => {
 
     await shared.admin`
       update organization_memberships
-      set status = 'active', revoked_at = null
+      set status = 'provisioning',
+          personal_workspace_id = ${firstAccess.defaultWorkspaceId!},
+          revoked_at = null
+      where account_id = ${firstAccountId}
+        and subject_id = ${firstSubjectId}
+    `;
+    await expectSqlState(
+      () =>
+        ensureManagedAccessForUser(client!.db, {
+          userId: firstUserId,
+          email: `${firstUserId}@example.test`,
+          name: "Adversarial managed human",
+        }),
+      "23505",
+    );
+
+    await shared.admin`
+      update organization_memberships
+      set status = 'active',
+          personal_workspace_id = ${firstPersonalWorkspaceId},
+          revoked_at = null
       where account_id = ${firstAccountId}
         and subject_id = ${firstSubjectId}
     `;

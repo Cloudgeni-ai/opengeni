@@ -249,6 +249,21 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             now={now}
             onRefresh={() => void machines.refresh()}
             onEnroll={() => setEnrollOpen(true)}
+            {...(machines.canUpdateAgent
+              ? {
+                  onUpdateAgent: (machine: MachineView) => {
+                    if (!machine.enrollmentId) return;
+                    void machines.updateAgent(machine.enrollmentId).then((result) => {
+                      if (result?.accepted) {
+                        toast.success(`Updating ${machine.name}`, {
+                          description: `The agent will drain current work, install signed v${result.targetVersion}, and reconnect automatically.`,
+                        });
+                      }
+                    });
+                  },
+                  updatingEnrollmentId: machines.updatingEnrollmentId,
+                }
+              : {})}
             {...(machines.canAttach
               ? {
                   onAttach: (m) => void machines.attach(m.sandboxId),
@@ -258,6 +273,12 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           />
         )}
       </div>
+
+      {machines.mutationError && !removeTarget ? (
+        <Notice tone="failed" title="Machine action failed">
+          {machines.mutationError.message}
+        </Notice>
+      ) : null}
 
       <Dialog open={enrollOpen} onOpenChange={setEnrollOpen}>
         <DialogContent className="max-w-md">

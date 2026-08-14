@@ -7,7 +7,7 @@
 // `session.resolveExposedPort`, `session.serializeSessionState`. If the
 // selfhosted client's `create()`/`resume()` return a session presenting that
 // EXACT surface — but backed by `ControlRpc` (request/reply to the agent over
-// `agent.<ws>.<id>.rpc`, encoded via `@opengeni/agent-proto`) instead of a
+// the exact claimed process subject, encoded via `@opengeni/agent-proto`) instead of a
 // provider SDK — then those seams work UNCHANGED. The agent IS the box.
 //
 // The session depends ONLY on `ControlRpc` + `{workspaceId, agentId}` (+ the
@@ -258,8 +258,16 @@ export interface SelfhostedOpStreamDeps {
 export interface SelfhostedSessionDeps {
   workspaceId: string;
   agentId: string;
+  /** Exact live daemon process claimed for this enrollment. Production builders
+   *  require it; direct transport tests may omit it for the legacy subject shape. */
+  connectionInstanceId?: string;
   controlRpc: ControlRpc;
   relay: SelfhostedRelayConfig;
+  /** Stable identity for the session's interactive terminal. Repeated stream
+   *  capability mints carrying this value reattach the existing PTY/channel
+   *  instead of spawning a replacement shell. Omitted preserves explicit
+   *  create-new semantics for non-viewer callers. */
+  terminalScopeId?: string;
   /** Op-stream exec transport (present = enabled; see SelfhostedOpStreamDeps). */
   opStream?: SelfhostedOpStreamDeps;
   /** The lease/active epoch this session is fenced under (echoed on every
@@ -359,6 +367,7 @@ export class SelfhostedSession {
   readonly agentId: string;
   private readonly controlRpc: ControlRpc;
   private readonly relay: SelfhostedRelayConfig;
+  private readonly terminalScopeId: string;
   private readonly epoch: number;
   private readonly timeoutMs: number;
   /** The exec process deadline (0 = none; omission is legacy embedding behavior). */
@@ -413,18 +422,22 @@ export class SelfhostedSession {
     this.agentId = deps.agentId;
     this.controlRpc = deps.controlRpc;
     this.relay = deps.relay;
+    this.terminalScopeId = deps.terminalScopeId ?? "";
     this.epoch = deps.epoch ?? 0;
     this.timeoutMs = deps.timeoutMs ?? SELFHOSTED_DEFAULT_TIMEOUT_MS;
     this.execTimeoutMs = deps.execTimeoutMs;
     this.retryClock = deps.retryClock ?? defaultSelfhostedRetryClock;
     this.onOp = deps.onOp;
-    this.subject = subjectFor(deps.workspaceId, deps.agentId);
+    this.subject = subjectFor(deps.workspaceId, deps.agentId, deps.connectionInstanceId);
     this.workingDir = deps.workingDir ?? "";
     this.transientExecEnvironment = deps.transientExecEnvironment;
     this.opStreamClient = deps.opStream
       ? new OpStreamExecClient({
           workspaceId: deps.workspaceId,
           agentId: deps.agentId,
+          ...(deps.connectionInstanceId !== undefined
+            ? { connectionInstanceId: deps.connectionInstanceId }
+            : {}),
           epoch: this.epoch,
           controlRpc: deps.controlRpc,
           rpcSubject: this.subject,
@@ -544,13 +557,16 @@ export class SelfhostedSession {
         return res.result;
       }
       const error = res.error
-        ? agentErrorToControlError(res.error)
-        : agentErrorToControlError({
-            code: 7, // ERROR_CODE_PROTOCOL — an empty result is a protocol violation
-            message: "agent returned an empty control response",
-            retryable: false,
-            detail: {},
-          });
+        ? agentErrorToControlError(res.error, req.requestId)
+        : agentErrorToControlError(
+            {
+              code: 7, // ERROR_CODE_PROTOCOL — an empty result is a protocol violation
+              message: "agent returned an empty control response",
+              retryable: false,
+              detail: {},
+            },
+            req.requestId,
+          );
       const decision = decideSelfhostedRetry({
         opKind,
         error,
@@ -1114,10 +1130,11 @@ export class SelfhostedSession {
    * real relay tier (the byte pump) behind THIS seam.
    *
    * THE CHANNEL-KEY QUERY (the M8b relay-dial contract): the relay
-   * routes by `{workspaceId, agentId, port}` — the EXACT `ChannelKey::query` the
+   * routes by `{workspaceId, agentId, port, channelId}` — the EXACT `ChannelKey::query` the
    * agent's relay client (`opengeni-agent-stream`) appends when it registers the
-   * producer side: `ws=<workspaceId>&agent=<agentId>&port=<port>`. We append the
-   * agent-registered `channel=<channelId>` as a correlation hint. So the viewer
+   * producer side: `ws=<workspaceId>&agent=<agentId>&port=<port>&channel=<channelId>`.
+   * Channel id is routing identity, not a correlation hint, so concurrent PTYs
+   * on one connected machine never replace one another. The viewer
    * dials `wss://<relay>/stream?ws=&agent=&port=&channel=` and presents the minted
    * `ogs_` token in-band (NEVER as a URL param) — the relay pairs it with the
    * producer by the routing key.
@@ -1131,7 +1148,7 @@ export class SelfhostedSession {
     // EVERY port — that wrongly coupled the terminal to the desktop probe, so a
     // headless (or display-degraded) machine could never get a terminal even though
     // `ptyOpen` would have succeeded. The returned channelId is the relay
-    // correlation hint; both ops carry a `StreamChannel` on their response.
+    // routing identity; both ops carry a `StreamChannel` on their response.
     let channel: StreamChannel | undefined;
     if (port === DESKTOP_STREAM_PORT) {
       const result = await this.call({
@@ -1160,6 +1177,7 @@ export class SelfhostedSession {
           cols: 0,
           rows: 0,
           term: "xterm-256color",
+          scopeId: this.terminalScopeId,
         },
       });
       if (result.$case !== "ptyOpen") {
@@ -1173,7 +1191,7 @@ export class SelfhostedSession {
     const channelId = channelKey(this.workspaceId, this.agentId, port);
     const tls = this.relay.tls ?? true;
     // The routing key the relay pairs producer↔consumer by — IDENTICAL to the
-    // agent's `ChannelKey::query` — plus the channel-id correlation hint.
+    // agent's `ChannelKey::query`, including the stream-instance channel id.
     const routingQuery =
       `ws=${encodeURIComponent(this.workspaceId)}` +
       `&agent=${encodeURIComponent(this.agentId)}` +
@@ -1233,6 +1251,8 @@ export class SelfhostedSandboxClient {
   private readonly relay: SelfhostedRelayConfig;
   private readonly controlRpcFactory: () => ControlRpc;
   private readonly defaultAgentId: string | undefined;
+  private readonly connectionInstanceId: string | undefined;
+  private readonly terminalScopeId: string | undefined;
   private readonly epoch: number | undefined;
   private readonly timeoutMs: number | undefined;
   private readonly execTimeoutMs: number | undefined;
@@ -1251,6 +1271,10 @@ export class SelfhostedSandboxClient {
     /** The agentId a bare create()/resume() (no state) binds to. Optional: the
      *  resume path supplies it via deserializeSessionState. */
     agentId?: string;
+    /** Exact live daemon process. Production builders always supply it. */
+    connectionInstanceId?: string;
+    /** Stable terminal identity (normally the durable OpenGeni session id). */
+    terminalScopeId?: string;
     epoch?: number;
     /** The control-op timeout threaded into every bound session. */
     timeoutMs?: number;
@@ -1279,6 +1303,8 @@ export class SelfhostedSandboxClient {
     this.relay = opts.relay;
     this.controlRpcFactory = opts.controlRpcFactory;
     this.defaultAgentId = opts.agentId;
+    this.connectionInstanceId = opts.connectionInstanceId;
+    this.terminalScopeId = opts.terminalScopeId;
     this.epoch = opts.epoch;
     this.timeoutMs = opts.timeoutMs;
     this.execTimeoutMs = opts.execTimeoutMs;
@@ -1300,8 +1326,12 @@ export class SelfhostedSandboxClient {
     return new SelfhostedSession({
       workspaceId: this.workspaceId,
       agentId,
+      ...(this.connectionInstanceId !== undefined
+        ? { connectionInstanceId: this.connectionInstanceId }
+        : {}),
       controlRpc: this.controlRpc(),
       relay: this.relay,
+      ...(this.terminalScopeId !== undefined ? { terminalScopeId: this.terminalScopeId } : {}),
       ...(this.epoch !== undefined ? { epoch: this.epoch } : {}),
       ...(this.timeoutMs !== undefined ? { timeoutMs: this.timeoutMs } : {}),
       ...(this.execTimeoutMs !== undefined ? { execTimeoutMs: this.execTimeoutMs } : {}),
@@ -1371,10 +1401,14 @@ export class SelfhostedSandboxClient {
 export interface SelfhostedSessionBuild {
   /** The workspace the machine's control-plane subject is scoped to. */
   workspaceId: string;
-  /** The enrollment id == the agent id `agent.<ws>.<id>.rpc` addresses. */
+  /** The enrollment id == the agent id the exact process subject addresses. */
   agentId: string;
+  /** Exact daemon instance holding the enrollment's live connection lease. */
+  connectionInstanceId: string;
   /** The relay-URL shape for stream endpoints. */
   relay: SelfhostedRelayConfig;
+  /** Stable terminal identity; normally the durable OpenGeni session id. */
+  terminalScopeId?: string;
   /** Lazily build the live ControlRpc (the request-scoped NATS connection). */
   controlRpcFactory: () => ControlRpc;
   /** The lease/active epoch the session is fenced under (echoed on every op). */
@@ -1422,7 +1456,9 @@ export async function buildSelfhostedBackendSession(
     relay: deps.relay,
     controlRpcFactory: deps.controlRpcFactory,
     agentId: deps.agentId,
+    connectionInstanceId: deps.connectionInstanceId,
     epoch: deps.epoch,
+    ...(deps.terminalScopeId !== undefined ? { terminalScopeId: deps.terminalScopeId } : {}),
     ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
     ...(deps.execTimeoutMs !== undefined ? { execTimeoutMs: deps.execTimeoutMs } : {}),
     ...(deps.onOp !== undefined ? { onOp: deps.onOp } : {}),

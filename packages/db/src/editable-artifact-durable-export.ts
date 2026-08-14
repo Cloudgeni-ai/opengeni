@@ -91,6 +91,9 @@ export type PersistedEditableArtifactMaterializationJob = Readonly<{
   result: PersistedEditableArtifactMaterializationResult | null;
 }>;
 
+export type ReadAuthorizedEditableArtifactMaterializationRequest = ExportContext &
+  Readonly<{ jobId: string }>;
+
 export type PersistedEditableArtifactExportSnapshot = Readonly<{
   modality: PersistedEditableArtifactExportModality;
   snapshotId: string;
@@ -488,6 +491,30 @@ export class PostgresEditableArtifactDurableExportStore {
       });
     });
   }
+}
+
+/**
+ * Reads one canonical materialization through the same exact actor authority
+ * used by editable-artifact export. This is intentionally narrower than the
+ * general store API: publication may verify an already-returned immutable
+ * receipt, but it cannot manufacture or widen artifact authority.
+ */
+export async function readAuthorizedEditableArtifactMaterialization(
+  db: Database,
+  input: ReadAuthorizedEditableArtifactMaterializationRequest,
+): Promise<PersistedEditableArtifactMaterializationJob | null> {
+  const context = validateContext(input);
+  const jobId = stableId(input.jobId, "job id");
+  return await withRlsContext(db, context.scope, async (tx) => {
+    const artifact = await lockArtifact(tx, context.scope, context.artifactId);
+    if (!artifact) return null;
+    const authorization = await authorize(tx, context);
+    if (!authorization.allowed || authorization.revision !== artifact.authorizationRevision) {
+      return null;
+    }
+    const loaded = await loadJob(tx, context.scope, context.artifactId, jobId, false);
+    return loaded?.job ?? null;
+  });
 }
 
 async function authorize(

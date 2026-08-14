@@ -488,6 +488,50 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       expect(routine.settings).toContain(`search_path=${SCHEMA}, pg_catalog`);
       expect(routine.app_execute).toBe(!routine.name.includes("_guard_"));
     }
+
+    const taskNoteFunctions = await admin<
+      Array<{
+        name: string;
+        securityDefiner: boolean;
+        appExecute: boolean;
+        publicExecute: boolean;
+        settings: string[] | null;
+      }>
+    >`
+      SELECT
+        procedure.proname AS name,
+        procedure.prosecdef AS "securityDefiner",
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') AS "appExecute",
+        exists (
+          SELECT 1
+          FROM aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+        ) AS "publicExecute",
+        procedure.proconfig AS settings
+      FROM pg_proc procedure
+      JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+      WHERE namespace.nspname = ${SCHEMA}
+        AND procedure.proname IN (
+          'guard_task_note_mutation',
+          'guard_task_note_event_mutation',
+          'resolve_task_note_attempt_authority',
+          'create_task_note_for_attempt',
+          'archive_task_note_for_attempt',
+          'list_task_notes_for_attempt'
+        )
+      ORDER BY procedure.proname`;
+    expect(taskNoteFunctions).toHaveLength(6);
+    const appExecutableTaskNoteFunctions = new Set([
+      "archive_task_note_for_attempt",
+      "create_task_note_for_attempt",
+      "list_task_notes_for_attempt",
+    ]);
+    for (const routine of taskNoteFunctions) {
+      expect(routine.securityDefiner).toBe(true);
+      expect(routine.publicExecute).toBe(false);
+      expect(routine.settings).toContain(`search_path=${SCHEMA}, pg_catalog`);
+      expect(routine.appExecute).toBe(appExecutableTaskNoteFunctions.has(routine.name));
+    }
   });
 
   test("migrate-then-provision grants the exact target-schema knowledge authority lock", async () => {

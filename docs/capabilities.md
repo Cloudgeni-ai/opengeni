@@ -139,6 +139,28 @@ token when the provider omits a replacement, and CAS-update or duplicate-safe
 create the normal encrypted Connection. Emulator-backed tests are merge proof;
 provider-live consent remains a separately labeled operational check.
 
+In the web control center, curated Definitions enter that flow through one
+reusable three-step connection journey. The account step gives every sibling
+account a human label and explains the consequences of Personal and Workspace
+ownership; users without integration-management permission may open the
+journey but receive administrator remediation instead of a mutation action. The
+access step describes reviewed agent use cases and permissions in plain
+language. Exact OAuth scopes and the provider domain remain available under
+progressive **Technical details**, rather than becoming the default interface.
+The review step repeats the provider, label, ownership, and capabilities before
+the user continues to the provider consent screen.
+
+The journey descriptor is presentation metadata only: it cannot grant scopes,
+select a Connection, or replace the Definition and Connection authority above.
+Its deterministic web reducer resets between account attempts and ignores stale
+submission outcomes. The existing controller still mints and preserves the
+exact instance key across a failed-start retry, owns the OAuth return path, and
+performs callback preview/install for that exact instance. The shared shell owns
+navigation, cancellation, accessible focus and progress semantics, loading, and
+safe errors; future thin provider adapters may add reviewed resource pickers or
+provider details without turning the shell into a generic schema form or
+changing the backend lifecycle.
+
 The normalized rows store the protocol-compiled revision, tools, Integration
 and API Facets, Facet installations, and owners under FORCE RLS. They are the
 only Integration Definition installation authority; generic API catalog and
@@ -187,11 +209,17 @@ rewritten by a browser request. Operators configure only a definition's bounded
 schema on one exact Integration instance, inheriting that instance's exact
 Connection and Personal/workspace authority. Configure, pause, resume, and
 remove use caller UUID idempotency plus exact binding-version OCC. The public
-projection reports only whether a provider cursor exists; page tokens, delta
-links, and other cursor contents remain private durable state. Integration
-definition upgrades migrate same-key facets without losing configuration,
-cursor, lifecycle status, evidence timestamps, or owner edges, and reject an
-upgrade that would silently remove a configured facet.
+projection includes the effective owner ledger plus an exact `directlyOwned`
+decision for the requested capability/instance/facet identity; clients must not
+infer current control from the presence of some unrelated `direct` owner. A
+Pack-, Plugin-, migration-, or other-direct-owned binding is read-only in the
+direct Integration controls. Removing a direct owner reports when another
+owner retains the binding instead of presenting the shared facet as deleted.
+The projection reports only whether a provider cursor exists; page tokens,
+delta links, and other cursor contents remain private durable state.
+Integration definition upgrades migrate same-key facets without losing
+configuration, cursor, lifecycle status, evidence timestamps, or owner edges,
+and reject an upgrade that would silently remove a configured facet.
 
 Google Drive's `drive-content` facet uses a provider-specific editor because
 its required schema contains a bounded array of verified folders/Shared Drives

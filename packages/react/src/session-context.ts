@@ -204,6 +204,7 @@ const BROWSER_INTERACTION_METHODS = [
   "listBrowserIdentities",
   "getBrowserIdentity",
   "createBrowserIdentity",
+  "updateBrowserIdentity",
   "listBrowserRevisions",
   "listBrowserSessions",
   "getBrowserSession",

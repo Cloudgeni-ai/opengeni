@@ -73,6 +73,43 @@ const LIVE_LEASE: LiveModalSandboxLeaseAttribution = {
 };
 
 describe("sweepModalOrphanSandboxes live-instance guard", () => {
+  test("treats an app that has not been created yet as an empty inventory", async () => {
+    const client = {
+      apps: {
+        fromName: async () => {
+          const error = new Error("app absent");
+          error.name = "NotFoundError";
+          throw error;
+        },
+      },
+      close: () => {},
+    };
+
+    await expect(
+      sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [], {
+        client: client as any,
+      }),
+    ).resolves.toEqual({ examined: 0, terminated: [], skipped: 0 });
+  });
+
+  test("does not hide unrelated app lookup failures", async () => {
+    const failure = new Error("Modal authentication failed");
+    const client = {
+      apps: {
+        fromName: async () => {
+          throw failure;
+        },
+      },
+      close: () => {},
+    };
+
+    await expect(
+      sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [], {
+        client: client as any,
+      }),
+    ).rejects.toBe(failure);
+  });
+
   test("never terminates an UNTAGGED box a live lease points at — and heals its tags", async () => {
     // The incident shape: the box lost/never got its attribution tags, is past
     // the unattributed grace, but a live lease resumes it by id every turn.

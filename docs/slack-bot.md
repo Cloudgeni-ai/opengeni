@@ -71,6 +71,10 @@ The separate workspace-shared principal uses this deliberately narrow bot manife
 display_information:
   name: OpenGeni
 features:
+  app_home:
+    home_tab_enabled: true
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
   bot_user:
     display_name: OpenGeni
     always_online: false
@@ -135,6 +139,7 @@ oauth_config:
 settings:
   event_subscriptions:
     bot_events:
+      - app_home_opened
       - app_mention
       - message.channels
       - message.groups
@@ -172,6 +177,12 @@ The bot connection is a workspace-shared `app_install` row (`subjectId = null`) 
 Migration `0212_slack_installation_bindings.sql` backfills one newest row only when all verified legacy rows for a team agree on the exact account/workspace and bot principal. Exact-principal duplicates remain stored but are non-authoritative. Conflicting legacy rows retain their provider credentials and are marked `quarantined`; routing and reinstall fail closed until an explicit forward fix resolves them. The database trigger fences rolling-old writers before they can commit a second binding. After migration, roll forward with binding-aware code rather than dropping the ledger or guessing a tenant; removing the binding authority is not a supported rollback.
 
 ## Start and continue OpenGeni work from Slack
+
+### Private App Home task inbox
+
+Opening the OpenGeni app's **Home** tab publishes one bounded, private task inbox for the exact Slack user. An explicitly linked Slack identity is resolved to its current OpenGeni subject and rechecked for live workspace membership, `sessions:read`, host session-list scope, account, workspace, connection, and installation authority before task data is sent to Slack. The view groups action-required or failed tasks, active tasks, and recent completions; each control is an authenticated OpenGeni deep link, so opening or changing a task goes through the ordinary browser authorization boundary.
+
+An unlinked or access-revoked identity receives a content-free connect/access view. A link or membership change immediately before publication replaces the task view instead of retaining stale task text. `views.publish` replaces the user's whole Home view, so duplicate `app_home_opened` deliveries converge without a second inbox or provider-side task record. The projection is read-only: it does not read ambient Slack messages, grant workspace access, create a session, answer a question, approve a tool, or write Documents, Knowledge, Memory, preferences, or policy.
 
 Authenticated Slack users can start work through four configured entry points:
 
@@ -256,4 +267,4 @@ Slack authentication errors that prove invalid, inactive, expired, or revoked cr
 
 ## Audit evidence
 
-Connect, reinstall, disconnect, channel-list, history, thread-reply, user-list, file-list, file-info, file-content, post, and deletion operations write connection-targeted audit events. Receipts identify the non-secret credential role, connection UUID, Slack team ID, operation, outcome, and applicable task/session IDs. Post receipts include the non-secret operation/client-message UUID; deletion receipts include only their operation UUID. They never include tokens, authorization headers, posted text, channel history, file contents, private-file URLs, protected request digests, or raw provider responses.
+Connect, reinstall, disconnect, channel-list, history, thread-reply, user-list, file-list, file-info, file-content, App Home publication, post, and deletion operations write connection-targeted audit events. Receipts identify the non-secret credential role, connection UUID, Slack team ID, operation, outcome, and applicable task/session IDs. Post receipts include the non-secret operation/client-message UUID; deletion receipts include only their operation UUID. They never include tokens, authorization headers, App Home task text, posted text, channel history, file contents, private-file URLs, protected request digests, or raw provider responses.

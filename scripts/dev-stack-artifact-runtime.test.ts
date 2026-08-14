@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 const scriptPath = new URL("./dev-stack.sh", import.meta.url);
 const sandboxDockerfilePath = new URL("../docker/sandbox.Dockerfile", import.meta.url);
 const envExamplePath = new URL("../.env.example", import.meta.url);
+const relaySupervisorPath = new URL("./run-development-relay.sh", import.meta.url);
 
 describe("local artifact runtime stack contract", () => {
   test("script is valid shell and uses the strict current-host runtime producer", async () => {
@@ -21,6 +22,8 @@ describe("local artifact runtime stack contract", () => {
     expect(source).toContain("OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST");
     expect(source).toContain("OPENGENI_ARTIFACT_MATERIALIZER_EXECUTABLE");
     expect(source).not.toMatch(/export OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/u);
+    expect(source).toContain('! (echo >"/dev/tcp/127.0.0.1/$1")');
+    expect(source).not.toContain('lsof -nP -iTCP:"$1"');
   });
 
   test("starts both dedicated artifact roles with isolated ports and credentials", async () => {
@@ -76,6 +79,17 @@ describe("local artifact runtime stack contract", () => {
     expect(source).not.toContain("printf 'OPENGENI_MODAL_TOKEN_SECRET=%s");
   });
 
+  test("isolates Modal sandbox ownership between local worktrees", async () => {
+    const source = await Bun.file(scriptPath).text();
+
+    expect(source).toContain('[ "${OPENGENI_PIN_MODAL_APP_NAME:-0}" != "1" ]');
+    expect(source).toContain('OPENGENI_MODAL_APP_NAME="opengeni-${COMPOSE_PROJECT_NAME}"');
+    expect(source).toContain("export OPENGENI_MODAL_APP_NAME");
+    expect(source).toContain(
+      "printf 'OPENGENI_MODAL_APP_NAME=%s\\n' \"${OPENGENI_MODAL_APP_NAME:-opengeni-sandbox}\"",
+    );
+  });
+
   test("makes local Connected Machines self-initializing", async () => {
     const [source, envExample] = await Promise.all([
       Bun.file(scriptPath).text(),
@@ -89,6 +103,91 @@ describe("local artifact runtime stack contract", () => {
     expect(source).toContain("OPENGENI_STREAM_TOKEN_SECRET");
     expect(source).toContain("OPENGENI_SELFHOSTED_NATS_URL");
     expect(source).toContain("OPENGENI_SELFHOSTED_RELAY_URL");
+    expect(source).toContain("OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED");
+    expect(source).toContain("OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD");
+    expect(source).toContain("OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD");
+    expect(source).toContain("bun scripts/prepare-development-nats-config.ts");
+    expect(source).toContain("OPENGENI_NATS_CONFIG_FILE");
+    expect(source).toContain("bash scripts/run-development-relay.sh");
+  });
+
+  test("probes local ports without walking unhealthy mounted filesystems", async () => {
+    const source = await Bun.file(scriptPath).text();
+    const netcatCapabilityCheck = source.indexOf("nc_help=");
+    const netcatProbe = source.indexOf("nc -z -w 1 127.0.0.1");
+    const lsofFallback = source.indexOf("lsof -nP -iTCP");
+
+    expect(netcatCapabilityCheck).toBeGreaterThan(-1);
+    expect(netcatProbe).toBeGreaterThan(netcatCapabilityCheck);
+    expect(netcatProbe).toBeGreaterThan(-1);
+    expect(source).toContain('! (echo >"/dev/tcp/127.0.0.1/$1")');
+    expect(lsofFallback).toBe(-1);
+  });
+
+  test("can advertise a remote-reachable development relay while binding it locally", async () => {
+    const source = await Bun.file(scriptPath).text();
+
+    expect(source).toContain('if [ -n "${OPENGENI_RELAY_BIND:-}" ]; then');
+    expect(source).toContain('explicit_relay_port="$(relay_bind_available');
+    expect(source).toContain('port_claimed "$explicit_relay_port"');
+    expect(source).toContain("OPENGENI_RELAY_BIND must be host:port");
+    expect(source).toContain("start_local_relay=1");
+    expect(source).toContain("export OPENGENI_RELAY_BIND OPENGENI_RELAY_TOKEN_SECRET");
+  });
+
+  test("reuses generated ports without restoring stale derived runtime settings", async () => {
+    const source = await Bun.file(scriptPath).text();
+
+    expect(source).not.toContain(". ./.env.runtime");
+    expect(source).toContain("for runtime_port_var in");
+    expect(source).toContain("OPENGENI_RELAY_HOST_PORT");
+    expect(source).toContain('sed -n "s/^${runtime_port_var}=//p" .env.runtime');
+  });
+
+  test("enables interactive Browser and Computer surfaces locally by default", async () => {
+    const source = await Bun.file(scriptPath).text();
+
+    for (const setting of [
+      "OPENGENI_SANDBOX_DESKTOP_ENABLED",
+      "OPENGENI_SANDBOX_DESKTOP_INTERACTIVE",
+      "OPENGENI_COMPUTER_USE_ENABLED",
+    ]) {
+      expect(source).toContain(`if [ -z "\${${setting}:-}" ]; then`);
+      expect(source).toContain(`${setting}=true`);
+      expect(source).toContain(`export ${setting}`);
+    }
+  });
+
+  test("uses durable lazy sandbox ownership locally by default", async () => {
+    const source = await Bun.file(scriptPath).text();
+
+    for (const setting of [
+      "OPENGENI_SANDBOX_OWNERSHIP_ENABLED",
+      "OPENGENI_SANDBOX_LAZY_PROVISION",
+    ]) {
+      expect(source).toContain(`if [ -z "\${${setting}:-}" ]; then`);
+      expect(source).toContain(`${setting}=true`);
+      expect(source).toContain(`export ${setting}`);
+      expect(source).toContain(`printf '${setting}=%s\\n'`);
+    }
+  });
+
+  test("supervises the local relay and terminates its current child cleanly", async () => {
+    const syntax = Bun.spawn(["bash", "-n", relaySupervisorPath.pathname], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [status, stderr, source] = await Promise.all([
+      syntax.exited,
+      new Response(syntax.stderr).text(),
+      Bun.file(relaySupervisorPath).text(),
+    ]);
+    expect(status).toBe(0);
+    expect(stderr).toBe("");
+    expect(source).toContain('while [ "$stopping" = "0" ]');
+    expect(source).toContain("cargo run --quiet -p opengeni-relay &");
+    expect(source).toContain("trap cleanup EXIT INT TERM");
+    expect(source).toContain('kill "$child_pid"');
   });
 
   test("unsandboxed execution is explicitly local, loopback, and visible in runtime env", async () => {

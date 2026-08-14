@@ -7,6 +7,7 @@ import {
 
 export const VIDEO_GENERATION_SCHEMA_VERSION = 1 as const;
 export const SEEDANCE_2_5_MODEL_ID = "bytedance/seedance-2.5" as const;
+export const GROK_IMAGINE_VIDEO_1_5_MODEL_ID = "xai/grok-imagine-video-1.5" as const;
 
 export const VideoGenerationSourceMode = z.enum([
   "text",
@@ -20,7 +21,11 @@ export type VideoGenerationSourceMode = z.infer<typeof VideoGenerationSourceMode
 export const VideoGenerationResolution = z.enum(["480p", "720p"]);
 export type VideoGenerationResolution = z.infer<typeof VideoGenerationResolution>;
 
-export const VideoGenerationFundingSource = z.enum(["opengeni_credits", "workspace_gateway"]);
+export const VideoGenerationFundingSource = z.enum([
+  "opengeni_credits",
+  "workspace_gateway",
+  "supergrok_subscription",
+]);
 export type VideoGenerationFundingSource = z.infer<typeof VideoGenerationFundingSource>;
 
 export const VideoGenerationAspectRatio = z.enum([
@@ -131,7 +136,11 @@ export const VideoGenerationCapabilities = z
   .superRefine((value, ctx) => {
     const ids = new Set(value.models.map((model) => model.modelId));
     if (ids.size !== value.models.length) {
-      ctx.addIssue({ code: "custom", path: ["models"], message: "model ids must be unique" });
+      ctx.addIssue({
+        code: "custom",
+        path: ["models"],
+        message: "model ids must be unique",
+      });
     }
     if (!ids.has(value.defaultModelId)) {
       ctx.addIssue({
@@ -205,21 +214,22 @@ export const WorkspaceVideoGenerationSettings = z
   .object({
     schemaVersion: z.literal(VIDEO_GENERATION_SCHEMA_VERSION),
     policy: VideoGenerationPolicy,
-    fundingOptions: z.array(VideoGenerationFundingOption).length(2),
+    fundingOptions: z.array(VideoGenerationFundingOption).length(3),
     availableModels: z.array(VideoGenerationModelCapability).max(16),
     capabilities: VideoGenerationCapabilities.nullable(),
   })
   .strict()
   .superRefine((value, ctx) => {
     if (
-      new Set(value.fundingOptions.map((option) => option.source)).size !== 2 ||
+      new Set(value.fundingOptions.map((option) => option.source)).size !== 3 ||
       !value.fundingOptions.some((option) => option.source === "opengeni_credits") ||
-      !value.fundingOptions.some((option) => option.source === "workspace_gateway")
+      !value.fundingOptions.some((option) => option.source === "workspace_gateway") ||
+      !value.fundingOptions.some((option) => option.source === "supergrok_subscription")
     ) {
       ctx.addIssue({
         code: "custom",
         path: ["fundingOptions"],
-        message: "both funding sources must be described exactly once",
+        message: "all funding sources must be described exactly once",
       });
     }
     const selected = value.fundingOptions.find(
@@ -249,6 +259,33 @@ export const VideoGenerationAcceptedReceipt = z
   })
   .strict();
 export type VideoGenerationAcceptedReceipt = z.infer<typeof VideoGenerationAcceptedReceipt>;
+
+export const VideoGenerationRejectedCode = z.enum([
+  "invalid_reference_path",
+  "reference_not_stable",
+  "reference_too_large",
+  "reference_media_type_mismatch",
+  "unsupported_reference_media",
+]);
+export type VideoGenerationRejectedCode = z.infer<typeof VideoGenerationRejectedCode>;
+
+/** Deterministic pre-admission rejection: no provider request or durable operation was created. */
+export const VideoGenerationRejectedResult = z
+  .object({
+    schemaVersion: z.literal(VIDEO_GENERATION_SCHEMA_VERSION),
+    status: z.literal("rejected"),
+    code: VideoGenerationRejectedCode,
+    message: z.string().min(1).max(512),
+    operationCreated: z.literal(false),
+  })
+  .strict();
+export type VideoGenerationRejectedResult = z.infer<typeof VideoGenerationRejectedResult>;
+
+export const VideoGenerationToolResult = z.discriminatedUnion("status", [
+  VideoGenerationAcceptedReceipt,
+  VideoGenerationRejectedResult,
+]);
+export type VideoGenerationToolResult = z.infer<typeof VideoGenerationToolResult>;
 
 export const GeneratedVideoFacts = z
   .object({

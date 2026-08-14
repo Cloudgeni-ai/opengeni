@@ -1,6 +1,6 @@
 import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
 import { FolderOpenIcon, Loader2Icon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -32,6 +32,25 @@ export type GoogleDriveFacetEntry = {
   binding: IntegrationFacetBindingSummary | null;
 };
 
+export type GoogleDriveFacetMutation = {
+  apply: (binding: IntegrationFacetBindingSummary) => boolean;
+  isCurrent: () => boolean;
+  finish: () => void;
+};
+
+export type GoogleDriveKnowledgeSourceDialogProps = {
+  client: OpenGeniCoreClient;
+  workspaceId: string;
+  instance: ApiIntegrationInstallationSummary;
+  entry: GoogleDriveFacetEntry | null;
+  canManage: boolean;
+  canManagePersonalDestination: boolean;
+  canManageWorkspaceDestination: boolean;
+  canManageOrganizationDestination: boolean;
+  onClose: () => void;
+  onMutationStart: () => GoogleDriveFacetMutation;
+};
+
 export function GoogleDriveKnowledgeSourceDialog({
   client,
   workspaceId,
@@ -42,21 +61,8 @@ export function GoogleDriveKnowledgeSourceDialog({
   canManageWorkspaceDestination,
   canManageOrganizationDestination,
   onClose,
-  onBusyChange,
-  onSaved,
-}: {
-  client: OpenGeniCoreClient;
-  workspaceId: string;
-  instance: ApiIntegrationInstallationSummary;
-  entry: GoogleDriveFacetEntry | null;
-  canManage: boolean;
-  canManagePersonalDestination: boolean;
-  canManageWorkspaceDestination: boolean;
-  canManageOrganizationDestination: boolean;
-  onClose: () => void;
-  onBusyChange: (busy: boolean) => void;
-  onSaved: () => Promise<void>;
-}) {
+  onMutationStart,
+}: GoogleDriveKnowledgeSourceDialogProps) {
   const [busy, setBusy] = useState(false);
   const [browseBusy, setBrowseBusy] = useState(false);
   const [items, setItems] = useState<GoogleDriveBrowseItem[]>([]);
@@ -69,6 +75,7 @@ export function GoogleDriveKnowledgeSourceDialog({
   const [folderIdDraft, setFolderIdDraft] = useState("");
   const [syncCadence, setSyncCadence] = useState<GoogleDriveSyncCadence>("hourly");
   const [readPolicy, setReadPolicy] = useState<GoogleDriveReadPolicy>("allow");
+  const browseGeneration = useRef(0);
 
   const folderItems = useMemo(() => items.filter((item) => item.kind === "folder"), [items]);
 
@@ -79,6 +86,7 @@ export function GoogleDriveKnowledgeSourceDialog({
       pageToken?: string,
     ): Promise<GoogleDriveBrowseItem | null> => {
       if (!entry) return null;
+      const generation = ++browseGeneration.current;
       setBrowseBusy(true);
       try {
         const response = await client.browseGoogleDriveFacetSource(
@@ -91,6 +99,7 @@ export function GoogleDriveKnowledgeSourceDialog({
             ...(pageToken ? { pageToken } : {}),
           },
         );
+        if (generation !== browseGeneration.current) return null;
         setItems((current) =>
           mode === "append" ? [...current, ...response.items] : response.items,
         );
@@ -111,19 +120,24 @@ export function GoogleDriveKnowledgeSourceDialog({
         }
         return response.current;
       } catch (error) {
+        if (generation !== browseGeneration.current) return null;
         toast.error("Google Drive folder could not be opened", {
           description: error instanceof Error ? error.message : String(error),
         });
         return null;
       } finally {
-        setBrowseBusy(false);
+        if (generation === browseGeneration.current) setBrowseBusy(false);
       }
     },
     [client, entry, instance.capabilityId, instance.instanceKey, workspaceId],
   );
 
   useEffect(() => {
-    if (!entry) return;
+    ++browseGeneration.current;
+    if (!entry) {
+      setBrowseBusy(false);
+      return;
+    }
     const config = googleDriveKnowledgeSourceConfig(entry.binding?.config);
     setSelectedSources(configuredGoogleDriveKnowledgeSources(entry.binding?.config));
     setAuthorityKind(
@@ -142,6 +156,10 @@ export function GoogleDriveKnowledgeSourceDialog({
     setNextPageToken(null);
     setFolderIdDraft("");
     void loadFolder({ id: "root", name: "My Drive" });
+    const browseGenerationRef = browseGeneration;
+    return () => {
+      ++browseGenerationRef.current;
+    };
   }, [
     canManageOrganizationDestination,
     canManagePersonalDestination,
@@ -218,10 +236,10 @@ export function GoogleDriveKnowledgeSourceDialog({
 
   async function saveSelection(): Promise<void> {
     if (!entry || selectedSources.length === 0 || destinationDisabled || !canManage) return;
+    const mutation = onMutationStart();
     setBusy(true);
-    onBusyChange(true);
     try {
-      await client.saveGoogleDriveFacetSource(
+      const result = await client.saveGoogleDriveFacetSource(
         workspaceId,
         instance.capabilityId,
         instance.instanceKey,
@@ -241,18 +259,21 @@ export function GoogleDriveKnowledgeSourceDialog({
           idempotencyKey: crypto.randomUUID(),
         },
       );
-      await onSaved();
-      onClose();
-      toast.success("Google Drive locations saved", {
-        description: `Only ${instance.displayName} was updated; sibling Drive accounts were unchanged.`,
-      });
+      if (mutation.apply(result.binding)) {
+        onClose();
+        toast.success("Google Drive locations saved", {
+          description: `Only ${instance.displayName} was updated; sibling Drive accounts were unchanged.`,
+        });
+      }
     } catch (error) {
-      toast.error("Google Drive locations could not be saved", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      if (mutation.isCurrent()) {
+        toast.error("Google Drive locations could not be saved", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
     } finally {
-      setBusy(false);
-      onBusyChange(false);
+      if (mutation.isCurrent()) setBusy(false);
+      mutation.finish();
     }
   }
 

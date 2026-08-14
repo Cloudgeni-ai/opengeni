@@ -23,6 +23,10 @@ import type {
   MachinesResponse,
   MachineState,
   MachineView,
+  MachineRuntime,
+  MachineRuntimeCapabilities,
+  MachineUpdateState,
+  MachineUpdateStatus,
   MetricSample,
 } from "@opengeni/sdk";
 
@@ -32,6 +36,10 @@ export type {
   MachinesResponse,
   MachineState,
   MachineView,
+  MachineRuntime,
+  MachineRuntimeCapabilities,
+  MachineUpdateState,
+  MachineUpdateStatus,
   MetricSample,
 };
 

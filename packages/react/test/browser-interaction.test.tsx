@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { StreamFrame, StreamOpen, StreamOpenAck } from "@opengeni/agent-proto";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import type {
+  AttachedBrowserBridge,
   AttachedBrowserDevice,
   BrowserActionReceipt,
   BrowserDownload,
@@ -16,9 +17,11 @@ import type {
   BrowserTarget,
   InteractionPlacement,
   InteractionIntervention,
+  SiteAuthConnection,
 } from "@opengeni/sdk/interaction";
 import { act } from "react";
-import { browserKey, BrowserViewer } from "../src/components/browser-viewer";
+import { browserKey, normalizeBrowserAddress } from "../src/components/browser-input";
+import { BrowserViewer } from "../src/components/browser-viewer";
 import { useAttachedBrowsers } from "../src/hooks/use-attached-browsers";
 import type {
   BrowserFrameWebSocket,
@@ -98,6 +101,17 @@ function attachedBrowserDevice(): AttachedBrowserDevice {
   };
 }
 
+function attachedBrowserBridge(): AttachedBrowserBridge {
+  return {
+    enrollmentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    state: "online",
+    bridgeGeneration: "bridge-generation-1",
+    inventoryRevision: 4,
+    connectedProfileCount: 0,
+    lastSeenAt: NOW,
+  };
+}
+
 function browserSession(
   id = BROWSER_SESSION_ID,
   associationSessionId = SESSION_ID,
@@ -164,6 +178,7 @@ function browserIdentity(): BrowserIdentity {
     workspaceId: WORKSPACE_ID,
     name: "Work",
     status: "active",
+    version: 1,
     defaultRevisionId: null,
     headGeneration: 0,
     revisionCount: 0,
@@ -207,6 +222,41 @@ function browserRevision(identity: BrowserIdentity, session: BrowserSession): Br
     ],
     createdBySubjectId: "user:test",
     createdAt: NOW,
+  };
+}
+
+function siteAuthConnection(
+  identity: BrowserIdentity,
+  overrides: Partial<SiteAuthConnection> = {},
+): SiteAuthConnection {
+  return {
+    id: "12121212-abab-4bab-8bab-121212121212",
+    accountId: ACCOUNT_ID,
+    workspaceId: WORKSPACE_ID,
+    name: "Google",
+    accountLabel: "jorgen@cloudgeni.ai",
+    origins: ["https://accounts.google.com"],
+    loginUrl: "https://accounts.google.com/",
+    verificationUrlPrefixes: ["https://myaccount.google.com/"],
+    authorities: [{ id: "human", kind: "human", label: "Human", fields: [] }],
+    methods: [{ id: "passkey", kind: "passkey", label: "Passkey", authorityIds: ["human"] }],
+    preferredIdentityId: identity.id,
+    preferredPlacement: null,
+    preferredNetworkRouteId: null,
+    healthPolicy: { mode: "on_use", intervalSeconds: null, automaticRepair: false },
+    status: "active",
+    verificationState: "needs_repair",
+    lastVerifiedAt: null,
+    lastVerifiedUrl: null,
+    lastCheckedAt: NOW,
+    nextCheckAt: null,
+    maintenance: null,
+    repairCode: "passkey_required",
+    version: 1,
+    createdBySubjectId: "user:test",
+    createdAt: NOW,
+    updatedAt: NOW,
+    ...overrides,
   };
 }
 
@@ -413,11 +463,12 @@ class FakeBrowserSocket {
 describe("BrowserSession React resources", () => {
   test("discovers connected Chrome profile endpoints through the public client", async () => {
     const device = attachedBrowserDevice();
+    const bridge = attachedBrowserBridge();
     const calls: unknown[] = [];
     const client = fakeClient({
       listAttachedBrowsers: async (_workspaceId, options) => {
         calls.push(options);
-        return { revision: 7, devices: [device] };
+        return { revision: 7, bridges: [bridge], devices: [device] };
       },
     });
     const hook = await renderHook(
@@ -432,6 +483,7 @@ describe("BrowserSession React resources", () => {
     await flush(20);
 
     expect(hook.result.current.revision).toBe(7);
+    expect(hook.result.current.bridges).toEqual([bridge]);
     expect(hook.result.current.devices).toEqual([device]);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ includeDisconnected: false });
@@ -884,6 +936,47 @@ describe("BrowserSession frame stream", () => {
     expect(hook.result.current.frame?.sequence).toBe(2);
     await hook.unmount();
   });
+
+  test("cannot publish a delayed frame from a detached socket after target switch", async () => {
+    const sockets: FakeBrowserSocket[] = [];
+    let release!: (value: ArrayBuffer) => void;
+    const delayed = new (class extends Blob {
+      override arrayBuffer(): Promise<ArrayBuffer> {
+        return new Promise((resolve) => {
+          release = resolve;
+        });
+      }
+    })();
+    const client = fakeClient({
+      attachBrowserSession: async (_workspaceId, _browserSessionId, request) =>
+        attachment(request.targetId),
+    });
+    const hook = await renderHook(
+      (props: { targetId: string }) =>
+        useBrowserFrameStream({
+          client,
+          workspaceId: WORKSPACE_ID,
+          browserSessionId: BROWSER_SESSION_ID,
+          targetId: props.targetId,
+          webSocketFactory: (url, protocols) => {
+            const socket = new FakeBrowserSocket(url, protocols);
+            sockets.push(socket);
+            return socket as unknown as BrowserFrameWebSocket;
+          },
+        }),
+      { targetId: "target-1" },
+    );
+    await flush(10);
+    await dispatch(sockets[0]!, "open");
+    await dispatch(sockets[0]!, "message", { data: delayed });
+    await hook.rerender({ targetId: "target-2" });
+    await flush(10);
+    release(frameMessage("target-1", 9).buffer as ArrayBuffer);
+    await flush(20);
+    expect(hook.result.current.frame).toBeNull();
+    expect(sockets[0]?.closed).toBe(true);
+    await hook.unmount();
+  });
 });
 
 describe("BrowserViewer", () => {
@@ -900,7 +993,65 @@ describe("BrowserViewer", () => {
     expect(browserKey(event("Meta", { metaKey: true }))).toBeNull();
     expect(browserKey(event("Control", { ctrlKey: true }))).toBeNull();
     expect(browserKey(event("Alt", { altKey: true }))).toBeNull();
-    expect(browserKey(event("a", { metaKey: true }))).toBe("Meta+a");
+    expect(browserKey(event("a", { metaKey: true }), "mac")).toBe("Mod+a");
+    expect(browserKey(event("a", { ctrlKey: true }), "mac")).toBe("Control+a");
+    expect(browserKey(event("a", { ctrlKey: true }), "other")).toBe("Mod+a");
+    expect(browserKey(event("a", { metaKey: true }), "other")).toBe("Meta+a");
+  });
+
+  test("treats the browser address field as an omnibox", () => {
+    expect(normalizeBrowserAddress("example.com")).toBe("https://example.com/");
+    expect(normalizeBrowserAddress("localhost:3000/test")).toBe("http://localhost:3000/test");
+    expect(normalizeBrowserAddress("opengeni browser platform")).toBe(
+      "https://www.google.com/search?q=opengeni%20browser%20platform",
+    );
+  });
+
+  test("renders a typed connected-machine startup failure instead of a generic spinner", async () => {
+    const current = browserSession();
+    const currentTarget = target();
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: current.id,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => observation(current.id, currentTarget),
+      attachBrowserSession: async () => {
+        throw new OpenGeniApiError(
+          502,
+          JSON.stringify({
+            error: {
+              status: 502,
+              code: "upstream_unavailable",
+              message: "The connected machine could not open the browser live view stream.",
+              retryable: false,
+              requestId: "outer-browser-request",
+              details: {
+                interactionLayer: "connected_machine",
+                interactionSurface: "browser",
+                controlFailureCode: "stream",
+                controlRequestId: "inner-browser-request",
+              },
+            },
+          }),
+          { mutation: true },
+        );
+      },
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(40);
+
+    expect(rendered.container.textContent).toContain("Live view disconnected");
+    expect(rendered.container.textContent).toContain(
+      "The connected machine could not open the browser live view stream.",
+    );
+    expect(rendered.container.textContent).toContain("Try again");
+    await rendered.unmount();
   });
 
   test("opens actionable runtime and page diagnostics without leaving the browser", async () => {
@@ -1317,12 +1468,12 @@ describe("BrowserViewer", () => {
     expect(address).not.toBeNull();
     expect(form).not.toBeNull();
     await actRun(() => {
-      address!.value = "example.com";
-      address!.dispatchEvent(new Event("input", { bubbles: true }));
+      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      setValue?.call(address, "example.com");
+      address!.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      address!.dispatchEvent(new Event("change", { bubbles: true }));
     });
-    await actRun(() => {
-      form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    });
+    await actRun(() => form!.requestSubmit());
     await flush(5);
     expect(actions).toHaveLength(2);
     expect(canvas?.className).toContain("invisible");
@@ -1506,6 +1657,7 @@ describe("BrowserViewer", () => {
           defaultRevisionId: revision.id,
           headGeneration: 1,
           revisionCount: 1,
+          version: identity.version + 1,
         };
         current = {
           ...current,
@@ -1601,6 +1753,7 @@ describe("BrowserViewer", () => {
             defaultRevisionId: revision.id,
             headGeneration: 1,
             revisionCount: 1,
+            version: emptyIdentity.version + 1,
           },
           revision,
           outcome: "saved_as_default",
@@ -1716,6 +1869,188 @@ describe("BrowserViewer", () => {
     await rendered.unmount();
   });
 
+  test("opens one exact saved profile version without changing the future default", async () => {
+    const secondRevisionId = "aaaaaaaa-9999-4999-8999-999999999999";
+    const createdSessionId = "aaaaaaaa-7777-4777-8777-777777777777";
+    const identity: BrowserIdentity = {
+      ...browserIdentity(),
+      version: 3,
+      defaultRevisionId: BROWSER_REVISION_ID,
+      headGeneration: 2,
+      revisionCount: 2,
+    };
+    const current: BrowserSession = {
+      ...browserSession(),
+      identityId: identity.id,
+      baseRevisionId: secondRevisionId,
+      capabilities: {
+        ...browserSession().capabilities,
+        identityPublication: true,
+        liveFrames: false,
+      },
+    };
+    const first = { ...browserRevision(identity, current), ordinal: 1 };
+    const second = { ...first, id: secondRevisionId, ordinal: 2 };
+    const createRequests: unknown[] = [];
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      listBrowserIdentities: async () => ({ revision: 1, identities: [identity] }),
+      listBrowserRevisions: async () => ({ identity, revisions: [first, second] }),
+      createBrowserSession: async (_workspaceId, request) => {
+        createRequests.push(request);
+        return mutation({
+          ...current,
+          id: createdSessionId,
+          baseRevisionId: request.baseRevisionId ?? identity.defaultRevisionId,
+        });
+      },
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: current.id,
+        controllerGeneration: "controller-1",
+        targets: [target()],
+      }),
+      observeBrowserTarget: async () => observation(current.id, target()),
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(30);
+
+    const profileSummary = [...rendered.container.querySelectorAll("summary")].find((summary) =>
+      /Work\s*·\s*v2/u.test(summary.textContent ?? ""),
+    );
+    expect(profileSummary).toBeDefined();
+    await actRun(() => profileSummary!.click());
+    const openFirst = rendered.container.querySelector<HTMLButtonElement>(
+      "button[aria-label='Open Work version 1']",
+    );
+    expect(openFirst).not.toBeNull();
+    await actRun(() => openFirst!.click());
+    await flush(30);
+
+    expect(createRequests).toHaveLength(1);
+    expect(createRequests[0]).toMatchObject({
+      sessionId: SESSION_ID,
+      name: "Work browser",
+      identityId: identity.id,
+      baseRevisionId: first.id,
+      headless: false,
+      initialUrl: "https://www.google.com/",
+    });
+    expect(identity.defaultRevisionId).toBe(BROWSER_REVISION_ID);
+    await rendered.unmount();
+  });
+
+  test("selects a future default version and archives a profile without changing the live browser", async () => {
+    const secondRevisionId = "aaaaaaaa-9999-4999-8999-999999999999";
+    let identity: BrowserIdentity = {
+      ...browserIdentity(),
+      version: 3,
+      defaultRevisionId: BROWSER_REVISION_ID,
+      headGeneration: 1,
+      revisionCount: 2,
+    };
+    const current: BrowserSession = {
+      ...browserSession(),
+      identityId: identity.id,
+      baseRevisionId: secondRevisionId,
+      capabilities: {
+        ...browserSession().capabilities,
+        identityPublication: true,
+        liveFrames: false,
+      },
+    };
+    const first = { ...browserRevision(identity, current), ordinal: 1 };
+    const second = { ...first, id: secondRevisionId, ordinal: 2 };
+    const updates: unknown[] = [];
+    const currentTarget = target();
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      listBrowserIdentities: async () => ({ revision: 1, identities: [identity] }),
+      listBrowserRevisions: async () => ({ identity, revisions: [first, second] }),
+      listSiteAuthConnections: async () => ({
+        revision: 1,
+        connections: [siteAuthConnection(identity)],
+      }),
+      updateBrowserIdentity: async (_workspaceId, identityId, request) => {
+        updates.push({ identityId, ...request });
+        const defaultChanged =
+          request.defaultRevisionId !== undefined &&
+          request.defaultRevisionId !== identity.defaultRevisionId;
+        identity = {
+          ...identity,
+          ...(request.status !== undefined ? { status: request.status } : {}),
+          ...(request.defaultRevisionId !== undefined
+            ? { defaultRevisionId: request.defaultRevisionId }
+            : {}),
+          headGeneration: identity.headGeneration + (defaultChanged ? 1 : 0),
+          version: identity.version + 1,
+        };
+        return { identity, operationId: request.operationId, replayed: false };
+      },
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: current.id,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => observation(current.id, currentTarget),
+    });
+    const notifications: string[] = [];
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        onNotify={(notification) => notifications.push(notification.message)}
+      />,
+    );
+    await flush(30);
+
+    const profileSummary = [...rendered.container.querySelectorAll("summary")].find((summary) =>
+      /Work\s*·\s*v2/u.test(summary.textContent ?? ""),
+    );
+    expect(profileSummary).toBeDefined();
+    await actRun(() => profileSummary!.click());
+    expect(rendered.container.textContent).toContain("Portable browser data");
+    expect(rendered.container.textContent).toContain("Google");
+    expect(rendered.container.textContent).toContain("Sign-in needs attention");
+    expect(rendered.container.textContent).toContain(
+      "Saved browser data can be copied; a website may still expire or re-verify its own session.",
+    );
+    const chooseDefault = rendered.container.querySelector<HTMLButtonElement>(
+      "button[aria-label='Use Work version 2 by default']",
+    );
+    expect(chooseDefault).not.toBeNull();
+    await actRun(() => chooseDefault!.click());
+    await flush(20);
+
+    expect(updates[0]).toMatchObject({
+      identityId: identity.id,
+      expectedVersion: 3,
+      defaultRevisionId: secondRevisionId,
+    });
+    expect(current.baseRevisionId).toBe(secondRevisionId);
+    expect(notifications).toContain("Work version 2 will open by default in future browsers.");
+
+    const archive = [...rendered.container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Hide from new browsers",
+    );
+    expect(archive).toBeDefined();
+    await actRun(() => archive!.click());
+    await flush(20);
+    expect(updates[1]).toMatchObject({
+      identityId: identity.id,
+      expectedVersion: 4,
+      status: "archived",
+    });
+    expect(rendered.container.textContent).toContain(
+      "Hidden from new browsers. This already-open browser is unchanged.",
+    );
+    await rendered.unmount();
+  });
+
   test("creates a managed browser inside an exact ComputerSession and opens that resource", async () => {
     const created: BrowserSession = {
       ...browserSession(),
@@ -1776,6 +2111,7 @@ describe("BrowserViewer", () => {
       sessionId: SESSION_ID,
       name: "Browser",
       headless: false,
+      initialUrl: "https://www.google.com/",
       linkedComputerSessionId: COMPUTER_SESSION_ID,
       placement: created.placement,
     });
@@ -1851,6 +2187,66 @@ describe("BrowserViewer", () => {
     await rendered.unmount();
   });
 
+  test("opens a browser when optional linked Computer creation is unavailable", async () => {
+    const created: BrowserSession = { ...browserSession(), headless: false };
+    const createRequests: unknown[] = [];
+    const notifications: Array<{ kind: string; message: string }> = [];
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
+      listBrowserIdentities: async () => ({ revision: 1, identities: [] }),
+      createBrowserSession: async (_workspaceId, request) => {
+        createRequests.push(request);
+        return mutation(created);
+      },
+      getBrowserSession: async () => created,
+      listBrowserTargets: async () => ({
+        browserSessionId: created.id,
+        controllerGeneration: "controller-1",
+        targets: [],
+      }),
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        createLinkedComputer={async () => {
+          throw new Error("No display is available on this placement");
+        }}
+        onNotify={(notification) => notifications.push(notification)}
+      />,
+    );
+    await flush(30);
+
+    const launchSummary = rendered.container.querySelector<HTMLElement>(
+      "summary[aria-label='New browser']",
+    );
+    expect(launchSummary).not.toBeNull();
+    await actRun(() => launchSummary!.click());
+    const clean = [...(launchSummary!.closest("details")?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent?.includes("Fresh browser"),
+    );
+    expect(clean).toBeDefined();
+    await actRun(() => clean!.click());
+    await flush(30);
+
+    expect(createRequests).toHaveLength(1);
+    expect(createRequests[0]).toMatchObject({
+      sessionId: SESSION_ID,
+      name: "Browser",
+      headless: false,
+    });
+    expect(createRequests[0]).not.toHaveProperty("linkedComputerSessionId");
+    expect(createRequests[0]).not.toHaveProperty("placement");
+    expect(notifications).toEqual([
+      {
+        kind: "info",
+        message: "Browser opened. Computer view is unavailable on this placement.",
+      },
+    ]);
+    await rendered.unmount();
+  });
+
   test("starts the canonical BrowserSession against a connected Chrome profile", async () => {
     const device = attachedBrowserDevice();
     const created: BrowserSession = {
@@ -1875,7 +2271,7 @@ describe("BrowserViewer", () => {
       placement: InteractionPlacement | undefined;
     }> = [];
     const client = fakeClient({
-      listAttachedBrowsers: async () => ({ revision: 4, devices: [device] }),
+      listAttachedBrowsers: async () => ({ revision: 4, bridges: [], devices: [device] }),
       listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
       listBrowserIdentities: async () => ({ revision: 1, identities: [] }),
       createBrowserSession: async (_workspaceId, request) => {
@@ -1934,6 +2330,39 @@ describe("BrowserViewer", () => {
     ]);
     expect(rendered.container.textContent).toContain("Your browser");
     expect(rendered.container.textContent).toContain("live");
+    await rendered.unmount();
+  });
+
+  test("offers attached-Chrome setup when the machine bridge has no connected profile", async () => {
+    const client = fakeClient({
+      listAttachedBrowsers: async () => ({
+        revision: 4,
+        bridges: [attachedBrowserBridge()],
+        devices: [],
+      }),
+      listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
+      listBrowserIdentities: async () => ({ revision: 1, identities: [] }),
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        browserExtensionSetupUrl="/browser-extension-setup.html"
+      />,
+    );
+    await flush(30);
+
+    const launchSummary = rendered.container.querySelector<HTMLElement>(
+      "summary[aria-label='New browser']",
+    );
+    expect(launchSummary).not.toBeNull();
+    await actRun(() => launchSummary!.click());
+    const setup = [...(launchSummary!.closest("details")?.querySelectorAll("a") ?? [])].find(
+      (link) => link.textContent?.includes("Connect this Chrome profile"),
+    );
+    expect(setup?.getAttribute("href")).toBe("/browser-extension-setup.html");
+    expect(setup?.textContent).toContain("Chrome extension missing");
     await rendered.unmount();
   });
 });

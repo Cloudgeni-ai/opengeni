@@ -1,0 +1,38 @@
+# Provider-free Google Drive release-readiness overlay. Review these non-secret
+# values with the ordinary environment-specific chart values; this file does
+# not authorize a deployment or a live Google acceptance run.
+
+secret:
+  create: false
+  existingSecret: opengeni-runtime
+
+config:
+  OPENGENI_INTEGRATIONS_ENABLED: "true"
+  OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ITEMS: "500"
+  OPENGENI_GOOGLE_DRIVE_SYNC_MAX_BYTES: "500000000"
+  OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FILE_BYTES: "100000000"
+  OPENGENI_GOOGLE_DRIVE_SYNC_MAX_PROVIDER_REQUESTS: "1000"
+  OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ELAPSED_SECONDS: "300"
+  OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FAILURE_DETAILS: "25"
+  OPENGENI_GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MS: "30000"
+  OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_ATTEMPTS: "3"
+  OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS: "250"
+  OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS: "5000"
+  OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_BUDGET_MS: "15000"
+
+observability:
+  structuredLogs: true
+  metrics:
+    enabled: true
+  serviceMonitor:
+    enabled: true
+  prometheusRule:
+    enabled: true
+
+# The existing runtime Secret must provide all four values below. Never place
+# their values in this file, command-line --set arguments, source control, issue
+# trackers, logs, readiness receipts, or model context:
+#   OPENGENI_INTEGRATIONS_STATE_SECRET
+#   OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY
+#   OPENGENI_GOOGLE_DRIVE_CLIENT_ID
+#   OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET

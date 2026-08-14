@@ -18,19 +18,27 @@ const RELAY = { host: "relay.test", port: 443, tls: true } as const;
 const WS = "11111111-1111-1111-1111-111111111111";
 const AGENT = "agent-abc";
 
-function sessionWith(rpc: ControlRpc, epoch = 0): SelfhostedSession {
+function sessionWith(rpc: ControlRpc, epoch = 0, terminalScopeId?: string): SelfhostedSession {
   return new SelfhostedSession({
     workspaceId: WS,
     agentId: AGENT,
     controlRpc: rpc,
     relay: RELAY,
     epoch,
+    ...(terminalScopeId !== undefined ? { terminalScopeId } : {}),
   });
 }
 
 describe("SelfhostedSession — structural surface over a ControlRpc (mock)", () => {
-  test("subject is agent.<ws>.<id>.rpc", () => {
+  test("legacy isolated callers retain the pre-claim subject shape", () => {
     expect(subjectFor(WS, AGENT)).toBe(`agent.${WS}.${AGENT}.rpc`);
+  });
+
+  test("live routing addresses the exact claimed daemon instance", () => {
+    const instanceId = "22222222-2222-4222-8222-222222222222";
+    expect(subjectFor(WS, AGENT, instanceId)).toBe(
+      `agent.${WS}.${AGENT}.connection.${instanceId}.rpc`,
+    );
   });
 
   test("exec runs through the agent and returns stdout/exitCode", async () => {
@@ -253,7 +261,8 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
 
   test("resolveExposedPort(7681) routes to ptyOpen (NOT desktopEnsure) — the PTY plane is display-independent", async () => {
     const mock = new MockAgentResponder();
-    const endpoint = await sessionWith(mock).resolveExposedPort(7681);
+    const terminalScopeId = "77777777-7777-4777-8777-777777777777";
+    const endpoint = await sessionWith(mock, 0, terminalScopeId).resolveExposedPort(7681);
     // The terminal port resolves a relay endpoint on 7681 …
     expect(endpoint.host).toBe("relay.test");
     expect(endpoint.path).toBe("/stream");
@@ -263,7 +272,27 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     // terminal must not inherit the desktop's live-display requirement (the gap).
     const op = mock.requests.at(-1)?.req.op?.$case;
     expect(op).toBe("ptyOpen");
+    const request = mock.requests.at(-1)?.req.op;
+    if (request?.$case !== "ptyOpen") throw new Error("expected ptyOpen");
+    expect(request.ptyOpen.scopeId).toBe(terminalScopeId);
     expect(mock.requests.some((r) => r.req.op?.$case === "desktopEnsure")).toBe(false);
+  });
+
+  test("SelfhostedSandboxClient threads the durable terminal scope into every resumed session", async () => {
+    const mock = new MockAgentResponder();
+    const terminalScopeId = "88888888-8888-4888-8888-888888888888";
+    const client = new SelfhostedSandboxClient({
+      workspaceId: WS,
+      relay: RELAY,
+      controlRpcFactory: () => mock,
+      agentId: AGENT,
+      terminalScopeId,
+    });
+    const session = await client.resume({ agentId: AGENT });
+    await session.resolveExposedPort(7681);
+    const request = mock.requests.at(-1)?.req.op;
+    if (request?.$case !== "ptyOpen") throw new Error("expected ptyOpen");
+    expect(request.ptyOpen.scopeId).toBe(terminalScopeId);
   });
 
   test("resolveExposedPort(6080) still routes to desktopEnsure (the desktop plane)", async () => {
@@ -323,6 +352,46 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(openedComputer.channel).toMatchObject({ kind: 4, port: 20_001 });
     expect(openedComputer.endpoint.query).toContain("port=20001");
     expect(openedComputer.endpoint.query).toContain("channel=mock-computer-window-1");
+  });
+
+  test("frame startup failures retain the exact inner control request correlation", async () => {
+    let dispatchedRequestId: string | null = null;
+    const rpc: ControlRpc = {
+      request: async (_subject, req) => {
+        dispatchedRequestId = req.requestId;
+        return {
+          requestId: req.requestId,
+          error: {
+            code: ErrorCode.ERROR_CODE_STREAM,
+            message: "private local capture failure",
+            retryable: false,
+            detail: { path: "/home/user/capture" },
+          },
+        };
+      },
+    };
+
+    const failure = await sessionWith(rpc)
+      .openBrowserFrames({
+        scopeId: `${WS}:attached:device-1`,
+        scopeGeneration: "connection-1",
+        browserSessionId: "22222222-2222-2222-2222-222222222222",
+        controllerGeneration: "controller-1",
+        targetId: "target-1",
+        viewToken: "b".repeat(32),
+        expiresAtMs: String(Date.now() + 60_000),
+        format: "jpeg",
+        quality: 70,
+        maxWidth: 1_440,
+        maxHeight: 900,
+        everyNthFrame: 1,
+      })
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(SelfhostedControlError);
+    expect((failure as SelfhostedControlError).code).toBe(ErrorCode.ERROR_CODE_STREAM);
+    expect((failure as SelfhostedControlError).controlRequestId).toBe(dispatchedRequestId);
+    expect(dispatchedRequestId).toMatch(/^[0-9a-f-]{36}$/u);
   });
 
   test("ping returns true against a live responder, false when offline", async () => {
@@ -587,9 +656,13 @@ describe("AgentError → runtime reason mapping (the M3 ruling)", () => {
   });
 
   test("TIMEOUT → agent_reconnecting + retryable (the turn pauses + retries)", () => {
-    const mapped = agentErrorToControlError(err(ErrorCode.ERROR_CODE_TIMEOUT, true));
+    const mapped = agentErrorToControlError(
+      err(ErrorCode.ERROR_CODE_TIMEOUT, true),
+      "inner-control-request",
+    );
     expect(mapped.reason).toBe("agent_reconnecting");
     expect(mapped.retryable).toBe(true);
+    expect(mapped.controlRequestId).toBe("inner-control-request");
   });
 
   test("CONSENT_REQUIRED → consent_required", () => {

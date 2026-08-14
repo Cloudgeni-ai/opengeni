@@ -1,9 +1,9 @@
 //! Single-instance guard: at most ONE agent process per machine.
 //!
-//! Every connection's identity IS its NATS subject (`agent.<ws>.<id>.rpc`, see
-//! [`config::StoredCredentials::rpc_subject`](crate::config::StoredCredentials::rpc_subject)).
-//! Two `run` processes on one machine would duplicate every configured responder
-//! and heartbeat publisher, so ops route nondeterministically and leases flap. This
+//! Every process claims a generation-fenced NATS subject
+//! (`agent.<ws>.<id>.connection.<instance>.rpc`). Two `run` processes on one
+//! machine are still an operator mistake: one is denied by the control plane, but
+//! the local lock avoids noisy duplicate reconnect loops and needless contention. This
 //! is not theoretical — it was observed live (twice): a Finder/Raycast launch (now
 //! run-by-default when enrolled, see [`run_default`](crate::run_default)) racing a
 //! terminal `opengeni-agent run` produced a second full agent sharing the identity

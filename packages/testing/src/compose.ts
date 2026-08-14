@@ -410,11 +410,29 @@ export async function buildSandboxImage(
   tag = "opengeni-sandbox:local",
   cwd = process.cwd(),
 ): Promise<void> {
+  const source = await runCommand(["git", "rev-parse", "HEAD"], {
+    cwd,
+    timeoutMs: 10_000,
+  });
+  const sourceSha = source.stdout.trim();
+  if (source.exitCode !== 0 || !/^[0-9a-f]{40}$/u.test(sourceSha)) {
+    throw new Error(`sandbox image source resolution failed\n${source.stdout}\n${source.stderr}`);
+  }
   const result = await runCommand(
-    ["docker", "build", "-f", "docker/sandbox.Dockerfile", "-t", tag, "."],
+    [
+      "docker",
+      "build",
+      "-f",
+      "docker/sandbox.Dockerfile",
+      "--build-arg",
+      `OPENGENI_SOURCE_SHA=${sourceSha}`,
+      "-t",
+      tag,
+      ".",
+    ],
     {
       cwd,
-      timeoutMs: 300_000,
+      timeoutMs: 600_000,
     },
   );
   if (result.exitCode !== 0) {

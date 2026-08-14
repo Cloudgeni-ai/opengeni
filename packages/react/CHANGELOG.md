@@ -1,5 +1,64 @@
 # @opengeni/react
 
+## 1.0.1
+
+### Patch Changes
+
+- 8bb860b: Keep embedded client configurations synchronized with the exported API contract revision and document the fail-closed host integration boundary.
+- Updated dependencies [8bb860b]
+  - @opengeni/sdk@1.0.1
+
+## 1.0.0
+
+### Major Changes
+
+- 083387e: Replace the removed per-turn `turnInstructions` system-prefix contract with generic per-message `modelContext` content. This is a breaking release-train cutover: old mutating clients are rejected after migration 0240. Context now enters canonical user history without standard timeline rendering, preserves the persistent prompt-cache prefix, and works across initial, queued, steer, realtime delegation, and transcript handoff paths.
+
+### Patch Changes
+
+- 1ef18cc: Deduplicate realtime model catalog loads and reuse settled catalogs across embedded control remounts.
+- Updated dependencies [083387e]
+- Updated dependencies [11913b7]
+  - @opengeni/sdk@1.0.0
+
+## 0.57.0
+
+### Patch Changes
+
+- d86610d: Prevent deterministic model-generated worker-spawn failures, hide exhausted nested-agent creation, and show bounded structured session orchestration diagnostics in worker timeline rows while preserving the advanced public REST/SDK create contract.
+- d86610d: Run published HTML artifacts as exact source in an opaque-origin sandbox, raise their UTF-8 ceiling to 4 MiB, and expose reusable React rendering. Add deployment-configurable default and allowed built-in session tools plus configured shared-key delegation fallback.
+- Updated dependencies [478d7fe]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+  - @opengeni/sdk@0.57.0
+
+## 0.56.0
+
+### Minor Changes
+
+- b0b2bed: Add unified browser and computer interaction APIs, reusable browser identities, native input, live streaming, and React viewer controls across managed sandboxes and connected machines.
+
+### Patch Changes
+
+- Updated dependencies [b0b2bed]
+  - @opengeni/sdk@0.56.0
+
+## 0.55.0
+
+### Minor Changes
+
+- 8beed26: Add managed-human organization membership discovery. Expose the exact active
+  self-membership and personal-workspace identity returned by the existing
+  narrow provisioning capability through a managed-session-only API route and
+  typed SDK method, while denying delegated/API-key principals and terminal
+  memberships.
+
+### Patch Changes
+
+- Updated dependencies [8beed26]
+  - @opengeni/sdk@0.55.0
+
 ## 0.54.0
 
 ### Patch Changes

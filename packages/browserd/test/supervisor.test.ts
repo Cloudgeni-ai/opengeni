@@ -66,6 +66,36 @@ describe("BrowserSupervisor", () => {
     });
   });
 
+  test("returns the launch observation without rebuilding the same fresh page", async () => {
+    let starts = 0;
+    let lists = 0;
+    let observations = 0;
+    await withSupervisor(
+      async ({ supervisor }) => {
+        const created = await supervisor.createSession({
+          ...reference(37),
+          headed: false,
+          initialUrl: "https://fresh.test/",
+        });
+        expect(created.observation.target.url).toBe("https://fresh.test/");
+        expect({ starts, lists, observations }).toEqual({ starts: 1, lists: 0, observations: 0 });
+      },
+      {
+        driverHooks: {
+          start: () => {
+            starts += 1;
+          },
+          listTargets: () => {
+            lists += 1;
+          },
+          observe: () => {
+            observations += 1;
+          },
+        },
+      },
+    );
+  });
+
   test("serializes provider authentication and fences ordinary mutations while it reconfigures", async () => {
     let releaseFirst!: () => void;
     let firstStarted!: () => void;
@@ -748,6 +778,9 @@ async function withSupervisor(
     maxSessions?: number;
     onFactory?: () => void;
     driverHooks?: {
+      start?: (instance: number) => void;
+      listTargets?: (instance: number) => void;
+      observe?: (instance: number) => void;
       dispatch?: (instance: number) => void | Promise<void>;
       externalAuth?: (
         instance: number,
@@ -785,6 +818,9 @@ async function withSupervisor(
 function fakeDriver(
   context: BrowserSupervisorDriverContext,
   hooks: {
+    start?: (instance: number) => void;
+    listTargets?: (instance: number) => void;
+    observe?: (instance: number) => void;
     dispatch?: (instance: number) => void | Promise<void>;
     externalAuth?: (
       instance: number,
@@ -835,6 +871,7 @@ function fakeDriver(
   return {
     async start(url) {
       requireOpen();
+      hooks.start?.(instance);
       target.url = url ?? "about:blank";
       return observation();
     },
@@ -844,6 +881,7 @@ function fakeDriver(
     },
     async listTargets() {
       requireOpen();
+      hooks.listTargets?.(instance);
       return [{ ...target }];
     },
     async openTarget(url) {
@@ -861,6 +899,7 @@ function fakeDriver(
     },
     async observe() {
       requireOpen();
+      hooks.observe?.(instance);
       return observation();
     },
     async dispatch() {

@@ -5,6 +5,7 @@ import type {
   CreateBrowserIdentityRequest,
   PublishBrowserRevisionRequest,
   PublishBrowserRevisionResponse,
+  UpdateBrowserIdentityRequest,
 } from "@opengeni/sdk/interaction";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { EmbeddedBrowserInteractionClientLike } from "../client";
@@ -16,6 +17,7 @@ import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
 export type UseBrowserIdentitiesOptions = EmbeddedBrowserInteractionClientOverride & {
   enabled?: boolean | undefined;
+  includeArchived?: boolean | undefined;
 };
 
 export type UseBrowserIdentitiesResult = {
@@ -30,6 +32,10 @@ export type UseBrowserIdentitiesResult = {
     request: Omit<CreateBrowserIdentityRequest, "operationId"> & {
       operationId?: string;
     },
+  ) => Promise<BrowserIdentityMutationResponse>;
+  update: (
+    identityId: string,
+    request: Omit<UpdateBrowserIdentityRequest, "operationId"> & { operationId?: string },
   ) => Promise<BrowserIdentityMutationResponse>;
   revisions: (identityId: string) => Promise<BrowserRevisionListResponse>;
   publish: (
@@ -47,6 +53,7 @@ export function useBrowserIdentities(
   const { client, workspaceId, workspaceInteractionEvent, workspaceInteractionConnectionState } =
     useEmbeddedBrowserInteraction(options);
   const enabled = options.enabled ?? true;
+  const includeArchived = options.includeArchived ?? false;
   const [state, setState] = useState(() => emptyState(workspaceId, enabled));
   const [mutationCount, setMutationCount] = useState(0);
   const requestRef = useRef<{ id: number; controller: AbortController | null }>({
@@ -77,6 +84,7 @@ export function useBrowserIdentities(
       }));
       try {
         const response = await client.listBrowserIdentities(workspaceId, {
+          includeArchived,
           signal: controller.signal,
         });
         if (!mountedRef.current || requestRef.current.id !== id) return;
@@ -101,7 +109,7 @@ export function useBrowserIdentities(
         if (requestRef.current.id === id) requestRef.current = { id, controller: null };
       }
     },
-    [client, enabled, workspaceId],
+    [client, enabled, includeArchived, workspaceId],
   );
 
   const refresh = useCallback(async () => await load(false), [load]);
@@ -162,6 +170,24 @@ export function useBrowserIdentities(
     [client, workspaceId],
   );
 
+  const update = useCallback(
+    async (
+      identityId: string,
+      request: Omit<UpdateBrowserIdentityRequest, "operationId"> & { operationId?: string },
+    ): Promise<BrowserIdentityMutationResponse> =>
+      await mutate(async () => {
+        const response = await client.updateBrowserIdentity(workspaceId, identityId, {
+          ...request,
+          operationId: request.operationId ?? crypto.randomUUID(),
+        });
+        setState((current) =>
+          mergeIdentity(current, workspaceId, response.identity, includeArchived),
+        );
+        return response;
+      }),
+    [client, includeArchived, mutate, workspaceId],
+  );
+
   const publish = useCallback(
     async (
       browserSessionId: string,
@@ -189,6 +215,7 @@ export function useBrowserIdentities(
     error: visibleState.error,
     refresh,
     create,
+    update,
     revisions,
     publish,
   };
@@ -221,14 +248,16 @@ function mergeIdentity(
   current: ReturnType<typeof emptyState>,
   workspaceId: string,
   identity: BrowserIdentity,
+  includeArchived = false,
 ): ReturnType<typeof emptyState> {
   if (current.workspaceId !== workspaceId) return current;
   return {
     ...current,
-    identities: sortIdentities([
-      ...current.identities.filter((candidate) => candidate.id !== identity.id),
-      identity,
-    ]),
+    identities: sortIdentities(
+      identity.status === "archived" && !includeArchived
+        ? current.identities.filter((candidate) => candidate.id !== identity.id)
+        : [...current.identities.filter((candidate) => candidate.id !== identity.id), identity],
+    ),
     error: null,
   };
 }

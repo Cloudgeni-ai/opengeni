@@ -26,6 +26,8 @@ export type XaiSubscriptionRequestContext = {
   hostedSearch?: XaiHostedSearchOptions;
   onFinalContextUsage?: (usage: XaiFinalContextUsage) => void;
   nextRequestId?: () => string;
+  /** Internal/test seam. Production uses the transport's bounded default. */
+  hostedToolContinuationTimeoutMs?: number;
 };
 
 export const xaiSubscriptionRequestStorage = new AsyncLocalStorage<XaiSubscriptionRequestContext>();

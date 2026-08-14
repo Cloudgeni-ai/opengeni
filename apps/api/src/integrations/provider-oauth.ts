@@ -164,7 +164,7 @@ export async function startApiIntegrationProviderOAuth(
   const verifier = randomBytes(48).toString("base64url");
   const key = requireEnvironmentEncryption(deps.settings);
   const baseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
-  const redirectUri = `${baseUrl}${PROVIDER_OAUTH_CALLBACK_PATH}`;
+  const redirectUri = `${baseUrl}${providerOAuthCallbackPath(definition)}`;
   const returnPath = safeReturnPath(
     input.payload.returnPath ?? `/workspaces/${input.workspaceId}/capabilities`,
   );
@@ -258,7 +258,7 @@ export async function completeApiIntegrationProviderOAuth(
     }
     const key = requireEnvironmentEncryption(deps.settings);
     const verifier = decryptEnvironmentValue(key, state.encryptedPkceVerifier);
-    const redirectUri = `${apiBaseUrl}${PROVIDER_OAUTH_CALLBACK_PATH}`;
+    const redirectUri = `${apiBaseUrl}${providerOAuthCallbackPath(definition)}`;
     const token = await exchangeProviderAuthorizationCode(deps, definition, client, {
       code: input.code,
       verifier,
@@ -432,6 +432,28 @@ function providerClientForDefinition(
     ...(entry.clientSecret ? { clientSecret: entry.clientSecret } : {}),
     tokenEndpointAuthMethod: entry.tokenEndpointAuthMethod,
   };
+}
+
+export function isApiIntegrationProviderOAuthState(
+  value: string | undefined,
+  settings: Settings,
+): boolean {
+  try {
+    readProviderOAuthState(value, settings);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function providerOAuthCallbackPath(definition: IntegrationDefinition): string {
+  // Google definitions share the established MCP OAuth callback. The
+  // route distinguishes signed provider state from MCP state, while the
+  // separate google-drive callback remains available for the legacy Drive
+  // installation flow.
+  return definition.provider.id === "google"
+    ? "/v1/integrations/oauth/callback"
+    : PROVIDER_OAUTH_CALLBACK_PATH;
 }
 
 function providerClientKeys(definition: IntegrationDefinition): string[] {
@@ -686,8 +708,18 @@ function providerScopesInclude(
   fallbackScopes: string[],
 ): boolean {
   const effective = returnedScopes.length > 0 ? returnedScopes : fallbackScopes;
-  const normalize = (value: string) =>
-    definition.provider.id === "microsoft" ? value.toLowerCase() : value;
+  const normalize = (value: string) => {
+    if (definition.provider.id === "microsoft") return value.toLowerCase();
+    if (definition.provider.id === "google") {
+      if (value === "email" || value === "https://www.googleapis.com/auth/userinfo.email") {
+        return "email";
+      }
+      if (value === "profile" || value === "https://www.googleapis.com/auth/userinfo.profile") {
+        return "profile";
+      }
+    }
+    return value;
+  };
   const granted = new Set(effective.map(normalize));
   return definition.authentication.scopes.every((scope) => granted.has(normalize(scope)));
 }

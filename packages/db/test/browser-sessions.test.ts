@@ -38,7 +38,9 @@ import {
   prepareComputerSessionEnd,
   reconcileAttachedBrowserInventory,
   reapStaleLeaseHolders,
+  reapStaleLeaseHoldersGlobal,
   touchBrowserSessionController,
+  touchInteractionOperation,
 } from "../src";
 import type { BrowserStateArtifactCommitInput } from "../src";
 
@@ -1085,5 +1087,336 @@ describe("durable BrowserSession lifecycle", () => {
       lifecycle: "active",
       failureCode: null,
     });
+  }, 60_000);
+
+  test("global reaper settles abandoned transitions but preserves stale active controllers", async () => {
+    if (!available) return;
+
+    const abandoned = await fixture();
+    const abandonedSeedHolder = `browser-session:pending-${crypto.randomUUID()}`;
+    const acquired = await acquireLease(client.db, {
+      ...abandoned,
+      kind: "interaction",
+      holderId: abandonedSeedHolder,
+      subjectId: abandoned.sessionId,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(acquired.role).toBe("spawner");
+    await commitWarmingToWarm(client.db, {
+      ...abandoned,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId: "placement:abandoned",
+      leaseTtlMs: 45_000,
+    });
+    const abandonedOperationId = crypto.randomUUID();
+    const prepared = await prepareBrowserSessionCreate(
+      client.db,
+      createInput(abandoned, abandonedOperationId),
+    );
+    const abandonedHolder = `browser-session:${prepared.session.id}`;
+    await shared!.admin`
+      update sandbox_lease_holders
+      set holder_id = ${abandonedHolder},
+          last_heartbeat_at = now() - interval '10 minutes'
+      where workspace_id = ${abandoned.workspaceId}
+        and holder_id = ${abandonedSeedHolder}`;
+    const abandonedGeneration = crypto.randomUUID();
+    await dispatchBrowserSessionOperation(client.db, {
+      ...abandoned,
+      operationId: abandonedOperationId,
+      browserSessionId: prepared.session.id,
+      controllerGeneration: abandonedGeneration,
+      controller: {
+        controllerId: "browserd:test",
+        controllerGeneration: abandonedGeneration,
+        placementInstanceId: "placement:abandoned",
+      },
+    });
+    await shared!.admin`
+      update interaction_operations
+      set updated_at = now() - interval '10 minutes'
+      where workspace_id = ${abandoned.workspaceId}
+        and operation_id = ${abandonedOperationId}`;
+
+    const active = await fixture();
+    const activeSeedHolder = `browser-session:pending-${crypto.randomUUID()}`;
+    const activeLease = await acquireLease(client.db, {
+      ...active,
+      kind: "interaction",
+      holderId: activeSeedHolder,
+      subjectId: active.sessionId,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(activeLease.role).toBe("spawner");
+    await commitWarmingToWarm(client.db, {
+      ...active,
+      expectedEpoch: activeLease.lease.leaseEpoch,
+      instanceId: "placement:active",
+      leaseTtlMs: 45_000,
+    });
+    const activeOperationId = crypto.randomUUID();
+    const activePrepared = await prepareBrowserSessionCreate(
+      client.db,
+      createInput(active, activeOperationId),
+    );
+    const activeHolder = `browser-session:${activePrepared.session.id}`;
+    await shared!.admin`
+      update sandbox_lease_holders
+      set holder_id = ${activeHolder}
+      where workspace_id = ${active.workspaceId}
+        and holder_id = ${activeSeedHolder}`;
+    const activeGeneration = crypto.randomUUID();
+    await dispatchBrowserSessionOperation(client.db, {
+      ...active,
+      operationId: activeOperationId,
+      browserSessionId: activePrepared.session.id,
+      controllerGeneration: activeGeneration,
+      controller: {
+        controllerId: "browserd:test",
+        controllerGeneration: activeGeneration,
+        placementInstanceId: "placement:active",
+      },
+    });
+    await activateBrowserSession(client.db, {
+      ...active,
+      operationId: activeOperationId,
+      browserSessionId: activePrepared.session.id,
+      controller: {
+        controllerId: "browserd:test",
+        controllerGeneration: activeGeneration,
+        placementInstanceId: "placement:active",
+      },
+      engineVersion: "151.0.7922.108",
+    });
+    await shared!.admin`
+      update sandbox_lease_holders
+      set last_heartbeat_at = now() - interval '10 minutes'
+      where workspace_id = ${active.workspaceId}
+        and holder_id = ${activeHolder}`;
+
+    // A dispatched operation with no sandbox holder models connected-machine
+    // placement. Its durable operation pulse alone must protect a live request.
+    const pulsed = await fixture();
+    const pulsedOperationId = crypto.randomUUID();
+    const pulsedPrepared = await prepareBrowserSessionCreate(
+      client.db,
+      createInput(pulsed, pulsedOperationId),
+    );
+    const pulsedGeneration = crypto.randomUUID();
+    await dispatchBrowserSessionOperation(client.db, {
+      ...pulsed,
+      operationId: pulsedOperationId,
+      browserSessionId: pulsedPrepared.session.id,
+      controllerGeneration: pulsedGeneration,
+      controller: {
+        controllerId: "browserd:test",
+        controllerGeneration: pulsedGeneration,
+        placementInstanceId: "placement:pulsed",
+      },
+    });
+    await shared!.admin`
+      update interaction_operations
+      set updated_at = now() - interval '10 minutes'
+      where workspace_id = ${pulsed.workspaceId}
+        and operation_id = ${pulsedOperationId}`;
+    expect(
+      await touchInteractionOperation(client.db, {
+        ...pulsed,
+        operationId: pulsedOperationId,
+        resourceId: pulsedPrepared.session.id,
+        controllerGeneration: pulsedGeneration,
+      }),
+    ).toBe(true);
+
+    const abandonedComputer = await fixture();
+    const computerSeedHolder = `computer-session:pending-${crypto.randomUUID()}`;
+    const computerLease = await acquireLease(client.db, {
+      ...abandonedComputer,
+      kind: "interaction",
+      holderId: computerSeedHolder,
+      subjectId: abandonedComputer.sessionId,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(computerLease.role).toBe("spawner");
+    await commitWarmingToWarm(client.db, {
+      ...abandonedComputer,
+      expectedEpoch: computerLease.lease.leaseEpoch,
+      instanceId: "placement:abandoned-computer",
+      leaseTtlMs: 45_000,
+    });
+    const computerOperationId = crypto.randomUUID();
+    const computerPrepared = await prepareComputerSessionCreate(client.db, {
+      ...abandonedComputer,
+      operationId: computerOperationId,
+      associatedSessionId: abandonedComputer.sessionId,
+      actorSubjectId: abandonedComputer.subjectId,
+      name: "Abandoned computer transition",
+      placement: {
+        kind: "sandbox_group",
+        sandboxGroupId: abandonedComputer.sandboxGroupId,
+      },
+    });
+    const computerHolder = `computer-session:${computerPrepared.session.id}`;
+    await shared!.admin`
+      update sandbox_lease_holders
+      set holder_id = ${computerHolder},
+          last_heartbeat_at = now() - interval '10 minutes'
+      where workspace_id = ${abandonedComputer.workspaceId}
+        and holder_id = ${computerSeedHolder}`;
+    const computerGeneration = crypto.randomUUID();
+    await dispatchComputerSessionOperation(client.db, {
+      ...abandonedComputer,
+      operationId: computerOperationId,
+      computerSessionId: computerPrepared.session.id,
+      controllerGeneration: computerGeneration,
+      controller: {
+        controllerId: "browserd:test",
+        controllerGeneration: computerGeneration,
+        placementInstanceId: "placement:abandoned-computer",
+      },
+    });
+    await shared!.admin`
+      update interaction_operations
+      set updated_at = now() - interval '10 minutes'
+      where workspace_id = ${abandonedComputer.workspaceId}
+        and operation_id = ${computerOperationId}`;
+
+    await reapStaleLeaseHoldersGlobal(client.db, {
+      viewerHolderTtlMs: 90_000,
+      turnHolderTtlMs: 90_000,
+      interactionHolderTtlMs: 90_000,
+      idleGraceMs: 0,
+    });
+    const abandonedRecord = await getBrowserSessionControlRecord(client.db, {
+      ...abandoned,
+      browserSessionId: prepared.session.id,
+      operationId: abandonedOperationId,
+    });
+    expect(abandonedRecord).toMatchObject({
+      session: {
+        lifecycle: "lost",
+        failureCode: "controller_transition_expired",
+        controller: {
+          controllerGeneration: abandonedGeneration,
+          placementInstanceId: "placement:abandoned",
+        },
+      },
+      operation: {
+        state: "outcome_unknown",
+      },
+    });
+    const [settledOperation] = await shared!.admin<
+      { state: string; error_code: string; error_retryable: boolean }[]
+    >`
+      select state, error_code, error_retryable
+      from interaction_operations
+      where workspace_id = ${abandoned.workspaceId}
+        and operation_id = ${abandonedOperationId}`;
+    expect(settledOperation).toEqual({
+      state: "outcome_unknown",
+      error_code: "controller_transition_expired",
+      error_retryable: false,
+    });
+    const [abandonedHolderCount] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from sandbox_lease_holders
+      where workspace_id = ${abandoned.workspaceId}
+        and holder_id = ${abandonedHolder}`;
+    expect(abandonedHolderCount?.count).toBe(0);
+    const [abandonedLease] = await shared!.admin<{ liveness: string; refcount: number }[]>`
+      select liveness, refcount
+      from sandbox_leases
+      where workspace_id = ${abandoned.workspaceId}
+        and sandbox_group_id = ${abandoned.sandboxGroupId}`;
+    expect(abandonedLease).toMatchObject({ liveness: "draining", refcount: 0 });
+
+    expect(
+      await getBrowserSession(client.db, {
+        ...active,
+        browserSessionId: activePrepared.session.id,
+      }),
+    ).toMatchObject({ lifecycle: "active", failureCode: null });
+    const [activeHolderCount] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from sandbox_lease_holders
+      where workspace_id = ${active.workspaceId}
+        and holder_id = ${activeHolder}`;
+    expect(activeHolderCount?.count).toBe(1);
+    expect(
+      await getBrowserSession(client.db, {
+        ...pulsed,
+        browserSessionId: pulsedPrepared.session.id,
+      }),
+    ).toMatchObject({ lifecycle: "starting", failureCode: null });
+    const [computerSession] = await shared!.admin<
+      {
+        lifecycle: string;
+        failure_code: string;
+        controller_generation: string;
+        placement_instance_id: string;
+      }[]
+    >`
+      select lifecycle, failure_code, controller_generation, placement_instance_id
+      from computer_sessions
+      where workspace_id = ${abandonedComputer.workspaceId}
+        and id = ${computerPrepared.session.id}`;
+    expect(computerSession).toEqual({
+      lifecycle: "lost",
+      failure_code: "controller_transition_expired",
+      controller_generation: computerGeneration,
+      placement_instance_id: "placement:abandoned-computer",
+    });
+    const [computerOperation] = await shared!.admin<
+      { state: string; error_code: string; error_retryable: boolean }[]
+    >`
+      select state, error_code, error_retryable
+      from interaction_operations
+      where workspace_id = ${abandonedComputer.workspaceId}
+        and operation_id = ${computerOperationId}`;
+    expect(computerOperation).toEqual({
+      state: "outcome_unknown",
+      error_code: "controller_transition_expired",
+      error_retryable: false,
+    });
+    const [computerHolderCount] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from sandbox_lease_holders
+      where workspace_id = ${abandonedComputer.workspaceId}
+        and holder_id = ${computerHolder}`;
+    expect(computerHolderCount?.count).toBe(0);
+    // A missed best-effort release is cleaned even when no transition expires
+    // in that reaper pass; otherwise it could pin a sandbox indefinitely.
+    const orphan = await fixture();
+    const orphanHolder = `browser-session:${crypto.randomUUID()}`;
+    const orphanLease = await acquireLease(client.db, {
+      ...orphan,
+      kind: "interaction",
+      holderId: orphanHolder,
+      subjectId: orphan.sessionId,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(orphanLease.role).toBe("spawner");
+    await commitWarmingToWarm(client.db, {
+      ...orphan,
+      expectedEpoch: orphanLease.lease.leaseEpoch,
+      instanceId: "placement:orphan-holder",
+      leaseTtlMs: 45_000,
+    });
+    await reapStaleLeaseHoldersGlobal(client.db, {
+      viewerHolderTtlMs: 90_000,
+      turnHolderTtlMs: 90_000,
+      interactionHolderTtlMs: 90_000,
+      idleGraceMs: 0,
+    });
+    const [orphanHolderCount] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from sandbox_lease_holders
+      where workspace_id = ${orphan.workspaceId}
+        and holder_id = ${orphanHolder}`;
+    expect(orphanHolderCount?.count).toBe(0);
   }, 60_000);
 });

@@ -1,6 +1,7 @@
 import {
   GENERATED_VIDEO_MAX_BYTES,
   GeneratedVideoReceipt,
+  GROK_IMAGINE_VIDEO_1_5_MODEL_ID,
   SEEDANCE_2_5_MODEL_ID,
   VideoGenerationPolicy,
   VideoGenerationOperationSummary,
@@ -236,8 +237,13 @@ export async function admitVideoGenerationOperation(
         }
         await tx
           .insert(schema.workspaceVideoGenerationQuotas)
-          .values({ workspaceId: input.workspaceId, accountId: input.accountId })
-          .onConflictDoNothing({ target: schema.workspaceVideoGenerationQuotas.workspaceId });
+          .values({
+            workspaceId: input.workspaceId,
+            accountId: input.accountId,
+          })
+          .onConflictDoNothing({
+            target: schema.workspaceVideoGenerationQuotas.workspaceId,
+          });
         const [quota] = await tx
           .select()
           .from(schema.workspaceVideoGenerationQuotas)
@@ -309,6 +315,44 @@ export async function admitVideoGenerationOperation(
         return { operation, created: true };
       }),
   );
+}
+
+/** Persist a rotated provider token before it is used for another remote call. */
+export async function rotateVideoGenerationCredential(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    operationId: string;
+    requestDigest: string;
+    expectedCredentialEncrypted: string;
+    credentialEncrypted: string;
+  },
+): Promise<VideoGenerationOperation> {
+  const [row] = await db
+    .update(schema.videoGenerationOperations)
+    .set({
+      credentialEncrypted: input.credentialEncrypted,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.videoGenerationOperations.accountId, input.accountId),
+        eq(schema.videoGenerationOperations.workspaceId, input.workspaceId),
+        eq(schema.videoGenerationOperations.id, input.operationId),
+        eq(schema.videoGenerationOperations.requestDigest, input.requestDigest),
+        eq(schema.videoGenerationOperations.credentialEncrypted, input.expectedCredentialEncrypted),
+        inArray(schema.videoGenerationOperations.status, [
+          "accepted",
+          "submission_uncertain",
+          "provider_started",
+          "retaining",
+        ]),
+      ),
+    )
+    .returning();
+  if (!row) throw new VideoGenerationConflictError("Video provider credential changed");
+  return row;
 }
 
 /**
@@ -422,11 +466,17 @@ export async function markVideoGenerationAcceptedInTransaction(
     operation.connectionId === null &&
     (operation.creditState === "debited" ||
       (operation.creditState === "not_applicable" && operation.pricedCostMicros === 0));
+  const supergrokAuthorized =
+    operation.fundingSource === "supergrok_subscription" &&
+    operation.connectionId === null &&
+    operation.credentialEncrypted !== null &&
+    operation.pricedCostMicros === 0 &&
+    operation.creditState === "not_applicable";
   if (
     !policy ||
     policy.fundingSource !== operation.fundingSource ||
     !policy.enabledModelIds.includes(operation.modelId) ||
-    (!workspaceGatewayAuthorized && !managedAuthorized)
+    (!workspaceGatewayAuthorized && !managedAuthorized && !supergrokAuthorized)
   ) {
     throw new VideoGenerationConflictError("Video generation authorization changed");
   }
@@ -684,7 +734,10 @@ export async function markVideoGenerationSubmissionIntent(
 
 export async function markVideoGenerationProviderStarted(
   db: Database,
-  input: OperationMutationInput & { providerJobId: string; nextReconcileAt: Date },
+  input: OperationMutationInput & {
+    providerJobId: string;
+    nextReconcileAt: Date;
+  },
 ): Promise<VideoGenerationOperation> {
   return await mutateOperation(db, input, async (tx, operation) => {
     if (
@@ -720,7 +773,11 @@ export async function markVideoGenerationProviderStarted(
 
 export async function rescheduleVideoGenerationOperation(
   db: Database,
-  input: OperationMutationInput & { owner?: string; nextReconcileAt: Date; error?: string },
+  input: OperationMutationInput & {
+    owner?: string;
+    nextReconcileAt: Date;
+    error?: string;
+  },
 ): Promise<boolean> {
   return await withRlsContext(
     db,
@@ -832,7 +889,10 @@ export type SettleVideoGenerationReadyInput = OperationMutationInput & {
 export async function settleVideoGenerationReady(
   db: Database,
   input: SettleVideoGenerationReadyInput,
-): Promise<{ operation: VideoGenerationOperation; artifact: GeneratedVideoArtifact }> {
+): Promise<{
+  operation: VideoGenerationOperation;
+  artifact: GeneratedVideoArtifact;
+}> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -931,6 +991,8 @@ export async function settleVideoGenerationReady(
             providerRequestExpiresAt: null,
             credentialEncrypted: null,
             requestEncrypted: null,
+            boundedPublicReason: null,
+            lastError: null,
             privateDataEraseAfter: now,
             reconcileLeaseOwner: null,
             reconcileLeaseExpiresAt: null,
@@ -950,7 +1012,10 @@ export async function getGeneratedVideoArtifact(
   db: Database,
   workspaceId: string,
   artifactId: string,
-): Promise<{ artifact: GeneratedVideoArtifact; file: typeof schema.files.$inferSelect } | null> {
+): Promise<{
+  artifact: GeneratedVideoArtifact;
+  file: typeof schema.files.$inferSelect;
+} | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select({ artifact: schema.generatedVideoArtifacts, file: schema.files })
@@ -971,13 +1036,21 @@ export async function listSessionGeneratedVideoArtifacts(
   db: Database,
   workspaceId: string,
   sessionId: string,
-): Promise<Array<{ artifact: GeneratedVideoArtifact; file: typeof schema.files.$inferSelect }>> {
+): Promise<
+  Array<{
+    artifact: GeneratedVideoArtifact;
+    file: typeof schema.files.$inferSelect;
+  }>
+> {
   return await withWorkspaceRls(
     db,
     workspaceId,
     async (scopedDb) =>
       await scopedDb
-        .select({ artifact: schema.generatedVideoArtifacts, file: schema.files })
+        .select({
+          artifact: schema.generatedVideoArtifacts,
+          file: schema.files,
+        })
         .from(schema.generatedVideoArtifacts)
         .innerJoin(schema.files, eq(schema.files.id, schema.generatedVideoArtifacts.primaryFileId))
         .where(
@@ -1026,7 +1099,9 @@ export async function markVideoGenerationReferenceCleaned(
             eq(schema.videoGenerationReferences.stagingObjectKey, input.stagingObjectKey),
           ),
         )
-        .returning({ operationId: schema.videoGenerationReferences.operationId });
+        .returning({
+          operationId: schema.videoGenerationReferences.operationId,
+        });
       if (updated) return true;
       const [existing] = await scopedDb
         .select({ cleanedAt: schema.videoGenerationReferences.cleanedAt })
@@ -1177,7 +1252,10 @@ export async function mediaGenerationResultForStoredOperation(
     },
     sandboxPath: `/workspace/generated-videos/${retained.artifact.sandboxFilename}`,
   });
-  return mediaGenerationResultForOperation({ operation, readyReceipt: receipt });
+  return mediaGenerationResultForOperation({
+    operation,
+    readyReceipt: receipt,
+  });
 }
 
 export async function getVideoGenerationOperationSummary(
@@ -1399,7 +1477,7 @@ function policyFromRow(
 
 function assertSupportedModels(modelIds: readonly string[]): void {
   for (const modelId of modelIds) {
-    if (modelId !== SEEDANCE_2_5_MODEL_ID) {
+    if (modelId !== SEEDANCE_2_5_MODEL_ID && modelId !== GROK_IMAGINE_VIDEO_1_5_MODEL_ID) {
       throw new Error(`Unknown video generation model: ${modelId}`);
     }
   }

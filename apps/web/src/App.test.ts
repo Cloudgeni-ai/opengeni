@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Permission } from "@opengeni/contracts";
+import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
 import {
   capabilityErrorToast,
@@ -55,6 +56,7 @@ import {
   enabledWorkspaceCapabilityMcpServers,
   gitHubRepositoryResource,
   initialReasoningEffort,
+  installedApiIntegrationMcpServers,
   labelEffort,
   mergeMcpServerOptions,
   newSessionDraftToolPolicy,
@@ -1260,6 +1262,26 @@ describe("buildTools", () => {
     ]);
   });
 
+  test("derives selectable MCP servers from installed API integration instances", () => {
+    expect(
+      installedApiIntegrationMcpServers([
+        {
+          serverId: "api_openapi_google_gmail_account_one",
+          name: "Gmail",
+          displayName: "Work Gmail",
+        },
+        {
+          serverId: "api_openapi_inventory_account_one",
+          name: "Inventory API",
+          displayName: "",
+        },
+      ]),
+    ).toEqual([
+      { id: "api_openapi_google_gmail_account_one", name: "Work Gmail" },
+      { id: "api_openapi_inventory_account_one", name: "Inventory API" },
+    ]);
+  });
+
   test("keeps mandatory OpenGeni infrastructure out of selectable server catalogs", () => {
     const config = {
       mcpServers: [
@@ -1314,7 +1336,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
   function clientConfig(patch: Partial<ClientConfig> = {}): ClientConfig {
     return {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-08-social-provider-tools-v1",
+      apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol"],
       models: [],

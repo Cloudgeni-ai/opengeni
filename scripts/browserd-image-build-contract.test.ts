@@ -90,16 +90,40 @@ describe("browser controller image build contract", () => {
     expect(dockerfile).not.toContain("https://dl.google.com/linux/chrome/deb/ stable main");
   });
 
+  test("Debian Chromium remains available from one retained security snapshot", async () => {
+    const dockerfiles = await Promise.all(
+      imagePaths.map((imagePath) => readFile(resolve(root, imagePath), "utf8")),
+    );
+
+    for (const dockerfile of dockerfiles) {
+      expect(dockerfile).toContain("ARG OPENGENI_CHROMIUM_VERSION=151.0.7922.108-1~deb13u1");
+      expect(dockerfile).toContain("ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20260809T010020Z");
+      expect(dockerfile).toContain(
+        "https://snapshot.debian.org/archive/debian-security/${OPENGENI_DEBIAN_SECURITY_SNAPSHOT} trixie-security main",
+      );
+      expect(dockerfile).toContain('"chromium-common=${OPENGENI_CHROMIUM_VERSION}"');
+      expect(dockerfile.indexOf("opengeni-chromium-snapshot.list")).toBeLessThan(
+        dockerfile.indexOf('"chromium=${OPENGENI_CHROMIUM_VERSION}"'),
+      );
+    }
+  });
+
   test("startup distinguishes a live setsid/env child from a completed browserd exec", async () => {
     const source = await readFile(resolve(root, startupScriptPath), "utf8");
-    const startupLoop = source.indexOf("for _ in $(seq 1 100); do");
+    const startupBudget = source.indexOf(
+      'STARTUP_TIMEOUT_SECONDS="${OPENGENI_BROWSERD_STARTUP_TIMEOUT_SECONDS:-30}"',
+    );
+    const startupLoop = source.indexOf('for _ in $(seq 1 "$STARTUP_ATTEMPTS"); do');
     const processAlive = source.indexOf('if ! kill -0 "$PID" 2>/dev/null; then', startupLoop);
     const browserdExecComplete = source.indexOf('if ! same_process "$PID"; then', processAlive);
     const readiness = source.indexOf("if admin_ready; then", browserdExecComplete);
 
+    expect(startupBudget).toBeGreaterThan(-1);
     expect(startupLoop).toBeGreaterThan(-1);
     expect(processAlive).toBeGreaterThan(startupLoop);
     expect(browserdExecComplete).toBeGreaterThan(processAlive);
     expect(readiness).toBeGreaterThan(browserdExecComplete);
+    expect(source).toContain("print_startup_log");
+    expect(source).toContain('tail -c 16384 "$LOG_FILE" | tail -n 80');
   });
 });

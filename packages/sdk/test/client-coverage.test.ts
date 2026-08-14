@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
 import { OpenGeniApiError } from "../src/errors";
 import {
+  OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
   type ConnectionMetadata,
@@ -306,6 +307,7 @@ describe("OpenGeniClient access + workspaces", () => {
       return jsonResponse({ id: WORKSPACE_ID, name: "Ops" });
     });
     await client.getAccessContext();
+    await client.listOrganizationMemberships();
     await client.listWorkspaces();
     await client.createWorkspace({ name: "Ops" });
     await client.getWorkspace(WORKSPACE_ID);
@@ -316,6 +318,7 @@ describe("OpenGeniClient access + workspaces", () => {
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [
         "GET /v1/access/me",
+        "GET /v1/organization-memberships",
         "GET /v1/workspaces",
         "POST /v1/workspaces",
         `GET /v1/workspaces/${WORKSPACE_ID}`,
@@ -323,11 +326,11 @@ describe("OpenGeniClient access + workspaces", () => {
         `PUT /v1/workspaces/${WORKSPACE_ID}/default-rig`,
       ],
     );
-    expect(JSON.parse(requests[4]!.body!)).toEqual({
+    expect(JSON.parse(requests[5]!.body!)).toEqual({
       name: "Ops 2",
       slug: null,
     });
-    expect(JSON.parse(requests[5]!.body!)).toEqual({
+    expect(JSON.parse(requests[6]!.body!)).toEqual({
       rigId: "22222222-2222-4222-8222-222222222222",
     });
   });
@@ -335,7 +338,7 @@ describe("OpenGeniClient access + workspaces", () => {
   test("getClientConfig fetches the public bootstrap endpoint and returns the provider-grouped models", async () => {
     const config = {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-08-social-provider-tools-v1",
+      apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
       models: [

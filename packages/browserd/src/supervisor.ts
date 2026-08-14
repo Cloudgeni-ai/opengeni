@@ -55,6 +55,7 @@ import {
   AgentBrowserJsonRunner,
   assertAgentBrowserSocketPath,
   browserProfileCryptoPolicy,
+  reapManagedBrowserProcesses,
 } from "./runner";
 import { SqliteBrowserOperationJournal } from "./journal";
 import { SqliteBrowserProtectedAuthJournal } from "./protected-auth-journal";
@@ -257,6 +258,10 @@ type Runtime = {
   downloadStore: BrowserDownloadStore | null;
   lastSnapshot: BrowserRuntimeSnapshot;
   lastTargets: BrowserTarget[];
+  /** Exact observation already produced while launching a new browser. It is
+   * returned once from createSession instead of immediately rebuilding the
+   * same accessibility tree through a second controller round trip. */
+  creationObservation: BrowserObservation | null;
   recovery: Promise<void> | null;
   externalAuthTail: Promise<void> | null;
   lifecycle: "active" | "recovering" | "reconfiguring" | "capturing" | "captured" | "ending";
@@ -340,6 +345,9 @@ export class BrowserSupervisor {
     });
     await chmod(supervisor.rootDirectory, 0o700);
     await chmod(supervisor.socketRootDirectory, 0o700);
+    if (!options.createDriver) {
+      await reapManagedBrowserProcesses(supervisor.rootDirectory);
+    }
     return supervisor;
   }
 
@@ -385,9 +393,11 @@ export class BrowserSupervisor {
           );
         }
         this.sessions.set(options.browserSessionId, runtime);
+        const observation = runtime.creationObservation ?? (await this.currentObservation(runtime));
+        runtime.creationObservation = null;
         return {
           ...binding(runtime),
-          observation: await this.currentObservation(runtime),
+          observation,
         };
       } finally {
         if (this.creating.get(options.browserSessionId) === creation) {
@@ -822,6 +832,7 @@ export class BrowserSupervisor {
           tabs: [],
         },
         lastTargets: [],
+        creationObservation: null,
         recovery: null,
       };
       runtime.controller = this.createController(runtime, driver, initialJournal);
@@ -839,12 +850,14 @@ export class BrowserSupervisor {
         );
         runtime.lastSnapshot = await driver.runtimeSnapshot();
         assertRestoredRuntimeCompatible(restoredManifest, runtime.lastSnapshot);
+        runtime.lastTargets = await driver.listTargets();
+        runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
       } else {
-        await driver.start(options.initialUrl);
-        runtime.lastSnapshot = await driver.runtimeSnapshot();
+        const observation = await driver.start(options.initialUrl);
+        runtime.creationObservation = observation;
+        runtime.lastTargets = [observation.target];
+        runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
       }
-      runtime.lastTargets = await driver.listTargets();
-      runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
       return runtime;
     } catch (error) {
       const failures: unknown[] = [error];

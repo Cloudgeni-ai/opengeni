@@ -42,6 +42,7 @@ import {
   GitHubInstallationLifecycle as ContractGitHubInstallationLifecycle,
   GitHubRepository as ContractGitHubRepository,
   GitHubRepositoryScope as ContractGitHubRepositoryScope,
+  ListManagedOrganizationMembershipsResponse as ContractListManagedOrganizationMembershipsResponse,
   PackInstallation as ContractPackInstallation,
   PackInstallationStatus as ContractPackInstallationStatus,
   Permission as ContractPermission,
@@ -114,6 +115,7 @@ import type {
   GitHubInstallationBinding,
   GitHubInstallationLifecycle,
   GitHubRepositoryScope,
+  ListManagedOrganizationMembershipsResponse,
   PackInstallation,
   PackInstallationStatus,
   ProductAccessMode,
@@ -221,6 +223,9 @@ describe("SDK / contracts parity (full coverage)", () => {
   test("contract-parsed responses are assignable to SDK types (compile-time)", () => {
     const acceptAccessContext = (value: z.infer<typeof ContractAccessContext>): AccessContext =>
       value;
+    const acceptOrganizationMemberships = (
+      value: z.infer<typeof ContractListManagedOrganizationMembershipsResponse>,
+    ): ListManagedOrganizationMembershipsResponse => value;
     const acceptWorkspace = (value: z.infer<typeof ContractWorkspace>): Workspace => value;
     const acceptApiKey = (value: z.infer<typeof ContractApiKey>): ApiKey => value;
     const acceptGoal = (value: z.infer<typeof ContractSessionGoal>): SessionGoal => value;
@@ -278,6 +283,7 @@ describe("SDK / contracts parity (full coverage)", () => {
     ): CreateCheckoutResponse => value;
     const checks = [
       acceptAccessContext,
+      acceptOrganizationMemberships,
       acceptWorkspace,
       acceptApiKey,
       acceptGoal,

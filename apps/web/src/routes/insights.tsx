@@ -30,6 +30,28 @@ import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 
+function inputSeriesHeading(seriesLabel: string, subject: string): string {
+  const separator = seriesLabel.indexOf(" / ");
+  return separator >= 0 ? `${subject}${seriesLabel.slice(separator)}` : subject;
+}
+
+const PROMPT_SOURCE_LABELS = {
+  workspace_instruction_policy: "Workspace instruction policy",
+  legacy_workspace_instructions: "Legacy workspace instructions",
+  preference_registry_descriptor: "Agent-noted preferences",
+  company_profile: "Company profile",
+  legacy_memory_v1: "Workspace memory",
+  runtime_skill_catalog: "Available skill guides",
+} as const;
+
+const EMPTY_PROMPT_CONTRIBUTIONS: WorkspaceInsightsSnapshot["promptContributions"] = {
+  estimatedTokens: 0,
+  utf8Bytes: 0,
+  coveredCalls: 0,
+  totalCalls: 0,
+  sources: [],
+};
+
 /**
  * Workspace Insights — live rollups from usage_events + model_call_facts.
  */
@@ -93,6 +115,10 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
   const series = view?.series ?? [];
   const models = view?.models ?? [];
   const providers = view?.providers ?? [];
+  const promptContributions = snap?.promptContributions ?? {
+    ...EMPTY_PROMPT_CONTRIBUTIONS,
+    totalCalls: snap?.modelCalls ?? 0,
+  };
   const maxDepthSessions = Math.max(...(snap?.depth.map((b) => b.sessions) ?? [1]), 1);
   const filtered = filters.provider !== "all" || filters.model !== "all";
   const showingPreviousSelection =
@@ -304,7 +330,9 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
           <div className="rounded-lg border border-border bg-surface/35 p-4">
             <div className="flex flex-wrap items-baseline justify-between gap-2">
               <h3 className="text-sm font-medium text-fg">
-                {measure === "tokens" ? "Token usage / UTC day" : "Pricing / UTC day"}
+                {measure === "tokens"
+                  ? inputSeriesHeading(snap.seriesLabel, "Token usage")
+                  : inputSeriesHeading(snap.seriesLabel, "Pricing")}
               </h3>
               <p className="text-2xs text-fg-subtle">
                 {measure === "tokens"
@@ -383,6 +411,86 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               ]}
             />
           </div>
+        </div>
+      </Section>
+
+      <Section title="Prompt context">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="max-w-2xl">
+            <h3 className="text-sm font-medium text-fg">Company Brain contribution</h3>
+            <p className="mt-1 text-xs leading-5 text-fg-muted">
+              Estimated tokens added to model input by workspace instructions, agent-noted
+              preferences, company profile, memory, and skill descriptors. Estimates use UTF-8 bytes
+              ÷ 4 and stay separate from provider-reported input-token totals.
+            </p>
+          </div>
+          <p className="text-2xs text-fg-subtle">
+            {promptContributions.coveredCalls.toLocaleString()} /{" "}
+            {promptContributions.totalCalls.toLocaleString()} calls covered
+          </p>
+        </div>
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          <Metric
+            label="Estimated prompt tokens"
+            value={formatTokens(promptContributions.estimatedTokens)}
+            delta="Company Brain material only"
+          />
+          <Metric
+            label="Average per covered call"
+            value={formatTokens(
+              promptContributions.coveredCalls > 0
+                ? Math.round(promptContributions.estimatedTokens / promptContributions.coveredCalls)
+                : 0,
+            )}
+            delta="Content-free receipt estimate"
+          />
+          <Metric
+            label="Receipt coverage"
+            value={`${promptContributions.totalCalls > 0 ? Math.round((promptContributions.coveredCalls / promptContributions.totalCalls) * 100) : 0}%`}
+            delta="Historical calls may be unavailable"
+          />
+        </div>
+
+        <div className="mt-4 overflow-x-auto rounded-lg border border-border">
+          <table className="min-w-full text-left text-xs">
+            <thead className="border-b border-border bg-surface/50 text-fg-subtle">
+              <tr>
+                <th className="px-3 py-2 font-medium">Source</th>
+                <th className="px-3 py-2 text-right font-medium">Est. tokens</th>
+                <th className="px-3 py-2 text-right font-medium">Share</th>
+                <th className="px-3 py-2 text-right font-medium">Calls</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {promptContributions.sources.map((row) => (
+                <tr key={row.source}>
+                  <td className="px-3 py-2 text-fg">{PROMPT_SOURCE_LABELS[row.source]}</td>
+                  <td className="px-3 py-2 text-right font-mono tabular-nums text-fg">
+                    {formatTokens(row.estimatedTokens)}
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono tabular-nums text-fg-muted">
+                    {promptContributions.estimatedTokens > 0
+                      ? Math.round(
+                          (row.estimatedTokens / promptContributions.estimatedTokens) * 100,
+                        )
+                      : 0}
+                    %
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono tabular-nums text-fg-muted">
+                    {row.calls.toLocaleString()}
+                  </td>
+                </tr>
+              ))}
+              {promptContributions.sources.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="px-3 py-5 text-center text-fg-subtle">
+                    No contribution receipts are available in this selection yet.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
         </div>
       </Section>
 

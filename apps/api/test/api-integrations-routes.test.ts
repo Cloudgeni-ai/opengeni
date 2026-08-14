@@ -591,8 +591,32 @@ describe("API Integration routes", () => {
     const configured = await configuredResponse.json();
     expect(configured).toMatchObject({
       status: "configured",
-      binding: { connectionId: connection.id, status: "active", version: 1 },
+      binding: {
+        connectionId: connection.id,
+        status: "active",
+        version: 1,
+        directlyOwned: true,
+        owners: [
+          {
+            kind: "direct",
+            id: expect.stringMatching(/^facet:[0-9a-f]{64}$/),
+            removable: true,
+          },
+        ],
+      },
     });
+    const legacyConfigured = {
+      ...configured,
+      binding: { ...configured.binding },
+    };
+    delete legacyConfigured.binding.directlyOwned;
+    delete legacyConfigured.binding.owners;
+    await shared!.admin`
+      update capability_operations
+      set result = ${shared!.admin.json(legacyConfigured)}
+      where workspace_id = ${workspaceId}::uuid
+        and idempotency_key = ${configureKey}
+    `;
     const replay = await request(`${base}/inventory-source`, {
       method: "PUT",
       body: JSON.stringify({
@@ -603,6 +627,19 @@ describe("API Integration routes", () => {
     });
     expect(replay.status).toBe(201);
     expect(await replay.json()).toEqual(configured);
+    const crossSubjectReplay = await request(
+      `${base}/inventory-source`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          displayName: "Finance inventory",
+          config: { collection: "finance", includeArchived: false },
+          idempotencyKey: configureKey,
+        }),
+      },
+      "user:api-integration-route-other-admin",
+    );
+    expect(crossSubjectReplay.status).toBe(409);
 
     const invalid = await request(`${base}/inventory-source`, {
       method: "PUT",
@@ -625,7 +662,12 @@ describe("API Integration routes", () => {
     const paused = await pausedResponse.json();
     expect(paused).toMatchObject({
       status: "paused",
-      binding: { status: "paused", version: 2 },
+      binding: {
+        status: "paused",
+        version: 2,
+        directlyOwned: true,
+        owners: configured.binding.owners,
+      },
     });
 
     const staleResume = await request(`${base}/inventory-source/resume`, {
@@ -647,7 +689,12 @@ describe("API Integration routes", () => {
     const resumed = await resumedResponse.json();
     expect(resumed).toMatchObject({
       status: "active",
-      binding: { status: "active", version: 3 },
+      binding: {
+        status: "active",
+        version: 3,
+        directlyOwned: true,
+        owners: configured.binding.owners,
+      },
     });
 
     const removed = await request(`${base}/inventory-source`, {
@@ -660,7 +707,7 @@ describe("API Integration routes", () => {
     expect(removed.status).toBe(200);
     expect(await removed.json()).toMatchObject({
       status: "removed",
-      binding: { status: "disabled", version: 4 },
+      binding: { status: "disabled", version: 4, directlyOwned: false, owners: [] },
       remainingOwners: [],
     });
   }, 60_000);

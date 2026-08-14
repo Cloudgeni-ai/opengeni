@@ -107,6 +107,8 @@ describe("Integration facet schema forms", () => {
       lastErrorCode: null,
       createdAt: "2026-08-10T00:00:00.000Z",
       updatedAt: "2026-08-11T00:00:00.000Z",
+      directlyOwned: true,
+      owners: [{ kind: "direct", id: "facet:drive-content", removable: true }],
     };
     expect(facetFormState(driveDefinition, binding)).toEqual({
       sourceId: "shared-drive:finance",

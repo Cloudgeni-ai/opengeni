@@ -2047,6 +2047,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "opengeni-agent-linux-ffi"
+version = "0.1.15"
+dependencies = [
+ "libc",
+ "tokio",
+]
+
+[[package]]
 name = "opengeni-agent-macos-ffi"
 version = "0.1.15"
 dependencies = [
@@ -2073,6 +2081,7 @@ dependencies = [
  "command-group",
  "image",
  "nix 0.29.0",
+ "opengeni-agent-linux-ffi",
  "opengeni-agent-macos-ffi",
  "opengeni-agent-proto",
  "portable-pty",

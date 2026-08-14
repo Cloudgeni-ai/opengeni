@@ -1057,6 +1057,7 @@ try {
         "  heartbeatSessionRealtime: unsupported,",
         "  negotiateCodexRealtimeWebrtc: unsupported,",
         "  negotiateGatewayRealtime: unsupported,",
+        "  negotiateXaiSubscriptionRealtime: unsupported,",
         "  activateCodexRealtimeConnection: unsupported,",
         "  syncSessionRealtimeLedger: unsupported,",
         "  endSessionRealtime: unsupported,",

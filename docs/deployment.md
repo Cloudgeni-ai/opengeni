@@ -420,6 +420,21 @@ secret-managed CI system. The open-source repository intentionally provides the
 reusable product, chart, Terraform roots, and conformance commands; it does not
 ship Cloudgeni-specific operational release gates or live-account scripts.
 
+Google Drive candidates also provide a provider-free, secret-safe configuration
+receipt:
+
+```bash
+bun run deployment:google-drive-readiness
+```
+
+The command makes no provider, deployment, database, or Kubernetes call. It
+checks the local runtime settings, emits the derived callback URL and numeric
+budgets, and leaves declared source-security dependencies, human-approved
+non-production provider acceptance, deployment, and production acceptance as
+explicit blocking gates. The canonical configuration, retry, observability, and
+acceptance contract is in `docs/google-drive.md`; the non-secret Helm overlay is
+`deploy/helm/opengeni/values.google-drive-readiness.example.yaml`.
+
 For private in-cluster MinIO behind a local port-forward, keep the presigned URL host intact with curl's connect mapping:
 
 ```bash
@@ -815,6 +830,21 @@ the candidate. The merge authority separately performs the fresh latest-main
 conflict, canonical patch-equivalence, protected-path, generated/migration,
 identity/manifest, security, and evidence checks immediately before merge.
 
+Do not enable or leave auto-merge armed on a generated Version PR before the
+exact-head release review is submitted. Release admission compares GitHub's
+provider-recorded review and merge timestamps and requires the decisive review
+to precede the merge. A review added after auto-merge is intentionally not
+release evidence and cannot rehabilitate that source commit; stop that train
+and use a fresh, normally reviewed release-source PR instead of retrying or
+weakening admission.
+
+Immediately before merge, re-read `baseRefOid`, `headRefOid`, `state`, and
+`autoMergeRequest` from the PR and the exact-head review from the provider API.
+Require the PR to remain open, auto-merge to remain null, and the canonical
+review to bind the unchanged head with a strictly earlier provider timestamp;
+equal review and merge timestamps are not ordering evidence. Then merge with an
+exact head-SHA fence. Never rely on an earlier UI observation for this boundary.
+
 The exact source must separately have one successful GitHub Actions result for
 each required candidate check:
 `Typecheck and unit tests`, `Deployment artifacts`, and `Workload image
@@ -908,7 +938,12 @@ caller-selected receipt URL or digest. The workflow re-runs the public package
 gates, verifies npm `gitHead` and integrity, publishes or reconciles the exact
 candidate chart, promotes the receipt's unchanged manifests to version and
 full-source-SHA tags, and writes one source-bound package/image/chart BOM. It
-deliberately does not create or update `latest`, and its immutable distribution
+also retains the candidate's verified amd64/arm64 native artifact-runtime inputs
+as `opengeni-artifact-runtime-<full-source-sha>.tgz` with a portable SHA-256
+sidecar. Source builders can therefore reproduce API, worker, materializer, and
+sandbox images after the short-lived Actions artifact expires without weakening
+the runtime integrity chain or rebuilding foreign-architecture binaries.
+It deliberately does not create or update `latest`, and its immutable distribution
 receipt makes no hosted Workbench, staging, production, or canary claim.
 
 An application-only embedded release additionally supplies the exact source SHA
@@ -1020,15 +1055,26 @@ byte for byte and fails instead of overwriting them. No moving BOM alias is
 created. Ordinary pushes to `main` can open/update the Version PR but cannot
 publish.
 
-The stock sandbox remains a separate workload image. The public release binds
-its immutable digest and its exact native artifact-runtime inputs to the same
-source SHA. Build it only with the verified `.release/artifact-runtime` bundle:
+The stock sandbox remains a separate workload image. The embedded public release
+binds its exact native artifact-runtime inputs to the same source SHA. Verify and
+extract that release asset so it creates `.release/artifact-runtime`, then build
+all source images only with that bundle:
 
 ```bash
+sha256sum --check "opengeni-artifact-runtime-${SOURCE_SHA}.tgz.sha256"
+tar -xzf "opengeni-artifact-runtime-${SOURCE_SHA}.tgz" -C .release
+
 docker build \
-  --build-arg OPENGENI_SOURCE_SHA="$(git rev-parse HEAD)" \
+  --build-arg OPENGENI_SERVER_VERSION="${SOURCE_SHA:0:12}" \
+  -f docker/opengeni.Dockerfile \
+  --target api \
+  -t opengeni-api:local-"${SOURCE_SHA:0:12}" \
+  .
+
+docker build \
+  --build-arg OPENGENI_SOURCE_SHA="$SOURCE_SHA" \
   -f docker/sandbox.Dockerfile \
-  -t opengeni-sandbox:local-"$(git rev-parse --short=12 HEAD)" \
+  -t opengeni-sandbox:local-"${SOURCE_SHA:0:12}" \
   .
 ```
 
@@ -1486,13 +1532,20 @@ with `CreateSessionRequest.targetSandboxId` (plus an optional `workingDir`).
 
 ## Security Boundary
 
-OpenGeni separates deployment edge access from product access. `OPENGENI_AUTH_REQUIRED=true` is an optional deployment shared-key boundary for smoke tests and simple self-hosting. It is not the tenant model and it does not create users, accounts, workspaces, or billing state. Set `OPENGENI_ACCESS_KEY` through a Kubernetes Secret, ExternalSecret, or provider secret manager; clients send it as `x-opengeni-access-key`.
+OpenGeni separates deployment edge access from product access. `OPENGENI_AUTH_REQUIRED=true` is an optional deployment shared-key boundary for smoke tests and simple self-hosting. It is not the tenant model and it does not create users, accounts, workspaces, or billing state. Set `OPENGENI_ACCESS_KEY` through a Kubernetes Secret, ExternalSecret, or provider secret manager; ordinary clients send it as `x-opengeni-access-key`. A valid first-party delegated bearer may enter the `/v1` product API without carrying that static key, but the normal access resolver and attempt fences still enforce its exact embedded authority. Deployment-only surfaces continue to require the static key.
 
 Product access is controlled by `OPENGENI_PRODUCT_ACCESS_MODE`:
 
 - `local` bootstraps a local default account/workspace.
 - `configured` supports self-hosted embedded deployments with delegated bearer tokens or the deployment shared-key boundary.
 - `managed` uses Better Auth for browser human auth, OpenGeni-owned API keys for product/API access, Stripe prepaid credits, usage, limits, and local entitlement mirrors.
+
+Configured deployments using `OPENGENI_AUTH_REQUIRED=true` reuse
+`OPENGENI_ACCESS_KEY` to sign internal first-party delegation when
+`OPENGENI_DELEGATION_SECRET` is unset. An explicit delegation secret always wins.
+`OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS` sets the selection for omitted session
+tool policies and `OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS` sets the hard runtime
+ceiling; each accepts a JSON array or comma-separated canonical tool names.
 
 Long-lived public deployments should still sit behind a gateway or ingress stack that provides:
 
@@ -1596,13 +1649,14 @@ helm upgrade --install opengeni deploy/helm/opengeni \
   --set secret.existingSecret=opengeni-runtime
 ```
 
-`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover stuck turns (`opengeni_turn_oldest_inflight_age_seconds > 900`), traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, scraped target availability, turn-worker memory-guard target/drain/failure signals, and node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
+`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover turns without durable progress (`opengeni_turn_oldest_no_progress_age_seconds > 900`), traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, scraped target availability, turn-worker memory-guard target/drain/failure signals, Google Drive sync failure ratio, reconnect-required events, and explicit Drive sync limit hits, plus node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Drive rules are fenced to the exact namespace, Helm release, configured environment, and `google_drive` provider. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
 
 Minimum production dashboards should cover:
 
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
-- Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, and `opengeni_turn_oldest_inflight_age_seconds`.
+- Google Drive sync: run outcome and failure ratio, reconnect-required events, p95 terminal activity-batch duration, logical provider requests, physical provider attempts/retries, explicit limit hits, and bounded terminal failure reasons, scoped by namespace, environment, release, and provider where applicable.
+- Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, `opengeni_turn_oldest_inflight_age_seconds`, and `opengeni_turn_oldest_no_progress_age_seconds`.
 - Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total{backend,stage}`, and `opengeni_sandbox_orphans_terminated_total`.
 - Queue, admission, and billing: `opengeni_turns_queued`, `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, `opengeni_turn_slot_saturation_ratio`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
 - Dependency health: Postgres connection health, Temporal worker poll health, NATS connectivity, object-storage write/read conformance, and sandbox backend readiness.

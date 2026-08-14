@@ -1,4 +1,5 @@
 import {
+  AttachedBrowserBridge,
   AttachedBrowserDevice,
   AuthRun,
   AuthRunListResponse,
@@ -94,6 +95,7 @@ const TOOL_PERMISSION = {
 
 const DiscoveryInput = z
   .object({
+    scope: z.enum(["current_session", "workspace"]).optional(),
     includeTerminal: z.boolean().optional(),
     includeArchivedIdentities: z.boolean().optional(),
     includeDisconnectedDevices: z.boolean().optional(),
@@ -108,6 +110,7 @@ const DiscoveryOutput = z
     browsers: z.array(BrowserSession),
     computers: z.array(ComputerSession),
     identities: z.array(BrowserIdentity),
+    attachedBrowserBridges: z.array(AttachedBrowserBridge),
     attachedBrowsers: z.array(AttachedBrowserDevice),
   })
   .strict();
@@ -295,16 +298,38 @@ const BrowserPublishInput = z
     advanceDefault: z.boolean().optional(),
   })
   .strict();
-const BrowserIdentityInput = z.discriminatedUnion("operation", [
-  z.object({ operation: z.literal("list"), includeArchived: z.boolean().optional() }).strict(),
-  z.object({ operation: z.literal("get"), identityId: z.string().uuid() }).strict(),
-  z.object({ operation: z.literal("create"), name: z.string().trim().min(1).max(200) }).strict(),
-  z.object({ operation: z.literal("revisions"), identityId: z.string().uuid() }).strict(),
-]);
+const BrowserIdentityInput = z
+  .discriminatedUnion("operation", [
+    z.object({ operation: z.literal("list"), includeArchived: z.boolean().optional() }).strict(),
+    z.object({ operation: z.literal("get"), identityId: z.string().uuid() }).strict(),
+    z.object({ operation: z.literal("create"), name: z.string().trim().min(1).max(200) }).strict(),
+    z
+      .object({
+        operation: z.literal("update"),
+        identityId: z.string().uuid(),
+        expectedVersion: z.number().int().positive(),
+        name: z.string().trim().min(1).max(200).optional(),
+        status: z.enum(["active", "archived"]).optional(),
+        defaultRevisionId: z.string().uuid().optional(),
+      })
+      .strict(),
+    z.object({ operation: z.literal("revisions"), identityId: z.string().uuid() }).strict(),
+  ])
+  .superRefine((value, context) => {
+    if (
+      value.operation === "update" &&
+      value.name === undefined &&
+      value.status === undefined &&
+      value.defaultRevisionId === undefined
+    ) {
+      context.addIssue({ code: "custom", message: "browser identity update is empty" });
+    }
+  });
 const BrowserIdentityOutput = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("list"), result: BrowserIdentityListResponse }).strict(),
   z.object({ operation: z.literal("get"), result: BrowserIdentity }).strict(),
   z.object({ operation: z.literal("create"), result: BrowserIdentityMutationResponse }).strict(),
+  z.object({ operation: z.literal("update"), result: BrowserIdentityMutationResponse }).strict(),
   z.object({ operation: z.literal("revisions"), result: BrowserRevisionListResponse }).strict(),
 ]);
 const BrowserLifecycleInput = z
@@ -437,12 +462,13 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "discover"],
     title: "Discover browsers and computers",
     description:
-      "List live workspace BrowserSessions, ComputerSessions, reusable browser identities, and attached Chrome devices. Resources are workspace-visible: inspect and reuse relevant peer/child sessions instead of creating duplicates.",
+      "List BrowserSessions and ComputerSessions associated with this agent session. The default current_session scope is deliberately small and omits workspace-wide identities, attached-browser bridges, and Chrome profiles. For requests about the user's existing/current/personal Chrome, reusable identities, or peer/child resources, call this with scope=workspace before browser_open and select an actual attachedBrowsers device; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. Leave includeTerminal=false unless ended history is specifically required.",
     input: DiscoveryInput,
     output: DiscoveryOutput,
     readOnly: true,
     idempotent: true,
     execute: async (value) => {
+      const scope = value.scope ?? "current_session";
       const [browsers, computers, identities, attached] = await Promise.all([
         input.transport.listBrowserSessions(input.workspaceId),
         input.transport.listComputerSessions(input.workspaceId),
@@ -458,14 +484,21 @@ export function createInteractionAttemptToolDefinitions(
         computerRevision: computers.revision,
         identityRevision: identities.revision,
         attachedBrowserRevision: attached.revision,
-        browsers: value.includeTerminal
-          ? browsers.sessions
-          : browsers.sessions.filter((session) => !TERMINAL_LIFECYCLES.has(session.lifecycle)),
-        computers: value.includeTerminal
-          ? computers.sessions
-          : computers.sessions.filter((session) => !TERMINAL_LIFECYCLES.has(session.lifecycle)),
-        identities: identities.identities,
-        attachedBrowsers: attached.devices,
+        browsers: filterDiscoveredSessions(
+          browsers.sessions,
+          input.sessionId,
+          scope,
+          value.includeTerminal ?? false,
+        ),
+        computers: filterDiscoveredSessions(
+          computers.sessions,
+          input.sessionId,
+          scope,
+          value.includeTerminal ?? false,
+        ),
+        identities: scope === "workspace" ? identities.identities : [],
+        attachedBrowserBridges: scope === "workspace" ? attached.bridges : [],
+        attachedBrowsers: scope === "workspace" ? attached.devices : [],
       };
     },
   });
@@ -475,7 +508,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
     description:
-      "Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, or attach to an explicit workspace BrowserSession. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Returns exact session and tab state.",
+      "Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Returns exact session and tab state.",
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
@@ -760,7 +793,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "identity"],
     title: "Manage reusable browser identities",
     description:
-      "List, inspect, create, or list immutable revisions of reusable BrowserIdentities. Live browser state changes only through explicit browser_publish; identities are never mutated automatically.",
+      "List, inspect, create, update, or list immutable revisions of reusable BrowserIdentities. Update can rename, archive/restore, or select the default revision for browsers opened later; it never changes a live browser. Live browser state changes only through explicit browser_publish.",
     input: BrowserIdentityInput,
     output: BrowserIdentityOutput,
     readOnly: false,
@@ -784,6 +817,20 @@ export function createInteractionAttemptToolDefinitions(
         return {
           operation: value.operation,
           result: await input.transport.listBrowserRevisions(input.workspaceId, value.identityId),
+        };
+      }
+      if (value.operation === "update") {
+        return {
+          operation: value.operation,
+          result: await input.transport.updateBrowserIdentity(input.workspaceId, value.identityId, {
+            operationId: context.operationId,
+            expectedVersion: value.expectedVersion,
+            ...(value.name !== undefined ? { name: value.name } : {}),
+            ...(value.status !== undefined ? { status: value.status } : {}),
+            ...(value.defaultRevisionId !== undefined
+              ? { defaultRevisionId: value.defaultRevisionId }
+              : {}),
+          }),
         };
       }
       return {
@@ -961,6 +1008,25 @@ export function createInteractionAttemptToolDefinitions(
   });
 
   return definitions;
+}
+
+function filterDiscoveredSessions<
+  T extends {
+    lifecycle: string;
+    associations: Array<{ sessionId: string }>;
+  },
+>(
+  sessions: T[],
+  sessionId: string,
+  scope: "current_session" | "workspace",
+  includeTerminal: boolean,
+) {
+  return sessions.filter(
+    (session) =>
+      (includeTerminal || !TERMINAL_LIFECYCLES.has(session.lifecycle)) &&
+      (scope === "workspace" ||
+        session.associations.some((association) => association.sessionId === sessionId)),
+  );
 }
 
 export type CreateFirstPartyInteractionAttemptToolsInput = Omit<

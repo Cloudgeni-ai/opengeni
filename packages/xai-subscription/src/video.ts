@@ -8,6 +8,8 @@ import {
 
 import {
   XAI_PUBLIC_API_BASE_URL,
+  XAI_CLIENT_MODE,
+  XAI_CLIENT_VERSION,
   XAI_VIDEO_DOWNLOAD_TIMEOUT_MS,
   XAI_VIDEO_GENERATION_TIMEOUT_MS,
   XAI_VIDEO_MODEL,
@@ -26,7 +28,10 @@ const defaultVideoFetch: XaiFetchLike = async (input, init) =>
   await pinnedFetch(
     input,
     init,
-    { environment: "production", integrationsAllowPrivateNetworkTargets: false },
+    {
+      environment: "production",
+      integrationsAllowPrivateNetworkTargets: false,
+    },
     { label: "xAI video generation", requireHttpsOutsideLocalTest: true },
   );
 
@@ -35,6 +40,137 @@ export type XaiGeneratedVideo = {
   declaredMediaType: "video/mp4";
   requestId: string;
 };
+
+export type XaiVideoStatus =
+  | Readonly<{ status: "pending" }>
+  | Readonly<{ status: "completed"; outputUrl: string; mediaType: "video/mp4" }>
+  | Readonly<{ status: "error"; publicReason: string }>;
+
+/** One-shot durable start. The caller owns replay/idempotency policy. */
+export async function startXaiSubscriptionVideoWithBody(input: {
+  body: Record<string, unknown>;
+  getToken: () => Promise<XaiSubscriptionTokenSnapshot>;
+  refresh: () => Promise<XaiSubscriptionTokenSnapshot>;
+  sessionId?: string;
+  signal?: AbortSignal;
+  fetch?: XaiFetchLike;
+  baseUrl?: string;
+}): Promise<{ providerJobId: string }> {
+  const fetchImpl = input.fetch ?? defaultVideoFetch;
+  const baseUrl = (input.baseUrl ?? XAI_PUBLIC_API_BASE_URL).replace(/\/+$/, "");
+  const request = async (token: XaiSubscriptionTokenSnapshot) =>
+    await fetchWithDeadline(
+      fetchImpl,
+      `${baseUrl}/videos/generations`,
+      {
+        method: "POST",
+        redirect: "error",
+        headers: publicVideoHeaders(token, input.sessionId, true),
+        body: JSON.stringify(input.body),
+        ...(input.signal ? { signal: input.signal } : {}),
+      },
+      XAI_VIDEO_START_TIMEOUT_MS,
+      input.signal ?? AbortSignal.timeout(XAI_VIDEO_START_TIMEOUT_MS),
+    );
+  let response = await request(await input.getToken());
+  if (response.status === 401) {
+    await response.body?.cancel().catch(() => undefined);
+    response = await request(await input.refresh());
+  }
+  if (!response.ok)
+    throw await providerError("start", response, input.signal ?? new AbortController().signal);
+  const body = await readResponseJsonBounded<Record<string, unknown>>(
+    response,
+    1024 * 1024,
+    "xAI video start",
+    input.signal ? { signal: input.signal } : {},
+  );
+  if (typeof body.request_id !== "string" || !body.request_id.trim()) {
+    throw new XaiSubscriptionError("invalid_response", "xAI video start response is malformed");
+  }
+  return { providerJobId: body.request_id };
+}
+
+export async function getXaiSubscriptionVideoStatus(input: {
+  providerJobId: string;
+  getToken: () => Promise<XaiSubscriptionTokenSnapshot>;
+  refresh: () => Promise<XaiSubscriptionTokenSnapshot>;
+  sessionId?: string;
+  signal?: AbortSignal;
+  fetch?: XaiFetchLike;
+  baseUrl?: string;
+}): Promise<XaiVideoStatus> {
+  if (!input.providerJobId.trim() || input.providerJobId.length > 1024) {
+    throw new Error("xAI video job identity is invalid");
+  }
+  const fetchImpl = input.fetch ?? defaultVideoFetch;
+  const baseUrl = (input.baseUrl ?? XAI_PUBLIC_API_BASE_URL).replace(/\/+$/, "");
+  const request = async (token: XaiSubscriptionTokenSnapshot) =>
+    await fetchWithDeadline(
+      fetchImpl,
+      `${baseUrl}/videos/${encodeURIComponent(input.providerJobId)}`,
+      {
+        method: "GET",
+        redirect: "error",
+        headers: publicVideoHeaders(token, input.sessionId, false),
+        ...(input.signal ? { signal: input.signal } : {}),
+      },
+      XAI_VIDEO_POLL_REQUEST_TIMEOUT_MS,
+      input.signal ?? AbortSignal.timeout(XAI_VIDEO_POLL_REQUEST_TIMEOUT_MS),
+    );
+  let response = await request(await input.getToken());
+  if (response.status === 401) {
+    await response.body?.cancel().catch(() => undefined);
+    response = await request(await input.refresh());
+  }
+  if (!response.ok && response.status !== 202) {
+    throw await providerError("poll", response, input.signal ?? new AbortController().signal);
+  }
+  const body = await readResponseJsonBounded<Record<string, unknown>>(
+    response,
+    1024 * 1024,
+    "xAI video poll",
+    input.signal ? { signal: input.signal } : {},
+  );
+  if (body.status === "pending" || body.status === "queued" || body.status === "running") {
+    return { status: "pending" };
+  }
+  if (body.status === "failed" || body.status === "expired") {
+    return {
+      status: "error",
+      publicReason: `xAI video generation ${body.status}`,
+    };
+  }
+  const video =
+    body.video && typeof body.video === "object" && !Array.isArray(body.video)
+      ? (body.video as Record<string, unknown>)
+      : null;
+  if (body.status !== "done" || typeof video?.url !== "string") {
+    throw new XaiSubscriptionError("invalid_response", "xAI video poll response is malformed");
+  }
+  return {
+    status: "completed",
+    outputUrl: validateMediaUrl(video.url),
+    mediaType: "video/mp4",
+  };
+}
+
+function publicVideoHeaders(
+  token: XaiSubscriptionTokenSnapshot,
+  sessionId: string | undefined,
+  json: boolean,
+): Headers {
+  return new Headers({
+    accept: "application/json",
+    authorization: `Bearer ${token.accessToken}`,
+    "user-agent": `opengeni/${XAI_CLIENT_VERSION}`,
+    "x-grok-client-version": XAI_CLIENT_VERSION,
+    "x-grok-client-identifier": "opengeni",
+    "x-grok-client-mode": XAI_CLIENT_MODE,
+    ...(sessionId ? { "x-grok-session-id": sessionId } : {}),
+    ...(json ? { "content-type": "application/json" } : {}),
+  });
+}
 
 export async function generateXaiSubscriptionVideo(input: {
   prompt: string;
@@ -182,7 +318,10 @@ async function pollVideo(
     {
       method: "GET",
       redirect: "error",
-      headers: { accept: "application/json", authorization: `Bearer ${token.accessToken}` },
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${token.accessToken}`,
+      },
       signal,
     },
     XAI_VIDEO_POLL_REQUEST_TIMEOUT_MS,
@@ -198,7 +337,10 @@ async function fetchWithDeadline(
   outerSignal: AbortSignal,
 ): Promise<Response> {
   const timeout = AbortSignal.timeout(timeoutMs);
-  return await fetchImpl(url, { ...init, signal: AbortSignal.any([outerSignal, timeout]) });
+  return await fetchImpl(url, {
+    ...init,
+    signal: AbortSignal.any([outerSignal, timeout]),
+  });
 }
 
 async function providerError(

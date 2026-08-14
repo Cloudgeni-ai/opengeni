@@ -1,0 +1,7 @@
+{
+  "name": "@opengeni/sandbox-anydoc-runtime",
+  "private": true,
+  "dependencies": {
+    "@firecrawl/anydoc": "0.1.8"
+  }
+}

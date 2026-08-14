@@ -33,6 +33,14 @@ describe("useBrowserIdentities", () => {
           replayed: false,
         };
       },
+      updateBrowserIdentity: async (_workspaceId, identityId, request) => {
+        calls.push({ kind: "update", request: { identityId, ...request } });
+        return {
+          identity: { ...work, status: "archived", version: work.version + 1 },
+          operationId: request.operationId,
+          replayed: false,
+        };
+      },
       listBrowserRevisions: async (_workspaceId, identityId) => {
         calls.push({ kind: "history", request: identityId });
         return { identity: work, revisions: [saved] };
@@ -96,6 +104,25 @@ describe("useBrowserIdentities", () => {
     expect(
       hook.result.current.identities.find((item) => item.id === IDENTITY_ID)?.defaultRevisionId,
     ).toBe(REVISION_ID);
+
+    const archived = await actRun(() =>
+      hook.result.current.update(IDENTITY_ID, {
+        expectedVersion: work.version,
+        status: "archived",
+        operationId: OPERATION_ID,
+      }),
+    );
+    expect(archived.identity.status).toBe("archived");
+    expect(calls.at(-1)).toEqual({
+      kind: "update",
+      request: {
+        identityId: IDENTITY_ID,
+        expectedVersion: work.version,
+        status: "archived",
+        operationId: OPERATION_ID,
+      },
+    });
+    expect(hook.result.current.identities.some((item) => item.id === IDENTITY_ID)).toBe(false);
     await hook.unmount();
   });
 });
@@ -107,6 +134,7 @@ function identity(id: string, name: string, updatedAt: string): BrowserIdentity 
     workspaceId: WORKSPACE_ID,
     name,
     status: "active",
+    version: 1,
     defaultRevisionId: null,
     headGeneration: 1,
     revisionCount: 0,

@@ -172,7 +172,7 @@ async function probeBrowserCompatibleMp4(
     "-analyzeduration",
     "5000000",
     "-show_entries",
-    "format=format_name,duration:stream=codec_type,codec_name,width,height,avg_frame_rate",
+    "format=format_name,duration:stream=codec_type,codec_name,width,height,avg_frame_rate:stream_disposition=attached_pic",
     "-of",
     "json",
     "--",
@@ -187,7 +187,9 @@ async function probeBrowserCompatibleMp4(
   const root = record(decoded);
   const format = record(root?.format);
   const streams = Array.isArray(root?.streams) ? root.streams.map(record).filter(Boolean) : [];
-  const video = streams.filter((stream) => stream?.codec_type === "video");
+  const video = streams.filter(
+    (stream) => stream?.codec_type === "video" && !isAttachedPicture(stream),
+  );
   const audio = streams.filter((stream) => stream?.codec_type === "audio");
   const durationSeconds = finitePositive(format?.duration);
   const width = positiveInteger(video[0]?.width);
@@ -221,6 +223,10 @@ async function probeBrowserCompatibleMp4(
     videoCodec: "h264",
     audioCodec: audio.length === 1 ? "aac" : null,
   };
+}
+
+function isAttachedPicture(stream: Record<string, unknown>): boolean {
+  return Number(record(stream.disposition)?.attached_pic) === 1;
 }
 
 async function spawnBounded(

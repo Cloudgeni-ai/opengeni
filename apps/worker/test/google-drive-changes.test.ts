@@ -9,6 +9,7 @@ import {
   GOOGLE_DRIVE_FOLDER_MIME_TYPE,
   type GoogleDriveInventoryProviderItem,
 } from "@opengeni/documents/google-drive";
+import { createObservability } from "@opengeni/observability";
 import {
   advanceGoogleDriveChangesCursor,
   buildGoogleDriveChangesCursor,
@@ -21,11 +22,172 @@ import {
   type GoogleDriveChangesCheckpoint,
 } from "../src/activities/google-drive-changes";
 import {
+  collectGoogleDriveAclEvidence,
   googleDriveSyncDriver,
   mergeGoogleDriveDurableObservationFloors,
   shouldProcessGoogleDriveDurableObservation,
   type GoogleDriveSyncProviderPort,
 } from "../src/activities/knowledge-source-sync";
+
+describe("Google Drive object ACL evidence", () => {
+  const entry = {
+    externalObjectId: "drive-file-1",
+    externalVersionId: "42",
+    driveId: "shared-drive",
+  } as const;
+
+  test("collects bounded multi-page direct, domain, group, and anyone principals", async () => {
+    const calls: Array<string | null> = [];
+    const evidence = await collectGoogleDriveAclEvidence({
+      entry,
+      maxProviderRequests: 3,
+      now: () => Date.parse("2026-08-14T00:00:00.000Z"),
+      listPermissions: async ({ pageToken }) => {
+        calls.push(pageToken);
+        return pageToken === null
+          ? {
+              permissions: [
+                {
+                  id: "permission-user",
+                  type: "user",
+                  role: "reader",
+                  emailAddress: "reader@example.com",
+                  domain: null,
+                  allowFileDiscovery: null,
+                  expirationTime: null,
+                  inherited: false,
+                },
+                {
+                  id: "permission-group",
+                  type: "group",
+                  role: "reader",
+                  emailAddress: "group@example.com",
+                  domain: null,
+                  allowFileDiscovery: null,
+                  expirationTime: null,
+                  inherited: true,
+                },
+              ],
+              nextPageToken: "page-2",
+              denied: false,
+            }
+          : {
+              permissions: [
+                {
+                  id: "permission-domain",
+                  type: "domain",
+                  role: "commenter",
+                  emailAddress: null,
+                  domain: "example.com",
+                  allowFileDiscovery: false,
+                  expirationTime: "2026-08-15T00:00:00.000Z",
+                  inherited: true,
+                },
+                {
+                  id: "permission-anyone",
+                  type: "anyone",
+                  role: "reader",
+                  emailAddress: null,
+                  domain: null,
+                  allowFileDiscovery: false,
+                  expirationTime: null,
+                  inherited: false,
+                },
+              ],
+              nextPageToken: null,
+              denied: false,
+            };
+      },
+    });
+
+    expect(calls).toEqual([null, "page-2"]);
+    expect(evidence).toMatchObject({
+      eligibility: "eligible",
+      providerRevision: "42",
+      driveId: "shared-drive",
+      observedAt: "2026-08-14T00:00:00.000Z",
+      expiresAt: "2026-08-15T02:00:00.000Z",
+      providerRequests: 2,
+    });
+    expect(evidence.aclRevision).toMatch(/^[0-9a-f]{64}$/);
+    expect(evidence.principals).toHaveLength(4);
+    expect(evidence.principals).toContainEqual(
+      expect.objectContaining({
+        type: "group",
+        permissionId: "permission-group",
+        inherited: true,
+      }),
+    );
+    expect(evidence.principals).toContainEqual(
+      expect.objectContaining({
+        type: "domain",
+        domain: "example.com",
+        expirationTime: "2026-08-15T00:00:00.000Z",
+      }),
+    );
+  });
+
+  test("falls back to source-owner-only evidence when permissions are hidden but file access remains", async () => {
+    const evidence = await collectGoogleDriveAclEvidence({
+      entry,
+      maxProviderRequests: 2,
+      now: () => Date.parse("2026-08-14T00:00:00.000Z"),
+      listPermissions: async () => ({ permissions: [], nextPageToken: null, denied: true }),
+      getFile: async () => file(entry.externalObjectId, [source.id]),
+    });
+
+    expect(evidence).toMatchObject({
+      eligibility: "eligible",
+      providerRequests: 2,
+      principals: [],
+    });
+    expect(evidence.aclRevision).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test("denies when both permission listing and current file access are gone", async () => {
+    const evidence = await collectGoogleDriveAclEvidence({
+      entry,
+      maxProviderRequests: 2,
+      now: () => Date.parse("2026-08-14T00:00:00.000Z"),
+      listPermissions: async () => ({ permissions: [], nextPageToken: null, denied: true }),
+      getFile: async () => null,
+    });
+
+    expect(evidence).toMatchObject({
+      eligibility: "denied",
+      providerRequests: 2,
+      principals: [],
+    });
+  });
+
+  test("fails closed on repeated pagination cursors", async () => {
+    await expect(
+      collectGoogleDriveAclEvidence({
+        entry,
+        maxProviderRequests: 3,
+        listPermissions: async () => ({
+          permissions: [],
+          nextPageToken: "repeat",
+          denied: false,
+        }),
+      }),
+    ).rejects.toThrow("provider_payload_invalid");
+  });
+
+  test("fails closed before exceeding the provider request budget", async () => {
+    await expect(
+      collectGoogleDriveAclEvidence({
+        entry,
+        maxProviderRequests: 1,
+        listPermissions: async () => ({
+          permissions: [],
+          nextPageToken: "page-2",
+          denied: false,
+        }),
+      }),
+    ).rejects.toThrow("resource_limit");
+  });
+});
 
 const source: GoogleDriveSelectedSource = {
   id: "folder-root",
@@ -135,6 +297,17 @@ const metadata = GoogleDriveConnectionMetadata.parse({
   accessMode: "readonly",
 });
 
+const observability = createObservability(
+  {
+    serviceName: "opengeni-test",
+    environment: "test",
+    observabilityStructuredLogs: false,
+    observabilityMetricsEnabled: false,
+    observabilityOtlpHeaders: "",
+  },
+  { component: "worker-control" },
+);
+
 function driverFor(
   selectedSource: GoogleDriveSelectedSource,
   provider: GoogleDriveSyncProviderPort,
@@ -156,6 +329,14 @@ function driverFor(
     workspaceId: "00000000-0000-4000-8000-000000000126",
     initiatingSubjectId: "user:drive-test",
     authorization: undefined,
+    retry: {
+      requestTimeoutMs: 1_000,
+      attempts: 1,
+      initialDelayMs: 1,
+      maxDelayMs: 1,
+      budgetMs: 1,
+    },
+    observability,
     fullReconciliationIntervalMs: 86_400_000,
     observedExternalObjectIds,
     provider,

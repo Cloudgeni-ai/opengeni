@@ -41,7 +41,9 @@ export class OpenGeniApiError extends Error {
     this.retryable = options.retryable ?? decoded?.retryable ?? retryableApiStatus(status);
     this.correlationId = correlationId;
     this.outcomeUnknown =
-      options.outcomeUnknown ?? (gatewayFailure && !!options.mutation && !decoded);
+      options.outcomeUnknown ??
+      decoded?.outcomeUnknown ??
+      (gatewayFailure && !!options.mutation && !decoded);
     this.body = !fromResponse || decoded ? body : "";
     this.details = decoded?.details;
   }
@@ -52,6 +54,7 @@ function decodeApiErrorBody(body: string): {
   message: string | undefined;
   requestId: string | undefined;
   retryable: boolean | undefined;
+  outcomeUnknown: boolean | undefined;
   details: Record<string, unknown> | undefined;
 } | null {
   if (!body) return null;
@@ -67,13 +70,24 @@ function decodeApiErrorBody(body: string): {
     const message = boundedApiField(nested.message);
     const requestId = boundedCorrelationId(nested.requestId);
     const retryable = typeof nested.retryable === "boolean" ? nested.retryable : undefined;
+    const outcomeUnknown =
+      typeof nested.outcomeUnknown === "boolean" ? nested.outcomeUnknown : undefined;
     const details = boundedApiDetails(nested.details);
-    if (!code && !message && !requestId && retryable === undefined && !details) return null;
+    if (
+      !code &&
+      !message &&
+      !requestId &&
+      retryable === undefined &&
+      outcomeUnknown === undefined &&
+      !details
+    )
+      return null;
     return {
       code,
       message,
       requestId,
       retryable,
+      outcomeUnknown,
       details,
     };
   } catch {

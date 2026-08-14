@@ -11,6 +11,7 @@
 //! module only wires the config and prints the outcome.
 
 use std::collections::BTreeSet;
+use std::io::Write as _;
 
 use opengeni_agent_update::{
     check_update_manifest, finalize_update, HttpSource, ManifestCheckOutcome, UpdateConfig,
@@ -25,6 +26,109 @@ use crate::enrollment::InstallIdentity;
 
 /// Public fallback used only before the machine has any enrolled deployment.
 const DEFAULT_BASE_URL: &str = "https://get.opengeni.ai";
+const COMPLETED_UPDATE_RECEIPT_FILE: &str = "completed-update.json";
+
+/// Non-secret durable proof that the exact control-plane operation installed a
+/// signed artifact and passed its startup preflight. The successor repeats this
+/// in Hello until a later successful update atomically replaces the receipt.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct CompletedUpdateReceipt {
+    pub operation_id: String,
+    pub target_version: String,
+    pub binary_sha256: String,
+}
+
+/// Read and validate the most recent completed managed-update proof.
+pub fn load_completed_update_receipt() -> Result<Option<CompletedUpdateReceipt>, String> {
+    let dir = config::config_dir().map_err(|_| "config_dir_unavailable".to_string())?;
+    load_completed_update_receipt_at(&dir)
+}
+
+fn load_completed_update_receipt_at(
+    dir: &std::path::Path,
+) -> Result<Option<CompletedUpdateReceipt>, String> {
+    let path = dir.join(COMPLETED_UPDATE_RECEIPT_FILE);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("update_receipt_read_failed".to_string()),
+    };
+    let receipt: CompletedUpdateReceipt =
+        serde_json::from_slice(&bytes).map_err(|_| "update_receipt_invalid".to_string())?;
+    validate_completed_update_receipt(&receipt)?;
+    Ok(Some(receipt))
+}
+
+fn validate_completed_update_receipt(receipt: &CompletedUpdateReceipt) -> Result<(), String> {
+    if uuid::Uuid::parse_str(&receipt.operation_id).is_err()
+        || Version::parse(&receipt.target_version).is_err()
+        || receipt.binary_sha256.len() != 64
+        || !receipt
+            .binary_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("update_receipt_invalid".to_string());
+    }
+    Ok(())
+}
+
+fn persist_completed_update_receipt(receipt: &CompletedUpdateReceipt) -> Result<(), String> {
+    let dir = config::config_dir().map_err(|_| "config_dir_unavailable".to_string())?;
+    persist_completed_update_receipt_at(&dir, receipt)
+}
+
+fn persist_completed_update_receipt_at(
+    dir: &std::path::Path,
+    receipt: &CompletedUpdateReceipt,
+) -> Result<(), String> {
+    validate_completed_update_receipt(receipt)?;
+    std::fs::create_dir_all(dir).map_err(|_| "update_receipt_persist_failed".to_string())?;
+    let path = dir.join(COMPLETED_UPDATE_RECEIPT_FILE);
+    let temporary = dir.join(format!(
+        ".{COMPLETED_UPDATE_RECEIPT_FILE}.{}.{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let body = serde_json::to_vec(receipt).map_err(|_| "update_receipt_invalid".to_string())?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|_| "update_receipt_persist_failed".to_string())?;
+    if file
+        .write_all(&body)
+        .and_then(|()| file.sync_all())
+        .is_err()
+    {
+        drop(file);
+        let _ = std::fs::remove_file(&temporary);
+        return Err("update_receipt_persist_failed".to_string());
+    }
+    drop(file);
+    if let Err(error) = std::fs::rename(&temporary, &path) {
+        #[cfg(windows)]
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+        ) && path.exists()
+        {
+            std::fs::remove_file(&path)
+                .and_then(|()| std::fs::rename(&temporary, &path))
+                .map_err(|_| "update_receipt_persist_failed".to_string())?;
+            return Ok(());
+        }
+        let _ = error;
+        let _ = std::fs::remove_file(&temporary);
+        return Err("update_receipt_persist_failed".to_string());
+    }
+    Ok(())
+}
 
 /// Runs the `update` subcommand.
 ///
@@ -136,6 +240,102 @@ pub fn run(args: &UpdateArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// Result of an explicitly requested control-plane update. The digest is the
+/// artifact sha256 from the verified signed manifest and is echoed in progress;
+/// the control plane requires the successor Hello to report it before success.
+#[derive(Debug, Clone)]
+pub struct ManagedUpdateResult {
+    /// Lowercase sha256 pinned by the signed manifest.
+    pub expected_sha256: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ManagedUpdatePhase {
+    Downloading,
+    Verifying,
+    Applying,
+}
+
+/// Applies one exact signed release from one deployment origin. This is the same
+/// updater as the local CLI, narrowed by the control-plane request: the signed
+/// manifest must offer exactly `target_version`, then artifact minisign+sha256,
+/// atomic swap, startup health-gate, and rollback all run unchanged.
+pub fn apply_managed(
+    operation_id: &str,
+    base_url: &str,
+    channel: &str,
+    target_version: &str,
+    mut progress: impl FnMut(ManagedUpdatePhase),
+) -> Result<ManagedUpdateResult, String> {
+    if uuid::Uuid::parse_str(operation_id).is_err() {
+        return Err("invalid_update_operation".to_string());
+    }
+    if !matches!(channel, "stable" | "beta") {
+        return Err("unsupported_update_channel".to_string());
+    }
+    Version::parse(target_version).map_err(|_| "invalid_target_version".to_string())?;
+    let install_identity = InstallIdentity::load_or_generate(
+        &config::config_dir().map_err(|_| "config_dir_unavailable".to_string())?,
+    )
+    .map_err(|_| "install_identity_unavailable".to_string())?;
+    let source = HttpSource::new().map_err(|_| "update_transport_unavailable".to_string())?;
+    let mut config = UpdateConfig::new(
+        base_url.trim_end_matches('/'),
+        channel,
+        install_identity.public_key_base64(),
+        env!("CARGO_PKG_VERSION"),
+    );
+    // This path exists only after an authorized human/control-plane request.
+    // Manual opt-in may cross a staged rollout boundary and may re-pin the same
+    // version after a failed/rolled-back attempt; signature, digest, target,
+    // monotonic-version, atomic-apply, health-gate, and rollback checks remain.
+    config.allow_staged_rollout_opt_in = true;
+    config.allow_same_version = true;
+    let plan = match check_update_manifest(&source, &config) {
+        Ok(ManifestCheckOutcome::Available(plan)) => plan,
+        Ok(ManifestCheckOutcome::UpToDate(_)) => return Err("target_not_offered".to_string()),
+        Err(_) => return Err("manifest_verification_failed".to_string()),
+    };
+    if plan.version != target_version {
+        return Err("target_manifest_mismatch".to_string());
+    }
+    let expected_sha256 = plan.expected_sha256().to_string();
+    progress(ManagedUpdatePhase::Downloading);
+    let pending = plan
+        .download(&source)
+        .map_err(|_| "artifact_verification_failed".to_string())?;
+    progress(ManagedUpdatePhase::Verifying);
+    let install_path =
+        std::env::current_exe().map_err(|_| "installed_binary_unavailable".to_string())?;
+    progress(ManagedUpdatePhase::Applying);
+    pending
+        .apply_running()
+        .map_err(|_| "atomic_apply_failed".to_string())?;
+    let health = verify_installed_binary(&install_path, &pending.version);
+    if let Err(error) = health {
+        finalize_update(&install_path, Err(error))
+            .map_err(|_| "startup_preflight_failed_rolled_back".to_string())?;
+    }
+    let receipt = CompletedUpdateReceipt {
+        operation_id: operation_id.to_string(),
+        target_version: pending.version.clone(),
+        binary_sha256: expected_sha256.clone(),
+    };
+    if let Err(error_code) = persist_completed_update_receipt(&receipt) {
+        finalize_update(
+            &install_path,
+            Err(UpdateError::HealthCheck(error_code.clone())),
+        )
+        .map_err(|_| "update_receipt_persist_failed_rolled_back".to_string())?;
+    }
+    // Once the new binary and its durable receipt are verified, failure to
+    // delete the rollback backup is cleanup debt—not a failed installation.
+    if let Err(error) = finalize_update(&install_path, Ok(())) {
+        warn!(%error, "verified update is live; stale rollback backup cleanup failed");
+    }
+    Ok(ManagedUpdateResult { expected_sha256 })
+}
+
 /// Executes the newly-swapped binary through the smallest stable startup surface.
 /// If the loader, executable bit, CLI wiring, or embedded version is wrong, the
 /// updater rolls back atomically before reporting success.
@@ -229,6 +429,38 @@ mod tests {
                 last_known_epoch: 0,
             },
         )
+    }
+
+    #[test]
+    fn completed_update_receipt_is_atomic_replaceable_and_validated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = CompletedUpdateReceipt {
+            operation_id: "00000000-0000-4000-8000-000000000001".to_string(),
+            target_version: "1.2.3".to_string(),
+            binary_sha256: "ab".repeat(32),
+        };
+        persist_completed_update_receipt_at(dir.path(), &first).expect("persist first");
+        assert_eq!(
+            load_completed_update_receipt_at(dir.path()).expect("load first"),
+            Some(first)
+        );
+
+        let second = CompletedUpdateReceipt {
+            operation_id: "00000000-0000-4000-8000-000000000002".to_string(),
+            target_version: "1.2.4-beta.1".to_string(),
+            binary_sha256: "cd".repeat(32),
+        };
+        persist_completed_update_receipt_at(dir.path(), &second).expect("replace");
+        assert_eq!(
+            load_completed_update_receipt_at(dir.path()).expect("load replacement"),
+            Some(second)
+        );
+
+        std::fs::write(dir.path().join(COMPLETED_UPDATE_RECEIPT_FILE), b"{}").expect("corrupt");
+        assert_eq!(
+            load_completed_update_receipt_at(dir.path()).expect_err("invalid receipt"),
+            "update_receipt_invalid"
+        );
     }
 
     #[test]

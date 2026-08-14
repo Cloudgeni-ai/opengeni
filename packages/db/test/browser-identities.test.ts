@@ -23,6 +23,7 @@ import {
   prepareBrowserRevisionPublication,
   prepareBrowserSessionCreate,
   prepareBrowserSessionEnd,
+  updateBrowserIdentity,
   type BrowserStateArtifactCommitInput,
 } from "../src";
 
@@ -291,6 +292,93 @@ describe("immutable BrowserIdentity lineage", () => {
         identityId: first.identity.id,
       }),
     ).rejects.toBeInstanceOf(BrowserIdentityNotFoundError);
+  });
+
+  test("selects defaults and archives or restores identities with exact replay and CAS", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const created = await createBrowserIdentity(client.db, {
+      ...scope,
+      operationId: crypto.randomUUID(),
+      actorSubjectId: scope.subjectId,
+      name: "Reusable work",
+    });
+    expect(created.identity.version).toBe(1);
+    const browser = await activeBrowser(scope);
+    const first = await dispatchAndCommit(
+      scope,
+      publicationInput(scope, browser, created.identity.id, 0),
+    );
+    const secondInput = {
+      ...publicationInput(scope, browser, created.identity.id, 1),
+      advanceDefault: false,
+    };
+    const second = await dispatchAndCommit(scope, secondInput);
+    expect(second.outcome).toBe("saved_not_default");
+    expect(second.identity.version).toBe(3);
+
+    const selectOperationId = crypto.randomUUID();
+    const selected = await updateBrowserIdentity(client.db, {
+      ...scope,
+      identityId: created.identity.id,
+      actorSubjectId: scope.subjectId,
+      operationId: selectOperationId,
+      expectedVersion: second.identity.version,
+      defaultRevisionId: second.revision.id,
+    });
+    expect(selected).toMatchObject({
+      replayed: false,
+      identity: {
+        version: 4,
+        headGeneration: 2,
+        defaultRevisionId: second.revision.id,
+      },
+    });
+    expect(
+      await updateBrowserIdentity(client.db, {
+        ...scope,
+        identityId: created.identity.id,
+        actorSubjectId: scope.subjectId,
+        operationId: selectOperationId,
+        expectedVersion: second.identity.version,
+        defaultRevisionId: second.revision.id,
+      }),
+    ).toEqual({ ...selected, replayed: true });
+
+    const archived = await updateBrowserIdentity(client.db, {
+      ...scope,
+      identityId: created.identity.id,
+      actorSubjectId: scope.subjectId,
+      operationId: crypto.randomUUID(),
+      expectedVersion: selected.identity.version,
+      status: "archived",
+    });
+    expect(archived.identity).toMatchObject({ status: "archived", version: 5 });
+    expect((await listBrowserIdentities(client.db, scope)).identities).toEqual([]);
+    expect(
+      (await listBrowserIdentities(client.db, { ...scope, includeArchived: true })).identities,
+    ).toHaveLength(1);
+    await expect(
+      updateBrowserIdentity(client.db, {
+        ...scope,
+        identityId: created.identity.id,
+        actorSubjectId: scope.subjectId,
+        operationId: crypto.randomUUID(),
+        expectedVersion: selected.identity.version,
+        status: "active",
+      }),
+    ).rejects.toBeInstanceOf(BrowserIdentityConflictError);
+    const restored = await updateBrowserIdentity(client.db, {
+      ...scope,
+      identityId: created.identity.id,
+      actorSubjectId: scope.subjectId,
+      operationId: crypto.randomUUID(),
+      expectedVersion: archived.identity.version,
+      status: "active",
+    });
+    expect(restored.identity).toMatchObject({ status: "active", version: 6 });
+    expect(restored.identity.defaultRevisionId).toBe(second.revision.id);
+    expect(first.revision.id).not.toBe(second.revision.id);
   });
 
   test("freezes the current default revision across idempotent BrowserSession creation", async () => {

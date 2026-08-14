@@ -3,13 +3,14 @@ import { existsSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const workspaceId = "00000000-0000-4000-8000-000000000241";
 const requestId = "00000000-0000-4000-8000-000000000242";
 const defaultWorkspaceId = "00000000-0000-4000-8000-000000000243";
 const defaultAccountId = "00000000-0000-4000-8000-000000000244";
-const apiContractRevision = "2026-08-social-provider-tools-v1";
+const apiContractRevision = OPENGENI_API_CONTRACT_REVISION;
 const signedLink = "signed.slack.browser.bearer";
 
 type AccessUiState = {

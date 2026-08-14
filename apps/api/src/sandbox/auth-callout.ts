@@ -12,15 +12,15 @@
 //      resolveEnrollmentSigningSecret) — an invalid/expired/forged bearer is denied;
 //   3. confirms the enrollment is still ACTIVE in the DB at the exact credential
 //      generation (a revoked or re-enrolled machine denies an old bearer);
-//   4. signs a NATS user JWT granting pub/sub ONLY `agent.<ws>.>` + `_INBOX.>`
-//      (deny-all-else by an allow-list) and returns it inside a signed
+//   4. atomically claims the daemon instance named in CONNECT;
+//   5. signs a NATS user JWT granting pub/sub ONLY that exact process subtree +
+//      `_INBOX.>` (deny-all-else by an allow-list) and returns it inside a signed
 //      authorization-response JWT.
 //
-// That per-subject scope is the per-workspace ISOLATION: workspace A's agent is
-// cryptographically incapable of pub/sub on `agent.B.>`. nats-server enforces the
-// signed permission set; the boundary does not rely on subject naming alone (the M4
-// transport test proved the CODE constructs scoped subjects; THIS proves the SERVER
-// refuses cross-workspace access).
+// That exact scope is both the tenancy boundary and routing fence: workspace A
+// cannot reach B, and an old/duplicate process cannot subscribe to its successor's
+// work. nats-server enforces the signed permission set; the boundary does not rely
+// on naming alone.
 //
 // SECURITY (§18): the bearer value + the account signing seed are NEVER logged. A
 // validation failure → a DENIAL response (the server refuses the connection); a
@@ -34,23 +34,24 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { verifyEnrollmentBearer } from "@opengeni/contracts";
-import { getEnrollment, type Database } from "@opengeni/db";
+import { claimEnrollmentConnection, getEnrollment, type Database } from "@opengeni/db";
 import {
   createResponderConnection,
   decodeAuthRequest,
   mintAuthResponse,
   mintUserJwt,
+  parseAgentConnectionName,
   workspaceAgentPermissions,
   type ResponderConnection,
 } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import { observabilityEventLogger } from "../observability";
+import { AGENT_CONNECTION_LEASE_MS } from "./connection-authority";
 
 /** The NATS subject nats-server publishes authorization requests on (ADR-26). */
 export const AUTH_CALLOUT_SUBJECT = "$SYS.REQ.USER.AUTH";
 /** Keep live NATS credentials short-lived while never outliving the bearer. */
 export const NATS_USER_JWT_TTL_SECONDS = 5 * 60;
-
 export interface AuthCalloutDeps {
   db: Database;
   settings: Settings;
@@ -138,9 +139,33 @@ export async function handleAuthorizationRequest(
     return deny("enrollment credential generation mismatch");
   }
 
-  // GRANT: a user JWT scoped to ONLY this workspace's agent subtree + the reply
-  // inbox. This allow-list IS the per-workspace isolation boundary.
-  const permissions = workspaceAgentPermissions(claims.workspaceId);
+  const connectionInstanceId = parseAgentConnectionName(decoded.name);
+  if (!connectionInstanceId) {
+    return deny("missing or invalid agent connection instance");
+  }
+  const claim = await claimEnrollmentConnection(deps.db, {
+    workspaceId: claims.workspaceId,
+    enrollmentId: claims.enrollmentId,
+    credentialGeneration: claims.credentialGeneration,
+    connectionInstanceId,
+    leaseMs: AGENT_CONNECTION_LEASE_MS,
+  });
+  if (!claim.claimed) {
+    deps.observability?.warn?.("auth-callout: denied a duplicate live runner", {
+      workspaceId: claims.workspaceId,
+      agentId: claims.agentId,
+    });
+    return deny("another runner instance currently owns this enrollment");
+  }
+
+  // GRANT: the operational subject includes the exact claimed process instance.
+  // A previous socket may remain open until its short JWT expires, but no control
+  // request is routed to its old subject after a successor claims authority.
+  const permissions = workspaceAgentPermissions(
+    claims.workspaceId,
+    claims.agentId,
+    connectionInstanceId,
+  );
   const nowSeconds = Math.floor(Date.now() / 1000);
   const userJwt = mintUserJwt({
     userPublicKey: decoded.userNkey,
@@ -165,6 +190,7 @@ export async function handleAuthorizationRequest(
   deps.observability?.info?.("auth-callout: granted a workspace-scoped NATS credential", {
     workspaceId: claims.workspaceId,
     agentId: claims.agentId,
+    connectionGeneration: claim.connectionGeneration,
   });
   return Buffer.from(response, "utf8");
 }

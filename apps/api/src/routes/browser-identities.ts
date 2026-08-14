@@ -4,6 +4,7 @@ import {
   BrowserIdentityMutationResponse,
   BrowserRevisionListResponse,
   CreateBrowserIdentityRequest,
+  UpdateBrowserIdentityRequest,
 } from "@opengeni/contracts";
 import {
   BrowserIdentityConflictError,
@@ -13,6 +14,7 @@ import {
   getBrowserIdentity,
   listBrowserIdentities,
   listBrowserRevisions,
+  updateBrowserIdentity,
 } from "@opengeni/db";
 import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import type { Context, Hono } from "hono";
@@ -68,6 +70,28 @@ export function registerBrowserIdentityRoutes(app: Hono, deps: ApiRouteDeps): vo
             accountId: grant.accountId,
             workspaceId,
             identityId: uuidParam(context, "identityId"),
+          }),
+        ),
+      );
+    } catch (error) {
+      throw browserIdentityRouteError(error);
+    }
+  });
+
+  app.patch("/v1/workspaces/:workspaceId/browser-identities/:identityId", async (context) => {
+    const workspaceId = context.req.param("workspaceId") ?? "";
+    const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:control");
+    const identityId = uuidParam(context, "identityId");
+    const request = await parseJsonBody(context, UpdateBrowserIdentityRequest);
+    try {
+      return context.json(
+        BrowserIdentityMutationResponse.parse(
+          await updateBrowserIdentity(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            identityId,
+            actorSubjectId: grant.subjectId,
+            ...request,
           }),
         ),
       );

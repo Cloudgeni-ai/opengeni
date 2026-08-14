@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { StreamFrame, StreamOpen, StreamOpenAck } from "@opengeni/agent-proto";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import type {
   ComputerActionReceipt,
   ComputerFrame,
@@ -200,6 +201,20 @@ function relayAttachment(targetId: string): ComputerSessionAttachment {
   };
 }
 
+function rfbAttachment(targetId: string): ComputerSessionAttachment {
+  return {
+    computerSessionId: COMPUTER_SESSION_ID,
+    controllerGeneration: "controller-1",
+    targetId,
+    stream: {
+      kind: "direct_rfb",
+      url: "wss://computer.example.test/v1/rfb",
+      protocols: ["binary", "opengeni.computer.rfb.v1", "opengeni.auth.super-secret"],
+    },
+    expiresAt: new Date(Date.now() + 120_000).toISOString(),
+  };
+}
+
 class FakeComputerSocket {
   binaryType = "blob";
   readyState = 0;
@@ -364,9 +379,73 @@ describe("ComputerSession React resources", () => {
     });
     await hook.unmount();
   });
+
+  test("prefers a capturable macOS screen over a focused semantic-only application", async () => {
+    const applicationTarget = { ...target("app-1", "app"), focused: true };
+    const screenTarget = target("screen-1", "screen");
+    const observed: string[] = [];
+    const client = fakeClient({
+      getComputerSession: async () => ({
+        ...computerSession(),
+        platform: "macos",
+        adapter: "opengeni.macos.ax-sck.v1",
+      }),
+      listComputerTargets: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [applicationTarget, screenTarget],
+      }),
+      observeComputerTarget: async (_workspaceId, _computerSessionId, targetId) => {
+        observed.push(targetId);
+        return observation(targetId === screenTarget.id ? screenTarget : applicationTarget);
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComputerSession({
+          client,
+          workspaceId: WORKSPACE_ID,
+          computerSessionId: COMPUTER_SESSION_ID,
+          pollIntervalMs: 60_000,
+        }),
+      undefined,
+    );
+    await flush(20);
+
+    expect(hook.result.current.selectedTarget?.id).toBe(screenTarget.id);
+    expect(observed).toEqual([screenTarget.id]);
+    await hook.unmount();
+  });
 });
 
 describe("ComputerSession frame stream", () => {
+  test("hands a direct RFB attachment to the viewer without opening a frame socket", async () => {
+    let sockets = 0;
+    const client = fakeClient({
+      attachComputerSession: async (_workspaceId, _computerSessionId, request) =>
+        rfbAttachment(request.targetId),
+    });
+    const hook = await renderHook(
+      () =>
+        useComputerFrameStream({
+          client,
+          workspaceId: WORKSPACE_ID,
+          computerSessionId: COMPUTER_SESSION_ID,
+          targetId: "screen-1",
+          webSocketFactory: () => {
+            sockets += 1;
+            throw new Error("direct RFB must not use the frame WebSocket client");
+          },
+        }),
+      undefined,
+    );
+    await flush(20);
+    expect(hook.result.current.state).toBe("live");
+    expect(hook.result.current.attachment?.stream.kind).toBe("direct_rfb");
+    expect(sockets).toBe(0);
+    await hook.unmount();
+  });
+
   test("keeps grants out of URLs, authenticates frames, and clears on target switch", async () => {
     const sockets: FakeComputerSocket[] = [];
     const client = fakeClient({
@@ -454,6 +533,47 @@ describe("ComputerSession frame stream", () => {
     expect(hook.result.current.frame?.sequence).toBe(1);
     await hook.unmount();
   });
+
+  test("cannot publish a delayed frame from a detached socket after target switch", async () => {
+    const sockets: FakeComputerSocket[] = [];
+    let release!: (value: ArrayBuffer) => void;
+    const delayed = new (class extends Blob {
+      override arrayBuffer(): Promise<ArrayBuffer> {
+        return new Promise((resolve) => {
+          release = resolve;
+        });
+      }
+    })();
+    const client = fakeClient({
+      attachComputerSession: async (_workspaceId, _computerSessionId, request) =>
+        attachment(request.targetId),
+    });
+    const hook = await renderHook(
+      (props: { targetId: string }) =>
+        useComputerFrameStream({
+          client,
+          workspaceId: WORKSPACE_ID,
+          computerSessionId: COMPUTER_SESSION_ID,
+          targetId: props.targetId,
+          webSocketFactory: (url, protocols) => {
+            const socket = new FakeComputerSocket(url, protocols);
+            sockets.push(socket);
+            return socket as unknown as ComputerFrameWebSocket;
+          },
+        }),
+      { targetId: "window-1" },
+    );
+    await flush(10);
+    await dispatch(sockets[0]!, "open");
+    await dispatch(sockets[0]!, "message", { data: delayed });
+    await hook.rerender({ targetId: "screen-1" });
+    await flush(10);
+    release(frameMessage("window-1", 9).buffer as ArrayBuffer);
+    await flush(20);
+    expect(hook.result.current.frame).toBeNull();
+    expect(sockets[0]?.closed).toBe(true);
+    await hook.unmount();
+  });
 });
 
 describe("ComputerViewer", () => {
@@ -471,6 +591,85 @@ describe("ComputerViewer", () => {
     expect(computerKey(event("Control", { ctrlKey: true }))).toBeNull();
     expect(computerKey(event("Alt", { altKey: true }))).toBeNull();
     expect(computerKey(event("a", { metaKey: true }))).toBe("Meta+a");
+  });
+
+  test("keeps semantic-only application targets out of the frame attachment path", async () => {
+    const applicationTarget = { ...target("app-1", "app"), focused: true };
+    let attachmentCalls = 0;
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
+      getComputerSession: async () => ({
+        ...computerSession(),
+        platform: "macos",
+        adapter: "opengeni.macos.ax-sck.v1",
+      }),
+      listComputerTargets: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [applicationTarget],
+      }),
+      observeComputerTarget: async () => observation(applicationTarget),
+      attachComputerSession: async (_workspaceId, _computerSessionId, request) => {
+        attachmentCalls += 1;
+        return attachment(request.targetId);
+      },
+    });
+    const rendered = await renderComponent(
+      <ComputerViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(40);
+
+    expect(attachmentCalls).toBe(0);
+    await rendered.unmount();
+  });
+
+  test("renders a typed connected-machine startup failure with truthful retry copy", async () => {
+    const current = computerSession();
+    const currentTarget = target();
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [current] }),
+      getComputerSession: async () => current,
+      listComputerTargets: async () => ({
+        computerSessionId: current.id,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeComputerTarget: async () => observation(currentTarget),
+      attachComputerSession: async () => {
+        throw new OpenGeniApiError(
+          504,
+          JSON.stringify({
+            error: {
+              status: 504,
+              code: "upstream_unavailable",
+              message:
+                "The connected machine did not finish opening the computer live view in time.",
+              retryable: true,
+              outcomeUnknown: true,
+              requestId: "outer-computer-request",
+              details: {
+                interactionLayer: "connected_machine",
+                interactionSurface: "computer",
+                controlFailureCode: "timeout",
+                controlRequestId: "inner-computer-request",
+              },
+            },
+          }),
+          { mutation: true },
+        );
+      },
+    });
+    const rendered = await renderComponent(
+      <ComputerViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(40);
+
+    expect(rendered.container.textContent).toContain("Live view disconnected");
+    expect(rendered.container.textContent).toContain(
+      "The connected machine did not finish opening the computer live view in time.",
+    );
+    expect(rendered.container.textContent).toContain("Reconnect");
+    await rendered.unmount();
   });
 
   test("pins an exact ComputerSession requested by Browser navigation", async () => {
@@ -616,6 +815,69 @@ describe("ComputerViewer", () => {
     expect(actions[0]).toMatchObject({
       action: { type: "semantic", locator: { kind: "ref", ref: "e1" }, action: "invoke" },
     });
+    await rendered.unmount();
+  });
+
+  test("verifies the native clipboard before issuing a paste keystroke", async () => {
+    const currentTarget = target();
+    const actions: Array<ComputerActionReceipt["state"] | string> = [];
+    let clipboardText: string | null = null;
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
+      getComputerSession: async () => computerSession(),
+      listComputerTargets: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeComputerTarget: async () => observation(currentTarget),
+      attachComputerSession: async (_workspaceId, _computerSessionId, request) =>
+        attachment(request.targetId),
+      readComputerClipboard: async () => {
+        actions.push("read");
+        return {
+          computerSessionId: COMPUTER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          text: clipboardText,
+          truncated: false,
+          observedAt: NOW,
+        };
+      },
+      actInComputer: async (_workspaceId, _computerSessionId, request) => {
+        const action = request.action;
+        if (action.type === "clipboard") {
+          actions.push(action.operation);
+          if (action.operation === "write" && action.text !== undefined) {
+            clipboardText = action.text;
+          }
+        }
+        return receipt(observation(currentTarget), request.operationId);
+      },
+    });
+    const rendered = await renderComponent(
+      <ComputerViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeComputerSocket(url, protocols) as unknown as ComputerFrameWebSocket
+        }
+      />,
+    );
+    await flush(40);
+    const keyboard = rendered.container.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='Computer keyboard input']",
+    );
+    expect(keyboard).not.toBeNull();
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", {
+      value: { getData: (type: string) => (type === "text/plain" ? "exact native paste" : "") },
+    });
+    await actRun(() => keyboard!.dispatchEvent(paste));
+    await flush(20);
+
+    expect(paste.defaultPrevented).toBe(true);
+    expect(actions).toEqual(["write", "read", "paste"]);
     await rendered.unmount();
   });
 });

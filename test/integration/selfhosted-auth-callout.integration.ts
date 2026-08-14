@@ -6,12 +6,13 @@
 // nats-server is started with `auth_callout` pointing at our in-process responder.
 // When a client connects presenting an `oge_` enrollment bearer as the connect
 // auth-token, nats-server issues an authorization request on $SYS.REQ.USER.AUTH; the
-// responder validates the bearer (verifyEnrollmentBearer) + confirms the enrollment
-// is active (DB getEnrollment) and returns a SIGNED user JWT scoping the connection
-// to pub/sub ONLY `agent.<ws>.>` (+ `_INBOX.>`).
+// responder validates the bearer, confirms the enrollment is active, atomically
+// claims the daemon generation, and returns a SIGNED user JWT scoped to that exact
+// `agent.<ws>.<id>.connection.<instance>.>` subtree (+ `_INBOX.>`).
 //
 // FUNCTIONAL: an agent with a valid bearer for workspace W connects and can pub/sub
-//   `agent.W.<id>.rpc` + a control-plane request/reply round-trips (the M4 path).
+//   `agent.W.<id>.connection.<instance>.rpc` + a control-plane request/reply
+//   round-trips (the M4 path).
 // ISOLATION SMOKE (the load-bearing security assertion):
 //   - an agent authenticated for workspace A is DENIED pub/sub on `agent.B.>`;
 //   - an invalid/revoked bearer is DENIED connection entirely.
@@ -56,6 +57,12 @@ const WS_A = "11111111-1111-4111-8111-111111111111";
 const WS_B = "22222222-2222-4222-8222-222222222222";
 const AGENT_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const AGENT_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const INSTANCE_A = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const INSTANCE_B = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+
+function connectionName(instanceId: string): string {
+  return `opengeni-agent/connection/${instanceId}`;
+}
 
 /** Mint an `oge_` enrollment bearer (the agent's NATS connect auth-token). */
 async function bearerFor(
@@ -87,6 +94,7 @@ const activeEnrollments = new Map<string, number>([
   [`${WS_A}:${AGENT_A}`, 1],
   [`${WS_B}:${AGENT_B}`, 1],
 ]);
+const liveConnectionClaims = new Map<string, string>();
 
 import { mock } from "bun:test";
 mock.module("@opengeni/db", () => ({
@@ -96,6 +104,25 @@ mock.module("@opengeni/db", () => ({
       return { id: enrollmentId, workspaceId, status: "active", credentialGeneration };
     }
     return null;
+  },
+  claimEnrollmentConnection: async (
+    _db: unknown,
+    input: {
+      workspaceId: string;
+      enrollmentId: string;
+      connectionInstanceId: string;
+    },
+  ) => {
+    const key = `${input.workspaceId}:${input.enrollmentId}`;
+    const current = liveConnectionClaims.get(key);
+    const claimed = current === undefined || current === input.connectionInstanceId;
+    if (current === undefined) liveConnectionClaims.set(key, input.connectionInstanceId);
+    return {
+      claimed,
+      connectionInstanceId: current ?? input.connectionInstanceId,
+      connectionGeneration: 1,
+      connectionLeaseExpiresAt: new Date(Date.now() + 20_000).toISOString(),
+    };
   },
 }));
 
@@ -203,7 +230,7 @@ async function startNatsWithCallout(accountPublicKey: string): Promise<RunningNa
   //   - agents    — NOT in auth_users → delegated to the callout, which validates the
   //                 bearer and mints a JWT placing them into APP (the user JWT `aud`)
   //                 scoped to `agent.<ws>.>` + `_INBOX.>`.
-  // All three share APP so `agent.<ws>.<id>.rpc` request/reply routes; the
+  // All three share APP so exact process request/reply routes; the
   // per-workspace isolation is carried entirely by each agent's signed subject
   // permissions.
   const config = `
@@ -333,13 +360,14 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
     await nats?.stop().catch(() => undefined);
   }, 30_000);
 
-  // (1) FUNCTIONAL: a valid bearer for workspace A connects + can pub/sub
-  //     agent.A.<id>.rpc, and a control-plane request/reply round-trips.
-  test("(1) a valid bearer connects + round-trips agent.<ws>.<id>.rpc request/reply", async () => {
+  // (1) FUNCTIONAL: a valid bearer for workspace A connects + can pub/sub its
+  //     exact claimed process subject, and request/reply round-trips.
+  test("(1) a valid bearer connects + round-trips its exact process subject", async () => {
     const bearer = await bearerFor(WS_A, AGENT_A);
     const agent: NatsConnection = await connect({
       servers: nats.url,
       token: bearer,
+      name: connectionName(INSTANCE_A),
     });
     // The control plane connects as the privileged `auth` user (account-default
     // permissions — it may request agent.>).
@@ -352,8 +380,8 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
       pass: "control",
     });
     try {
-      const subject = `agent.${WS_A}.${AGENT_A}.rpc`;
-      // The agent subscribes to its OWN subject (its subscription IS the registry).
+      const subject = `agent.${WS_A}.${AGENT_A}.connection.${INSTANCE_A}.rpc`;
+      // The agent subscribes only to its exact claimed generation.
       const sub = agent.subscribe(subject);
       void (async () => {
         for await (const msg of sub) {
@@ -393,6 +421,7 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
     const agent: NatsConnection = await connect({
       servers: nats.url,
       token: bearer,
+      name: connectionName(INSTANCE_A),
     });
     try {
       // PUBLISH to B's subject → a permissions violation (async error on the conn).
@@ -405,7 +434,7 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
         }
       })();
 
-      const foreignSubject = `agent.${WS_B}.${AGENT_B}.rpc`;
+      const foreignSubject = `agent.${WS_B}.${AGENT_B}.connection.${INSTANCE_B}.rpc`;
 
       // SUBSCRIBE to B's subtree → the server sends a permissions-violation error.
       let subErr: unknown;
@@ -453,6 +482,7 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
       const c = await connect({
         servers: nats.url,
         token: "oge_not.a.valid.bearer",
+        name: connectionName(INSTANCE_A),
         timeout: 5_000,
       });
       await c.close();
@@ -475,6 +505,7 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
       const c = await connect({
         servers: nats.url,
         token: bearer,
+        name: connectionName(INSTANCE_A),
         timeout: 5_000,
       });
       await c.close();
@@ -489,12 +520,50 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
     const staleBearer = await bearerFor(WS_A, AGENT_A, 2);
     let err: unknown;
     try {
-      const c = await connect({ servers: nats.url, token: staleBearer, timeout: 5_000 });
+      const c = await connect({
+        servers: nats.url,
+        token: staleBearer,
+        name: connectionName(INSTANCE_A),
+        timeout: 5_000,
+      });
       await c.close();
     } catch (e) {
       err = e;
     }
     expect(err).toBeDefined();
     expect(/auth|denied|violation|generation|timeout/i.test(String(err))).toBe(true);
+  }, 30_000);
+
+  test("(6) AUTHORITY: two lanes from one daemon connect; a competing daemon is denied", async () => {
+    const bearer = await bearerFor(WS_B, AGENT_B);
+    const control = await connect({
+      servers: nats.url,
+      token: bearer,
+      name: connectionName(INSTANCE_B),
+      timeout: 5_000,
+    });
+    const bulk = await connect({
+      servers: nats.url,
+      token: bearer,
+      name: connectionName(INSTANCE_B),
+      timeout: 5_000,
+    });
+    let competingError: unknown;
+    try {
+      const competing = await connect({
+        servers: nats.url,
+        token: bearer,
+        name: connectionName(INSTANCE_A),
+        timeout: 5_000,
+      });
+      await competing.close();
+    } catch (error) {
+      competingError = error;
+    } finally {
+      await control.close();
+      await bulk.close();
+    }
+    expect(competingError).toBeDefined();
+    expect(/auth|denied|violation|another runner|timeout/i.test(String(competingError))).toBe(true);
   }, 30_000);
 });

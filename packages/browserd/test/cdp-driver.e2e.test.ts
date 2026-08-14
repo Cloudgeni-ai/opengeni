@@ -147,6 +147,12 @@ e2e(
         message: "Name?",
         defaultPrompt: "Ada",
       });
+      const targetWhilePrompting = await driver.target(asking.target.id);
+      expect(targetWhilePrompting).toMatchObject({
+        id: asking.target.id,
+        targetGeneration: asking.target.targetGeneration,
+        documentGeneration: asking.target.documentGeneration,
+      });
       const answered = await driver.dispatch(
         command(asking, {
           type: "handle_dialog",
@@ -201,6 +207,17 @@ e2e(
           receipts.push(receipt.state);
         },
       });
+      const unconfirmedFill = await controller.run(
+        command(selected, {
+          type: "fill",
+          locator: { kind: "label", text: "Rejecting editor" },
+          value: "silently ignored",
+        }),
+      );
+      expect(unconfirmedFill.state).toBe("outcome_unknown");
+      expect(unconfirmedFill.error?.code).toBe("outcome_unknown");
+      expect(receipts).toEqual(["prepared", "dispatched", "outcome_unknown"]);
+      receipts.length = 0;
       const operation = command(selected, {
         type: "double_click",
         locator: { kind: "role", role: "button", name: "Increment 2" },
@@ -246,8 +263,46 @@ e2e(
       expect(names(secondDone)).toContain("Done Parallel B");
       expect(barrierArrivals).toBe(2);
 
+      // A BrowserSession has no daemon-global "active tab" media authority.
+      // Independent target streams stay live at the same time and continue to
+      // describe their own target while both targets mutate concurrently.
+      const firstFrames = await driver.subscribeFrames(firstDone.target.id, {
+        format: "jpeg",
+        maxWidth: 640,
+        maxHeight: 480,
+      });
+      const secondFrames = await driver.subscribeFrames(secondDone.target.id, {
+        format: "jpeg",
+        maxWidth: 640,
+        maxHeight: 480,
+      });
+      const [firstSeed, secondSeed] = await Promise.all([
+        frameWithin(firstFrames[Symbol.asyncIterator](), 5_000),
+        frameWithin(secondFrames[Symbol.asyncIterator](), 5_000),
+      ]);
+      expect(firstSeed.targetId).toBe(firstDone.target.id);
+      expect(secondSeed.targetId).toBe(secondDone.target.id);
+
+      const [firstChanged, secondChanged] = await Promise.all([
+        driver.dispatch(command(firstDone, { type: "navigate", url: fixture("Stream A") })),
+        driver.dispatch(command(secondDone, { type: "navigate", url: fixture("Stream B") })),
+      ]);
+      const [firstUpdatedFrame, secondUpdatedFrame] = await Promise.all([
+        frameAfter(firstFrames[Symbol.asyncIterator](), firstSeed.sequence, 5_000),
+        frameAfter(secondFrames[Symbol.asyncIterator](), secondSeed.sequence, 5_000),
+      ]);
+      expect(firstUpdatedFrame).toMatchObject({
+        targetId: firstChanged.target.id,
+        documentGeneration: firstChanged.target.documentGeneration,
+      });
+      expect(secondUpdatedFrame).toMatchObject({
+        targetId: secondChanged.target.id,
+        documentGeneration: secondChanged.target.documentGeneration,
+      });
+      await Promise.all([firstFrames.close(), secondFrames.close()]);
+
       const replacement = await driver.dispatch(
-        command(firstDone, { type: "navigate", url: fixture("Replacement") }),
+        command(firstChanged, { type: "navigate", url: fixture("Replacement") }),
       );
       expect(replacement.target.title).toBe("Replacement");
       const stale = await controller.run(
@@ -336,6 +391,7 @@ function fixture(title: string): string {
       <form onsubmit="event.preventDefault(); output.textContent='Submitted ' + message.value">
         <label>Message <input id="message" placeholder="Say something"></label>
       </form>
+      <label>Rejecting editor <input oninput="this.value=''" /></label>
       <label>Enable feature <input type="checkbox"></label>
       <label>Priority
         <select onchange="selection.textContent='Selected ' + this.value">
@@ -408,4 +464,17 @@ async function frameWithin(
   ]);
   if (result.done) throw new Error("browser frame stream ended early");
   return result.value;
+}
+
+async function frameAfter(
+  frames: AsyncIterator<import("../src").BrowserImageFrame>,
+  sequence: number,
+  timeoutMs: number,
+): Promise<import("../src").BrowserImageFrame> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const frame = await frameWithin(frames, deadline - Date.now());
+    if (frame.sequence > sequence) return frame;
+  }
+  throw new Error("browser frame did not advance");
 }

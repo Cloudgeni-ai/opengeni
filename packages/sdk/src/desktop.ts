@@ -75,6 +75,9 @@ export interface DesktopRfbLike {
   clipboardPasteFrom?(text: string): void;
   /** Send one RFB key event. A missing `down` emits a complete key press. */
   sendKey?(keysym: number, code: string, down?: boolean): void;
+  /** Focus or release the RFB keyboard sink without reconnecting. */
+  focus?(options?: FocusOptions): void;
+  blur?(): void;
   disconnect(): void;
 }
 

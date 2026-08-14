@@ -96,7 +96,10 @@ export type {
   CreateCodexRealtimeControllerOptions,
   RealtimeControllerTransportStarter,
 } from "./codex-realtime-controller";
-export { createGatewayRealtimeTransportStarter } from "./gateway-realtime-transport";
+export {
+  createGatewayRealtimeTransportStarter,
+  createXaiSubscriptionRealtimeTransportStarter,
+} from "./gateway-realtime-transport";
 export { projectSessionRealtimeLifecycle } from "./codex-realtime-lifecycle";
 export type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecycle";
 // Provider-neutral Browser/Computer resource client + bounded frame protocol.
@@ -132,6 +135,12 @@ export { streamWorkspaceControlEvents } from "./workspace-control-stream";
 export type { WorkspaceControlStreamTransport } from "./workspace-control-stream";
 export { streamWorkspaceInteractionRevisions } from "./interaction-revision-stream";
 export type { WorkspaceInteractionRevisionStreamTransport } from "./interaction-revision-stream";
+export { parseWorkspaceLiveEvent, streamWorkspaceLiveEvents } from "./workspace-live-stream";
+export type {
+  WorkspaceLiveEvent,
+  WorkspaceLiveStreamOptions,
+  WorkspaceLiveStreamTransport,
+} from "./workspace-live-stream";
 export type {
   CreateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
@@ -319,10 +328,15 @@ export type {
   BillingEntitlementsResponse,
   BillingMode,
   BillingSummary,
+  ListManagedOrganizationMembershipsResponse,
+  ManagedOrganizationMembership,
   BillingUsageResponse,
   InsightsRange,
   InsightsBillingPath,
   InsightsPricingSource,
+  ModelContextContributionSource,
+  InsightsPromptContributionRow,
+  InsightsPromptContributions,
   InsightsModelUsageRow,
   InsightsModelCallRow,
   InsightsSeriesPoint,
@@ -884,6 +898,12 @@ export type {
   MetricSample,
   MachineState,
   MachineKind,
+  MachineConnectionAuthority,
+  MachineRuntimeCapabilities,
+  MachineUpdateStatus,
+  MachineUpdateState,
+  MachineRuntime,
+  UpdateMachineAgentResponse,
   MachineView,
   MachinesResponse,
   MachineMetricsSeriesResponse,

@@ -614,3 +614,9 @@ packages. `test/contract-parity.test.ts` pins them to `@opengeni/contracts`,
 so contract drift fails the repo gate instead of shipping. `SessionEvent.type`
 is an open union: unknown event types from newer servers flow through instead
 of breaking older SDK consumers.
+
+Hosts, test doubles, and same-origin proxies must import
+`OPENGENI_API_CONTRACT_REVISION` from `@opengeni/sdk` when constructing a client
+configuration or contract header. Do not copy its string value: the revision is
+an executable compatibility boundary, and `getClientConfig()` intentionally
+fails closed when server and SDK revisions differ.

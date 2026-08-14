@@ -29,6 +29,7 @@ import {
   createEnrollment,
   createSandbox,
   createSession,
+  claimEnrollmentConnection,
   readActiveSandbox,
   type Database,
   type DbClient,
@@ -48,6 +49,7 @@ let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
+const CONNECTION_INSTANCE_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 const settings = testSettings({
   productAccessMode: "managed",
@@ -76,69 +78,75 @@ function busWithAgent(opts: {
   }
   const files = new Map<string, Uint8Array>();
   const enc = new TextEncoder();
-  bus.subscribeRequests(subjectFor(opts.workspaceId, opts.agentId), (payload) => {
-    const req = ControlRequest.decode(payload);
-    const op = req.op;
-    let res: ControlResponse;
-    if (op?.$case === "ping") {
-      res = {
-        requestId: req.requestId,
-        result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
-      };
-    } else if (op?.$case === "exec") {
-      const joined = op.exec.command.join(" ");
-      const stdout = /HOSTNAME|hostname/.test(joined) ? (opts.hostname ?? "the-machine") : joined;
-      res = {
-        requestId: req.requestId,
-        result: {
-          $case: "exec",
-          exec: {
-            exitCode: 0,
-            stdout: enc.encode(`${stdout}\n`),
-            stderr: new Uint8Array(0),
-            timedOut: false,
-            durationMs: "1",
+  bus.subscribeRequests(
+    subjectFor(opts.workspaceId, opts.agentId, CONNECTION_INSTANCE_ID),
+    (payload) => {
+      const req = ControlRequest.decode(payload);
+      const op = req.op;
+      let res: ControlResponse;
+      if (op?.$case === "ping") {
+        res = {
+          requestId: req.requestId,
+          result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
+        };
+      } else if (op?.$case === "exec") {
+        const joined = op.exec.command.join(" ");
+        const stdout = /HOSTNAME|hostname/.test(joined) ? (opts.hostname ?? "the-machine") : joined;
+        res = {
+          requestId: req.requestId,
+          result: {
+            $case: "exec",
+            exec: {
+              exitCode: 0,
+              stdout: enc.encode(`${stdout}\n`),
+              stderr: new Uint8Array(0),
+              timedOut: false,
+              durationMs: "1",
+            },
           },
-        },
-      };
-    } else if (op?.$case === "fsWrite") {
-      files.set(op.fsWrite.path, op.fsWrite.content);
-      res = {
-        requestId: req.requestId,
-        result: { $case: "fsWrite", fsWrite: { bytesWritten: String(op.fsWrite.content.length) } },
-      };
-    } else if (op?.$case === "fsRead") {
-      const bytes = files.get(op.fsRead.path);
-      res = bytes
-        ? {
-            requestId: req.requestId,
-            result: {
-              $case: "fsRead",
-              fsRead: { content: bytes, totalSize: String(bytes.length) },
-            },
-          }
-        : {
-            requestId: req.requestId,
-            error: {
-              code: ErrorCode.ERROR_CODE_NOT_FOUND,
-              message: "no such file",
-              retryable: false,
-              detail: {},
-            },
-          };
-    } else {
-      res = {
-        requestId: req.requestId,
-        error: {
-          code: ErrorCode.ERROR_CODE_UNSUPPORTED,
-          message: "unsupported",
-          retryable: false,
-          detail: {},
-        },
-      };
-    }
-    return ControlResponse.encode(res).finish();
-  });
+        };
+      } else if (op?.$case === "fsWrite") {
+        files.set(op.fsWrite.path, op.fsWrite.content);
+        res = {
+          requestId: req.requestId,
+          result: {
+            $case: "fsWrite",
+            fsWrite: { bytesWritten: String(op.fsWrite.content.length) },
+          },
+        };
+      } else if (op?.$case === "fsRead") {
+        const bytes = files.get(op.fsRead.path);
+        res = bytes
+          ? {
+              requestId: req.requestId,
+              result: {
+                $case: "fsRead",
+                fsRead: { content: bytes, totalSize: String(bytes.length) },
+              },
+            }
+          : {
+              requestId: req.requestId,
+              error: {
+                code: ErrorCode.ERROR_CODE_NOT_FOUND,
+                message: "no such file",
+                retryable: false,
+                detail: {},
+              },
+            };
+      } else {
+        res = {
+          requestId: req.requestId,
+          error: {
+            code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+            message: "unsupported",
+            retryable: false,
+            detail: {},
+          },
+        };
+      }
+      return ControlResponse.encode(res).finish();
+    },
+  );
   return bus;
 }
 
@@ -178,6 +186,14 @@ async function seedFleet(
     os: "linux",
     arch: "x86_64",
   });
+  const connection = await claimEnrollmentConnection(db, {
+    workspaceId,
+    enrollmentId: enrollment.id,
+    credentialGeneration: enrollment.credentialGeneration,
+    connectionInstanceId: CONNECTION_INSTANCE_ID,
+    leaseMs: 60_000,
+  });
+  expect(connection.claimed).toBe(true);
   // Stamp lastSeenAt recent so a probe-miss would be "reconnecting", but our online
   // responder makes the probe succeed → online.
   await admin`update enrollments set last_seen_at = now() where id = ${enrollment.id}`;

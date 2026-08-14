@@ -9,6 +9,7 @@ import {
   BrowserSessionCapabilities,
   InteractionError,
   PublishBrowserRevisionResponse,
+  UpdateBrowserIdentityRequest,
   type BrowserIdentity as BrowserIdentityValue,
   type BrowserIdentityListResponse as BrowserIdentityListResponseValue,
   type BrowserIdentityMutationResponse as BrowserIdentityMutationResponseValue,
@@ -17,6 +18,7 @@ import {
   type BrowserRevisionMaterialization as BrowserRevisionMaterializationValue,
   type InteractionError as InteractionErrorValue,
   type PublishBrowserRevisionResponse as PublishBrowserRevisionResponseValue,
+  type UpdateBrowserIdentityRequest as UpdateBrowserIdentityRequestValue,
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { type Database, withRlsContext } from "./database";
@@ -40,6 +42,7 @@ type BrowserRevisionComponentRow = typeof schema.browserRevisionComponents.$infe
 type BrowserStateArtifactRow = typeof schema.browserStateArtifacts.$inferSelect;
 type BrowserSessionRow = typeof schema.browserSessions.$inferSelect;
 type InteractionOperationRow = typeof schema.interactionOperations.$inferSelect;
+type InteractionResourceOperationRow = typeof schema.interactionResourceOperations.$inferSelect;
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const MAX_COMPONENTS = 16;
@@ -118,6 +121,7 @@ function identityFromRow(row: BrowserIdentityRow): BrowserIdentityValue {
     workspaceId: row.workspaceId,
     name: row.name,
     status: row.status,
+    version: safeInteger(row.version, "BrowserIdentity version"),
     defaultRevisionId: row.defaultRevisionId,
     headGeneration: safeInteger(row.headGeneration, "BrowserIdentity head generation"),
     revisionCount: safeInteger(row.revisionCount, "BrowserIdentity revision count"),
@@ -392,6 +396,160 @@ export async function createBrowserIdentity(
       throw error;
     }
   });
+}
+
+export async function updateBrowserIdentity(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    identityId: string;
+    actorSubjectId: string;
+  } & UpdateBrowserIdentityRequestValue,
+): Promise<BrowserIdentityMutationResponseValue> {
+  const request = UpdateBrowserIdentityRequest.parse({
+    operationId: input.operationId,
+    expectedVersion: input.expectedVersion,
+    ...(input.name !== undefined ? { name: input.name } : {}),
+    ...(input.status !== undefined ? { status: input.status } : {}),
+    ...(input.defaultRevisionId !== undefined
+      ? { defaultRevisionId: input.defaultRevisionId }
+      : {}),
+  });
+  const { operationId: _operationId, ...digestRequest } = request;
+  const requestDigest = createHash("sha256")
+    .update(
+      JSON.stringify({
+        version: 1,
+        identityId: input.identityId,
+        request: digestRequest,
+        actorSubjectId: input.actorSubjectId,
+      }),
+    )
+    .digest("hex");
+
+  try {
+    return await withRlsContext(
+      db,
+      input,
+      async (scopedDb) =>
+        await scopedDb.transaction(async (txRaw) => {
+          const tx = txRaw as unknown as Database;
+          await lockBrowserIdentityMutationOperation(tx, request.operationId);
+          const existing = await loadBrowserIdentityMutationOperation(
+            tx,
+            input.workspaceId,
+            request.operationId,
+          );
+          if (existing) {
+            if (
+              existing.resourceKind !== "browser_identity" ||
+              existing.resourceId !== input.identityId ||
+              existing.kind !== "update" ||
+              existing.requestDigest !== requestDigest ||
+              existing.actorSubjectId !== input.actorSubjectId
+            ) {
+              throw new BrowserIdentityConflictError(
+                "Operation id is already bound to another browser identity request",
+              );
+            }
+            if (existing.state !== "completed" || !existing.result || !existing.resultVersion) {
+              throw new BrowserIdentityStateError("Browser identity operation is not complete");
+            }
+            const response = BrowserIdentityMutationResponse.parse(existing.result);
+            return { ...response, replayed: true };
+          }
+
+          await lockBrowserIdentity(tx, input.workspaceId, input.identityId);
+          const current = await loadIdentity(tx, input.workspaceId, input.identityId);
+          if (!current) throw new BrowserIdentityNotFoundError("BrowserIdentity not found");
+          if (current.version !== request.expectedVersion) {
+            throw new BrowserIdentityConflictError("BrowserIdentity changed before this update");
+          }
+
+          let defaultRevisionChanged = false;
+          if (request.defaultRevisionId !== undefined) {
+            if ((request.status ?? current.status) !== "active") {
+              throw new BrowserIdentityStateError(
+                "An archived browser profile cannot select a default version",
+              );
+            }
+            const [revision] = await tx
+              .select({ id: schema.browserRevisions.id })
+              .from(schema.browserRevisions)
+              .where(
+                and(
+                  eq(schema.browserRevisions.workspaceId, input.workspaceId),
+                  eq(schema.browserRevisions.identityId, input.identityId),
+                  eq(schema.browserRevisions.id, request.defaultRevisionId),
+                ),
+              )
+              .limit(1);
+            if (!revision) {
+              throw new BrowserIdentityStateError(
+                "Default browser version does not belong to this profile",
+              );
+            }
+            defaultRevisionChanged = request.defaultRevisionId !== current.defaultRevisionId;
+          }
+
+          const now = new Date();
+          const [row] = await tx
+            .update(schema.browserIdentities)
+            .set({
+              name: request.name ?? current.name,
+              status: request.status ?? current.status,
+              ...(defaultRevisionChanged
+                ? {
+                    defaultRevisionId: request.defaultRevisionId,
+                    headGeneration: safeInteger(
+                      current.headGeneration + 1,
+                      "next BrowserIdentity head generation",
+                    ),
+                  }
+                : {}),
+              version: safeInteger(current.version + 1, "next BrowserIdentity version"),
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.browserIdentities.workspaceId, input.workspaceId),
+                eq(schema.browserIdentities.id, input.identityId),
+                eq(schema.browserIdentities.version, request.expectedVersion),
+              ),
+            )
+            .returning();
+          if (!row) throw new BrowserIdentityConflictError("BrowserIdentity update lost its fence");
+
+          const response = BrowserIdentityMutationResponse.parse({
+            identity: identityFromRow(row),
+            operationId: request.operationId,
+            replayed: false,
+          });
+          await tx.insert(schema.interactionResourceOperations).values({
+            operationId: request.operationId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            resourceKind: "browser_identity",
+            resourceId: input.identityId,
+            kind: "update",
+            requestDigest,
+            resultVersion: row.version,
+            result: response,
+            actorSubjectId: input.actorSubjectId,
+            state: "completed",
+            settledAt: now,
+          });
+          await advanceWorkspaceInteractionRevision(tx, input.accountId, input.workspaceId);
+          return response;
+        }),
+    );
+  } catch (error) {
+    if (postgresConstraint(error) === "browser_identities_workspace_active_name_uq") {
+      throw new BrowserIdentityConflictError("An active browser profile already uses this name");
+    }
+    throw error;
+  }
 }
 
 export function browserRevisionPublicationRequestDigest(input: {
@@ -862,6 +1020,7 @@ export async function commitBrowserRevisionPublication(
           .update(schema.browserIdentities)
           .set({
             revisionCount: ordinal,
+            version: safeInteger(identity.version + 1, "next BrowserIdentity version"),
             ...(defaultAdvanced
               ? { defaultRevisionId: revisionId, headGeneration: resultHeadGeneration }
               : {}),
@@ -1176,6 +1335,33 @@ async function lockBrowserIdentity(db: Database, workspaceId: string, identityId
     where workspace_id = ${workspaceId} and id = ${identityId}
     for update
   `);
+}
+
+async function lockBrowserIdentityMutationOperation(
+  db: Database,
+  operationId: string,
+): Promise<void> {
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`interaction-resource:${operationId}`}, 0))`,
+  );
+}
+
+async function loadBrowserIdentityMutationOperation(
+  db: Database,
+  workspaceId: string,
+  operationId: string,
+): Promise<InteractionResourceOperationRow | null> {
+  const [row] = await db
+    .select()
+    .from(schema.interactionResourceOperations)
+    .where(
+      and(
+        eq(schema.interactionResourceOperations.workspaceId, workspaceId),
+        eq(schema.interactionResourceOperations.operationId, operationId),
+      ),
+    )
+    .limit(1);
+  return row ?? null;
 }
 
 async function lockBrowserSession(db: Database, workspaceId: string, browserSessionId: string) {

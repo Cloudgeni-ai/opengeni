@@ -55,10 +55,25 @@ import {
 import { publishDurableSessionEvents } from "@opengeni/events";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { sseWorkspaceInteractionRevisionStream } from "../http/sse";
+import { sseWorkspaceInteractionRevisionStream, sseWorkspaceLiveStream } from "../http/sse";
 import { observeInterventionMutation } from "../interaction-metrics";
 
 export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps): void {
+  app.get("/v1/workspaces/:workspaceId/live-events/stream", async (context) => {
+    const { workspaceId, grant } = await preamble(context, deps, "sessions:read");
+    await requireAccessGrant(context, deps, workspaceId, "workspace:read");
+    return await sseWorkspaceLiveStream(
+      deps.db,
+      deps.bus,
+      grant.accountId,
+      workspaceId,
+      nonnegativeSafeIntegerQuery(context, "controlAfter", 0),
+      nonnegativeSafeIntegerQuery(context, "interactionAfter", 0),
+      context.req.raw.signal,
+      { observability: deps.observability },
+    );
+  });
+
   app.get("/v1/workspaces/:workspaceId/interaction-events/stream", async (context) => {
     const { workspaceId, grant } = await preamble(context, deps, "sessions:read");
     const after = nonnegativeSafeIntegerQuery(context, "after", 0);

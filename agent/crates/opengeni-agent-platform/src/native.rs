@@ -251,11 +251,15 @@ impl ExecProcessGroup {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        #[cfg(target_os = "linux")]
+        crate::cgroup::configure_exec_oom_score_adj_before_exec(&mut anchor_command);
         let mut anchor = anchor_command.spawn()?;
         let pgid = i32::try_from(anchor.id().expect("new anchor must have a pid"))
             .map_err(|_| std::io::Error::other("exec anchor PID exceeds i32"))?;
 
         command.process_group(pgid);
+        #[cfg(target_os = "linux")]
+        crate::cgroup::configure_exec_oom_score_adj_before_exec(&mut command);
         let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -622,8 +626,7 @@ impl Platform for NativePlatform {
             .resolve_process_cwd(&req.cwd, "pty")?
             .to_string_lossy()
             .into_owned();
-        let process = crate::pty::spawn_pty(&resolved, &self.default_shell())?;
-        registry.register_pty(process).await
+        registry.open_pty(&resolved, &self.default_shell()).await
     }
 
     /// Builds the command (shell vs argv, cwd/env resolution) and spawns it
@@ -1677,25 +1680,70 @@ mod tests {
         let exec_task = tokio::spawn(async move { task_platform.exec(&req).await });
 
         let child_pid = recorded_pid(&pid_file).await;
-        // The stamp is written post-spawn, so poll briefly for the raised value
-        // rather than assume it landed before the fixture published its PID.
         let oom_path = format!("/proc/{child_pid}/oom_score_adj");
-        let mut observed = String::new();
-        for _ in 0..200 {
-            if let Ok(text) = tokio::fs::read_to_string(&oom_path).await {
-                observed = text.trim().to_string();
-                if observed == "500" {
-                    break;
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        let observed = tokio::fs::read_to_string(&oom_path)
+            .await
+            .expect("read child OOM score")
+            .trim()
+            .to_string();
         exec_task.abort();
         let _ = exec_task.await;
         assert_eq!(
             observed, "500",
             "exec child {child_pid} must have oom_score_adj=500, saw {observed:?}"
         );
+    }
+
+    /// The pre-exec hook closes the no-cgroup race: user code cannot fork a
+    /// descendant that still carries the supervisor's OOM bias.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn immediate_descendant_inherits_raised_oom_score_adj_without_cgroups() {
+        let (platform, dir) = rooted();
+        let pid_file = dir.path().join("oom-score-tree.pid");
+        let req = ExecRequest {
+            command: vec![format!(
+                "sleep 10 & printf '%s %s' \"$$\" \"$!\" > {}; wait",
+                pid_file.display()
+            )],
+            shell: true,
+            timeout_ms: 15_000,
+            ..Default::default()
+        };
+        let platform = Arc::new(platform);
+        let task_platform = platform.clone();
+        let exec_task = tokio::spawn(async move { task_platform.exec(&req).await });
+
+        let (parent, descendant) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Ok(raw) = tokio::fs::read_to_string(&pid_file).await {
+                    let pids = raw
+                        .split_whitespace()
+                        .map(str::parse::<u32>)
+                        .collect::<Result<Vec<_>, _>>()
+                        .expect("fixture pids");
+                    if let [parent, descendant] = pids.as_slice() {
+                        break (*parent, *descendant);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fixture should publish both pids");
+
+        for pid in [parent, descendant] {
+            let score = tokio::fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
+                .await
+                .expect("read process OOM score");
+            assert_eq!(
+                score.trim(),
+                "500",
+                "pid {pid} inherited the wrong OOM bias"
+            );
+        }
+        exec_task.abort();
+        let _ = exec_task.await;
     }
 
     #[tokio::test]

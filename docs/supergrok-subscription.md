@@ -71,19 +71,18 @@ Selection is deterministic and transaction-scoped:
    RLS;
 2. lock the pool rotation row, reap expired leases, and reuse an exact live
    same-turn lease when present;
-3. filter to active, allocator-enabled, non-exhausted, currently unleased
-   accounts; an expired access token remains eligible because the request
-   transport can refresh it;
-4. honor a session pin when present; otherwise use fair least-selected,
-   least-recent ordering when rotation is enabled, or the explicit active
-   credential when rotation is disabled;
+3. filter to active, allocator-enabled, non-exhausted accounts; an expired
+   access token remains eligible because the request transport can refresh it;
+4. honor a session pin when present; otherwise balance concurrent live-turn
+   leases, then use fair least-selected, least-recent ordering when rotation is
+   enabled, or the explicit active credential when rotation is disabled;
 5. write the unique `(workspace_id, turn_id)` lease, fairness metadata, and
    active cursor in one transaction.
 
 The five-minute lease is renewed every minute and at runtime/model-usage
-ownership checkpoints. A replacement holder advances generation. Every release
-is idempotent and transactionally advances matching capacity waiters plus the
-workflow-wake outbox so newly freed capacity is not stranded.
+ownership checkpoints. A replacement holder advances generation. Leases fence
+exact turn ownership; they do not serialize an account or limit its concurrent
+sessions. Every release is idempotent.
 
 ## Provider requests and media
 
@@ -92,8 +91,9 @@ frozen authority. Requests use request-local async context; credentials never
 enter session history, events, RunState, model-visible tool arguments, or the
 sandbox environment. A 401 receives one OAuth refresh and one replay of the
 same replayable JSON request. The Responses transport normalizes xAI's stream,
-encrypted reasoning, hosted web/X search, and live model metadata. Portable
-compaction reuses the same provider context. Image generation uses the ordinary
+encrypted reasoning, and hosted web/X search. The model catalog is the static
+OpenGeni-supported product set; the status route uses xAI's model endpoint only
+to validate a credential. Portable compaction reuses the same provider context. Image generation uses the ordinary
 durable generated-image operation/artifact boundary; xAI video helpers retain
 their existing durable video boundary.
 
@@ -113,7 +113,7 @@ release, and waiter arm are one transaction. Conversation truth is checkpointed
 first. The worker immediately performs one metadata-only re-evaluation: an
 alternate account moves the same logical turn to `recovering`; otherwise the
 provider-tagged waiter persists until a quota reset, account reconnect,
-allocator/rotation/pin mutation, lease release, or bounded timer wakes it.
+allocator/rotation/pin mutation, or bounded timer wakes it.
 
 Ambiguous network failures, provider 5xx, malformed/partial streams, invalid
 content, and unrelated 4xx errors do not quarantine or rotate credentials. They

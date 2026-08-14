@@ -541,6 +541,9 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/control-events/stream`)).toBe(
       "/v1/workspaces/:workspaceId/control-events/stream",
     );
+    expect(routeLabel(`/v1/workspaces/${workspace}/live-events/stream`)).toBe(
+      "/v1/workspaces/:workspaceId/live-events/stream",
+    );
     expect(
       routeLabel(
         `/v1/workspaces/${workspace}/browser-sessions/browser-1/targets/target-1/diagnostics`,

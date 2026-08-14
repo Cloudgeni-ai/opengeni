@@ -11,12 +11,12 @@
 //
 // ## Transport overview (informational — the transport itself is NOT in this file)
 //
-//   * CONTROL plane: NATS request/reply. The agent subscribes to a subject that
-//     IS its identity (`agent.<workspaceId>.<agentId>.rpc`); the control plane
-//     issues a `ControlRequest` and receives a `ControlResponse`. Subject routing
-//     is the registry (no bespoke agentId→connection table). Liveness is "is
-//     there a responder on the subject". Ownership stays in Postgres (the lease);
-//     NATS only routes.
+//   * CONTROL plane: NATS request/reply. The runner process subscribes to its
+//     generation-fenced address
+//     (`agent.<workspaceId>.<agentId>.connection.<instanceId>.rpc`); the control
+//     plane resolves the currently claimed instance in Postgres, issues a
+//     `ControlRequest`, and receives a `ControlResponse`. Postgres owns live
+//     process authority; NATS only routes to that exact process address.
 //
 //   * STREAM plane: a stateless relay edge. pty + desktop bytes ride
 //     `StreamFrame` messages over a relay channel, fate-isolated from the control
@@ -140,6 +140,16 @@ message Hello {
   // recognize a reconnect (vs a fresh enrollment) and fence by epoch. Empty on
   // first connect.
   string resume_token = 10;
+  // Lowercase sha256 of the exact running executable. The control plane uses
+  // this with agent_version to verify that a self-update's successor process is
+  // the build the signed manifest selected, not merely a process that reconnected.
+  string binary_sha256 = 11;
+  // Durable proof written only after an explicitly requested update passed the
+  // signed-manifest, artifact signature+digest, atomic apply, and startup health
+  // gates. Repeating it on successor Hellos heals lost progress events.
+  string completed_update_operation_id = 12;
+  string completed_update_target_version = 13;
+  string completed_update_binary_sha256 = 14;
 }
 
 // What the agent is able and consented to do. Each bool is a hard capability
@@ -523,6 +533,13 @@ message PtyOpenRequest {
   uint32 rows = 5;
   // The TERM value to advertise (e.g. "xterm-256color").
   string term = 6;
+  // Stable caller-owned identity for an idempotent terminal. Repeating pty_open
+  // with the same non-empty scope_id returns the existing live PTY/channel rather
+  // than spawning another shell. Empty preserves the explicit "open a new PTY"
+  // behavior. The control plane uses the durable OpenGeni session id here so
+  // capability/token refreshes reattach the same terminal while separate sessions
+  // on one machine remain isolated.
+  string scope_id = 7;
 }
 
 message PtyOpenResponse {
@@ -889,6 +906,53 @@ message UpdateMayProceedResponse {
   uint32 active_sessions = 2;
 }
 
+// Control-plane initiated, process-global self-update. This wraps the same
+// signed/minisign/sha256/atomic-rollback updater used by the local CLI; it is not
+// a second installer. The request is idempotent by operation_id and fenced by
+// the exact process subject plus its expected running version+digest.
+message AgentUpdateApplyRequest {
+  string operation_id = 1;
+  string target_version = 2;
+  string channel = 3;
+  string expected_current_version = 4;
+  string expected_current_sha256 = 5;
+  // The deployment origin serving the signed channel manifest. The pinned
+  // minisign key remains the trust root; this only chooses the fetch origin.
+  string release_base_url = 6;
+}
+
+message AgentUpdateApplyResponse {
+  bool accepted = 1;
+  string operation_id = 2;
+  string current_version = 3;
+  string current_sha256 = 4;
+  string target_version = 5;
+}
+
+enum AgentUpdateStage {
+  AGENT_UPDATE_STAGE_UNSPECIFIED = 0;
+  AGENT_UPDATE_STAGE_ACCEPTED = 1;
+  AGENT_UPDATE_STAGE_WAITING_FOR_IDLE = 2;
+  AGENT_UPDATE_STAGE_DOWNLOADING = 3;
+  AGENT_UPDATE_STAGE_VERIFYING = 4;
+  AGENT_UPDATE_STAGE_APPLYING = 5;
+  AGENT_UPDATE_STAGE_RESTARTING = 6;
+  AGENT_UPDATE_STAGE_FAILED = 7;
+}
+
+// Durable, secret-free progress from the authoritative runner. A successful
+// RESTARTING event is still provisional: only the successor Hello completes the
+// update in the control plane.
+message AgentUpdateProgress {
+  string operation_id = 1;
+  string target_version = 2;
+  AgentUpdateStage stage = 3;
+  string expected_binary_sha256 = 4;
+  string error_code = 5;
+  bool retryable = 6;
+  bool rolled_back = 7;
+}
+
 // =============================================================================
 // Op-stream (v1.1) — the reliable-transfer op protocol
 // =============================================================================
@@ -896,8 +960,8 @@ message UpdateMayProceedResponse {
 // A generic sequenced/acked/credited transfer plane plus thin op-lifecycle
 // bookkeeping, layered over the SAME control subject for the server→runner
 // requests and two new fire-and-forget subjects for the bulk direction:
-//   * `agent.<ws>.<id>.op.<op_id>`  — runner→server op frames (OpFrame).
-//   * `agent.<ws>.<id>.ack`         — server→runner acks/credit (OpAck).
+//   * `agent.<ws>.<id>.connection.<instance>.op.<op_id>` — runner→server frames.
+//   * `agent.<ws>.<id>.connection.<instance>.ack` — server→runner acks/credit.
 // Everything here is ADDITIVE: the legacy request/reply exec/fs/git ops remain
 // valid forever and are served by adapters over the same engine. These types
 // wire NO behavior on their own — they are the contract the runtime implements.
@@ -1082,7 +1146,8 @@ message OpData {
 message OpProgress {}
 
 // A server→runner cumulative ack + credit replenishment, published fire-and-forget
-// on the ack subject (`agent.<ws>.<id>.ack`). Best-effort, healed by repetition.
+// on the exact process ack subject
+// (`agent.<ws>.<id>.connection.<instance>.ack`). Best-effort, healed by repetition.
 message OpAck {
   string op_id = 1;
   // Cumulative: every frame with seq ≤ acked_seq is acknowledged.
@@ -1143,6 +1208,7 @@ message ControlRequest {
     BrowserControlEnsureRequest browser_control_ensure = 36;
     BrowserFramesOpenRequest browser_frames_open = 37;
     ComputerFramesOpenRequest computer_frames_open = 38;
+    AgentUpdateApplyRequest agent_update_apply = 39;
   }
 }
 
@@ -1181,6 +1247,7 @@ message ControlResponse {
     BrowserControlEnsureResponse browser_control_ensure = 36;
     BrowserFramesOpenResponse browser_frames_open = 37;
     ComputerFramesOpenResponse computer_frames_open = 38;
+    AgentUpdateApplyResponse agent_update_apply = 39;
   }
 }
 
@@ -1205,6 +1272,7 @@ message AgentEvent {
   oneof event {
     Heartbeat heartbeat = 10;
     GoingOffline going_offline = 11;
+    AgentUpdateProgress agent_update_progress = 12;
   }
 }
 

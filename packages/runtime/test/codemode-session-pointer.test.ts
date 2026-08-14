@@ -74,6 +74,7 @@ describe("session-specific Codemode token pointers", () => {
 
   test("decorates client create/resume sessions and preserves lifecycle methods", async () => {
     const tokenFile = "/workspace/.opengeni/codemode-tokens/" + "a".repeat(64);
+    const codemodeUrl = "https://sandbox-route.example/v1/workspaces/ws/codemode";
     const commands: string[] = [];
     const rawSession = {
       exec: async (args: { cmd: string }) => {
@@ -111,7 +112,7 @@ describe("session-specific Codemode token pointers", () => {
         return { restored: true };
       },
     };
-    const client = withCodemodeTokenClient(rawClient as never, tokenFile) as any;
+    const client = withCodemodeTokenClient(rawClient as never, tokenFile, codemodeUrl) as any;
     const created = await client.create({});
     const resumed = await client.resume({});
 
@@ -119,8 +120,8 @@ describe("session-specific Codemode token pointers", () => {
     await created.exec({ cmd: "echo exec" });
     await created.execCommand({ cmd: "echo exec-command" });
     expect(commands).toEqual([
-      `export OPENGENI_CODEMODE_TOKEN_FILE='${tokenFile}'\necho exec`,
-      `export OPENGENI_CODEMODE_TOKEN_FILE='${tokenFile}'\necho exec-command`,
+      `export OPENGENI_CODEMODE_TOKEN_FILE='${tokenFile}'\nexport OPENGENI_CODEMODE_URL='${codemodeUrl}'\necho exec`,
+      `export OPENGENI_CODEMODE_TOKEN_FILE='${tokenFile}'\nexport OPENGENI_CODEMODE_URL='${codemodeUrl}'\necho exec-command`,
     ]);
     await client.delete({});
     await client.serializeSessionState({}, {});

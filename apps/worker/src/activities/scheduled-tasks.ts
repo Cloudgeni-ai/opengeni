@@ -34,6 +34,7 @@ import {
   upsertSessionGoal,
 } from "@opengeni/db";
 import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/events";
+import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
 import {
   assertReusableSessionRevivable,
   scheduledUserMessagePayload,
@@ -276,6 +277,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               initialMessage: task.agentConfig.prompt,
               resources: task.agentConfig.resources,
               tools: taskTools,
+              firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(settings).default,
               metadata: {
                 ...taskMetadata,
                 model,

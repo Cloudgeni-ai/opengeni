@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   CreateScheduledTaskRequest,
-  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   FIRST_PARTY_MCP_TOOL_NAMES,
   defaultRepositoryMountPath,
   SESSION_EVENT_RAW_DELTA_TYPES,
@@ -30,10 +29,21 @@ import {
   type SessionAuthorizationActor,
   type SessionAuthorizationSurface,
   type Session,
+  type WorkspaceMemoryPromptMode,
   type ScheduledTask,
   UpdateScheduledTaskRequest,
   normalizeWorkspaceArtifactSlug,
   WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
+  SESSION_GOAL_PROGRESS_MAX_BYTES,
+  SESSION_GOAL_RATIONALE_MAX_BYTES,
+  SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
+  SESSION_GOAL_TEXT_MAX_BYTES,
+  sessionGoalUtf8Bytes,
+  TASK_NOTE_LIST_DEFAULT_LIMIT,
+  TASK_NOTE_LIST_MAX_LIMIT,
+  TASK_NOTE_MAX_LIFETIME_DAYS,
+  TASK_NOTE_REASON_MAX_BYTES,
+  TASK_NOTE_TEXT_MAX_BYTES,
 } from "@opengeni/contracts";
 import {
   countVariableSets,
@@ -75,6 +85,7 @@ import {
   searchWorkspaceMemories,
   serializeEffectiveSessionControl,
   setSessionGoalStatusWithEvent,
+  recordSessionGoalProgressWithEvent,
   setVariableSetVariable,
   updateScheduledTask,
   updateSessionGoalWithEvent,
@@ -86,12 +97,16 @@ import {
   listWorkspaceArtifacts,
   publishWorkspaceArtifactVersion,
   rollbackWorkspaceArtifact,
+  archiveTaskNote,
+  createTaskNote,
+  listTaskNotes,
 } from "@opengeni/db";
 import {
   appendAndPublishEvents,
   appendAndPublishTurnEventsFenced,
   publishDurableSessionEvents,
 } from "@opengeni/events";
+import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
 import {
   createSignedState,
   GitHubAppConfigurationError,
@@ -104,6 +119,7 @@ import {
 } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
 import {
   hasLiteralPermission,
@@ -116,6 +132,8 @@ import {
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
+  SessionAuthorizationDeniedError,
+  SessionAuthorizationUnavailableError,
   saveWorkspaceMemoryWithSlackPublication,
   searchCapabilityCatalogItems,
   type ResolvedSessionAuthorization,
@@ -215,13 +233,126 @@ import {
 } from "../integrations/atlassian";
 import { AtlassianConnectionMetadata } from "@opengeni/contracts/atlassian";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
+import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
   // tools use it only when no configured public base URL is available.
   requestOrigin?: string | null;
   workspaceMemoryEnabled?: boolean | undefined;
+  workspaceMemoryPromptMode?: WorkspaceMemoryPromptMode | undefined;
 };
+
+const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
+const ORCHESTRATION_FAILURE_MESSAGE_MAX_UTF8_BYTES = 1_024;
+
+type OrchestrationToolName = "session_create" | "session_send_message";
+
+function boundedOrchestrationFailureMessage(value: string): string {
+  const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  if (!normalized) return "OpenGeni could not complete the request.";
+  const encoded = new TextEncoder().encode(normalized);
+  if (encoded.byteLength <= ORCHESTRATION_FAILURE_MESSAGE_MAX_UTF8_BYTES) return normalized;
+  let end = ORCHESTRATION_FAILURE_MESSAGE_MAX_UTF8_BYTES;
+  while (end > 0 && (encoded[end]! & 0xc0) === 0x80) end -= 1;
+  return new TextDecoder().decode(encoded.slice(0, end)).trim();
+}
+
+function orchestrationFailureCode(tool: OrchestrationToolName, error: HTTPException): string {
+  const suffix =
+    error.status === 401
+      ? "unauthenticated"
+      : error.status === 403
+        ? "forbidden"
+        : error.status === 404
+          ? "not_found"
+          : error.status === 409
+            ? "conflict"
+            : error.status === 429
+              ? "limit_exceeded"
+              : error.status >= 500
+                ? "unavailable"
+                : "rejected";
+  return `${tool}_${suffix}`.slice(0, ORCHESTRATION_FAILURE_CODE_MAX_LENGTH);
+}
+
+function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknown) {
+  if (error instanceof SessionSpawnDeniedError) {
+    const denial = sessionSpawnDenialEnvelope(error);
+    return {
+      error: {
+        ...denial.error,
+        message: boundedOrchestrationFailureMessage(denial.error.message),
+      },
+    };
+  }
+  if (error instanceof HTTPException) {
+    return {
+      error: {
+        code: orchestrationFailureCode(tool, error),
+        message:
+          error.status >= 500
+            ? "OpenGeni is temporarily unavailable — retry."
+            : boundedOrchestrationFailureMessage(error.message),
+      },
+    };
+  }
+  if (error instanceof SessionAuthorizationDeniedError) {
+    return {
+      error: {
+        code: `${tool}_not_found_or_denied`,
+        message: "Session not found or access denied.",
+      },
+    };
+  }
+  if (error instanceof SessionAuthorizationUnavailableError) {
+    return {
+      error: {
+        code: `${tool}_authorization_unavailable`,
+        message: "Session authorization is temporarily unavailable — retry.",
+      },
+    };
+  }
+  const typedCode =
+    error && typeof error === "object" && "code" in error
+      ? (error as { code?: unknown }).code
+      : null;
+  const knownFailure =
+    typedCode === "CALLER_STALE"
+      ? ["caller_stale", "The calling session no longer owns this attempt."]
+      : typedCode === "CALLER_INTERRUPTED"
+        ? ["caller_interrupted", "The calling session was interrupted before delivery."]
+        : typedCode === "TARGET_NOT_VERTICAL"
+          ? ["target_not_vertical", "Agents may message only their parent or immediate children."]
+          : typedCode === "CONTROL_CHANGED"
+            ? ["conflict", "The target session control state changed; refresh and retry."]
+            : typedCode === "IDEMPOTENCY_KEY_REUSED"
+              ? ["idempotency_key_reused", "The idempotency key was reused with different input."]
+              : null;
+  if (knownFailure) {
+    return {
+      error: {
+        code: `${tool}_${knownFailure[0]}`,
+        message: knownFailure[1],
+      },
+    };
+  }
+  return {
+    error: {
+      code: `${tool}_failed`,
+      message: "OpenGeni could not complete the request.",
+    },
+  };
+}
+
+function orchestrationFailureResult(tool: OrchestrationToolName, error: unknown) {
+  const envelope = orchestrationFailureEnvelope(tool, error);
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
+    structuredContent: envelope,
+    isError: true as const,
+  };
+}
 
 type FirstPartyToolAuthorization = {
   sessionRequired?: true;
@@ -238,6 +369,7 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   set_session_title: { sessionRequired: true, allOf: ["sessions:control"] },
   goal_set: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_update: { sessionRequired: true, allOf: ["goals:manage"] },
+  goal_progress: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_complete: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_pause: { sessionRequired: true, allOf: ["goals:manage"] },
   memory_search: { sessionRequired: true, allOf: ["documents:search"] },
@@ -248,6 +380,9 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
     allOf: ["workspace:read"],
   },
   preference_registry_get: { sessionRequired: true, allOf: ["workspace:read"] },
+  task_notes_list: { sessionRequired: true, allOf: ["sessions:read"] },
+  task_note_save: { sessionRequired: true, allOf: ["sessions:control"] },
+  task_note_archive: { sessionRequired: true, allOf: ["sessions:control"] },
   sandboxes_list: { sessionRequired: true, allOf: ["sessions:read"] },
   sandbox_attach: { sessionRequired: true, allOf: ["sessions:control"] },
   sandbox_swap: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -276,7 +411,10 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   browser_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_debug: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_auth: { sessionRequired: true, allOf: ["sessions:control"] },
-  interaction_request_human: { sessionRequired: true, allOf: ["sessions:control"] },
+  interaction_request_human: {
+    sessionRequired: true,
+    allOf: ["sessions:control"],
+  },
   browser_identity: { sessionRequired: true, allOf: ["sessions:control"] },
   browser_publish: { sessionRequired: true, allOf: ["sessions:control"] },
   browser_lifecycle: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -296,7 +434,10 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
     allOf: ["variable-sets:write", "secrets:write"],
   },
   environment_set_variable: { allOf: ["variable-sets:write", "secrets:write"] },
-  capability_catalog_search: { sessionRequired: true, allOf: ["workspace:read"] },
+  capability_catalog_search: {
+    sessionRequired: true,
+    allOf: ["workspace:read"],
+  },
   capability_authorization_request: {
     sessionRequired: true,
     allOf: ["workspace:read"],
@@ -372,14 +513,23 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   artifacts_publish: { sessionRequired: true, allOf: ["artifacts:publish"] },
   artifacts_rollback: { sessionRequired: true, allOf: ["artifacts:publish"] },
   editable_artifact_list: { sessionRequired: true, allOf: ["artifacts:read"] },
-  editable_artifact_create: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  editable_artifact_create: {
+    sessionRequired: true,
+    allOf: ["artifacts:publish"],
+  },
   editable_artifact_import: {
     sessionRequired: true,
     allOf: ["artifacts:publish", "files:read"],
   },
   editable_artifact_get: { sessionRequired: true, allOf: ["artifacts:read"] },
-  editable_artifact_inspect: { sessionRequired: true, allOf: ["artifacts:read"] },
-  editable_artifact_apply: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  editable_artifact_inspect: {
+    sessionRequired: true,
+    allOf: ["artifacts:read"],
+  },
+  editable_artifact_apply: {
+    sessionRequired: true,
+    allOf: ["artifacts:publish"],
+  },
   editable_artifact_export: {
     sessionRequired: true,
     allOf: ["artifacts:read"],
@@ -508,10 +658,21 @@ export function buildOpenGeniMcpServer(
   const selectedTools =
     sessionId !== null
       ? new Set(
-          (grant.metadata?.["firstPartyMcpTools"] as FirstPartyMcpToolName[] | undefined) ??
-            DEFAULT_FIRST_PARTY_MCP_TOOLS,
+          allowedFirstPartyMcpToolsForSession(
+            deps.settings,
+            grant.metadata?.["firstPartyMcpTools"] as FirstPartyMcpToolName[] | undefined,
+          ),
         )
       : null;
+  const nestedAgentDepth = grant.metadata?.["nestedAgentDepth"];
+  const effectiveMaxNestedAgentDepth = grant.metadata?.["effectiveMaxNestedAgentDepth"];
+  // Optional claims keep rolling deployments compatible. When both trusted
+  // facts are present, an exhausted session does not receive an unusable spawn
+  // tool; stale/legacy callers still meet the authoritative DB admission gate.
+  const sessionCreateVisible =
+    typeof nestedAgentDepth !== "number" ||
+    typeof effectiveMaxNestedAgentDepth !== "number" ||
+    nestedAgentDepth < effectiveMaxNestedAgentDepth;
   const server = new PolicyMcpServer(grant, sessionId, selectedTools);
   // set_session_title names the agent's OWN session — pure session metadata,
   // not a goal operation — so it is available on every session, gated only on
@@ -540,10 +701,18 @@ export function buildOpenGeniMcpServer(
     registerGoalTools(server, deps, grant, sessionId, json);
   }
   if (sessionId !== null && options.workspaceMemoryEnabled === true) {
-    registerMemoryTools(server, deps, grant, sessionId, json);
+    registerMemoryTools(
+      server,
+      deps,
+      grant,
+      sessionId,
+      json,
+      options.workspaceMemoryPromptMode ?? "legacy_standing",
+    );
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerPreferenceRegistryTools(server, deps, grant, json);
+    registerTaskNoteTools(server, deps, grant, sessionId, json);
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerWorkspaceArtifactTools(server, deps, grant, sessionId, json);
@@ -586,7 +755,15 @@ export function buildOpenGeniMcpServer(
   // never returned through a model-visible MCP tool. A user DEMOTES a specific
   // session by setting a narrower session.firstPartyMcpPermissions (capped to
   // the creator's own grant); operators still cap what any session can be given.
-  registerWorkspaceOrchestrationTools(server, deps, grant, can, sessionId, json);
+  registerWorkspaceOrchestrationTools(
+    server,
+    deps,
+    grant,
+    can,
+    sessionId,
+    sessionCreateVisible,
+    json,
+  );
   registerVariableSetTools(server, deps, grant, can, sessionId, json);
   if (sessionId !== null && can("workspace:read")) {
     registerCapabilityDiscoveryTools(server, deps, grant, sessionId, json);
@@ -881,7 +1058,10 @@ export function buildOpenGeniMcpServer(
             },
             { query, subreddit, limit },
           );
-          return json({ provider: result.connection.provider, posts: result.posts });
+          return json({
+            provider: result.connection.provider,
+            posts: result.posts,
+          });
         },
       );
       server.registerTool(
@@ -908,7 +1088,10 @@ export function buildOpenGeniMcpServer(
             },
             { sinceId, limit },
           );
-          return json({ provider: result.connection.provider, posts: result.posts });
+          return json({
+            provider: result.connection.provider,
+            posts: result.posts,
+          });
         },
       );
       server.registerTool(
@@ -935,7 +1118,10 @@ export function buildOpenGeniMcpServer(
             },
             { id, limit },
           );
-          return json({ provider: result.connection.provider, posts: result.posts });
+          return json({
+            provider: result.connection.provider,
+            posts: result.posts,
+          });
         },
       );
     }
@@ -1759,7 +1945,10 @@ function registerFikenTools(
     {
       description:
         "List the Fiken companies this workspace's Fiken connection can act on. Use the returned slug as companySlug in other fiken tools.",
-      inputSchema: { connectionId: z4.string().uuid().optional(), ...pageInputs },
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        ...pageInputs,
+      },
     },
     async ({ connectionId, page, pageSize }) =>
       json(
@@ -1961,7 +2150,10 @@ function registerAtlassianTools(
   json: JsonResult,
 ): void {
   const connectionFor = async (connectionId?: string) => {
-    const authorized = await authorizedAtlassianConnectionsForGrant({ db: deps.db, grant });
+    const authorized = await authorizedAtlassianConnectionsForGrant({
+      db: deps.db,
+      grant,
+    });
     const candidates = authorized.filter(({ connection }) =>
       connectionId ? connection.id === connectionId : true,
     );
@@ -2005,7 +2197,10 @@ function registerAtlassianTools(
       return json({
         connectionId: authority.connection.id,
         account: authority.metadata.displayName,
-        items: response.items.map((item) => ({ ...item, selected: selected.has(item.id) })),
+        items: response.items.map((item) => ({
+          ...item,
+          selected: selected.has(item.id),
+        })),
       });
     },
   );
@@ -2116,20 +2311,43 @@ function registerGoalTools(
   sessionId: string,
   json: (value: unknown) => { content: Array<{ type: "text"; text: string }> },
 ): void {
+  const boundedGoalToolString = (maxBytes: number, field: string) =>
+    z4
+      .string()
+      .min(1)
+      .refine((value) => sessionGoalUtf8Bytes(value) <= maxBytes, {
+        message: `${field} exceeds ${maxBytes} UTF-8 bytes`,
+      });
+  const goalText = boundedGoalToolString(SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
+  const successCriteriaSchema = boundedGoalToolString(
+    SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
+    "goal success criteria",
+  );
+  const goalRationale = boundedGoalToolString(SESSION_GOAL_RATIONALE_MAX_BYTES, "goal rationale");
+  const progressNoteSchema = boundedGoalToolString(
+    SESSION_GOAL_PROGRESS_MAX_BYTES,
+    "goal progress note",
+  );
   server.registerTool(
     "goal_set",
     {
       description:
-        "Set or replace this session's goal. While a goal is active the session keeps working: idle moments synthesize continuation turns until goal_complete or goal_pause is called. Replacing a goal reactivates it and resets the continuation budget.",
+        "Create a goal when this session has none. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an existing goal, use goal_update with its objective revision, a change kind, and rationale.",
       inputSchema: {
-        text: z4.string().min(1),
-        successCriteria: z4.string().min(1).optional(),
+        text: goalText,
+        successCriteria: successCriteriaSchema.optional(),
         maxAutoContinuations: z4.number().int().positive().optional(),
       },
     },
     async ({ text, successCriteria, maxAutoContinuations }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
+      const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
+      if (existing) {
+        throw new Error(
+          `this session already has a goal at objective revision ${existing.objectiveRevision}; use goal_update to revise it`,
+        );
+      }
       const callerTurnId =
         typeof grant.metadata?.["turnId"] === "string"
           ? (grant.metadata["turnId"] as string)
@@ -2173,26 +2391,100 @@ function registerGoalTools(
     "goal_update",
     {
       description:
-        "Revise the session goal's text or success criteria, or record a progress note. Counts as progress for the no-progress detector; the goal stays active.",
+        "Propose or apply a semantic goal revision under the session's mutation policy. Retain the standing goal unless explicit user direction or meaningful new evidence justifies the declared refinement, adaptation, or replacement. A rewrite never counts as execution progress; use goal_progress for that.",
       inputSchema: {
-        text: z4.string().min(1).optional(),
-        successCriteria: z4.string().min(1).optional(),
-        progressNote: z4.string().min(1).optional(),
+        text: goalText.optional(),
+        successCriteria: successCriteriaSchema.nullable().optional(),
+        // Optional for rolling compatibility with the former goal_update
+        // surface. Omitted semantic metadata is classified as a refinement of
+        // the currently fenced objective; new callers should always supply it.
+        changeKind: z4.enum(["refinement", "adaptation", "replacement"]).optional(),
+        rationale: goalRationale.optional(),
+        expectedObjectiveRevision: z4.number().int().positive().optional(),
+        // Deprecated compatibility input. It is committed through the new
+        // progress operation and never makes a semantic rewrite count itself.
+        progressNote: progressNoteSchema.optional(),
         idempotencyKey: z4.string().uuid(),
       },
     },
-    async ({ text, successCriteria, progressNote, idempotencyKey }) => {
+    async ({
+      text,
+      successCriteria,
+      changeKind,
+      rationale,
+      expectedObjectiveRevision,
+      progressNote,
+      idempotencyKey,
+    }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
+      if (text === undefined && successCriteria === undefined && progressNote === undefined) {
+        throw new Error("goal_update requires semantic content or a progressNote");
+      }
+      const context = exactAgentCommandContext(grant, sessionId);
+      const command = {
+        accountId: grant.accountId,
+        actor: {
+          type: "agent_attempt" as const,
+          attemptId: context.callerAttemptId,
+          sessionId: context.callerSessionId,
+          turnId: context.callerTurnId,
+          executionGeneration: context.callerExecutionGeneration,
+        },
+        operationKey: idempotencyKey,
+      };
+      const semantic =
+        text !== undefined || successCriteria !== undefined
+          ? await updateSessionGoalWithEvent(deps.db, grant.workspaceId, sessionId, {
+              ...(text !== undefined ? { text } : {}),
+              ...(successCriteria !== undefined ? { successCriteria } : {}),
+              changeKind: changeKind ?? "refinement",
+              rationale: rationale ?? "Compatibility refinement from goal_update",
+              ...(expectedObjectiveRevision !== undefined ? { expectedObjectiveRevision } : {}),
+              actor: "agent",
+              command,
+            })
+          : null;
+      const progress = progressNote
+        ? await recordSessionGoalProgressWithEvent(deps.db, grant.workspaceId, sessionId, {
+            progressNote,
+            command,
+          })
+        : null;
+      await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, [
+        ...(semantic?.events ?? []),
+        ...(progress?.events ?? []),
+      ]);
+      const goal = progress?.goal ?? semantic?.goal;
+      if (!goal) throw new Error("goal_update produced no mutation");
+      return json({
+        ...goal,
+        operationId: semantic?.operationId ?? progress?.operationId ?? null,
+        replay: Boolean(semantic?.replay || progress?.replay),
+        outcome: semantic?.outcome ?? "progress_recorded",
+        proposalId: semantic?.proposalId ?? null,
+      });
+    },
+  );
+
+  server.registerTool(
+    "goal_progress",
+    {
+      description:
+        "Record concrete progress toward the unchanged active goal. This does not change goal text, success criteria, mutation policy, or objective revision. Do not use it merely to keep the continuation loop alive.",
+      inputSchema: {
+        progressNote: progressNoteSchema,
+        idempotencyKey: z4.string().uuid(),
+      },
+    },
+    async ({ progressNote, idempotencyKey }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       const context = exactAgentCommandContext(grant, sessionId);
-      const { goal, events, operationId, replay } = await updateSessionGoalWithEvent(
+      const { goal, events, operationId, replay } = await recordSessionGoalProgressWithEvent(
         deps.db,
         grant.workspaceId,
         sessionId,
         {
-          ...(text !== undefined ? { text } : {}),
-          ...(successCriteria !== undefined ? { successCriteria } : {}),
-          ...(progressNote !== undefined ? { progressNote } : {}),
-          actor: "agent",
+          progressNote,
           command: {
             accountId: grant.accountId,
             actor: {
@@ -2264,7 +2556,7 @@ function registerGoalTools(
     {
       description:
         "Pause the session goal with a rationale (blocked, not productive, needs human input). No further continuation turns are synthesized until the goal is resumed or replaced.",
-      inputSchema: { rationale: z4.string().min(1) },
+      inputSchema: { rationale: goalRationale },
     },
     async ({ rationale }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
@@ -2439,7 +2731,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_create",
     {
       description:
-        "Create and publish a generic static workspace artifact from a complete, self-contained HTML document with inline CSS. JavaScript and active or navigation-capable markup do not render in the MVP.",
+        "Create and publish a generic workspace artifact from a complete HTML document. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.",
       inputSchema: {
         title: z4.string().min(1).max(120),
         description: z4.string().max(2000).nullable().optional(),
@@ -2474,7 +2766,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_publish",
     {
       description:
-        "Publish a new immutable static HTML/CSS version. JavaScript and active or navigation-capable markup do not render in the MVP. First read the current source and pass its version id for optimistic concurrency.",
+        "Publish a new immutable HTML version. The exact HTML runs in an opaque-origin sandboxed iframe. First read the current source and pass its version id for optimistic concurrency.",
       inputSchema: {
         artifactId: z4.string().uuid(),
         expectedCurrentVersionId: z4.string().uuid(),
@@ -2533,6 +2825,7 @@ function exactAgentAttemptClaims(grant: AccessGrant): {
   attemptId: string;
   executionGeneration: number;
 } | null {
+  if (grant.principalKind !== "agent_attempt") return null;
   const metadata = grant.metadata ?? {};
   if (
     typeof metadata["sessionId"] !== "string" ||
@@ -2551,6 +2844,109 @@ function exactAgentAttemptClaims(grant: AccessGrant): {
     attemptId: metadata["attemptId"],
     executionGeneration: metadata["executionGeneration"],
   };
+}
+
+function registerTaskNoteTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  json: JsonResult,
+): void {
+  const attemptClaims = () => {
+    const resolved = exactAgentAttemptClaims(grant);
+    if (!resolved || resolved.sessionId !== sessionId) {
+      throw new Error("Exact signed task-note attempt authority is required.");
+    }
+    return { accountId: grant.accountId, workspaceId: grant.workspaceId, ...resolved };
+  };
+  const authorize = async () => {
+    await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+  };
+  const boundedUtf8 = (maxBytes: number, label: string) =>
+    z4
+      .string()
+      .min(1)
+      .refine((value) => value === value.trim(), {
+        message: `${label} must not have leading or trailing whitespace`,
+      })
+      .refine((value) => new TextEncoder().encode(value).byteLength <= maxBytes, {
+        message: `${label} must be at most ${maxBytes} UTF-8 bytes`,
+      });
+
+  server.registerTool(
+    "task_notes_list",
+    {
+      description:
+        "Explicitly retrieve bounded, unexpired coordination notes shared by this session's root task tree. Notes are non-authoritative and are never injected into prompts automatically.",
+      inputSchema: {
+        includeArchived: z4.boolean().optional().default(false),
+        limit: z4
+          .number()
+          .int()
+          .min(1)
+          .max(TASK_NOTE_LIST_MAX_LIMIT)
+          .optional()
+          .default(TASK_NOTE_LIST_DEFAULT_LIMIT),
+      },
+    },
+    async ({ includeArchived, limit }) => {
+      await authorize();
+      return json(await listTaskNotes(deps.db, { ...attemptClaims(), includeArchived, limit }));
+    },
+  );
+
+  server.registerTool(
+    "task_note_save",
+    {
+      description:
+        "Save one bounded, expiring, non-authoritative coordination note for agents in this root task tree. Use a fresh operationId; exact retries of the same attempt and input replay safely.",
+      inputSchema: {
+        operationId: z4.string().uuid(),
+        kind: z4.enum(["finding", "decision", "blocker", "ownership", "artifact", "handoff"]),
+        text: boundedUtf8(TASK_NOTE_TEXT_MAX_BYTES, "Task note text"),
+        expiresInDays: z4.number().int().min(1).max(TASK_NOTE_MAX_LIFETIME_DAYS),
+      },
+    },
+    async ({ operationId, kind, text, expiresInDays }) => {
+      await authorize();
+      return json(
+        await createTaskNote(deps.db, {
+          ...attemptClaims(),
+          operationId,
+          kind,
+          text,
+          expiresInDays,
+        }),
+      );
+    },
+  );
+
+  server.registerTool(
+    "task_note_archive",
+    {
+      description:
+        "Archive a coordination note from this root task tree with optimistic version fencing. This preserves its immutable create receipt and records a separate archive receipt.",
+      inputSchema: {
+        operationId: z4.string().uuid(),
+        noteId: z4.string().uuid(),
+        expectedVersion: z4.number().int().min(1).max(1),
+        reason: boundedUtf8(TASK_NOTE_REASON_MAX_BYTES, "Task note archive reason"),
+      },
+    },
+    async ({ operationId, noteId, expectedVersion, reason }) => {
+      await authorize();
+      return json(
+        await archiveTaskNote(deps.db, {
+          ...attemptClaims(),
+          operationId,
+          noteId,
+          expectedVersion,
+          reason,
+        }),
+      );
+    },
+  );
 }
 
 function registerPreferenceRegistryTools(
@@ -2694,6 +3090,7 @@ function registerMemoryTools(
   grant: AccessGrant,
   sessionId: string,
   json: JsonResult,
+  promptMode: WorkspaceMemoryPromptMode,
 ): void {
   const publicationActor = async () => {
     const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
@@ -2709,7 +3106,10 @@ function registerMemoryTools(
   server.registerTool(
     "memory_search",
     {
-      description: MEMORY_SEARCH_TOOL_DESCRIPTION,
+      description:
+        promptMode === "retrieval_only"
+          ? `${MEMORY_SEARCH_TOOL_DESCRIPTION} Legacy preference-kind records are excluded here because structured preferences are the only behavioral authority.`
+          : MEMORY_SEARCH_TOOL_DESCRIPTION,
       inputSchema: {
         query: z4.string().min(1),
         kind: MemoryKindSchema.optional(),
@@ -2725,6 +3125,7 @@ function registerMemoryTools(
             query,
             ...(kind ? { kind } : {}),
             ...(limit ? { limit } : {}),
+            agentPromptMode: promptMode,
           },
           deps.getDocumentServices().embedder,
         ),
@@ -2734,7 +3135,10 @@ function registerMemoryTools(
   server.registerTool(
     "memory_save",
     {
-      description: MEMORY_SAVE_TOOL_DESCRIPTION,
+      description:
+        promptMode === "retrieval_only"
+          ? `${MEMORY_SAVE_TOOL_DESCRIPTION} A preference-kind save is retained only as a legacy observation and cannot become behavioral authority; use the structured preference proposal surface for behavioral guidance.`
+          : MEMORY_SAVE_TOOL_DESCRIPTION,
       inputSchema: {
         text: z4.string().min(1),
         kind: MemoryKindSchema,
@@ -2966,6 +3370,27 @@ function registerFleetTools(
       sessionId,
     });
 
+  const oneOffCodemodeEnvironment = async (
+    op: RunOnOp,
+  ): Promise<Readonly<Record<string, string>> | undefined> => {
+    if (op.kind !== "exec") return undefined;
+    const claims = exactAgentAttemptClaims(grant);
+    if (!claims || claims.sessionId !== sessionId) return undefined;
+    const material = await mintSandboxCodemodeToken(
+      deps.settings,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId },
+      claims,
+    );
+    if (!material) return undefined;
+    return {
+      OPENGENI_CODEMODE_URL: codemodeWorkspaceUrl(deps.settings, grant.workspaceId),
+      OPENGENI_CODEMODE_TOKEN: material.token,
+      ...(deps.settings.ogtoolPackageSpec
+        ? { OPENGENI_OGTOOL_PACKAGE_SPEC: deps.settings.ogtoolPackageSpec }
+        : {}),
+    };
+  };
+
   server.registerTool(
     "sandboxes_list",
     {
@@ -3018,8 +3443,15 @@ function registerFleetTools(
         ]),
       },
     },
-    async ({ target, op }) =>
-      json(await runOnSandbox(services, await fleetContext(), target, op as RunOnOp)),
+    async ({ target, op }) => {
+      const typedOp = op as RunOnOp;
+      const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
+      return json(
+        await runOnSandbox(services, await fleetContext(), target, typedOp, {
+          ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
+        }),
+      );
+    },
   );
 
   server.registerTool(
@@ -3057,7 +3489,7 @@ function registerConnectedMachineTools(
     "connected_machine_remove",
     {
       description:
-        "Remove one enrolled self-hosted machine while it is offline. Access is revoked, future heartbeat/reconnect credentials are rejected, session/route/lease/archive history is retained, and a fresh human-approved device-flow enrollment is required to reconnect. Pass the enrollmentId from the Machines surface, never a Modal sandbox id. Blocked outcomes include every dependent session and the action needed before retrying. Move each dependent session through the canonical sandbox_swap target=default path before retrying removal; the removal authority never rewrites routes directly.",
+        "Remove one enrolled self-hosted machine while it is offline. Access is revoked, future heartbeat/reconnect credentials are rejected, and session, route, lease, archive, and audit history is retained. Idle dependent sessions are detached atomically; machine-home sessions become compute-less (backend none) until another sandbox is selected. Active turns, live leases, and recovery work remain fail-closed blockers whose typed outcome explains what must settle before retrying. Pass the enrollmentId from the Machines surface, never a Modal sandbox id. Reconnecting later requires a fresh human-approved device-flow enrollment.",
       inputSchema: {
         enrollmentId: z4.string().uuid(),
         expectedUpdatedAt: z4.string().datetime({ offset: true }).optional(),
@@ -3431,6 +3863,7 @@ function registerWorkspaceOrchestrationTools(
   grant: AccessGrant,
   can: (permission: Permission) => boolean,
   callerSessionId: string | null,
+  sessionCreateVisible: boolean,
   json: JsonResult,
 ): void {
   if (can("sessions:read")) {
@@ -3630,135 +4063,94 @@ function registerWorkspaceOrchestrationTools(
     );
   }
 
-  if (can("sessions:create")) {
+  if (can("sessions:create") && sessionCreateVisible) {
+    const sessionCreateInput = z4
+      .object({
+        initialMessage: z4.string().min(1),
+        instructions: z4.string().min(1).max(32768).optional(),
+        goal: z4.unknown().optional(),
+        resources: z4.array(z4.unknown()).optional(),
+        tools: z4.array(z4.unknown()).optional(),
+        mcpServers: z4.array(z4.unknown()).optional(),
+        variableSetId: z4.string().uuid().optional(),
+        environmentId: z4.string().uuid().optional(),
+        rigId: z4.string().uuid().optional(),
+        model: z4
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Model for the worker. Omit to inherit the exact calling turn's model, including its Codex subscription billing path.",
+          ),
+        reasoningEffort: z4
+          .string()
+          .optional()
+          .describe("Omit to inherit the exact calling turn's reasoning effort."),
+        latencyMode: z4
+          .enum(["standard", "priority", "fast"])
+          .optional()
+          .describe("Omit to inherit the exact calling turn's latency mode."),
+        sandboxBackend: z4.string().optional(),
+        // Model-only structural coupling: workingDir cannot exist without a
+        // targetSandboxId because both live inside one optional object. The
+        // handler maps this back to the stable public REST/SDK request fields.
+        machineTarget: z4
+          .object({
+            targetSandboxId: z4.string().uuid(),
+            workingDir: z4.string().optional(),
+          })
+          .strict()
+          .optional(),
+        metadata: z4.record(z4.string(), z4.unknown()).optional(),
+        idempotencyKey: z4.string().min(1).max(200).optional(),
+        firstPartyMcpPermissions: z4
+          .array(z4.string())
+          .optional()
+          .describe(
+            "Optional first-party capability set for the child. Omit to inherit this session's effective permissions. An explicit set may only narrow capabilities held by this session. A goal-bearing child requires goals:manage in the resulting set; creation fails rather than adding it implicitly.",
+          ),
+        firstPartyMcpTools: z4
+          .array(z4.enum(FIRST_PARTY_MCP_TOOL_NAMES))
+          .optional()
+          .describe(
+            "Exact model-visible first-party tool selection for the child. Omit to inherit this session's effective selection. To create a non-delegating leaf, provide a selection that omits session_create. This does not grant permissions.",
+          ),
+        // Omission is the ordinary safe sharing path. Literal "shared" remains
+        // available to advanced REST/SDK callers but is intentionally absent
+        // from the model surface because it turns compatibility drift into a
+        // deterministic failure instead of the omission path's safe own-box fallback.
+        sandbox: z4
+          .union([z4.literal("new"), z4.object({ groupId: z4.string().uuid() })])
+          .optional(),
+      })
+      .strict();
     server.registerTool(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker) with an initial message and optional goal, resources (e.g. repositories from github_repositories_list), tools, and variable set attachment. VariableSet attachment happens at creation only — it cannot be added to a running session — and requires the variable-sets:use permission. When targetSandboxId names a machine, workingDir sets the working directory (cwd) the spawned session runs under on that machine.",
-        inputSchema: {
-          initialMessage: z4.string().min(1),
-          // Per-session agent persona/system instructions for the spawned worker
-          // (a per-agent-type prompt). Delivered system-level, composed AFTER the
-          // workspace persona; never shown in the worker's timeline. Trimmed,
-          // non-empty, max 32768 chars (re-validated by the contracts schema).
-          instructions: z4.string().min(1).max(32768).optional(),
-          goal: z4.unknown().optional(),
-          resources: z4.array(z4.unknown()).optional(),
-          tools: z4.array(z4.unknown()).optional(),
-          // Per-session third-party MCP servers. Credential header values are
-          // accepted only at create and never appear in responses/events.
-          mcpServers: z4.array(z4.unknown()).optional(),
-          variableSetId: z4.string().uuid().optional(),
-          // Deprecated alias of variableSetId (rename back-compat); declared so MCP
-          // validation doesn't strip it before createSessionForRequest maps it.
-          environmentId: z4.string().uuid().optional(),
-          // Bind the spawned session to a rig (freezes its active version);
-          // declared so MCP validation doesn't strip it before the domain reads it.
-          rigId: z4.string().uuid().optional(),
-          model: z4
-            .string()
-            .min(1)
-            .optional()
-            .describe(
-              "Model for the worker. Omit to inherit the exact calling turn's model, including its Codex subscription billing path.",
-            ),
-          reasoningEffort: z4
-            .string()
-            .optional()
-            .describe("Omit to inherit the exact calling turn's reasoning effort."),
-          latencyMode: z4
-            .enum(["standard", "priority", "fast"])
-            .optional()
-            .describe("Omit to inherit the exact calling turn's latency mode."),
-          sandboxBackend: z4.string().optional(),
-          // Create-time machine targeting: an enrolled sandbox id (from
-          // sandboxes_list) to run the spawned session on. Seeds the active-sandbox
-          // pointer at creation so the FIRST turn lands on the chosen machine
-          // (race-free). Ownership + liveness are validated in the domain via the
-          // same path as sandbox_swap; an unowned/offline/unknown target 422s.
-          targetSandboxId: z4.string().uuid().optional(),
-          // The working directory (cwd) for a machine target: the path/cwd base the
-          // spawned session's agent exec, terminal, and file dock run under. A
-          // workspace_root-relative subdir or an absolute machine path. Only valid
-          // WITH targetSandboxId (workingDir alone 422s); omitted ⇒ workspace_root.
-          workingDir: z4.string().optional(),
-          metadata: z4.record(z4.string(), z4.unknown()).optional(),
-          // Workspace-scoped CREATE idempotency key: a retried session_create with
-          // the same key returns the already-spawned worker instead of a duplicate.
-          idempotencyKey: z4.string().min(1).max(200).optional(),
-          // Per-session/agent descendant policy. Reductions need only create;
-          // increases are authorized server-side with workspace:admin.
-          maxNestedAgentDepth: z4.number().int().nonnegative().optional(),
-          // First-party MCP token permissions for the spawned session; every
-          // permission must be held by this grant (validated in the domain).
-          // A goal requires goals:manage in the resulting set; it is never
-          // silently added beyond the inherited or explicit authority.
-          firstPartyMcpPermissions: z4
-            .array(z4.string())
-            .optional()
-            .describe(
-              "Optional first-party capability set for the child. Omit to inherit this session's effective permissions. An explicit set may only narrow capabilities held by this session. A goal-bearing child requires goals:manage in the resulting set; creation fails rather than adding it implicitly.",
-            ),
-          firstPartyMcpTools: z4
-            .array(z4.enum(FIRST_PARTY_MCP_TOOL_NAMES))
-            .optional()
-            .describe(
-              "Exact model-visible first-party tool selection for the child. Omit to inherit this session's effective selection. This does not grant permissions.",
-            ),
-          // Shared-sandbox placement (addendum 05 §D). OMIT (default) to SHARE the
-          // creator's box — one filesystem/repo/desktop, N independent conversations;
-          // this is the SAFE DEFAULT. Pass "new" for a fresh isolated box (a different
-          // repo set or a genuinely separate filesystem), or {groupId} (a sibling
-          // session's `sandboxGroupId` from a prior session_create response) to join
-          // that specific sibling's box.
-          // Shared state must be compatible: a shared box requires the SAME image
-          // (rejected at the lease layer, B3) and — because the box's variable set is
-          // fixed at creation under the current mechanics — the SAME workspace
-          // VariableSet. The domain layer is env-aware: an inherited default with a
-          // different variableSetId silently gets its OWN box (the spawn still works),
-          // while an explicit shared/{groupId} with a mismatched variableSet 422s at
-          // create. When the VariableSet is eventually evicted from the box manifest
-          // (per-exec, like the git token), the env check dissolves on its own.
-          // The description below is what the AGENT sees (this comment is invisible to
-          // it); keep the two in sync.
-          sandbox: z4
-            .union([
-              z4.literal("shared"),
-              z4.literal("new"),
-              z4.object({ groupId: z4.string().uuid() }),
-            ])
-            .describe(
-              "Sandbox placement. OMIT (default) to SHARE the creator's box — one filesystem/repo/desktop, N independent conversations; this is the safe default. If the new session attaches a DIFFERENT variableSet than the creator's box, the platform automatically gives it its own box (the box variable set is fixed at creation), so omitting stays safe. Pass 'new' for a fresh isolated box (different repo set or a genuinely separate filesystem). Pass {groupId} to join a specific sibling's box — requires the same variableSet (a mismatch is rejected at create) and the same image (a conflicting image is rejected when the box warms).",
-            )
-            .optional(),
-          // The parent (manager) session is auto-inferred from the caller's
-          // worker-signed sessionId claim, so a spawned worker's completion wakes
-          // its manager automatically. There is deliberately no caller-supplied
-          // parent parameter: it would let a sessions:create grant target an
-          // arbitrary session's wake channel without sessions:control on it.
-        },
+          "Spawn a new agent session (a worker). Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set or Rig gets its own compatible box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+        inputSchema: sessionCreateInput,
       },
       async (args) => {
         try {
           if (callerSessionId !== null) {
             await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
           }
-          const result = await createSessionForRequestWithOutcome(
-            deps,
-            grant,
-            grant.workspaceId,
-            args,
-          );
-          return json(sessionCreateMutationReceipt(result, Boolean(args.idempotencyKey)));
+          const { machineTarget, ...request } = args;
+          const result = await createSessionForRequestWithOutcome(deps, grant, grant.workspaceId, {
+            ...request,
+            ...(machineTarget
+              ? {
+                  targetSandboxId: machineTarget.targetSandboxId,
+                  ...(machineTarget.workingDir !== undefined
+                    ? { workingDir: machineTarget.workingDir }
+                    : {}),
+                }
+              : {}),
+          });
+          return json(sessionCreateMutationReceipt(result, Boolean(request.idempotencyKey)));
         } catch (error) {
-          if (error instanceof SessionSpawnDeniedError) {
-            return {
-              ...json(sessionSpawnDenialEnvelope(error)),
-              isError: true,
-            };
-          }
-          throw error;
+          return orchestrationFailureResult("session_create", error);
         }
       },
     );
@@ -3780,81 +4172,87 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ sessionId: targetSessionId, text, idempotencyKey, mcpCredentialUpdates }) => {
-        await authorizeFirstPartySession(deps, grant, targetSessionId, "session.append");
-        if (callerSessionId !== null) {
-          if ((mcpCredentialUpdates?.length ?? 0) > 0) {
-            throw new Error("internal session updates cannot change MCP credentials");
+        try {
+          await authorizeFirstPartySession(deps, grant, targetSessionId, "session.append");
+          if (callerSessionId !== null) {
+            if ((mcpCredentialUpdates?.length ?? 0) > 0) {
+              throw new HTTPException(422, {
+                message: "internal session updates cannot change MCP credentials",
+              });
+            }
+            const result = await sendAgentSessionMessage(
+              deps,
+              exactAgentCommandContext(grant, callerSessionId),
+              { targetSessionId, text, idempotencyKey },
+            );
+            return json(
+              mcpMutationReceipt({
+                operation: "session_send_message",
+                committed: true,
+                outcome: result.replay ? "replayed" : "accepted",
+                changed: !result.replay,
+                resource: {
+                  type: "session_system_update",
+                  id: result.updateId,
+                  state: result.effectiveState,
+                },
+                relatedResources: [{ type: "session", id: targetSessionId }],
+                timestamp: result.receipt.createdAt.toISOString(),
+                idempotency: { status: result.replay ? "replayed" : "applied" },
+                facts: {
+                  delivery: "coalesced_internal_update",
+                  wakeRequested: result.wakeRevision !== null,
+                  resumeRequired: result.effectiveState === "paused",
+                },
+                nextAction: {
+                  tool: "session_get",
+                  arguments: { sessionId: targetSessionId },
+                },
+              }),
+            );
           }
-          const result = await sendAgentSessionMessage(
+          const { accepted, turn, replay } = await acceptSessionUserMessageWithOutcome(
             deps,
-            exactAgentCommandContext(grant, callerSessionId),
-            { targetSessionId, text, idempotencyKey },
+            grant,
+            grant.workspaceId,
+            targetSessionId,
+            {
+              text,
+              delivery: "send",
+              origin: "operator",
+              clientEventId: idempotencyKey,
+              mcpCredentialUpdates: (mcpCredentialUpdates ?? []).map((update) =>
+                SessionMcpCredentialUpdateInput.parse(update),
+              ),
+            },
           );
           return json(
             mcpMutationReceipt({
               operation: "session_send_message",
               committed: true,
-              outcome: result.replay ? "replayed" : "accepted",
-              changed: !result.replay,
+              outcome: replay ? "replayed" : "accepted",
+              changed: !replay,
               resource: {
-                type: "session_system_update",
-                id: result.updateId,
-                state: result.effectiveState,
+                type: "session_turn",
+                id: turn.id,
+                version: turn.version,
+                state: turn.status,
               },
-              relatedResources: [{ type: "session", id: targetSessionId }],
-              timestamp: result.receipt.createdAt.toISOString(),
-              idempotency: { status: result.replay ? "replayed" : "applied" },
-              facts: {
-                delivery: "coalesced_internal_update",
-                wakeRequested: result.wakeRevision !== null,
-                resumeRequired: result.effectiveState === "paused",
-              },
+              relatedResources: [
+                { type: "session", id: targetSessionId },
+                { type: "session_event", id: accepted.id, state: accepted.type },
+              ],
+              timestamp: accepted.occurredAt,
+              idempotency: { status: replay ? "replayed" : "applied" },
               nextAction: {
                 tool: "session_get",
                 arguments: { sessionId: targetSessionId },
               },
             }),
           );
+        } catch (error) {
+          return orchestrationFailureResult("session_send_message", error);
         }
-        const { accepted, turn, replay } = await acceptSessionUserMessageWithOutcome(
-          deps,
-          grant,
-          grant.workspaceId,
-          targetSessionId,
-          {
-            text,
-            delivery: "send",
-            origin: "operator",
-            clientEventId: idempotencyKey,
-            mcpCredentialUpdates: (mcpCredentialUpdates ?? []).map((update) =>
-              SessionMcpCredentialUpdateInput.parse(update),
-            ),
-          },
-        );
-        return json(
-          mcpMutationReceipt({
-            operation: "session_send_message",
-            committed: true,
-            outcome: replay ? "replayed" : "accepted",
-            changed: !replay,
-            resource: {
-              type: "session_turn",
-              id: turn.id,
-              version: turn.version,
-              state: turn.status,
-            },
-            relatedResources: [
-              { type: "session", id: targetSessionId },
-              { type: "session_event", id: accepted.id, state: accepted.type },
-            ],
-            timestamp: accepted.occurredAt,
-            idempotency: { status: replay ? "replayed" : "applied" },
-            nextAction: {
-              tool: "session_get",
-              arguments: { sessionId: targetSessionId },
-            },
-          }),
-        );
       },
     );
 
@@ -3891,10 +4289,16 @@ function registerWorkspaceOrchestrationTools(
               committed: true,
               outcome: controlled.replay ? "replayed" : "updated",
               changed: !controlled.replay,
-              resource: { type: "session", id: sessionId, state: effectiveControl.state },
+              resource: {
+                type: "session",
+                id: sessionId,
+                state: effectiveControl.state,
+              },
               relatedResources: [{ type: "session_command_receipt", id: controlled.receipt.id }],
               timestamp: controlled.receipt.createdAt.toISOString(),
-              idempotency: { status: controlled.replay ? "replayed" : "applied" },
+              idempotency: {
+                status: controlled.replay ? "replayed" : "applied",
+              },
               facts: { interruptionCount: controlled.interruptionCount },
               nextAction: { tool: "session_get", arguments: { sessionId } },
             }),
@@ -3953,10 +4357,16 @@ function registerWorkspaceOrchestrationTools(
               committed: true,
               outcome: controlled.replay ? "replayed" : "updated",
               changed: !controlled.replay,
-              resource: { type: "session", id: sessionId, state: effectiveControl.state },
+              resource: {
+                type: "session",
+                id: sessionId,
+                state: effectiveControl.state,
+              },
               relatedResources: [{ type: "session_command_receipt", id: controlled.receipt.id }],
               timestamp: controlled.receipt.createdAt.toISOString(),
-              idempotency: { status: controlled.replay ? "replayed" : "applied" },
+              idempotency: {
+                status: controlled.replay ? "replayed" : "applied",
+              },
               facts: { interruptionCount: controlled.interruptionCount },
               nextAction: { tool: "session_get", arguments: { sessionId } },
             }),
@@ -4452,7 +4862,11 @@ async function capabilitySetupProjection(
     }
     const installations = await listWorkspaceGitHubInstallationBindings(deps, workspaceId);
     if (githubBindingStatus(true, installations) === "bound") {
-      return { status: "ready", action: null, detail: "GitHub is connected and ready." };
+      return {
+        status: "ready",
+        action: null,
+        detail: "GitHub is connected and ready.",
+      };
     }
     return {
       status: "authorization_required",
@@ -4462,7 +4876,11 @@ async function capabilitySetupProjection(
   }
   if (item.surfaceType === "codex_apps") {
     return item.enabled
-      ? { status: "ready", action: null, detail: "Codex Apps is connected and ready." }
+      ? {
+          status: "ready",
+          action: null,
+          detail: "Codex Apps is connected and ready.",
+        }
       : {
           status: "authorization_required",
           action: "connect",
@@ -4470,7 +4888,11 @@ async function capabilitySetupProjection(
         };
   }
   if (item.enabled) {
-    return { status: "ready", action: null, detail: "This capability is already enabled." };
+    return {
+      status: "ready",
+      action: null,
+      detail: "This capability is already enabled.",
+    };
   }
   if (!item.runtime.available) {
     return {

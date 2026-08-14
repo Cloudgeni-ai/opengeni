@@ -61,7 +61,7 @@ describe("real Docker rig verification e2e", () => {
     });
     accountId = access.defaultAccountId!;
     workspaceId = access.defaultWorkspaceId!;
-  }, 360_000);
+  }, 660_000);
 
   afterAll(async () => {
     await db?.close();

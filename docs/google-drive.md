@@ -131,6 +131,94 @@ The dev stack can select another API or web port if the defaults are occupied.
 If that happens, update both base URLs and the Google authorized redirect URI
 to the exact ports printed by the dev stack.
 
+## Provider-free release-readiness receipt
+
+Run the source-controlled readiness command from the exact candidate checkout:
+
+```bash
+bun run deployment:google-drive-readiness
+```
+
+The command parses the ordinary OpenGeni runtime configuration and emits one
+secret-safe JSON receipt with schema
+`opengeni.google-drive-release-readiness.v1`. It verifies integration
+enablement, the presence of the OAuth client pair, signed-state and credential
+encryption secrets, the public callback origin, structured logs, and metrics.
+It prints only the derived callback URL and numeric budgets; it never prints
+secret values, OAuth tokens, provider response bodies, or request URLs. The
+receipt always states `providerCallsPerformed: false` and makes no Google API,
+deployment, database, or Kubernetes call.
+
+Exit status `0` means the local configuration checks passed, `2` means one or
+more readiness checks blocked, and `3` means the runtime configuration was
+invalid. A successful receipt is reusable source evidence only. It does not
+prove that every declared Drive source-security dependency is merged, authorize
+a non-production real-provider test, authorize a deployment, or establish
+Google verification, security-assessment, legal, or production acceptance.
+
+The configurable source budgets below are validated at process startup and
+persisted into every newly created or authorizedly updated Drive sync Schedule.
+Existing schedules retain their previously persisted limits until an authorized
+source save updates them.
+
+| Environment variable | Default | Validated purpose |
+| --- | ---: | --- |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ITEMS` | `500` | Maximum items examined by one source run. |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_BYTES` | `500000000` | Maximum total content bytes accepted by one run. |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FILE_BYTES` | `100000000` | Maximum bytes for one file; must not exceed the total-byte limit. |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_PROVIDER_REQUESTS` | `1000` | Maximum logical provider operations charged to one run. |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ELAPSED_SECONDS` | `300` | Maximum cumulative source-run elapsed time. |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FAILURE_DETAILS` | `25` | Maximum bounded per-item failure details retained in a result. |
+| `OPENGENI_GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MS` | `30000` | Per-attempt timeout for a Drive HTTP request. |
+| `OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_ATTEMPTS` | `3` | Maximum physical attempts for one retryable operation, including the first attempt. |
+| `OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS` | `250` | Initial exponential retry delay. |
+| `OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS` | `5000` | Maximum delay for one retry; must be at least the initial delay. |
+| `OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_BUDGET_MS` | `15000` | Maximum cumulative retry delay for one logical operation; must be at least the initial delay. |
+
+Bounded retries cover start-page-token, changes-page, metadata, folder-list,
+download, and export requests. Only transport failures, HTTP `429`, and HTTP
+`5xx` responses are retried; permanent provider responses retain the existing
+credential, permission, cursor, and reconnect classifications. Retry delay
+honors a bounded `Retry-After` value and otherwise uses capped exponential
+backoff. Exhausting the local policy returns control to the durable sync
+workflow. Physical retry attempts have separate telemetry and do not consume
+additional units from the durable source run's logical provider-request budget.
+
+Use `deploy/helm/opengeni/values.google-drive-readiness.example.yaml` as a
+non-secret values overlay during review. Its referenced runtime Secret must
+provide `OPENGENI_INTEGRATIONS_STATE_SECRET`,
+`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, `OPENGENI_GOOGLE_DRIVE_CLIENT_ID`, and
+`OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET`; never put their values in Helm values or
+readiness evidence.
+
+### Sync-health evidence and response
+
+The canonical `Google Drive sync` Grafana dashboard reports run outcomes,
+failure ratio, reconnect-required events, p95 terminal activity-batch duration, provider attempts and
+retries, explicit limit hits, and bounded terminal failure reasons. The Helm
+chart adds exact namespace/release/environment/provider-scoped alerts for a
+sustained failure ratio, reconnect-required events, and explicit limit hits.
+Structured terminal logs contain bounded reason and numeric counters only; they
+must not contain provider URLs, headers, bodies, tokens, or secrets.
+
+Operators should respond to reconnect-required alerts through the normal
+user-owned connection lifecycle, not by copying credentials. Investigate
+failure reasons and retry telemetry before increasing limits or retry budgets.
+A limit-hit alert is evidence that the configured safety boundary worked, not
+automatic authority to widen it.
+
+Release progression remains explicitly staged:
+
+1. Produce source-only tests, type checks, static chart/dashboard evidence, and
+   the provider-free readiness receipt from the exact candidate.
+2. Keep release acceptance blocked until every declared Drive source-security
+   dependency is merged and reconciled against the candidate.
+3. Run any real-provider acceptance only in a separately owned non-production
+   Google project after an authorized human records explicit approval.
+4. Require a separate explicit human approval for deployment or production
+   live-provider acceptance. No source merge or non-production result supplies
+   that authority.
+
 ## Connection lifecycle and recovery
 
 The Capabilities card projects one explicit, durable state for the current
@@ -301,9 +389,34 @@ Documents in the frozen destination collection/default collection. Imported
 Documents are deliberately `agentAccess=false`: each immutable version creates
 a durable index obligation before indexing, and a later generation-fenced ACL
 evidence operation is the only seam that may make the Document agent-readable.
-Google ACL evidence collection and citation-time reauthorization are not
-implemented by this slice, so Drive imports remain fail-closed for agent
-retrieval until that follow-on lands.
+The worker now reads every bounded Drive permissions page, hashes normalized
+user/domain/permission principals before persistence, and records append-only,
+freshness-bounded evidence against the exact source, object, immutable version,
+file, Document, connection version, and index obligation. Unsupported group
+membership remains fail-closed; owner identity, user, domain, and `anyone`
+permissions are evaluated without storing plaintext ACL principals.
+
+Every Knowledge read and every file-byte path reauthorizes the immutable
+initiating subject at query/use time through migration 0243. The subject must
+still have an active subject-owned read-only Google connection with a recursive
+Drive read scope, and the source, object, current version, sync generation,
+index obligation, connection lifecycle, provider revision, ACL evidence, and
+evidence expiry must all remain current. Authorization is an all-protectors
+intersection over every Google Drive object that has ever mapped to the exact
+file bytes: an ordinary upload or a second allowed Drive object cannot mask one
+denied, stale, or revoked Drive mapping. ACL refresh first clears the active
+evidence pointer and Document agent access, so provider I/O never extends stale
+readability. Search filters before ranking and rechecks selected rows; direct
+get/browse, session resources, model-history images, sandbox mounts, signed
+downloads, and image-generation file references recheck immediately before
+returning metadata or bytes.
+
+Authorized Knowledge records may include a bounded provider citation containing
+only the external object/revision/version, Drive id, deep link, ACL revision,
+and authorization observation/expiry/reauthorization timestamps. Connection
+UUIDs and principal identities are never projected. Citation construction calls
+the same live file-authorization predicate and returns no citation when any
+protector fails.
 
 Provider revision is observation metadata, not the immutable OpenGeni version
 identity. A revision or metadata/ACL change is recorded even when the bytes,
@@ -412,9 +525,10 @@ demo video, privacy policy, user help, and security-assessment evidence:
    authority. Disconnect is local and intentionally does not call Google's
    project-wide token-revocation endpoint; users must remove CloudGeni access in
    their Google Account when they also want provider-side revocation.
-11. Imported Drive Documents remain `agentAccess=false` until a separate fresh,
-    generation-fenced ACL evidence operation authorizes retrieval. Google ACL
-    projection and citation-time reauthorization are not part of this package.
+11. Imported Drive Documents remain `agentAccess=false` until a fresh,
+    generation-fenced ACL evidence operation authorizes retrieval. Knowledge
+    ranking, exact reads, citations, and every file-byte consumer then recheck
+    the current initiating subject through the same all-protectors authority.
 
 Canonical implementation and proof:
 
@@ -446,7 +560,7 @@ following without widening the claims beyond shipped behavior:
   authority, explicit sync enablement, pause, local disconnect, and separate
   provider-side revocation guidance;
 - launch gating that does not claim Workspace Events/Pub/Sub delivery, Drive
-  writes, live Google ACL/citation reauthorization, or production deployment.
+  writes, completed live-provider acceptance, or production deployment.
 
 ### Privacy, Limited Use, retention, and deletion packet
 

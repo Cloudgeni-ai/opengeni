@@ -4,6 +4,7 @@ import {
   KnowledgeSourceSyncRunSummary,
   type ScheduledTask,
 } from "@opengeni/contracts";
+import { createHash } from "node:crypto";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { setSubjectRlsContext, withRlsContext } from "./database";
@@ -41,6 +42,40 @@ export type KnowledgeSourceSyncObservationFence = {
   scanGeneration: number;
   executionCheckpointGeneration: number;
   observations: KnowledgeSourceSyncObservationFloor[];
+};
+
+export type GoogleDriveObjectAclPrincipal = {
+  type: "user" | "group" | "domain" | "anyone";
+  permissionId?: string | null;
+  emailAddress?: string | null;
+  domain?: string | null;
+  role: "owner" | "organizer" | "fileOrganizer" | "writer" | "commenter" | "reader";
+  inherited?: boolean;
+  allowFileDiscovery?: boolean | null;
+  expirationTime?: string | null;
+};
+
+export type GoogleDriveObjectAclEvidenceInput = {
+  accountId: string;
+  workspaceId: string;
+  obligationId: string;
+  connectionId: string;
+  connectionVersion: number;
+  sourceGooglePermissionId: string;
+  sourceSyncGeneration: number;
+  sourceConfigGeneration: number;
+  sourceLifecycleGeneration: number;
+  objectLifecycleGeneration: number;
+  objectVersionGeneration: number;
+  providerRevision: string | null;
+  driveId: string | null;
+  aclRevision: string;
+  eligibility: "eligible" | "denied";
+  observedAt: string;
+  expiresAt: string;
+  citationLocator: Record<string, unknown>;
+  operationId: string;
+  principals: GoogleDriveObjectAclPrincipal[];
 };
 
 export type KnowledgeSourceSyncObjectObservationResult = KnowledgeSourceSyncObservationFloor & {
@@ -1612,6 +1647,501 @@ export async function recordKnowledgeSourceSyncAclEvidence(
       });
     },
   );
+}
+
+/**
+ * Persist one append-only Google Drive object ACL observation and atomically
+ * make it the current authorization pointer for the exact index obligation.
+ * Raw provider principals never enter storage: only domain-separated hashes
+ * are retained. Denial deletes chunks in the same transaction so stale vector
+ * or keyword rows cannot survive permission loss.
+ */
+export async function recordGoogleDriveObjectAclEvidence(
+  db: Database,
+  input: GoogleDriveObjectAclEvidenceInput,
+): Promise<{ evidenceId: string; aclHash: string }> {
+  const observedAt = exactDate(input.observedAt, "Google Drive ACL observedAt");
+  const expiresAt = exactDate(input.expiresAt, "Google Drive ACL expiresAt");
+  if (expiresAt.getTime() <= observedAt.getTime()) {
+    throw new Error("Google Drive ACL evidence must expire after it was observed");
+  }
+  if (input.principals.length > 1_000) {
+    throw new Error("Google Drive ACL evidence exceeds 1000 principals");
+  }
+  const principals = input.principals.map(normalizeGoogleDriveAclPrincipal);
+  const canonicalAcl = principals
+    .map((principal) => JSON.stringify(principal))
+    .sort((left, right) => left.localeCompare(right));
+  const aclHash = sha256Hex(JSON.stringify(canonicalAcl));
+  const sourcePrincipalHash = principalHash("permission", input.sourceGooglePermissionId);
+  const inputHash = sha256Hex(
+    JSON.stringify({
+      version: 1,
+      obligationId: input.obligationId,
+      connectionId: input.connectionId,
+      connectionVersion: input.connectionVersion,
+      sourcePrincipalHash,
+      sourceSyncGeneration: input.sourceSyncGeneration,
+      sourceConfigGeneration: input.sourceConfigGeneration,
+      sourceLifecycleGeneration: input.sourceLifecycleGeneration,
+      objectLifecycleGeneration: input.objectLifecycleGeneration,
+      objectVersionGeneration: input.objectVersionGeneration,
+      providerRevision: input.providerRevision,
+      driveId: input.driveId,
+      aclRevision: input.aclRevision,
+      aclHash,
+      eligibility: input.eligibility,
+      observedAt: observedAt.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+      citationLocator: input.citationLocator,
+    }),
+  );
+
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [observedObligation] = await tx
+          .select()
+          .from(schema.knowledgeSourceSyncIndexObligations)
+          .where(eq(schema.knowledgeSourceSyncIndexObligations.id, input.obligationId))
+          .limit(1);
+        if (!observedObligation) {
+          throw new Error("Google Drive ACL evidence obligation was not found");
+        }
+        await setSubjectRlsContext(tx, observedObligation.initiatingSubjectId);
+        const [state] = await tx
+          .select()
+          .from(schema.knowledgeSourceSyncStates)
+          .where(eq(schema.knowledgeSourceSyncStates.sourceId, observedObligation.sourceId))
+          .for("update")
+          .limit(1);
+        if (!state) throw new Error("Google Drive sync authorization is no longer active");
+        await tx.execute(sql`
+          SELECT knowledge_source_sync_lock_authority(
+            ${input.accountId}::uuid,
+            ${observedObligation.sourceId}::uuid,
+            ${observedObligation.knowledgeSourceObjectId}::uuid
+          )
+        `);
+        const [[source], [object], [version], [obligation], [connection]] = await Promise.all([
+          tx
+            .select()
+            .from(schema.knowledgeSources)
+            .where(eq(schema.knowledgeSources.id, observedObligation.sourceId))
+            .limit(1),
+          tx
+            .select()
+            .from(schema.knowledgeSourceObjects)
+            .where(eq(schema.knowledgeSourceObjects.id, observedObligation.knowledgeSourceObjectId))
+            .limit(1),
+          tx
+            .select()
+            .from(schema.knowledgeDocumentVersions)
+            .where(
+              eq(
+                schema.knowledgeDocumentVersions.id,
+                observedObligation.knowledgeDocumentVersionId,
+              ),
+            )
+            .limit(1),
+          tx
+            .select()
+            .from(schema.knowledgeSourceSyncIndexObligations)
+            .where(eq(schema.knowledgeSourceSyncIndexObligations.id, input.obligationId))
+            .for("update")
+            .limit(1),
+          tx
+            .select()
+            .from(schema.connections)
+            .where(eq(schema.connections.id, input.connectionId))
+            .limit(1),
+        ]);
+        const [provider] = source
+          ? await tx
+              .select()
+              .from(schema.knowledgeProviders)
+              .where(eq(schema.knowledgeProviders.id, source.providerId))
+              .limit(1)
+          : [];
+        const [document] = obligation
+          ? await tx
+              .select()
+              .from(schema.documents)
+              .where(eq(schema.documents.id, obligation.documentId))
+              .for("update")
+              .limit(1)
+          : [];
+        const metadata = connection?.metadata ?? {};
+        const connectionPermissionId = cleanBoundedString(metadata.googlePermissionId, 256);
+        const connectionLifecycle =
+          metadata.lifecycle && typeof metadata.lifecycle === "object"
+            ? cleanBoundedString((metadata.lifecycle as Record<string, unknown>).state, 64)
+            : null;
+        const hasDriveReadScope =
+          Array.isArray(connection?.grantedScopes) &&
+          connection.grantedScopes.some(
+            (scope) =>
+              scope === "https://www.googleapis.com/auth/drive" ||
+              scope === "https://www.googleapis.com/auth/drive.readonly",
+          );
+        if (
+          !obligation ||
+          !source ||
+          !object ||
+          !version ||
+          !provider ||
+          !document ||
+          !connection ||
+          provider.providerKey !== "google-drive" ||
+          provider.lifecycleState !== "active" ||
+          state.connectionId !== input.connectionId ||
+          state.connectionProviderDomain !== "googleapis.com" ||
+          state.connectionKind !== "oauth2" ||
+          state.connectionOwnerSubjectId !== connection.subjectId ||
+          state.reconnectRequired ||
+          connection.accountId !== input.accountId ||
+          connection.subjectId !== observedObligation.initiatingSubjectId ||
+          connection.providerDomain !== "googleapis.com" ||
+          connection.kind !== "oauth2" ||
+          connection.status !== "active" ||
+          connection.version !== input.connectionVersion ||
+          connection.version < state.connectionVersion ||
+          metadata.accessMode !== "readonly" ||
+          (connectionLifecycle !== null && connectionLifecycle !== "active") ||
+          !hasDriveReadScope ||
+          !connectionPermissionId ||
+          principalHash("permission", connectionPermissionId) !== sourcePrincipalHash ||
+          input.sourceSyncGeneration !== obligation.sourceSyncGeneration ||
+          state.sourceSyncGeneration < obligation.sourceSyncGeneration ||
+          state.sourceConfigGeneration !== input.sourceConfigGeneration ||
+          state.sourceConfigGeneration !== obligation.sourceConfigGeneration ||
+          state.sourceLifecycleGeneration !== input.sourceLifecycleGeneration ||
+          state.sourceLifecycleGeneration !== obligation.sourceLifecycleGeneration ||
+          source.lifecycleState !== "active" ||
+          source.syncGeneration < obligation.sourceSyncGeneration ||
+          source.lifecycleGeneration !== obligation.sourceLifecycleGeneration ||
+          source.currentAclGeneration !== version.aclGeneration ||
+          object.sourceId !== obligation.sourceId ||
+          object.externalObjectId !== obligation.externalObjectId ||
+          object.lifecycleState !== "active" ||
+          object.lifecycleGeneration !== obligation.objectLifecycleGeneration ||
+          object.versionGeneration !== obligation.objectVersionGeneration ||
+          object.currentVersionId !== obligation.knowledgeDocumentVersionId ||
+          version.sourceId !== obligation.sourceId ||
+          version.objectId !== obligation.knowledgeSourceObjectId ||
+          version.versionGeneration !== obligation.objectVersionGeneration ||
+          version.documentId !== obligation.documentId ||
+          version.fileId !== document.fileId ||
+          document.accountId !== input.accountId ||
+          document.workspaceId !== input.workspaceId ||
+          document.sourceExternalId !== obligation.externalObjectId ||
+          !document.knowledgeSourceIdentity ||
+          obligation.sourceLifecycleGeneration !== input.sourceLifecycleGeneration ||
+          obligation.objectLifecycleGeneration !== input.objectLifecycleGeneration ||
+          obligation.objectVersionGeneration !== input.objectVersionGeneration
+        ) {
+          throw new Error("Google Drive ACL evidence authority changed");
+        }
+        if (input.eligibility === "eligible" && obligation.status !== "indexed") {
+          throw new Error("Google Drive ACL eligibility requires a completed index obligation");
+        }
+
+        const evidenceValues = {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sourceId: obligation.sourceId,
+          knowledgeSourceObjectId: obligation.knowledgeSourceObjectId,
+          knowledgeDocumentVersionId: obligation.knowledgeDocumentVersionId,
+          documentId: obligation.documentId,
+          fileId: document.fileId,
+          indexObligationId: obligation.id,
+          connectionId: input.connectionId,
+          connectionVersion: input.connectionVersion,
+          sourcePrincipalHash,
+          sourceSyncGeneration: input.sourceSyncGeneration,
+          sourceConfigGeneration: input.sourceConfigGeneration,
+          sourceLifecycleGeneration: input.sourceLifecycleGeneration,
+          objectLifecycleGeneration: input.objectLifecycleGeneration,
+          objectVersionGeneration: input.objectVersionGeneration,
+          providerRevision: input.providerRevision,
+          driveId: cleanBoundedString(input.driveId, 1024),
+          aclRevision: exactBoundedString(input.aclRevision, 1024, "Google Drive ACL revision"),
+          aclHash,
+          eligibility: input.eligibility,
+          observedAt,
+          expiresAt,
+          citationLocator: input.citationLocator,
+          operationId: exactBoundedString(input.operationId, 256, "Google Drive ACL operation id"),
+          inputHash,
+        };
+        const [inserted] = await tx
+          .insert(schema.googleDriveObjectAclEvidence)
+          .values(evidenceValues)
+          .onConflictDoNothing({
+            target: [
+              schema.googleDriveObjectAclEvidence.indexObligationId,
+              schema.googleDriveObjectAclEvidence.operationId,
+            ],
+          })
+          .returning();
+        const [evidence] = inserted
+          ? [inserted]
+          : await tx
+              .select()
+              .from(schema.googleDriveObjectAclEvidence)
+              .where(
+                and(
+                  eq(schema.googleDriveObjectAclEvidence.indexObligationId, obligation.id),
+                  eq(schema.googleDriveObjectAclEvidence.operationId, evidenceValues.operationId),
+                ),
+              )
+              .limit(1);
+        if (!evidence || evidence.inputHash !== inputHash) {
+          throw new Error("Google Drive ACL evidence operation conflicted");
+        }
+        if (inserted && principals.length > 0) {
+          await tx.insert(schema.googleDriveObjectAclPrincipals).values(
+            principals.map((principal, ordinal) => ({
+              evidenceId: evidence.id,
+              ordinal,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              ...principal,
+            })),
+          );
+        }
+        const now = new Date();
+        await tx
+          .update(schema.knowledgeSourceSyncIndexObligations)
+          .set({
+            googleDriveAclEvidenceId: evidence.id,
+            aclEligibility: input.eligibility,
+            updatedAt: now,
+          })
+          .where(eq(schema.knowledgeSourceSyncIndexObligations.id, obligation.id));
+        await tx
+          .update(schema.knowledgeSourceSyncItemOutcomes)
+          .set({
+            aclEligibility: input.eligibility,
+            aclEvidence: {
+              version: 1,
+              provider: "google_drive",
+              evidenceId: evidence.id,
+              aclRevision: evidence.aclRevision,
+              observedAt: evidence.observedAt.toISOString(),
+              expiresAt: evidence.expiresAt.toISOString(),
+            },
+          })
+          .where(eq(schema.knowledgeSourceSyncItemOutcomes.indexObligationId, obligation.id));
+        const [updatedDocument] = await tx
+          .update(schema.documents)
+          .set({
+            agentAccess: input.eligibility === "eligible",
+            ...(input.eligibility === "denied" ? { chunkCount: 0 } : {}),
+            updatedAt: now,
+          })
+          .where(eq(schema.documents.id, obligation.documentId))
+          .returning({ id: schema.documents.id });
+        if (!updatedDocument) {
+          throw new Error("Google Drive ACL evidence document authority changed");
+        }
+        if (input.eligibility === "denied") {
+          await tx
+            .delete(schema.documentChunks)
+            .where(eq(schema.documentChunks.documentId, obligation.documentId));
+        }
+        return { evidenceId: evidence.id, aclHash };
+      }),
+  );
+}
+
+/**
+ * Clear the current Drive authorization pointer before provider I/O without
+ * destroying an otherwise valid index. All read surfaces immediately deny
+ * because agent_access is false and the current evidence pointer is null. A
+ * successful refresh can restore access without re-embedding; a final denied
+ * observation uses recordGoogleDriveObjectAclEvidence and deletes chunks.
+ */
+export async function beginGoogleDriveObjectAclRefresh(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    obligationId: string;
+    sourceSyncGeneration: number;
+    sourceConfigGeneration: number;
+    sourceLifecycleGeneration: number;
+    objectLifecycleGeneration: number;
+    objectVersionGeneration: number;
+  },
+): Promise<void> {
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [observed] = await tx
+          .select()
+          .from(schema.knowledgeSourceSyncIndexObligations)
+          .where(eq(schema.knowledgeSourceSyncIndexObligations.id, input.obligationId))
+          .limit(1);
+        if (!observed) throw new Error("Google Drive ACL refresh obligation was not found");
+        await setSubjectRlsContext(tx, observed.initiatingSubjectId);
+        const [state] = await tx
+          .select()
+          .from(schema.knowledgeSourceSyncStates)
+          .where(eq(schema.knowledgeSourceSyncStates.sourceId, observed.sourceId))
+          .for("update")
+          .limit(1);
+        if (!state) throw new Error("Google Drive sync authorization is no longer active");
+        await tx.execute(sql`
+          SELECT knowledge_source_sync_lock_authority(
+            ${input.accountId}::uuid,
+            ${observed.sourceId}::uuid,
+            ${observed.knowledgeSourceObjectId}::uuid
+          )
+        `);
+        const [[source], [object], [version], [obligation]] = await Promise.all([
+          tx
+            .select()
+            .from(schema.knowledgeSources)
+            .where(eq(schema.knowledgeSources.id, observed.sourceId))
+            .limit(1),
+          tx
+            .select()
+            .from(schema.knowledgeSourceObjects)
+            .where(eq(schema.knowledgeSourceObjects.id, observed.knowledgeSourceObjectId))
+            .limit(1),
+          tx
+            .select()
+            .from(schema.knowledgeDocumentVersions)
+            .where(eq(schema.knowledgeDocumentVersions.id, observed.knowledgeDocumentVersionId))
+            .limit(1),
+          tx
+            .select()
+            .from(schema.knowledgeSourceSyncIndexObligations)
+            .where(eq(schema.knowledgeSourceSyncIndexObligations.id, input.obligationId))
+            .for("update")
+            .limit(1),
+        ]);
+        const [document] = obligation
+          ? await tx
+              .select()
+              .from(schema.documents)
+              .where(eq(schema.documents.id, obligation.documentId))
+              .for("update")
+              .limit(1)
+          : [];
+        if (
+          !source ||
+          !object ||
+          !version ||
+          !obligation ||
+          !document ||
+          state.reconnectRequired ||
+          state.sourceSyncGeneration < input.sourceSyncGeneration ||
+          state.sourceConfigGeneration !== input.sourceConfigGeneration ||
+          state.sourceLifecycleGeneration !== input.sourceLifecycleGeneration ||
+          source.lifecycleState !== "active" ||
+          source.syncGeneration < obligation.sourceSyncGeneration ||
+          source.lifecycleGeneration !== input.sourceLifecycleGeneration ||
+          source.currentAclGeneration !== version.aclGeneration ||
+          object.lifecycleState !== "active" ||
+          object.lifecycleGeneration !== input.objectLifecycleGeneration ||
+          object.versionGeneration !== input.objectVersionGeneration ||
+          object.currentVersionId !== version.id ||
+          version.documentId !== document.id ||
+          version.fileId !== document.fileId ||
+          obligation.sourceSyncGeneration !== input.sourceSyncGeneration ||
+          obligation.sourceConfigGeneration !== input.sourceConfigGeneration ||
+          obligation.sourceLifecycleGeneration !== input.sourceLifecycleGeneration ||
+          obligation.objectLifecycleGeneration !== input.objectLifecycleGeneration ||
+          obligation.objectVersionGeneration !== input.objectVersionGeneration ||
+          obligation.status !== "indexed"
+        ) {
+          throw new Error("Google Drive ACL refresh authority changed");
+        }
+        const now = new Date();
+        await tx
+          .update(schema.knowledgeSourceSyncIndexObligations)
+          .set({
+            googleDriveAclEvidenceId: null,
+            aclEligibility: "denied",
+            updatedAt: now,
+          })
+          .where(eq(schema.knowledgeSourceSyncIndexObligations.id, obligation.id));
+        await tx
+          .update(schema.knowledgeSourceSyncItemOutcomes)
+          .set({
+            aclEligibility: "denied",
+            aclEvidence: { version: 1, provider: "google_drive", state: "refresh_pending" },
+          })
+          .where(eq(schema.knowledgeSourceSyncItemOutcomes.indexObligationId, obligation.id));
+        await tx
+          .update(schema.documents)
+          .set({ agentAccess: false, updatedAt: now })
+          .where(eq(schema.documents.id, obligation.documentId));
+      }),
+  );
+}
+
+function normalizeGoogleDriveAclPrincipal(principal: GoogleDriveObjectAclPrincipal) {
+  const permissionId = cleanBoundedString(principal.permissionId, 1024);
+  const emailAddress = cleanBoundedString(principal.emailAddress, 320)?.toLowerCase() ?? null;
+  const domain = cleanBoundedString(principal.domain, 320)?.toLowerCase() ?? null;
+  if (principal.type === "user" || principal.type === "group") {
+    if (!permissionId && !emailAddress) {
+      throw new Error(`Google Drive ${principal.type} principal is missing identity`);
+    }
+  } else if (principal.type === "domain") {
+    if (!domain) throw new Error("Google Drive domain principal is missing its domain");
+  } else if (principal.type !== "anyone") {
+    throw new Error("Google Drive ACL principal type is invalid");
+  }
+  const expirationTime = principal.expirationTime
+    ? exactDate(principal.expirationTime, "Google Drive ACL principal expiration")
+    : null;
+  return {
+    principalType: principal.type,
+    permissionIdHash: permissionId ? principalHash("permission", permissionId) : null,
+    emailHash: emailAddress ? principalHash("email", emailAddress) : null,
+    domainHash: domain ? principalHash("domain", domain) : null,
+    role: principal.role,
+    inherited: principal.inherited === true,
+    allowFileDiscovery:
+      principal.allowFileDiscovery === undefined ? null : principal.allowFileDiscovery,
+    expirationTime,
+  };
+}
+
+function principalHash(kind: "permission" | "email" | "domain", value: string): string {
+  return sha256Hex(`${kind}:${value.trim().toLowerCase()}`);
+}
+
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function exactDate(value: string, label: string): Date {
+  const parsed = new Date(value);
+  if (!value || !Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value) {
+    throw new Error(`${label} must be an exact UTC timestamp`);
+  }
+  return parsed;
+}
+
+function exactBoundedString(value: unknown, max: number, label: string): string {
+  const normalized = cleanBoundedString(value, max);
+  if (!normalized || normalized !== value) throw new Error(`${label} is invalid`);
+  return normalized;
+}
+
+function cleanBoundedString(value: unknown, max: number): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized && normalized.length <= max ? normalized : null;
 }
 
 /** Bounded retention hook. Callers choose policy and cadence; pending index or

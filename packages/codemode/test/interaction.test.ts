@@ -315,6 +315,44 @@ describe("OpenGeni Codemode interaction facade", () => {
     ]);
   });
 
+  test("updates browser identity lifecycle through the same typed atomic tool", async () => {
+    const identityId = "44444444-4444-4444-8444-444444444444";
+    const operationId = "55555555-5555-4555-8555-555555555555";
+    const fake = fakeClient((_path, args) =>
+      result({
+        operation: "update",
+        result: {
+          identity: {
+            id: String(args.identityId),
+            status: String(args.status),
+            version: 8,
+          },
+          operationId,
+          replayed: false,
+        },
+      }),
+    );
+    const updated = await createOpenGeniCodemode(fake.client).browsers.identities.update(
+      identityId,
+      { expectedVersion: 7, status: "archived" },
+      { operationId },
+    );
+
+    expect(updated).toMatchObject({ identity: { status: "archived", version: 8 } });
+    expect(fake.calls).toEqual([
+      {
+        path: "interaction.browser.identity",
+        args: {
+          operation: "update",
+          identityId,
+          expectedVersion: 7,
+          status: "archived",
+        },
+        options: { operationId },
+      },
+    ]);
+  });
+
   test("keeps auth and human handoff on the same typed atomic paths", async () => {
     const authRunId = "55555555-5555-4555-8555-555555555555";
     const fake = fakeClient((path, args) => {

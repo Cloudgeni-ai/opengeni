@@ -10,6 +10,7 @@ import { MemorySlackPublicationDistribution } from "./memory-slack-delivery";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 import { MediaGenerationResult } from "./video-generation";
+import { KnowledgeProviderCitation } from "./knowledge";
 
 export * from "./slack-bot-scopes";
 export * from "./slack-task-policy";
@@ -626,6 +627,7 @@ export const ErrorEnvelope = z.object({
     code: ErrorCode,
     message: z.string(),
     retryable: z.boolean(),
+    outcomeUnknown: z.boolean().optional(),
     requestId: z.string().optional(),
     details: z.record(z.string(), z.unknown()).optional(),
   }),
@@ -799,6 +801,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "set_session_title",
   "goal_set",
   "goal_update",
+  "goal_progress",
   "goal_complete",
   "goal_pause",
   "memory_search",
@@ -806,6 +809,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "memory_correct",
   "preference_registry_summary",
   "preference_registry_get",
+  "task_notes_list",
+  "task_note_save",
+  "task_note_archive",
   "sandboxes_list",
   "sandbox_attach",
   "sandbox_swap",
@@ -1127,6 +1133,28 @@ export const OrganizationMembershipProjection = z.object({
   personalRetentionUntil: z.string().datetime({ offset: true }).nullable(),
 });
 export type OrganizationMembershipProjection = z.infer<typeof OrganizationMembershipProjection>;
+
+/**
+ * Exact active-membership facts returned by managed-human login provisioning.
+ * Retention is intentionally absent because the narrow provisioning capability
+ * neither reads nor mutates offboarding policy.
+ */
+export const ManagedOrganizationMembershipProjection = z.object({
+  id: z.string().uuid(),
+  organizationId: z.string().uuid(),
+  status: z.literal("active"),
+  personalWorkspaceId: z.string().uuid(),
+});
+export type ManagedOrganizationMembershipProjection = z.infer<
+  typeof ManagedOrganizationMembershipProjection
+>;
+
+export const ListManagedOrganizationMembershipsResponse = z.object({
+  memberships: z.array(ManagedOrganizationMembershipProjection),
+});
+export type ListManagedOrganizationMembershipsResponse = z.infer<
+  typeof ListManagedOrganizationMembershipsResponse
+>;
 
 /**
  * Opaque user-resource authority projection. Ownership is represented by the
@@ -1687,12 +1715,17 @@ export const DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS = {
   channelPolicy: { mode: "bot_member" },
 } as const satisfies WorkspaceSlackReactionSummonSettings;
 
+export const WorkspaceMemoryPromptMode = z.enum(["legacy_standing", "retrieval_only"]);
+export type WorkspaceMemoryPromptMode = z.infer<typeof WorkspaceMemoryPromptMode>;
+
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
-// (future) keys rather than stripping them. memoryEnabled defaults off;
+// (future) keys rather than stripping them. memoryEnabled defaults off and the
+// reversible Memory V1 containment rollout defaults to legacy standing context;
 // voiceInput defaults to enabled when the deployment has a provider.
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
     /** Preferred workspace voice-input toggle. */
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /**
@@ -1720,6 +1753,12 @@ export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
 export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
   return parsed.success ? parsed.data.memoryEnabled === true : false;
+}
+
+/** Reversible Memory V1 prompt rollout. Absent preserves legacy composition. */
+export function resolveWorkspaceMemoryPromptMode(settings: unknown): WorkspaceMemoryPromptMode {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? (parsed.data.memoryPromptMode ?? "legacy_standing") : "legacy_standing";
 }
 
 /** Default Codex compaction mode for new Codex sessions (remote_v2 when unset). */
@@ -1792,6 +1831,7 @@ export function workspaceSlackReactionChannelAllowed(
 export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
     transcription: WorkspaceTranscriptionPolicy.optional(),
@@ -1962,6 +2002,11 @@ export const DelegatedAccessTokenPayload = z
     // Model-visible first-party tool selection for a worker-bound session.
     // This is visibility only; permissions remain the authorization boundary.
     firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+    // Trusted root-relative depth facts frozen when the worker prepares this
+    // attempt. They shape only the model-visible tool catalog; the database
+    // remains authoritative for admission and concurrent policy changes.
+    nestedAgentDepth: NestedAgentDepthValue.optional(),
+    effectiveMaxNestedAgentDepth: NestedAgentDepthValue.optional(),
     // The turn making the call (the caller's identity), HMAC-signed by the worker
     // at turn setup. Lets a tool classify WHO is calling from the token itself,
     // instead of racily re-reading the session's live active_turn_id — e.g. the
@@ -1982,6 +2027,23 @@ export const DelegatedAccessTokenPayload = z
       payload.executionGeneration,
     ];
     const exactAttemptClaimCount = exactAttemptClaims.filter((value) => value !== undefined).length;
+    const depthClaimCount = [payload.nestedAgentDepth, payload.effectiveMaxNestedAgentDepth].filter(
+      (value) => value !== undefined,
+    ).length;
+    if (depthClaimCount !== 0 && depthClaimCount !== 2) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["nestedAgentDepth"],
+        message: "nested-agent depth claims must be supplied together",
+      });
+    }
+    if (depthClaimCount > 0 && payload.principalKind !== "agent_attempt") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["principalKind"],
+        message: "nested-agent depth claims require an agent_attempt principal",
+      });
+    }
     if (
       payload.principalKind === "human_session" &&
       (exactAttemptClaimCount !== 0 || payload.serviceInitiator !== undefined)
@@ -2613,6 +2675,59 @@ export type InsightsBillingPath = z.infer<typeof InsightsBillingPath>;
 export const InsightsPricingSource = z.enum(["configured_list_price", "gateway_reported"]);
 export type InsightsPricingSource = z.infer<typeof InsightsPricingSource>;
 
+export const ModelContextContributionSource = z.enum([
+  "workspace_instruction_policy",
+  "legacy_workspace_instructions",
+  "preference_registry_descriptor",
+  "company_profile",
+  "legacy_memory_v1",
+  "runtime_skill_catalog",
+]);
+export type ModelContextContributionSource = z.infer<typeof ModelContextContributionSource>;
+
+/** Content-free per-call summary of model-visible Company Brain material. */
+export const ModelContextContributionSummary = z
+  .object({
+    source: ModelContextContributionSource,
+    items: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    utf8Bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    estimatedTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type ModelContextContributionSummary = z.infer<typeof ModelContextContributionSummary>;
+
+export const ModelContextContributionSummaries = z
+  .array(ModelContextContributionSummary)
+  .max(6)
+  .superRefine((summaries, context) => {
+    const seen = new Set<ModelContextContributionSource>();
+    for (const [index, summary] of summaries.entries()) {
+      if (seen.has(summary.source)) {
+        context.addIssue({
+          code: "custom",
+          message: "Model context contribution sources must be unique",
+          path: [index, "source"],
+        });
+      }
+      seen.add(summary.source);
+    }
+  });
+
+export const InsightsPromptContributionRow = ModelContextContributionSummary.extend({
+  calls: z.number().int().nonnegative(),
+});
+export type InsightsPromptContributionRow = z.infer<typeof InsightsPromptContributionRow>;
+
+export const InsightsPromptContributions = z.object({
+  /** Sum of UTF-8 byte / 4 estimates across calls with contribution receipts. */
+  estimatedTokens: z.number().int().nonnegative(),
+  utf8Bytes: z.number().int().nonnegative(),
+  coveredCalls: z.number().int().nonnegative(),
+  totalCalls: z.number().int().nonnegative(),
+  sources: z.array(InsightsPromptContributionRow),
+});
+export type InsightsPromptContributions = z.infer<typeof InsightsPromptContributions>;
+
 export const InsightsModelUsageRow = z.object({
   id: z.string().min(1),
   model: z.string().min(1),
@@ -2638,9 +2753,9 @@ export type InsightsModelUsageRow = z.infer<typeof InsightsModelUsageRow>;
 
 export const InsightsSeriesPoint = z.object({
   label: z.string().min(1),
-  /** Day-bucketed sum of usage_events.model.cost (workspace-wide) or filtered facts when provider/model set. */
+  /** UTC hour/day-bucketed sum of usage_events.model.cost (workspace-wide) or filtered facts when provider/model set. */
   modelCostUsd: z.number().nonnegative(),
-  /** Day-bucketed hypothetical provider-rate USD for calls with captured pricing. */
+  /** UTC hour/day-bucketed hypothetical provider-rate USD for calls with captured pricing. */
   estimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
   warmSeconds: z.number().nonnegative(),
@@ -2779,6 +2894,13 @@ export const WorkspaceInsightsSnapshot = z.object({
   drivers: z.array(InsightsSpendDriver),
   schedules: z.array(InsightsScheduleRow),
   recentCalls: z.array(InsightsModelCallRow),
+  promptContributions: InsightsPromptContributions.default({
+    estimatedTokens: 0,
+    utf8Bytes: 0,
+    coveredCalls: 0,
+    totalCalls: 0,
+    sources: [],
+  }),
   warmSeconds: z.number().nonnegative(),
   priorWarmSeconds: z.number().nonnegative(),
   warmGroups: z.array(InsightsWarmGroupRow),
@@ -3964,6 +4086,7 @@ export const DocumentSearchResult = z.object({
   authorityKind: DocumentAuthorityKind,
   authorityWorkspaceId: z.string().uuid().nullable(),
   authoritySubjectId: z.string().nullable(),
+  citation: KnowledgeProviderCitation.nullable().optional(),
 });
 export type DocumentSearchResult = z.infer<typeof DocumentSearchResult>;
 
@@ -3993,6 +4116,7 @@ export const IndexedDocumentProvenance = z.object({
   authoritySubjectId: z.string().nullable(),
   createdBy: z.string().nullable(),
   createdAt: z.string(),
+  citation: KnowledgeProviderCitation.nullable().optional(),
 });
 export type IndexedDocumentProvenance = z.infer<typeof IndexedDocumentProvenance>;
 
@@ -4560,6 +4684,86 @@ export type SessionGoalStatus = z.infer<typeof SessionGoalStatus>;
 export const SessionGoalCreatedBy = z.enum(["api", "agent", "scheduled_task"]);
 export type SessionGoalCreatedBy = z.infer<typeof SessionGoalCreatedBy>;
 
+export const SessionGoalMutationPolicy = z.enum([
+  "review_changes",
+  "preserve_intent",
+  "autonomous_adaptation",
+]);
+export type SessionGoalMutationPolicy = z.infer<typeof SessionGoalMutationPolicy>;
+
+export const SessionGoalChangeKind = z.enum(["refinement", "adaptation", "replacement"]);
+export type SessionGoalChangeKind = z.infer<typeof SessionGoalChangeKind>;
+
+export const SESSION_GOAL_TEXT_MAX_BYTES = 8 * 1024;
+export const SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES = 8 * 1024;
+export const SESSION_GOAL_RATIONALE_MAX_BYTES = 2 * 1024;
+export const SESSION_GOAL_PROGRESS_MAX_BYTES = 4 * 1024;
+
+export function sessionGoalUtf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function boundedSessionGoalString(maxBytes: number, field: string) {
+  return z
+    .string()
+    .min(1)
+    .refine((value) => sessionGoalUtf8Bytes(value) <= maxBytes, {
+      message: `${field} exceeds ${maxBytes} UTF-8 bytes`,
+    });
+}
+
+const SessionGoalTextWrite = boundedSessionGoalString(SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
+const SessionGoalSuccessCriteriaWrite = boundedSessionGoalString(
+  SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
+  "goal success criteria",
+);
+const SessionGoalRationaleWrite = boundedSessionGoalString(
+  SESSION_GOAL_RATIONALE_MAX_BYTES,
+  "goal rationale",
+);
+
+export const SessionGoalSnapshot = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("none"), capturedAt: z.string() }),
+  z.object({
+    state: z.enum(["active", "paused", "completed"]),
+    goalId: z.string().uuid(),
+    objectiveRevision: z.number().int().positive(),
+    text: SessionGoalTextWrite,
+    successCriteria: SessionGoalSuccessCriteriaWrite.nullable(),
+    mutationPolicy: SessionGoalMutationPolicy,
+    capturedAt: z.string(),
+  }),
+]);
+export type SessionGoalSnapshot = z.infer<typeof SessionGoalSnapshot>;
+
+export const SessionGoalRevision = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  goalId: z.string().uuid(),
+  disposition: z.enum(["applied", "proposed", "rejected"]),
+  changeKind: SessionGoalChangeKind,
+  baseObjectiveRevision: z.number().int().nonnegative(),
+  resultObjectiveRevision: z.number().int().positive().nullable(),
+  text: z.string().min(1),
+  successCriteria: z.string().nullable(),
+  mutationPolicy: SessionGoalMutationPolicy,
+  rationale: z.string().min(1),
+  actor: z.enum(["agent", "api", "scheduled_task"]),
+  actorTurnId: z.string().uuid().nullable(),
+  actorAttemptId: z.string().uuid().nullable(),
+  proposalId: z.string().uuid().nullable(),
+  createdAt: z.string(),
+});
+export type SessionGoalRevision = z.infer<typeof SessionGoalRevision>;
+
+export const ApplySessionGoalRevisionRequest = z.object({
+  expectedObjectiveRevision: z.number().int().positive(),
+  rationale: SessionGoalRationaleWrite.optional(),
+});
+export type ApplySessionGoalRevisionRequest = z.infer<typeof ApplySessionGoalRevisionRequest>;
+
 export const SessionGoalPausedReason = z.enum([
   "agent",
   "user_pause",
@@ -4618,6 +4822,8 @@ export const SessionGoal = z.object({
   pausedReason: z.string().nullable(),
   createdBy: SessionGoalCreatedBy,
   version: z.number().int().positive(),
+  objectiveRevision: z.number().int().positive(),
+  mutationPolicy: SessionGoalMutationPolicy,
   autoContinuations: z.number().int().nonnegative(),
   noProgressStreak: z.number().int().nonnegative(),
   maxAutoContinuations: z.number().int().positive().nullable(),
@@ -4631,16 +4837,26 @@ export const SessionGoal = z.object({
 export type SessionGoal = z.infer<typeof SessionGoal>;
 
 export const GoalSpec = z.object({
-  text: z.string().min(1),
-  successCriteria: z.string().min(1).optional(),
+  text: SessionGoalTextWrite,
+  successCriteria: SessionGoalSuccessCriteriaWrite.optional(),
   maxAutoContinuations: z.number().int().positive().optional(),
+  mutationPolicy: SessionGoalMutationPolicy.optional(),
 });
 export type GoalSpec = z.infer<typeof GoalSpec>;
 
-export const UpdateSessionGoalRequest = z.object({
-  status: z.enum(["paused", "active"]),
-  rationale: z.string().min(1).optional(),
-});
+export const UpdateSessionGoalRequest = z.union([
+  z.object({
+    status: z.enum(["paused", "active"]),
+    rationale: SessionGoalRationaleWrite.optional(),
+  }),
+  z.object({
+    text: SessionGoalTextWrite,
+    successCriteria: SessionGoalSuccessCriteriaWrite.nullable().optional(),
+    mutationPolicy: SessionGoalMutationPolicy.optional(),
+    rationale: SessionGoalRationaleWrite,
+    expectedObjectiveRevision: z.number().int().positive(),
+  }),
+]);
 export type UpdateSessionGoalRequest = z.infer<typeof UpdateSessionGoalRequest>;
 
 export const UpdateSessionRequest = z.object({
@@ -4936,8 +5152,26 @@ export const SessionRealtimeInboundEntry = z
     delegationItemId: z.string().max(1024).nullable().optional(),
     text: z.string().max(131_072).nullable().optional(),
     payload: z.record(z.string(), z.unknown()).optional(),
+    // Application context attached to the exact delegation/transcript message.
+    // It is ordinary model-visible user-message content when materialized, not
+    // a secret or instruction-authority boundary.
+    modelContext: z.string().trim().min(1).max(32768).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((entry, context) => {
+    if (
+      entry.modelContext !== undefined &&
+      entry.kind !== "delegation_call" &&
+      entry.kind !== "user_transcript" &&
+      entry.kind !== "assistant_transcript"
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["modelContext"],
+        message: "modelContext requires a delegation or finalized transcript entry",
+      });
+    }
+  });
 export type SessionRealtimeInboundEntry = z.infer<typeof SessionRealtimeInboundEntry>;
 
 export const SyncSessionRealtimeLedgerRequest = SessionRealtimeOwnerProof.extend({
@@ -4969,6 +5203,7 @@ export type SyncSessionRealtimeLedgerResponse = z.infer<typeof SyncSessionRealti
 
 export const SessionRealtimeModel = z.enum([
   "gpt-live-1-boulder-alpha",
+  "supergrok/grok-voice-think-fast-2.0",
   "opengeni-gateway/openai/gpt-realtime-2.1",
   "opengeni-gateway/openai/gpt-realtime-mini",
   "opengeni-gateway/xai/grok-voice-think-fast-2.0",
@@ -4981,7 +5216,7 @@ export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
 export const WorkspaceRealtimeModelCatalogItem = z.object({
   id: SessionRealtimeModel,
   label: z.string().min(1),
-  provider: z.enum(["OpenGeni", "Connected Codex", "Your Gateway"]),
+  provider: z.enum(["OpenGeni", "Connected Codex", "Connected SuperGrok", "Your Gateway"]),
   description: z.string().min(1),
   available: z.boolean(),
   unavailableReason: z.string().nullable(),
@@ -5403,6 +5638,28 @@ export function renderTimelineAnnotationsForModel(
       index > 0 && line.startsWith("Annotation ") ? ["", line] : [line],
     ),
   ].join("\n");
+}
+
+export const MODEL_CONTEXT_LABEL = "[Application context attached to this user message]" as const;
+
+/**
+ * Build one canonical user-role message body. `modelContext` is ordinary
+ * message content: it is model-visible in the same chronological position as
+ * the visible text, but presentation layers may omit it. It is not a secret or
+ * an instruction-authority boundary.
+ */
+export function renderUserMessageContentForModel(
+  text: string,
+  annotations: readonly TimelineAnnotation[],
+  modelContext?: string | null,
+): string | Array<{ type: "input_text"; text: string }> {
+  const visibleContent = renderTimelineAnnotationsForModel(text, annotations);
+  const context = modelContext?.trim();
+  if (!context) return visibleContent;
+  return [
+    { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\n${context}` },
+    { type: "input_text", text: visibleContent },
+  ];
 }
 
 export const SessionTurn = z
@@ -6014,12 +6271,16 @@ export const VariableSetVariableName = z
   .max(128);
 export type VariableSetVariableName = z.infer<typeof VariableSetVariableName>;
 
-function withVariableSetIdAlias<T extends z.ZodRawShape>(shape: T) {
+function withVariableSetIdAlias<T extends z.ZodRawShape>(
+  shape: T,
+  options: { rejectKeys?: readonly string[] } = {},
+) {
   return z.preprocess((input) => {
     if (!input || typeof input !== "object" || Array.isArray(input)) {
       return input;
     }
     const record = input as Record<string, unknown>;
+    if (options.rejectKeys?.some((key) => Object.hasOwn(record, key))) return null;
     if (record.variableSetId !== undefined || record.environmentId === undefined) {
       return record;
     }
@@ -6722,47 +6983,48 @@ export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
 ]);
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
 
-export const UpdateScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
-  name: z.string().min(1).optional(),
-  schedule: ScheduledTaskScheduleSpec.optional(),
-  runMode: ScheduledTaskRunMode.optional(),
-  overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
-  action: ScheduledTaskAction.optional(),
-  targetSessionId: z.string().uuid().nullable().optional(),
-  agentConfig: ScheduledTaskAgentConfig.optional(),
-  status: ScheduledTaskStatus.optional(),
-  variableSetId: z.string().uuid().nullable().optional(),
-  environmentId: z.string().uuid().nullable().optional(),
-  // The rig each run binds to (M3); null clears it. Its active version is
-  // resolved per fire, so an update takes effect on the next dispatch.
-  rigId: z.string().uuid().nullable().optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-}).superRefine((value, context) => {
-  if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
-    context.addIssue({
-      code: "custom",
-      path: ["targetSessionId"],
-      message: "targetSessionId requires runMode=existing_session",
-    });
-  }
-  if (value.runMode === "existing_session" && value.targetSessionId === null) {
-    context.addIssue({
-      code: "custom",
-      path: ["targetSessionId"],
-      message: "targetSessionId cannot be null when runMode=existing_session",
-    });
-  }
-  if (
-    value.agentConfig?.goal &&
-    (value.runMode === "existing_session" || Boolean(value.targetSessionId))
-  ) {
-    context.addIssue({
-      code: "custom",
-      path: ["agentConfig", "goal"],
-      message: "agentConfig.goal cannot be used with an existing-session target",
-    });
-  }
-});
+export const UpdateScheduledTaskRequest =
+  /* @__PURE__ */ withVariableSetIdAlias({
+    name: z.string().min(1).optional(),
+    schedule: ScheduledTaskScheduleSpec.optional(),
+    runMode: ScheduledTaskRunMode.optional(),
+    overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
+    action: ScheduledTaskAction.optional(),
+    targetSessionId: z.string().uuid().nullable().optional(),
+    agentConfig: ScheduledTaskAgentConfig.optional(),
+    status: ScheduledTaskStatus.optional(),
+    variableSetId: z.string().uuid().nullable().optional(),
+    environmentId: z.string().uuid().nullable().optional(),
+    // The rig each run binds to (M3); null clears it. Its active version is
+    // resolved per fire, so an update takes effect on the next dispatch.
+    rigId: z.string().uuid().nullable().optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+  }).superRefine((value, context) => {
+    if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
+      context.addIssue({
+        code: "custom",
+        path: ["targetSessionId"],
+        message: "targetSessionId requires runMode=existing_session",
+      });
+    }
+    if (value.runMode === "existing_session" && value.targetSessionId === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["targetSessionId"],
+        message: "targetSessionId cannot be null when runMode=existing_session",
+      });
+    }
+    if (
+      value.agentConfig?.goal &&
+      (value.runMode === "existing_session" || Boolean(value.targetSessionId))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["agentConfig", "goal"],
+        message: "agentConfig.goal cannot be used with an existing-session target",
+      });
+    }
+  });
 export type UpdateScheduledTaskRequest = z.infer<typeof UpdateScheduledTaskRequest>;
 
 /**
@@ -8068,7 +8330,10 @@ const IntegrationFacetJsonObject = z.record(z.string(), z.unknown()).superRefine
     return;
   }
   if (new TextEncoder().encode(serialized).byteLength > 131_072) {
-    ctx.addIssue({ code: "custom", message: "must not exceed 131072 UTF-8 bytes" });
+    ctx.addIssue({
+      code: "custom",
+      message: "must not exceed 131072 UTF-8 bytes",
+    });
   }
 });
 
@@ -8133,6 +8398,8 @@ export const IntegrationFacetBindingSummary = z
     lastErrorCode: z.string().min(1).max(120).nullable(),
     createdAt: z.string().datetime({ offset: true }),
     updatedAt: z.string().datetime({ offset: true }),
+    directlyOwned: z.boolean(),
+    owners: z.array(CapabilityComponentOwner),
   })
   .strict();
 export type IntegrationFacetBindingSummary = z.infer<typeof IntegrationFacetBindingSummary>;
@@ -8199,7 +8466,12 @@ export const IntegrationFacetRemovalResult = z
 export type IntegrationFacetRemovalResult = z.infer<typeof IntegrationFacetRemovalResult>;
 
 export const IntegrationSource = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("definition"), definitionId: z.string().min(1).max(128) }).strict(),
+  z
+    .object({
+      kind: z.literal("definition"),
+      definitionId: z.string().min(1).max(128),
+    })
+    .strict(),
   z
     .object({
       kind: z.literal("openapi"),
@@ -8457,7 +8729,11 @@ export const PluginManifest = z
       .array(
         z.discriminatedUnion("kind", [
           z
-            .object({ key: PluginComponentKey, kind: z.literal("skill"), url: z.string().url() })
+            .object({
+              key: PluginComponentKey,
+              kind: z.literal("skill"),
+              url: z.string().url(),
+            })
             .strict(),
           z
             .object({
@@ -8558,7 +8834,12 @@ export const InstallPluginRequest = z
     expectedManifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
     expectedComponents: z
       .array(
-        z.object({ key: PluginComponentKey, digest: z.string().regex(/^[0-9a-f]{64}$/) }).strict(),
+        z
+          .object({
+            key: PluginComponentKey,
+            digest: z.string().regex(/^[0-9a-f]{64}$/),
+          })
+          .strict(),
       )
       .min(1)
       .max(64),
@@ -8934,6 +9215,9 @@ export const SessionEventType = z.enum([
   "artifact.created",
   "goal.set",
   "goal.updated",
+  "goal.progress",
+  "goal.rewrite.proposed",
+  "goal.rewrite.rejected",
   "goal.completed",
   "goal.paused",
   "goal.resumed",
@@ -9137,6 +9421,9 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "user.humanInputResponse",
     "goal.set",
     "goal.updated",
+    "goal.progress",
+    "goal.rewrite.proposed",
+    "goal.rewrite.rejected",
     "goal.completed",
     "goal.paused",
     "goal.resumed",
@@ -11043,134 +11330,138 @@ export const SessionControlResponse = z.object({
 });
 export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
-export const CreateSessionRequest = withVariableSetIdAlias({
-  /**
-   * Optional UUID preallocated by an embedding host. This lets the host durably
-   * link its own projection before OpenGeni admits the initial turn. Replays
-   * must pair it with the same idempotency key; OpenGeni never derives host
-   * identity or authorization from the UUID.
-   */
-  requestedSessionId: z.string().uuid().optional(),
-  initialMessage: z.string().min(1).optional(),
-  // Creates the durable session shell without fabricating a user message or
-  // starting an underlying agent turn. Realtime can then become the first
-  // interaction and use the ordinary Send/Steer path when it delegates.
-  startMode: z.literal("realtime").optional(),
-  // System-level host context for the initial turn only. Unlike `instructions`,
-  // this does not persist into later turns and is never emitted as a user event.
-  turnInstructions: z.string().trim().min(1).max(32768).optional(),
-  // Per-session agent persona/system instructions (org-visible metadata, NOT a
-  // secret). Rides the SAME system-level instructions channel the per-workspace
-  // agentInstructions rides, composed AFTER the workspace persona so it refines
-  // it for this one session — how a host delivers per-agent-type prompts without
-  // leaking them into the user-visible timeline (it is NEVER emitted as an
-  // event, unlike goal/initialMessage). Trimmed, non-empty. The 32768-char cap
-  // matches the codebase's largest free-form string convention (workspace
-  // variable set variable values). Absent ⇒ byte-identical to today.
-  instructions: z.string().trim().min(1).max(32768).optional(),
-  // Immutable prompt-policy role binding for matching one activated role
-  // policy. This never derives from or grants a human workspace membership
-  // role. Existing callers may continue to use normalized metadata.role as a
-  // compatibility fallback by omitting this field.
-  policyRole: WorkspaceInstructionPolicyRoleKeyInput.optional(),
-  // For an agent-created child, omission inherits the trusted immediate
-  // parent's repository/file context. An explicit array, including [], is
-  // authoritative. Top-level omission remains []. Presence is resolved from
-  // the raw request because this Zod default erases absent-vs-empty.
-  resources: z.array(ResourceRef).default([]),
-  // Inline skills are fixed onto the session. Child omission inherits the
-  // trusted parent's selection; an explicit array, including [], wins.
-  skills: SessionSkills.default([]),
-  // The same child omission rule applies to selected MCP tool refs. Top-level
-  // omission still applies workspace-default capability MCP tools; explicit []
-  // suppresses those defaults (the first-party OpenGeni server remains added).
-  tools: z.array(ToolRef).default([]),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-  model: z.string().min(1).optional(),
-  reasoningEffort: ReasoningEffort.optional(),
-  latencyMode: LatencyMode.optional(),
-  sandboxBackend: SandboxBackend.optional(),
-  // The enrolled machine (a sandbox id) to run this session on; seeds the
-  // active-sandbox pointer at creation so the FIRST turn routes to the chosen
-  // machine (race-free: the pointer is committed before the worker turn
-  // workflow can read it). An invalid/unowned/offline target fails the create.
-  targetSandboxId: z.string().uuid().optional(),
-  // The working directory the targeted machine runs the session under — the
-  // path/cwd base for its agent exec, terminal, and file dock. Free-form pass-
-  // through: a launch-workspace_root-relative subdir or an absolute machine path
-  // (the agent's resolve_cwd handles both). Only valid WITH targetSandboxId
-  // (workingDir alone is a 422); omitted ⇒ the machine's default workspace_root.
-  workingDir: z.string().min(1).optional(),
-  // Variable set attachment is fixed at session creation; follow-up
-  // user.message events cannot switch or add one.
-  variableSetId: z.string().uuid().optional(),
-  environmentId: z.string().uuid().optional(),
-  // The rig to bind this session to (M3). Its ACTIVE version is resolved and
-  // FROZEN onto the session at create. Omitted ⇒ inherit the workspace default;
-  // null ⇒ explicitly create a rig-less session; UUID ⇒ bind that exact rig.
-  // An id that does not name a rig in the workspace is a 422.
-  rigId: z.string().uuid().nullable().optional(),
-  // The workspace channel to file this session under (rail organization only).
-  // Omitted/null ⇒ unfiled (inbox). An id that does not name a channel in the
-  // workspace is a 422.
-  channelId: z.string().uuid().nullable().optional(),
-  goal: GoalSpec.optional(),
-  clientEventId: SessionOperationKey.optional(),
-  // Workspace-scoped CREATE idempotency key: collapses concurrent/retried
-  // create calls carrying the same key to a single session (partial unique
-  // index on (workspace_id, create_idempotency_key)). Distinct from
-  // clientEventId, whose uniqueness is per-session and so cannot dedup the
-  // creation of a brand-new session. Absent means no create-dedup (each call
-  // is an independent create).
-  idempotencyKey: z.string().min(1).max(200).optional(),
-  // The exact actor-private pre-session draft revision represented by this
-  // create. The durable initializer consumes only this revision. A newer draft
-  // written by a sibling tab survives, while every failed pre-initialization
-  // create leaves the submitted draft intact.
-  expectedNewSessionDraftRevision: z.number().int().nonnegative().optional(),
-  // A child may lower its inherited limit freely; an increase requires
-  // workspace:admin and is checked again at the DB transaction boundary.
-  maxNestedAgentDepth: NestedAgentDepthValue.optional(),
-  // Permissions the session's first-party MCP token should carry. A top-level
-  // omission uses the deployment's worker default; a child omission inherits
-  // the creating session's effective grant. An explicit set is capped at
-  // creation: every requested permission must be held by the creating grant.
-  // A goal-bearing session whose explicit/effective set omits goals:manage is
-  // rejected; creation never silently expands a child beyond that set.
-  firstPartyMcpPermissions: z.array(Permission).optional(),
-  // Exact model-visible selection from the broad first-party OpenGeni MCP
-  // catalog. Omission selects the safe non-connector default; [] intentionally
-  // exposes none.
-  // This does not grant authority: every registered tool is permission-gated.
-  firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
-  // Third-party MCP servers attached only to this session. For an agent-created
-  // child, omission snapshots its trusted immediate parent's server definitions,
-  // policies, connection refs, and encrypted credentials. Explicit arrays,
-  // including [], are authoritative; non-empty explicit arrays require attach
-  // permission. Credential headers are write-only: create responses and events
-  // expose only SessionMcpServerMetadata.
-  mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
-  // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
-  // today's behavior (a context-dependent default resolved server-side: from
-  // inside a session → "shared" with the creator's box, top-level → "new").
-  //   - "shared":  join the CREATOR's box. Requires a parent session (inferred
-  //                from the worker-signed sessionId claim, never caller-supplied);
-  //                top-level "shared" is a 422.
-  //   - "new":     mint a fresh singleton box (group ≡ the new session's id).
-  //   - {groupId}: join a SPECIFIC sibling group in THIS workspace (manager
-  //                fan-out). Validated workspace-scoped (cross-workspace → 404).
-  // A shared spawn inherits the box's (backend, os) — it is literally the same
-  // box; the child cannot pick its own backend. Cross-workspace sharing is
-  // forbidden by construction (the parent/group reads are RLS-workspace-scoped).
-  // ENV-AWARE: the box's variable set is fixed at creation, so a share requires
-  // the SAME variableSetId as the creator's box. On a mismatch the inherited
-  // default silently falls back to an own box; an explicit "shared"/{groupId}
-  // request 422s at create (instead of the first turn dying on the SDK's
-  // manifest-env guard).
-  sandbox: z
-    .union([z.literal("shared"), z.literal("new"), z.object({ groupId: z.string().uuid() })])
-    .optional(),
-}).superRefine((value, context) => {
+export const CreateSessionRequest = withVariableSetIdAlias(
+  {
+    /**
+     * Optional UUID preallocated by an embedding host. This lets the host durably
+     * link its own projection before OpenGeni admits the initial turn. Replays
+     * must pair it with the same idempotency key; OpenGeni never derives host
+     * identity or authorization from the UUID.
+     */
+    requestedSessionId: z.string().uuid().optional(),
+    initialMessage: z.string().min(1).optional(),
+    // Creates the durable session shell without fabricating a user message or
+    // starting an underlying agent turn. Realtime can then become the first
+    // interaction and use the ordinary Send/Steer path when it delegates.
+    startMode: z.literal("realtime").optional(),
+    // Model-visible application context attached to the initial user message.
+    // Standard timeline rendering omits it, while full event/audit reads retain
+    // it. This is ordinary user-role content, not secret or privileged input.
+    modelContext: z.string().trim().min(1).max(32768).optional(),
+    // Per-session agent persona/system instructions (org-visible metadata, NOT a
+    // secret). Rides the SAME system-level instructions channel the per-workspace
+    // agentInstructions rides, composed AFTER the workspace persona so it refines
+    // it for this one session — how a host delivers per-agent-type prompts without
+    // leaking them into the user-visible timeline (it is NEVER emitted as an
+    // event, unlike goal/initialMessage). Trimmed, non-empty. The 32768-char cap
+    // matches the codebase's largest free-form string convention (workspace
+    // variable set variable values). Absent ⇒ byte-identical to today.
+    instructions: z.string().trim().min(1).max(32768).optional(),
+    // Immutable prompt-policy role binding for matching one activated role
+    // policy. This never derives from or grants a human workspace membership
+    // role. Existing callers may continue to use normalized metadata.role as a
+    // compatibility fallback by omitting this field.
+    policyRole: WorkspaceInstructionPolicyRoleKeyInput.optional(),
+    // For an agent-created child, omission inherits the trusted immediate
+    // parent's repository/file context. An explicit array, including [], is
+    // authoritative. Top-level omission remains []. Presence is resolved from
+    // the raw request because this Zod default erases absent-vs-empty.
+    resources: z.array(ResourceRef).default([]),
+    // Inline skills are fixed onto the session. Child omission inherits the
+    // trusted parent's selection; an explicit array, including [], wins.
+    skills: SessionSkills.default([]),
+    // The same child omission rule applies to selected MCP tool refs. Top-level
+    // omission still applies workspace-default capability MCP tools; explicit []
+    // suppresses those defaults (the first-party OpenGeni server remains added).
+    tools: z.array(ToolRef).default([]),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+    model: z.string().min(1).optional(),
+    reasoningEffort: ReasoningEffort.optional(),
+    latencyMode: LatencyMode.optional(),
+    sandboxBackend: SandboxBackend.optional(),
+    // The enrolled machine (a sandbox id) to run this session on; seeds the
+    // active-sandbox pointer at creation so the FIRST turn routes to the chosen
+    // machine (race-free: the pointer is committed before the worker turn
+    // workflow can read it). An invalid/unowned/offline target fails the create.
+    targetSandboxId: z.string().uuid().optional(),
+    // The working directory the targeted machine runs the session under — the
+    // path/cwd base for its agent exec, terminal, and file dock. Free-form pass-
+    // through: a launch-workspace_root-relative subdir or an absolute machine path
+    // (the agent's resolve_cwd handles both). Only valid WITH targetSandboxId
+    // (workingDir alone is a 422); omitted ⇒ the machine's default workspace_root.
+    workingDir: z.string().min(1).optional(),
+    // Variable set attachment is fixed at session creation; follow-up
+    // user.message events cannot switch or add one.
+    variableSetId: z.string().uuid().optional(),
+    environmentId: z.string().uuid().optional(),
+    // The rig to bind this session to (M3). Its ACTIVE version is resolved and
+    // FROZEN onto the session at create. Omitted ⇒ inherit the workspace default;
+    // null ⇒ explicitly create a rig-less session; UUID ⇒ bind that exact rig.
+    // An id that does not name a rig in the workspace is a 422.
+    rigId: z.string().uuid().nullable().optional(),
+    // The workspace channel to file this session under (rail organization only).
+    // Omitted/null ⇒ unfiled (inbox). An id that does not name a channel in the
+    // workspace is a 422.
+    channelId: z.string().uuid().nullable().optional(),
+    goal: GoalSpec.optional(),
+    clientEventId: SessionOperationKey.optional(),
+    // Workspace-scoped CREATE idempotency key: collapses concurrent/retried
+    // create calls carrying the same key to a single session (partial unique
+    // index on (workspace_id, create_idempotency_key)). Distinct from
+    // clientEventId, whose uniqueness is per-session and so cannot dedup the
+    // creation of a brand-new session. Absent means no create-dedup (each call
+    // is an independent create).
+    idempotencyKey: z.string().min(1).max(200).optional(),
+    // The exact actor-private pre-session draft revision represented by this
+    // create. The durable initializer consumes only this revision. A newer draft
+    // written by a sibling tab survives, while every failed pre-initialization
+    // create leaves the submitted draft intact.
+    expectedNewSessionDraftRevision: z.number().int().nonnegative().optional(),
+    // A child may lower its inherited limit freely; an increase requires
+    // workspace:admin and is checked again at the DB transaction boundary.
+    maxNestedAgentDepth: NestedAgentDepthValue.optional(),
+    // Permissions the session's first-party MCP token should carry. A top-level
+    // omission uses the deployment's worker default; a child omission inherits
+    // the creating session's effective grant. An explicit set is capped at
+    // creation: every requested permission must be held by the creating grant.
+    // A goal-bearing session whose explicit/effective set omits goals:manage is
+    // rejected; creation never silently expands a child beyond that set.
+    firstPartyMcpPermissions: z.array(Permission).optional(),
+    // Exact model-visible selection from the broad first-party OpenGeni MCP
+    // catalog. Omission selects the safe non-connector default; [] intentionally
+    // exposes none.
+    // This does not grant authority: every registered tool is permission-gated.
+    firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+    // Third-party MCP servers attached only to this session. For an agent-created
+    // child, omission snapshots its trusted immediate parent's server definitions,
+    // policies, connection refs, and encrypted credentials. Explicit arrays,
+    // including [], are authoritative; non-empty explicit arrays require attach
+    // permission. Credential headers are write-only: create responses and events
+    // expose only SessionMcpServerMetadata.
+    mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
+    // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
+    // today's behavior (a context-dependent default resolved server-side: from
+    // inside a session → "shared" with the creator's box, top-level → "new").
+    //   - "shared":  join the CREATOR's box. Requires a parent session (inferred
+    //                from the worker-signed sessionId claim, never caller-supplied);
+    //                top-level "shared" is a 422.
+    //   - "new":     mint a fresh singleton box (group ≡ the new session's id).
+    //   - {groupId}: join a SPECIFIC sibling group in THIS workspace (manager
+    //                fan-out). Validated workspace-scoped (cross-workspace → 404).
+    // A shared spawn inherits the box's (backend, os) — it is literally the same
+    // box; the child cannot pick its own backend. Cross-workspace sharing is
+    // forbidden by construction (the parent/group reads are RLS-workspace-scoped).
+    // ENV-AWARE: the box's variable set is fixed at creation, so a share requires
+    // the SAME variableSetId as the creator's box. On a mismatch the inherited
+    // default silently falls back to an own box; an explicit "shared"/{groupId}
+    // request 422s at create (instead of the first turn dying on the SDK's
+    // manifest-env guard).
+    sandbox: z
+      .union([z.literal("shared"), z.literal("new"), z.object({ groupId: z.string().uuid() })])
+      .optional(),
+  },
+  { rejectKeys: ["turnInstructions"] },
+).superRefine((value, context) => {
   if (value.startMode !== "realtime" && value.initialMessage === undefined) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -11183,6 +11474,13 @@ export const CreateSessionRequest = withVariableSetIdAlias({
       code: z.ZodIssueCode.custom,
       path: ["initialMessage"],
       message: "initialMessage must be omitted when startMode is realtime",
+    });
+  }
+  if (value.startMode === "realtime" && value.modelContext !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["modelContext"],
+      message: "modelContext requires an initialMessage; attach it to a realtime entry instead",
     });
   }
 });
@@ -11371,9 +11669,9 @@ export const SessionUserMessagePayload = z
   .object({
     text: z.string().default(""),
     annotations: SubmittedTimelineAnnotations.default([]),
-    // System-level host context for this exact turn only. Persisted on the
-    // turn for retry/recovery, never copied into the visible user message.
-    turnInstructions: z.string().trim().min(1).max(32768).optional(),
+    // Model-visible application context attached to this exact user message.
+    // It is retained in full event/history data but omitted by standard UI.
+    modelContext: z.string().trim().min(1).max(32768).optional(),
     resources: z.array(ResourceRef).default([]),
     model: z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
@@ -11418,8 +11716,8 @@ export const SteerSessionMessageRequest = z
   .object({
     text: z.string().default(""),
     annotations: SubmittedTimelineAnnotations.default([]),
-    // Same per-turn system-level context as a queued user.message.
-    turnInstructions: z.string().trim().min(1).max(32768).optional(),
+    // Same model-visible message context as a queued user.message.
+    modelContext: z.string().trim().min(1).max(32768).optional(),
     resources: z.array(ResourceRef).default([]),
     model: z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
@@ -12064,6 +12362,82 @@ export type MachineState = z.infer<typeof MachineState>;
 export const MachineKind = z.enum(["modal", "selfhosted"]);
 export type MachineKind = z.infer<typeof MachineKind>;
 
+/** Diagnostic projection of the single live Connected-Machine runner authority.
+ * It contains no bearer or NATS subject material. `supersededCount` is derived
+ * from the monotonic generation; duplicate-denial evidence records valid
+ * competing processes that were prevented from receiving work. */
+export const MachineConnectionAuthority = z.object({
+  state: z.enum(["not_applicable", "unclaimed", "active", "expired"]),
+  generation: z.number().int().nonnegative(),
+  supersededCount: z.number().int().nonnegative(),
+  leaseExpiresAt: z.string().nullable(),
+  duplicateRunnerDeniedCount: z.number().int().nonnegative(),
+  duplicateRunnerDeniedAt: z.string().nullable(),
+});
+export type MachineConnectionAuthority = z.infer<typeof MachineConnectionAuthority>;
+
+export const MachineRuntimeCapabilities = z.object({
+  exec: z.boolean(),
+  filesystem: z.boolean(),
+  git: z.boolean(),
+  pty: z.boolean(),
+  desktop: z.boolean(),
+  opStream: z.boolean(),
+  browserBridge: z.boolean(),
+});
+export type MachineRuntimeCapabilities = z.infer<typeof MachineRuntimeCapabilities>;
+
+export const MachineUpdateStatus = z.enum([
+  "requested",
+  "accepted",
+  "waiting_for_idle",
+  "downloading",
+  "verifying",
+  "applying",
+  "restarting",
+  "succeeded",
+  "failed",
+]);
+export type MachineUpdateStatus = z.infer<typeof MachineUpdateStatus>;
+
+export const MachineUpdateState = z.object({
+  operationId: z.string().uuid(),
+  status: MachineUpdateStatus,
+  targetVersion: z.string(),
+  expectedBinarySha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .nullable(),
+  errorCode: z.string().nullable(),
+  retryable: z.boolean(),
+  rolledBack: z.boolean(),
+  requestedAt: z.string(),
+  updatedAt: z.string(),
+  completedAt: z.string().nullable(),
+});
+export type MachineUpdateState = z.infer<typeof MachineUpdateState>;
+
+export const MachineRuntime = z.object({
+  installedVersion: z.string().nullable(),
+  binarySha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .nullable(),
+  updateChannel: z.enum(["stable", "beta"]).nullable(),
+  desiredVersion: z.string().nullable(),
+  versionState: z.enum(["unknown", "current", "outdated", "ahead", "updating", "update_failed"]),
+  capabilities: MachineRuntimeCapabilities,
+  update: MachineUpdateState.nullable(),
+});
+export type MachineRuntime = z.infer<typeof MachineRuntime>;
+
+export const UpdateMachineAgentResponse = z.object({
+  operationId: z.string().uuid(),
+  accepted: z.boolean(),
+  targetVersion: z.string(),
+});
+export type UpdateMachineAgentResponse = z.infer<typeof UpdateMachineAgentResponse>;
+
 /**
  * A machine as the Machines dashboard renders it. The workspace's enrolled
  * selfhosted machines PLUS the session's synthetic Modal group box
@@ -12093,6 +12467,10 @@ export const MachineView = z.object({
   allowScreenControl: z.boolean(),
   sharedSessionCount: z.number().int(),
   lastSeenAt: z.string().nullable(),
+  connectionAuthority: MachineConnectionAuthority,
+  // Exact connected-agent build/capabilities and current update operation. Null
+  // for managed/session sandboxes and pre-runtime-reporting synthetic rows.
+  runtime: MachineRuntime.nullable().default(null),
   metrics: MetricSample.nullable(),
 });
 export type MachineView = z.infer<typeof MachineView>;
@@ -12574,7 +12952,7 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-social-provider-tools-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-model-context-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -12602,6 +12980,15 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         }),
       )
       .default([]),
+    firstPartyMcpTools: z
+      .object({
+        default: z.array(FirstPartyMcpToolName),
+        allowed: z.array(FirstPartyMcpToolName),
+      })
+      .default({
+        default: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+        allowed: [...FIRST_PARTY_MCP_TOOL_NAMES],
+      }),
     fileUploads: z.object({
       enabled: z.boolean(),
       maxSizeBytes: z.number().int().positive(),
@@ -12743,4 +13130,6 @@ export * from "./workspace-learning-policy";
 export * from "./workspace-state";
 export * from "./preference-registry";
 export * from "./scoped-knowledge";
+export * from "./knowledge";
+export * from "./task-notes";
 export * from "./canonical-human-identities";

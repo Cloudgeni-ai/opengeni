@@ -32,3 +32,27 @@ export class XaiSubscriptionTransientError extends XaiSubscriptionError {
     this.name = "XaiSubscriptionTransientError";
   }
 }
+
+export class XaiSubscriptionHostedToolContinuationError extends XaiSubscriptionError {
+  readonly code = "xai_hosted_tool_continuation_stalled";
+
+  constructor() {
+    super(
+      "timeout",
+      "SuperGrok stopped responding after completing a hosted search. The partial response was preserved and was not replayed automatically.",
+    );
+    this.name = "XaiSubscriptionHostedToolContinuationError";
+  }
+}
+
+export function isXaiSubscriptionHostedToolContinuationError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (current instanceof XaiSubscriptionHostedToolContinuationError) return true;
+    if ((current as { code?: unknown }).code === "xai_hosted_tool_continuation_stalled") {
+      return true;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}

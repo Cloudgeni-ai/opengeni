@@ -11,7 +11,7 @@ const routeUrl = new URL("../src/routes/browser-identities.ts", import.meta.url)
 const appUrl = new URL("../src/app.ts", import.meta.url);
 
 describe("BrowserIdentity route discipline", () => {
-  test("registers workspace identity discovery, creation, and immutable history", async () => {
+  test("registers workspace identity discovery, creation, lifecycle, and immutable history", async () => {
     const source = await readFile(routeUrl, "utf8");
     for (const route of [
       '"/v1/workspaces/:workspaceId/browser-identities"',
@@ -23,6 +23,8 @@ describe("BrowserIdentity route discipline", () => {
     expect(await readFile(appUrl, "utf8")).toContain(
       "registerBrowserIdentityRoutes(app, routeDeps)",
     );
+    expect(source).toContain("app.patch");
+    expect(source).toContain("UpdateBrowserIdentityRequest");
   });
 
   test("maps absence separately from immutable-state and CAS conflicts", () => {

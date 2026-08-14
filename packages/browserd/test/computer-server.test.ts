@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:net";
 import { join } from "node:path";
 import type {
   ComputerActionCommand,
@@ -8,6 +9,7 @@ import type {
   ComputerSessionCapabilities,
   ComputerTarget,
 } from "@opengeni/contracts";
+import { COMPUTER_RFB_WEBSOCKET_PROTOCOL } from "@opengeni/contracts";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   BrowserControlServer,
@@ -186,6 +188,50 @@ describe("Computer routes on the placement interaction server", () => {
       expect(ended.status).toBe(200);
     });
   });
+
+  test("forwards a complete raw-sized RFB response without pausing mid-rectangle", async () => {
+    const expected = new Uint8Array(1_440 * 900 * 4);
+    for (let index = 0; index < expected.byteLength; index += 1) expected[index] = index % 251;
+    const upstream = createServer((socket) => {
+      for (let offset = 0; offset < expected.byteLength; offset += 64 * 1024) {
+        socket.write(expected.subarray(offset, Math.min(offset + 64 * 1024, expected.byteLength)));
+      }
+    });
+    await new Promise<void>((resolve, reject) => {
+      upstream.once("error", reject);
+      upstream.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = upstream.address();
+    if (!address || typeof address === "string") throw new Error("RFB fixture did not bind TCP");
+    try {
+      await withServer(
+        async ({ server, reference }) => {
+          const created = await request(server, "/v1/computer-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          });
+          expect(created.status).toBe(201);
+          const websocket = new WebSocket(
+            `${server.url.replace("http:", "ws:")}/v1/computer-sessions/${reference.computerSessionId}/targets/screen-1/rfb`,
+            [
+              "binary",
+              COMPUTER_RFB_WEBSOCKET_PROTOCOL,
+              `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${viewToken}`,
+            ],
+          );
+          websocket.binaryType = "arraybuffer";
+          expect(await websocketBytes(websocket, expected.byteLength)).toEqual(expected);
+          websocket.close(1000, "fixture complete");
+        },
+        { rfbPort: address.port },
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        upstream.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
 });
 
 async function withServer(
@@ -193,6 +239,7 @@ async function withServer(
     server: BrowserControlServer;
     reference: { computerSessionId: string; controllerGeneration: string };
   }) => Promise<void>,
+  options: { rfbPort?: number } = {},
 ): Promise<void> {
   const directory = await mkdtemp("/tmp/og-computer-server-");
   const browserSupervisor = await BrowserSupervisor.open({
@@ -204,8 +251,9 @@ async function withServer(
   });
   const computerSupervisor = await ComputerSupervisor.open({
     rootDirectory: join(directory, "computer-state"),
-    environmentAllocator: fixtureEnvironmentAllocator(),
-    createDriver: async (context) => new FixtureComputerDriver(context),
+    environmentAllocator: fixtureEnvironmentAllocator(options.rfbPort ?? null),
+    createDriver: async (context) =>
+      new FixtureComputerDriver(context, options.rfbPort !== undefined),
   });
   const server = BrowserControlServer.start({
     supervisor: browserSupervisor,
@@ -241,14 +289,21 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
     parallelApps: true,
   };
 
-  constructor(private readonly context: ComputerSupervisorDriverContext) {}
+  constructor(
+    private readonly context: ComputerSupervisorDriverContext,
+    private readonly includeScreen = false,
+  ) {}
 
   async listTargets(): Promise<ComputerTarget[]> {
-    return [this.buildTarget()];
+    return this.includeScreen
+      ? [this.buildTarget(), this.buildScreenTarget()]
+      : [this.buildTarget()];
   }
 
   async target(targetId: string): Promise<ComputerTarget | null> {
-    return targetId === "window-1" ? this.buildTarget() : null;
+    if (targetId === "window-1") return this.buildTarget();
+    if (targetId === "screen-1" && this.includeScreen) return this.buildScreenTarget();
+    return null;
   }
 
   async observe(): Promise<ComputerObservation> {
@@ -293,6 +348,17 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
       title: "Fixture",
       bounds: { x: 0, y: 0, width: 3, height: 2 },
       focused: true,
+    };
+  }
+
+  private buildScreenTarget(): ComputerTarget {
+    return {
+      ...this.buildTarget(),
+      id: "screen-1",
+      kind: "screen",
+      applicationId: null,
+      processId: null,
+      title: "Fixture screen",
     };
   }
 
@@ -341,13 +407,13 @@ function createBody(
   };
 }
 
-function fixtureEnvironmentAllocator(): ComputerEnvironmentAllocator {
+function fixtureEnvironmentAllocator(rfbPort: number | null = null): ComputerEnvironmentAllocator {
   return {
     async allocate() {
       return {
         seatId: "seat-1",
         displayId: ":101",
-        rfbPort: null,
+        rfbPort,
         environment: { PATH: process.env.PATH ?? "/usr/bin" },
         async close() {},
       };
@@ -409,6 +475,39 @@ async function websocketMessage(websocket: WebSocket): Promise<ArrayBuffer> {
     websocket.addEventListener("error", () => reject(new Error("websocket failed")), {
       once: true,
     });
+  });
+}
+
+async function websocketBytes(websocket: WebSocket, expectedLength: number): Promise<Uint8Array> {
+  return await new Promise((resolve, reject) => {
+    const chunks: Uint8Array[] = [];
+    let length = 0;
+    const timer = setTimeout(
+      () => reject(new Error(`RFB fixture received ${length} bytes`)),
+      5_000,
+    );
+    websocket.addEventListener("message", (event) => {
+      const chunk = new Uint8Array(event.data as ArrayBuffer);
+      chunks.push(chunk);
+      length += chunk.byteLength;
+      if (length < expectedLength) return;
+      clearTimeout(timer);
+      const received = new Uint8Array(length);
+      let offset = 0;
+      for (const value of chunks) {
+        received.set(value, offset);
+        offset += value.byteLength;
+      }
+      resolve(received);
+    });
+    websocket.addEventListener(
+      "error",
+      () => {
+        clearTimeout(timer);
+        reject(new Error("RFB fixture websocket failed"));
+      },
+      { once: true },
+    );
   });
 }
 

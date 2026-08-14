@@ -6,16 +6,18 @@ use std::time::Duration;
 use async_trait::async_trait;
 use image::{
     codecs::{jpeg::JpegEncoder, png::PngEncoder},
-    ExtendedColorType, ImageEncoder as _,
+    imageops::FilterType,
+    ExtendedColorType, ImageEncoder as _, RgbaImage,
 };
 use opengeni_agent_macos_ffi::{
     accessibility_trusted, capture_display_rgba, capture_display_rgba_sized, capture_window_rgba,
-    capture_window_rgba_sized, focus_target, inject_batch, inject_display_batch,
-    inject_window_batch, input_monitoring_granted, launch_application, list_displays, list_targets,
-    machine_locked, probe_display, screen_capture_granted, start_display_frame_stream,
-    start_window_frame_stream, DisplayInfo, InputEvent, KeyAction, MacAxAction, MacAxActionValue,
-    MacAxController, MacAxElementSelector, MacAxNode, MacAxValue, MacFfiError, MacFrameStream,
-    MacRect, MacTargetInfo, MacTargetKind, MacWindowFrame, PointerAction, PointerButton, RgbaFrame,
+    capture_window_rgba_sized, focus_and_inject_target, focus_and_inject_window, focus_target,
+    inject_batch, inject_display_batch, input_monitoring_granted, launch_application,
+    list_displays, list_targets, machine_locked, probe_display, screen_capture_granted,
+    start_display_frame_stream, start_window_frame_stream, DisplayInfo, InputEvent, KeyAction,
+    MacAxAction, MacAxActionValue, MacAxController, MacAxElementSelector, MacAxNode, MacAxValue,
+    MacFfiError, MacFrameStream, MacRect, MacTargetInfo, MacTargetKind, MacWindowFrame,
+    PointerAction, PointerButton, RgbaFrame,
 };
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
@@ -418,7 +420,7 @@ impl AxComputerAdapter {
                 true,
             ));
         }
-        let (bytes, mime_type) =
+        let (bytes, mime_type, width, height) =
             encode_frame(&captured.rgba, captured.width, captured.height, options)?;
         let frame_id = self.next_frame_id();
         self.latest_screen_frames.write().await.insert(
@@ -426,15 +428,15 @@ impl AxComputerAdapter {
             ScreenFrameFence {
                 frame_id: frame_id.clone(),
                 target_generation: record.target.target_generation.clone(),
-                width: captured.width,
-                height: captured.height,
+                width,
+                height,
             },
         );
         Ok(captured_frame(
             frame_id,
             record.target,
-            captured.width,
-            captured.height,
+            width,
+            height,
             mime_type,
             bytes,
         ))
@@ -490,7 +492,7 @@ impl AxComputerAdapter {
                 true,
             ));
         }
-        let (bytes, mime_type) = encode_frame(
+        let (bytes, mime_type, width, height) = encode_frame(
             &captured.frame.rgba,
             captured.frame.width,
             captured.frame.height,
@@ -507,8 +509,8 @@ impl AxComputerAdapter {
                 target_generation: record.target.target_generation.clone(),
                 window_id: captured.window_id,
                 bounds: captured.bounds,
-                width: captured.frame.width,
-                height: captured.frame.height,
+                width,
+                height,
             },
         );
         while frames.len() > MAX_WINDOW_FRAME_FENCES {
@@ -525,8 +527,8 @@ impl AxComputerAdapter {
         Ok(captured_frame(
             frame_id,
             record.target,
-            captured.frame.width,
-            captured.frame.height,
+            width,
+            height,
             mime_type,
             bytes,
         ))
@@ -535,7 +537,6 @@ impl AxComputerAdapter {
     fn live_capture(
         &self,
         target_id: &str,
-        options: NativeCaptureOptions,
         target_generation: &str,
     ) -> NativeAdapterResult<Arc<MacFrameStream>> {
         let captures = self
@@ -545,10 +546,10 @@ impl AxComputerAdapter {
         let capture = captures
             .get(target_id)
             .ok_or_else(|| driver_failure("macOS live capture was not started for this target"))?;
-        if capture.options != options || capture.target_generation != target_generation {
+        if capture.target_generation != target_generation {
             return Err(NativeAdapterError::definite(
                 NativeAdapterErrorCode::FrameStale,
-                "macOS live capture configuration or target generation changed",
+                "macOS live capture target generation changed",
                 true,
             ));
         }
@@ -668,30 +669,19 @@ impl AxComputerAdapter {
     async fn dispatch_window_pointer(
         &self,
         command: &NativeActionCommand,
-    ) -> NativeAdapterResult<NativeObservation> {
+    ) -> NativeAdapterResult<Option<NativeObservation>> {
         let _seat = self.input_seat.lock().await;
         let (record, frame) = self.validate_window_pointer(command).await?;
-        let current = self
-            .refresh_target_records()
-            .await?
-            .into_iter()
-            .find(|candidate| candidate.target.id == record.target.id)
-            .ok_or_else(|| {
-                NativeAdapterError::definite(
-                    NativeAdapterErrorCode::TargetStale,
-                    "macOS window disappeared before raw input",
-                    true,
-                )
-            })?;
-        if !current.target.focused {
-            return Err(NativeAdapterError::unsupported(
-                "raw macOS pointer input would foreground this window; use its background Accessibility actions or explicitly focus it first",
-            ));
-        }
         let inputs = pointer_inputs(&command.action)?;
         self.invalidate_frames().await;
         tokio::task::spawn_blocking(move || {
-            inject_window_batch(&inputs, frame.bounds, frame.width, frame.height)
+            focus_and_inject_window(
+                &record.native,
+                frame.bounds,
+                frame.width,
+                frame.height,
+                &inputs,
+            )
         })
         .await
         .map_err(|error| {
@@ -700,13 +690,11 @@ impl AxComputerAdapter {
             ))
         })?
         .map_err(map_ffi_mutation)?;
-        self.observe_after_mutation(&record.target.id, &[])
-            .await
-            .map_err(|error| {
-                NativeAdapterError::outcome_unknown(format!(
-                    "macOS window input was delivered but state could not be observed: {error}"
-                ))
-            })
+        // Raw input already completed atomically against the exact captured
+        // window. Rebuilding a large AX tree only to decorate this receipt can
+        // add a full second and does not strengthen the dispatch proof; callers
+        // get live pixels immediately and may explicitly observe when needed.
+        Ok(None)
     }
 
     async fn validate_observed_action(
@@ -773,7 +761,7 @@ impl AxComputerAdapter {
     async fn dispatch_semantic(
         &self,
         command: &NativeActionCommand,
-    ) -> NativeAdapterResult<NativeObservation> {
+    ) -> NativeAdapterResult<Option<NativeObservation>> {
         // Explicit target focus changes the shared foreground seat. Ordinary AX
         // actions remain parallel and never acquire the seat queue.
         let _seat = if matches!(
@@ -858,19 +846,16 @@ impl AxComputerAdapter {
                 })?
                 .map_err(map_ffi_mutation)?;
         }
-        self.observe_after_mutation(&record.target.id, &before_roots)
+        Ok(self
+            .observe_after_mutation(&record.target.id, &before_roots)
             .await
-            .map_err(|error| {
-                NativeAdapterError::outcome_unknown(format!(
-                    "macOS action was accepted but state could not be observed: {error}"
-                ))
-            })
+            .ok())
     }
 
     async fn dispatch_keyboard_target(
         &self,
         command: &NativeActionCommand,
-    ) -> NativeAdapterResult<NativeObservation> {
+    ) -> NativeAdapterResult<Option<NativeObservation>> {
         let _seat = self.input_seat.lock().await;
         let record = self.load_target(&command.target_id).await?;
         if record.target.target_generation != command.expected_target_generation
@@ -882,26 +867,9 @@ impl AxComputerAdapter {
                 true,
             ));
         }
-        let current = self
-            .refresh_target_records()
-            .await?
-            .into_iter()
-            .find(|candidate| candidate.target.id == record.target.id)
-            .ok_or_else(|| {
-                NativeAdapterError::definite(
-                    NativeAdapterErrorCode::TargetStale,
-                    "macOS target disappeared before raw input",
-                    true,
-                )
-            })?;
-        if !current.target.focused {
-            return Err(NativeAdapterError::unsupported(
-                "raw macOS keyboard input would foreground this target; use background Accessibility set_value/actions or explicitly focus it first",
-            ));
-        }
         let input = keyboard_or_clipboard_input(&command.action)?;
         self.invalidate_frames().await;
-        tokio::task::spawn_blocking(move || inject_batch(&[input]))
+        tokio::task::spawn_blocking(move || focus_and_inject_target(&record.native, &[input]))
             .await
             .map_err(|error| {
                 NativeAdapterError::outcome_unknown(format!(
@@ -909,19 +877,16 @@ impl AxComputerAdapter {
                 ))
             })?
             .map_err(map_ffi_mutation)?;
-        self.observe_after_mutation(&record.target.id, &[])
-            .await
-            .map_err(|error| {
-                NativeAdapterError::outcome_unknown(format!(
-                    "macOS keyboard input was delivered but state could not be observed: {error}"
-                ))
-            })
+        // Raw input already completed atomically against the exact target.
+        // Keep acknowledgement on the input critical path; semantic state is a
+        // separate explicit observation and live capture publishes convergence.
+        Ok(None)
     }
 
     async fn dispatch_clipboard_storage(
         &self,
         command: &NativeActionCommand,
-    ) -> Option<NativeAdapterResult<NativeObservation>> {
+    ) -> Option<NativeAdapterResult<Option<NativeObservation>>> {
         let NativeAction::Clipboard { operation, text } = &command.action else {
             return None;
         };
@@ -943,11 +908,7 @@ impl AxComputerAdapter {
                     })?
                     .mutate(*operation, text.clone())
                     .await?;
-                self.observe(&command.target_id).await.map_err(|error| {
-                    NativeAdapterError::outcome_unknown(format!(
-                        "native clipboard changed but target state could not be observed: {error}"
-                    ))
-                })
+                Ok(self.observe(&command.target_id).await.ok())
             }
             .await,
         )
@@ -1107,7 +1068,7 @@ impl ComputerAdapter for AxComputerAdapter {
     ) -> NativeAdapterResult<NativeCapturedFrame> {
         Self::ensure_unlocked()?;
         if let Some(screen) = Self::load_screen(target_id)? {
-            let stream = self.live_capture(target_id, options, &screen.target.target_generation)?;
+            let stream = self.live_capture(target_id, &screen.target.target_generation)?;
             let captured = tokio::task::spawn_blocking(move || stream.next_frame())
                 .await
                 .map_err(|error| {
@@ -1121,8 +1082,7 @@ impl ComputerAdapter for AxComputerAdapter {
         let record = self.load_target(target_id).await?;
         match record.target.kind {
             NativeTargetKind::Window => {
-                let stream =
-                    self.live_capture(target_id, options, &record.target.target_generation)?;
+                let stream = self.live_capture(target_id, &record.target.target_generation)?;
                 let frame = tokio::task::spawn_blocking(move || stream.next_frame())
                     .await
                     .map_err(|error| {
@@ -1226,7 +1186,7 @@ impl ComputerAdapter for AxComputerAdapter {
     async fn dispatch(
         &self,
         command: &NativeActionCommand,
-    ) -> NativeAdapterResult<NativeObservation> {
+    ) -> NativeAdapterResult<Option<NativeObservation>> {
         Self::ensure_unlocked()?;
         if let Some(result) = self.dispatch_clipboard_storage(command).await {
             return result;
@@ -1274,7 +1234,7 @@ impl ComputerAdapter for AxComputerAdapter {
                 }
                 NativeAction::Semantic { .. } | NativeAction::Focus { .. } => unreachable!(),
             }
-            return Ok(self.screen_observation(screen.target).await);
+            return Ok(Some(self.screen_observation(screen.target).await));
         }
         match &command.action {
             NativeAction::Pointer { .. } => self.dispatch_window_pointer(command).await,
@@ -1358,6 +1318,12 @@ fn target_record(native: MacTargetInfo) -> TargetRecord {
     let digest = stable_digest(&identity);
     let generation_identity = match native.kind {
         MacTargetKind::Application => identity,
+        // ScreenCaptureKit's window id plus process-launch generation is the
+        // exact physical window lifetime. Title, focus and bounds are mutable
+        // metadata; putting them in the generation tears down a live stream
+        // during normal app interaction. AX-only windows have no native id, so
+        // retain the fingerprint fence until they become capturable.
+        MacTargetKind::Window if native.window_id.is_some() => identity,
         MacTargetKind::Window => format!(
             "{}\0{}\0{:?}\0{:?}",
             identity, native.title, native.bounds, native.ax_window
@@ -1586,9 +1552,15 @@ fn encode_frame(
     width: u32,
     height: u32,
     options: Option<NativeCaptureOptions>,
-) -> NativeAdapterResult<(Vec<u8>, String)> {
+) -> NativeAdapterResult<(Vec<u8>, String, u32, u32)> {
+    let (rgba, width, height) = fit_rgba(rgba, width, height, options)?;
     if options.is_none_or(|options| options.format == NativeFrameFormat::Png) {
-        return Ok((encode_png(rgba, width, height)?, "image/png".to_string()));
+        return Ok((
+            encode_png(&rgba, width, height)?,
+            "image/png".to_string(),
+            width,
+            height,
+        ));
     }
     let quality = options.map_or(80, |options| options.quality);
     let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
@@ -1599,7 +1571,31 @@ fn encode_frame(
     JpegEncoder::new_with_quality(&mut jpeg, quality)
         .write_image(&rgb, width, height, ExtendedColorType::Rgb8)
         .map_err(|error| driver_failure(format!("encode macOS live frame: {error}")))?;
-    Ok((jpeg, "image/jpeg".to_string()))
+    Ok((jpeg, "image/jpeg".to_string(), width, height))
+}
+
+fn fit_rgba(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    options: Option<NativeCaptureOptions>,
+) -> NativeAdapterResult<(Vec<u8>, u32, u32)> {
+    let Some(options) = options else {
+        return Ok((rgba.to_vec(), width, height));
+    };
+    let Some((output_width, output_height)) =
+        crate::model::fit_frame_dimensions(width, height, options.max_width, options.max_height)
+    else {
+        return Err(driver_failure("macOS capture dimensions are invalid"));
+    };
+    if (output_width, output_height) == (width, height) {
+        return Ok((rgba.to_vec(), width, height));
+    }
+    let source = RgbaImage::from_raw(width, height, rgba.to_vec())
+        .ok_or_else(|| driver_failure("macOS capture RGBA dimensions are inconsistent"))?;
+    let resized =
+        image::imageops::resize(&source, output_width, output_height, FilterType::Triangle);
+    Ok((resized.into_raw(), output_width, output_height))
 }
 
 fn captured_frame(
@@ -1751,6 +1747,45 @@ fn map_ffi_mutation(error: MacFfiError) -> NativeAdapterError {
 mod capability_tests {
     use super::*;
 
+    fn window_target(window_id: Option<u32>, title: &str, x: f64) -> MacTargetInfo {
+        MacTargetInfo {
+            kind: MacTargetKind::Window,
+            process_id: 42,
+            process_generation: "launch-1".to_string(),
+            application_id: Some("com.example.fixture".to_string()),
+            application_name: "Fixture".to_string(),
+            title: title.to_string(),
+            bounds: Some(MacRect {
+                x,
+                y: 20.0,
+                width: 800.0,
+                height: 600.0,
+            }),
+            focused: false,
+            window_id,
+            ax_window: None,
+        }
+    }
+
+    #[test]
+    fn native_window_generation_survives_mutable_title_and_bounds() {
+        let initial = target_record(window_target(Some(77), "Initial", 10.0));
+        let changed = target_record(window_target(Some(77), "Changed", 30.0));
+        assert_eq!(initial.target.id, changed.target.id);
+        assert_eq!(
+            initial.target.target_generation,
+            changed.target.target_generation
+        );
+
+        let ax_only_initial = target_record(window_target(None, "Initial", 10.0));
+        let ax_only_changed = target_record(window_target(None, "Changed", 30.0));
+        assert_eq!(ax_only_initial.target.id, ax_only_changed.target.id);
+        assert_ne!(
+            ax_only_initial.target.target_generation,
+            ax_only_changed.target.target_generation
+        );
+    }
+
     #[test]
     fn projects_each_live_tcc_and_lock_boundary_independently() {
         let complete_grants = MacCapabilityGrants {
@@ -1803,5 +1838,21 @@ mod capability_tests {
                 && !locked.window_capture
                 && !locked.clipboard
         );
+    }
+
+    #[test]
+    fn live_profile_encoding_preserves_aspect_ratio_and_reports_output_geometry() {
+        let rgba = vec![255_u8; 8 * 4 * 4];
+        let options = NativeCaptureOptions {
+            format: NativeFrameFormat::Png,
+            quality: 70,
+            max_width: 4,
+            max_height: 4,
+        };
+        let (bytes, mime_type, width, height) =
+            encode_frame(&rgba, 8, 4, Some(options)).expect("encode compact frame");
+        assert_eq!(mime_type, "image/png");
+        assert_eq!((width, height), (4, 2));
+        assert!(!bytes.is_empty());
     }
 }

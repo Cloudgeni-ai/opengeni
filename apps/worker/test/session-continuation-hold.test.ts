@@ -3,6 +3,8 @@ import {
   continuationHoldMs,
   deferredResultMayContinue,
   humanInputDeadlineWaitMs,
+  unclaimedAttemptRetryDelayMs,
+  unclaimedAttemptWakeChanged,
 } from "../src/workflows/session";
 
 // P3 all-capped infinite-loop bugfix (fix #6). session.ts must treat a rotation
@@ -74,5 +76,39 @@ describe("deferredResultMayContinue — failed recovery converges until a real w
 
   test("a newly committed non-control wake allows one later retry", () => {
     expect(deferredResultMayContinue(17, 18)).toBe(true);
+  });
+});
+
+describe("unclaimedAttemptRetryDelayMs — pre-claim failures do not hot-loop", () => {
+  test("backs off exponentially and caps at one minute", () => {
+    expect([1, 2, 3, 4, 5, 6, 7, 8].map(unclaimedAttemptRetryDelayMs)).toEqual([
+      1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000,
+    ]);
+  });
+
+  test("normalizes invalid counters to the first retry floor", () => {
+    expect(unclaimedAttemptRetryDelayMs(0)).toBe(1_000);
+    expect(unclaimedAttemptRetryDelayMs(Number.NaN)).toBe(1_000);
+  });
+});
+
+describe("unclaimed-attempt backoff wake coverage", () => {
+  const baseline = {
+    wakeups: 3,
+    interruptionWakeups: 4,
+    approvalWakeups: 5,
+    capacityWakeups: 6,
+  };
+
+  test("every signal that can change admission interrupts the timer", () => {
+    for (const key of Object.keys(baseline) as Array<keyof typeof baseline>) {
+      expect(unclaimedAttemptWakeChanged(baseline, { ...baseline, [key]: baseline[key] + 1 })).toBe(
+        true,
+      );
+    }
+  });
+
+  test("unchanged counters preserve the bounded delay", () => {
+    expect(unclaimedAttemptWakeChanged(baseline, baseline)).toBe(false);
   });
 });

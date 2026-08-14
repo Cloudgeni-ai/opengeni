@@ -1,7 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import type { ConnectionMetadata, McpPersonalConnectionDelegation } from "@opengeni/contracts";
+import {
+  GOOGLE_DRIVE_CREDENTIAL_LABEL,
+  GOOGLE_DRIVE_CREDENTIAL_ROLE,
+  GOOGLE_DRIVE_FILE_SCOPE,
+  GOOGLE_DRIVE_PROVIDER_DOMAIN,
+  GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+} from "@opengeni/contracts/google-drive";
 import type { ResolveConnectionCredentialInput } from "@opengeni/db";
 import {
+  googleDrivePublicationDelegationFromVisibleConnections,
   personalConnectionDelegationSourceForGrant,
   personalConnectionDelegationsFromParent,
   personalConnectionDelegationsFromVisibleConnections,
@@ -18,6 +26,47 @@ const personalServer = {
     subjectScope: "subject" as const,
   },
 };
+
+function googleDriveConnection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMetadata {
+  const now = "2026-08-14T00:00:00.000Z";
+  return {
+    id: crypto.randomUUID(),
+    accountId: crypto.randomUUID(),
+    workspaceId: crypto.randomUUID(),
+    subjectId: "user:owner",
+    providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
+    kind: "oauth2",
+    status: "active",
+    grantedScopes: [GOOGLE_DRIVE_FILE_SCOPE],
+    expiresAt: null,
+    lastRefreshAt: null,
+    lastUsedAt: null,
+    lastError: null,
+    version: 1,
+    metadata: {
+      credentialRole: GOOGLE_DRIVE_CREDENTIAL_ROLE,
+      credentialLabel: GOOGLE_DRIVE_CREDENTIAL_LABEL,
+      googlePermissionId: "permission-1",
+      googleEmail: "owner@example.com",
+      googleDisplayName: "Owner",
+      verifiedAt: now,
+      accessMode: "file_only",
+      lifecycle: { state: "active", recoverable: true, observedAt: now },
+      outputDestination: {
+        folderId: "folder-1",
+        folderName: "Published",
+        driveId: null,
+        location: "my_drive",
+        selectedAt: now,
+      },
+    },
+    createdBySubjectId: "user:owner",
+    updatedBySubjectId: "user:owner",
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
 
 describe("personal MCP connection delegation", () => {
   test("uses human/API subjects but copies authority for agent attempts", () => {
@@ -171,6 +220,76 @@ describe("personal MCP connection delegation", () => {
     ).toEqual([social]);
   });
 
+  test("freezes, inherits, and composes one exact Google Drive publication connection", async () => {
+    const drive = googleDriveConnection();
+    const delegation = googleDrivePublicationDelegationFromVisibleConnections({
+      subjectId: "user:owner",
+      connections: [drive],
+    });
+    expect(delegation).toEqual({
+      serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+      connectionId: drive.id,
+      ownerSubjectId: "user:owner",
+      providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
+      kind: "oauth2",
+    });
+    const inherited = personalConnectionDelegationsFromParent({
+      servers: [],
+      parentDelegations: [delegation!],
+    });
+    expect(inherited).toEqual([delegation]);
+    const received: ResolveConnectionCredentialInput[] = [];
+    const resolver = withFrozenPersonalConnectionDelegations({
+      settings: { mcpServers: [] },
+      personalConnectionDelegations: inherited,
+      ownerHasWorkspaceMembership: async (subjectId) => subjectId === "user:owner",
+      resolveCredential: async (input) => {
+        received.push(input);
+        return {
+          status: "ok",
+          headers: { authorization: "Bearer exact-frozen-drive" },
+          connectionId: input.connectionRef.connectionId!,
+        };
+      },
+    });
+    await resolver({
+      workspaceId: drive.workspaceId,
+      subjectId: "worker:first-party-mcp",
+      serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+      toolName: "google_drive_publish_file",
+      destinationUrl: "https://www.googleapis.com/upload/drive/v3/files",
+      connectionRef: {
+        providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
+        kind: "oauth2",
+        subjectScope: "subject",
+        scopes: [GOOGLE_DRIVE_FILE_SCOPE],
+      },
+    });
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({
+      subjectId: "user:owner",
+      connectionRef: { connectionId: drive.id },
+    });
+  });
+
+  test("fails closed when Google Drive publication authority is missing or ambiguous", () => {
+    expect(
+      googleDrivePublicationDelegationFromVisibleConnections({
+        subjectId: "user:owner",
+        connections: [
+          googleDriveConnection({ grantedScopes: [] }),
+          googleDriveConnection({ subjectId: "user:other" }),
+        ],
+      }),
+    ).toBeNull();
+    expect(
+      googleDrivePublicationDelegationFromVisibleConnections({
+        subjectId: "user:owner",
+        connections: [googleDriveConnection(), googleDriveConnection()],
+      }),
+    ).toBeNull();
+  });
+
   test("pins every caller surface to the same exact owner, UUID, provider, and kind", async () => {
     const frozenConnectionId = "11111111-1111-4111-8111-111111111111";
     const received: ResolveConnectionCredentialInput[] = [];
@@ -272,5 +391,90 @@ describe("personal MCP connection delegation", () => {
     expect(
       received.some((input) => input.connectionRef.connectionId === replacementConnectionId),
     ).toBe(false);
+  });
+
+  test("resolves the private Google Drive publication server only through its frozen UUID", async () => {
+    const frozenConnectionId = "11111111-1111-4111-8111-111111111111";
+    const received: ResolveConnectionCredentialInput[] = [];
+    const resolver = withFrozenPersonalConnectionDelegations({
+      settings: { mcpServers: [] },
+      personalConnectionDelegations: [
+        {
+          serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+          connectionId: frozenConnectionId,
+          ownerSubjectId: "user:owner",
+          providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
+          kind: "oauth2",
+        },
+      ],
+      ownerHasWorkspaceMembership: async (subjectId) => subjectId === "user:owner",
+      resolveCredential: async (input) => {
+        received.push(input);
+        return {
+          status: "ok",
+          headers: { "x-test-credential": "frozen" },
+          connectionId: input.connectionRef.connectionId!,
+        };
+      },
+    });
+
+    await resolver({
+      workspaceId: "workspace-1",
+      subjectId: "worker:first-party-mcp",
+      serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+      toolName: "google_drive_publish_file",
+      destinationUrl: "https://www.googleapis.com/upload/drive/v3/files",
+      connectionRef: {
+        providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
+        kind: "oauth2",
+        subjectScope: "subject",
+        scopes: [GOOGLE_DRIVE_FILE_SCOPE],
+      },
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({
+      subjectId: "user:owner",
+      connectionRef: { connectionId: frozenConnectionId },
+    });
+  });
+
+  test("rejects ambiguous frozen Google Drive publication delegations", async () => {
+    const delegation = {
+      serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      ownerSubjectId: "user:owner",
+      providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
+      kind: "oauth2" as const,
+    };
+    const resolver = withFrozenPersonalConnectionDelegations({
+      settings: { mcpServers: [] },
+      personalConnectionDelegations: [
+        delegation,
+        { ...delegation, connectionId: "22222222-2222-4222-8222-222222222222" },
+      ],
+      ownerHasWorkspaceMembership: async () => true,
+      resolveCredential: async () => {
+        throw new Error("must not resolve an ambiguous delegation");
+      },
+    });
+    await expect(
+      resolver({
+        workspaceId: "workspace-1",
+        subjectId: "worker:first-party-mcp",
+        serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+        toolName: "google_drive_publish_file",
+        destinationUrl: "https://www.googleapis.com/upload/drive/v3/files",
+        connectionRef: {
+          providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
+          kind: "oauth2",
+          subjectScope: "subject",
+          scopes: [GOOGLE_DRIVE_FILE_SCOPE],
+        },
+      }),
+    ).resolves.toMatchObject({
+      status: "auth_needed",
+      reason: "personal_authority_unavailable",
+    });
   });
 });

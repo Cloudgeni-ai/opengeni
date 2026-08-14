@@ -23,6 +23,10 @@ const MAX_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 const MAX_IN_FLIGHT_CAPTURES: usize = 2;
+// The TypeScript controller accepts at most 8,192 UTF-16 code units and no
+// control characters. Four thousand Unicode scalar values therefore remain
+// valid even when every value requires a surrogate pair.
+const MAX_WIRE_ERROR_MESSAGE_CHARS: usize = 4_000;
 
 /// Fatal native-helper protocol/transport failure. Individual adapter failures
 /// are returned on the wire and do not stop the helper.
@@ -133,11 +137,29 @@ impl From<NativeAdapterError> for NativeWireError {
     fn from(error: NativeAdapterError) -> Self {
         Self {
             code: error.code,
-            message: error.message,
+            message: bounded_wire_error_message(&error.message),
             retryable: error.retryable,
             dispatched: error.dispatched,
         }
     }
+}
+
+fn bounded_wire_error_message(message: &str) -> String {
+    let normalized: String = message
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let trimmed = normalized.trim();
+    if trimmed.is_empty() {
+        return "native adapter request failed".to_string();
+    }
+    trimmed.chars().take(MAX_WIRE_ERROR_MESSAGE_CHARS).collect()
 }
 
 /// Runs the native helper on length-prefixed stdin/stdout frames.
@@ -529,14 +551,14 @@ mod tests {
         }
 
         async fn validate(&self, _command: &NativeActionCommand) -> NativeAdapterResult<()> {
-            Err(NativeAdapterError::unsupported("not used"))
+            Ok(())
         }
 
         async fn dispatch(
             &self,
             _command: &NativeActionCommand,
-        ) -> NativeAdapterResult<NativeObservation> {
-            Err(NativeAdapterError::unsupported("not used"))
+        ) -> NativeAdapterResult<Option<NativeObservation>> {
+            Ok(None)
         }
     }
 
@@ -596,6 +618,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn represents_successful_target_replacement_as_a_null_observation() {
+        let (client, server) = duplex(16 * 1024);
+        let (mut client_read, mut client_write) = split(client);
+        let (server_read, server_write) = split(server);
+        let task = tokio::spawn(serve(Arc::new(MockAdapter), server_read, server_write));
+        let request = serde_json::to_vec(&json!({
+            "protocolVersion": NATIVE_RPC_PROTOCOL_VERSION,
+            "requestId": "r_dispatch",
+            "method": "dispatch",
+            "command": {
+                "targetId": "window:test",
+                "expectedTargetGeneration": "g_test",
+                "expectedObservationId": null,
+                "expectedFrameId": null,
+                "action": { "type": "focus", "targetId": "window:test" }
+            }
+        }))
+        .expect("serialize request");
+        write_frame(&mut client_write, &request, MAX_REQUEST_BYTES)
+            .await
+            .expect("write request");
+        let response = read_frame(&mut client_read, MAX_RESPONSE_BYTES)
+            .await
+            .expect("read response")
+            .expect("response frame");
+        let response: Value = serde_json::from_slice(&response).expect("decode response");
+        assert_eq!(response["requestId"], "r_dispatch");
+        assert_eq!(response["status"], "ok");
+        assert_eq!(response["result"], Value::Null);
+        client_write.shutdown().await.expect("close request stream");
+        task.await.expect("server task").expect("server result");
+    }
+
+    #[tokio::test]
     async fn rejects_oversized_frames_before_allocation() {
         let (mut client, mut server) = duplex(64);
         client
@@ -606,6 +662,26 @@ mod tests {
             .await
             .expect_err("oversized frame must fail");
         assert!(error.to_string().contains("outside"));
+    }
+
+    #[test]
+    fn native_wire_errors_are_nonempty_control_free_and_bounded() {
+        let raw = format!("\n\t{}\u{0000}", "😀".repeat(5_000));
+        let wire = NativeWireError::from(NativeAdapterError::definite(
+            NativeAdapterErrorCode::DriverFailed,
+            raw,
+            true,
+        ));
+        assert!(!wire.message.is_empty());
+        assert!(wire
+            .message
+            .chars()
+            .all(|character| !character.is_control()));
+        assert_eq!(wire.message.chars().count(), MAX_WIRE_ERROR_MESSAGE_CHARS);
+        assert!(wire.message.encode_utf16().count() <= 8_192);
+
+        let empty = NativeWireError::from(NativeAdapterError::unsupported("\n\t"));
+        assert_eq!(empty.message, "native adapter request failed");
     }
 
     #[tokio::test]

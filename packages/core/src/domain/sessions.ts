@@ -2,9 +2,11 @@ import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
+  resolveFirstPartyMcpToolPolicy,
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -154,10 +156,18 @@ export class SessionSpawnDeniedError extends Error {
 export function resolveFirstPartyMcpToolsForCreate(
   requested: FirstPartyMcpToolName[] | undefined,
   parentStored: FirstPartyMcpToolName[] | null | undefined,
+  policy: {
+    default: readonly FirstPartyMcpToolName[];
+    allowed: readonly FirstPartyMcpToolName[];
+  } = {
+    default: DEFAULT_FIRST_PARTY_MCP_TOOLS,
+    allowed: FIRST_PARTY_MCP_TOOL_NAMES,
+  },
 ): FirstPartyMcpToolName[] {
   if (requested !== undefined) return [...requested];
-  if (parentStored === undefined) return [...DEFAULT_FIRST_PARTY_MCP_TOOLS];
-  return [...(parentStored ?? DEFAULT_FIRST_PARTY_MCP_TOOLS)];
+  const allowed = new Set(policy.allowed);
+  const inherited = parentStored === undefined ? policy.default : (parentStored ?? policy.default);
+  return [...inherited].filter((tool) => allowed.has(tool));
 }
 
 function sessionSpawnDeniedMessage(denial: SessionSpawnDenial): string {
@@ -555,7 +565,7 @@ export async function createAndStartSessionWithOutcome(input: {
   initialMessage: string;
   /** Create the session shell without an initial user event/agent turn. */
   deferInitialTurn?: boolean;
-  turnInstructions?: string | null;
+  modelContext?: string | null;
   resources: ResourceRef[];
   skills?: SessionSkill[];
   tools: ToolRef[];
@@ -664,7 +674,7 @@ export async function createAndStartSessionWithOutcome(input: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       initialMessage: input.initialMessage,
-      initialTurnInstructions: input.turnInstructions ?? null,
+      initialModelContext: input.modelContext ?? null,
       resources: input.resources,
       skills: input.skills ?? [],
       tools: input.tools,
@@ -730,7 +740,7 @@ export async function createAndStartSessionWithOutcome(input: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       initialMessage: input.initialMessage,
-      initialTurnInstructions: input.turnInstructions ?? null,
+      initialModelContext: input.modelContext ?? null,
       resources: input.resources,
       skills: input.skills ?? [],
       tools: input.tools,
@@ -799,7 +809,7 @@ async function finishStartSession(
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     initialMessage: string;
     deferInitialTurn?: boolean;
-    turnInstructions?: string | null;
+    modelContext?: string | null;
     resources: ResourceRef[];
     tools: ToolRef[];
     toolPolicy: SessionToolPolicy;
@@ -951,6 +961,16 @@ export function canonicalConfiguredModel(
   if (settings.codexSubscriptionEnabled && canonicalModel.startsWith(CODEX_MODEL_ID_PREFIX)) {
     return canonicalModel;
   }
+  // SuperGrok subscription models are also discovered per workspace rather
+  // than stored in the deployment-global allow-list. Connection availability
+  // is enforced by the workspace policy and worker; this edge guard only needs
+  // to admit the product-model namespace when the feature is enabled.
+  if (
+    settings.supergrokSubscriptionEnabled &&
+    canonicalModel.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)
+  ) {
+    return canonicalModel;
+  }
   if (canonicalModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
     return canonicalModel;
   }
@@ -1083,7 +1103,7 @@ export async function postUserMessageTurn(input: {
   sessionId: string;
   text: string;
   annotations?: TimelineAnnotation[];
-  turnInstructions?: string | null;
+  modelContext?: string | null;
   resources: ResourceRef[];
   model?: string | null;
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
@@ -1156,7 +1176,7 @@ export async function postUserMessageTurn(input: {
               expectedDraftRevision: input.expectedDraftRevision ?? null,
               text: input.text,
               annotations: input.annotations ?? [],
-              turnInstructions: input.turnInstructions ?? null,
+              modelContext: input.modelContext ?? null,
               resources: input.resources,
               model: requestedModel,
               reasoningEffort: requestedReasoningEffort,
@@ -1342,7 +1362,9 @@ export async function createSessionForRequestWithOutcome(
     db,
     workspaceId,
     settings,
-    { subjectId: grant.subjectId },
+    {
+      subjectId: grant.subjectId,
+    },
   );
   const sessionMcpServers = hasOwnProperty(rawPayload, "mcpServers")
     ? validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers)
@@ -1429,7 +1451,7 @@ export async function createSessionForRequestWithOutcome(
       message: "object storage is not configured",
     });
   }
-  await validateFileResources(db, workspaceId, resources);
+  await validateFileResources(db, grant.accountId, workspaceId, grant.subjectId, resources);
   // VariableSet attachment requires variable-sets:use on the calling grant
   // (validateVariableSetAttachment enforces it), preserving the invariant
   // that sandboxed agents cannot self-attach workspace secrets.
@@ -1480,7 +1502,9 @@ export async function createSessionForRequestWithOutcome(
   if (payload.channelId) {
     const channel = await getChannel(db, workspaceId, payload.channelId);
     if (!channel) {
-      throw new HTTPException(422, { message: `unknown channelId: ${payload.channelId}` });
+      throw new HTTPException(422, {
+        message: `unknown channelId: ${payload.channelId}`,
+      });
     }
     channelId = channel.id;
   }
@@ -1603,12 +1627,22 @@ export async function createSessionForRequestWithOutcome(
   // Tool visibility is independent from permission authority. A child that
   // omits the field inherits the parent's exact effective selection; a
   // top-level omission selects the safe non-connector default catalog.
+  const deploymentFirstPartyMcpToolPolicy = resolveFirstPartyMcpToolPolicy(settings);
+  const disallowedFirstPartyMcpTool = payload.firstPartyMcpTools?.find(
+    (tool) => !deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
+  );
+  if (disallowedFirstPartyMcpTool) {
+    throw new HTTPException(422, {
+      message: `first-party MCP tool is disabled by deployment policy: ${disallowedFirstPartyMcpTool}`,
+    });
+  }
   const firstPartyMcpTools = resolveFirstPartyMcpToolsForCreate(
     payload.firstPartyMcpTools,
     parentSession ? parentSession.firstPartyMcpTools : undefined,
+    deploymentFirstPartyMcpToolPolicy,
   );
   if (payload.goal) {
-    const missingGoalTools = ["goal_update", "goal_complete", "goal_pause"].filter(
+    const missingGoalTools = ["goal_update", "goal_progress", "goal_complete", "goal_pause"].filter(
       (name) => !firstPartyMcpTools.includes(name as FirstPartyMcpToolName),
     );
     if (missingGoalTools.length > 0) {
@@ -1849,7 +1883,7 @@ export async function createSessionForRequestWithOutcome(
       workspaceId,
       initialMessage: payload.initialMessage ?? "",
       deferInitialTurn: payload.startMode === "realtime",
-      turnInstructions: payload.turnInstructions ?? null,
+      modelContext: payload.modelContext ?? null,
       resources,
       skills,
       tools,
@@ -1990,7 +2024,7 @@ export async function acceptSessionUserMessageWithOutcome(
   input: {
     text: string;
     annotations?: SubmittedTimelineAnnotation[];
-    turnInstructions?: string | null;
+    modelContext?: string | null;
     resources?: ResourceRef[];
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
@@ -2068,7 +2102,13 @@ export async function acceptSessionUserMessageWithOutcome(
       message: "object storage is not configured",
     });
   }
-  await validateFileResources(db, workspaceId, requestedResources);
+  await validateFileResources(
+    db,
+    grant.accountId,
+    workspaceId,
+    grant.subjectId,
+    requestedResources,
+  );
   await validateGitHubRepositorySelection(db, workspaceId, [
     ...existingSession.resources,
     ...requestedResources,
@@ -2099,7 +2139,7 @@ export async function acceptSessionUserMessageWithOutcome(
     sessionId,
     text: input.text,
     annotations,
-    turnInstructions: input.turnInstructions ?? null,
+    modelContext: input.modelContext ?? null,
     resources: requestedResources,
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
@@ -2374,11 +2414,20 @@ export async function updateSessionToolPolicy(
   const explicitRequestedFirstPartyTools = explicitRequest
     ? [...explicitRequest.firstPartyMcpTools]
     : null;
+  const deploymentFirstPartyMcpToolPolicy = resolveFirstPartyMcpToolPolicy(deps.settings);
+  const disallowedFirstPartyMcpTool = explicitRequestedFirstPartyTools?.find(
+    (tool) => !deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
+  );
+  if (disallowedFirstPartyMcpTool) {
+    throw new HTTPException(422, {
+      message: `first-party MCP tool is disabled by deployment policy: ${disallowedFirstPartyMcpTool}`,
+    });
+  }
   const workspaceDefaultTools = withFirstPartyTools(
     withDefaultEnabledCapabilityMcpTools([], deps.settings, capabilityRuntimeSettings),
     runtimeSettings,
   );
-  const workspaceDefaultFirstPartyTools = [...FIRST_PARTY_MCP_TOOL_NAMES];
+  const workspaceDefaultFirstPartyTools = [...deploymentFirstPartyMcpToolPolicy.default];
   const events = await appendSessionEventsWithLockedSessionUpdate(
     deps.db,
     grant.workspaceId,
@@ -2410,9 +2459,12 @@ export async function updateSessionToolPolicy(
             : parent.tools,
           runtimeSettings,
         );
+        const deploymentAllowedFirstPartyMcpTools = new Set(
+          deploymentFirstPartyMcpToolPolicy.allowed,
+        );
         const parentFirstPartyMcpTools = [
-          ...(parent.firstPartyMcpTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS),
-        ];
+          ...(parent.firstPartyMcpTools ?? deploymentFirstPartyMcpToolPolicy.default),
+        ].filter((tool) => deploymentAllowedFirstPartyMcpTools.has(tool));
         if (requestedMode === "workspace_default") {
           if (!parentTracksWorkspaceDefaults) {
             throw new HTTPException(403, {
@@ -2466,7 +2518,8 @@ export async function updateSessionToolPolicy(
       const unchanged =
         stableJson({
           tools: session.tools,
-          firstPartyMcpTools: session.firstPartyMcpTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS,
+          firstPartyMcpTools:
+            session.firstPartyMcpTools ?? deploymentFirstPartyMcpToolPolicy.default,
           policy: currentPolicy,
         }) ===
         stableJson({
@@ -2487,7 +2540,7 @@ export async function updateSessionToolPolicy(
               before: toolPolicyAuditSnapshot(
                 session,
                 session.tools,
-                [...(session.firstPartyMcpTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS)],
+                [...(session.firstPartyMcpTools ?? deploymentFirstPartyMcpToolPolicy.default)],
                 currentPolicy,
               ),
               after: toolPolicyAuditSnapshot(

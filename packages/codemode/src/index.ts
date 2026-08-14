@@ -13,6 +13,8 @@ import {
   CodemodeOperation,
   CodemodeDispatchAck,
   CodemodeDispatchRequest,
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
   type AttemptToolCall as AttemptToolCallValue,
   type AttemptToolCaller,
   type AttemptToolCatalog as AttemptToolCatalogValue,
@@ -364,7 +366,12 @@ export class CodemodeClient {
       method: "POST",
       ...(signal ? { signal } : {}),
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ operationId, catalogDigest, identity, arguments: argumentsValue }),
+      body: JSON.stringify({
+        operationId,
+        catalogDigest,
+        identity,
+        arguments: argumentsValue,
+      }),
     });
     return CodemodeCallSubmission.parse(await response.json()).operation;
   }
@@ -384,13 +391,16 @@ export class CodemodeClient {
       ...init,
       headers: {
         ...Object.fromEntries(new Headers(init.headers).entries()),
+        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
         authorization: `Bearer ${token}`,
       },
     });
     if (!response.ok) {
       let message = `Codemode request failed with HTTP ${response.status}`;
       try {
-        const payload = (await response.json()) as { error?: { message?: unknown } };
+        const payload = (await response.json()) as {
+          error?: { message?: unknown };
+        };
         if (typeof payload.error?.message === "string") message = payload.error.message;
       } catch {
         // The status is sufficient; never echo an unbounded provider body.
@@ -453,7 +463,10 @@ export class AttemptToolEnvironment {
 
   async call(
     input: AttemptToolCallValue,
-    context: { transportMeta?: Record<string, unknown> | null; signal?: AbortSignal } = {},
+    context: {
+      transportMeta?: Record<string, unknown> | null;
+      signal?: AbortSignal;
+    } = {},
   ): Promise<AttemptToolResultValue> {
     const call = AttemptToolCall.parse(input);
     if (call.catalogDigest !== this.catalog.digest) {
@@ -598,6 +611,15 @@ function assertCatalogSize(catalog: AttemptToolCatalogValue): void {
 
 type SchemaCompiler = { compile(schema: object): ValidateFunction<unknown> };
 
+// Validator compilation is structural and independent of attempt identity,
+// executable closures, credentials, and authorization. Reuse only exact
+// content-addressed validators; the attempt environment and catalog remain
+// freshly bound and digested on every execution. The hard cap prevents an
+// untrusted MCP schema stream from turning this process cache into a memory
+// sink.
+const COMPILED_CATALOG_SCHEMA_CACHE_MAX_ENTRIES = 512;
+const compiledCatalogSchemaCache = new Map<string, ValidateFunction<unknown>>();
+
 function createSchemaValidators(): {
   draft7: SchemaCompiler;
   draft2019: SchemaCompiler;
@@ -622,9 +644,31 @@ function compileCatalogSchema(
   schema: AttemptToolCatalogEntryValue["inputSchema"],
 ): ValidateFunction<unknown> {
   const dialect = typeof schema.$schema === "string" ? schema.$schema : "";
-  if (dialect.includes("2020-12")) return validators.draft2020.compile(schema);
-  if (dialect.includes("2019-09")) return validators.draft2019.compile(schema);
-  return validators.draft7.compile(schema);
+  const family = dialect.includes("2020-12")
+    ? "2020-12"
+    : dialect.includes("2019-09")
+      ? "2019-09"
+      : "draft7";
+  const cacheKey = `${family}:${digestCanonicalJson(schema)}`;
+  const cached = compiledCatalogSchemaCache.get(cacheKey);
+  if (cached) {
+    compiledCatalogSchemaCache.delete(cacheKey);
+    compiledCatalogSchemaCache.set(cacheKey, cached);
+    return cached;
+  }
+  const compiled =
+    family === "2020-12"
+      ? validators.draft2020.compile(schema)
+      : family === "2019-09"
+        ? validators.draft2019.compile(schema)
+        : validators.draft7.compile(schema);
+  while (compiledCatalogSchemaCache.size >= COMPILED_CATALOG_SCHEMA_CACHE_MAX_ENTRIES) {
+    const oldest = compiledCatalogSchemaCache.keys().next().value;
+    if (oldest === undefined) break;
+    compiledCatalogSchemaCache.delete(oldest);
+  }
+  compiledCatalogSchemaCache.set(cacheKey, compiled);
+  return compiled;
 }
 
 function allocateCodemodePaths(definitions: readonly AttemptToolDefinition[]): string[][] {

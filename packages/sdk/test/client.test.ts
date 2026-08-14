@@ -157,7 +157,7 @@ describe("OpenGeniClient", () => {
     const { client, requests } = makeClient(() => jsonResponse(session, 202));
     const created = await client.createSession(WORKSPACE_ID, {
       initialMessage: "hello",
-      turnInstructions: "Host context for the initial turn.",
+      modelContext: "Host context for the initial turn.",
       sandboxBackend: "none",
       expectedNewSessionDraftRevision: 4,
     });
@@ -171,7 +171,7 @@ describe("OpenGeniClient", () => {
     expect(request.headers["content-type"]).toBe("application/json");
     expect(JSON.parse(request.body!)).toEqual({
       initialMessage: "hello",
-      turnInstructions: "Host context for the initial turn.",
+      modelContext: "Host context for the initial turn.",
       sandboxBackend: "none",
       expectedNewSessionDraftRevision: 4,
     });
@@ -539,7 +539,7 @@ describe("OpenGeniClient", () => {
     const { client, requests } = makeClient(() => jsonResponse(accepted, 202));
     const result = await client.sendMessage(WORKSPACE_ID, SESSION_ID, {
       text: "do the thing",
-      turnInstructions: "Host context for this turn.",
+      modelContext: "Host context for this turn.",
       clientEventId: "ce-1",
     });
     expect(result.sequence).toBe(4);
@@ -552,7 +552,7 @@ describe("OpenGeniClient", () => {
       clientEventId: "ce-1",
       payload: {
         text: "do the thing",
-        turnInstructions: "Host context for this turn.",
+        modelContext: "Host context for this turn.",
       },
     });
   });
@@ -795,6 +795,35 @@ describe("OpenGeniClient", () => {
       outcomeUnknown: false,
       body,
       message: "OpenGeni is temporarily unavailable — retry. Reference: api-safe-503.",
+    });
+  });
+
+  test("uses canonical outcome-unknown truth for an accepted mutation transport failure", async () => {
+    const body = JSON.stringify({
+      error: {
+        status: 503,
+        code: "upstream_unavailable",
+        message: "OpenGeni could not confirm the controller mutation.",
+        retryable: true,
+        outcomeUnknown: true,
+        requestId: "controller-mutation-503",
+      },
+    });
+    const { client } = makeClient(
+      () => new Response(body, { status: 503, headers: { "content-type": "application/json" } }),
+    );
+    const error = await client
+      .sendMessage(WORKSPACE_ID, SESSION_ID, {
+        text: "continue",
+        clientEventId: "same-id",
+      })
+      .catch((caught) => caught);
+
+    expect(error).toMatchObject({
+      status: 503,
+      retryable: true,
+      outcomeUnknown: true,
+      correlationId: "controller-mutation-503",
     });
   });
 

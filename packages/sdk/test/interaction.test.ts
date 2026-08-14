@@ -2,10 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   OpenGeniClient,
+  OpenGeniApiError,
   browserFrameSocketUrl,
   computerFrameSocketUrl,
   decodeBrowserFrameMessage,
   decodeComputerFrameMessage,
+  interactionControlFailureFromError,
   type AttachedBrowserDevice,
   type BrowserFrameMetadata,
   type BrowserIdentity,
@@ -29,6 +31,60 @@ const INTERVENTION_ID = "00000000-0000-4000-8000-000000000022";
 const BROWSER_DOWNLOAD_ID = "00000000-0000-4000-8000-000000000023";
 const BROWSER_DOWNLOAD_SAVE_OPERATION_ID = "00000000-0000-4000-8000-000000000024";
 const BROWSER_DOWNLOAD_FILE_ID = "00000000-0000-4000-8000-000000000025";
+
+describe("interaction control failure projection", () => {
+  test("decodes typed control detail while retaining outer and inner correlation", () => {
+    const error = new OpenGeniApiError(
+      502,
+      JSON.stringify({
+        error: {
+          status: 502,
+          code: "upstream_unavailable",
+          message: "The connected machine could not open the browser live view stream.",
+          retryable: false,
+          requestId: "outer-request",
+          details: {
+            interactionLayer: "connected_machine",
+            interactionSurface: "browser",
+            controlFailureCode: "stream",
+            controlRequestId: "inner-request",
+          },
+        },
+      }),
+      { mutation: true },
+    );
+    expect(interactionControlFailureFromError(error)).toEqual({
+      layer: "connected_machine",
+      surface: "browser",
+      code: "stream",
+      retryable: false,
+      outcomeUnknown: false,
+      requestId: "outer-request",
+      controlRequestId: "inner-request",
+      message: error.message,
+    });
+  });
+
+  test("rejects arbitrary details that do not match the interaction contract", () => {
+    const error = new OpenGeniApiError(
+      502,
+      JSON.stringify({
+        error: {
+          code: "upstream_unavailable",
+          message: "failed",
+          retryable: true,
+          details: {
+            interactionLayer: "connected_machine",
+            interactionSurface: "browser",
+            controlFailureCode: "PRIVATE_SECRET",
+          },
+        },
+      }),
+      { mutation: true },
+    );
+    expect(interactionControlFailureFromError(error)).toBeNull();
+  });
+});
 
 function attachedBrowser(): AttachedBrowserDevice {
   return {
@@ -278,7 +334,7 @@ describe("BrowserSession SDK", () => {
         calls.push(url);
         return url.endsWith(`/${ATTACHED_BROWSER_ID}`)
           ? json(device)
-          : json({ revision: 9, devices: [device] });
+          : json({ revision: 9, bridges: [], devices: [device] });
       },
     });
 
@@ -587,6 +643,13 @@ describe("BrowserSession SDK", () => {
         if (url.endsWith("/browser-identities") && method === "POST") {
           return json({ identity, operationId, replayed: false }, 201);
         }
+        if (url.endsWith(`/browser-identities/${BROWSER_IDENTITY_ID}`) && method === "PATCH") {
+          return json({
+            identity: { ...identity, status: "archived", version: identity.version + 1 },
+            operationId,
+            replayed: false,
+          });
+        }
         if (url.endsWith(`/browser-identities/${BROWSER_IDENTITY_ID}/revisions`)) {
           return json({ identity, revisions: [revision] });
         }
@@ -620,6 +683,15 @@ describe("BrowserSession SDK", () => {
     });
     expect(await resource.get()).toEqual(identity);
     expect((await resource.revisions()).revisions).toEqual([revision]);
+    expect(
+      (
+        await resource.update({
+          operationId,
+          expectedVersion: identity.version,
+          status: "archived",
+        })
+      ).identity.status,
+    ).toBe("archived");
     const published = await client.interaction.browsers
       .session(WORKSPACE_ID, BROWSER_SESSION_ID)
       .publishRevision({
@@ -628,12 +700,29 @@ describe("BrowserSession SDK", () => {
         expectedHeadGeneration: 0,
       });
     expect(published.revision).toEqual(revision);
+    expect(calls).toContainEqual({
+      url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/browser-identities/${BROWSER_IDENTITY_ID}`,
+      method: "PATCH",
+      body: {
+        operationId,
+        expectedVersion: identity.version,
+        status: "archived",
+      },
+    });
     expect(JSON.stringify(published)).not.toContain("objectKey");
     expect(calls.map(({ method, body }) => ({ method, body }))).toEqual([
       { method: "GET", body: null },
       { method: "POST", body: { operationId, name: identity.name } },
       { method: "GET", body: null },
       { method: "GET", body: null },
+      {
+        method: "PATCH",
+        body: {
+          operationId,
+          expectedVersion: identity.version,
+          status: "archived",
+        },
+      },
       {
         method: "POST",
         body: {
@@ -1224,6 +1313,7 @@ function browserIdentity(): BrowserIdentity {
     workspaceId: WORKSPACE_ID,
     name: "Signed in work",
     status: "active",
+    version: 1,
     defaultRevisionId: null,
     headGeneration: 0,
     revisionCount: 0,

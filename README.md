@@ -56,7 +56,7 @@ There are three product access modes:
 - `configured`: self-hosted or embedded deployments using configured deployment keys or delegated bearer tokens from a parent product.
 - `managed`: OpenGeni owns email/password sign-up through Better Auth, workspaces, OpenGeni API keys, prepaid Stripe credits, usage, and limits.
 
-The optional deployment shared-key boundary is still available for infra smoke tests and simple self-hosting. It uses `x-opengeni-access-key`, not `Authorization`. Product API keys and delegated tokens use `Authorization: Bearer ...`.
+The optional deployment shared-key boundary is still available for infra smoke tests and simple self-hosting. Ordinary clients send it as `x-opengeni-access-key`; product API keys and delegated tokens use `Authorization: Bearer ...`. Valid first-party delegated bearers can enter the `/v1` API without copying the static deployment key, then remain constrained by normal route authorization.
 
 Do not expose a production deployment without a deliberate access mode, RLS-tested database role posture, rate limits, real model/sandbox credentials, and reviewed sandbox preparation policy. Sandbox preparation profiles and env allowlists can make host credentials available to agent sandboxes, so review `.env` before running live sessions.
 
@@ -373,6 +373,7 @@ Core endpoints:
 - `GET /healthz`
 - `GET /v1/config/client`
 - `GET /v1/access/me`
+- `GET /v1/organization-memberships` (managed-human self membership and personal-workspace identity)
 - `GET /v1/workspaces`
 - `POST /v1/workspaces`
 - `POST /v1/workspaces/:workspaceId/sessions`

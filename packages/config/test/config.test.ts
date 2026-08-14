@@ -151,6 +151,23 @@ describe("provider-neutral progressive tool disclosure", () => {
 });
 
 describe("Google Drive integration settings", () => {
+  test("provides bounded sync and provider retry defaults", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(settings).toMatchObject({
+      googleDriveSyncMaxItems: 500,
+      googleDriveSyncMaxBytes: 500_000_000,
+      googleDriveSyncMaxFileBytes: 100_000_000,
+      googleDriveSyncMaxProviderRequests: 1_000,
+      googleDriveSyncMaxElapsedSeconds: 300,
+      googleDriveSyncMaxFailureDetails: 25,
+      googleDriveProviderRequestTimeoutMs: 30_000,
+      googleDriveProviderRetryAttempts: 3,
+      googleDriveProviderRetryInitialDelayMs: 250,
+      googleDriveProviderRetryMaxDelayMs: 5_000,
+      googleDriveProviderRetryBudgetMs: 15_000,
+    });
+  });
+
   test("keeps Workspace Events wake hints default-off", () => {
     expect(withEnv({}, () => getSettings()).googleDriveWorkspaceEventsEnabled).toBeUndefined();
     expect(
@@ -193,6 +210,127 @@ describe("Google Drive integration settings", () => {
     ).toThrow(
       "OPENGENI_GOOGLE_DRIVE_CLIENT_ID and OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET must be configured together",
     );
+  });
+
+  test("requires integrations to be enabled for a configured Google OAuth client", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "local",
+          OPENGENI_PUBLIC_BASE_URL: "http://127.0.0.1:8000",
+          OPENGENI_INTEGRATIONS_STATE_SECRET: "state-secret",
+          OPENGENI_GOOGLE_DRIVE_CLIENT_ID: "client.apps.googleusercontent.com",
+          OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET: "client-secret",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/OPENGENI_INTEGRATIONS_ENABLED=true/);
+  });
+
+  test("rejects a non-origin public URL for a configured Google OAuth client", () => {
+    for (const publicBaseUrl of [
+      "https://user:password@opengeni.example.com",
+      "https://opengeni.example.com/path",
+      "https://opengeni.example.com?token=secret",
+      "https://opengeni.example.com#secret",
+    ]) {
+      expect(() =>
+        withEnv(
+          {
+            OPENGENI_ENVIRONMENT: "production",
+            OPENGENI_INTEGRATIONS_ENABLED: "true",
+            OPENGENI_PUBLIC_BASE_URL: publicBaseUrl,
+            OPENGENI_INTEGRATIONS_STATE_SECRET: "state-secret",
+            OPENGENI_GOOGLE_DRIVE_CLIENT_ID: "client.apps.googleusercontent.com",
+            OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET: "client-secret",
+          },
+          () => getSettings(),
+        ),
+      ).toThrow(/must be a credential-free origin/);
+    }
+  });
+
+  test("loads custom sync and provider retry budgets", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ITEMS: "321",
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_BYTES: "654000000",
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FILE_BYTES: "54000000",
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_PROVIDER_REQUESTS: "876",
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ELAPSED_SECONDS: "240",
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FAILURE_DETAILS: "17",
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MS: "12000",
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_ATTEMPTS: "4",
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS: "400",
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS: "4000",
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_BUDGET_MS: "9000",
+      },
+      () => getSettings(),
+    );
+    expect(settings).toMatchObject({
+      googleDriveSyncMaxItems: 321,
+      googleDriveSyncMaxBytes: 654_000_000,
+      googleDriveSyncMaxFileBytes: 54_000_000,
+      googleDriveSyncMaxProviderRequests: 876,
+      googleDriveSyncMaxElapsedSeconds: 240,
+      googleDriveSyncMaxFailureDetails: 17,
+      googleDriveProviderRequestTimeoutMs: 12_000,
+      googleDriveProviderRetryAttempts: 4,
+      googleDriveProviderRetryInitialDelayMs: 400,
+      googleDriveProviderRetryMaxDelayMs: 4_000,
+      googleDriveProviderRetryBudgetMs: 9_000,
+    });
+  });
+
+  test("rejects contradictory Drive sync and retry budgets", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_GOOGLE_DRIVE_SYNC_MAX_BYTES: "1000",
+          OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FILE_BYTES: "1001",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/SYNC_MAX_FILE_BYTES must not exceed/);
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS: "5001",
+          OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS: "5000",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/RETRY_INITIAL_DELAY_MS must not exceed.*RETRY_MAX_DELAY_MS/);
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS: "1000",
+          OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_BUDGET_MS: "999",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/RETRY_INITIAL_DELAY_MS must not exceed.*RETRY_BUDGET_MS/);
+  });
+
+  test("keeps accepted provider waits at or below the heartbeat-safe maxima", () => {
+    expect(
+      withEnv(
+        {
+          OPENGENI_GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MS: "60000",
+          OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS: "60000",
+        },
+        () => getSettings(),
+      ),
+    ).toMatchObject({
+      googleDriveProviderRequestTimeoutMs: 60_000,
+      googleDriveProviderRetryMaxDelayMs: 60_000,
+    });
+    expect(() =>
+      withEnv({ OPENGENI_GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MS: "60001" }, () => getSettings()),
+    ).toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS: "60001" }, () => getSettings()),
+    ).toThrow();
   });
 });
 
@@ -883,6 +1021,8 @@ describe("sandbox preparation profiles", () => {
         "list_document_bases",
         "list_indexed_documents",
         "knowledge_search",
+        "knowledge_get",
+        "knowledge_browse",
         "knowledge_fetch",
         "memory_search",
         "memory_propose",
@@ -915,7 +1055,7 @@ describe("sandbox preparation profiles", () => {
     expect(local.ogtoolPackageSpec).toBeUndefined();
     expect(stableSandboxEnvironmentForRun(local, {}, { workspaceId: "ws-1" })).toMatchObject({
       OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
-      OPENGENI_CODEMODE_URL: "http://127.0.0.1:8000/v1/workspaces/ws-1/codemode",
+      OPENGENI_CODEMODE_URL: "http://host.docker.internal:8000/v1/workspaces/ws-1/codemode",
     });
 
     const configured = withEnv(
@@ -930,7 +1070,7 @@ describe("sandbox preparation profiles", () => {
     expect(configured.codemodeMaxCallsPerTurn).toBe(17);
     expect(stableSandboxEnvironmentForRun(configured, {}, { workspaceId: "ws-1" })).toMatchObject({
       OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
-      OPENGENI_CODEMODE_URL: "http://127.0.0.1:8000/v1/workspaces/ws-1/codemode",
+      OPENGENI_CODEMODE_URL: "http://host.docker.internal:8000/v1/workspaces/ws-1/codemode",
       OPENGENI_OGTOOL_PACKAGE_SPEC: "@opengeni/ogtool@0.1.0",
     });
 
@@ -996,17 +1136,51 @@ describe("sandbox preparation profiles", () => {
     expect(env).toEqual({});
   });
 
-  test("resolves a local-only first-party delegation secret without weakening configured mode", async () => {
+  test("resolves first-party delegation from explicit, configured shared-key, or local mode", async () => {
     const { resolveFirstPartyDelegationSecret } = await import("../src/index");
     const local = withEnv({}, () => getSettings());
-    const configured = withEnv({ OPENGENI_PRODUCT_ACCESS_MODE: "configured" }, () => getSettings());
+    const configured = withEnv(
+      {
+        OPENGENI_PRODUCT_ACCESS_MODE: "configured",
+        OPENGENI_AUTH_REQUIRED: "true",
+        OPENGENI_ACCESS_KEY: "configured-shared-key",
+      },
+      () => getSettings(),
+    );
     const explicit = withEnv({ OPENGENI_DELEGATION_SECRET: "operator-secret" }, () =>
       getSettings(),
     );
 
     expect(resolveFirstPartyDelegationSecret(local)).toBeTruthy();
-    expect(resolveFirstPartyDelegationSecret(configured)).toBeUndefined();
+    expect(resolveFirstPartyDelegationSecret(configured)).toBe("configured-shared-key");
     expect(resolveFirstPartyDelegationSecret(explicit)).toBe("operator-secret");
+  });
+
+  test("parses deployment first-party tool defaults and allowed ceiling", async () => {
+    const { resolveFirstPartyMcpToolPolicy } = await import("../src/index");
+    const settings = withEnv(
+      {
+        OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS: "session_get,goal_update",
+        OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS: '["session_get","goal_update","goal_pause"]',
+      },
+      () => getSettings(),
+    );
+    expect(resolveFirstPartyMcpToolPolicy(settings)).toEqual({
+      default: ["session_get", "goal_update"],
+      allowed: ["session_get", "goal_update", "goal_pause"],
+    });
+  });
+
+  test("rejects defaults outside the deployment first-party tool ceiling", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS: "session_get,session_create",
+          OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS: "session_get",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("must be a subset");
   });
 
   test("does not duplicate a custom files MCP profile", () => {
@@ -1409,8 +1583,15 @@ describe("backend-gated sandbox required-credential validation", () => {
         () => getSettings(),
       ).modalImageId,
     ).toBe(imageId);
+    const snapshotImageId = "im-01KZWASVD6W1WEHC1PKN62PAF3";
+    expect(
+      withEnv({ OPENGENI_MODAL_IMAGE_ID: snapshotImageId }, () => getSettings()).modalImageId,
+    ).toBe(snapshotImageId);
     expect(() =>
       withEnv({ OPENGENI_MODAL_IMAGE_ID: "im-not-a-valid-id" }, () => getSettings()),
+    ).toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_MODAL_IMAGE_ID: "im-valid/escape" }, () => getSettings()),
     ).toThrow();
   });
 

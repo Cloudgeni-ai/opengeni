@@ -7,6 +7,8 @@
 )]
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs;
+use std::path::Path;
 use std::sync::{mpsc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -15,9 +17,9 @@ use accessibility_sys::{
     kAXApplicationActivatedNotification, kAXApplicationDeactivatedNotification,
     kAXDescriptionAttribute, kAXElementBusyAttribute, kAXEnabledAttribute,
     kAXErrorNotificationAlreadyRegistered, kAXErrorSuccess, kAXExpandedAttribute,
-    kAXFocusedAttribute, kAXFocusedUIElementChangedNotification,
-    kAXFocusedWindowChangedNotification, kAXHelpAttribute, kAXIdentifierAttribute,
-    kAXLabelValueAttribute, kAXLayoutChangedNotification, kAXMainAttribute,
+    kAXFocusedAttribute, kAXFocusedUIElementChangedNotification, kAXFocusedWindowAttribute,
+    kAXFocusedWindowChangedNotification, kAXFrontmostAttribute, kAXHelpAttribute,
+    kAXIdentifierAttribute, kAXLabelValueAttribute, kAXLayoutChangedNotification, kAXMainAttribute,
     kAXMainWindowChangedNotification, kAXMinimizedAttribute, kAXPositionAttribute,
     kAXRoleAttribute, kAXSecureTextFieldSubrole, kAXSelectedAttribute,
     kAXSelectedChildrenChangedNotification, kAXSizeAttribute, kAXSubroleAttribute,
@@ -39,7 +41,7 @@ use objc2_app_kit::{
     NSApplicationActivationOptions, NSApplicationActivationPolicy, NSRunningApplication,
     NSWorkspace, NSWorkspaceOpenConfiguration,
 };
-use objc2_foundation::NSError;
+use objc2_foundation::{NSArray, NSError, NSString, NSURL};
 
 use super::{ax_element::AxElement, ShareableWindow};
 use crate::{
@@ -63,6 +65,20 @@ const MAX_AX_ACTIONS_PER_NODE: usize = 64;
 const MAX_STRING_CHARS: usize = 32_768;
 const AX_CONTAINS_PROTECTED_CONTENT: &str = "AXContainsProtectedContent";
 const AX_SCROLL_TO_VISIBLE_ACTION: &str = "AXScrollToVisible";
+const SET_FRONT_PROCESS_FRONT_WINDOW_ONLY: u32 = 1 << 0;
+const SET_FRONT_PROCESS_CAUSED_BY_USER: u32 = 1 << 1;
+
+#[repr(C)]
+struct ProcessSerialNumber {
+    high: u32,
+    low: u32,
+}
+
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn GetProcessForPID(pid: i32, process: *mut ProcessSerialNumber) -> i32;
+    fn SetFrontProcessWithOptions(process: *const ProcessSerialNumber, options: u32) -> i32;
+}
 const AX_CORE_ATTRIBUTES: [&str; 16] = [
     "AXRole",
     "AXSubrole",
@@ -1030,6 +1046,7 @@ pub(super) fn focus_target(target: &MacTargetInfo) -> Result<(), MacFfiError> {
     })?;
     let application = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
         .ok_or_else(|| MacFfiError::TargetStale("application is no longer running".to_string()))?;
+    let application_element = AxElement::application(pid);
     // Resolve and verify the exact window before the first foreground side
     // effect. A stale selector therefore remains a definite safe rejection.
     let window = if target.kind == MacTargetKind::Window {
@@ -1038,18 +1055,142 @@ pub(super) fn focus_target(target: &MacTargetInfo) -> Result<(), MacFfiError> {
     } else {
         None
     };
-    #[allow(deprecated)]
-    let options = NSApplicationActivationOptions::ActivateAllWindows
-        | NSApplicationActivationOptions::ActivateIgnoringOtherApps;
-    if !application.activateWithOptions(options) {
-        return Err(MacFfiError::OutcomeUnknown(
-            "AppKit did not confirm application activation".to_string(),
-        ));
+    let was_application_frontmost = application_element
+        .bool_attribute(kAXFrontmostAttribute)
+        .ok()
+        .is_some_and(bool::from);
+    let was_window_main = window.as_ref().is_none_or(|window| {
+        window
+            .bool_attribute(kAXMainAttribute)
+            .ok()
+            .is_some_and(bool::from)
+    });
+    // AXFrontmost below is the exact per-PID foreground primitive. AppKit's
+    // activateWithOptions is bundle-oriented and can synchronously stall for a
+    // full second (especially with multiple Chrome processes), so using both
+    // was slower and less exact. Unhide only restores a genuinely hidden app.
+    if application.isHidden() {
+        let _ = application.unhide();
     }
-    if let Some(window) = window {
-        window.perform_action("AXRaise").map_err(|error| {
-            MacFfiError::OutcomeUnknown(format!("AXRaise could not be confirmed: {error}"))
+    set_bool_attribute(&application_element, kAXFrontmostAttribute, true).map_err(|error| {
+        MacFfiError::OutcomeUnknown(format!(
+            "Accessibility could not make the exact process frontmost: {error}"
+        ))
+    })?;
+    if let Some(window) = window.as_ref() {
+        if application_element
+            .is_settable(kAXFocusedWindowAttribute)
+            .unwrap_or(false)
+        {
+            let focused_window = window.as_CFType();
+            set_cf_attribute(
+                &application_element,
+                kAXFocusedWindowAttribute,
+                &focused_window,
+            )
+            .map_err(|error| {
+                MacFfiError::OutcomeUnknown(format!(
+                    "Accessibility could not select the exact focused window: {error}"
+                ))
+            })?;
+        }
+        set_bool_attribute(window, kAXMainAttribute, true).map_err(|error| {
+            MacFfiError::OutcomeUnknown(format!(
+                "Accessibility could not make the exact window main: {error}"
+            ))
         })?;
+        if !was_application_frontmost || !was_window_main {
+            window.perform_action("AXRaise").map_err(|error| {
+                MacFfiError::OutcomeUnknown(format!("AXRaise could not be confirmed: {error}"))
+            })?;
+        }
+    }
+    // AXFrontmost is exact and normally settles immediately. A separately
+    // launched Chrome process can nevertheless accept the AX write without
+    // WindowServer activating that process while another Chrome instance owns
+    // the application foreground. NSRunningApplication activation is
+    // bundle-oriented in that case and can select the user's other Chrome
+    // instance. Escalate only an explicit focus request through the exact PID's
+    // Process Manager identity, then reassert the exact AX window. Browser
+    // creation itself never takes this path and remains background-safe.
+    let fallback_at = Instant::now() + Duration::from_millis(100);
+    let mut exact_process_activation_attempted = false;
+    let mut deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let application_frontmost = application_element
+            .bool_attribute(kAXFrontmostAttribute)
+            .ok()
+            .is_some_and(bool::from);
+        let window_main = window.as_ref().is_none_or(|window| {
+            window
+                .bool_attribute(kAXMainAttribute)
+                .ok()
+                .is_some_and(bool::from)
+        });
+        if application_frontmost && window_main {
+            break;
+        }
+        if !exact_process_activation_attempted && Instant::now() >= fallback_at {
+            exact_process_activation_attempted = true;
+            activate_exact_process(pid)?;
+            if let Some(window) = window.as_ref() {
+                if application_element
+                    .is_settable(kAXFocusedWindowAttribute)
+                    .unwrap_or(false)
+                {
+                    let focused_window = window.as_CFType();
+                    set_cf_attribute(
+                        &application_element,
+                        kAXFocusedWindowAttribute,
+                        &focused_window,
+                    )
+                    .map_err(|error| {
+                        MacFfiError::OutcomeUnknown(format!(
+                            "Accessibility could not reselect the exact focused window after exact process activation: {error}"
+                        ))
+                    })?;
+                }
+                set_bool_attribute(window, kAXMainAttribute, true).map_err(|error| {
+                    MacFfiError::OutcomeUnknown(format!(
+                        "Accessibility could not reassert the exact window after exact process activation: {error}"
+                    ))
+                })?;
+                window.perform_action("AXRaise").map_err(|error| {
+                    MacFfiError::OutcomeUnknown(format!(
+                        "AXRaise could not be confirmed after exact process activation: {error}"
+                    ))
+                })?;
+            }
+            // Process activation synchronously coordinates with WindowServer.
+            // Give confirmation its own bounded interval rather than charging
+            // that coordination against the AX fast path.
+            deadline = Instant::now() + Duration::from_secs(2);
+        }
+        if Instant::now() >= deadline {
+            return Err(MacFfiError::OutcomeUnknown(
+                "Accessibility and exact process activation accepted focus but the exact process/window did not confirm it within the bounded interval"
+                    .to_string(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
+}
+
+fn activate_exact_process(pid: i32) -> Result<(), MacFfiError> {
+    let mut process = ProcessSerialNumber { high: 0, low: 0 };
+    let lookup = unsafe { GetProcessForPID(pid, &raw mut process) };
+    if lookup != 0 {
+        return Err(MacFfiError::OutcomeUnknown(format!(
+            "Process Manager could not resolve the exact foreground process ({lookup})"
+        )));
+    }
+    let options = SET_FRONT_PROCESS_FRONT_WINDOW_ONLY | SET_FRONT_PROCESS_CAUSED_BY_USER;
+    let activation = unsafe { SetFrontProcessWithOptions(&raw const process, options) };
+    if activation != 0 {
+        return Err(MacFfiError::OutcomeUnknown(format!(
+            "Process Manager could not activate the exact foreground process ({activation})"
+        )));
     }
     Ok(())
 }
@@ -1112,6 +1253,172 @@ pub(super) fn launch_application(application_id: &str) -> Result<(), MacFfiError
             "LaunchServices did not settle within 15 seconds after accepting the request"
                 .to_string(),
         )),
+    }
+}
+
+pub(super) fn run_background_application(
+    application_bundle: &str,
+    arguments: &[String],
+    pid_file: Option<&Path>,
+) -> Result<(), MacFfiError> {
+    if application_bundle.trim().is_empty() {
+        return Err(MacFfiError::Invalid(
+            "application bundle path is empty".to_string(),
+        ));
+    }
+    if arguments.len() > 256 || arguments.iter().any(|value| value.contains('\0')) {
+        return Err(MacFfiError::Invalid(
+            "background application arguments are invalid".to_string(),
+        ));
+    }
+
+    let workspace = NSWorkspace::sharedWorkspace();
+    let prior_frontmost = workspace.frontmostApplication();
+    let bundle_path = NSString::from_str(application_bundle);
+    let bundle_url = NSURL::fileURLWithPath(&bundle_path);
+    let native_arguments = arguments
+        .iter()
+        .map(|argument| NSString::from_str(argument))
+        .collect::<Vec<_>>();
+    let native_arguments = NSArray::from_retained_slice(&native_arguments);
+    let configuration = NSWorkspaceOpenConfiguration::configuration();
+    configuration.setActivates(false);
+    configuration.setAddsToRecentItems(false);
+    configuration.setCreatesNewApplicationInstance(true);
+    configuration.setArguments(&native_arguments);
+
+    let (tx, rx) = mpsc::channel::<Result<i32, String>>();
+    let completion = RcBlock::new(
+        move |application: *mut NSRunningApplication, error: *mut NSError| {
+            if !application.is_null() {
+                let application: &NSRunningApplication = unsafe { &*application };
+                let _ = tx.send(Ok(application.processIdentifier()));
+            } else if error.is_null() {
+                let _ = tx.send(Err("LaunchServices returned no application".to_string()));
+            } else {
+                let error: &NSError = unsafe { &*error };
+                let _ = tx.send(Err(format!("{error}")));
+            }
+        },
+    );
+    workspace.openApplicationAtURL_configuration_completionHandler(
+        &bundle_url,
+        &configuration,
+        Some(&*completion),
+    );
+    let process_id = match rx.recv_timeout(Duration::from_secs(15)) {
+        Ok(Ok(process_id)) if process_id > 0 => process_id,
+        Ok(Ok(_)) => {
+            return Err(MacFfiError::OutcomeUnknown(
+                "LaunchServices returned an invalid process identifier".to_string(),
+            ));
+        }
+        Ok(Err(message)) => {
+            return Err(MacFfiError::OutcomeUnknown(format!(
+                "LaunchServices rejected background application launch: {message}"
+            )));
+        }
+        Err(_) => {
+            return Err(MacFfiError::OutcomeUnknown(
+                "LaunchServices did not settle within 15 seconds after accepting the background application"
+                    .to_string(),
+            ));
+        }
+    };
+    let launched = NSRunningApplication::runningApplicationWithProcessIdentifier(process_id)
+        .ok_or_else(|| {
+            MacFfiError::OutcomeUnknown(
+                "launched background application disappeared before supervision".to_string(),
+            )
+        })?;
+    if let Some(path) = pid_file {
+        if let Err(error) = write_background_browser_pid(path, process_id) {
+            let _ = launched.terminate();
+            return Err(error);
+        }
+    }
+
+    // Chrome can activate its first native window after LaunchServices has
+    // already completed. Keep the exact prior foreground owner authoritative
+    // until that first window exists, but do not hide Chrome: hidden windows
+    // are unavailable to ScreenCaptureKit and headed CDP frame capture can
+    // throttle. Ending the guard on this causal boundary also ensures a later
+    // explicit Computer focus is never undone by a blind startup timer.
+    let guard_until = Instant::now() + Duration::from_secs(5);
+    let application_element =
+        super::accessibility_trusted().then(|| AxElement::application(process_id));
+    let mut guarding_startup = true;
+    let mut first_window_seen_at = None;
+    while let Some(application) =
+        NSRunningApplication::runningApplicationWithProcessIdentifier(process_id)
+    {
+        let first_window_exists = application_element.as_ref().is_some_and(|element| {
+            element
+                .windows_bounded(1)
+                .ok()
+                .is_some_and(|(windows, _)| !windows.is_empty())
+        });
+        if first_window_exists && first_window_seen_at.is_none() {
+            first_window_seen_at = Some(Instant::now());
+        }
+        if guarding_startup && application.isActive() {
+            if let Some(prior) = prior_frontmost
+                .as_ref()
+                .filter(|prior| !prior.isTerminated() && prior.processIdentifier() != process_id)
+            {
+                #[allow(deprecated)]
+                let options = NSApplicationActivationOptions::ActivateIgnoringOtherApps;
+                let _ = prior.activateWithOptions(options);
+            }
+        }
+        if guarding_startup
+            && (first_window_seen_at
+                .is_some_and(|seen_at| seen_at.elapsed() >= Duration::from_millis(250))
+                || Instant::now() >= guard_until)
+        {
+            guarding_startup = false;
+        }
+        thread::sleep(if guarding_startup {
+            Duration::from_millis(20)
+        } else {
+            Duration::from_millis(250)
+        });
+    }
+    if let Some(path) = pid_file {
+        clear_background_browser_pid(path, process_id);
+    }
+    Ok(())
+}
+
+fn write_background_browser_pid(path: &Path, process_id: i32) -> Result<(), MacFfiError> {
+    let parent = path.parent().ok_or_else(|| {
+        MacFfiError::Invalid("background browser PID file has no parent directory".to_string())
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        MacFfiError::OutcomeUnknown(format!(
+            "could not create background browser PID directory: {error}"
+        ))
+    })?;
+    let temporary = path.with_extension(format!("pid.tmp-{}", std::process::id()));
+    fs::write(&temporary, format!("{process_id}\n")).map_err(|error| {
+        MacFfiError::OutcomeUnknown(format!(
+            "could not write background browser PID file: {error}"
+        ))
+    })?;
+    fs::rename(&temporary, path).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        MacFfiError::OutcomeUnknown(format!(
+            "could not publish background browser PID file: {error}"
+        ))
+    })
+}
+
+fn clear_background_browser_pid(path: &Path, process_id: i32) {
+    let Ok(value) = fs::read_to_string(path) else {
+        return;
+    };
+    if value.trim() == process_id.to_string() {
+        let _ = fs::remove_file(path);
     }
 }
 

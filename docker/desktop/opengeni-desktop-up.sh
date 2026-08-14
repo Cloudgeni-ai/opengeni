@@ -141,7 +141,7 @@ desktop_stage xfce_dbus_fonts_started
 #    the SAME :0 independently. Control is gated client-side (the "Take control"
 #    affordance) and by the stream posture (unguessable short-TTL tunnel URL +
 #    server-recorded scoped token); there is no in-box token validation by design.
-start x11vnc x11vnc -display :0 -forever -shared -wait 50 -rfbport 5900 -nopw \
+start x11vnc x11vnc -display :0 -forever -shared -wait 50 -sb 0 -rfbport 5900 -nopw \
   -xkb -noxdamage -noxfixes -repeat -ping 1 -speeds lan -o "$RUN/x11vnc.full.log"
 for i in $(seq 1 50); do nc -z localhost 5900 && break; sleep 0.1; \
   [ "$i" = "50" ] && { echo "x11vnc failed on :5900" >&2; exit 12; }; done

@@ -2,8 +2,8 @@
 //
 // The op-stream client needs two primitives the request/reply `ControlRpc`
 // cannot express: a plain SUBSCRIPTION (runner→server op frames on
-// `agent.<ws>.<id>.op.<op_id>`, fire-and-forget publishes) and a plain PUBLISH
-// (server→runner acks on `agent.<ws>.<id>.ack`). This module defines that seam
+// `agent.<ws>.<id>.connection.<instance>.op.<op_id>`, fire-and-forget publishes)
+// and a plain PUBLISH (server→runner acks on the exact instance's `.ack`).
 // exactly like control-rpc.ts defines `ControlRpc`: the session leaf speaks
 // ONLY `OpStreamTransport`; the worker/api inject a live NATS-backed
 // implementation (the same lazy-factory discipline — boot never requires a
@@ -14,16 +14,31 @@
 // the existing rpc subject through the existing `ControlRpc`, with its typed
 // offline/timeout synthesis and retry taxonomy.
 
-/** The per-op frame subject (runner→server, fire-and-forget). Mirrors the
- *  runner's wire constant: `agent.<ws>.<id>.op.<op_id>`. */
-export function opFrameSubject(workspaceId: string, agentId: string, opId: string): string {
-  return `agent.${workspaceId}.${agentId}.op.${opId}`;
+/** The per-op frame subject (runner→server, fire-and-forget). Production supplies
+ * the exact process generation; the legacy branch exists for isolated adapters. */
+export function opFrameSubject(
+  workspaceId: string,
+  agentId: string,
+  opId: string,
+  connectionInstanceId?: string,
+): string {
+  const prefix = `agent.${workspaceId}.${agentId}`;
+  return connectionInstanceId
+    ? `${prefix}.connection.${connectionInstanceId}.op.${opId}`
+    : `${prefix}.op.${opId}`;
 }
 
 /** The per-agent ack subject (server→runner, fire-and-forget). Mirrors the
- *  runner's wire constant: `agent.<ws>.<id>.ack`. */
-export function opAckSubject(workspaceId: string, agentId: string): string {
-  return `agent.${workspaceId}.${agentId}.ack`;
+ *  runner's exact generation-fenced ack subject. */
+export function opAckSubject(
+  workspaceId: string,
+  agentId: string,
+  connectionInstanceId?: string,
+): string {
+  const prefix = `agent.${workspaceId}.${agentId}`;
+  return connectionInstanceId
+    ? `${prefix}.connection.${connectionInstanceId}.ack`
+    : `${prefix}.ack`;
 }
 
 /** A live subscription handle. `unsubscribe` is idempotent and never throws. */

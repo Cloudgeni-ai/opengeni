@@ -1,12 +1,16 @@
 import {
   BillingMode,
   CAPABILITY_DESCRIPTORS,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   Entitlements,
   EntitlementsMode,
+  KnowledgeSourceSyncLimits,
   LatencyMode,
   MAX_NESTED_AGENT_DEPTH,
   ProductAccessMode,
   ReasoningEffort,
+  FIRST_PARTY_MCP_TOOL_NAMES,
+  FirstPartyMcpToolName,
   SandboxBackend,
   SessionMcpApprovalPolicy,
   SEEDANCE_2_5_MODEL_ID,
@@ -17,6 +21,7 @@ import {
   type TurnExecutionModelSourceV1,
   type TurnExecutionReasoningSourceV1,
   type VideoGenerationResolution,
+  type FirstPartyMcpToolName as FirstPartyMcpToolNameType,
 } from "@opengeni/contracts";
 import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
 import {
@@ -29,15 +34,15 @@ import {
   CODEX_PROVIDER_ID,
 } from "@opengeni/codex/constants";
 import {
-  XAI_SUBSCRIPTION_FALLBACK_MODEL_SLUGS,
+  XAI_SUBSCRIPTION_MODEL_SLUGS,
   XAI_SUBSCRIPTION_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
   XAI_SUBSCRIPTION_MODEL_CONTEXT_WINDOW_TOKENS,
   XAI_SUBSCRIPTION_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
   XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
   XAI_SUBSCRIPTION_PROVIDER_ID,
   XAI_SUBSCRIPTION_PROXY_BASE_URL,
-  type XaiSubscriptionModelMetadata,
 } from "@opengeni/xai-subscription";
+export { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
@@ -51,6 +56,8 @@ export const SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS = 60 * 60_000;
 export const SANDBOX_ARCHIVE_CAPTURE_SETTLEMENT_GRACE_MS = 10_000;
 export const SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS =
   SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS - SANDBOX_ARCHIVE_CAPTURE_SETTLEMENT_GRACE_MS;
+export const GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MAX_MS = 60_000;
+export const GOOGLE_DRIVE_PROVIDER_RETRY_DELAY_MAX_MS = 60_000;
 // Admission waits are observational: successful capture/teardown returns as
 // soon as the DB fence clears. This ceiling only covers the unhealthy path. It
 // allows one scheduled inventory and one complete successor claim without
@@ -74,6 +81,38 @@ const EnvBoolean = z.preprocess((value) => {
   }
   return value;
 }, z.boolean());
+
+const EnvFirstPartyMcpTools = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") return value;
+    const source = value.trim();
+    if (!source) return undefined;
+    if (source.startsWith("[")) {
+      try {
+        return JSON.parse(source);
+      } catch {
+        return value;
+      }
+    }
+    return source.split(",").map((entry) => entry.trim());
+  },
+  z
+    .array(FirstPartyMcpToolName)
+    .superRefine((tools, context) => {
+      const seen = new Set<FirstPartyMcpToolNameType>();
+      for (const [index, tool] of tools.entries()) {
+        if (seen.has(tool)) {
+          context.addIssue({
+            code: "custom",
+            message: "first-party MCP tool lists must not contain duplicates",
+            path: [index],
+          });
+        }
+        seen.add(tool);
+      }
+    })
+    .optional(),
+);
 
 export const sandboxPreparationProfiles: Record<string, { env: string[]; hooks: string[] }> = {
   none: {
@@ -299,6 +338,8 @@ const SettingsSchema = z.object({
   staticEntitlementsJson: z.string().default("{}"),
   staticUsageLimitsJson: z.string().default("{}"),
   delegationSecret: z.string().optional(),
+  defaultFirstPartyMcpTools: EnvFirstPartyMcpTools,
+  allowedFirstPartyMcpTools: EnvFirstPartyMcpTools,
   // sandbox workspace scoped stream-token HMAC secret (sandbox contract §C.3 / stream-token availability contract).
   // When unset, the API falls back to `delegationSecret` (the same HMAC envelope
   // family, `ogs_` vs `ogd_` prefix). REQUIRED-WHEN-DESKTOP, but the absence of
@@ -328,6 +369,42 @@ const SettingsSchema = z.object({
   slackSigningSecret: z.string().optional(),
   googleDriveClientId: z.string().optional(),
   googleDriveClientSecret: z.string().optional(),
+  googleDriveSyncMaxItems: z.coerce.number().int().positive().max(10_000).default(500),
+  googleDriveSyncMaxBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(5_000_000_000)
+    .default(500_000_000),
+  googleDriveSyncMaxFileBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(5_000_000_000)
+    .default(100_000_000),
+  googleDriveSyncMaxProviderRequests: z.coerce.number().int().positive().max(10_000).default(1_000),
+  googleDriveSyncMaxElapsedSeconds: z.coerce.number().int().positive().max(3_600).default(300),
+  googleDriveSyncMaxFailureDetails: z.coerce.number().int().positive().max(100).default(25),
+  googleDriveProviderRequestTimeoutMs: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .max(GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MAX_MS)
+    .default(30_000),
+  googleDriveProviderRetryAttempts: z.coerce.number().int().min(1).max(5).default(3),
+  googleDriveProviderRetryInitialDelayMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(30_000)
+    .default(250),
+  googleDriveProviderRetryMaxDelayMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(GOOGLE_DRIVE_PROVIDER_RETRY_DELAY_MAX_MS)
+    .default(5_000),
+  googleDriveProviderRetryBudgetMs: z.coerce.number().int().positive().max(120_000).default(15_000),
   fikenClientId: z.string().optional(),
   fikenClientSecret: z.string().optional(),
   googleDriveWorkspaceEventsEnabled: EnvBoolean.optional(),
@@ -486,10 +563,12 @@ const SettingsSchema = z.object({
     .default(24 * 60 * 60),
   voiceInputFfmpegPath: z.string().trim().min(1).max(1024).default("ffmpeg"),
   // Preferred provider order (comma-separated ids). First configured+ready wins.
-  // Codex subscription STT is preferred by default when subscription routing is
-  // enabled; operators can put openai/azure-openai first explicitly.
-  // Supported: openai, azure-openai, codex-subscription.
-  voiceInputProviderOrder: z.string().default("codex-subscription,openai,azure-openai"),
+  // Connected subscription STT is preferred by default; operators can put
+  // openai/azure-openai first explicitly.
+  // Supported: supergrok-subscription, codex-subscription, openai, azure-openai.
+  voiceInputProviderOrder: z
+    .string()
+    .default("supergrok-subscription,codex-subscription,openai,azure-openai"),
   // OpenAI public /v1/audio/transcriptions path. Reuses OPENGENI_OPENAI_API_KEY
   // when voiceInputOpenaiApiKey is unset. Default model is gpt-transcribe.
   voiceInputOpenaiEnabled: EnvBoolean.default(true),
@@ -623,7 +702,13 @@ const SettingsSchema = z.object({
   // the Modal session envelope persists the actual image ID.
   modalImageId: z
     .string()
-    .regex(/^im-[A-Za-z0-9]{22}$/)
+    // Modal image IDs are provider-opaque. Older builds use a 22-character
+    // random suffix while current filesystem snapshots use a 26-character
+    // ULID suffix. Validate the stable namespace/safe alphabet and let Modal
+    // remain authoritative over current/future suffix lengths.
+    .min(4)
+    .max(128)
+    .regex(/^im-[A-Za-z0-9]+$/)
     .optional(),
   // Name of a Modal Secret (containing REGISTRY_USERNAME + REGISTRY_PASSWORD) used
   // to authenticate the pull of `modalImageRef` from a PRIVATE registry. When UNSET
@@ -669,8 +754,9 @@ const SettingsSchema = z.object({
   // /workspace FILE PERSISTENCE across warm/cold cycles. Directory snapshots
   // preserve only the durable user workspace, so provider recovery does not
   // restore an entire machine image or replace the selected rig/base image.
-  // Existing serialized sessions retain their original persistence mode and
-  // remain recoverable; this default governs newly created Modal sandboxes.
+  // Cold restore derives the mode from its verified native artifact, so existing
+  // serialized sessions remain recoverable; this default governs archive-free
+  // Modal creations only.
   // `snapshot_filesystem` remains available for explicit compatibility and
   // immutable rig-image materialization. `tar` is the portable fallback.
   modalWorkspacePersistence: z
@@ -843,9 +929,10 @@ const SettingsSchema = z.object({
   // nats-server is configured with AUTH CALLOUT: an external agent connects
   // presenting its `oge_` enrollment bearer as the connect auth-token; the server
   // issues an authorization request on $SYS.REQ.USER.AUTH to our responder, which
-  // validates the bearer and returns a SIGNED NATS user JWT scoped to pub/sub ONLY
-  // `agent.<ws>.>` (+ `_INBOX.>`). That per-subject scope IS the per-workspace
-  // isolation. These are deployment-level secrets in the opengeni-runtime secret
+  // validates the bearer, claims one daemon generation, and returns a SIGNED NATS
+  // user JWT scoped to that exact process subtree (+ `_INBOX.>`). The exact scope
+  // provides both workspace isolation and single-daemon routing authority. These
+  // are deployment-level secrets in the opengeni-runtime secret
   // (Helm-clobbered configmap avoided), all OPTIONAL: when the callout plane is not
   // configured the responder simply does not start (selfhosted agents cannot
   // connect — graceful, never a boot-fail).
@@ -857,7 +944,7 @@ const SettingsSchema = z.object({
   // The TARGET ACCOUNT NAME the minted user is placed into (the server-config-mode
   // `auth_callout.account`, e.g. "APP"). The responder writes it as the minted user
   // JWT `aud` so nats-server binds the agent to this account — the SAME account the
-  // privileged control plane connects into, so `agent.<ws>.<id>.rpc` request/reply
+  // privileged control plane connects into, so exact process request/reply
   // routes. Optional; resolveNatsCalloutConfig defaults it to "APP".
   selfhostedNatsCalloutAccountName: z.string().optional(),
   // The callout RESPONDER's own NATS login (one of the `auth_callout.auth_users`
@@ -866,7 +953,7 @@ const SettingsSchema = z.object({
   selfhostedNatsCalloutUser: z.string().optional(),
   selfhostedNatsCalloutPassword: z.string().optional(),
   // The PRIVILEGED control-plane login (api/worker): a static account user that may
-  // request `agent.*.rpc` + receive its inbox replies. The event bus + the
+  // request exact process RPC subjects + receive their inbox replies. The event bus + the
   // selfhosted control RPC ride THIS connection. Username/password; when unset the
   // bus connects anonymously (local dev / a NATS with no auth_callout).
   selfhostedNatsControlUser: z.string().optional(),
@@ -1049,8 +1136,76 @@ const SettingsSchema = z.object({
 export type Settings = z.infer<typeof SettingsSchema>;
 export type McpServerConfig = Settings["mcpServers"][number];
 
+export type GoogleDriveProviderRetryOptions = {
+  requestTimeoutMs: number;
+  attempts: number;
+  initialDelayMs: number;
+  maxDelayMs: number;
+  budgetMs: number;
+};
+
+/** Freeze one validated provider-neutral budget into every newly created or
+ * updated Google Drive knowledge-source schedule. Existing schedules retain
+ * their persisted limits until an authorized source save updates them. */
+export function configuredGoogleDriveSyncLimits(settings: Settings) {
+  return KnowledgeSourceSyncLimits.parse({
+    maxItems: settings.googleDriveSyncMaxItems,
+    maxBytes: settings.googleDriveSyncMaxBytes,
+    maxFileBytes: settings.googleDriveSyncMaxFileBytes,
+    maxProviderRequests: settings.googleDriveSyncMaxProviderRequests,
+    maxElapsedSeconds: settings.googleDriveSyncMaxElapsedSeconds,
+    maxFailureDetails: settings.googleDriveSyncMaxFailureDetails,
+  });
+}
+
+/** Bounded in-activity retry policy for individual Google Drive requests. The
+ * durable sync workflow remains authoritative after this local budget ends. */
+export function googleDriveProviderRetryOptions(
+  settings: Settings,
+): GoogleDriveProviderRetryOptions {
+  return {
+    requestTimeoutMs: settings.googleDriveProviderRequestTimeoutMs,
+    attempts: settings.googleDriveProviderRetryAttempts,
+    initialDelayMs: settings.googleDriveProviderRetryInitialDelayMs,
+    maxDelayMs: settings.googleDriveProviderRetryMaxDelayMs,
+    budgetMs: settings.googleDriveProviderRetryBudgetMs,
+  };
+}
+
+/** Return only a credential-free HTTP(S) origin. Reject path, user-info, query,
+ * and fragment input instead of reflecting it into callbacks or evidence. */
+export function canonicalPublicOrigin(publicBaseUrl: string | undefined): string | null {
+  if (!publicBaseUrl) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(publicBaseUrl);
+  } catch {
+    return null;
+  }
+  if (
+    !["http:", "https:"].includes(parsed.protocol) ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    (parsed.pathname !== "" && parsed.pathname !== "/")
+  ) {
+    return null;
+  }
+  return parsed.origin;
+}
+
+export function googleDriveOAuthCallbackUrl(publicBaseUrl: string | undefined): string | null {
+  const origin = canonicalPublicOrigin(publicBaseUrl);
+  return origin ? `${origin}/v1/integrations/google-drive/callback` : null;
+}
+
 /** Declarative voice-input transcription provider ids. */
-export type VoiceInputProviderId = "openai" | "azure-openai" | "codex-subscription";
+export type VoiceInputProviderId =
+  | "openai"
+  | "azure-openai"
+  | "codex-subscription"
+  | "supergrok-subscription";
 
 export type VoiceInputProviderConfig =
   | {
@@ -1072,6 +1227,11 @@ export type VoiceInputProviderConfig =
   | {
       id: "codex-subscription";
       kind: "codex-subscription";
+      experimental: true;
+    }
+  | {
+      id: "supergrok-subscription";
+      kind: "supergrok-subscription";
       experimental: true;
     };
 
@@ -1109,7 +1269,10 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
     .map((part) => part.trim())
     .filter(
       (part): part is VoiceInputProviderId =>
-        part === "openai" || part === "azure-openai" || part === "codex-subscription",
+        part === "openai" ||
+        part === "azure-openai" ||
+        part === "codex-subscription" ||
+        part === "supergrok-subscription",
     );
   const seen = new Set<VoiceInputProviderId>();
   const providers: VoiceInputProviderConfig[] = [];
@@ -1197,6 +1360,15 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
         kind: "codex-subscription",
         experimental: true,
       });
+      continue;
+    }
+    if (id === "supergrok-subscription") {
+      if (!settings.supergrokSubscriptionEnabled) continue;
+      providers.push({
+        id: "supergrok-subscription",
+        kind: "supergrok-subscription",
+        experimental: true,
+      });
     }
   }
   return providers;
@@ -1205,7 +1377,8 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
 /** True when the deployment has at least one supported (non-experimental) provider. */
 export function voiceInputDeploymentConfigured(settings: Settings): boolean {
   return resolveVoiceInputProviderRegistry(settings).some(
-    (provider) => provider.kind !== "codex-subscription",
+    (provider) =>
+      provider.kind !== "codex-subscription" && provider.kind !== "supergrok-subscription",
   );
 }
 
@@ -1597,6 +1770,7 @@ export const VERCEL_AI_GATEWAY_CONNECTION_DOMAIN = "ai-gateway.vercel.sh" as con
 export const VERCEL_AI_GATEWAY_CONNECTION_ROLE = "vercel_ai_gateway" as const;
 
 export const CODEX_REALTIME_MODEL_ID = "gpt-live-1-boulder-alpha" as const;
+export const SUPERGROK_REALTIME_MODEL_ID = "supergrok/grok-voice-think-fast-2.0" as const;
 export const OPENGENI_REALTIME_MODEL_ID_PREFIX = "opengeni-gateway/" as const;
 export const WORKSPACE_REALTIME_MODEL_ID_PREFIX = "workspace-gateway/" as const;
 
@@ -1891,6 +2065,8 @@ export function getSettings(): Settings {
     staticEntitlementsJson: optional("OPENGENI_STATIC_ENTITLEMENTS_JSON"),
     staticUsageLimitsJson: optional("OPENGENI_STATIC_USAGE_LIMITS_JSON"),
     delegationSecret: optional("OPENGENI_DELEGATION_SECRET"),
+    defaultFirstPartyMcpTools: optional("OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS"),
+    allowedFirstPartyMcpTools: optional("OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS"),
     streamTokenSecret: optional("OPENGENI_STREAM_TOKEN_SECRET"),
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
     codemodeMaxCallsPerTurn: optional("OPENGENI_CODEMODE_MAX_CALLS_PER_TURN"),
@@ -1908,6 +2084,25 @@ export function getSettings(): Settings {
     slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
     googleDriveClientSecret: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET"),
+    googleDriveSyncMaxItems: optional("OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ITEMS"),
+    googleDriveSyncMaxBytes: optional("OPENGENI_GOOGLE_DRIVE_SYNC_MAX_BYTES"),
+    googleDriveSyncMaxFileBytes: optional("OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FILE_BYTES"),
+    googleDriveSyncMaxProviderRequests: optional(
+      "OPENGENI_GOOGLE_DRIVE_SYNC_MAX_PROVIDER_REQUESTS",
+    ),
+    googleDriveSyncMaxElapsedSeconds: optional("OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ELAPSED_SECONDS"),
+    googleDriveSyncMaxFailureDetails: optional("OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FAILURE_DETAILS"),
+    googleDriveProviderRequestTimeoutMs: optional(
+      "OPENGENI_GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MS",
+    ),
+    googleDriveProviderRetryAttempts: optional("OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_ATTEMPTS"),
+    googleDriveProviderRetryInitialDelayMs: optional(
+      "OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS",
+    ),
+    googleDriveProviderRetryMaxDelayMs: optional(
+      "OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS",
+    ),
+    googleDriveProviderRetryBudgetMs: optional("OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_BUDGET_MS"),
     fikenClientId: optional("OPENGENI_FIKEN_OAUTH_CLIENT_ID"),
     fikenClientSecret: optional("OPENGENI_FIKEN_OAUTH_CLIENT_SECRET"),
     googleDriveWorkspaceEventsEnabled: optional("OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED"),
@@ -2196,10 +2391,42 @@ const LOCAL_FIRST_PARTY_DELEGATION_SECRET = "opengeni-local-first-party-delegati
 export function resolveFirstPartyDelegationSecret(settings: Settings): string | undefined {
   const explicit = settings.delegationSecret?.trim();
   if (explicit) return explicit;
+  const configuredAccessKey = settings.accessKey?.trim();
+  if (settings.productAccessMode === "configured" && settings.authRequired && configuredAccessKey) {
+    return configuredAccessKey;
+  }
   return settings.productAccessMode === "local" &&
     (settings.environment === "local" || settings.environment === "test")
     ? LOCAL_FIRST_PARTY_DELEGATION_SECRET
     : undefined;
+}
+
+export type FirstPartyMcpToolPolicy = {
+  default: FirstPartyMcpToolNameType[];
+  allowed: FirstPartyMcpToolNameType[];
+};
+
+/** Resolve the deployment's session-tool defaults and hard execution ceiling. */
+export function resolveFirstPartyMcpToolPolicy(
+  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+): FirstPartyMcpToolPolicy {
+  const allowed = settings.allowedFirstPartyMcpTools ?? [...FIRST_PARTY_MCP_TOOL_NAMES];
+  const allowedSet = new Set(allowed);
+  const defaults = settings.defaultFirstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS];
+  return {
+    default: defaults.filter((tool) => allowedSet.has(tool)),
+    allowed: [...allowed],
+  };
+}
+
+/** Apply the deployment ceiling to an existing durable session selection. */
+export function allowedFirstPartyMcpToolsForSession(
+  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+  selected: readonly FirstPartyMcpToolNameType[] | null | undefined,
+): FirstPartyMcpToolNameType[] {
+  const policy = resolveFirstPartyMcpToolPolicy(settings);
+  const allowed = new Set(policy.allowed);
+  return [...(selected ?? policy.default)].filter((tool) => allowed.has(tool));
 }
 
 /**
@@ -2687,12 +2914,17 @@ const GPT56_FAST_BILLING_MULTIPLIER_BPS = 20_000;
 /**
  * Product display label for catalog/picker UI.
  * Same string for OpenAI and Codex copies of a slug (`gpt-5.6-luna` and
- * `codex/gpt-5.6-luna` → `GPT-5.6 Luna`). Non-gpt ids pass through unchanged.
+ * `codex/gpt-5.6-luna` → `GPT-5.6 Luna`). Curated Grok slugs receive the same
+ * product casing; other ids pass through unchanged.
  */
 export function productLabelForModelId(modelId: string): string {
   const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
     ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
     : modelId;
+  const grokMatch = /^grok-(\d+(?:\.\d+)?)$/i.exec(slug);
+  if (grokMatch) {
+    return `Grok ${grokMatch[1]}`;
+  }
   const match = /^(gpt-\d+(?:\.\d+)?)(?:-(.+))?$/i.exec(slug);
   if (!match) {
     return slug;
@@ -2711,14 +2943,16 @@ export function productLabelForModelId(modelId: string): string {
 }
 
 /**
- * Curated compact product labels for dense UI. Only known GPT family slugs;
- * everything else returns null so callers fall back to the full `label`.
+ * Curated compact product labels for dense UI. Unknown model slugs return null
+ * so callers fall back to the full `label`.
  */
 export function productShortLabelForModelId(modelId: string): string | null {
   const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
     ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
     : modelId;
   switch (slug) {
+    case "grok-4.6":
+      return "4.6";
     case "gpt-5.6-sol":
       return "5.6 Sol";
     case "gpt-5.6-terra":
@@ -2797,7 +3031,7 @@ export function isDirectOpenAiApiBaseUrl(baseUrl: string | undefined): boolean {
 
 /**
  * Map OpenGeni latency mode to the provider `service_tier` wire value.
- * Azure and Codex ChatGPT accept `priority`; OpenAI API accepts `fast` (alias of priority).
+ * Azure, Codex ChatGPT, and xAI accept `priority`; OpenAI API accepts `fast`.
  * Standard omits the field.
  */
 export function serviceTierForLatencyMode(
@@ -2807,7 +3041,11 @@ export function serviceTierForLatencyMode(
   if (latencyMode === "standard") {
     return undefined;
   }
-  if (providerId === "azure" || providerId === CODEX_PROVIDER_ID) {
+  if (
+    providerId === "azure" ||
+    providerId === CODEX_PROVIDER_ID ||
+    providerId === XAI_SUBSCRIPTION_PROVIDER_ID
+  ) {
     return "priority";
   }
   return "fast";
@@ -3085,51 +3323,47 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
 }
 
 /**
- * Static SuperGrok product catalogue plus optional live `/models-v2` limits.
+ * Static SuperGrok product catalogue, matching the Codex subscription seam.
  * The overlay never contains a concrete account id or bearer; selection and
  * per-turn credential freeze remain worker/DB responsibilities.
  */
-export function withXaiSubscriptionCatalogProvider(
-  settings: Settings,
-  liveModels: readonly XaiSubscriptionModelMetadata[] = [],
-): Settings {
+export function withXaiSubscriptionCatalogProvider(settings: Settings): Settings {
   const providers = parseModelProvidersJson(settings.modelProvidersJson);
   if (providers.some((provider) => provider.id === XAI_SUBSCRIPTION_PROVIDER_ID)) {
     return settings;
   }
-  const liveBySlug = new Map(liveModels.map((model) => [model.slug, model]));
-  const slugs = uniqueValues([
-    ...XAI_SUBSCRIPTION_FALLBACK_MODEL_SLUGS,
-    ...liveModels.filter((model) => model.apiBackend === "responses").map((model) => model.slug),
-  ]);
   const provider: RegistryProvider = {
     kind: "xai-subscription",
     id: XAI_SUBSCRIPTION_PROVIDER_ID,
     label: "SuperGrok (xAI subscription)",
     api: "responses",
     baseUrl: XAI_SUBSCRIPTION_PROXY_BASE_URL,
-    models: slugs.map((slug) => {
-      const live = liveBySlug.get(slug);
+    models: XAI_SUBSCRIPTION_MODEL_SLUGS.map((slug) => {
       const capabilities = legacyModelCapabilities(settings, {
         reasoningEffort: true,
         hostedWebSearch: true,
       });
+      capabilities.reasoning.efforts = ["low", "medium", "high", "xhigh"];
+      capabilities.reasoning.defaultEffort = "high";
+      capabilities.latencyModes = [
+        { id: "standard", upstream: "supported", runnable: true },
+        { id: "fast", upstream: "supported", runnable: true },
+      ];
       capabilities.hostedTools.xSearch = { upstream: "supported", runnable: true };
       capabilities.hostedTools.imageGeneration = { upstream: "supported", runnable: true };
       return {
         id: `${XAI_SUBSCRIPTION_MODEL_ID_PREFIX}${slug}`,
         upstreamModelId: slug,
-        label: live?.name ?? productLabelForModelId(slug),
+        label: productLabelForModelId(slug),
+        ...(productShortLabelForModelId(slug)
+          ? { shortLabel: productShortLabelForModelId(slug)! }
+          : {}),
         reasoningEffort: true,
         hostedWebSearch: true,
         capabilities,
-        contextWindowTokens:
-          live?.contextWindowTokens ?? XAI_SUBSCRIPTION_MODEL_CONTEXT_WINDOW_TOKENS,
-        effectiveContextWindowTokens:
-          live?.effectiveContextWindowTokens ??
-          XAI_SUBSCRIPTION_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
-        autoCompactTokenLimit:
-          live?.autoCompactTokenLimit ?? XAI_SUBSCRIPTION_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+        contextWindowTokens: XAI_SUBSCRIPTION_MODEL_CONTEXT_WINDOW_TOKENS,
+        effectiveContextWindowTokens: XAI_SUBSCRIPTION_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+        autoCompactTokenLimit: XAI_SUBSCRIPTION_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
         toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
       };
     }),
@@ -4553,6 +4787,8 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
               "list_document_bases",
               "list_indexed_documents",
               "knowledge_search",
+              "knowledge_get",
+              "knowledge_browse",
               "knowledge_fetch",
               "memory_search",
               "memory_propose",
@@ -4605,11 +4841,30 @@ export function firstPartyMcpWorkspaceUrl(settings: Settings, workspaceId: strin
 }
 
 export function codemodeWorkspaceUrl(settings: Settings, workspaceId: string): string {
-  const url = new URL(firstPartyMcpWorkspaceUrl(settings, workspaceId));
-  if (!url.pathname.endsWith("/mcp")) {
-    throw new Error("First-party MCP URL cannot be projected to the Codemode endpoint");
+  if (settings.opengeniMcpUrl) {
+    const url = new URL(firstPartyMcpWorkspaceUrl(settings, workspaceId));
+    if (!url.pathname.endsWith("/mcp")) {
+      throw new Error("First-party MCP URL cannot be projected to the Codemode endpoint");
+    }
+    url.pathname = `${url.pathname.slice(0, -4)}/codemode`;
+    return url.toString();
   }
-  url.pathname = `${url.pathname.slice(0, -4)}/codemode`;
+
+  // Codemode executes inside the selected placement, not beside the worker.
+  // Local Docker reaches the host through Docker's canonical host alias; an
+  // in-process local sandbox uses loopback; remote managed providers use the
+  // deployment's public origin. `OPENGENI_MCP_URL` above remains the explicit
+  // escape hatch for mounted deployments and local remote-provider tunnels.
+  const executionOrigin =
+    settings.sandboxBackend === "docker"
+      ? `http://host.docker.internal:${settings.apiPort}`
+      : settings.sandboxBackend === "local"
+        ? `http://127.0.0.1:${settings.apiPort}`
+        : (settings.publicBaseUrl ?? `http://127.0.0.1:${settings.apiPort}`);
+  const url = new URL(executionOrigin);
+  url.pathname = `${url.pathname.replace(/\/+$/u, "")}/v1/workspaces/${workspaceId}/codemode`;
+  url.search = "";
+  url.hash = "";
   return url.toString();
 }
 
@@ -4627,6 +4882,17 @@ function firstPartyFilesMcpServerUrl(mcpUrl: string): string {
 
 function validateSettings(settings: Settings): void {
   temporalConnectionOptions(settings);
+  const allowedFirstPartyMcpTools = new Set(
+    settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES,
+  );
+  const disallowedDefaults = (settings.defaultFirstPartyMcpTools ?? []).filter(
+    (tool) => !allowedFirstPartyMcpTools.has(tool),
+  );
+  if (disallowedDefaults.length > 0) {
+    throw new Error(
+      `OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS must be a subset of OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS: ${disallowedDefaults.join(", ")}`,
+    );
+  }
   if (settings.productAccessMode === "managed") {
     if (!settings.publicBaseUrl) {
       throw new Error(
@@ -4730,9 +4996,19 @@ function validateSettings(settings: Settings): void {
     }
   }
   if (settings.googleDriveClientId) {
+    if (!settings.integrationsEnabled) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_ENABLED=true is required when the Google Drive integration is configured",
+      );
+    }
     if (!settings.publicBaseUrl) {
       throw new Error(
         "OPENGENI_PUBLIC_BASE_URL is required when the Google Drive integration is configured",
+      );
+    }
+    if (!googleDriveOAuthCallbackUrl(settings.publicBaseUrl)) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must be a credential-free origin without a path, query, or fragment when the Google Drive integration is configured",
       );
     }
     if (
@@ -4748,6 +5024,23 @@ function validateSettings(settings: Settings): void {
         "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Google Drive integration is configured",
       );
     }
+  }
+  if (settings.googleDriveSyncMaxFileBytes > settings.googleDriveSyncMaxBytes) {
+    throw new Error(
+      "OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FILE_BYTES must not exceed OPENGENI_GOOGLE_DRIVE_SYNC_MAX_BYTES",
+    );
+  }
+  if (
+    settings.googleDriveProviderRetryInitialDelayMs > settings.googleDriveProviderRetryMaxDelayMs
+  ) {
+    throw new Error(
+      "OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS must not exceed OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS",
+    );
+  }
+  if (settings.googleDriveProviderRetryInitialDelayMs > settings.googleDriveProviderRetryBudgetMs) {
+    throw new Error(
+      "OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS must not exceed OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_BUDGET_MS",
+    );
   }
   if (Boolean(settings.atlassianClientId) !== Boolean(settings.atlassianClientSecret)) {
     throw new Error(
@@ -5230,7 +5523,7 @@ export function resolveNatsCalloutConfig(settings: Settings): NatsCalloutConfig 
  * The PRIVILEGED control-plane NATS login (api/worker). Present only when BOTH a
  * user and password are set; otherwise null and the bus connects anonymously (local
  * dev / a NATS without auth_callout). When the callout plane is on, this is the
- * static account user permitted to request `agent.*.rpc`.
+ * static account user permitted to request exact generation-fenced agent RPC subjects.
  */
 export interface NatsControlPlaneAuth {
   user: string;

@@ -44,6 +44,7 @@ function snapshot(overrides: Partial<LeaseSnapshot> = {}): LeaseSnapshot {
     rigVersionId: VERSION_ID,
     dataPlaneUrl: null,
     terminalDataPlaneUrl: null,
+    controllerDataPlaneUrl: null,
     leaseEpoch: 7,
     resumeBackendId: null,
     resumeState: null,

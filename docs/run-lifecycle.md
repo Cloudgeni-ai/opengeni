@@ -95,6 +95,15 @@ peer events inert. Failed preparation leaves the old healthy peer active;
 recovery uses bounded backoff and terminal conflicts permanently stop its retry
 loop. Stop, reload without owner proof, and concurrent timer/network failure
 all abort pending negotiation and release peers, timers, media, and playback.
+The same-browser owner record also carries a versioned, bounded delegation
+replay journal. A delegation snapshot is written before it enters the bridge
+queue; successful sync advances the journal from the exact pending entry to its
+accepted item identity before in-memory acknowledgement. Reload recovery
+requeues pending snapshots without rereading host context and suppresses
+accepted provider duplicates. Malformed, normalization-changing, oversized,
+over-count, or unwritable journal state fails closed and stops that connection
+generation instead of mutating or dropping durable work; terminal mode
+settlement removes the owner record and journal together.
 The browser installs a raw listener synchronously when `oai-events` is created,
 before any asynchronous negotiation. Its activation FIFO excludes audio deltas,
 rejects malformed or over-1-MiB events, and is hard-bounded to 256 entries and
@@ -282,10 +291,24 @@ the causal human in `initiating_human_subject_id` solely for personal
 preference authority while retaining their service initiator; pure service work
 has no personal authority. Runtime composition is deterministic: core safety,
 organization/workspace/user preference descriptors plus organization/global,
-workspace, and role policy, then session/turn instructions, tool/repository/
-skill substrate, and memory. Documents and RAG evidence never become policy,
+workspace, and role policy, then durable session instructions, tool/repository/
+skill substrate, and memory. Optional application `modelContext` is not part of
+that prefix: claim stores it as a separate leading `input_text` part of the
+exact chronological user message. Standard timeline rendering omits it, while
+full audit data retains it. Documents and RAG evidence never become policy,
 and full preference bodies require explicit retrieval. When no structured
 governance applies, the legacy prompt bytes remain unchanged.
+
+The workspace `memoryPromptMode` is resolved at each accepted attempt from the
+existing settings JSON. Its default `legacy_standing` keeps the prior prompt
+path. Opt-in `retrieval_only` removes the broad Memory V1 working-set block and
+legacy preference-kind agent retrieval; canonical rows and human surfaces are
+unchanged. A root still receives the bounded company profile, while a child
+omits it and retains mandatory instruction policy plus the always-visible
+structured preference and configured Skill descriptors. At the ordinary model
+request boundary, metadata-only telemetry records the exact attempt, existing
+governance snapshot ids, inclusion reason, authority class, root/child role,
+UTF-8 size, and estimated tokens without recording content.
 
 Approval, capacity wait, worker recovery, and Pause/Resume create newer
 attempts for the **same logical turn**, so they must replay the original policy
@@ -475,6 +498,14 @@ Normal publication and crash recovery consume the same retained event value, so
 recovery cannot reconstruct a poorer MCP result from model-facing content or
 drop open protocol extension fields.
 
+First-party `session_create` and `session_send_message` failures return an MCP
+`isError` result with a bounded structured `{ error: { code, message } }`
+projection. The durable tool-output event retains that raw MCP result, and the
+React timeline promotes the two calls to worker rows that display the safe code
+and message. Known authorization/control failures use fixed public wording;
+unknown internal exceptions remain generic. This diagnostic projection does
+not alter transaction admission, retry, or idempotency semantics.
+
 Before a personal MCP is attached, the worker/Codemode boundary revalidates the
 delegation's exact workspace membership, connection id, provider domain, kind,
 owner subject, and active status. A missing, revoked, transferred, or otherwise
@@ -520,11 +551,47 @@ supersession, and worker-death events commit
 with turn status, session status/pointer, and `lastSequence` in one transaction.
 Generic appends and operation-keyed Agent Message/Steer commands retry PostgreSQL
 `40P01`/`40001` only around their bounded, idempotent persistence transaction.
+The pre-inference turn claim follows the same rule around its complete
+transaction, reusing the exact workflow, run, attempt, and dispatch identities.
 Provider inference, tools, live event publication, and workflow wakes remain after
 that boundary and are never replayed. An exhausted or non-retryable database
 failure surfaces as sanitized typed truth with SQLSTATE, stage, one correlation
 ID, an equally sanitized typed cause, and allowlisted catalog identifiers—never
 raw SQL text, a raw driver cause, or bound parameters.
+
+An activity failure can occur before that transaction creates its attempt row.
+The turn worker exports a stable typed Temporal disposition: exhausted
+contention and operational database unavailability are retryable, while
+constraints, permissions, malformed state, and claim invariants are permanent.
+The failure activity distinguishes this from a
+stale or settled attempt. Retryable and rolling-legacy unknown failures record a
+delayed `session_workflow_wake_outbox` revision and return an explicit
+`unclaimed` result; new workflow histories retain the logical turn, back off
+exponentially to a one-minute ceiling, and re-peek durable work. User/queue,
+control, accepted approval, and capacity signals all interrupt that timer,
+including signals received while activity execution or failure settlement is
+in flight. A permanent failure atomically fails the exact still-runnable turn
+(or the session-level
+compaction/internal-update obligation), session, events, maintenance, and child
+terminal outbox without fabricating an attempt row or looping. Raw SQL and
+invariant messages never enter workflow history.
+Older histories retain their recorded activity arguments for deterministic
+replay. A still-open legacy history records a tail patch after its historical
+failure activity and follows the bounded re-peek path even when a rolling legacy
+activity worker returned void; an already-completed history replays its original
+close. A separate pre-claim-classification marker preserves the exact v2
+failure-activity arguments for histories that already recorded that command;
+new histories and open histories that have not reached it can send the trigger
+and typed disposition fields. The upgraded
+activity derives the stable workflow id and leaves the same
+durable restart obligation. Migration 0238 seeds that obligation for
+already-recovering active turns whose `active_attempt_id` is null and for every
+effectively active pre-attempt claim shape whose existing wake revision was
+fully delivered: queued turns, accepted approval responses, released capacity
+waits, manual compaction, and pending internal updates. The cutover mirrors
+runtime's recursive session/workspace control algebra and excludes live
+attempts, unanswered approvals, real capacity waiters, compaction-failure holds,
+paused work, and healthy undelivered wakes.
 
 After a reviewed release reaches staging, run the dry-by-default event-ordering invariant canary
 with `bun run canary:session-event-ordering`. Execution requires
@@ -726,7 +793,10 @@ A lost provider is rematerialized by one cold-to-warming winner. Under the lease
 row lock it selects one versioned archive revision. A native Modal revision must
 match its immutable current artifact receipt, source mutation generation, and
 canonical provider-workspace binding; the exact authenticated client embedded
-in the created session must match that binding before hydration. A real tar
+in the created session must match that binding before hydration. The verified
+native artifact also pins the restore client's workspace-persistence mode; the
+process default governs only archive-free creations and cannot invalidate an
+older selected revision. A real tar
 revision instead carries byte/hash plus deterministic content-tree metadata.
 Repeated starts with the same rematerialization id are idempotent; rivals and
 stale progress/commit writes are fenced. Native restore trusts Modal's snapshot
@@ -870,6 +940,14 @@ once; a replay after execution started is recorded as outcome-unknown, and a
 replay after completion is rejected as already executed. Recovery may therefore
 re-enter the SDK approval step without issuing the MCP request again.
 
+Root-task-tree note tools follow that same no-ambiguous-replay boundary. Their
+operation receipts bind the exact accepted turn, attempt, execution generation,
+root tree, and input. The same attempt/input may replay its durable receipt, but
+a recovered successor attempt cannot claim or reissue the predecessor's
+operation UUID. Notes remain an explicit retrieval surface and are never
+composed into recovery history or ordinary prompts. See
+[`company-brain-write-routing.md`](company-brain-write-routing.md).
+
 Resource-based turn workers use that exact graceful path only as emergency
 memory protection. Temporal's cgroup-aware slot tuner closes new admission at
 `OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE`; reaching that target is ordinary
@@ -970,6 +1048,15 @@ counts.
 
 A session's content lives in three places. Keep them straight; reaching for the
 wrong one is the classic mistake.
+
+Application-provided `modelContext` follows the same rule: it is ordinary
+model-visible user-role content attached to one accepted message, not a system
+or developer instruction. Initial, queued Send/Steer, realtime delegation, and
+finalized transcript handoff all converge on the same canonical history shape.
+Because the newest message carries the changing bytes, persistent
+`Agent.instructions` and earlier history remain prompt-cache stable. Public
+turn/queue projections and the standard timeline omit the field; full event and
+audit reads may return it, so it is never a secret boundary.
 
 1. **`session_history_items` — conversation truth (the model-facing store).**
    Ordered, protocol-preserving SDK `AgentInputItem` JSON, exact for accepted

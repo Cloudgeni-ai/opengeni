@@ -4,8 +4,8 @@
 // surface + the AgentError→reason mapping with an IN-PROCESS `MockAgentResponder`
 // (no broker). M4 fills the seam with the real NATS request/reply transport — and
 // THIS test is the thing M3's mock could not cover: a `ControlRequest` actually
-// travels `nc.request("agent.<ws>.<id>.rpc", …)` over a live NATS connection to a
-// real subscriber, and the `ControlResponse` travels back, with the load-bearing
+// travels over `agent.<ws>.<id>.connection.<instance>.rpc` on a live NATS
+// connection to a real subscriber, and the `ControlResponse` travels back, with the load-bearing
 // safety mapping (no-responder → agent_offline, NEVER a NotFound) proven on the
 // wire.
 //
@@ -32,6 +32,7 @@ import {
 import { startTestServices, waitFor, type TestServices } from "@opengeni/testing";
 
 const RELAY: SelfhostedRelayConfig = { host: "relay.test", port: 443, tls: true };
+const CONNECTION_INSTANCE_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
 /** Bridge a `MockAgentResponder` (the agent's op semantics) onto NATS: decode the
  *  request bytes, run the mock, encode its `ControlResponse`. This is the "enrolled
@@ -49,6 +50,7 @@ function responderFor(mock: MockAgentResponder): RequestHandler {
 function buildClient(bus: EventBus, workspaceId: string): SelfhostedSandboxClient {
   return new SelfhostedSandboxClient({
     workspaceId,
+    connectionInstanceId: CONNECTION_INSTANCE_ID,
     relay: RELAY,
     // The control transport over the SAME connection the bus owns — no second dial.
     controlRpcFactory: () => new NatsControlRpc(async () => bus.getRequestConnection()),
@@ -75,11 +77,11 @@ describe("selfhosted control transport over a REAL local NATS", () => {
     await services?.down();
   }, 60_000);
 
-  // (a) ROUND-TRIP: a subscriber answering on `agent.<ws>.<id>.rpc` round-trips a
+  // (a) ROUND-TRIP: a subscriber answering on the exact process subject round-trips a
   //     ControlRequest → ControlResponse through `NatsControlRpc` (real exec + fs).
-  test("(a) a subscriber on agent.<ws>.<id>.rpc round-trips exec + fs through NatsControlRpc", async () => {
+  test("(a) an exact process subscriber round-trips exec + fs through NatsControlRpc", async () => {
     const mock = new MockAgentResponder({ hostname: "real-nats-vm" });
-    const subject = subjectFor(WS_A, AGENT);
+    const subject = subjectFor(WS_A, AGENT, CONNECTION_INSTANCE_ID);
     const unsub = bus.subscribeRequests(subject, responderFor(mock));
     try {
       const session = await buildClient(bus, WS_A).resume({ agentId: AGENT });
@@ -122,7 +124,7 @@ describe("selfhosted control transport over a REAL local NATS", () => {
   //     responder re-subscribes — the SAME minted session, same connection.
   test("(c) bouncing the responder mid-session: blip → recover on the SAME connection", async () => {
     const mock = new MockAgentResponder({ hostname: "reconnect-vm" });
-    const subject = subjectFor(WS_A, AGENT);
+    const subject = subjectFor(WS_A, AGENT, CONNECTION_INSTANCE_ID);
     let unsub = bus.subscribeRequests(subject, responderFor(mock));
     const session = await buildClient(bus, WS_A).resume({ agentId: AGENT });
 
@@ -175,10 +177,15 @@ describe("selfhosted control transport over a REAL local NATS", () => {
   test("(d) cross-workspace subject isolation: B cannot reach A's responder", async () => {
     const mock = new MockAgentResponder({ hostname: "workspace-a-vm" });
     // Responder lives ONLY on workspace A's subject.
-    const unsub = bus.subscribeRequests(subjectFor(WS_A, AGENT), responderFor(mock));
+    const unsub = bus.subscribeRequests(
+      subjectFor(WS_A, AGENT, CONNECTION_INSTANCE_ID),
+      responderFor(mock),
+    );
     try {
       // Same agentId, but a workspace-B-scoped client → a DIFFERENT subject.
-      expect(subjectFor(WS_B, AGENT)).not.toBe(subjectFor(WS_A, AGENT));
+      expect(subjectFor(WS_B, AGENT, CONNECTION_INSTANCE_ID)).not.toBe(
+        subjectFor(WS_A, AGENT, CONNECTION_INSTANCE_ID),
+      );
 
       const sessionB = await buildClient(bus, WS_B).resume({ agentId: AGENT });
       let err: { reason?: string; agentOffline?: boolean } | undefined;
@@ -195,7 +202,9 @@ describe("selfhosted control transport over a REAL local NATS", () => {
       // genuinely the isolation boundary, not a broken responder).
       const sessionA = await buildClient(bus, WS_A).resume({ agentId: AGENT });
       expect((await sessionA.exec({ cmd: "echo $HOSTNAME" })).stdout.trim()).toBe("workspace-a-vm");
-      expect(mock.requests.every((r) => r.subject === subjectFor(WS_A, AGENT))).toBe(true);
+      expect(
+        mock.requests.every((r) => r.subject === subjectFor(WS_A, AGENT, CONNECTION_INSTANCE_ID)),
+      ).toBe(true);
     } finally {
       unsub();
     }
@@ -211,7 +220,7 @@ describe("selfhosted control transport over a REAL local NATS", () => {
     // the never-sent retry class existed this surfaced as a hard agent_offline
     // on the first op; the healed-in-place behavior is the current contract.
     const mock = new MockAgentResponder({ hostname: "late-nats-vm" });
-    const subject = subjectFor(WS_A, AGENT);
+    const subject = subjectFor(WS_A, AGENT, CONNECTION_INSTANCE_ID);
     const unsub = bus.subscribeRequests(subject, responderFor(mock));
     let attempts = 0;
     const rpc = new NatsControlRpc(async () => {
@@ -220,6 +229,7 @@ describe("selfhosted control transport over a REAL local NATS", () => {
     });
     const client = new SelfhostedSandboxClient({
       workspaceId: WS_A,
+      connectionInstanceId: CONNECTION_INSTANCE_ID,
       relay: RELAY,
       controlRpcFactory: () => rpc,
       timeoutMs: 2_000,

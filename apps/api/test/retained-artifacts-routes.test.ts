@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
 import {
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
@@ -471,6 +472,26 @@ async function createGeneratedVideoArtifact(
 }
 
 describe("retained artifact metadata and bounded content", () => {
+  test("authorizes retained workspace-file fallbacks before serving bytes", async () => {
+    const source = await readFile(new URL("../src/routes/files.ts", import.meta.url), "utf8");
+    const fallback = source.slice(source.indexOf("async function getWorkspaceArtifact"));
+    expect(fallback).toContain("getFilesForSubject(db");
+    expect(fallback).toContain("subjectId: input.subjectId");
+    expect(fallback.indexOf("getFilesForSubject(db")).toBeLessThan(
+      fallback.indexOf("retainedArtifactMetadata(authorizedArtifact)"),
+    );
+    const contentRoute = source.slice(
+      source.indexOf('app.get("/v1/workspaces/:workspaceId/artifacts/:artifactId/content"'),
+      source.indexOf(
+        'app.post("/v1/workspaces/:workspaceId/artifacts/:artifactId/playback-source"',
+      ),
+    );
+    expect(contentRoute).toContain("fileAuthoritySubjectIdForGrant(deps, grant)");
+    expect(contentRoute.indexOf("getWorkspaceArtifact")).toBeLessThan(
+      contentRoute.indexOf("serveRetainedArtifactContent"),
+    );
+  });
+
   test("serves generated images as permanent provider-neutral workspace artifacts", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();

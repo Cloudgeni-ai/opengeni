@@ -11,6 +11,7 @@ import {
   mintAuthResponse,
   mintUserJwt,
   nkeys,
+  parseAgentConnectionName,
   workspaceAgentPermissions,
 } from "../src/index";
 
@@ -55,7 +56,7 @@ describe("nats-jwt encoding", () => {
     expect(nats.type).toBe("user");
     expect(nats.version).toBe(2);
     expect(nats.pub).toEqual({ allow: [`agent.${WS}.>`, "_INBOX.>"] });
-    expect(nats.sub).toEqual({ allow: [`agent.${WS}.>`, "_INBOX.>"] });
+    expect(nats.sub).toEqual({ allow: [`agent.${WS}.>`] });
   });
 
   test("the jti is the base32(SHA-512/256(claims-with-blank-jti)) NATS hash", () => {
@@ -152,13 +153,17 @@ describe("nats-jwt encoding", () => {
 });
 
 describe("decodeAuthRequest", () => {
-  test("extracts the user_nkey, server_id, and connect auth_token", () => {
+  test("extracts the user_nkey, server_id, and connect identity", () => {
     // Build a request-shaped JWT payload (only the payload matters to decode).
     const reqPayload = {
       nats: {
         user_nkey: "UABCDEF",
         server_id: { id: "NSERVER" },
-        connect_opts: { auth_token: "oge_thebearer", user: "agentuser" },
+        connect_opts: {
+          auth_token: "oge_thebearer",
+          user: "agentuser",
+          name: "opengeni-agent/connection/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        },
       },
     };
     const fakeJwt = `h.${Buffer.from(JSON.stringify(reqPayload)).toString("base64url")}.s`;
@@ -168,6 +173,7 @@ describe("decodeAuthRequest", () => {
     expect(decoded!.serverId).toBe("NSERVER");
     expect(decoded!.authToken).toBe("oge_thebearer");
     expect(decoded!.user).toBe("agentuser");
+    expect(decoded!.name).toBe("opengeni-agent/connection/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
   });
 
   test("returns null for a malformed token (no nats block / wrong segment count)", () => {
@@ -178,13 +184,33 @@ describe("decodeAuthRequest", () => {
 });
 
 describe("workspaceAgentPermissions", () => {
-  test("scopes pub+sub to ONLY agent.<ws>.> and _INBOX.> (the isolation boundary)", () => {
+  test("legacy scope can answer but cannot read arbitrary reply inboxes", () => {
     const perms = workspaceAgentPermissions(WS);
     expect(perms.pub.allow).toEqual([`agent.${WS}.>`, "_INBOX.>"]);
-    expect(perms.sub.allow).toEqual([`agent.${WS}.>`, "_INBOX.>"]);
+    expect(perms.sub.allow).toEqual([`agent.${WS}.>`]);
     // No deny entries needed: an allow-list IS deny-all-else. Crucially, a DIFFERENT
     // workspace's subtree is NOT in the allow list.
     const other = "22222222-2222-4222-8222-222222222222";
     expect(perms.pub.allow).not.toContain(`agent.${other}.>`);
+  });
+
+  test("scopes an authenticated runner to its exact process subtree", () => {
+    const agentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const instanceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const exact = `agent.${WS}.${agentId}.connection.${instanceId}.>`;
+    const perms = workspaceAgentPermissions(WS, agentId, instanceId);
+    expect(perms.pub.allow).toEqual([exact, "_INBOX.>"]);
+    expect(perms.sub.allow).toEqual([exact]);
+    expect(perms.pub.allow).not.toContain(`agent.${WS}.>`);
+  });
+});
+
+describe("parseAgentConnectionName", () => {
+  test("accepts only the exact OpenGeni process-name shape", () => {
+    const instanceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    expect(parseAgentConnectionName(`opengeni-agent/connection/${instanceId}`)).toBe(instanceId);
+    expect(parseAgentConnectionName(instanceId)).toBeNull();
+    expect(parseAgentConnectionName("opengeni-agent/connection/not-a-uuid")).toBeNull();
+    expect(parseAgentConnectionName(`opengeni-agent/connection/${instanceId}.rpc`)).toBeNull();
   });
 });

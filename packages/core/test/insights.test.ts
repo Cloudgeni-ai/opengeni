@@ -28,10 +28,16 @@ describe("getWorkspaceInsights", () => {
       new Map(),
     );
     restores.push(() => emptyDays.mockRestore());
+    const emptyHours = spyOn(opengeniDb, "aggregateModelCallFactsByHour").mockResolvedValue(
+      new Map(),
+    );
+    restores.push(() => emptyHours.mockRestore());
     const usage = spyOn(opengeniDb, "sumUsageQuantityInRange").mockResolvedValue(0);
     restores.push(() => usage.mockRestore());
     const usageDay = spyOn(opengeniDb, "sumUsageQuantityByDay").mockResolvedValue(new Map());
     restores.push(() => usageDay.mockRestore());
+    const usageHour = spyOn(opengeniDb, "sumUsageQuantityByHour").mockResolvedValue(new Map());
+    restores.push(() => usageHour.mockRestore());
     const warmGroups = spyOn(opengeniDb, "aggregateWarmSecondsByGroup").mockResolvedValue([]);
     restores.push(() => warmGroups.mockRestore());
     const liveWarm = spyOn(opengeniDb, "listLiveWarmLeases").mockResolvedValue([]);
@@ -67,7 +73,18 @@ describe("getWorkspaceInsights", () => {
     restores.push(() => facets.mockRestore());
     const recent = spyOn(opengeniDb, "listRecentModelCalls").mockResolvedValue([]);
     restores.push(() => recent.mockRestore());
-    return { machines, emptyAgg, emptyDays, recent };
+    const promptContributions = spyOn(
+      opengeniDb,
+      "aggregateModelContextContributions",
+    ).mockResolvedValue({
+      estimatedTokens: 0,
+      utf8Bytes: 0,
+      coveredCalls: 0,
+      totalCalls: 0,
+      sources: [],
+    });
+    restores.push(() => promptContributions.mockRestore());
+    return { machines, emptyAgg, emptyDays, emptyHours, usageDay, usageHour, recent };
   }
 
   test("uses UTC-month model.tokens and agent_run.created for caps", async () => {
@@ -128,8 +145,54 @@ describe("getWorkspaceInsights", () => {
     expect(snapshot.machinesOnline).toBe(0);
   });
 
+  test("uses elapsed UTC-hour buckets for today and daily buckets for longer ranges", async () => {
+    const { emptyDays, emptyHours, usageDay, usageHour } = stubEmptyWorkspace();
+    const capSpy = spyOn(opengeniDb, "sumUsageQuantity").mockResolvedValue(0);
+    restores.push(() => capSpy.mockRestore());
+
+    const { snapshot: today } = await getWorkspaceInsights(
+      db,
+      testSettings({ sandboxSelfhostedEnabled: false }),
+      { workspaceId: WORKSPACE, range: "today", now: new Date("2026-07-15T12:34:56.000Z") },
+    );
+
+    expect(today.series).toHaveLength(13);
+    expect(today.series.map((point) => point.label)).toEqual([
+      "00:00",
+      "01:00",
+      "02:00",
+      "03:00",
+      "04:00",
+      "05:00",
+      "06:00",
+      "07:00",
+      "08:00",
+      "09:00",
+      "10:00",
+      "11:00",
+      "12:00",
+    ]);
+    expect(today.seriesLabel).toBe("Credit $ / UTC hour");
+    expect(emptyHours).toHaveBeenCalledTimes(1);
+    expect(usageHour).toHaveBeenCalledTimes(2);
+    expect(emptyDays).not.toHaveBeenCalled();
+    expect(usageDay).not.toHaveBeenCalled();
+
+    const { snapshot: week } = await getWorkspaceInsights(
+      db,
+      testSettings({ sandboxSelfhostedEnabled: false }),
+      { workspaceId: WORKSPACE, range: "week", now: new Date("2026-07-15T12:34:56.000Z") },
+    );
+
+    expect(week.series).toHaveLength(7);
+    expect(week.series[0]?.label).toBe("07-09");
+    expect(week.series.at(-1)?.label).toBe("07-15");
+    expect(emptyDays).toHaveBeenCalledTimes(1);
+    expect(usageDay).toHaveBeenCalledTimes(2);
+  });
+
   test("keeps token/cache coverage and hypothetical provider cost separate from credits", async () => {
-    const { emptyAgg, emptyDays, recent } = stubEmptyWorkspace();
+    const { emptyAgg, emptyHours, recent } = stubEmptyWorkspace();
     const capSpy = spyOn(opengeniDb, "sumUsageQuantity").mockResolvedValue(0);
     restores.push(() => capSpy.mockRestore());
     emptyAgg
@@ -154,10 +217,10 @@ describe("getWorkspaceInsights", () => {
         },
       ])
       .mockResolvedValueOnce([]);
-    emptyDays.mockResolvedValue(
+    emptyHours.mockResolvedValue(
       new Map([
         [
-          "2026-07-15",
+          "2026-07-15T11:00",
           {
             costMicros: 0,
             estimatedProviderCostMicros: 8,
@@ -216,7 +279,8 @@ describe("getWorkspaceInsights", () => {
       creditUsd: 0,
       estimatedProviderUsd: 0.000008,
     });
-    expect(snapshot.series[0]).toMatchObject({
+    expect(snapshot.series[11]).toMatchObject({
+      label: "11:00",
       totalTokens: 150,
       cacheHitPct: 50,
       estimatedProviderUsd: 0.000008,

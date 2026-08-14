@@ -1,6 +1,6 @@
 //! The channel registry — the stateful-but-bounded pairing + splice core.
 //!
-//! Keyed by [`ChannelKey`] (`{workspaceId, agentId, port}`), the registry holds the
+//! Keyed by [`ChannelKey`] (`{workspaceId, agentId, port, channelId}`), the registry holds the
 //! live channels and pairs a PRODUCER (`role=AGENT`) with a CONSUMER (`role=CLIENT`)
 //! that present the same key. It is the relay's ONLY state, and it is bounded:
 //! per-channel it keeps two [`ReplayRing`]s (one per direction, for resume) and the
@@ -460,6 +460,7 @@ mod tests {
             workspace_id: "ws-1".to_string(),
             agent_id: "ag-1".to_string(),
             port: 7681,
+            channel_id: "ch".to_string(),
         }
     }
 
@@ -530,6 +531,7 @@ mod tests {
         let key_a = key();
         let key_b = ChannelKey {
             port: 6080,
+            channel_id: "ch-b".to_string(),
             ..key()
         };
 
@@ -555,6 +557,41 @@ mod tests {
         }
         // B's viewer received nothing from A.
         assert!(client_b_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_channels_on_the_same_machine_and_port_never_replace_each_other() {
+        let reg = registry();
+        let now = Instant::now();
+        let key_a = key();
+        let key_b = ChannelKey {
+            channel_id: "ch-b".to_string(),
+            ..key()
+        };
+        let (agent_a_tx, _agent_a_rx) = tokio::sync::mpsc::channel(16);
+        let (client_a_tx, mut client_a_rx) = tokio::sync::mpsc::channel(16);
+        let (agent_b_tx, _agent_b_rx) = tokio::sync::mpsc::channel(16);
+        let (client_b_tx, mut client_b_rx) = tokio::sync::mpsc::channel(16);
+
+        reg.attach(&key_a, Role::Agent, None, 0, agent_a_tx, now)
+            .unwrap();
+        reg.attach(&key_a, Role::Client, Some(0), 0, client_a_tx, now)
+            .unwrap();
+        reg.attach(&key_b, Role::Agent, None, 0, agent_b_tx, now)
+            .unwrap();
+        reg.attach(&key_b, Role::Client, Some(0), 0, client_b_tx, now)
+            .unwrap();
+
+        assert!(reg.forward(&key_a, Role::Agent, frame(0, "shell-a"), now));
+        assert!(reg.forward(&key_b, Role::Agent, frame(0, "shell-b"), now));
+        match client_a_rx.recv().await.unwrap() {
+            RelayMessage::Frame(f) => assert_eq!(&f.data[..], b"shell-a"),
+            other => panic!("expected shell-a frame, got {other:?}"),
+        }
+        match client_b_rx.recv().await.unwrap() {
+            RelayMessage::Frame(f) => assert_eq!(&f.data[..], b"shell-b"),
+            other => panic!("expected shell-b frame, got {other:?}"),
+        }
     }
 
     #[tokio::test]

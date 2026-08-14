@@ -13,7 +13,7 @@ import {
   DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
   modelToolOutputSerializationBudgetTokens,
 } from "@opengeni/codex";
-import { isSearchableMcpFunctionTool, searchMcpTools } from "./codex-tool-search";
+import { isSearchableMcpFunctionTool, searchMcpTools, searchToolPool } from "./codex-tool-search";
 
 /** Provider-contained progressive-disclosure strategy for one resolved turn. */
 export type LazyToolTransport = "codex_native" | "openai_native" | "generic_dispatch";
@@ -171,11 +171,17 @@ export class LazyToolRuntime {
     for (const tool of tools) {
       if (!isFunctionTool(tool)) continue;
       this.functionTools.set(tool.name, tool);
-      if (isSearchableMcpFunctionTool(tool, this.mcpServerIds)) {
+      const lazy =
+        this.transport === "generic_dispatch" ||
+        isSearchableMcpFunctionTool(tool, this.mcpServerIds);
+      if (lazy) {
         // Native OpenAI client search and generic dispatch keep the real tool
         // in Runner's registry but deliberately do not use the SDK's deferred
-        // gate. Enforce that invariant even if an upstream tool object was
-        // previously tagged; only Codex's separate transport uses deferLoading.
+        // gate. Generic dispatch hides every function schema behind its stable
+        // search/invoke pair; this includes large first-party Browser/Computer
+        // tools that are not backed by an MCP server. Enforce that invariant
+        // even if an upstream tool object was previously tagged; only Codex's
+        // separate transport uses deferLoading.
         tool.deferLoading = false;
         this.searchableToolNames.add(tool.name);
       }
@@ -200,7 +206,14 @@ export class LazyToolRuntime {
   }
 
   search(rawArguments: unknown): Tool[] {
-    return searchMcpTools(this.currentTools, rawArguments, this.mcpServerIds);
+    return this.transport === "generic_dispatch"
+      ? searchToolPool(
+          this.currentTools.filter(
+            (tool) => isFunctionTool(tool) && this.searchableToolNames.has(tool.name),
+          ),
+          rawArguments,
+        )
+      : searchMcpTools(this.currentTools, rawArguments, this.mcpServerIds);
   }
 
   private buildNativeSearchTool(): Tool {
@@ -266,8 +279,9 @@ export function lazyToolRuntimeForAgent(agent: object): LazyToolRuntime | undefi
 
 /**
  * Install native OpenAI/Azure or generic progressive disclosure on an agent.
- * The full tools remain in Runner's execution registry; only the model wrapper
- * projects searchable schemas out of provider requests.
+ * The full tools remain in Runner's execution registry. Native search projects
+ * eligible MCP schemas; generic dispatch projects every function schema behind
+ * its stable search/invoke pair.
  */
 export function installLazyToolRuntime(
   agent: CloneCapableAgent,

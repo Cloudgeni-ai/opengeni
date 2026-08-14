@@ -5,6 +5,7 @@ members = [
     "crates/opengeni-agent-engine",
     "crates/opengeni-agent-proto",
     "crates/opengeni-agent-platform",
+    "crates/opengeni-agent-linux-ffi",
     "crates/opengeni-agent-macos-ffi",
     "crates/opengeni-agent-stream",
     "crates/opengeni-agent-update",
@@ -46,7 +47,8 @@ async-trait = "0.1"
 command-group = { version = "5.0.1", features = ["with-tokio"] }
 
 # Control-plane transport. async-nats is the official Rust NATS client; the agent
-# subscribes to `agent.<ws>.<id>.rpc` and answers ControlRequests. 0.47+ requires
+# claims and subscribes to `agent.<ws>.<id>.connection.<instance>.rpc`, then
+# answers ControlRequests. 0.47+ requires
 # Rust 1.88, so keep the newest lineage compatible with our declared 1.82 floor.
 async-nats = "=0.46.0"
 
