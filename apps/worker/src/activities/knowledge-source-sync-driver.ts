@@ -11,6 +11,28 @@ export type KnowledgeSourceSyncDriverInventory<Entry, StopReason extends string>
   hardLimitReached: boolean;
 };
 
+export type KnowledgeSourceSyncAclPrincipal = {
+  type: "user" | "group" | "domain" | "anyone";
+  permissionId?: string | null;
+  emailAddress?: string | null;
+  domain?: string | null;
+  role: "owner" | "organizer" | "fileOrganizer" | "writer" | "commenter" | "reader";
+  inherited?: boolean;
+  allowFileDiscovery?: boolean | null;
+  expirationTime?: string | null;
+};
+
+export type KnowledgeSourceSyncAclEvidence = {
+  eligibility: "eligible" | "denied";
+  providerRevision: string | null;
+  driveId: string | null;
+  aclRevision: string;
+  observedAt: string;
+  expiresAt: string;
+  providerRequests: number;
+  principals: KnowledgeSourceSyncAclPrincipal[];
+};
+
 /** Provider port for deterministic knowledge ingestion. Implementations own
  * provider JSON and byte transfer; the shared activity owns authority,
  * persistence, indexing obligations, telemetry, and checkpoint settlement. */
@@ -24,4 +46,5 @@ export type KnowledgeSourceSyncDriver<Entry, StopReason extends string> = {
   ) => Promise<KnowledgeSourceSyncDriverInventory<Entry, StopReason>>;
   fetchContent: (entry: Entry, maxBytes: number) => Promise<Uint8Array>;
   citationLocator: (entry: Entry) => Record<string, unknown>;
+  readAcl?: (entry: Entry, maxProviderRequests: number) => Promise<KnowledgeSourceSyncAclEvidence>;
 };

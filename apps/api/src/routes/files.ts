@@ -26,7 +26,7 @@ import {
   getGeneratedVideoArtifact,
   getRetainedFileArtifact,
   getRetainedScreenshotArtifact,
-  requireFile,
+  requireFileForSubject,
   type RetainedFileArtifact,
   type GeneratedImageArtifact,
   type GeneratedVideoArtifact,
@@ -265,8 +265,13 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/files/:fileId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "files:read");
-    const file = await requireFile(db, workspaceId, c.req.param("fileId")).catch(() => null);
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const file = await requireFileForSubject(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      fileId: c.req.param("fileId"),
+    }).catch(() => null);
     if (!file) {
       throw new HTTPException(404, { message: "file not found" });
     }
@@ -378,13 +383,18 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/files/:fileId/download-url", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
     if (!objectStorage) {
       throw new HTTPException(503, {
         message: "object storage is not configured",
       });
     }
-    const file = await requireFile(db, workspaceId, c.req.param("fileId")).catch(() => null);
+    const file = await requireFileForSubject(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      fileId: c.req.param("fileId"),
+    }).catch(() => null);
     if (!file) {
       throw new HTTPException(404, { message: "file not found" });
     }

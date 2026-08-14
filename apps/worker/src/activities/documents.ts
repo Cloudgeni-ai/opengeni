@@ -23,7 +23,7 @@ export function createDocumentActivities(
       if (!resolveDocumentServices) {
         throw new Error("document services are not configured");
       }
-      const [{ getDocument, indexDocumentNow }, documentServices] = await Promise.all([
+      const [{ getDocumentForIndexing, indexDocumentNow }, documentServices] = await Promise.all([
         import("@opengeni/documents"),
         resolveDocumentServices(),
       ]);
@@ -57,9 +57,11 @@ export function createDocumentActivities(
         if (suppliedCount !== 0 && suppliedCount !== suppliedAuthorityFields.length) {
           throw new Error("document authority tuple is partial");
         }
-        const claimedDocument = await getDocument(lockedDb, input.workspaceId, input.documentId, {
-          viewerSubjectId: storedAuthority.authoritySubjectId,
-        });
+        const claimedDocument = await getDocumentForIndexing(
+          lockedDb,
+          input.workspaceId,
+          input.documentId,
+        );
         if (
           !claimedDocument ||
           claimedDocument.authorityKind !== storedAuthority.authorityKind ||

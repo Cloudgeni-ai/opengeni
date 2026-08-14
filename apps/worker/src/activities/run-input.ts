@@ -8,13 +8,13 @@ import {
 import { createHash } from "node:crypto";
 import {
   getActiveSessionHistoryItemsPaged,
-  getFiles,
+  getFilesForSubject,
   getLatestRunState,
   getHumanInputResumeForEvent,
   getSandboxSessionEnvelope,
   getSessionEvent,
   listSessionSystemUpdatesForTurn,
-  requireFile,
+  requireFileForSubject,
   type Database,
 } from "@opengeni/db";
 import {
@@ -76,6 +76,8 @@ export type PreparedTurnInput = {
 
 export type TurnInputOptions = {
   turnId: string;
+  /** Frozen initiating-human authority for every model-visible file read. */
+  fileAuthority: { accountId: string; subjectId: string | null };
   recovering?: boolean;
   unavailableSandboxFilesNote?: string;
   runCredentialsNote?: string;
@@ -290,6 +292,9 @@ function attachmentRefsFromItem(item: Record<string, unknown>): FileResourceRef[
 }
 
 function attachmentUnavailableText(ref: FileResourceRef, file: FileAsset | undefined): string {
+  if (!file) {
+    return `[Attachment unavailable or no longer authorized: ${ref.fileId}.]`;
+  }
   const filename = file?.safeFilename ?? ref.fileId;
   const mediaType = file?.contentType ?? "unknown type";
   const path = file ? sandboxFilePath(ref, file) : `/workspace/${resourceMountPath(ref)}`;
@@ -307,7 +312,7 @@ function attachmentUnavailableText(ref: FileResourceRef, file: FileAsset | undef
  */
 export function createModelHistoryAttachmentProjector(
   db: Database,
-  workspaceId: string,
+  authority: { accountId: string; workspaceId: string; subjectId: string | null },
   policy: ModelAttachmentInputPolicy,
   readFileBytes?: (file: FileAsset) => Promise<Uint8Array>,
 ): ModelHistoryAttachmentProjector {
@@ -334,7 +339,10 @@ export function createModelHistoryAttachmentProjector(
 
     const unknownIds = orderedFileIds.filter((id) => !fileById.has(id) && !missingFileIds.has(id));
     if (unknownIds.length > 0) {
-      const files = await getFiles(db, workspaceId, unknownIds);
+      const files = await getFilesForSubject(db, {
+        ...authority,
+        fileIds: unknownIds,
+      });
       for (const file of files) fileById.set(file.id, file);
       for (const id of unknownIds) {
         if (!fileById.has(id)) missingFileIds.add(id);
@@ -467,7 +475,14 @@ export async function turnInput(
     const fileAttachments = await measureHistoryPreparationPhase(
       options,
       "current_attachment_resolution",
-      async () => await resolveUserMessageFileAttachments(db, trigger.workspaceId, resources),
+      async () =>
+        await resolveUserMessageFileAttachments(
+          db,
+          options.fileAuthority.accountId,
+          trigger.workspaceId,
+          options.fileAuthority.subjectId,
+          resources,
+        ),
     );
     const attachmentContext = userMessageAttachmentsContext(fileAttachments);
     return await messageInput(
@@ -673,11 +688,19 @@ async function messageInput(
 
 export async function userMessageTextWithAttachments(
   db: Database,
+  accountId: string,
   workspaceId: string,
+  subjectId: string | null,
   text: string,
   resources: ResourceRef[],
 ): Promise<string> {
-  const fileAttachments = await resolveUserMessageFileAttachments(db, workspaceId, resources);
+  const fileAttachments = await resolveUserMessageFileAttachments(
+    db,
+    accountId,
+    workspaceId,
+    subjectId,
+    resources,
+  );
   const attachmentContext = userMessageAttachmentsContext(fileAttachments);
   return attachmentContext ? [text, "", attachmentContext].join("\n") : text;
 }
@@ -689,13 +712,20 @@ type UserMessageFileAttachment = {
 
 async function resolveUserMessageFileAttachments(
   db: Database,
+  accountId: string,
   workspaceId: string,
+  subjectId: string | null,
   resources: ResourceRef[],
 ): Promise<UserMessageFileAttachment[]> {
   const attachments: UserMessageFileAttachment[] = [];
   for (const resource of resources) {
     if (resource.kind !== "file") continue;
-    const file = await requireFile(db, workspaceId, resource.fileId);
+    const file = await requireFileForSubject(db, {
+      accountId,
+      workspaceId,
+      subjectId,
+      fileId: resource.fileId,
+    });
     attachments.push({ resource, file });
   }
   return attachments;

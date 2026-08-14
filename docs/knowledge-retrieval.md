@@ -70,6 +70,32 @@ An inaccessible parent returns no children and no title, source, or relationship
 metadata. A cursor can only move within the already-authorized query; it never
 widens access.
 
+### Google Drive object authority
+
+Migration `0243_google_drive_object_acl_authority.sql` adds an additional
+provider authorization predicate for any file bytes protected by Google Drive.
+It is evaluated before search ranking and again on every selected search row,
+exact get, browse parent/child, compatibility fetch, and file-byte consumer.
+An ordinary Document or another allowed Drive object that shares those bytes
+cannot override one denied, expired, stale, disconnected, scope-revoked, or
+otherwise invalid Drive object: every historical Drive object protector must
+still resolve to its current version and fresh eligible evidence for the exact
+initiating subject.
+
+Evidence is append-only and binds the current source/object/version, provider
+revision, sync and lifecycle generations, index obligation, and subject-owned
+Google connection version. Persisted ACL principals are domain-separated
+SHA-256 hashes rather than plaintext permission ids, emails, or domains.
+Unsupported group membership fails closed. Starting an ACL refresh clears the
+active evidence pointer and agent access before provider I/O, so stale evidence
+cannot remain readable while the refresh is incomplete.
+
+An authorized Google Drive record may carry a bounded provider citation with
+external object/version/revision facts, Drive id, deep link, ACL revision, and
+authorization timestamps. The citation function invokes the same current
+authorization predicate and exposes neither connection UUIDs nor principal
+identities; denial returns no record rather than a citation without authority.
+
 ## Deliberately deferred
 
 This no-migration slice does not make normalized scoped claims model-visible,

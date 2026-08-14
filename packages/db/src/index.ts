@@ -4581,6 +4581,87 @@ export async function requireFile(
   return file;
 }
 
+/**
+ * Subject-bound file read for user-visible and model-injection surfaces. The
+ * database predicate returns true for ordinary workspace files, but Drive-
+ * derived bytes require current per-object ACL evidence for every protecting
+ * mapping. Missing/stale/mixed denied mappings therefore look not found.
+ */
+export async function requireFileForSubject(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string | null;
+    fileId: string;
+  },
+): Promise<FileAsset> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
+      const [row] = await scopedDb
+        .select()
+        .from(schema.files)
+        .where(
+          and(
+            eq(schema.files.accountId, input.accountId),
+            eq(schema.files.workspaceId, input.workspaceId),
+            eq(schema.files.id, input.fileId),
+            sql`google_drive_file_authorized(
+              ${input.accountId}::uuid,
+              ${input.workspaceId}::uuid,
+              ${input.subjectId},
+              ${input.fileId}::uuid
+            )`,
+          ),
+        )
+        .limit(1);
+      if (!row) throw new Error(`File not found: ${input.fileId}`);
+      return mapFile(row);
+    },
+  );
+}
+
+/** Batch form of requireFileForSubject for durable model-history projection. */
+export async function getFilesForSubject(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string | null;
+    fileIds: readonly string[];
+  },
+): Promise<FileAsset[]> {
+  const ids = [...new Set(input.fileIds)];
+  if (ids.length === 0) return [];
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
+      const rows = await scopedDb
+        .select()
+        .from(schema.files)
+        .where(
+          and(
+            eq(schema.files.accountId, input.accountId),
+            eq(schema.files.workspaceId, input.workspaceId),
+            inArray(schema.files.id, ids),
+            sql`google_drive_file_authorized(
+              ${input.accountId}::uuid,
+              ${input.workspaceId}::uuid,
+              ${input.subjectId},
+              ${schema.files.id}
+            )`,
+          ),
+        );
+      return rows.map(mapFile);
+    },
+  );
+}
+
 /** One RLS-scoped query for all attachment metadata needed by a model turn. */
 export async function getFiles(
   db: Database,

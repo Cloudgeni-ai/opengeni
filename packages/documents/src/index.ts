@@ -1,6 +1,8 @@
 import type { Settings } from "@opengeni/config";
-import type {
-  AddDocumentRequest,
+import {
+  KnowledgeProviderCitation,
+  type KnowledgeProviderCitation as KnowledgeProviderCitationValue,
+  type AddDocumentRequest,
   CreateDocumentBaseRequest,
   Document,
   DocumentAuthorityKind,
@@ -1403,6 +1405,30 @@ export async function getDocument(
   });
 }
 
+/**
+ * Internal ingestion-only read used after the worker has independently resolved
+ * and fenced the immutable document authority tuple. It deliberately does not
+ * apply provider retrieval authorization because a new Drive document must be
+ * indexed before its first ACL evidence can be attached. User, API, MCP, and
+ * agent reads must use getDocument/effective retrieval instead.
+ */
+export async function getDocumentForIndexing(
+  db: Database,
+  workspaceId: string,
+  documentId: string,
+): Promise<Document | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.documents)
+      .where(
+        and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId)),
+      )
+      .limit(1);
+    return row ? mapDocument(row) : null;
+  });
+}
+
 export async function queueDocumentForReindex(
   db: Database,
   workspaceId: string,
@@ -1604,9 +1630,7 @@ export async function indexDocumentNow(
   // Internal indexing must be able to return a private document to the caller
   // that created/queued it. Public reads remain fail-closed when no subject is
   // supplied; the creator subject is the document's frozen access principal.
-  const updated = await getDocument(db, workspaceId, documentId, {
-    viewerSubjectId: document.authoritySubjectId,
-  });
+  const updated = await getDocumentForIndexing(db, workspaceId, documentId);
   if (!updated) throw new Error(`Document disappeared after indexing: ${documentId}`);
   return updated;
 }
@@ -1839,7 +1863,11 @@ export async function searchEffectiveKnowledge(
     access,
     async (scopedDb) =>
       await scopedDb
-        .select({ chunk: schema.documentChunks, document: schema.documents })
+        .select({
+          chunk: schema.documentChunks,
+          document: schema.documents,
+          citation: googleDriveCitationProjection(input.workspaceId, access),
+        })
         .from(schema.documentChunks)
         .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
         .where(
@@ -1862,7 +1890,7 @@ export async function searchEffectiveKnowledge(
       if (!row) return [];
       return [
         {
-          record: knowledgeChunkRecord(row.document, row.chunk),
+          record: knowledgeChunkRecord(row.document, row.chunk, row.citation),
           retrieval: {
             score: rankedResult.score,
             matchType: rankedResult.matchType,
@@ -1895,8 +1923,11 @@ export async function getEffectiveKnowledgeRecord(
     access,
     async (scopedDb) => {
       if (target.kind === "document") {
-        const [document] = await scopedDb
-          .select()
+        const [row] = await scopedDb
+          .select({
+            document: schema.documents,
+            citation: googleDriveCitationProjection(input.workspaceId, access),
+          })
           .from(schema.documents)
           .where(
             and(
@@ -1907,10 +1938,14 @@ export async function getEffectiveKnowledgeRecord(
             ),
           )
           .limit(1);
-        return document ? knowledgeDocumentRecord(document) : null;
+        return row ? knowledgeDocumentRecord(row.document, row.citation) : null;
       }
       const [row] = await scopedDb
-        .select({ chunk: schema.documentChunks, document: schema.documents })
+        .select({
+          chunk: schema.documentChunks,
+          document: schema.documents,
+          citation: googleDriveCitationProjection(input.workspaceId, access),
+        })
         .from(schema.documentChunks)
         .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
         .where(
@@ -1923,7 +1958,7 @@ export async function getEffectiveKnowledgeRecord(
           ),
         )
         .limit(1);
-      return row ? knowledgeChunkRecord(row.document, row.chunk) : null;
+      return row ? knowledgeChunkRecord(row.document, row.chunk, row.citation) : null;
     },
   );
 }
@@ -1988,7 +2023,11 @@ export async function browseEffectiveKnowledge(
           .limit(1);
         if (!authorizedParent) return { records: [], nextCursor: null, hasMore: false };
         const rows = await scopedDb
-          .select({ chunk: schema.documentChunks, document: schema.documents })
+          .select({
+            chunk: schema.documentChunks,
+            document: schema.documents,
+            citation: googleDriveCitationProjection(input.workspaceId, access),
+          })
           .from(schema.documentChunks)
           .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
           .where(
@@ -2006,7 +2045,7 @@ export async function browseEffectiveKnowledge(
         const page = rows.slice(0, limit);
         const last = page.at(-1)?.chunk.chunkIndex;
         return {
-          records: page.map((row) => knowledgeChunkRecord(row.document, row.chunk)),
+          records: page.map((row) => knowledgeChunkRecord(row.document, row.chunk, row.citation)),
           nextCursor:
             hasMore && last !== undefined
               ? encodeKnowledgeBrowseCursor(cursorScope, BigInt(last + 1))
@@ -2026,16 +2065,19 @@ export async function browseEffectiveKnowledge(
       if (sourceKinds.length > 0)
         conditions.push(inArray(schema.documents.sourceKind, sourceKinds));
       const rows = await scopedDb
-        .select()
+        .select({
+          document: schema.documents,
+          citation: googleDriveCitationProjection(input.workspaceId, access),
+        })
         .from(schema.documents)
         .where(and(...conditions))
         .orderBy(asc(schema.documents.indexSequence))
         .limit(limit + 1);
       const hasMore = rows.length > limit;
       const page = rows.slice(0, limit);
-      const last = page.at(-1)?.indexSequence;
+      const last = page.at(-1)?.document.indexSequence;
       return {
-        records: page.map(knowledgeDocumentRecord),
+        records: page.map((row) => knowledgeDocumentRecord(row.document, row.citation)),
         nextCursor:
           hasMore && last !== undefined && last !== null
             ? encodeKnowledgeBrowseCursor(cursorScope, last)
@@ -2132,7 +2174,10 @@ function parseKnowledgeRecordId(value: string): {
   return { kind: match[1] as "document" | "document_chunk", id: match[2]!.toLowerCase() };
 }
 
-function knowledgeDocumentRecord(document: typeof schema.documents.$inferSelect): KnowledgeRecord {
+function knowledgeDocumentRecord(
+  document: typeof schema.documents.$inferSelect,
+  citation: unknown = null,
+): KnowledgeRecord {
   if (!document.indexedAt) throw new Error(`Ready document is missing indexed_at: ${document.id}`);
   const projected = projectKnowledgeRecord({
     title: document.title,
@@ -2151,6 +2196,7 @@ function knowledgeDocumentRecord(document: typeof schema.documents.$inferSelect)
     provenance: {
       source: projected.source,
       indexedAt: document.indexedAt.toISOString(),
+      citation: parseKnowledgeProviderCitation(citation),
     },
     lifecycle: { state: "active", updatedAt: document.updatedAt.toISOString() },
     quality: knowledgeQuality(document),
@@ -2162,6 +2208,7 @@ function knowledgeDocumentRecord(document: typeof schema.documents.$inferSelect)
 function knowledgeChunkRecord(
   document: typeof schema.documents.$inferSelect,
   chunk: typeof schema.documentChunks.$inferSelect,
+  citation: unknown = null,
 ): KnowledgeRecord {
   if (!document.indexedAt) throw new Error(`Ready document is missing indexed_at: ${document.id}`);
   const projected = projectKnowledgeRecord({
@@ -2181,6 +2228,7 @@ function knowledgeChunkRecord(
     provenance: {
       source: projected.source,
       indexedAt: document.indexedAt.toISOString(),
+      citation: parseKnowledgeProviderCitation(citation),
     },
     lifecycle: { state: "active", updatedAt: document.updatedAt.toISOString() },
     quality: knowledgeQuality(document),
@@ -2259,6 +2307,7 @@ async function vectorSearchDocuments(
           authorityKind: schema.documents.authorityKind,
           authorityWorkspaceId: schema.documents.authorityWorkspaceId,
           authoritySubjectId: schema.documents.authoritySubjectId,
+          citation: googleDriveCitationProjection(input.workspaceId, input.access),
           distance,
         })
         .from(schema.documentChunks)
@@ -2309,6 +2358,7 @@ async function keywordSearchDocuments(
           authorityKind: schema.documents.authorityKind,
           authorityWorkspaceId: schema.documents.authorityWorkspaceId,
           authoritySubjectId: schema.documents.authoritySubjectId,
+          citation: googleDriveCitationProjection(input.workspaceId, input.access),
           rank,
         })
         .from(schema.documentChunks)
@@ -2365,6 +2415,7 @@ export async function getDocumentChunk(
           authorityKind: schema.documents.authorityKind,
           authorityWorkspaceId: schema.documents.authorityWorkspaceId,
           authoritySubjectId: schema.documents.authoritySubjectId,
+          citation: googleDriveCitationProjection(workspaceId, access),
         })
         .from(schema.documentChunks)
         .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
@@ -2492,10 +2543,16 @@ function documentAccessConditions(
   const authority = viewer
     ? (or(organization, workspace, personal) ?? organization)
     : (or(organization, workspace) ?? organization);
+  const providerAuthorization = sql`google_drive_file_authorized(
+    ${schema.documents.accountId},
+    ${workspaceId}::uuid,
+    ${viewer},
+    ${schema.documents.fileId}
+  )`;
   if (access?.agentOnly) {
-    return [eq(schema.documents.agentAccess, true), authority];
+    return [eq(schema.documents.agentAccess, true), authority, providerAuthorization];
   }
-  return [authority];
+  return [authority, providerAuthorization];
 }
 
 function documentMatchesAccess(
@@ -2606,6 +2663,7 @@ function mapSearchRowBase(row: {
   authorityKind: string;
   authorityWorkspaceId: string | null;
   authoritySubjectId: string | null;
+  citation?: unknown;
 }): SearchRowBase {
   return {
     chunkId: row.chunkId,
@@ -2629,7 +2687,26 @@ function mapSearchRowBase(row: {
     authorityKind: normalizeDocumentAuthorityKind(row.authorityKind),
     authorityWorkspaceId: row.authorityWorkspaceId,
     authoritySubjectId: row.authoritySubjectId,
+    citation: parseKnowledgeProviderCitation(row.citation),
   };
+}
+
+function googleDriveCitationProjection(
+  workspaceId: string,
+  access: DocumentAccessFilter | undefined,
+): SQL<unknown> {
+  const viewer = cleanString(access?.viewerSubjectId ?? null);
+  return sql`google_drive_document_citation(
+    ${schema.documents.accountId},
+    ${workspaceId}::uuid,
+    ${viewer},
+    ${schema.documents.id},
+    ${schema.documents.fileId}
+  )`;
+}
+
+function parseKnowledgeProviderCitation(value: unknown): KnowledgeProviderCitationValue | null {
+  return value === null || value === undefined ? null : KnowledgeProviderCitation.parse(value);
 }
 
 function mergeDocumentSearchRows(

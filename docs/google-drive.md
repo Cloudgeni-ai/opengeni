@@ -301,9 +301,34 @@ Documents in the frozen destination collection/default collection. Imported
 Documents are deliberately `agentAccess=false`: each immutable version creates
 a durable index obligation before indexing, and a later generation-fenced ACL
 evidence operation is the only seam that may make the Document agent-readable.
-Google ACL evidence collection and citation-time reauthorization are not
-implemented by this slice, so Drive imports remain fail-closed for agent
-retrieval until that follow-on lands.
+The worker now reads every bounded Drive permissions page, hashes normalized
+user/domain/permission principals before persistence, and records append-only,
+freshness-bounded evidence against the exact source, object, immutable version,
+file, Document, connection version, and index obligation. Unsupported group
+membership remains fail-closed; owner identity, user, domain, and `anyone`
+permissions are evaluated without storing plaintext ACL principals.
+
+Every Knowledge read and every file-byte path reauthorizes the immutable
+initiating subject at query/use time through migration 0243. The subject must
+still have an active subject-owned read-only Google connection with a recursive
+Drive read scope, and the source, object, current version, sync generation,
+index obligation, connection lifecycle, provider revision, ACL evidence, and
+evidence expiry must all remain current. Authorization is an all-protectors
+intersection over every Google Drive object that has ever mapped to the exact
+file bytes: an ordinary upload or a second allowed Drive object cannot mask one
+denied, stale, or revoked Drive mapping. ACL refresh first clears the active
+evidence pointer and Document agent access, so provider I/O never extends stale
+readability. Search filters before ranking and rechecks selected rows; direct
+get/browse, session resources, model-history images, sandbox mounts, signed
+downloads, and image-generation file references recheck immediately before
+returning metadata or bytes.
+
+Authorized Knowledge records may include a bounded provider citation containing
+only the external object/revision/version, Drive id, deep link, ACL revision,
+and authorization observation/expiry/reauthorization timestamps. Connection
+UUIDs and principal identities are never projected. Citation construction calls
+the same live file-authorization predicate and returns no citation when any
+protector fails.
 
 Provider revision is observation metadata, not the immutable OpenGeni version
 identity. A revision or metadata/ACL change is recorded even when the bytes,
@@ -412,9 +437,10 @@ demo video, privacy policy, user help, and security-assessment evidence:
    authority. Disconnect is local and intentionally does not call Google's
    project-wide token-revocation endpoint; users must remove CloudGeni access in
    their Google Account when they also want provider-side revocation.
-11. Imported Drive Documents remain `agentAccess=false` until a separate fresh,
-    generation-fenced ACL evidence operation authorizes retrieval. Google ACL
-    projection and citation-time reauthorization are not part of this package.
+11. Imported Drive Documents remain `agentAccess=false` until a fresh,
+    generation-fenced ACL evidence operation authorizes retrieval. Knowledge
+    ranking, exact reads, citations, and every file-byte consumer then recheck
+    the current initiating subject through the same all-protectors authority.
 
 Canonical implementation and proof:
 
@@ -446,7 +472,7 @@ following without widening the claims beyond shipped behavior:
   authority, explicit sync enablement, pause, local disconnect, and separate
   provider-side revocation guidance;
 - launch gating that does not claim Workspace Events/Pub/Sub delivery, Drive
-  writes, live Google ACL/citation reauthorization, or production deployment.
+  writes, completed live-provider acceptance, or production deployment.
 
 ### Privacy, Limited Use, retention, and deletion packet
 
