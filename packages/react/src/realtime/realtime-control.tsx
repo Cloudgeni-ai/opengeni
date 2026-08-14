@@ -423,6 +423,8 @@ export function SessionRealtimeControl(props: {
    * `none` never attaches a model menu to the bar button.
    */
   modelMenu?: "split" | "split-desktop" | "none" | undefined;
+  /** Explicitly expose low-level controller diagnostics; disabled by default. */
+  showDiagnostics?: boolean | undefined;
   /** Deterministic browser-test/demo seam. Production hosts should use the SDK default. */
   controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }) {
@@ -492,6 +494,7 @@ export function SessionRealtimeControl(props: {
       modelAvailable={selectedModel.available}
       menuSide="top"
       modelMenu={props.modelMenu ?? "split"}
+      showDiagnostics={props.showDiagnostics}
       audioRef={realtime.audioRef}
       selectedModel={selectedModel}
       models={selection.models}
@@ -709,7 +712,7 @@ export function RealtimeVoiceControl(props: {
    * `none` = start button only.
    */
   modelMenu?: "split" | "split-desktop" | "none" | undefined;
-  showDiagnostics?: boolean;
+  showDiagnostics?: boolean | undefined;
   /** Extra classes on the in-bar mute cluster (e.g. `max-sm:hidden` when mutes live in “+”). */
   muteControlsClassName?: string | undefined;
   audioRef: RefObject<HTMLAudioElement | null>;
@@ -763,7 +766,7 @@ export function RealtimeVoiceControl(props: {
       : modeOwned
         ? props.onStop
         : props.onStart;
-  const diagnosticsVisible = props.showDiagnostics ?? import.meta.env.DEV;
+  const diagnosticsVisible = props.showDiagnostics ?? false;
   const modelMenu = props.modelMenu ?? "split";
   const showAttachedModelMenu = modelMenu === "split" || modelMenu === "split-desktop";
   const desktopOnlyModelMenu = modelMenu === "split-desktop";

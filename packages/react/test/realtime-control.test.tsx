@@ -85,6 +85,13 @@ describe("ordinary session Codex realtime control", () => {
     container.remove();
   });
 
+  test("keeps the shipped control independent of Vite runtime globals", async () => {
+    const source = await Bun.file(
+      new URL("../src/realtime/realtime-control.tsx", import.meta.url),
+    ).text();
+    expect(source).not.toContain("import.meta.env");
+  });
+
   test("admits non-cancelled work states when control and Codex are ready", () => {
     for (const sessionStatus of ["idle", "queued", "running", "requires_action"] as const) {
       expect(
@@ -718,6 +725,7 @@ describe("ordinary session Codex realtime control", () => {
         .querySelector('[role="group"][aria-label="Realtime voice"]')
         ?.getAttribute("data-picker-side"),
     ).toBe("bottom");
+    expect(container.textContent).not.toContain("Realtime diagnostics");
   });
 
   test("exposes an autoplay-blocked retry without starting another realtime call", async () => {
