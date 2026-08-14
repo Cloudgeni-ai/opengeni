@@ -185,6 +185,7 @@ import {
   desktopCapableBackend,
   repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
+  RoutingMutationOutcomeUnknownError,
   setSelfhostedApplyDiff,
   codemodeTokenFileFromEnvironment,
   withCodemodeTokenClient,
@@ -5388,6 +5389,11 @@ export class PrefixedMcpServer implements MCPServer {
           content: [{ type: "text", text: MCP_AUTH_NEEDED_ERROR.message }],
         };
       }
+      // A routed workspace mutation crossed provider admission but lost exact
+      // settlement. Best-effort MCP isolation must not turn that uncertainty
+      // into a completed tool result: model execution fails loud, and Codemode
+      // durably settles the operation as outcome_unknown.
+      if (error instanceof RoutingMutationOutcomeUnknownError) throw error;
       // Best-effort INVOCATION isolation (sibling to the listTools guard). When
       // the model calls a best-effort server's tool and the call throws for ANY
       // other reason — a raw transport 401/403 that never became the broker's

@@ -530,6 +530,9 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       async exec(args) {
         const command = String((args as { cmd?: unknown }).cmd ?? "");
         expect(command).not.toContain(privateUrl);
+        if (command.includes("__OPENGENI_FS_CONFINED_OK__")) {
+          return { stdout: "__OPENGENI_FS_CONFINED_OK__", stderr: "", exitCode: 0 };
+        }
         const marker = command.match(/__OPENGENI_WORKSPACE_IMPORT_[0-9a-f]+_OK__/u)?.[0];
         if (!marker) throw new Error("expected workspace import marker");
         events.push("old:imported");
@@ -589,6 +592,92 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       "admitted:importWorkspaceFile",
       "old:staged",
       "old:imported",
+      "old:cleaned",
+      "settled:resolved",
+    ]);
+  });
+
+  test("pins a multi-file import batch to one backend and rejects the complete output after a swap", async () => {
+    const pointer = mutablePointer();
+    const events: string[] = [];
+    let oldImports = 0;
+    let newCalls = 0;
+    const oldBackend: RoutableBackendSession = {
+      async writePlacementPrivate() {
+        events.push("old:staged");
+      },
+      async exec(args) {
+        const command = String((args as { cmd?: unknown }).cmd ?? "");
+        if (command.includes("__OPENGENI_FS_CONFINED_OK__")) {
+          return { stdout: "__OPENGENI_FS_CONFINED_OK__", stderr: "", exitCode: 0 };
+        }
+        const marker = command.match(/__OPENGENI_WORKSPACE_IMPORT_[0-9a-f]+_OK__/u)?.[0];
+        if (!marker) throw new Error("expected workspace import marker");
+        oldImports += 1;
+        events.push(`old:imported:${oldImports}`);
+        if (oldImports === 1) pointer.swap("new-backend");
+        return { stdout: `${marker}\tcreated`, stderr: "", exitCode: 0 };
+      },
+      async deletePlacementPrivate() {
+        events.push("old:cleaned");
+      },
+    };
+    const newBackend: RoutableBackendSession = {
+      async writePlacementPrivate() {
+        newCalls += 1;
+      },
+      async exec() {
+        newCalls += 1;
+        return { stdout: "wrong-backend", stderr: "", exitCode: 0 };
+      },
+      async deletePlacementPrivate() {
+        newCalls += 1;
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: pointer.read,
+      resolveActiveBackend: async (active) =>
+        active.activeSandboxId === null
+          ? { session: oldBackend, sandboxId: null, kind: "modal" }
+          : { session: newBackend, sandboxId: active.activeSandboxId, kind: "selfhosted" },
+      beforeMutation: async ({ op }) => {
+        events.push(`admitted:${op}`);
+        return "admission";
+      },
+      afterMutation: async ({ outcome }) => {
+        events.push(`settled:${outcome}`);
+      },
+    });
+    const channel = new SandboxChannelAService({
+      session: proxy,
+      workspaceRoot: "/workspace",
+      emit: async () => events.push("fs:emitted"),
+    });
+    const requests = ["one.bin", "two.bin"].map((fileName, index) => ({
+      operationId: `11111111-1111-4111-8111-11111111111${index}`,
+      destinationPath: `.opengeni/connector-attachments/example/digest-${index}/${fileName}`,
+      overwrite: false,
+      mayReplaceExisting: false,
+      sizeBytes: 6,
+      sha256: String(index + 1).repeat(64),
+      source: {
+        url: `https://files.example.test/${index}?signature=private`,
+        expiresAt: "2030-01-02T03:04:05.000Z",
+      },
+    }));
+
+    await expect(channel.importWorkspaceFiles(requests)).rejects.toBeInstanceOf(
+      RoutingMutationOutcomeUnknownError,
+    );
+    expect(oldImports).toBe(2);
+    expect(newCalls).toBe(0);
+    expect(events).toEqual([
+      "admitted:importWorkspaceFiles",
+      "old:staged",
+      "old:imported:1",
+      "old:cleaned",
+      "old:staged",
+      "old:imported:2",
       "old:cleaned",
       "settled:resolved",
     ]);

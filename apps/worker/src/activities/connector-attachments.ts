@@ -7,7 +7,10 @@ import {
   type ConnectorAttachmentTransfer,
 } from "@opengeni/contracts";
 import type { ConnectorAttachmentMaterializationRequest } from "@opengeni/runtime";
-import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
+import {
+  RoutingMutationOutcomeUnknownError,
+  SandboxChannelAService,
+} from "@opengeni/runtime/sandbox";
 
 export class ConnectorAttachmentMaterializationError extends Error {
   constructor() {
@@ -16,7 +19,7 @@ export class ConnectorAttachmentMaterializationError extends Error {
   }
 }
 
-type ConnectorAttachmentChannel = Pick<SandboxChannelAService, "fsMkdir" | "importWorkspaceFile">;
+type ConnectorAttachmentChannel = Pick<SandboxChannelAService, "importWorkspaceFiles">;
 
 function digestParts(...parts: readonly string[]): Buffer {
   const hash = createHash("sha256");
@@ -88,20 +91,27 @@ export async function materializeConnectorAttachmentsInChannel(
   request: ConnectorAttachmentMaterializationRequest,
 ): Promise<ConnectorAttachmentReceiptEnvelopeValue> {
   try {
-    const receipts = [];
-    for (const [index, attachment] of request.attachments.entries()) {
-      const sandboxPath = connectorAttachmentSandboxPath(request, attachment);
-      await channel.fsMkdir({ path: posixPath.dirname(sandboxPath), recursive: true });
-      const imported = await channel.importWorkspaceFile({
+    const imports = request.attachments.map((attachment, index) => {
+      const destinationPath = connectorAttachmentSandboxPath(request, attachment);
+      return {
         operationId: connectorAttachmentImportOperationId(request, attachment, index),
-        destinationPath: sandboxPath,
+        destinationPath,
         overwrite: false,
         mayReplaceExisting: false,
+        createParents: true,
         sizeBytes: attachment.byteSize,
         sha256: attachment.contentSha256,
         source: attachment.source,
-      });
+      };
+    });
+    const importedFiles = await channel.importWorkspaceFiles(imports);
+    const receipts = [];
+    for (const [index, attachment] of request.attachments.entries()) {
+      const sandboxPath = imports[index]?.destinationPath;
+      const imported = importedFiles[index];
       if (
+        !sandboxPath ||
+        !imported ||
         imported.destinationPath !== sandboxPath ||
         imported.sizeBytes !== attachment.byteSize ||
         imported.sha256 !== attachment.contentSha256
@@ -121,7 +131,8 @@ export async function materializeConnectorAttachmentsInChannel(
       version: CONNECTOR_ATTACHMENT_RECEIPT_VERSION,
       attachments: receipts,
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof RoutingMutationOutcomeUnknownError) throw error;
     throw new ConnectorAttachmentMaterializationError();
   }
 }

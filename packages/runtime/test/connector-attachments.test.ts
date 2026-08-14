@@ -15,6 +15,7 @@ import {
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
 } from "../src";
+import { RoutingMutationOutcomeUnknownError } from "../src/sandbox";
 
 const operationId = "11111111-1111-4111-8111-111111111111";
 const connectionId = "22222222-2222-4222-8222-222222222222";
@@ -227,6 +228,51 @@ describe("connector attachment MCP projection", () => {
       ),
     ).rejects.toThrow("rejected");
     expect(materializerCalled).toBe(false);
+  });
+
+  test("preserves routed mutation outcome-unknown through the private projection", async () => {
+    const uncertain = new RoutingMutationOutcomeUnknownError(
+      "importWorkspaceFiles",
+      "synthetic uncertain connector attachment batch",
+    );
+    await expect(
+      projectConnectorAttachmentTransfers(transferResult(), {
+        serverId: "connector",
+        toolName: "download_attachment",
+        operationId,
+        authorizeAndMaterialize: async () => {
+          throw uncertain;
+        },
+      }),
+    ).rejects.toBe(uncertain);
+  });
+
+  test("best-effort MCP isolation does not flatten routed mutation outcome-unknown", async () => {
+    const uncertain = new RoutingMutationOutcomeUnknownError(
+      "importWorkspaceFiles",
+      "synthetic uncertain connector attachment batch",
+    );
+    const wrapped = new PrefixedMcpServer(
+      {
+        name: "connector-inner",
+        cacheToolsList: false,
+        async connect() {},
+        async close() {},
+        async listTools() {
+          return [];
+        },
+        async callTool() {
+          throw uncertain;
+        },
+        async invalidateToolsCache() {},
+      } as MCPServer,
+      "connector",
+      undefined,
+      true,
+    );
+    await expect(
+      wrapped.callTool(`${wrapped.prefix}download_attachment`, {}, undefined),
+    ).rejects.toBe(uncertain);
   });
 
   test("rejects structured content beside an out-of-band transfer", async () => {

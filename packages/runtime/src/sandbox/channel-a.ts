@@ -131,6 +131,11 @@ export type ChannelASession = {
   importWorkspaceFileOnResolvedBackend?(
     input: ChannelARoutedWorkspaceImportRequest,
   ): Promise<WorkspaceFileImportReceipt>;
+  /** Routing-only composite for one logical attachment envelope. Every exact
+   * import stays on one resolved backend under one mutation settlement. */
+  importWorkspaceFilesOnResolvedBackend?(
+    input: ChannelARoutedWorkspaceImportBatchRequest,
+  ): Promise<readonly WorkspaceFileImportReceipt[]>;
   writeStdin?(args: {
     sessionId: number;
     chars?: string;
@@ -162,6 +167,8 @@ export type WorkspaceFileImportRequest = {
   overwrite: boolean;
   /** True only for the request that durably crossed the save dispatch fence. */
   mayReplaceExisting: boolean;
+  /** Build missing destination directories inside the exact import operation. */
+  createParents?: boolean;
   sizeBytes: number;
   sha256: string;
   source: {
@@ -180,6 +187,13 @@ export type WorkspaceFileImportReceipt = {
 
 export type ChannelARoutedWorkspaceImportRequest = {
   request: WorkspaceFileImportRequest;
+  workspaceRoot: string;
+  revision: number;
+  runAs?: string;
+};
+
+export type ChannelARoutedWorkspaceImportBatchRequest = {
+  requests: readonly WorkspaceFileImportRequest[];
   workspaceRoot: string;
   revision: number;
   runAs?: string;
@@ -855,6 +869,63 @@ export class SandboxChannelAService {
     return { path, sizeBytes: bytes.byteLength, revision: this.revision };
   }
 
+  /** Import one logical batch of exact signed objects. A routing session keeps
+   * the complete batch on one resolved backend and emits URL-free file events
+   * only after the enclosing mutation settlement succeeds. */
+  async importWorkspaceFiles(
+    requests: readonly WorkspaceFileImportRequest[],
+  ): Promise<readonly WorkspaceFileImportReceipt[]> {
+    if (requests.length === 0) return [];
+    const routedBatch = this.session.importWorkspaceFilesOnResolvedBackend?.bind(this.session);
+    if (
+      routedBatch &&
+      requests.every((request) => !request.overwrite && !request.mayReplaceExisting)
+    ) {
+      const receipts = await routedBatch({
+        requests,
+        workspaceRoot: this.workspaceRoot,
+        revision: this.revision,
+        ...(this.runAs ? { runAs: this.runAs } : {}),
+      });
+      if (receipts.length !== requests.length) {
+        throw new ChannelAUnavailableError("Workspace file imports returned invalid receipts.");
+      }
+      let revision = this.revision;
+      const changes: FsChangedPayload["changes"] = [];
+      for (const [index, request] of requests.entries()) {
+        const receipt = receipts[index];
+        if (!receipt) {
+          throw new ChannelAUnavailableError("Workspace file imports returned invalid receipts.");
+        }
+        const expectedRevision = revision + (receipt.replayed ? 0 : 1);
+        if (
+          receipt.destinationPath !== request.destinationPath ||
+          receipt.sizeBytes !== request.sizeBytes ||
+          receipt.sha256 !== request.sha256 ||
+          receipt.revision !== expectedRevision
+        ) {
+          throw new ChannelAUnavailableError("Workspace file imports returned invalid receipts.");
+        }
+        revision = receipt.revision;
+        if (!receipt.replayed) {
+          changes.push({
+            path: receipt.destinationPath,
+            kind: "created",
+            isDir: false,
+            sizeBytes: receipt.sizeBytes,
+          });
+        }
+      }
+      this.revision = revision;
+      if (changes.length > 0) await this.emitFsChanged(changes, "write");
+      return receipts;
+    }
+
+    const receipts: WorkspaceFileImportReceipt[] = [];
+    for (const request of requests) receipts.push(await this.importWorkspaceFile(request));
+    return receipts;
+  }
+
   /** Import one exact signed object into /workspace. The signed URL is staged
    * outside the workspace and never enters argv, environment, stdout, events,
    * or the public receipt. Exactly one routed exec crosses the workspace
@@ -904,6 +975,9 @@ export class SandboxChannelAService {
     if (typeof req.overwrite !== "boolean" || typeof req.mayReplaceExisting !== "boolean") {
       throw new ChannelAValidationError("workspace import overwrite policy is invalid");
     }
+    if (req.createParents !== undefined && typeof req.createParents !== "boolean") {
+      throw new ChannelAValidationError("workspace import parent policy is invalid");
+    }
     if (req.mayReplaceExisting && !req.overwrite) {
       throw new ChannelAValidationError("workspace import replacement authority is invalid");
     }
@@ -916,15 +990,18 @@ export class SandboxChannelAService {
     }
     const expectedSha256 = workspaceImportSha256(req.sha256);
     const source = workspaceImportSource(req.source);
+    const destination = this.workspaceRoot
+      ? this.joinRoot(destinationPath)
+      : `./${destinationPath}`;
+    await this.assertConfinedMutationParent(destinationPath, {
+      allowMissingParents: req.createParents === true,
+      rejectFinalSymlink: true,
+    });
     const transferId = crypto.randomUUID();
     const privateDirectory = "/tmp/opengeni-private/workspace-imports";
     const configPath = `${privateDirectory}/${operationId}-${transferId}.curl`;
     const config = workspaceImportCurlConfig(source.url);
     await this.writePlacementPrivate(configPath, config);
-
-    const destination = this.workspaceRoot
-      ? this.joinRoot(destinationPath)
-      : `./${destinationPath}`;
     const frame = transferId.replaceAll("-", "");
     const okMarker = `__OPENGENI_WORKSPACE_IMPORT_${frame}_OK__`;
     const conflictMarker = `__OPENGENI_WORKSPACE_IMPORT_${frame}_CONFLICT__`;
@@ -948,6 +1025,9 @@ export class SandboxChannelAService {
       'parent=$(dirname "$destination")',
       'name=$(basename "$destination")',
       'target="./$name"',
+      ...(req.createParents
+        ? [`mkdir -p -- "$parent" || { printf %s ${shellQuote(unavailableMarker)}; exit 70; }`]
+        : []),
       `test -d "$parent" || { printf %s ${shellQuote(missingMarker)}; exit 66; }`,
       `test ! -L "$destination" || { printf %s ${shellQuote(escapeMarker)}; exit 68; }`,
       `cd -P -- "$parent" || { printf %s ${shellQuote(missingMarker)}; exit 66; }`,

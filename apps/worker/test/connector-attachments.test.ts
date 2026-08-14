@@ -3,7 +3,11 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { testSettings } from "@opengeni/testing";
-import { SandboxChannelAService, type ChannelASession } from "@opengeni/runtime/sandbox";
+import {
+  RoutingMutationOutcomeUnknownError,
+  SandboxChannelAService,
+  type ChannelASession,
+} from "@opengeni/runtime/sandbox";
 import { createSandboxClientForBackend } from "@opengeni/runtime";
 import {
   ConnectorAttachmentMaterializationError,
@@ -144,9 +148,11 @@ describe("connector attachment sandbox materialization", () => {
         });
       },
     });
+    const events: Array<{ type: string; payload: unknown }> = [];
     const channel = new SandboxChannelAService({
       session: placement.session,
       workspaceRoot: root,
+      emit: async (batch) => events.push(...batch),
     });
     const request = {
       serverId: "example-connector",
@@ -191,10 +197,22 @@ describe("connector attachment sandbox materialization", () => {
         true,
       );
       expect(placement.staged.every((entry) => !existsSync(entry.path))).toBe(true);
+      expect(events).toHaveLength(fixtures.length);
+      expect(
+        events.every((event) =>
+          (event.payload as { changes?: Array<{ isDir?: boolean }> }).changes?.every(
+            (change) => change.isDir === false,
+          ),
+        ),
+      ).toBe(true);
+      const firstRevision = channel.currentRevision();
+      const firstEvents = structuredClone(events);
 
       const replay = await materializeConnectorAttachmentsInChannel(channel, request);
       expect(replay).toEqual(first);
       for (const fixture of fixtures) expect(requests.get(fixture.fileName)).toBe(1);
+      expect(channel.currentRevision()).toBe(firstRevision);
+      expect(events).toEqual(firstEvents);
     } finally {
       server.stop(true);
     }
@@ -232,6 +250,30 @@ describe("connector attachment sandbox materialization", () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
     expect(connectorAttachmentImportOperationId(request, attachment, 0)).toBe(operation);
+  });
+
+  test("preserves routed mutation outcome-unknown", async () => {
+    const uncertain = new RoutingMutationOutcomeUnknownError(
+      "importWorkspaceFiles",
+      "synthetic uncertain connector attachment batch",
+    );
+    const request = {
+      serverId: "example-connector",
+      toolName: "download_attachment",
+      operationId: "11111111-1111-4111-8111-111111111111",
+      connectionId: "22222222-2222-4222-8222-222222222222",
+      attachments: [],
+    };
+    await expect(
+      materializeConnectorAttachmentsInChannel(
+        {
+          async importWorkspaceFiles() {
+            throw uncertain;
+          },
+        },
+        request,
+      ),
+    ).rejects.toBe(uncertain);
   });
 
   test.each([

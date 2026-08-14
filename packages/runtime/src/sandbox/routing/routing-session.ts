@@ -39,6 +39,7 @@ import {
 import type {
   ChannelAExecArgs,
   ChannelAExecResult,
+  ChannelARoutedWorkspaceImportBatchRequest,
   ChannelARoutedWorkspaceImportRequest,
   ChannelASession,
   WorkspaceFileImportReceipt,
@@ -1435,6 +1436,28 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         ...(input.runAs ? { runAs: input.runAs } : {}),
       });
       return await channel.importWorkspaceFile(input.request);
+    });
+  }
+
+  /** Keep every exact file in one logical attachment envelope on the same
+   * backend and under one mutation admission/settlement. A pointer move rejects
+   * the complete batch output as outcome-unknown; no attachment is replayed on
+   * the new route. */
+  async importWorkspaceFilesOnResolvedBackend(
+    input: ChannelARoutedWorkspaceImportBatchRequest,
+  ): Promise<readonly WorkspaceFileImportReceipt[]> {
+    return await this.dispatch("importWorkspaceFiles", true, async (session) => {
+      const channel = new SandboxChannelAService({
+        session: session as ChannelASession,
+        workspaceRoot: input.workspaceRoot,
+        revision: input.revision,
+        ...(input.runAs ? { runAs: input.runAs } : {}),
+      });
+      const receipts: WorkspaceFileImportReceipt[] = [];
+      for (const request of input.requests) {
+        receipts.push(await channel.importWorkspaceFile(request));
+      }
+      return receipts;
     });
   }
 
