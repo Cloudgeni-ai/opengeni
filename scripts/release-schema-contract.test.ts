@@ -252,8 +252,8 @@ describe("release schema contract", () => {
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
       if (migrations.has("0247_company_brain_governed_write_proposals.sql")) {
         return includesActivation
-          ? "3a9db0d56a1beb1b69dd279134b8e875e1671b85c0249cef286ad5aca85da6dc"
-          : "8fad48661be9c1347d2f19e2cd4264b58ab36bee721aa5f0d28445d875a2b5f0";
+          ? "559f7ba060d2c1434cc88f2d063d29f27d7c58688ecbf7fdf49207b5ac7728d0"
+          : "d06f6787ae19ea9fcf9564e7d180055310c580c5c70ab5b57fac88737d3371a3";
       }
       if (migrations.has("0246_integration_personal_instance_authority.sql")) {
         return includesActivation
