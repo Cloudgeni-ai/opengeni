@@ -334,6 +334,152 @@ describe("appendAndPublishEvents is best-effort on the live fan-out", () => {
     expect(outcomes).toEqual(["succeeded"]);
   });
 
+  test("a slower lower append cannot publish after a faster higher append", async () => {
+    const appendReleases = new Map<number, () => void>();
+    const publishReleases: Array<() => void> = [];
+    const published: number[][] = [];
+    const bus = {
+      publish: async (
+        _workspaceId: string,
+        _sessionId: string,
+        events: Array<{ sequence: number }>,
+      ) => {
+        published.push(events.map((event) => event.sequence));
+        await new Promise<void>((resolve) => publishReleases.push(resolve));
+      },
+    } as never;
+    const fanout = createDetachedSessionEventFanout(bus, {
+      timeoutScheduler: () => () => {},
+    });
+    const delayedAppend = (sequence: number) =>
+      (async () => {
+        await new Promise<void>((resolve) => appendReleases.set(sequence, resolve));
+        return { events: [eventFor(sequence)], accepted: true };
+      }) as never;
+    const args = [
+      {} as never,
+      bus,
+      SENTINEL_WS,
+      "00000000-0000-4000-8000-000000000001",
+      "00000000-0000-4000-8000-000000000020",
+      1,
+      "00000000-0000-4000-8000-000000000021",
+    ] as const;
+
+    const lower = appendAndPublishTurnEventsFenced(
+      ...args,
+      [{ type: "sandbox.box.created", payload: {} }] as never,
+      {
+        fanout: "detached",
+        detachedFanout: fanout,
+        appendSessionEventsForTurnAttempt: delayedAppend(11),
+      },
+    );
+    const higher = appendAndPublishTurnEventsFenced(
+      ...args,
+      [{ type: "turn.completed", payload: {} }] as never,
+      {
+        fanout: "awaited",
+        detachedFanout: fanout,
+        appendSessionEventsForTurnAttempt: delayedAppend(12),
+      },
+    );
+    await settleMicrotasks();
+
+    appendReleases.get(12)!();
+    await settleMicrotasks();
+    expect(published).toEqual([]);
+
+    appendReleases.get(11)!();
+    await lower;
+    await settleMicrotasks();
+    expect(published).toEqual([[11]]);
+
+    publishReleases.shift()!();
+    await settleMicrotasks();
+    expect(published).toEqual([[11], [12]]);
+
+    publishReleases.shift()!();
+    await higher;
+    await fanout.drain();
+  });
+
+  test("an unresolved append does not stall an unrelated session", async () => {
+    let releaseFirst!: () => void;
+    const published: Array<[string, number[]]> = [];
+    const bus = {
+      publish: async (
+        _workspaceId: string,
+        sessionId: string,
+        events: Array<{ sequence: number }>,
+      ) => {
+        published.push([sessionId, events.map((event) => event.sequence)]);
+      },
+    } as never;
+    const fanout = createDetachedSessionEventFanout(bus, {
+      timeoutScheduler: () => () => {},
+    });
+    const sharedArgs = [
+      {} as never,
+      bus,
+      SENTINEL_WS,
+      "00000000-0000-4000-8000-000000000020",
+      1,
+      "00000000-0000-4000-8000-000000000021",
+    ] as const;
+
+    const first = appendAndPublishTurnEventsFenced(
+      sharedArgs[0],
+      sharedArgs[1],
+      sharedArgs[2],
+      "00000000-0000-4000-8000-000000000001",
+      sharedArgs[3],
+      sharedArgs[4],
+      sharedArgs[5],
+      [{ type: "sandbox.box.created", payload: {} }] as never,
+      {
+        fanout: "detached",
+        detachedFanout: fanout,
+        appendSessionEventsForTurnAttempt: (async () => {
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+          });
+          return { events: [eventFor(11)], accepted: true };
+        }) as never,
+      },
+    );
+    await settleMicrotasks();
+
+    await appendAndPublishTurnEventsFenced(
+      sharedArgs[0],
+      sharedArgs[1],
+      sharedArgs[2],
+      "00000000-0000-4000-8000-000000000002",
+      sharedArgs[3],
+      sharedArgs[4],
+      sharedArgs[5],
+      [{ type: "turn.completed", payload: {} }] as never,
+      {
+        fanout: "detached",
+        detachedFanout: fanout,
+        appendSessionEventsForTurnAttempt: (async () => ({
+          events: [eventFor(21)],
+          accepted: true,
+        })) as never,
+      },
+    );
+    await settleMicrotasks();
+    expect(published).toEqual([["00000000-0000-4000-8000-000000000002", [21]]]);
+
+    releaseFirst();
+    await first;
+    await fanout.drain();
+    expect(published).toEqual([
+      ["00000000-0000-4000-8000-000000000002", [21]],
+      ["00000000-0000-4000-8000-000000000001", [11]],
+    ]);
+  });
+
   test("an admitted awaited sequence cannot be overtaken by a later detached enqueue", async () => {
     const releases: Array<() => void> = [];
     const published: number[][] = [];

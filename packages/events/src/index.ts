@@ -323,7 +323,18 @@ export type DetachedSessionEventFanoutCloseReason =
   | "activity_cancelled"
   | "worker_shutdown";
 
+export type DetachedSessionEventFanoutReservation = {
+  commit: (events: SessionEvent[]) => Promise<void>;
+  cancel: () => void;
+};
+
 export type DetachedSessionEventFanout = {
+  reserve: (
+    mode: "detached" | "awaited",
+    workspaceId: string,
+    sessionId: string,
+    observe?: AppendPublishObserver,
+  ) => DetachedSessionEventFanoutReservation;
   enqueue: (workspaceId: string, sessionId: string, events: SessionEvent[]) => void;
   publishAwaited: (
     workspaceId: string,
@@ -351,8 +362,12 @@ export type DetachedSessionEventFanoutOptions = {
  *
  * Detached live-only capacity is deliberately tiny: one active publish and the
  * oldest pending detached batch. Later detached batches are dropped from LIVE
- * delivery, never from the durable ledger. Awaited publications reserve FIFO
- * positions in that same lane and are not subject to detached overflow drops.
+ * delivery, never from the durable ledger. Every fenced publisher reserves its
+ * place before starting the Postgres append. The lane blocks behind unresolved
+ * earlier reservations, then orders each ready prefix by the DB-assigned session
+ * sequence, so a faster higher-sequence append cannot overtake a slower lower
+ * sequence. Awaited publications use the same reservation domain and are not
+ * subject to detached overflow drops.
  * This is safe only for events whose DB append is already authoritative and
  * whose consumers replay/gap-fill from Postgres. The caller must retain awaited
  * publication for control/recovery, model-memory, and tool-call creation
@@ -377,20 +392,25 @@ export function createDetachedSessionEventFanout(
       return () => clearTimeout(timer);
     });
   type FanoutItem = {
+    reservationOrder: number;
     mode: "detached" | "awaited";
     workspaceId: string;
     sessionId: string;
-    events: SessionEvent[];
+    events: SessionEvent[] | null;
     observe?: AppendPublishObserver;
-    resolveAwaited?: () => void;
+    state: "reserved" | "ready" | "active" | "settled" | "dropped" | "cancelled";
+    resolveCompletion: () => void;
+    completion: Promise<void>;
   };
   type ActiveFanout = {
+    item: FanoutItem;
     done: Promise<void>;
     forceTimeout: () => void;
   };
   let accepting = true;
   let active: ActiveFanout | null = null;
-  const pending: FanoutItem[] = [];
+  const reservations: FanoutItem[] = [];
+  let nextReservationOrder = 0;
   let closePromise: Promise<void> | null = null;
 
   const emitOutcome = (
@@ -410,6 +430,11 @@ export function createDetachedSessionEventFanout(
   };
 
   const start = (item: FanoutItem): ActiveFanout => {
+    const events = item.events;
+    if (!events) {
+      throw new Error("Session event fanout reservation has no committed events");
+    }
+    item.state = "active";
     const startedAt = performance.now();
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => {
@@ -424,22 +449,21 @@ export function createDetachedSessionEventFanout(
       settled = true;
       cancelTimeout?.();
       if (item.mode === "detached") {
-        emitOutcome(outcome, startedAt, item.events.length);
+        emitOutcome(outcome, startedAt, events.length);
       } else {
-        observeSince(item.observe?.onPublish, startedAt, item.events.length);
+        observeSince(item.observe?.onPublish, startedAt, events.length);
       }
       if (active === operation) {
         active = null;
-        if (accepting) {
-          const next = pending.shift();
-          if (next) start(next);
-        }
+        item.state = "settled";
+        item.resolveCompletion();
+        pump();
       }
-      item.resolveAwaited?.();
       resolveDone();
     };
 
     operation = {
+      item,
       done,
       forceTimeout: () => finish("timed_out"),
     };
@@ -447,8 +471,8 @@ export function createDetachedSessionEventFanout(
     cancelTimeout = scheduleTimeout(operation.forceTimeout, timeoutMs);
     try {
       const providerPromise = bus.publishWithOutcome
-        ? Promise.resolve(bus.publishWithOutcome(item.workspaceId, item.sessionId, item.events))
-        : Promise.resolve(bus.publish(item.workspaceId, item.sessionId, item.events)).then(
+        ? Promise.resolve(bus.publishWithOutcome(item.workspaceId, item.sessionId, events))
+        : Promise.resolve(bus.publish(item.workspaceId, item.sessionId, events)).then(
             () => "succeeded" as const,
             () => "failed" as const,
           );
@@ -464,62 +488,158 @@ export function createDetachedSessionEventFanout(
     return operation;
   };
 
+  const firstSequence = (item: FanoutItem): number =>
+    item.events?.[0]?.sequence ?? Number.MAX_SAFE_INTEGER;
+
+  const pump = (): void => {
+    if (active || !accepting) return;
+    for (let index = reservations.length - 1; index >= 0; index -= 1) {
+      const state = reservations[index]?.state;
+      if (state === "settled" || state === "cancelled" || state === "dropped") {
+        reservations.splice(index, 1);
+      }
+    }
+    if (reservations.length === 0) return;
+    const ready = reservations.filter(
+      (candidate) =>
+        candidate.state === "ready" &&
+        !reservations.some(
+          (item) =>
+            item.state === "reserved" &&
+            item.workspaceId === candidate.workspaceId &&
+            item.sessionId === candidate.sessionId,
+        ),
+    );
+    ready.sort((left, right) => {
+      if (left.workspaceId !== right.workspaceId || left.sessionId !== right.sessionId) {
+        return left.reservationOrder - right.reservationOrder;
+      }
+      return (
+        firstSequence(left) - firstSequence(right) || left.reservationOrder - right.reservationOrder
+      );
+    });
+    const next = ready[0];
+    if (!next) return;
+    reservations.splice(reservations.indexOf(next), 1);
+    start(next);
+  };
+
+  const reserve = (
+    mode: "detached" | "awaited",
+    workspaceId: string,
+    sessionId: string,
+    observe?: AppendPublishObserver,
+  ): DetachedSessionEventFanoutReservation => {
+    let resolveCompletion!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+    const liveDetachedReservations =
+      (active?.item.mode === "detached" ? 1 : 0) +
+      reservations.filter(
+        (item) =>
+          item.mode === "detached" &&
+          item.state !== "settled" &&
+          item.state !== "cancelled" &&
+          item.state !== "dropped",
+      ).length;
+    const detachedCapacity =
+      active?.item.mode === "detached"
+        ? 2
+        : active?.item.mode === "awaited" || reservations.some((item) => item.mode === "awaited")
+          ? 1
+          : 2;
+    const dropped =
+      !accepting || (mode === "detached" && liveDetachedReservations >= detachedCapacity);
+    const item: FanoutItem = {
+      reservationOrder: nextReservationOrder++,
+      mode,
+      workspaceId,
+      sessionId,
+      events: null,
+      ...(observe ? { observe } : {}),
+      state: dropped ? "dropped" : "reserved",
+      resolveCompletion,
+      completion,
+    };
+    reservations.push(item);
+
+    return {
+      async commit(events) {
+        if (item.state === "cancelled" || item.state === "settled") return;
+        item.events = events;
+        if (item.state === "dropped") {
+          if (item.mode === "detached" && events.length > 0) {
+            emitOutcome("dropped", performance.now(), events.length);
+          }
+          item.resolveCompletion();
+          pump();
+          return;
+        }
+        if (events.length === 0 || !accepting) {
+          item.state = item.mode === "detached" ? "dropped" : "cancelled";
+          if (item.mode === "detached" && events.length > 0) {
+            emitOutcome("dropped", performance.now(), events.length);
+          }
+          item.resolveCompletion();
+          pump();
+          return;
+        }
+        item.state = "ready";
+        pump();
+        if (item.mode === "awaited") {
+          await item.completion;
+        }
+      },
+      cancel() {
+        if (item.state !== "reserved") return;
+        item.state = "cancelled";
+        item.resolveCompletion();
+        pump();
+      },
+    };
+  };
+
   const drain = async (): Promise<void> => {
     for (;;) {
       const current = active;
-      if (!current) return;
+      if (!current) {
+        pump();
+        if (!active) {
+          const pendingCompletion = reservations.find(
+            (item) =>
+              item.state !== "settled" && item.state !== "cancelled" && item.state !== "dropped",
+          )?.completion;
+          if (!pendingCompletion) return;
+          await pendingCompletion;
+        }
+        continue;
+      }
       await current.done;
     }
   };
 
   return {
+    reserve,
     enqueue(workspaceId, sessionId, events) {
       if (events.length === 0) return;
-      const item: FanoutItem = { mode: "detached", workspaceId, sessionId, events };
-      if (!accepting) {
-        emitOutcome("dropped", performance.now(), events.length);
-        return;
-      }
-      if (active) {
-        if (pending.some((candidate) => candidate.mode === "detached")) {
-          emitOutcome("dropped", performance.now(), events.length);
-          return;
-        }
-        pending.push(item);
-        return;
-      }
-      start(item);
+      void reserve("detached", workspaceId, sessionId).commit(events);
     },
     async publishAwaited(workspaceId, sessionId, events, observe) {
-      if (events.length === 0 || !accepting) return;
-      let resolveAwaited!: () => void;
-      const awaited = new Promise<void>((resolve) => {
-        resolveAwaited = resolve;
-      });
-      const item: FanoutItem = {
-        mode: "awaited",
-        workspaceId,
-        sessionId,
-        events,
-        ...(observe ? { observe } : {}),
-        resolveAwaited,
-      };
-      if (active) {
-        pending.push(item);
-      } else {
-        start(item);
-      }
-      await awaited;
+      if (events.length === 0) return;
+      await reserve("awaited", workspaceId, sessionId, observe).commit(events);
     },
     drain,
     async close(_reason) {
       if (closePromise) return await closePromise;
       accepting = false;
-      for (const item of pending.splice(0)) {
-        if (item.mode === "detached") {
+      for (const item of reservations.splice(0)) {
+        if (item.state === "active" || item.state === "settled") continue;
+        if (item.mode === "detached" && item.events && item.events.length > 0) {
           emitOutcome("dropped", performance.now(), item.events.length);
         }
-        item.resolveAwaited?.();
+        item.state = item.mode === "detached" ? "dropped" : "cancelled";
+        item.resolveCompletion();
       }
       const current = active;
       if (!current) return;
@@ -897,23 +1017,34 @@ export async function appendAndPublishTurnEventsFenced(
     appendSessionEventsForTurnAttempt?: typeof appendSessionEventsForTurnAttempt;
   },
 ): Promise<{ events: SessionEvent[]; accepted: boolean }> {
-  const appendStartedAt = performance.now();
-  const result = await (
-    observe?.appendSessionEventsForTurnAttempt ?? appendSessionEventsForTurnAttempt
-  )(db, workspaceId, sessionId, turnId, executionGeneration, attemptId, events);
-  observeSince(observe?.onAppend, appendStartedAt, result.events.length);
-  if (result.events.length === 0) return result;
+  let fanoutReservation: DetachedSessionEventFanoutReservation | null = null;
   if (observe?.fanout) {
     if (!observe.detachedFanout) {
       throw new Error("Session event fanout is not configured");
     }
-    if (observe.fanout === "detached") {
-      observe.detachedFanout.enqueue(workspaceId, sessionId, result.events);
-      return result;
-    }
-    await observe.detachedFanout.publishAwaited(workspaceId, sessionId, result.events, observe);
+    fanoutReservation = observe.detachedFanout.reserve(
+      observe.fanout,
+      workspaceId,
+      sessionId,
+      observe,
+    );
+  }
+  const appendStartedAt = performance.now();
+  let result: { events: SessionEvent[]; accepted: boolean };
+  try {
+    result = await (
+      observe?.appendSessionEventsForTurnAttempt ?? appendSessionEventsForTurnAttempt
+    )(db, workspaceId, sessionId, turnId, executionGeneration, attemptId, events);
+  } catch (error) {
+    fanoutReservation?.cancel();
+    throw error;
+  }
+  observeSince(observe?.onAppend, appendStartedAt, result.events.length);
+  if (fanoutReservation) {
+    await fanoutReservation.commit(result.events);
     return result;
   }
+  if (result.events.length === 0) return result;
   const publishStartedAt = performance.now();
   try {
     await bus.publish(workspaceId, sessionId, result.events);
