@@ -329,6 +329,18 @@ export async function completeGoogleDriveOAuthCallback(
       },
       fetchImpl,
     );
+    const grantedScopes = [...new Set(token.scopes)].sort();
+    const scopeDecision = googleDriveOAuthScopeDecision(grantedScopes);
+    const requiredCapability =
+      state.capability === "publish" ? "publish_file" : "recursive_source_sync";
+    if (
+      !scopeDecision.accessMode ||
+      !scopeDecision.capabilities.includes(requiredCapability) ||
+      (state.capability === "publish" &&
+        !scopeDecision.capabilities.includes("recursive_source_sync"))
+    ) {
+      throw new GoogleDriveCallbackError("scope_not_granted");
+    }
     const identity = await verifyGoogleDriveIdentity(token.accessToken, fetchImpl);
     await requireGoogleDriveCallbackGrant(deps, state);
     const existing = state.connectionId
@@ -350,18 +362,6 @@ export async function completeGoogleDriveOAuthCallback(
     const previousMetadata = existing
       ? GoogleDriveConnectionMetadata.parse(existing.metadata)
       : null;
-    const grantedScopes = [...new Set(token.scopes)].sort();
-    const scopeDecision = googleDriveOAuthScopeDecision(grantedScopes);
-    const requiredCapability =
-      state.capability === "publish" ? "publish_file" : "recursive_source_sync";
-    if (
-      !scopeDecision.accessMode ||
-      !scopeDecision.capabilities.includes(requiredCapability) ||
-      (state.capability === "publish" &&
-        !scopeDecision.capabilities.includes("recursive_source_sync"))
-    ) {
-      throw new GoogleDriveCallbackError("scope_not_granted");
-    }
     const outputDestination =
       state.capability === "publish"
         ? await verifyPickedGoogleDriveOutputDestination(
@@ -463,13 +463,7 @@ export async function completeGoogleDriveOAuthCallback(
       throw new GoogleDriveCallbackError("connection_conflict");
     }
     return {
-      redirectTo: googleDriveReturnUrl(
-        returnBaseUrl,
-        state.returnPath,
-        "connected",
-        connection.id,
-        state.capability,
-      ),
+      redirectTo: googleDriveReturnUrl(returnBaseUrl, state.returnPath, "connected", connection.id),
     };
   } catch (error) {
     return {
@@ -2282,14 +2276,10 @@ function googleDriveReturnUrl(
   returnPath: string,
   status: "connected" | "error",
   value: string,
-  capability?: GoogleDriveOAuthState["capability"],
 ): string {
   const url = new URL(returnPath, returnBaseUrl);
   url.searchParams.set("google_drive", status);
   url.searchParams.set(status === "connected" ? "connectionId" : "reason", value);
-  if (status === "connected" && capability) {
-    url.searchParams.set("google_drive_capability", capability);
-  }
   return url.toString();
 }
 

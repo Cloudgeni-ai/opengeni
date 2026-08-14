@@ -146,8 +146,12 @@ export function GoogleDriveConnectorCard({
     const url = new URL(window.location.href);
     const status = url.searchParams.get("google_drive");
     if (!status) return;
+    const completedCapability = window.sessionStorage.getItem(
+      `opengeni:google-drive-oauth-capability:${workspaceId}`,
+    );
+    window.sessionStorage.removeItem(`opengeni:google-drive-oauth-capability:${workspaceId}`);
     if (status === "connected") {
-      if (url.searchParams.get("google_drive_capability") === "publish") {
+      if (completedCapability === "publish") {
         toast.success("Google Drive publishing configured", {
           description: "The selected output folder is active. Connector writes ask by default.",
         });
@@ -164,10 +168,9 @@ export function GoogleDriveConnectorCard({
     }
     url.searchParams.delete("google_drive");
     url.searchParams.delete("connectionId");
-    url.searchParams.delete("google_drive_capability");
     url.searchParams.delete("reason");
     window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
-  }, [refreshConnections]);
+  }, [refreshConnections, workspaceId]);
 
   async function connect(reconnect = false, capability: "source_read" | "publish" = "source_read") {
     if (!canWrite) return;
@@ -182,6 +185,10 @@ export function GoogleDriveConnectorCard({
             capability,
           }),
         },
+      );
+      window.sessionStorage.setItem(
+        `opengeni:google-drive-oauth-capability:${workspaceId}`,
+        capability,
       );
       window.location.assign(start.authorizationUrl);
     } catch (error) {
