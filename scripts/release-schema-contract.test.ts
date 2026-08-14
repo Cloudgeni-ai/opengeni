@@ -225,7 +225,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0250_scheduled_personal_resource_delegation.sql",
       ),
     ).toMatchObject({
-      sha256: "04ee0caf1b385825b51905b79ec21c6cb5a652941d26ec628a41df052eb3188d",
+      sha256: "c3ed65cc1d59528358834ee9d1d4dae053f55878649fc4f5020a1fe017de1dfe",
       deploymentMode: "rolling",
     });
     const migrations = new Map(

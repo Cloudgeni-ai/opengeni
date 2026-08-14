@@ -411,14 +411,14 @@ CREATE OR REPLACE FUNCTION freeze_scheduled_task_personal_resources(
 RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path FROM CURRENT
+SET search_path = pg_catalog, pg_temp
 AS $freeze_scheduled_task_personal_resources$
 DECLARE
-  task_row scheduled_tasks%ROWTYPE;
-  member_row organization_memberships%ROWTYPE;
-  session_row sessions%ROWTYPE;
+  task_row record;
+  member_row record;
+  session_row record;
   resource_row record;
-  grant_row organization_user_resource_grants%ROWTYPE;
+  grant_row record;
   initiating_subject text := coalesce(
     nullif(btrim(current_setting('opengeni.initiating_human_subject_id', true)), ''),
     nullif(btrim(current_setting('opengeni.subject_id', true)), '')
@@ -687,12 +687,21 @@ CREATE OR REPLACE FUNCTION clone_scheduled_task_personal_resource_authority(
 RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path FROM CURRENT
+SET search_path = pg_catalog, pg_temp
 AS $clone_scheduled_task_personal_resource_authority$
 DECLARE
-  source_authority scheduled_task_personal_resource_authorities%ROWTYPE;
+  source_authority record;
   copied_count integer;
 BEGIN
+  IF p_account_id IS DISTINCT FROM nullif(current_setting('opengeni.account_id', true), '')::uuid
+    OR p_workspace_id IS DISTINCT FROM nullif(
+      current_setting('opengeni.workspace_id', true), ''
+    )::uuid
+  THEN
+    RAISE EXCEPTION 'scheduled personal-resource clone scope mismatch'
+      USING ERRCODE = '42501';
+  END IF;
+
   IF p_source_task_authority_revision <= 0
     OR p_target_task_authority_revision <= p_source_task_authority_revision
   THEN
@@ -792,11 +801,11 @@ CREATE OR REPLACE FUNCTION admit_scheduled_task_run_personal_resources()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path FROM CURRENT
+SET search_path = pg_catalog, pg_temp
 AS $admit_scheduled_task_run_personal_resources$
 DECLARE
-  task_row scheduled_tasks%ROWTYPE;
-  authority_row scheduled_task_personal_resource_authorities%ROWTYPE;
+  task_row record;
+  authority_row record;
   once_snapshot record;
   selected_personal_count integer;
   invalid_count integer;
@@ -1041,12 +1050,12 @@ CREATE OR REPLACE FUNCTION prepare_scheduled_task_attempt_once_grants()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path FROM CURRENT
+SET search_path = pg_catalog, pg_temp
 AS $prepare_scheduled_task_attempt_once_grants$
 DECLARE
   scheduled_run_id uuid;
   run_count integer;
-  receipt_row scheduled_task_run_personal_resource_once_receipts%ROWTYPE;
+  receipt_row record;
   prior_attempt_run_id uuid;
   affected integer;
 BEGIN
@@ -1130,12 +1139,12 @@ CREATE OR REPLACE FUNCTION validate_scheduled_task_attempt_personal_resources()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path FROM CURRENT
+SET search_path = pg_catalog, pg_temp
 AS $validate_scheduled_task_attempt_personal_resources$
 DECLARE
   scheduled_run_id uuid;
   run_count integer;
-  admission_row scheduled_task_run_personal_resource_admissions%ROWTYPE;
+  admission_row record;
   turn_subject text;
   mismatch_count integer;
 BEGIN
@@ -1271,7 +1280,7 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path FROM CURRENT
+SET search_path = pg_catalog, pg_temp
 AS $scheduled_task_run_personal_resource_authority$
 BEGIN
   IF p_account_id IS DISTINCT FROM nullif(current_setting('opengeni.account_id', true), '')::uuid
@@ -1304,6 +1313,46 @@ BEGIN
     AND capability_kind = 'run_admit';
 END
 $scheduled_task_run_personal_resource_authority$;
+
+-- The migration target may be public or a dedicated embed schema. Bind that
+-- trusted schema explicitly into every privileged routine and put pg_temp last
+-- so caller-created temporary relations can never shadow durable authority.
+DO $scheduled_personal_resource_search_path$
+DECLARE
+  data_schema text := current_schema();
+BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION %1$I.freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint) '
+      || 'SET search_path = pg_catalog, %1$I, pg_temp',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %1$I.clone_scheduled_task_personal_resource_authority('
+      || 'uuid, uuid, uuid, bigint, bigint) SET search_path = pg_catalog, %1$I, pg_temp',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %1$I.admit_scheduled_task_run_personal_resources() '
+      || 'SET search_path = pg_catalog, %1$I, pg_temp',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %1$I.prepare_scheduled_task_attempt_once_grants() '
+      || 'SET search_path = pg_catalog, %1$I, pg_temp',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %1$I.validate_scheduled_task_attempt_personal_resources() '
+      || 'SET search_path = pg_catalog, %1$I, pg_temp',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %1$I.scheduled_task_run_personal_resource_authority(uuid, uuid, uuid) '
+      || 'SET search_path = pg_catalog, %1$I, pg_temp',
+    data_schema
+  );
+END
+$scheduled_personal_resource_search_path$;
 
 REVOKE ALL ON FUNCTION freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint)
   FROM PUBLIC;

@@ -41,11 +41,21 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
     expect(executable.match(/ENABLE ROW LEVEL SECURITY/gu)).toHaveLength(5);
     expect(executable.match(/FORCE ROW LEVEL SECURITY/gu)).toHaveLength(5);
     expect(executable.match(/SECURITY DEFINER/gu)?.length).toBeGreaterThanOrEqual(5);
-    expect(source).toContain("SET search_path FROM CURRENT");
+    expect(source).not.toContain("SET search_path FROM CURRENT");
+    expect(executable.match(/SET search_path = pg_catalog, pg_temp/gu)).toHaveLength(6);
+    expect(executable.match(/SET search_path = pg_catalog, %1\$I, pg_temp/gu)).toHaveLength(6);
     expect(source).not.toContain("SET search_path = public");
     expect(source).toContain("scheduled personal-resource authority snapshot is no longer live");
     expect(source).toContain("scheduled personal-resource task has no authority snapshot");
     expect(source).toContain("clone_scheduled_task_personal_resource_authority");
+    expect(source).toContain("scheduled personal-resource clone scope mismatch");
+    const cloneBody = source.slice(
+      source.indexOf("CREATE OR REPLACE FUNCTION clone_scheduled_task_personal_resource_authority"),
+      source.indexOf("$clone_scheduled_task_personal_resource_authority$;"),
+    );
+    expect(cloneBody.indexOf("scheduled personal-resource clone scope mismatch")).toBeLessThan(
+      cloneBody.indexOf("INSERT INTO opengeni_private.scheduled_personal_resource_capabilities"),
+    );
     expect(source).toContain("SET \"status\" = 'paused'");
     expect(source).toContain("scheduled task authority revision changed before attempt admission");
     expect(source).toContain("scheduled occurrence personal-resource snapshot widened or changed");
@@ -83,6 +93,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
           updateColumn: boolean;
           freezeFunction: boolean;
           cloneFunction: boolean;
+          hardenedSearchPaths: number;
           runTrigger: boolean;
           attemptTrigger: boolean;
           forcedLedgers: number;
@@ -103,6 +114,23 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
             is not null as "freezeFunction",
           to_regprocedure('${schema}.clone_scheduled_task_personal_resource_authority(uuid,uuid,uuid,bigint,bigint)')
             is not null as "cloneFunction",
+          (
+            select count(*)::int
+            from pg_proc procedure
+            join pg_namespace namespace_value on namespace_value.oid = procedure.pronamespace
+            where namespace_value.nspname = '${schema}'
+              and procedure.proname in (
+                'freeze_scheduled_task_personal_resources',
+                'clone_scheduled_task_personal_resource_authority',
+                'admit_scheduled_task_run_personal_resources',
+                'prepare_scheduled_task_attempt_once_grants',
+                'validate_scheduled_task_attempt_personal_resources',
+                'scheduled_task_run_personal_resource_authority'
+              )
+              and procedure.proconfig = array[
+                'search_path=pg_catalog, ${schema}, pg_temp'
+              ]::text[]
+          ) as "hardenedSearchPaths",
           exists (
             select 1 from pg_trigger trigger_value
             join pg_class table_value on table_value.oid = trigger_value.tgrelid
@@ -137,12 +165,128 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
         updateColumn: true,
         freezeFunction: true,
         cloneFunction: true,
+        hardenedSearchPaths: 6,
         runTrigger: true,
         attemptTrigger: true,
         forcedLedgers: 5,
       });
     } finally {
       await sql.end({ timeout: 5 }).catch(() => undefined);
+      await blank.release();
+    }
+  }, 180_000);
+
+  test("denies cross-scope app clones before capability elevation", async () => {
+    const blank = await acquireMigrationTestDatabase("clone-scope-fence");
+    if (!blank) {
+      if (requireRealDatabase) {
+        throw new Error(
+          "[migration-0250-scheduled-personal-resource-delegation] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+        );
+      }
+      return;
+    }
+    const admin = postgres(blank.databaseUrl, { max: 2, prepare: false });
+    const client = createDb(blank.databaseUrl, { max: 2 });
+    try {
+      await migrate(blank.databaseUrl);
+      const fixture = await createAuthorityFixture(admin);
+      const task = await createPersonalScheduledTask(client.db, fixture, "clone scope fence");
+      await admin`
+        update scheduled_tasks set authority_revision = 2 where id = ${task.id}
+      `;
+
+      let scopeError: unknown;
+      try {
+        await admin.begin(async (tx) => {
+          await tx.unsafe("set local role opengeni_app");
+          await tx`select set_config('opengeni.account_id', ${crypto.randomUUID()}, true)`;
+          await tx`select set_config('opengeni.workspace_id', ${crypto.randomUUID()}, true)`;
+          await tx`
+            select clone_scheduled_task_personal_resource_authority(
+              ${fixture.accountId}::uuid,
+              ${fixture.targetWorkspaceId}::uuid,
+              ${task.id}::uuid,
+              1::bigint,
+              2::bigint
+            )
+          `;
+        });
+      } catch (error) {
+        scopeError = error;
+      }
+      expect((scopeError as { code?: string } | undefined)?.code).toBe("42501");
+      expect(await rejectedErrorChain(Promise.reject(scopeError))).toContain(
+        "scheduled personal-resource clone scope mismatch",
+      );
+      const [ledger] = await admin<Array<{ targetHeaders: number; capabilities: number }>>`
+        select
+          (select count(*)::int from scheduled_task_personal_resource_authorities
+            where task_id = ${task.id} and task_authority_revision = 2) as "targetHeaders",
+          (select count(*)::int from opengeni_private.scheduled_personal_resource_capabilities)
+            as capabilities
+      `;
+      expect(ledger).toEqual({ targetHeaders: 0, capabilities: 0 });
+    } finally {
+      await client.close().catch(() => undefined);
+      await admin.end({ timeout: 5 }).catch(() => undefined);
+      await blank.release();
+    }
+  }, 180_000);
+
+  test("app clone ignores caller temporary authority relations", async () => {
+    const blank = await acquireMigrationTestDatabase("clone-temp-shadow");
+    if (!blank) {
+      if (requireRealDatabase) {
+        throw new Error(
+          "[migration-0250-scheduled-personal-resource-delegation] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+        );
+      }
+      return;
+    }
+    const admin = postgres(blank.databaseUrl, { max: 2, prepare: false });
+    const client = createDb(blank.databaseUrl, { max: 2 });
+    try {
+      await migrate(blank.databaseUrl);
+      const fixture = await createAuthorityFixture(admin);
+      const task = await createPersonalScheduledTask(client.db, fixture, "clone temp shadow");
+      await admin`
+        update scheduled_tasks set authority_revision = 2 where id = ${task.id}
+      `;
+
+      const [result] = await admin.begin(async (tx) => {
+        await tx.unsafe("set local role opengeni_app");
+        await tx`select set_config('opengeni.account_id', ${fixture.accountId}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${fixture.targetWorkspaceId}, true)`;
+        await tx.unsafe("create temporary table scheduled_tasks (trap text) on commit drop");
+        await tx.unsafe(
+          "create temporary table scheduled_task_personal_resource_authorities (trap text) on commit drop",
+        );
+        await tx.unsafe(
+          "create temporary table scheduled_task_personal_resource_snapshots (trap text) on commit drop",
+        );
+        return await tx<Array<{ copied: number }>>`
+          select clone_scheduled_task_personal_resource_authority(
+            ${fixture.accountId}::uuid,
+            ${fixture.targetWorkspaceId}::uuid,
+            ${task.id}::uuid,
+            1::bigint,
+            2::bigint
+          )::int as copied
+        `;
+      });
+      expect(result).toEqual({ copied: 1 });
+      const [cloned] = await admin<Array<{ headers: number; snapshots: number }>>`
+        select
+          (select count(*)::int from scheduled_task_personal_resource_authorities
+            where task_id = ${task.id} and task_authority_revision = 2) as headers,
+          (select count(*)::int from scheduled_task_personal_resource_snapshots
+            where task_id = ${task.id} and task_authority_revision = 2) as snapshots
+      `;
+      expect(cloned).toEqual({ headers: 1, snapshots: 1 });
+    } finally {
+      await client.close().catch(() => undefined);
+      await admin.end({ timeout: 5 }).catch(() => undefined);
       await blank.release();
     }
   }, 180_000);
@@ -633,6 +777,32 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
     }
   }, 180_000);
 });
+
+async function createPersonalScheduledTask(
+  db: Parameters<typeof createScheduledTask>[0],
+  fixture: Awaited<ReturnType<typeof createAuthorityFixture>>,
+  name: string,
+) {
+  return await createScheduledTask(db, {
+    accountId: fixture.accountId,
+    workspaceId: fixture.targetWorkspaceId,
+    name,
+    status: "active",
+    schedule: { type: "manual" },
+    temporalScheduleId: `scheduled-personal-${crypto.randomUUID()}`,
+    runMode: "new_session_per_run",
+    overlapPolicy: "allow_concurrent",
+    agentConfig: {
+      prompt: "exercise scheduled personal-resource authority",
+      resources: [],
+      tools: [],
+      metadata: {},
+    },
+    createdBy: { kind: "subject", subjectId: fixture.subjectId },
+    variableSetId: fixture.variableSetId,
+    metadata: {},
+  });
+}
 
 async function createAuthorityFixture(sql: postgres.Sql): Promise<{
   accountId: string;
