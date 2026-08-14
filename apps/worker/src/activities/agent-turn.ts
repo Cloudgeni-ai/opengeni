@@ -1702,6 +1702,7 @@ export async function processCompactionModelUsageEvent(input: {
   renewLease: () => Promise<void>;
   leaseLost: () => boolean;
   leaseLostMessage: string;
+  contextContributions?: readonly ModelContextContributionSummary[] | null;
 }): Promise<
   | { status: "duplicate"; sourceKey: string }
   | { status: "processed"; sourceKey: string; authoritative: boolean }
@@ -1776,6 +1777,9 @@ export async function processCompactionModelUsageEvent(input: {
           providerApi: input.providerApi,
           model: input.model,
           billing,
+          ...(input.contextContributions !== undefined
+            ? { contextContributions: input.contextContributions }
+            : {}),
         });
       }
     },
@@ -5453,6 +5457,37 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const structuredWorkspacePolicyActive =
         hasActiveWorkspaceInstructionPolicy(instructionPolicySnapshot);
       const workspaceMemory = await resolveWorkspaceMemoryBlock(db, input.workspaceId);
+      const buildCompanyBrainContributionReceiptFor = (
+        skillActivations: Parameters<
+          typeof buildCompanyBrainContributionReceipt
+        >[0]["skillActivations"],
+      ) =>
+        buildCompanyBrainContributionReceipt({
+          attemptId: input.attemptId,
+          turnId: turn.id,
+          nestedAgentDepth: session.nestedAgentDepth,
+          memoryPromptMode,
+          instructionPolicy: instructionPolicySnapshot,
+          workspaceAgentInstructions,
+          preferences: preferenceSnapshot,
+          companyProfile: companyProfileSnapshot,
+          companyProfileIncluded,
+          workspaceMemory,
+          skillActivations,
+        });
+      let companyBrainContextContributions: readonly ModelContextContributionSummary[] | null =
+        null;
+      try {
+        // Portable operator compaction runs before tool/skill preparation, so its
+        // exact Company Brain prefix contains governance and standing memory but
+        // no runtime skill catalog. Later compaction paths replace this summary
+        // after the complete skill activation set is resolved.
+        companyBrainContextContributions = summarizeCompanyBrainContributions(
+          buildCompanyBrainContributionReceiptFor([]),
+        );
+      } catch {
+        // Contribution telemetry must never change model execution semantics.
+      }
       const logicalSandboxSettings = settingsWithRigImage(
         settingsWithPackSandboxImage(
           capabilitySettings,
@@ -5856,6 +5891,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           renewLease: () => renewServingCredentialLease("model_usage"),
           leaseLost: servingCredentialLeaseLost,
           leaseLostMessage: "Provider credential lease expired during context compaction",
+          contextContributions: companyBrainContextContributions,
         });
       };
       const compactionSummarizerFor = (systemInstructions?: string) =>
@@ -7806,6 +7842,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           reason: "attached to session",
         })),
       ];
+      try {
+        companyBrainContextContributions = summarizeCompanyBrainContributions(
+          buildCompanyBrainContributionReceiptFor(runtimeSkillActivations),
+        );
+      } catch {
+        // Contribution telemetry must never change model execution semantics.
+      }
       recordTurnStartupPhase(observability, {
         phase: "post_tool_preparation",
         provider: turnExecutionPolicy.providerId,
@@ -8224,25 +8267,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         );
       }
       let companyBrainContributionReceiptRecorded = false;
-      let companyBrainContextContributions: readonly ModelContextContributionSummary[] | null =
-        null;
       const recordCompanyBrainContributionReceiptOnce = (): void => {
         if (companyBrainContributionReceiptRecorded) return;
         companyBrainContributionReceiptRecorded = true;
         try {
-          const companyBrainContributionReceipt = buildCompanyBrainContributionReceipt({
-            attemptId: input.attemptId,
-            turnId: turn.id,
-            nestedAgentDepth: session.nestedAgentDepth,
-            memoryPromptMode,
-            instructionPolicy: instructionPolicySnapshot,
-            workspaceAgentInstructions,
-            preferences: preferenceSnapshot,
-            companyProfile: companyProfileSnapshot,
-            companyProfileIncluded,
-            workspaceMemory,
-            skillActivations: runtimeSkillActivations,
-          });
+          const companyBrainContributionReceipt =
+            buildCompanyBrainContributionReceiptFor(runtimeSkillActivations);
           companyBrainContextContributions = summarizeCompanyBrainContributions(
             companyBrainContributionReceipt,
           );
