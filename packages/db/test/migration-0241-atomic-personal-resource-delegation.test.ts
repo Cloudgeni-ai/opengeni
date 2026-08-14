@@ -236,9 +236,9 @@ describe("migration 0241 atomic personal-resource delegation", () => {
     expect(runtimePosture).toContain('"personal_resource_delegation_capabilities"');
   });
 
-  test("converges helper ACLs in both provisioning orders without breaking ordinary app-role RLS", async () => {
-    const appPassword = "apppw";
-    for (const order of ["migrate-then-provision", "provision-then-migrate"] as const) {
+  for (const order of ["migrate-then-provision", "provision-then-migrate"] as const) {
+    test(`converges helper ACLs after ${order} without breaking ordinary app-role RLS`, async () => {
+      const appPassword = "apppw";
       const blank = await acquireBlankTestDatabase(`migration-0241-capability-${order}`);
       if (!blank) return;
 
@@ -374,9 +374,10 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       } finally {
         await app.end({ timeout: 5 });
         await admin.end({ timeout: 5 });
+        await blank.release();
       }
-    }
-  }, 180_000);
+    }, 180_000);
+  }
 
   test("admits an ordinary attempt with no selected personal resources or personal authority", async () => {
     const blank = await acquireBlankTestDatabase("migration-0241-empty-personal-selection");
@@ -422,11 +423,11 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         insert into session_turns (
           id, account_id, workspace_id, session_id, trigger_event_id,
           temporal_workflow_id, status, position, prompt, model,
-          reasoning_effort, sandbox_backend, active_attempt_id
+          reasoning_effort, sandbox_backend
         ) values (
           ${turnId}, ${account!.id}, ${workspace!.id}, ${sessionId}, ${crypto.randomUUID()},
           'ordinary-workflow', 'running', 1, 'ordinary attempt', 'codex/gpt-5.6-sol',
-          'low', 'modal', ${attemptId}
+          'low', 'modal'
         )
       `;
       await sql`
@@ -439,6 +440,11 @@ describe("migration 0241 atomic personal-resource delegation", () => {
           'running', 'ordinary-workflow', 'ordinary-run', 'ordinary-activity', 0,
           '{}'::jsonb
         )
+      `;
+      await sql`
+        update session_turns
+        set active_attempt_id = ${attemptId}
+        where id = ${turnId}
       `;
 
       const [attempt] = await sql<
@@ -504,6 +510,11 @@ describe("migration 0241 atomic personal-resource delegation", () => {
     try {
       const ids = await createFixture(admin, blank.databaseUrl, "session");
       await setRuntimeScope(app, ids);
+      await admin`
+        update rig_versions
+        set active = false
+        where id = ${ids.rigVersion}
+      `;
       const [mismatchedVersion] = await app<Array<{ id: string }>>`
         insert into rig_versions (
           account_id, workspace_id, rig_id, version, default_variable_set_ids, active
@@ -529,6 +540,16 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         ),
       ).rejects.toThrow("personal resource identity changed during admission");
 
+      await admin`
+        update rig_versions
+        set active = false
+        where id = ${mismatchedVersion!.id}
+      `;
+      await admin`
+        update rig_versions
+        set active = true
+        where id = ${ids.rigVersion}
+      `;
       await app`
         update sessions
         set rig_version_id = ${ids.rigVersion}
@@ -662,6 +683,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
     if (!blank) return;
 
     const admin = postgres(blank.databaseUrl, { max: 6, onnotice: () => undefined });
+    const scoped = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
     try {
       await migrate(blank.databaseUrl);
       const ids = await createFixture(admin, blank.databaseUrl, "once", {
@@ -724,8 +746,8 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         "activity-drift",
       );
 
-      await setRuntimeScope(admin, drift);
-      const resolve = () => admin`
+      await setRuntimeScope(scoped, drift);
+      const resolve = () => scoped`
         select * from resolve_session_attempt_personal_resources(
           ${drift.account}, ${drift.targetWorkspace}, ${drift.attemptA}
         )
@@ -789,6 +811,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       `;
       await expect(resolve()).rejects.toThrow("snapshot is no longer live");
     } finally {
+      await scoped.end({ timeout: 5 });
       await admin.end({ timeout: 5 });
     }
   });
@@ -973,6 +996,7 @@ async function createFixture(
       resources: [],
       metadata: {},
       createdBy: { kind: "subject", subjectId: subject },
+      subjectId: subject,
       model: "test-model",
       sandboxBackend: "modal",
       variableSetId: directVariableSet!.id,
