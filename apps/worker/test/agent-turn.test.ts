@@ -2657,16 +2657,21 @@ describe("lazy sandbox provisioner single-flight", () => {
     ).toEqual({ policy: "eager", reason: "signed_file_resources" });
   });
 
-  test("credential-bearing lazy turns fetch and materialize once at the first shared operation", async () => {
+  test("credential-bearing lazy turns resolve context once and materialize at the first shared operation", async () => {
     const steps: string[] = [];
     let resolves = 0;
     let materializations = 0;
-    const provisioner = createTurnSandboxProvisioner(async () => {
+    const initialMaterial = await (async () => {
       resolves += 1;
       steps.push("credential-resolved");
+      return { available: true };
+    })();
+    const provisioner = createTurnSandboxProvisioner(async () => {
       await Bun.sleep(5);
-      materializations += 1;
-      steps.push("credential-materialized");
+      if (initialMaterial.available) {
+        materializations += 1;
+        steps.push("credential-materialized");
+      }
       return {
         exec: async () => {
           steps.push("provider-operation");
@@ -2674,10 +2679,12 @@ describe("lazy sandbox provisioner single-flight", () => {
       };
     });
 
-    // Model-only work never asks the provisioner for a box, and therefore does
-    // not fetch, decrypt, write, renew, or later clean up credential material.
-    expect(resolves).toBe(0);
+    // Model preparation resolves the exact attempt once so auth-needed state
+    // can be model-visible, but a model-only turn still owns no sandbox write,
+    // renewal loop, lease, box, or exact-generation cleanup.
+    expect(resolves).toBe(1);
     expect(materializations).toBe(0);
+    expect(steps).toEqual(["credential-resolved"]);
 
     const boxes = await Promise.all(Array.from({ length: 8 }, () => provisioner.get()));
     await boxes[0]!.exec();
@@ -2685,6 +2692,37 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(resolves).toBe(1);
     expect(materializations).toBe(1);
     expect(steps).toEqual(["credential-resolved", "credential-materialized", "provider-operation"]);
+  });
+
+  test("activity prepares credential model context before turn input and reuses it lazily", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    const resolutionAt = source.indexOf(
+      "const initialRunCredentialMaterial = runCredentialResolver",
+    );
+    const modelNoteAt = source.indexOf(
+      "const runCredentialsNote = initialRunCredentialMaterial",
+      resolutionAt,
+    );
+    const turnInputAt = source.indexOf("const prepared = await turnInput(", modelNoteAt);
+    const provisionerAt = source.indexOf(
+      "turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
+      modelNoteAt,
+    );
+    const lazyCredentialAttachAt = source.indexOf(
+      "await attachRunCredentialRenewal(",
+      provisionerAt,
+    );
+    const lazyProvisionerPrefix = source.slice(provisionerAt, lazyCredentialAttachAt + 500);
+
+    expect(resolutionAt).toBeGreaterThan(-1);
+    expect(modelNoteAt).toBeGreaterThan(resolutionAt);
+    expect(turnInputAt).toBeGreaterThan(modelNoteAt);
+    expect(provisionerAt).toBeGreaterThan(modelNoteAt);
+    expect(lazyCredentialAttachAt).toBeGreaterThan(provisionerAt);
+    expect(lazyProvisionerPrefix).not.toContain("runCredentialResolver.resolve(");
+    expect(lazyProvisionerPrefix).toContain("initialRunCredentialMaterial");
   });
 
   test("deadline rotation uses only short anti-churn pacing", () => {

@@ -2122,10 +2122,10 @@ export function sandboxEstablishPolicyDecision(input: {
     return { policy: "eager", reason: "signed_file_resources" };
   }
   // Merely having a host run-credential resolver is not proof that this turn
-  // will use the sandbox. Resolve and materialize its attempt-bound secret
-  // material inside the existing first-operation provisioner instead. This
-  // keeps a chat-only turn free of credential fetch/decrypt work, lease rows,
-  // boxes, renewals, and cleanup while preserving the eager file paths above.
+  // will use the sandbox. Resolve its attempt-bound material before model input
+  // so auth-needed context remains deterministic, but defer every sandbox
+  // write, lease, renewal, and cleanup action to the first-operation
+  // provisioner. The eager file paths above remain unchanged.
   if (input.hasRunCredentialResolver) {
     return { policy: "on-demand", reason: "initial_run_credentials_deferred" };
   }
@@ -6756,20 +6756,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         reason: establishDecision.reason,
         backend: machinePrimary ? "selfhosted" : groupBoxBackend,
       });
-      // Eager-only requirements still resolve before setup exactly as before.
-      // The on-demand branch resolves inside createTurnSandboxProvisioner so a
-      // model-only turn never asks the host to fetch or decrypt credentials.
-      const initialRunCredentialMaterial =
-        runCredentialResolver && establishPolicy === "eager"
-          ? await waitForTurnOperation(
-              runCredentialResolver.resolve({
-                purpose: "provision",
-                forceRefresh: false,
-              }),
-              cancellationSignal,
-              undefined,
-            )
-          : null;
+      // Resolve once before model preparation so partial/auth-needed host state
+      // is available as bounded model context and reconnect UI even when an
+      // on-demand turn never provisions a box. Resolution alone performs no
+      // sandbox write or renewal; both paths reuse this exact material and the
+      // lazy path materializes it only inside its first-operation single-flight.
+      const initialRunCredentialMaterial = runCredentialResolver
+        ? await waitForTurnOperation(
+            runCredentialResolver.resolve({
+              purpose: "provision",
+              forceRefresh: false,
+            }),
+            cancellationSignal,
+            undefined,
+          )
+        : null;
       if (initialRunCredentialMaterial) {
         for (const payload of runCredentialAuthNeededPayloads(initialRunCredentialMaterial)) {
           publishedRunCredentialNotices.add(JSON.stringify(payload));
@@ -8471,19 +8472,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           async () => {
             throwIfWorkerShuttingDown();
             throwIfTurnCancelled();
-            // This resolution is intentionally inside the provisioner's
-            // memoized promise. Parallel first tool calls share one exact
-            // attempt/group-scoped fetch and no model-only turn invokes it.
-            const lazyRunCredentialMaterial = runCredentialResolver
-              ? await waitForTurnOperation(
-                  runCredentialResolver.resolve({
-                    purpose: "provision",
-                    forceRefresh: false,
-                  }),
-                  sandboxResumeSignal,
-                  undefined,
-                )
-              : null;
             const lazyGitCredentials =
               activeSandboxBackend === "selfhosted"
                 ? undefined
@@ -8530,10 +8518,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             await publishSandboxLifecycleEvents(provisioned);
             await attachRunCredentialRenewal(
               provisioned.established.session as RunCredentialCommandSession,
-              lazyRunCredentialMaterial,
+              initialRunCredentialMaterial,
               provisioned,
             );
-            const provisionedSetupSession = lazyRunCredentialMaterial
+            const provisionedSetupSession = initialRunCredentialMaterial
               ? withRunCredentialsSession(
                   provisioned.established.session as object,
                   input.sessionId,
