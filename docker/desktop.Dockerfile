@@ -331,7 +331,7 @@ RUN set -eux; \
     /opt/checkov/bin/pip install --no-cache-dir "checkov==${CHECKOV_VERSION}"; \
     ln -s /opt/checkov/bin/checkov /usr/local/bin/checkov; \
     checkov --version
-RUN set -eux; curl -fsSL https://aka.ms/InstallAzureCLIDeb | bash; az version
+RUN set -eux; curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL https://aka.ms/InstallAzureCLIDeb | bash; az version
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \
     install -d -m 0755 /etc/apt/keyrings; \

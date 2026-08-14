@@ -6719,6 +6719,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         runSettings.sandboxBackend === "selfhosted" && !machinePrimary
           ? settings.sandboxBackend
           : runSettings.sandboxBackend;
+      const groupBoxImage = rigProviderImageSourceImage(runSettings, groupBoxBackend);
       const sandboxCreationBackend: Settings["sandboxBackend"] =
         settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
           ? groupBoxBackend
@@ -7437,16 +7438,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   backend: groupBoxBackend,
                   os: session.sandboxOs,
                   environment: sandboxEnvironment,
-                  // IMAGE IS SHARED STATE (B3, Modal warm-box path only): the container image
+                  // IMAGE IS SHARED STATE (B3): the container image
                   // this run resolves. The lease stamps it + conflicts on a live shared box
                   // running a DIFFERENT image (solo → durable rotation; N-holders →
-                  // SandboxImageConflictError surfaced as an actionable turn error). Prefer
-                  // the explicit Modal image ref, else the docker image. The selfhosted branch
+                  // SandboxImageConflictError surfaced as an actionable turn error). Select
+                  // the image for the actual group-box backend; a configured Modal image must
+                  // never override a Docker run. The selfhosted branch
                   // (establishSelfhostedTurnSession) NEVER passes
-                  // an image — B3 lives only on this Modal else-branch.
-                  ...((runSettings.modalImageRef ?? runSettings.dockerImage)
+                  // an image — B3 lives only on this managed-box branch.
+                  ...(groupBoxImage
                     ? {
-                        image: runSettings.modalImageRef ?? runSettings.dockerImage,
+                        image: groupBoxImage,
                       }
                     : {}),
                   // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
@@ -8511,9 +8513,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 backend: groupBoxBackend,
                 os: session.sandboxOs,
                 environment: sandboxEnvironment,
-                ...((runSettings.modalImageRef ?? runSettings.dockerImage)
+                ...(groupBoxImage
                   ? {
-                      image: runSettings.modalImageRef ?? runSettings.dockerImage,
+                      image: groupBoxImage,
                     }
                   : {}),
                 // The lazy acquire must enforce the same frozen rig authority

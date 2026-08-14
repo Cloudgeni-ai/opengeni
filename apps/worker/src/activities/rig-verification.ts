@@ -501,7 +501,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       holderId,
       subjectId: null,
       backend: input.settings.sandboxBackend,
-      image: input.settings.modalImageRef ?? input.settings.dockerImage,
+      image: rigProviderImageSourceImage(input.settings, input.settings.sandboxBackend),
       rigVersionId: input.rigVersionId,
       leaseTtlMs: RIG_VERIFICATION_OWNER_TTL_MS,
       warmingLeaseTtlMs: RIG_VERIFICATION_OWNER_TTL_MS,
