@@ -6464,6 +6464,15 @@ export async function getCapabilityCatalogItem(
   });
 }
 
+function portableSkillManifestIdentity(manifest: Record<string, unknown>): string {
+  // The version column is already the immutable version identity. Older rows
+  // predate the duplicate manifest field, so including it in the digest would
+  // make an unchanged Skill conflict with itself after an upgrade.
+  const identity = { ...manifest };
+  delete identity.version;
+  return stableJson(identity);
+}
+
 /**
  * Install one immutable, already-validated Skill through the authoritative
  * Plugin/Skill-Facet ownership model. Repeating the same exact source is
@@ -6558,7 +6567,12 @@ export async function installPortableSkill(
           )
           .for("update")
           .limit(1);
-        if (versionByName && versionByName.manifestDigest !== manifestDigest) {
+        if (
+          versionByName &&
+          versionByName.manifestDigest !== manifestDigest &&
+          portableSkillManifestIdentity(versionByName.manifest) !==
+            portableSkillManifestIdentity(manifest)
+        ) {
           throw new Error(`Skill version ${version} conflicts with immutable stored content`);
         }
         let pluginVersion = versionByName;
