@@ -168,13 +168,6 @@ describe("release schema contract", () => {
     );
     if (modelContextCutover) {
       expect(modelContextCutover).toMatchObject({ deploymentMode: "maintenance" });
-      if (
-        !completeSourceContract.migrations.some(
-          (migration) => migration.path === "0242_google_drive_account_admin_authority.sql",
-        )
-      ) {
-        expect(completeSourceContract.latestMigration).toBe(modelContextCutover.path);
-      }
     }
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),

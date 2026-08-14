@@ -823,6 +823,13 @@ release evidence and cannot rehabilitate that source commit; stop that train
 and use a fresh, normally reviewed release-source PR instead of retrying or
 weakening admission.
 
+Immediately before merge, re-read `baseRefOid`, `headRefOid`, `state`, and
+`autoMergeRequest` from the PR and the exact-head review from the provider API.
+Require the PR to remain open, auto-merge to remain null, and the canonical
+review to bind the unchanged head with a strictly earlier provider timestamp;
+equal review and merge timestamps are not ordering evidence. Then merge with an
+exact head-SHA fence. Never rely on an earlier UI observation for this boundary.
+
 The exact source must separately have one successful GitHub Actions result for
 each required candidate check:
 `Typecheck and unit tests`, `Deployment artifacts`, and `Workload image
