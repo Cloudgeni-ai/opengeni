@@ -286,6 +286,8 @@ export async function completeApiIntegrationProviderOAuth(
     ) {
       throw new ProviderOAuthCallbackError("account_mismatch");
     }
+    await requireProviderOAuthGrant(deps, state);
+
     const existing = state.connectionId
       ? await getConnectionMetadata(deps.db, state.workspaceId, state.connectionId, state.subjectId)
       : null;

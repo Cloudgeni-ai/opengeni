@@ -173,6 +173,8 @@ function providerFixture(
   options: {
     googleTokenGate?: Promise<void>;
     googleTokenStarted?: () => void;
+    googleIdentityGate?: Promise<void>;
+    googleIdentityStarted?: () => void;
   } = {},
 ) {
   const googlePlans: TokenPlan[] = [];
@@ -227,6 +229,8 @@ function providerFixture(
       });
     }
     if (url.href === "https://openidconnect.googleapis.com/v1/userinfo") {
+      options.googleIdentityStarted?.();
+      await options.googleIdentityGate;
       return Response.json({
         sub: googlePrincipalId,
         email: "google.user@example.com",
@@ -430,6 +434,54 @@ describe("API Integration provider OAuth", () => {
       where account_id = ${managed.accountId} and subject_id = ${managed.subjectId}
     `;
     tokenGate.resolve();
+
+    const rejected = await pending;
+    expect(new URL(rejected.headers.get("location")!).searchParams.get("reason")).toBe(
+      "connection_conflict",
+    );
+    expect(fixture.tokenRequests).toHaveLength(1);
+    const persisted = await shared!.admin<Array<{ id: string; credential_encrypted: string }>>`
+      select id, credential_encrypted
+      from connections
+      where workspace_id = ${managed.workspaceId}
+        and subject_id is null
+        and provider_domain = 'www.googleapis.com'
+    `;
+    expect(persisted).toEqual([]);
+  }, 60_000);
+
+  test("rejects workspace Google Drive persistence when connections:write is lost after exchange", async () => {
+    if (!available) return;
+    const managed = await freshManagedWorkspace();
+    const identityGate = deferred();
+    const identityStarted = deferred();
+    const fixture = providerFixture({
+      googleIdentityGate: identityGate.promise,
+      googleIdentityStarted: identityStarted.resolve,
+    });
+    fixture.googlePlans.push({
+      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "must-not-persist-after-workspace-grant-loss",
+    });
+    const started = await start(
+      fixture,
+      managed,
+      {
+        definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+        ownership: "workspace",
+      },
+      ["account:admin", "connections:read", "connections:write", "workspace:read"],
+    );
+    expect(started.response.status).toBe(200);
+
+    const pending = callback(fixture, new URL(started.authorizationUrl).searchParams.get("state")!);
+    await identityStarted.promise;
+    await shared!.admin`
+      update workspace_memberships
+      set permissions = ${shared!.admin.json(["connections:read", "workspace:read"])}
+      where workspace_id = ${managed.workspaceId} and subject_id = ${managed.subjectId}
+    `;
+    identityGate.resolve();
 
     const rejected = await pending;
     expect(new URL(rejected.headers.get("location")!).searchParams.get("reason")).toBe(
