@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase } from "@opengeni/testing";
 import { randomUUID } from "node:crypto";
-import { sql } from "drizzle-orm";
+import { getTableName, sql } from "drizzle-orm";
 import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
+import postgres from "postgres";
 
 import {
   acquireLease,
@@ -68,7 +69,110 @@ const claimInvariantColumns = [
   "workspace_id",
 ] as const;
 
-async function expectSqlState(operation: PromiseLike<unknown>, code: string): Promise<void> {
+type ReferentialAction = "no action" | "restrict" | "cascade" | "set null" | "set default";
+
+type ProviderLossForeignKey = {
+  name: string;
+  columns: string[];
+  foreignTable: string;
+  foreignColumns: string[];
+  onDelete: ReferentialAction;
+  onUpdate: ReferentialAction;
+};
+
+const providerLossForeignKeys: ProviderLossForeignKey[] = [
+  {
+    name: "sandbox_provider_loss_receipts_admission_scope_fk",
+    columns: ["account_id", "workspace_id", "session_id", "lease_id", "admission_id"],
+    foreignTable: "sandbox_workspace_mutation_admissions",
+    foreignColumns: ["account_id", "workspace_id", "session_id", "lease_id", "id"],
+    onDelete: "restrict",
+    onUpdate: "no action",
+  },
+  {
+    name: "sandbox_provider_loss_receipts_claim_scope_fk",
+    columns: ["account_id", "workspace_id", "admission_id", "claim_id"],
+    foreignTable: "sandbox_provider_loss_teardown_claims",
+    foreignColumns: ["account_id", "workspace_id", "admission_id", "id"],
+    onDelete: "restrict",
+    onUpdate: "no action",
+  },
+  {
+    name: "sandbox_provider_loss_receipts_workspace_account_fk",
+    columns: ["workspace_id", "account_id"],
+    foreignTable: "workspaces",
+    foreignColumns: ["id", "account_id"],
+    onDelete: "cascade",
+    onUpdate: "no action",
+  },
+  {
+    name: "sandbox_provider_loss_receipts_workspace_session_fk",
+    columns: ["workspace_id", "session_id"],
+    foreignTable: "sessions",
+    foreignColumns: ["workspace_id", "id"],
+    onDelete: "restrict",
+    onUpdate: "no action",
+  },
+  {
+    name: "sandbox_provider_loss_teardown_claims_admission_scope_fk",
+    columns: ["account_id", "workspace_id", "session_id", "lease_id", "admission_id"],
+    foreignTable: "sandbox_workspace_mutation_admissions",
+    foreignColumns: ["account_id", "workspace_id", "session_id", "lease_id", "id"],
+    onDelete: "restrict",
+    onUpdate: "no action",
+  },
+  {
+    name: "sandbox_provider_loss_teardown_claims_workspace_account_fk",
+    columns: ["workspace_id", "account_id"],
+    foreignTable: "workspaces",
+    foreignColumns: ["id", "account_id"],
+    onDelete: "cascade",
+    onUpdate: "no action",
+  },
+  {
+    name: "sandbox_provider_loss_teardown_claims_workspace_session_fk",
+    columns: ["workspace_id", "session_id"],
+    foreignTable: "sessions",
+    foreignColumns: ["workspace_id", "id"],
+    onDelete: "restrict",
+    onUpdate: "no action",
+  },
+];
+
+const providerLossCheckExpressions = [
+  {
+    name: "sandbox_provider_loss_receipts_consume_check",
+    expression: "((consumed_at IS NULL) OR (consumed_at >= created_at))",
+  },
+  {
+    name: "sandbox_provider_loss_receipts_identity_check",
+    expression:
+      "((actor_kind = 'turn'::text) AND (actor_id = attempt_id) AND (holder_kind = 'turn'::text) AND (operation = 'codemodeTokenRenewal'::text) AND (lease_epoch >= 0) AND (workspace_generation > 0) AND (route_epoch >= 0) AND ((route_kind = 'active'::text) OR (route_target_id IS NULL)) AND (terminate_outcome = ANY (ARRAY['terminated'::text, 'not_found'::text])) AND ((octet_length(holder_id) >= 1) AND (octet_length(holder_id) <= 256)) AND ((octet_length(provider_backend) >= 1) AND (octet_length(provider_backend) <= 64)) AND ((octet_length(provider_instance_id) >= 1) AND (octet_length(provider_instance_id) <= 512)) AND ((octet_length(destruction_correlation_id) >= 1) AND (octet_length(destruction_correlation_id) <= 256)) AND (not_found_observed_at >= destruction_observed_at))",
+  },
+  {
+    name: "sandbox_provider_loss_teardown_claims_consume_check",
+    expression: "((consumed_at IS NULL) OR (consumed_at >= claimed_at))",
+  },
+  {
+    name: "sandbox_provider_loss_teardown_claims_identity_check",
+    expression:
+      "((actor_kind = 'turn'::text) AND (actor_id = attempt_id) AND (holder_kind = 'turn'::text) AND (operation = 'codemodeTokenRenewal'::text) AND (lease_epoch >= 0) AND (workspace_generation > 0) AND (route_epoch >= 0) AND ((route_kind = 'active'::text) OR (route_target_id IS NULL)) AND ((octet_length(holder_id) >= 1) AND (octet_length(holder_id) <= 256)) AND ((octet_length(provider_backend) >= 1) AND (octet_length(provider_backend) <= 64)) AND ((octet_length(provider_instance_id) >= 1) AND (octet_length(provider_instance_id) <= 512)))",
+  },
+];
+
+function normalizeSql(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function countOccurrences(value: string, needle: string): number {
+  return value.split(needle).length - 1;
+}
+
+async function expectSqlState(
+  operation: PromiseLike<unknown>,
+  code: string,
+  message?: string,
+): Promise<void> {
   let failure: unknown;
   try {
     await operation;
@@ -77,15 +181,25 @@ async function expectSqlState(operation: PromiseLike<unknown>, code: string): Pr
   }
   const seen = new Set<unknown>();
   let current = failure;
+  let matchingCode = false;
+  let matchingMessage = message === undefined;
   while (typeof current === "object" && current !== null && !seen.has(current)) {
     seen.add(current);
     if ("code" in current && typeof current.code === "string") {
-      expect(current.code).toBe(code);
-      return;
+      matchingCode ||= current.code === code;
+    }
+    if (
+      message !== undefined &&
+      "message" in current &&
+      typeof current.message === "string" &&
+      current.message.includes(message)
+    ) {
+      matchingMessage = true;
     }
     current = "cause" in current ? current.cause : undefined;
   }
-  expect(failure).toMatchObject({ code });
+  expect(matchingCode).toBe(true);
+  expect(matchingMessage).toBe(true);
 }
 
 describe("0240 provider-loss receipt protocol", () => {
@@ -94,17 +208,21 @@ describe("0240 provider-loss receipt protocol", () => {
     const claims = getTableConfig(sandboxProviderLossTeardownClaims);
     const receipts = getTableConfig(sandboxProviderLossReceipts);
 
-    expect(claims.foreignKeys.map((foreignKey) => foreignKey.getName()).sort()).toEqual([
-      "sandbox_provider_loss_teardown_claims_admission_scope_fk",
-      "sandbox_provider_loss_teardown_claims_workspace_account_fk",
-      "sandbox_provider_loss_teardown_claims_workspace_session_fk",
-    ]);
-    expect(receipts.foreignKeys.map((foreignKey) => foreignKey.getName()).sort()).toEqual([
-      "sandbox_provider_loss_receipts_admission_scope_fk",
-      "sandbox_provider_loss_receipts_claim_scope_fk",
-      "sandbox_provider_loss_receipts_workspace_account_fk",
-      "sandbox_provider_loss_receipts_workspace_session_fk",
-    ]);
+    expect(
+      [...claims.foreignKeys, ...receipts.foreignKeys]
+        .map((foreignKey) => {
+          const reference = foreignKey.reference();
+          return {
+            name: foreignKey.getName(),
+            columns: reference.columns.map((column) => column.name),
+            foreignTable: getTableName(reference.foreignTable),
+            foreignColumns: reference.foreignColumns.map((column) => column.name),
+            onDelete: foreignKey.onDelete,
+            onUpdate: foreignKey.onUpdate,
+          };
+        })
+        .sort((left, right) => left.name.localeCompare(right.name)),
+    ).toEqual(providerLossForeignKeys);
 
     const claimChecks = new Map(
       claims.checks.map((check) => [check.name, dialect.sqlToQuery(check.value).sql]),
@@ -120,22 +238,48 @@ describe("0240 provider-loss receipt protocol", () => {
       "sandbox_provider_loss_receipts_consume_check",
       "sandbox_provider_loss_receipts_identity_check",
     ]);
-    expect(claimChecks.get("sandbox_provider_loss_teardown_claims_consume_check")).toContain(
-      '"consumed_at" is null or "sandbox_provider_loss_teardown_claims"."consumed_at" >= "sandbox_provider_loss_teardown_claims"."claimed_at"',
+    expect(
+      normalizeSql(claimChecks.get("sandbox_provider_loss_teardown_claims_identity_check")!),
+    ).toBe(
+      normalizeSql(`
+          "sandbox_provider_loss_teardown_claims"."actor_kind" = 'turn'
+          and "sandbox_provider_loss_teardown_claims"."actor_id" = "sandbox_provider_loss_teardown_claims"."attempt_id"
+          and "sandbox_provider_loss_teardown_claims"."holder_kind" = 'turn'
+          and "sandbox_provider_loss_teardown_claims"."operation" = 'codemodeTokenRenewal'
+          and "sandbox_provider_loss_teardown_claims"."lease_epoch" >= 0
+          and "sandbox_provider_loss_teardown_claims"."workspace_generation" > 0
+          and "sandbox_provider_loss_teardown_claims"."route_epoch" >= 0
+          and ("sandbox_provider_loss_teardown_claims"."route_kind" = 'active' or "sandbox_provider_loss_teardown_claims"."route_target_id" is null)
+          and octet_length("sandbox_provider_loss_teardown_claims"."holder_id") between 1 and 256
+          and octet_length("sandbox_provider_loss_teardown_claims"."provider_backend") between 1 and 64
+          and octet_length("sandbox_provider_loss_teardown_claims"."provider_instance_id") between 1 and 512
+        `),
     );
-    const receiptIdentity = receiptChecks.get("sandbox_provider_loss_receipts_identity_check");
-    for (const predicate of [
-      `"actor_kind" = 'turn'`,
-      '"actor_id" = "sandbox_provider_loss_receipts"."attempt_id"',
-      `"holder_kind" = 'turn'`,
-      `"operation" = 'codemodeTokenRenewal'`,
-      `"terminate_outcome" in ('terminated', 'not_found')`,
-      '"not_found_observed_at" >= "sandbox_provider_loss_receipts"."destruction_observed_at"',
-    ]) {
-      expect(receiptIdentity).toContain(predicate);
-    }
-    expect(receiptChecks.get("sandbox_provider_loss_receipts_consume_check")).toContain(
-      '"consumed_at" is null or "sandbox_provider_loss_receipts"."consumed_at" >= "sandbox_provider_loss_receipts"."created_at"',
+    expect(
+      normalizeSql(claimChecks.get("sandbox_provider_loss_teardown_claims_consume_check")!),
+    ).toBe(
+      '"sandbox_provider_loss_teardown_claims"."consumed_at" is null or "sandbox_provider_loss_teardown_claims"."consumed_at" >= "sandbox_provider_loss_teardown_claims"."claimed_at"',
+    );
+    expect(normalizeSql(receiptChecks.get("sandbox_provider_loss_receipts_identity_check")!)).toBe(
+      normalizeSql(`
+        "sandbox_provider_loss_receipts"."actor_kind" = 'turn'
+        and "sandbox_provider_loss_receipts"."actor_id" = "sandbox_provider_loss_receipts"."attempt_id"
+        and "sandbox_provider_loss_receipts"."holder_kind" = 'turn'
+        and "sandbox_provider_loss_receipts"."operation" = 'codemodeTokenRenewal'
+        and "sandbox_provider_loss_receipts"."lease_epoch" >= 0
+        and "sandbox_provider_loss_receipts"."workspace_generation" > 0
+        and "sandbox_provider_loss_receipts"."route_epoch" >= 0
+        and ("sandbox_provider_loss_receipts"."route_kind" = 'active' or "sandbox_provider_loss_receipts"."route_target_id" is null)
+        and "sandbox_provider_loss_receipts"."terminate_outcome" in ('terminated', 'not_found')
+        and octet_length("sandbox_provider_loss_receipts"."holder_id") between 1 and 256
+        and octet_length("sandbox_provider_loss_receipts"."provider_backend") between 1 and 64
+        and octet_length("sandbox_provider_loss_receipts"."provider_instance_id") between 1 and 512
+        and octet_length("sandbox_provider_loss_receipts"."destruction_correlation_id") between 1 and 256
+        and "sandbox_provider_loss_receipts"."not_found_observed_at" >= "sandbox_provider_loss_receipts"."destruction_observed_at"
+      `),
+    );
+    expect(normalizeSql(receiptChecks.get("sandbox_provider_loss_receipts_consume_check")!)).toBe(
+      '"sandbox_provider_loss_receipts"."consumed_at" is null or "sandbox_provider_loss_receipts"."consumed_at" >= "sandbox_provider_loss_receipts"."created_at"',
     );
   });
 
@@ -286,31 +430,69 @@ describe("0240 provider-loss receipt protocol", () => {
         "sandbox_workspace_mutation_admissions_outcome_check",
         "sandbox_workspace_mutation_admissions_settlement_check",
       ]);
+      const physicalForeignKeys = await shared.admin<ProviderLossForeignKey[]>`
+        select
+          source_constraint.conname as name,
+          array(
+            select attribute.attname
+            from unnest(source_constraint.conkey) with ordinality key(attnum, position)
+            join pg_attribute attribute
+              on attribute.attrelid = source_constraint.conrelid
+             and attribute.attnum = key.attnum
+            order by key.position
+          ) as columns,
+          foreign_table.relname as "foreignTable",
+          array(
+            select attribute.attname
+            from unnest(source_constraint.confkey) with ordinality key(attnum, position)
+            join pg_attribute attribute
+              on attribute.attrelid = source_constraint.confrelid
+             and attribute.attnum = key.attnum
+            order by key.position
+          ) as "foreignColumns",
+          case source_constraint.confdeltype
+            when 'a' then 'no action'
+            when 'r' then 'restrict'
+            when 'c' then 'cascade'
+            when 'n' then 'set null'
+            when 'd' then 'set default'
+          end as "onDelete",
+          case source_constraint.confupdtype
+            when 'a' then 'no action'
+            when 'r' then 'restrict'
+            when 'c' then 'cascade'
+            when 'n' then 'set null'
+            when 'd' then 'set default'
+          end as "onUpdate"
+        from pg_constraint source_constraint
+        join pg_class foreign_table on foreign_table.oid = source_constraint.confrelid
+        where source_constraint.conname like 'sandbox_provider_loss%_fk'
+        order by source_constraint.conname
+      `;
+      expect(Array.from(physicalForeignKeys)).toEqual(providerLossForeignKeys);
+
+      const physicalCheckExpressions = await shared.admin<
+        Array<{ name: string; expression: string }>
+      >`
+        select conname as name,
+               regexp_replace(pg_get_expr(conbin, conrelid), '\\s+', ' ', 'g') as expression
+        from pg_constraint
+        where conname in (
+          'sandbox_provider_loss_teardown_claims_identity_check',
+          'sandbox_provider_loss_teardown_claims_consume_check',
+          'sandbox_provider_loss_receipts_identity_check',
+          'sandbox_provider_loss_receipts_consume_check'
+        )
+        order by conname
+      `;
+      expect(Array.from(physicalCheckExpressions)).toEqual(providerLossCheckExpressions);
+
       expect(constraints.find((row) => row.name.endsWith("outcome_check"))?.definition).toContain(
         "unknown",
       );
       expect(
         constraints.find((row) => row.name.endsWith("settlement_check"))?.definition,
       ).toContain("unknown");
-      expect(
-        constraints.find((row) => row.name.endsWith("teardown_claims_consume_check"))?.definition,
-      ).toContain("consumed_at >= claimed_at");
-      expect(
-        constraints.find((row) => row.name.endsWith("receipts_consume_check"))?.definition,
-      ).toContain("consumed_at >= created_at");
-      const receiptIdentity = constraints.find((row) =>
-        row.name.endsWith("provider_loss_receipts_identity_check"),
-      )?.definition;
-      for (const predicate of [
-        "actor_kind = 'turn'::text",
-        "actor_id = attempt_id",
-        "holder_kind = 'turn'::text",
-        "operation = 'codemodeTokenRenewal'::text",
-        "terminate_outcome = ANY",
-        "not_found_observed_at >= destruction_observed_at",
-      ]) {
-        expect(receiptIdentity).toContain(predicate);
-      }
 
       const triggers = await shared.admin<{ name: string; tableName: string }[]>`
         select trigger.tgname as name, target.relname as "tableName"
@@ -447,6 +629,83 @@ describe("0240 provider-loss receipt protocol", () => {
       });
       expect(transitionDigestFunction?.source).toContain("digest(");
       expect(transitionDigestFunction?.source).toContain("SET search_path TO 'pg_catalog'");
+      const [dataSchema] = await shared.admin<Array<{ quoted: string }>>`
+        select quote_ident(current_schema()) as quoted
+      `;
+      const relationFunctions = await shared.admin<
+        Array<{
+          name: string;
+          securityDefiner: boolean;
+          config: string[] | null;
+          source: string;
+        }>
+      >`
+        select p.proname as name,
+               p.prosecdef as "securityDefiner",
+               p.proconfig as config,
+               pg_get_functiondef(p.oid) as source
+        from pg_proc p
+        join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'opengeni_private'
+          and p.proname in (
+            'validate_sandbox_retained_process_v2',
+            'guard_provider_loss_claim_fence',
+            'guard_provider_loss_lease_mutation'
+          )
+        order by p.proname
+      `;
+      expect(relationFunctions.map((fn) => fn.name)).toEqual([
+        "guard_provider_loss_claim_fence",
+        "guard_provider_loss_lease_mutation",
+        "validate_sandbox_retained_process_v2",
+      ]);
+      for (const fn of relationFunctions) {
+        expect(fn.config).toEqual(["search_path=pg_catalog"]);
+        expect(fn.source).toContain("SET search_path TO 'pg_catalog'");
+      }
+      expect(
+        relationFunctions.find((fn) => fn.name === "validate_sandbox_retained_process_v2")
+          ?.securityDefiner,
+      ).toBe(false);
+      for (const name of [
+        "guard_provider_loss_claim_fence",
+        "guard_provider_loss_lease_mutation",
+      ]) {
+        expect(relationFunctions.find((fn) => fn.name === name)?.securityDefiner).toBe(true);
+      }
+      const retainedValidatorSource = relationFunctions.find(
+        (fn) => fn.name === "validate_sandbox_retained_process_v2",
+      )!.source;
+      expect(
+        countOccurrences(
+          retainedValidatorSource,
+          `${dataSchema!.quoted}.sandbox_workspace_mutation_admissions`,
+        ),
+      ).toBe(2);
+      expect(
+        countOccurrences(retainedValidatorSource, `${dataSchema!.quoted}.sandbox_lease_holders`),
+      ).toBe(2);
+      expect(
+        countOccurrences(retainedValidatorSource, `${dataSchema!.quoted}.sandbox_pty_sessions`),
+      ).toBe(1);
+      const claimFenceSource = relationFunctions.find(
+        (fn) => fn.name === "guard_provider_loss_claim_fence",
+      )!.source;
+      expect(
+        countOccurrences(
+          claimFenceSource,
+          `${dataSchema!.quoted}.sandbox_provider_loss_teardown_claims`,
+        ),
+      ).toBe(1);
+      const leaseFenceSource = relationFunctions.find(
+        (fn) => fn.name === "guard_provider_loss_lease_mutation",
+      )!.source;
+      expect(
+        countOccurrences(
+          leaseFenceSource,
+          `${dataSchema!.quoted}.sandbox_provider_loss_teardown_claims`,
+        ),
+      ).toBe(3);
       const leaseColumns = await shared.admin<Array<{ columnName: string }>>`
         select column_name as "columnName"
         from information_schema.columns
@@ -474,27 +733,6 @@ describe("0240 provider-loss receipt protocol", () => {
       `;
       expect(leaseMutationTrigger?.definition).toContain("BEFORE UPDATE ON");
       expect(leaseMutationTrigger?.definition).not.toContain("UPDATE OF");
-      const securityFunctions = await shared.admin<
-        {
-          name: string;
-          securityDefiner: boolean;
-          config: string[] | null;
-        }[]
-      >`
-        select p.proname as name,
-               p.prosecdef as "securityDefiner",
-               p.proconfig as config
-        from pg_proc p
-        join pg_namespace n on n.oid = p.pronamespace
-        where n.nspname = 'opengeni_private'
-          and p.proname in ('guard_provider_loss_claim_fence', 'guard_provider_loss_lease_mutation')
-        order by p.proname
-      `;
-      expect(securityFunctions).toHaveLength(2);
-      for (const fn of securityFunctions) {
-        expect(fn.securityDefiner).toBe(true);
-        expect(fn.config?.some((entry) => entry.startsWith("search_path=pg_catalog,"))).toBe(true);
-      }
     } finally {
       await shared.release();
     }
@@ -736,6 +974,155 @@ describe("0240 provider-loss receipt protocol", () => {
           terminateOutcome: "not_found",
         }),
       ).toEqual({ status: "rejected", reason: "provider_identity_mismatch" });
+
+      const admin = shared.admin;
+      const withHostileClaimShadow = async (
+        operation: (tx: postgres.TransactionSql) => Promise<void>,
+      ): Promise<void> =>
+        await admin.begin(async (tx) => {
+          await tx`
+            create temporary table sandbox_provider_loss_teardown_claims (
+              lease_id uuid not null,
+              consumed_at timestamptz
+            ) on commit drop
+          `;
+          await tx`set local search_path = pg_temp, public`;
+          await operation(tx);
+        });
+
+      await expectSqlState(
+        withHostileClaimShadow(async (tx) => {
+          await tx`
+            insert into sandbox_workspace_mutation_admissions
+              (id, account_id, workspace_id, lease_id, sandbox_group_id, session_id,
+               actor_kind, actor_id, holder_kind, holder_id, lease_epoch, provider_backend,
+               provider_instance_id, route_kind, route_target_id, route_epoch,
+               workspace_generation, operation)
+            values
+              (${randomUUID()}, ${account!.id}, ${workspace!.id}, ${leaseId},
+               ${session.sandboxGroupId}, ${session.id}, 'direct', ${randomUUID()}, 'direct',
+               'provider-loss-hostile-admission', 7, 'modal', ${providerInstanceId},
+               'home', null, 0, 2, 'provider-loss-hostile')
+          `;
+        }),
+        "55000",
+        "provider-loss teardown claim fences new lease mutations",
+      );
+      await expectSqlState(
+        withHostileClaimShadow(async (tx) => {
+          await tx`
+            insert into sandbox_lease_holders
+              (account_id, workspace_id, lease_id, kind, holder_id, subject_id)
+            values
+              (${account!.id}, ${workspace!.id}, ${leaseId}, 'viewer',
+               'provider-loss-hostile-holder', ${session.id})
+          `;
+        }),
+        "55000",
+        "provider-loss teardown claim fences new lease mutations",
+      );
+      await expectSqlState(
+        withHostileClaimShadow(async (tx) => {
+          await tx`
+            insert into sandbox_retained_processes
+              (id, account_id, workspace_id, session_id, lease_id, sandbox_group_id,
+               parent_admission_id, holder_id, owner_actor_kind, owner_actor_id,
+               lease_epoch, provider_backend, provider_instance_id, route_kind,
+               route_target_id, route_epoch, provider_session_id)
+            values
+              (${randomUUID()}, ${account!.id}, ${workspace!.id}, ${session.id}, ${leaseId},
+               ${session.sandboxGroupId}, ${admissionId}, 'provider-loss-hostile-process',
+               'direct', ${randomUUID()}, 7, 'modal', ${providerInstanceId}, 'home', null, 0, 2)
+          `;
+        }),
+        "55000",
+        "provider-loss teardown claim fences new lease mutations",
+      );
+      await expectSqlState(
+        withHostileClaimShadow(async (tx) => {
+          await tx`
+            update sandbox_leases
+            set lease_epoch = lease_epoch + 1
+            where id = ${leaseId}::uuid
+          `;
+        }),
+        "55000",
+        "provider-loss teardown claim fences lease lifecycle mutation",
+      );
+      await expectSqlState(
+        withHostileClaimShadow(async (tx) => {
+          await tx`delete from sandbox_leases where id = ${leaseId}::uuid`;
+        }),
+        "55000",
+        "provider-loss teardown claim fences lease deletion",
+      );
+
+      const hostileRollback = new Error("rollback hostile provider-loss transition probe");
+      try {
+        await withHostileClaimShadow(async (tx) => {
+          await tx`
+            insert into pg_temp.sandbox_provider_loss_teardown_claims (lease_id, consumed_at)
+            values (${cleanAcquire.lease.id}::uuid, null)
+          `;
+          await tx`
+            insert into sandbox_lease_holders
+              (account_id, workspace_id, lease_id, kind, holder_id, subject_id)
+            values
+              (${account!.id}, ${workspace!.id}, ${cleanAcquire.lease.id}::uuid, 'viewer',
+               'provider-loss-temp-only-fake-claim', ${session.id}::uuid)
+          `;
+          await tx`
+            select set_config('opengeni.sandbox_provider_loss_claim_id', ${claimId}, true)
+          `;
+          await tx`
+            select set_config(
+              'opengeni.sandbox_provider_loss_transition_sha256',
+              opengeni_private.provider_loss_transition_sha256(
+                jsonb_build_object(
+                  'resumeBackendId', 'modal'::text,
+                  'resumeState', '{}'::jsonb
+                )
+              ),
+              true
+            )
+          `;
+          const [hostileTransition] = await tx<Array<{ liveness: string; leaseEpoch: number }>>`
+            update sandbox_leases set
+              liveness = 'cold',
+              instance_id = null,
+              data_plane_url = null,
+              terminal_data_plane_url = null,
+              controller_data_plane_url = null,
+              lease_epoch = lease_epoch + 1,
+              reaper_hold_id = null,
+              reaper_hold_until = null,
+              reaper_hold_reason = null,
+              resume_state = '{}'::jsonb,
+              resume_backend_id = 'modal',
+              provider_created_at = null,
+              provider_deadline_at = null,
+              rotation_requested_at = null,
+              rotation_reason = null,
+              archive_capture_id = null,
+              archive_capture_operation_id = null,
+              archive_capture_provider_request_id = null,
+              archive_capture_provider_replay_safe = false,
+              archive_capture_takeover_safe = false,
+              archive_capture_attempt = null,
+              archive_capture_generation = null,
+              archive_capture_started_at = null,
+              archive_capture_deadline_at = null,
+              archive_capture_published_at = null,
+              updated_at = now()
+            where id = ${leaseId}::uuid
+            returning liveness, lease_epoch as "leaseEpoch"
+          `;
+          expect(hostileTransition).toEqual({ liveness: "cold", leaseEpoch: 8 });
+          throw hostileRollback;
+        });
+      } catch (error) {
+        expect(error).toBe(hostileRollback);
+      }
 
       await shared.admin`
         update sandbox_leases set updated_at = now() where id = ${leaseId}::uuid`;
@@ -1306,6 +1693,31 @@ describe("0240 provider-loss receipt protocol", () => {
       expect(state?.claim_consumed_at).toBeTruthy();
       expect(state?.receipt_consumed_at).toBeTruthy();
       expect(state).toMatchObject({ liveness: "cold", lease_epoch: 8 });
+
+      const lostProcessId = randomUUID();
+      await shared.admin`
+        insert into sandbox_retained_processes
+          (id, account_id, workspace_id, session_id, lease_id, sandbox_group_id,
+           parent_admission_id, holder_id, owner_actor_kind, owner_actor_id,
+           owner_turn_id, owner_attempt_id, owner_execution_generation,
+           lease_epoch, provider_backend, provider_instance_id, route_kind,
+           route_target_id, route_epoch, provider_session_id, state,
+           settlement_reason, settled_at)
+        values
+          (${lostProcessId}, ${account!.id}, ${workspace!.id}, ${session.id}, ${leaseId},
+           ${session.sandboxGroupId}, ${admissionId}, ${`turn-attempt:${attemptId}`}, 'turn',
+           ${attemptId}, ${turn!.id}, ${attemptId}, ${turn!.execution_generation}, 7, 'modal',
+           ${providerInstanceId}, 'home', null, 0, 3, 'lost', 'provider_loss', now())
+      `;
+      await expectSqlState(
+        shared.admin`
+          update sandbox_retained_processes
+          set state = 'exited', exit_code = 0, settlement_reason = 'provider_exit'
+          where id = ${lostProcessId}::uuid
+        `,
+        "55000",
+        "unknown provider outcome cannot be exited",
+      );
 
       await shared.admin`
         update sandbox_leases set

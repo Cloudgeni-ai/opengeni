@@ -22,76 +22,87 @@ ALTER TABLE sandbox_workspace_mutation_admissions
 
 -- Unknown is a terminal outcome only for a provider-loss path. Retained
 -- processes may therefore be marked lost against unknown, but never exited.
-CREATE OR REPLACE FUNCTION opengeni_private.validate_sandbox_retained_process_v2()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
+DO $retained_process_validator$
+DECLARE data_schema text := current_schema();
 BEGIN
-  IF NOT EXISTS (
-    SELECT 1
-    FROM sandbox_workspace_mutation_admissions admission
-    WHERE admission.id = NEW.parent_admission_id
-      AND admission.account_id = NEW.account_id
-      AND admission.workspace_id = NEW.workspace_id
-      AND admission.session_id = NEW.session_id
-      AND admission.lease_id = NEW.lease_id
-      AND admission.sandbox_group_id = NEW.sandbox_group_id
-      AND admission.actor_kind = NEW.owner_actor_kind
-      AND admission.actor_id = NEW.owner_actor_id
-      AND admission.turn_id IS NOT DISTINCT FROM NEW.owner_turn_id
-      AND admission.attempt_id IS NOT DISTINCT FROM NEW.owner_attempt_id
-      AND admission.execution_generation IS NOT DISTINCT FROM NEW.owner_execution_generation
-      AND admission.lease_epoch = NEW.lease_epoch
-      AND admission.provider_backend = NEW.provider_backend
-      AND admission.provider_instance_id = NEW.provider_instance_id
-      AND admission.route_kind = NEW.route_kind
-      AND admission.route_target_id IS NOT DISTINCT FROM NEW.route_target_id
-      AND admission.route_epoch = NEW.route_epoch
-      AND (
-        (
-          NEW.state = 'active'
-          AND admission.provider_outcome = 'retained'
-          AND admission.settled_at IS NULL
-          AND EXISTS (
-            SELECT 1 FROM sandbox_lease_holders holder
-            WHERE holder.lease_id = NEW.lease_id
-              AND holder.account_id = NEW.account_id
-              AND holder.workspace_id = NEW.workspace_id
-              AND holder.kind = 'process'
-              AND holder.holder_id = NEW.holder_id
-              AND holder.subject_id = NEW.session_id
-          )
-        ) OR (
-          NEW.state IN ('exited', 'lost')
-          AND admission.provider_outcome IN ('resolved', 'rejected', 'unknown')
-          AND admission.settled_at IS NOT NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM sandbox_lease_holders holder
-            WHERE holder.lease_id = NEW.lease_id
-              AND holder.kind = 'process'
-              AND holder.holder_id = NEW.holder_id
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM sandbox_pty_sessions pty
-            WHERE pty.retained_process_id = NEW.id
-              AND pty.status = 'open'
-          )
-        )
-      )
-  ) THEN
-    RAISE EXCEPTION 'retained process does not match its parent admission and holder state'
-      USING ERRCODE = '55000';
-  END IF;
-  IF NEW.state = 'exited' AND EXISTS (
-    SELECT 1 FROM sandbox_workspace_mutation_admissions admission
-    WHERE admission.id = NEW.parent_admission_id AND admission.provider_outcome = 'unknown'
-  ) THEN
-    RAISE EXCEPTION 'unknown provider outcome cannot be exited'
-      USING ERRCODE = '55000';
-  END IF;
-  RETURN NEW;
-END;
-$$;
+  EXECUTE format(
+    $function$
+      CREATE OR REPLACE FUNCTION opengeni_private.validate_sandbox_retained_process_v2()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      SET search_path = pg_catalog
+      AS $body$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM %1$I.sandbox_workspace_mutation_admissions admission
+          WHERE admission.id = NEW.parent_admission_id
+            AND admission.account_id = NEW.account_id
+            AND admission.workspace_id = NEW.workspace_id
+            AND admission.session_id = NEW.session_id
+            AND admission.lease_id = NEW.lease_id
+            AND admission.sandbox_group_id = NEW.sandbox_group_id
+            AND admission.actor_kind = NEW.owner_actor_kind
+            AND admission.actor_id = NEW.owner_actor_id
+            AND admission.turn_id IS NOT DISTINCT FROM NEW.owner_turn_id
+            AND admission.attempt_id IS NOT DISTINCT FROM NEW.owner_attempt_id
+            AND admission.execution_generation IS NOT DISTINCT FROM NEW.owner_execution_generation
+            AND admission.lease_epoch = NEW.lease_epoch
+            AND admission.provider_backend = NEW.provider_backend
+            AND admission.provider_instance_id = NEW.provider_instance_id
+            AND admission.route_kind = NEW.route_kind
+            AND admission.route_target_id IS NOT DISTINCT FROM NEW.route_target_id
+            AND admission.route_epoch = NEW.route_epoch
+            AND (
+              (
+                NEW.state = 'active'
+                AND admission.provider_outcome = 'retained'
+                AND admission.settled_at IS NULL
+                AND EXISTS (
+                  SELECT 1 FROM %1$I.sandbox_lease_holders holder
+                  WHERE holder.lease_id = NEW.lease_id
+                    AND holder.account_id = NEW.account_id
+                    AND holder.workspace_id = NEW.workspace_id
+                    AND holder.kind = 'process'
+                    AND holder.holder_id = NEW.holder_id
+                    AND holder.subject_id = NEW.session_id
+                )
+              ) OR (
+                NEW.state IN ('exited', 'lost')
+                AND admission.provider_outcome IN ('resolved', 'rejected', 'unknown')
+                AND admission.settled_at IS NOT NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM %1$I.sandbox_lease_holders holder
+                  WHERE holder.lease_id = NEW.lease_id
+                    AND holder.kind = 'process'
+                    AND holder.holder_id = NEW.holder_id
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM %1$I.sandbox_pty_sessions pty
+                  WHERE pty.retained_process_id = NEW.id
+                    AND pty.status = 'open'
+                )
+              )
+            )
+        ) THEN
+          RAISE EXCEPTION 'retained process does not match its parent admission and holder state'
+            USING ERRCODE = '55000';
+        END IF;
+        IF NEW.state = 'exited' AND EXISTS (
+          SELECT 1 FROM %1$I.sandbox_workspace_mutation_admissions admission
+          WHERE admission.id = NEW.parent_admission_id AND admission.provider_outcome = 'unknown'
+        ) THEN
+          RAISE EXCEPTION 'unknown provider outcome cannot be exited'
+            USING ERRCODE = '55000';
+        END IF;
+        RETURN NEW;
+      END;
+      $body$;
+    $function$,
+    data_schema
+  );
+END
+$retained_process_validator$;
 
 CREATE TABLE sandbox_provider_loss_teardown_claims (
   id uuid PRIMARY KEY NOT NULL,
@@ -313,26 +324,37 @@ CREATE TRIGGER sandbox_recovery_protocol_v2_provider_loss_receipt_guard
 BEFORE INSERT OR UPDATE OR DELETE ON sandbox_provider_loss_receipts
 FOR EACH ROW EXECUTE FUNCTION opengeni_private.enforce_sandbox_recovery_protocol_v2();
 
-CREATE OR REPLACE FUNCTION opengeni_private.guard_provider_loss_claim_fence()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
+DO $provider_loss_claim_fence$
+DECLARE data_schema text := current_schema();
 BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM sandbox_provider_loss_teardown_claims claim
-    WHERE claim.consumed_at IS NULL
-      AND (
-        claim.lease_id = NEW.lease_id
-        OR (TG_OP = 'UPDATE' AND claim.lease_id = OLD.lease_id)
-      )
-  ) THEN
-    RAISE EXCEPTION 'provider-loss teardown claim fences new lease mutations'
-      USING ERRCODE = '55000';
-  END IF;
-  RETURN NEW;
-END;
-$$;
+  EXECUTE format(
+    $function$
+      CREATE OR REPLACE FUNCTION opengeni_private.guard_provider_loss_claim_fence()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      SET search_path = pg_catalog
+      AS $body$
+      BEGIN
+        IF EXISTS (
+          SELECT 1
+          FROM %1$I.sandbox_provider_loss_teardown_claims claim
+          WHERE claim.consumed_at IS NULL
+            AND (
+              claim.lease_id = NEW.lease_id
+              OR (TG_OP = 'UPDATE' AND claim.lease_id = OLD.lease_id)
+            )
+        ) THEN
+          RAISE EXCEPTION 'provider-loss teardown claim fences new lease mutations'
+            USING ERRCODE = '55000';
+        END IF;
+        RETURN NEW;
+      END;
+      $body$;
+    $function$,
+    data_schema
+  );
+END
+$provider_loss_claim_fence$;
 
 CREATE TRIGGER sandbox_provider_loss_claim_admission_fence
 BEFORE INSERT ON sandbox_workspace_mutation_admissions
@@ -383,11 +405,17 @@ BEGIN
 END
 $provider_loss_transition_sha256$;
 
-CREATE OR REPLACE FUNCTION opengeni_private.guard_provider_loss_lease_mutation()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-DECLARE
+DO $provider_loss_lease_guard$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format(
+    $function$
+      CREATE OR REPLACE FUNCTION opengeni_private.guard_provider_loss_lease_mutation()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      SET search_path = pg_catalog
+      AS $body$
+      DECLARE
   atomic_claim_id text := nullif(current_setting('opengeni.sandbox_provider_loss_claim_id', true), '');
   atomic_transition_sha256 text := nullif(
     current_setting('opengeni.sandbox_provider_loss_transition_sha256', true),
@@ -399,7 +427,7 @@ BEGIN
   IF TG_OP = 'DELETE' THEN
     IF EXISTS (
       SELECT 1
-      FROM sandbox_provider_loss_teardown_claims claim
+      FROM %1$I.sandbox_provider_loss_teardown_claims claim
       WHERE claim.lease_id = OLD.id
         AND claim.consumed_at IS NULL
     ) THEN
@@ -411,7 +439,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1
-    FROM sandbox_provider_loss_teardown_claims claim
+    FROM %1$I.sandbox_provider_loss_teardown_claims claim
     WHERE claim.lease_id = OLD.id
       AND claim.consumed_at IS NULL
   ) THEN
@@ -445,7 +473,7 @@ BEGIN
     )
     AND EXISTS (
       SELECT 1
-      FROM sandbox_provider_loss_teardown_claims claim
+      FROM %1$I.sandbox_provider_loss_teardown_claims claim
       WHERE claim.id = atomic_claim_id::uuid
         AND claim.account_id::text = old_row ->> 'account_id'
         AND claim.workspace_id::text = old_row ->> 'workspace_id'
@@ -575,20 +603,20 @@ BEGIN
       USING ERRCODE = '55000';
   END IF;
   RETURN NEW;
-END;
-$$;
+      END;
+      $body$;
+    $function$,
+    data_schema
+  );
+END
+$provider_loss_lease_guard$;
 
 DO $security$
-DECLARE data_schema text := current_schema();
 BEGIN
-  EXECUTE format(
-    'ALTER FUNCTION opengeni_private.guard_provider_loss_claim_fence() SECURITY DEFINER SET search_path = pg_catalog, %I',
-    data_schema
-  );
-  EXECUTE format(
-    'ALTER FUNCTION opengeni_private.guard_provider_loss_lease_mutation() SECURITY DEFINER SET search_path = pg_catalog, %I',
-    data_schema
-  );
+  ALTER FUNCTION opengeni_private.guard_provider_loss_claim_fence()
+    SECURITY DEFINER SET search_path = pg_catalog;
+  ALTER FUNCTION opengeni_private.guard_provider_loss_lease_mutation()
+    SECURITY DEFINER SET search_path = pg_catalog;
   REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_claim_mutation() FROM PUBLIC;
   REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_receipt_mutation() FROM PUBLIC;
   REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_claim_fence() FROM PUBLIC;
