@@ -328,9 +328,21 @@ pub fn windows_recovery_command() -> String {
 #[must_use]
 pub fn systemd_unit_path(scope: ServiceScope, home: &std::path::Path) -> PathBuf {
     match scope {
-        ServiceScope::User => home.join(".config/systemd/user").join(ids::SYSTEMD_UNIT),
-        ServiceScope::System => PathBuf::from("/etc/systemd/system").join(ids::SYSTEMD_UNIT),
+        ServiceScope::User => systemd_user_unit_path(home),
+        ServiceScope::System => systemd_system_unit_path(),
     }
+}
+
+/// Returns the per-user systemd unit path.
+#[must_use]
+pub fn systemd_user_unit_path(home: &std::path::Path) -> PathBuf {
+    home.join(".config/systemd/user").join(ids::SYSTEMD_UNIT)
+}
+
+/// Returns the system-wide systemd unit path without requiring a home directory.
+#[must_use]
+pub fn systemd_system_unit_path() -> PathBuf {
+    PathBuf::from("/etc/systemd/system").join(ids::SYSTEMD_UNIT)
 }
 
 /// The macOS LaunchAgent plist path.
@@ -498,10 +510,14 @@ mod tests {
         let home = std::path::Path::new("/home/user");
         assert_eq!(
             systemd_unit_path(ServiceScope::User, home),
-            PathBuf::from("/home/user/.config/systemd/user/opengeni-agent.service")
+            systemd_user_unit_path(home)
         );
         assert_eq!(
             systemd_unit_path(ServiceScope::System, home),
+            systemd_system_unit_path()
+        );
+        assert_eq!(
+            systemd_system_unit_path(),
             PathBuf::from("/etc/systemd/system/opengeni-agent.service")
         );
     }

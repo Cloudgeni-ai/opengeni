@@ -123,6 +123,13 @@ fn home() -> Result<PathBuf, String> {
         .ok_or_else(|| "could not resolve a home directory ($HOME/$USERPROFILE)".to_string())
 }
 
+fn systemd_unit_path_for_scope(install_scope: ServiceScope) -> Result<PathBuf, String> {
+    match install_scope {
+        ServiceScope::User => Ok(service::systemd_user_unit_path(&home()?)),
+        ServiceScope::System => Ok(service::systemd_system_unit_path()),
+    }
+}
+
 fn spec_for(install_scope: ServiceScope) -> Result<ServiceSpec, String> {
     Ok(ServiceSpec {
         binary_path: binary_path()?,
@@ -237,7 +244,7 @@ fn find_live_managed_systemd_scope(
             "--value",
         ]);
         let fragment = capture_systemctl(&fragment_args)?;
-        let canonical_fragment = service::systemd_unit_path(install_scope, &home()?);
+        let canonical_fragment = systemd_unit_path_for_scope(install_scope)?;
         if !systemd_show_path_matches(&fragment, &canonical_fragment) {
             continue;
         }
@@ -282,7 +289,7 @@ fn migrate_legacy_systemd_unit(
         return Ok(false);
     }
 
-    remove_legacy_opengeni_control_dropins(install_scope, &home()?)?;
+    remove_legacy_opengeni_control_dropins(install_scope)?;
     atomic_replace_managed_unit(unit_path, &service::render_systemd_unit(spec))?;
     let scope_prefix = match install_scope {
         ServiceScope::User => Some("--user"),
@@ -339,23 +346,9 @@ fn rollback_managed_unit(path: &Path, prior: &str, reload_args: &[&str]) {
 /// OpenGeni `set-property ... infinity` reset. Unknown names, comments plus extra
 /// directives, and ordinary operator drop-ins are preserved byte-for-byte.
 #[cfg(target_os = "linux")]
-fn remove_legacy_opengeni_control_dropins(
-    install_scope: ServiceScope,
-    home_dir: &Path,
-) -> Result<(), String> {
+fn remove_legacy_opengeni_control_dropins(install_scope: ServiceScope) -> Result<(), String> {
     let suffix = PathBuf::from(format!("{}.d", service::ids::SYSTEMD_UNIT));
-    let mut roots = match install_scope {
-        ServiceScope::User => vec![home_dir.join(".config/systemd/user.control")],
-        ServiceScope::System => vec![PathBuf::from("/etc/systemd/system.control")],
-    };
-    match install_scope {
-        ServiceScope::User => {
-            if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
-                roots.push(PathBuf::from(runtime).join("systemd/user.control"));
-            }
-        }
-        ServiceScope::System => roots.push(PathBuf::from("/run/systemd/system.control")),
-    }
+    let roots = systemd_control_roots(install_scope)?;
 
     for root in roots {
         let directory = root.join(&suffix);
@@ -380,6 +373,24 @@ fn remove_legacy_opengeni_control_dropins(
         }
     }
     Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn systemd_control_roots(install_scope: ServiceScope) -> Result<Vec<PathBuf>, String> {
+    let mut roots = match install_scope {
+        ServiceScope::User => vec![home()?.join(".config/systemd/user.control")],
+        ServiceScope::System => vec![PathBuf::from("/etc/systemd/system.control")],
+    };
+    match install_scope {
+        ServiceScope::User => {
+            if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
+                roots.push(PathBuf::from(runtime).join("systemd/user.control"));
+            }
+        }
+        ServiceScope::System => roots.push(PathBuf::from("/run/systemd/system.control")),
+    }
+
+    Ok(roots)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -570,7 +581,7 @@ fn install(args: &ServiceInstallArgs) -> Result<(), String> {
 /// for a user unit — enable lingering so it survives logout / boots without a
 /// session. This is the concrete, testable live path.
 fn install_systemd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
-    let unit_path = service::systemd_unit_path(spec.scope, &home()?);
+    let unit_path = systemd_unit_path_for_scope(spec.scope)?;
     let systemd_version = capture_systemctl(&["--version"])
         .ok()
         .and_then(|output| parse_systemd_version(&output));
@@ -592,7 +603,7 @@ fn install_systemd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     std::fs::write(&unit_path, body).map_err(|e| format!("write {}: {e}", unit_path.display()))?;
     info!(path = %unit_path.display(), "wrote systemd unit");
     #[cfg(target_os = "linux")]
-    remove_legacy_opengeni_control_dropins(spec.scope, &home()?)?;
+    remove_legacy_opengeni_control_dropins(spec.scope)?;
 
     match spec.scope {
         ServiceScope::User => {
@@ -802,7 +813,7 @@ fn uninstall(install_scope: ServiceScope) -> Result<(), String> {
                     let _ = systemctl(&["disable", "--now", unit]);
                 }
             }
-            let unit_path = service::systemd_unit_path(install_scope, &home()?);
+            let unit_path = systemd_unit_path_for_scope(install_scope)?;
             let _ = std::fs::remove_file(&unit_path);
             let _ = match install_scope {
                 ServiceScope::User => systemctl(&["--user", "daemon-reload"]),
@@ -1039,6 +1050,21 @@ mod tests {
     fn scope_label_is_human_readable() {
         assert_eq!(scope_label(ServiceScope::User), "user");
         assert_eq!(scope_label(ServiceScope::System), "system");
+    }
+
+    #[test]
+    fn systemd_system_scope_path_does_not_require_a_home_directory() {
+        assert_eq!(
+            systemd_unit_path_for_scope(ServiceScope::System).unwrap(),
+            PathBuf::from("/etc/systemd/system/opengeni-agent.service")
+        );
+        assert_eq!(
+            systemd_control_roots(ServiceScope::System).unwrap(),
+            vec![
+                PathBuf::from("/etc/systemd/system.control"),
+                PathBuf::from("/run/systemd/system.control")
+            ]
+        );
     }
 
     #[test]
