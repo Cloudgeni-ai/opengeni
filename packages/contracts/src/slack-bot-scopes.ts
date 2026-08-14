@@ -33,6 +33,7 @@ export const OPENGENI_SLACK_BOT_REQUESTED_SCOPES = [
 ] as const;
 
 export const OPENGENI_SLACK_BOT_EVENTS = [
+  "app_home_opened",
   "app_mention",
   "message.channels",
   "message.groups",
@@ -89,6 +90,11 @@ export function buildOpenGeniSlackBotManifest(publicBaseUrl: string) {
   return {
     display_information: { name: "OpenGeni" },
     features: {
+      app_home: {
+        home_tab_enabled: true,
+        messages_tab_enabled: true,
+        messages_tab_read_only_enabled: false,
+      },
       bot_user: { display_name: "OpenGeni", always_online: false },
       slash_commands: [
         {

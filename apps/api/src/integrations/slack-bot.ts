@@ -190,6 +190,41 @@ export type SlackMessageBlock =
     }
   | { type: "divider" };
 
+export type SlackHomeBlock =
+  | {
+      type: "header";
+      block_id?: string;
+      text: { type: "plain_text"; text: string; emoji?: boolean };
+    }
+  | {
+      type: "section";
+      block_id?: string;
+      text: { type: "mrkdwn" | "plain_text"; text: string; emoji?: boolean };
+      accessory?: {
+        type: "button";
+        action_id: string;
+        text: { type: "plain_text"; text: string; emoji?: boolean };
+        url: string;
+      };
+    }
+  | {
+      type: "context";
+      block_id?: string;
+      elements: Array<{ type: "mrkdwn" | "plain_text"; text: string; emoji?: boolean }>;
+    }
+  | {
+      type: "actions";
+      block_id: string;
+      elements: Array<{
+        type: "button";
+        action_id: string;
+        text: { type: "plain_text"; text: string; emoji?: boolean };
+        url: string;
+        style?: "primary" | "danger";
+      }>;
+    }
+  | { type: "divider" };
+
 type SlackBotOperation =
   | "channels.list"
   | "channel_history.read"
@@ -198,6 +233,7 @@ type SlackBotOperation =
   | "files.list"
   | "file.info"
   | "file.content.read"
+  | "home.publish"
   | "message.post"
   | "message.update"
   | "message.delete";
@@ -451,6 +487,25 @@ export class OpenGeniSlackBotClient {
   async verifyChannelAccess(channelId: string) {
     const headers = await this.headersFor("channel_history.read");
     return await this.requireMemberChannel(headers, channelId);
+  }
+
+  /**
+   * Replace one Slack user's private App Home view. `views.publish` is a
+   * naturally convergent replace operation: Slack event retries may safely
+   * repeat the exact bounded view without creating duplicate provider state.
+   */
+  async publishHomeView(input: { userId: string; blocks: SlackHomeBlock[] }) {
+    const userId = requiredSlackString(input.userId, "user_id");
+    const blocks = validateSlackHomeBlocks(input.blocks);
+    return await this.withAudit("home.publish", async (headers) => {
+      const payload = await this.call(headers, "views.publish", {
+        user_id: userId,
+        view: JSON.stringify({ type: "home", blocks }),
+      });
+      return {
+        viewId: requiredSlackString(slackRecord(payload.view)?.id, "view.id"),
+      };
+    });
   }
 
   async slackTaskPolicyFacts(channelId: string, userId: string) {
@@ -2716,6 +2771,8 @@ function slackMethodForOperation(operation: SlackBotOperation): string {
     case "file.info":
     case "file.content.read":
       return "files.info";
+    case "home.publish":
+      return "views.publish";
     case "message.post":
       return "chat.postMessage";
     case "message.update":
@@ -2734,6 +2791,16 @@ function validateSlackMessageBlocks(
   }
   if (Buffer.byteLength(JSON.stringify(blocks), "utf8") > MAX_SLACK_BLOCK_BYTES) {
     throw new RangeError("Slack message blocks exceed the supported byte size");
+  }
+  return blocks;
+}
+
+function validateSlackHomeBlocks(blocks: SlackHomeBlock[]): SlackHomeBlock[] {
+  if (blocks.length < 1 || blocks.length > 100) {
+    throw new RangeError("Slack App Home blocks exceed the supported count");
+  }
+  if (Buffer.byteLength(JSON.stringify(blocks), "utf8") > 48 * 1024) {
+    throw new RangeError("Slack App Home blocks exceed the supported byte size");
   }
   return blocks;
 }

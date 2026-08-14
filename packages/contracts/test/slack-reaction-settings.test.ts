@@ -65,6 +65,11 @@ describe("Slack reaction summon workspace settings", () => {
   test("generates one managed or self-hosted manifest with the exact read scope and reaction event", () => {
     const managed = buildOpenGeniSlackBotManifest(OPENGENI_MANAGED_PUBLIC_BASE_URL);
     expect(managed.oauth_config.scopes.bot).toEqual([...OPENGENI_SLACK_BOT_REQUESTED_SCOPES]);
+    expect(managed.features.app_home).toEqual({
+      home_tab_enabled: true,
+      messages_tab_enabled: true,
+      messages_tab_read_only_enabled: false,
+    });
     expect(managed.oauth_config.scopes.bot).not.toContain("reactions:write");
     expect(managed.oauth_config.scopes.user).toEqual([...OPENGENI_SLACK_MCP_USER_SCOPES]);
     expect(managed.settings.is_mcp_enabled).toBe(true);

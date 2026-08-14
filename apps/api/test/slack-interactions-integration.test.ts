@@ -105,6 +105,11 @@ type SlackCall = {
   inclusive?: string | null;
 };
 
+type SlackHomePublication = {
+  userId: string;
+  view: { type: string; blocks: unknown[] };
+};
+
 type SlackReactionContextPage = {
   messages: Array<Record<string, unknown>>;
   nextCursor?: string;
@@ -142,6 +147,7 @@ function fakeSlack(
   } = {},
 ) {
   const posts: SlackPost[] = [];
+  const homePublications: SlackHomePublication[] = [];
   const calls: SlackCall[] = [];
   const reactionContexts = new Map<string, SlackReactionContext>();
   const privateFiles = new Map<string, SlackPrivateFileFixture>();
@@ -330,6 +336,11 @@ function fakeSlack(
       const user = form.get("users") ?? "";
       return Response.json({ ok: true, channel: { id: `D_${user}` } });
     }
+    if (method === "views.publish") {
+      const view = JSON.parse(form.get("view") ?? "null") as SlackHomePublication["view"];
+      homePublications.push({ userId: form.get("user_id") ?? "", view });
+      return Response.json({ ok: true, view: { id: `V_${homePublications.length}` } });
+    }
     if (method === "files.info") {
       const fileId = form.get("file") ?? "";
       const privateFile = privateFiles.get(fileId);
@@ -433,6 +444,7 @@ function fakeSlack(
   return {
     fetch: fetch as typeof globalThis.fetch,
     posts,
+    homePublications,
     calls,
     reactionContexts,
     privateFiles,
@@ -799,6 +811,85 @@ async function interactions(workspaceId: string) {
 }
 
 describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
+  test("App Home publishes only currently authorized tasks from the linked workspace", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await createSessionForRequest(value.deps, value.owner, value.owner.workspaceId, {
+      initialMessage: "Visible App Home task",
+      model: "gpt-5.6-terra",
+      sandboxBackend: "none",
+    });
+    const crossWorkspace = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "slack-app-home-cross-workspace",
+      accountExternalId: `account-${crypto.randomUUID()}`,
+      accountName: "Slack App Home isolation",
+      workspaceExternalSource: "slack-app-home-cross-workspace",
+      workspaceExternalId: `workspace-${crypto.randomUUID()}`,
+      workspaceName: "Slack App Home isolation",
+      subjectId: value.owner.subjectId,
+    });
+    const crossWorkspaceGrant = crossWorkspace.workspaceGrants[0]!;
+    await createSessionForRequest(
+      value.deps,
+      crossWorkspaceGrant,
+      crossWorkspaceGrant.workspaceId,
+      {
+        initialMessage: "Cross-workspace task must stay hidden",
+        model: "gpt-5.6-terra",
+        sandboxBackend: "none",
+      },
+    );
+
+    const event = {
+      teamId: value.teamId,
+      eventId: `E_HOME_${crypto.randomUUID()}`,
+      event: {
+        type: "app_home_opened",
+        user: value.ownerSlackUserId,
+        tab: "home",
+      },
+    };
+    expect((await postEvent(value.app, event)).status).toBe(200);
+    expect((await postEvent(value.app, event)).status).toBe(200);
+    expect(value.slack.homePublications).toHaveLength(2);
+    const first = JSON.stringify(value.slack.homePublications[0]!.view.blocks);
+    expect(first).toContain("Visible App Home task");
+    expect(first).not.toContain("Cross-workspace task must stay hidden");
+    expect(value.slack.homePublications[0]!.userId).toBe(value.ownerSlackUserId);
+    expect(value.slack.calls.filter((call) => call.method === "views.publish")).toHaveLength(2);
+  });
+
+  test("App Home replaces task data with an access view after link revocation", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await createSessionForRequest(value.deps, value.owner, value.owner.workspaceId, {
+      initialMessage: "Must disappear after unlink",
+      model: "gpt-5.6-terra",
+      sandboxBackend: "none",
+    });
+    const event = {
+      teamId: value.teamId,
+      eventId: `E_HOME_REVOKED_${crypto.randomUUID()}`,
+      event: {
+        type: "app_home_opened",
+        user: value.ownerSlackUserId,
+        tab: "home",
+      },
+    };
+    expect((await postEvent(value.app, event)).status).toBe(200);
+    await shared!.admin`
+      delete from slack_bot_user_links
+      where workspace_id = ${value.owner.workspaceId}
+        and connection_id = ${value.connectionId}
+        and slack_user_id = ${value.ownerSlackUserId}`;
+    expect((await postEvent(value.app, { ...event, eventId: `${event.eventId}_2` })).status).toBe(
+      200,
+    );
+    const revoked = JSON.stringify(value.slack.homePublications.at(-1)!.view.blocks);
+    expect(revoked).toContain("Connect your OpenGeni account");
+    expect(revoked).not.toContain("Must disappear after unlink");
+  });
+
   test("Slack identity link tokens are scoped, tamper-evident, and short-lived", () => {
     const now = 1_800_000_000_000;
     const input = {
