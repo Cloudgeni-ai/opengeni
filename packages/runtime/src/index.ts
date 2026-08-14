@@ -3159,10 +3159,11 @@ export type PrepareToolsOptions = {
 };
 
 type PrefixedMcpConnectorAttachmentAuthority = Readonly<{
-  connectionId: string;
   expectedProvider?: string;
+  connectionIdForOperation: (operationId: string) => string | undefined;
+  releaseOperation: (operationId: string) => void;
   authorizeAndMaterialize: (
-    input: Omit<Parameters<ConnectorAttachmentMaterializer>[0], "connectionId">,
+    input: Parameters<ConnectorAttachmentMaterializer>[0],
   ) => ReturnType<ConnectorAttachmentMaterializer>;
 }>;
 
@@ -3300,6 +3301,7 @@ export async function prepareAgentTools(
   // sanitizing fetch and the current turn's tool_search description.
   const codexConnectorNamespaces = new Set<string>();
   const resolvedMcpConnectionIds = new Map<string, string>();
+  const resolvedMcpToolConnectionIds = new Map<string, string>();
   assertMcpServerSelectionWithinBounds(tools);
   if (options.attemptToolDefinitions?.length && !attemptToolScope(options)) {
     throw new Error("in-process attempt tools require exact attempt scope");
@@ -3348,8 +3350,9 @@ export async function prepareAgentTools(
               buildConnectorAttachmentAuthority(
                 config,
                 options,
-                resolvedMcpConnectionIds,
+                resolvedMcpToolConnectionIds,
                 config.url,
+                local.resolvedConnectionId,
               ),
             ),
             bestEffort: optional || Boolean(config.connectionRef),
@@ -3380,6 +3383,7 @@ export async function prepareAgentTools(
                 config,
                 options,
                 resolvedMcpConnectionIds,
+                resolvedMcpToolConnectionIds,
                 optional,
               )
             : firstParty
@@ -3464,7 +3468,7 @@ export async function prepareAgentTools(
           aggregateToolBudget,
           `${config.id}:${index}`,
           firstParty && !bestEffort,
-          buildConnectorAttachmentAuthority(config, options, resolvedMcpConnectionIds, url),
+          buildConnectorAttachmentAuthority(config, options, resolvedMcpToolConnectionIds, url),
         );
         return {
           server,
@@ -3743,6 +3747,7 @@ function connectionBrokerFetch(
   config: Settings["mcpServers"][number],
   options: PrepareToolsOptions,
   resolvedMcpConnectionIds: Map<string, string>,
+  resolvedMcpToolConnectionIds: Map<string, string>,
   suppressSetupAuthNeeded: boolean,
 ): FetchLike {
   const connectionRef = config.connectionRef;
@@ -3771,6 +3776,12 @@ function connectionBrokerFetch(
       );
     }
     recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, first.connectionId);
+    recordResolvedMcpToolConnectionId(
+      resolvedMcpToolConnectionIds,
+      config,
+      request,
+      first.connectionId,
+    );
     const response = await baseFetch(
       fetchInputForAttempt(input),
       withConnectionHeaders(input, init, first.headers),
@@ -3881,6 +3892,25 @@ function connectionBrokerFetch(
   };
 }
 
+function mcpToolConnectionKey(serverId: string, operationId: string): string {
+  return `${serverId}\u0000${operationId}`;
+}
+
+function recordResolvedMcpToolConnectionId(
+  resolvedMcpToolConnectionIds: Map<string, string>,
+  config: Settings["mcpServers"][number],
+  request: McpRequestReplayInfo,
+  connectionId: string,
+): void {
+  if (request.method !== "tools/call" || !request.operationId) return;
+  const key = mcpToolConnectionKey(config.id, request.operationId);
+  const existingConnectionId = resolvedMcpToolConnectionIds.get(key);
+  if (existingConnectionId !== undefined && existingConnectionId !== connectionId) {
+    throw new Error("MCP connection identity changed during tool execution");
+  }
+  resolvedMcpToolConnectionIds.set(key, connectionId);
+}
+
 function recordResolvedMcpConnectionId(
   resolvedMcpConnectionIds: Map<string, string>,
   config: Settings["mcpServers"][number],
@@ -3950,17 +3980,24 @@ async function resolveConnectionForRequest(
 function buildConnectorAttachmentAuthority(
   config: Settings["mcpServers"][number],
   options: PrepareToolsOptions,
-  resolvedMcpConnectionIds: ReadonlyMap<string, string>,
+  resolvedMcpToolConnectionIds: Map<string, string>,
   destinationUrl: string,
+  frozenLocalConnectionId?: string,
 ): PrefixedMcpConnectorAttachmentAuthority | undefined {
   const connectionRef = config.connectionRef;
   if (!connectionRef?.provider) return undefined;
-  const frozenConnectionId = resolvedMcpConnectionIds.get(config.id);
   const materializeConnectorAttachments = options.materializeConnectorAttachments;
-  if (!frozenConnectionId || !materializeConnectorAttachments) return undefined;
+  if (!materializeConnectorAttachments) return undefined;
   return {
-    connectionId: frozenConnectionId,
     expectedProvider: connectionRef.provider,
+    connectionIdForOperation: (operationId) =>
+      frozenLocalConnectionId ??
+      resolvedMcpToolConnectionIds.get(mcpToolConnectionKey(config.id, operationId)),
+    releaseOperation: (operationId) => {
+      if (!frozenLocalConnectionId) {
+        resolvedMcpToolConnectionIds.delete(mcpToolConnectionKey(config.id, operationId));
+      }
+    },
     authorizeAndMaterialize: async (input) => {
       const revalidated = await resolveConnectionForRequest(
         options,
@@ -4009,15 +4046,12 @@ function buildConnectorAttachmentAuthority(
         throw new ConnectorAttachmentTransferError();
       }
       if (
-        revalidated.connectionId !== frozenConnectionId ||
+        revalidated.connectionId !== input.connectionId ||
         (revalidated.expiresAt instanceof Date && revalidated.expiresAt.getTime() <= Date.now())
       ) {
         throw new ConnectorAttachmentTransferError();
       }
-      return await materializeConnectorAttachments({
-        ...input,
-        connectionId: frozenConnectionId,
-      });
+      return await materializeConnectorAttachments(input);
     },
   };
 }
@@ -5435,29 +5469,33 @@ export class PrefixedMcpServer implements MCPServer {
       metricRecorded = true;
       recordRuntimeMcpToolCallMetric(outcome, startedAt);
     };
+    const operationId =
+      meta && typeof meta.opengeniOperationId === "string" ? meta.opengeniOperationId : undefined;
     try {
       const projectedOutput = this.inner.callToolResult
         ? await this.inner.callToolResult(unprefixed, args, meta, options)
         : mcpContentAsResult(await this.inner.callTool(unprefixed, args, meta, options));
       const rawOutput = unwrapSdkMcpResultProjection(projectedOutput);
-      const operationId =
-        meta && typeof meta.opengeniOperationId === "string" ? meta.opengeniOperationId : undefined;
+      const connectionId = operationId
+        ? this.connectorAttachmentAuthority?.connectionIdForOperation(operationId)
+        : undefined;
       const output = await projectConnectorAttachmentTransfers(rawOutput, {
         serverId: this.registryId,
         toolName: unprefixed,
         operationId,
-        connectionId: this.connectorAttachmentAuthority?.connectionId,
+        connectionId,
         ...(this.connectorAttachmentAuthority?.expectedProvider
           ? { expectedProvider: this.connectorAttachmentAuthority.expectedProvider }
           : {}),
         authorizeAndMaterialize: async (attachments) => {
-          if (!operationId || !this.connectorAttachmentAuthority) {
+          if (!operationId || !connectionId || !this.connectorAttachmentAuthority) {
             throw new ConnectorAttachmentTransferError();
           }
           return await this.connectorAttachmentAuthority.authorizeAndMaterialize({
             serverId: this.registryId,
             toolName: unprefixed,
             operationId,
+            connectionId,
             attachments,
           });
         },
@@ -5523,6 +5561,10 @@ export class PrefixedMcpServer implements MCPServer {
         };
       }
       throw error;
+    } finally {
+      if (operationId) {
+        this.connectorAttachmentAuthority?.releaseOperation(operationId);
+      }
     }
   }
 

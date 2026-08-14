@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { MCPServer } from "@openai/agents";
-import { testSettings } from "@opengeni/testing";
+import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import {
   CONNECTOR_ATTACHMENT_MAX_BYTES,
   CONNECTOR_ATTACHMENT_RECEIPT_META_KEY,
@@ -175,6 +175,74 @@ describe("connector attachment MCP projection", () => {
     const bytes = new TextEncoder().encode(JSON.stringify(projected)).byteLength;
     expect(bytes).toBeLessThan(CONNECTOR_ATTACHMENT_SANITIZED_RESULT_MAX_BYTES);
     expect(JSON.stringify(projected)).not.toContain(privateUrl);
+  });
+
+  test("binds a remote brokered transfer to the exact resolved tool-call connection", async () => {
+    const remote = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer hidden" },
+      toolResultText: "Attachment is ready.",
+      toolResultMeta: transferResult()._meta,
+    });
+    const materialized: ConnectorAttachmentMaterializationRequest[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "connector",
+            name: "Connector",
+            url: remote.url,
+            connectionRef: {
+              connectionId,
+              provider: "example",
+              providerDomain: "example.test",
+              kind: "oauth2",
+              subjectScope: "workspace",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "connector" }],
+      {
+        accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        workspaceId: "33333333-3333-4333-8333-333333333333",
+        sessionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        turnId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        attemptId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        executionGeneration: 1,
+        resolveCredential: async (): Promise<ResolveConnectionCredentialResult> => ({
+          status: "ok",
+          connectionId,
+          headers: { authorization: "Bearer hidden" },
+        }),
+        materializeConnectorAttachments: async (request) => {
+          materialized.push(request);
+          return matchingReceipt(request);
+        },
+      },
+    );
+    try {
+      const result = await prepared.attemptToolEnvironment!.call({
+        operationId,
+        catalogDigest: prepared.attemptToolCatalog!.digest,
+        identity: { serverId: "connector", toolName: "search_documents" },
+        arguments: { query: "attachment" },
+        caller: { kind: "codemode", subjectId: "agent:test" },
+      });
+      expect(materialized).toHaveLength(1);
+      expect(materialized[0]).toMatchObject({
+        serverId: "connector",
+        toolName: "search_documents",
+        operationId,
+        connectionId,
+      });
+      expect(result).not.toMatchObject({ isError: true });
+      expect(JSON.stringify(result)).toContain(CONNECTOR_ATTACHMENT_RECEIPT_META_KEY);
+      expect(JSON.stringify(result)).not.toContain(privateUrl);
+    } finally {
+      await prepared.close();
+      remote.close();
+    }
   });
 
   test.each([
