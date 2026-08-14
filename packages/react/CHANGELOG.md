@@ -1,5 +1,15 @@
 # @opengeni/react
 
+## 1.0.2
+
+### Patch Changes
+
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+- 79f57b5: Present an active goal yielding to a foreground human turn as waiting instead of blocked, and keep active-goal elapsed time advancing.
+- Updated dependencies [90c0c3e]
+- Updated dependencies [e0e0102]
+  - @opengeni/sdk@1.0.2
+
 ## 1.0.1
 
 ### Patch Changes
