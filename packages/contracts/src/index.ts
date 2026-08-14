@@ -6793,23 +6793,142 @@ export const ScheduledTaskScheduleSpec = /* @__PURE__ */ z.discriminatedUnion("t
 ]);
 export type ScheduledTaskScheduleSpec = z.infer<typeof ScheduledTaskScheduleSpec>;
 
-export const ScheduledTaskAgentConfig = /* @__PURE__ */ z.object({
-  prompt: z.string().min(1),
-  resources: z.array(ResourceRef).default([]),
-  tools: z.array(ToolRef).default([]),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-  // Explicit workspace-shared OpenGeni Slack bot binding for scheduled runs.
-  // The worker copies this non-secret pointer into session metadata; the
-  // first-party Slack tools never fall back to a personal hosted-MCP grant.
-  slackBotConnectionId: z.string().uuid().optional(),
-  model: z.string().min(1).optional(),
-  reasoningEffort: ReasoningEffort.optional(),
-  sandboxBackend: SandboxBackend.optional(),
-  goal: GoalSpec.optional(),
-  // Durable task override. Scheduled dispatch is trusted to preserve this
-  // snapshot even if the workspace/deployment policy narrows later.
-  maxNestedAgentDepth: NestedAgentDepthValue.optional(),
-});
+export const IncidentTelemetryExecutionClass = z.literal("incident_telemetry");
+export type IncidentTelemetryExecutionClass = z.infer<typeof IncidentTelemetryExecutionClass>;
+
+const IncidentTelemetryIdentifier = z.string().trim().min(1).max(200);
+const IncidentTelemetryMetricName = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z_:][A-Za-z0-9_:]*$/);
+const IncidentTelemetryLabelName = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
+
+export const IncidentTelemetrySeriesMetadata = z
+  .object({
+    metric: IncidentTelemetryMetricName,
+    labels: z.array(IncidentTelemetryLabelName).min(1).max(64),
+  })
+  .strict();
+export type IncidentTelemetrySeriesMetadata = z.infer<typeof IncidentTelemetrySeriesMetadata>;
+
+export const IncidentTelemetryDataRoute = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("mcp"),
+      serverId: SessionMcpServerId,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("first_party"),
+      tool: FirstPartyMcpToolName,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("variable_set"),
+      variableSetName: z.string().trim().min(1).max(120),
+      variableNames: z.array(VariableSetVariableName).min(1).max(100),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("rig_credential_hook"),
+      credentialHookId: IncidentTelemetryIdentifier,
+    })
+    .strict(),
+]);
+export type IncidentTelemetryDataRoute = z.infer<typeof IncidentTelemetryDataRoute>;
+
+export const IncidentTelemetryPreflight = z
+  .object({
+    // These are exact selected resource refs, not discovery hints. The core
+    // validator requires every entry to already be present in agentConfig.
+    requiredResources: z.array(ResourceRef).max(100).default([]),
+    requiredMcpServerIds: z.array(SessionMcpServerId).max(64).default([]),
+    requiredFirstPartyMcpTools: z.array(FirstPartyMcpToolName).max(100).default([]),
+    requiredRig: z
+      .object({
+        name: z.string().trim().min(1).max(120),
+        credentialHookIds: z.array(IncidentTelemetryIdentifier).max(50).default([]),
+      })
+      .strict()
+      .nullable()
+      .default(null),
+    // Names only. The dispatch preflight never reads or decrypts values.
+    requiredVariableSetNames: z.array(z.string().trim().min(1).max(120)).max(25).default([]),
+    requiredVariableNames: z.array(VariableSetVariableName).max(100).default([]),
+    dataSource: z
+      .object({
+        kind: z.literal("prometheus"),
+        // Exposition endpoints such as /metrics are deliberately excluded.
+        queryPath: z.enum(["/api/v1/query", "/api/v1/query_range"]),
+        workspaceLabel: IncidentTelemetryLabelName,
+        route: IncidentTelemetryDataRoute,
+        requiredSeries: z.array(IncidentTelemetrySeriesMetadata).min(1).max(100),
+        availableSeries: z.array(IncidentTelemetrySeriesMetadata).min(1).max(500),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    for (const [index, series] of value.dataSource.requiredSeries.entries()) {
+      if (!series.labels.includes(value.dataSource.workspaceLabel)) {
+        context.addIssue({
+          code: "custom",
+          path: ["dataSource", "requiredSeries", index, "labels"],
+          message: "required incident series must include the workspace label",
+        });
+      }
+    }
+  });
+export type IncidentTelemetryPreflight = z.infer<typeof IncidentTelemetryPreflight>;
+
+export const ScheduledTaskAgentConfig = /* @__PURE__ */ z
+  .object({
+    prompt: z.string().min(1),
+    resources: z.array(ResourceRef).default([]),
+    tools: z.array(ToolRef).default([]),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+    // Explicit workspace-shared OpenGeni Slack bot binding for scheduled runs.
+    // The worker copies this non-secret pointer into session metadata; the
+    // first-party Slack tools never fall back to a personal hosted-MCP grant.
+    slackBotConnectionId: z.string().uuid().optional(),
+    model: z.string().min(1).optional(),
+    reasoningEffort: ReasoningEffort.optional(),
+    sandboxBackend: SandboxBackend.optional(),
+    goal: GoalSpec.optional(),
+    // Incident telemetry is the only special execution class. Omission keeps
+    // every existing task on the byte-compatible ordinary dispatch path.
+    executionClass: IncidentTelemetryExecutionClass.optional(),
+    incidentTelemetryPreflight: IncidentTelemetryPreflight.optional(),
+    // Durable task override. Scheduled dispatch is trusted to preserve this
+    // snapshot even if the workspace/deployment policy narrows later.
+    maxNestedAgentDepth: NestedAgentDepthValue.optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.executionClass === "incident_telemetry" && !value.incidentTelemetryPreflight) {
+      context.addIssue({
+        code: "custom",
+        path: ["incidentTelemetryPreflight"],
+        message: "incident telemetry tasks require incidentTelemetryPreflight",
+      });
+    }
+    if (value.executionClass !== "incident_telemetry" && value.incidentTelemetryPreflight) {
+      context.addIssue({
+        code: "custom",
+        path: ["executionClass"],
+        message: "incidentTelemetryPreflight requires executionClass=incident_telemetry",
+      });
+    }
+  });
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
 
 export const ScheduledTask = /* @__PURE__ */ z.object({

@@ -1,4 +1,4 @@
-import type { Settings } from "@opengeni/config";
+import { resolveFirstPartyMcpToolPolicy, type Settings } from "@opengeni/config";
 import type {
   AccessGrant,
   McpPersonalConnectionDelegation,
@@ -32,6 +32,7 @@ import {
   type UpdateScheduledTaskInput,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { isDeepStrictEqual } from "node:util";
 import { hasPermission, requirePermission } from "../access";
 import {
   requireSessionAuthorization,
@@ -846,13 +847,94 @@ async function validateScheduledTaskAgentConfig(input: {
       });
     }
   }
-  return {
+  const validated = {
     ...input.payload.agentConfig,
     ...(model === undefined || model === null ? {} : { model }),
     prompt,
     resources,
     tools,
   };
+  validateIncidentTelemetryPreflightSelection(input.settings, validated);
+  return validated;
+}
+
+/**
+ * Static incident-telemetry admission validates only already-selected task
+ * authority. It never discovers a resource, reads a variable value, probes a
+ * provider, or treats ambient worker credentials as responder capability.
+ * Mutable rig/variable-set metadata is revalidated again at dispatch.
+ */
+export function validateIncidentTelemetryPreflightSelection(
+  settings: Pick<Settings, "allowedFirstPartyMcpTools" | "defaultFirstPartyMcpTools">,
+  agentConfig: ScheduledTaskAgentConfig,
+): void {
+  const executionClass = agentConfig.executionClass;
+  const preflight = agentConfig.incidentTelemetryPreflight;
+  if (executionClass === undefined && preflight === undefined) return;
+  if (executionClass !== "incident_telemetry" || !preflight) {
+    throw new HTTPException(422, {
+      message:
+        "executionClass=incident_telemetry and incidentTelemetryPreflight must be configured together",
+    });
+  }
+
+  for (const required of preflight.requiredResources) {
+    if (!agentConfig.resources.some((selected) => isDeepStrictEqual(selected, required))) {
+      throw new HTTPException(422, {
+        message: "incidentTelemetryPreflight.requiredResources must be exact selected resources",
+      });
+    }
+  }
+
+  const selectedMcpServerIds = new Set(agentConfig.tools.map((tool) => tool.id));
+  // Scheduled dispatch always attaches the first-party OpenGeni MCP server.
+  selectedMcpServerIds.add("opengeni");
+  if (preflight.requiredMcpServerIds.some((id) => !selectedMcpServerIds.has(id))) {
+    throw new HTTPException(422, {
+      message: "incidentTelemetryPreflight.requiredMcpServerIds must be exact selected MCP servers",
+    });
+  }
+
+  const selectedFirstPartyTools = new Set(resolveFirstPartyMcpToolPolicy(settings).default);
+  if (preflight.requiredFirstPartyMcpTools.some((tool) => !selectedFirstPartyTools.has(tool))) {
+    throw new HTTPException(422, {
+      message:
+        "incidentTelemetryPreflight.requiredFirstPartyMcpTools must be present in the selected first-party tool policy",
+    });
+  }
+
+  const route = preflight.dataSource.route;
+  if (route.kind === "mcp" && !selectedMcpServerIds.has(route.serverId)) {
+    throw new HTTPException(422, {
+      message: "incidentTelemetryPreflight.dataSource.route must use a selected MCP server",
+    });
+  }
+  if (route.kind === "first_party" && !selectedFirstPartyTools.has(route.tool)) {
+    throw new HTTPException(422, {
+      message: "incidentTelemetryPreflight.dataSource.route must use a selected first-party tool",
+    });
+  }
+  if (route.kind === "variable_set") {
+    const declaredSets = new Set(preflight.requiredVariableSetNames);
+    const declaredVariables = new Set(preflight.requiredVariableNames);
+    if (
+      !declaredSets.has(route.variableSetName) ||
+      route.variableNames.some((name) => !declaredVariables.has(name))
+    ) {
+      throw new HTTPException(422, {
+        message:
+          "incidentTelemetryPreflight.dataSource.route variable metadata must be declared as required",
+      });
+    }
+  }
+  if (route.kind === "rig_credential_hook") {
+    if (!preflight.requiredRig?.credentialHookIds.includes(route.credentialHookId)) {
+      throw new HTTPException(422, {
+        message:
+          "incidentTelemetryPreflight.dataSource.route rig hook must be declared as required",
+      });
+    }
+  }
 }
 
 function validateScheduledTaskSchedule(schedule: ScheduledTask["schedule"]): void {
