@@ -2949,6 +2949,10 @@ export function createTurnSandboxProvisioner<T>(
       settlement: Pick<TurnSandboxProvisionSettlement, "provisionId">,
     ) => Promise<void> | void;
     onAttemptSettled?: (attempt: TurnSandboxProvisionAttempt<T>) => Promise<void> | void;
+    beforeCompleted?: (
+      result: T,
+      settlement: Pick<TurnSandboxProvisionSettlement, "provisionId" | "internalAttempts">,
+    ) => Promise<void> | void;
     onCompleted?: (result: T, settlement: TurnSandboxProvisionSettlement) => Promise<void> | void;
     onFailed?: (error: unknown, settlement: TurnSandboxProvisionSettlement) => Promise<void> | void;
     disposeResult?: (result: T) => Promise<void> | void;
@@ -3020,6 +3024,10 @@ export function createTurnSandboxProvisioner<T>(
             internalAttempts = runResult.internalAttempts;
             hasResult = true;
             throwIfTurnOperationCancelled(options.signal);
+            await options.beforeCompleted?.(result, {
+              provisionId,
+              internalAttempts,
+            });
             await options.onCompleted?.(result, {
               provisionId,
               internalAttempts,
@@ -8597,6 +8605,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 durationSeconds: durationMs / 1_000,
               });
             },
+            beforeCompleted: async (provisioned) => {
+              throwIfTurnOperationCancelled(sandboxResumeSignal);
+              startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
+              setupBoxSession = provisioned.established.session;
+              resolvedSandbox = provisioned;
+              // `get()` does not release the first routed sandbox operation
+              // until this hook returns. Materialize durable generated images
+              // here so that operation can use their advertised paths without
+              // racing a best-effort background copy.
+              for (const receipt of generatedImageReceiptsByArtifactId.values()) {
+                await materializeGeneratedImageInSandbox(
+                  receipt,
+                  provisioned,
+                  provisioned.established.session,
+                );
+              }
+              throwIfTurnOperationCancelled(sandboxResumeSignal);
+            },
             onCompleted: async (provisioned, settlement) => {
               await publish?.(
                 [
@@ -8631,21 +8657,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 internalAttempts: settlement.internalAttempts,
                 durationSeconds: settlement.durationMs / 1_000,
               });
-              throwIfTurnOperationCancelled(sandboxResumeSignal);
-              startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
-              setupBoxSession = provisioned.established.session;
-              resolvedSandbox = provisioned;
-              // `get()` does not release the first routed sandbox operation
-              // until this hook returns. Materialize durable generated images
-              // here so that operation can use their advertised paths without
-              // racing a best-effort background copy.
-              for (const receipt of generatedImageReceiptsByArtifactId.values()) {
-                await materializeGeneratedImageInSandbox(
-                  receipt,
-                  provisioned,
-                  provisioned.established.session,
-                );
-              }
             },
             onFailed: async (error, settlement) => {
               const failure = classifySandboxLogicalProvisionFailure(groupBoxBackend, error);

@@ -2952,6 +2952,39 @@ describe("lazy sandbox provisioner single-flight", () => {
     ]);
   });
 
+  test("fallible pre-terminal completion work records only the failed logical outcome", async () => {
+    let establishes = 0;
+    let disposed = 0;
+    const terminal: string[] = [];
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        establishes += 1;
+        return "ready";
+      },
+      {
+        provisionIdFactory: () => "11111111-1111-4111-8111-111111111111",
+        beforeCompleted: () => {
+          throw new Error("generated image materialization failed");
+        },
+        onCompleted: () => {
+          terminal.push("completed");
+        },
+        onFailed: (_error, settlement) => {
+          terminal.push(`failed:${settlement.provisionId}`);
+        },
+        disposeResult: () => {
+          disposed += 1;
+        },
+      },
+    );
+
+    await expect(provisioner.get()).rejects.toThrow("generated image materialization failed");
+    await expect(provisioner.get()).rejects.toThrow("generated image materialization failed");
+    expect(establishes).toBe(1);
+    expect(disposed).toBe(1);
+    expect(terminal).toEqual(["failed:11111111-1111-4111-8111-111111111111"]);
+  });
+
   test("an exhausted expected transition settles one logical id before a later re-read", async () => {
     let sequence = 0;
     const failures: Array<{ provisionId: string; internalAttempts: number }> = [];
