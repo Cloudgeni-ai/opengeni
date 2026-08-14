@@ -19,6 +19,7 @@ import {
   isCodexAppsFunctionTool,
   isSearchableMcpFunctionTool,
   renderSearchToolDescription,
+  searchToolPool,
 } from "../src/codex-tool-search";
 import {
   buildOpenGeniAgent,
@@ -97,6 +98,11 @@ const POOL: Tool[] = [
 ];
 
 describe("bm25RankTools", () => {
+  test("collapses an identical tool reference repeated in the callback pool", () => {
+    const repeated = POOL[0]!;
+    expect(searchToolPool([repeated, repeated], { query: "send an email" })).toEqual([repeated]);
+  });
+
   test("ranks the capability-relevant tool first", () => {
     const top = bm25RankTools(POOL, "send an email to someone", 3)[0] as { name: string };
     expect(top.name).toBe("codex_apps__gmail_send_email");

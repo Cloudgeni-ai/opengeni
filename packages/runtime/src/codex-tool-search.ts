@@ -371,7 +371,11 @@ export function searchMcpTools(
  * paths keep their narrower MCP selection before entering this shared bound.
  */
 export function searchToolPool(availableTools: Tool[], rawArguments: unknown): Tool[] {
-  const searchable = availableTools.filter(
+  // The Agents SDK can present the same configured tool reference more than once
+  // while resolving multiple client tool_search calls from one model response.
+  // Collapse only referential duplicates here: distinct objects with the same
+  // routed identity must still reach the SDK's conflict checks and fail closed.
+  const searchable = [...new Set(availableTools)].filter(
     (tool): tool is Tool & { name: string } =>
       tool.type === "function" && typeof (tool as { name?: unknown }).name === "string",
   );
