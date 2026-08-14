@@ -3,6 +3,7 @@ import type {
   AccessGrant,
   McpPersonalConnectionDelegation,
   KnowledgeSourceSyncAction,
+  Permission,
   ScheduledTask,
   ScheduledTaskAgentConfig,
   Session,
@@ -12,7 +13,10 @@ import type {
   UpdateScheduledTaskRequest as UpdateScheduledTaskPayload,
   XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
-import { OPENGENI_SLACK_BOT_SESSION_METADATA_KEY } from "@opengeni/contracts";
+import {
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
+} from "@opengeni/contracts";
 import {
   createScheduledTask,
   deleteScheduledTask,
@@ -900,6 +904,18 @@ export function validateIncidentTelemetryPreflightSelection(
     throw new HTTPException(422, {
       message:
         "incidentTelemetryPreflight.requiredFirstPartyMcpTools must be present in the selected first-party tool policy",
+    });
+  }
+
+  const selectedFirstPartyPermissions = new Set<Permission>(DEFAULT_FIRST_PARTY_MCP_PERMISSIONS);
+  if (
+    (preflight.requiredFirstPartyMcpPermissions ?? []).some(
+      (permission) => !selectedFirstPartyPermissions.has(permission),
+    )
+  ) {
+    throw new HTTPException(422, {
+      message:
+        "incidentTelemetryPreflight.requiredFirstPartyMcpPermissions must be present in the scheduled responder permission policy",
     });
   }
 

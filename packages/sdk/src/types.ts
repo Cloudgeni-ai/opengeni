@@ -2196,6 +2196,54 @@ export type ScheduledTaskScheduleSpec =
       daysOfWeek?: ScheduledTaskDayOfWeek[] | undefined;
     };
 
+export type IncidentTelemetrySeriesMetadata = {
+  metric: string;
+  labels: string[];
+};
+
+export type IncidentTelemetryDataRoute =
+  | { kind: "mcp"; serverId: string }
+  | { kind: "first_party"; tool: FirstPartyMcpToolName }
+  | { kind: "variable_set"; variableSetName: string; variableNames: string[] }
+  | { kind: "rig_credential_hook"; credentialHookId: string };
+
+export type IncidentTelemetryPreflight = {
+  requiredResources: ResourceRef[];
+  requiredMcpServerIds: string[];
+  requiredFirstPartyMcpTools: FirstPartyMcpToolName[];
+  requiredFirstPartyMcpPermissions: Permission[];
+  requiredRig: { name: string; credentialHookIds: string[] } | null;
+  requiredVariableSetNames: string[];
+  requiredVariableNames: string[];
+  dataSource: {
+    kind: "prometheus";
+    queryPath: "/api/v1/query" | "/api/v1/query_range";
+    workspaceLabel: string;
+    route: IncidentTelemetryDataRoute;
+    requiredSeries: IncidentTelemetrySeriesMetadata[];
+    availableSeries: IncidentTelemetrySeriesMetadata[];
+  };
+};
+
+export type IncidentTelemetryPreflightInput = Omit<
+  IncidentTelemetryPreflight,
+  | "requiredResources"
+  | "requiredMcpServerIds"
+  | "requiredFirstPartyMcpTools"
+  | "requiredFirstPartyMcpPermissions"
+  | "requiredRig"
+  | "requiredVariableSetNames"
+  | "requiredVariableNames"
+> & {
+  requiredResources?: ResourceRef[] | undefined;
+  requiredMcpServerIds?: string[] | undefined;
+  requiredFirstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
+  requiredFirstPartyMcpPermissions?: Permission[] | undefined;
+  requiredRig?: { name: string; credentialHookIds?: string[] | undefined } | null | undefined;
+  requiredVariableSetNames?: string[] | undefined;
+  requiredVariableNames?: string[] | undefined;
+};
+
 export type ScheduledTaskAgentConfig = {
   prompt: string;
   resources: ResourceRef[];
@@ -2206,6 +2254,8 @@ export type ScheduledTaskAgentConfig = {
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   goal?: GoalSpec | undefined;
+  executionClass?: "incident_telemetry" | undefined;
+  incidentTelemetryPreflight?: IncidentTelemetryPreflight | undefined;
   maxNestedAgentDepth?: number | undefined;
 };
 
@@ -3780,6 +3830,8 @@ export type ScheduledTaskAgentConfigInput = {
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   goal?: GoalSpec | undefined;
+  executionClass?: "incident_telemetry" | undefined;
+  incidentTelemetryPreflight?: IncidentTelemetryPreflightInput | undefined;
   maxNestedAgentDepth?: number | undefined;
 };
 

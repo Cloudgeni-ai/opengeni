@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import type {
-  FirstPartyMcpToolName,
-  Rig,
-  ScheduledTaskAgentConfig,
-  VariableSet,
+import {
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  type FirstPartyMcpToolName,
+  type Permission,
+  type ScheduledTaskAgentConfig,
 } from "@opengeni/contracts";
-import { evaluateIncidentTelemetryPreflight } from "../src/activities/incident-telemetry-preflight";
+import {
+  evaluateIncidentTelemetryPreflight,
+  incidentTelemetryPreflightDeclaration,
+  type IncidentTelemetryResponderMetadata,
+} from "../src/activities/incident-telemetry-preflight";
 
 const repository = {
   kind: "repository" as const,
@@ -27,6 +31,7 @@ function incidentConfig(): ScheduledTaskAgentConfig {
       requiredResources: [repository],
       requiredMcpServerIds: ["cloud-observability"],
       requiredFirstPartyMcpTools: ["github_repositories_list"],
+      requiredFirstPartyMcpPermissions: ["github:use"],
       requiredRig: {
         name: "incident-response",
         credentialHookIds: ["azure-monitor"],
@@ -59,81 +64,60 @@ function incidentConfig(): ScheduledTaskAgentConfig {
   };
 }
 
-const rig: Rig = {
-  id: "00000000-0000-4000-8000-000000000010",
-  accountId: "00000000-0000-4000-8000-000000000011",
-  workspaceId: "00000000-0000-4000-8000-000000000012",
-  name: "incident-response",
-  description: null,
-  createdBy: null,
-  activeVersion: {
-    id: "00000000-0000-4000-8000-000000000013",
-    rigId: "00000000-0000-4000-8000-000000000010",
-    version: 1,
-    image: null,
-    setupScript: null,
-    checks: [],
-    credentialHooks: ["azure-monitor"],
-    defaultVariableSetIds: [],
-    changelog: null,
-    providerImages: {},
-    createdBy: null,
-    active: true,
-    createdAt: new Date(0).toISOString(),
-  },
-  activeVersionHealth: {
-    checkHealth: "unknown",
-    lastVerifiedAt: null,
-  },
-  versionCount: 1,
-  createdAt: new Date(0).toISOString(),
-  updatedAt: new Date(0).toISOString(),
-};
-
-const variableSets: VariableSet[] = [
-  {
-    id: "00000000-0000-4000-8000-000000000020",
-    accountId: rig.accountId,
-    workspaceId: rig.workspaceId,
-    name: "incident-production",
-    description: null,
-    variables: ["PROMETHEUS_TOKEN", "PROMETHEUS_URL"].map((name) => ({
-      name,
-      version: 1,
-      createdAt: new Date(0).toISOString(),
-      updatedAt: new Date(0).toISOString(),
-    })),
-    createdAt: new Date(0).toISOString(),
-    updatedAt: new Date(0).toISOString(),
-  },
-];
-
 const firstPartyTools: FirstPartyMcpToolName[] = ["github_repositories_list"];
+const firstPartyPermissions: Permission[] = [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS];
+
+function responder(
+  overrides: Partial<IncidentTelemetryResponderMetadata> = {},
+): IncidentTelemetryResponderMetadata {
+  return {
+    metadataComplete: true,
+    resources: [repository],
+    mcpServerIds: ["cloud-observability", "opengeni"],
+    firstPartyMcpTools: firstPartyTools,
+    firstPartyMcpPermissions: firstPartyPermissions,
+    rig: {
+      name: "incident-response",
+      credentialHooks: ["azure-monitor"],
+      checkHealth: "passing",
+    },
+    variableSets: [
+      {
+        name: "incident-production",
+        variables: [{ name: "PROMETHEUS_TOKEN" }, { name: "PROMETHEUS_URL" }],
+      },
+    ],
+    ...overrides,
+  };
+}
 
 function evaluate(
   agentConfig: ScheduledTaskAgentConfig,
-  overrides: Partial<{
-    firstPartyMcpTools: FirstPartyMcpToolName[];
-    rig: Rig | null;
-    variableSets: VariableSet[];
-  }> = {},
+  overrides: Partial<IncidentTelemetryResponderMetadata> = {},
+  incidentTriggered = false,
 ) {
   return evaluateIncidentTelemetryPreflight({
     agentConfig,
-    firstPartyMcpTools: overrides.firstPartyMcpTools ?? firstPartyTools,
-    rig: overrides.rig === undefined ? rig : overrides.rig,
-    variableSets: overrides.variableSets ?? variableSets,
+    incidentTriggered,
+    responder: responder(overrides),
   });
 }
 
 describe("incident telemetry dispatch preflight", () => {
-  test("does not affect ordinary scheduled tasks", () => {
-    expect(evaluate({ prompt: "ordinary task", resources: [], tools: [], metadata: {} })).toEqual({
+  test("does not affect ordinary or malformed non-alert scheduled tasks", () => {
+    const ordinary = { prompt: "ordinary task", resources: [], tools: [], metadata: {} };
+    expect(evaluate(ordinary)).toEqual({ action: "not_required" });
+    expect(incidentTelemetryPreflightDeclaration(ordinary, false)).toEqual({
       action: "not_required",
     });
   });
 
-  test("fails closed when incident metadata is missing or malformed", () => {
+  test("fails closed for a valid legacy alert or incomplete incident declaration", () => {
+    const legacy = { prompt: "legacy alert", resources: [], tools: [], metadata: {} };
+    expect(evaluate(legacy, {}, true)).toEqual({
+      action: "blocked",
+      reason: "incident_preflight_metadata_missing",
+    });
     expect(
       evaluate({
         prompt: "incident",
@@ -145,13 +129,39 @@ describe("incident telemetry dispatch preflight", () => {
     ).toEqual({ action: "blocked", reason: "incident_preflight_metadata_missing" });
   });
 
-  test("blocks an under-capable responder before retrieval", () => {
+  test("blocks incomplete exact metadata and every missing authority dimension", () => {
     const config = incidentConfig();
-    config.tools = [];
-    expect(evaluate(config, { rig: null, variableSets: [] })).toEqual({
-      action: "blocked",
-      reason: "incident_responder_under_capable",
-    });
+    for (const missing of [
+      { metadataComplete: false },
+      { resources: [] },
+      { mcpServerIds: ["opengeni"] },
+      { firstPartyMcpTools: [] },
+      { firstPartyMcpPermissions: [] },
+      { rig: null },
+      { variableSets: [] },
+    ] satisfies Array<Partial<IncidentTelemetryResponderMetadata>>) {
+      expect(evaluate(config, missing)).toEqual({
+        action: "blocked",
+        reason:
+          missing.metadataComplete === false
+            ? "incident_preflight_metadata_missing"
+            : "incident_responder_under_capable",
+      });
+    }
+  });
+
+  test("requires passing health for the exact selected rig version", () => {
+    for (const checkHealth of ["unknown", "failing"] as const) {
+      expect(
+        evaluate(incidentConfig(), {
+          rig: {
+            name: "incident-response",
+            credentialHooks: ["azure-monitor"],
+            checkHealth,
+          },
+        }),
+      ).toEqual({ action: "blocked", reason: "incident_responder_under_capable" });
+    }
   });
 
   test("blocks public exposition endpoints and absent alert-series labels", () => {
@@ -174,8 +184,19 @@ describe("incident telemetry dispatch preflight", () => {
     });
   });
 
-  test("allows a capable responder with the exact selected authority and data metadata", () => {
-    expect(evaluate(incidentConfig())).toEqual({ action: "ready" });
+  test("uses the resolved responder, not task declarations, for all four run modes", () => {
+    for (const mode of [
+      "new_session_per_run",
+      "reusable_session:new",
+      "existing_session",
+      "reusable_session:existing",
+    ]) {
+      expect(evaluate(incidentConfig()), mode).toEqual({ action: "ready" });
+      expect(evaluate(incidentConfig(), { resources: [] }), mode).toEqual({
+        action: "blocked",
+        reason: "incident_responder_under_capable",
+      });
+    }
   });
 
   test("returns fixed blockers without secret, endpoint, repository, or identity leakage", () => {
@@ -186,10 +207,33 @@ describe("incident telemetry dispatch preflight", () => {
       "PROMETHEUS_TOKEN",
       "PROMETHEUS_URL",
       repository.uri,
-      variableSets[0]!.id,
-      rig.workspaceId,
+      "github-installation:123",
+      "azure-monitor",
     ]) {
       expect(rendered).not.toContain(privateFact);
     }
+  });
+
+  test("is ordered before authority, admission, run/session creation and exposes no retrieval primitive", async () => {
+    const dispatchSource = await Bun.file(
+      new URL("../src/activities/scheduled-tasks.ts", import.meta.url),
+    ).text();
+    const evaluatorSource = await Bun.file(
+      new URL("../src/activities/incident-telemetry-preflight.ts", import.meta.url),
+    ).text();
+    const preflight = dispatchSource.indexOf("incidentTelemetryPreflightDeclaration(");
+    expect(preflight).toBeGreaterThan(0);
+    for (const downstream of [
+      "getScheduledTaskPersonalConnectionDelegations(",
+      "getScheduledTaskXaiProviderAccountAuthoritySnapshot(",
+      "agentRunAdmissionDenial(",
+      "createScheduledTaskRun(",
+      "createSessionWithIdempotencyKeyResult(",
+    ]) {
+      expect(dispatchSource.indexOf(downstream, preflight)).toBeGreaterThan(preflight);
+    }
+    expect(evaluatorSource).not.toContain("fetch(");
+    expect(evaluatorSource).not.toContain("process.env");
+    expect(evaluatorSource).not.toContain("getVariableSetValue");
   });
 });

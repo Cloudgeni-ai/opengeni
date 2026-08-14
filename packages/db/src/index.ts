@@ -15340,6 +15340,33 @@ export async function getRigVersion(
   });
 }
 
+/** Metadata-only health for one exact frozen rig version. Never reads setup,
+ * variable values, credential material, or the currently active version. */
+export async function getRigVersionHealth(
+  db: Database,
+  workspaceId: string,
+  rigId: string,
+  versionId: string,
+): Promise<RigVerificationHealth | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.rigVersions)
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, workspaceId),
+          eq(schema.rigVersions.rigId, rigId),
+          eq(schema.rigVersions.id, versionId),
+        ),
+      )
+      .limit(1);
+    if (!row) return null;
+    const version = mapRigVersion(row);
+    const healthByVersion = await loadRigHealthByActiveVersion(scopedDb, workspaceId, [version]);
+    return healthByVersion.get(version.id) ?? unknownRigHealth(version);
+  });
+}
+
 export async function getRigVersionById(
   db: Database,
   workspaceId: string,

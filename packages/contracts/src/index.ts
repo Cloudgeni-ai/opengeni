@@ -6854,6 +6854,7 @@ export const IncidentTelemetryPreflight = z
     requiredResources: z.array(ResourceRef).max(100).default([]),
     requiredMcpServerIds: z.array(SessionMcpServerId).max(64).default([]),
     requiredFirstPartyMcpTools: z.array(FirstPartyMcpToolName).max(100).default([]),
+    requiredFirstPartyMcpPermissions: z.array(Permission).max(100).default([]),
     requiredRig: z
       .object({
         name: z.string().trim().min(1).max(120),

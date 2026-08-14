@@ -22,6 +22,7 @@ function incidentConfig(): ScheduledTaskAgentConfig {
       requiredResources: [repository],
       requiredMcpServerIds: ["cloud-observability"],
       requiredFirstPartyMcpTools: ["github_repositories_list"],
+      requiredFirstPartyMcpPermissions: ["github:use"],
       requiredRig: null,
       requiredVariableSetNames: ["incident-production"],
       requiredVariableNames: ["PROMETHEUS_URL", "PROMETHEUS_TOKEN"],
@@ -87,6 +88,14 @@ describe("scheduled incident telemetry static selection", () => {
         incidentConfig(),
       ),
     ).toThrow(/requiredFirstPartyMcpTools/);
+
+    const missingPermission = incidentConfig();
+    missingPermission.incidentTelemetryPreflight!.requiredFirstPartyMcpPermissions = [
+      "workspace:admin",
+    ];
+    expect(() => validateIncidentTelemetryPreflightSelection({}, missingPermission)).toThrow(
+      /requiredFirstPartyMcpPermissions/,
+    );
   });
 
   test("requires the declared data route to be part of the exact selected authority", () => {

@@ -766,14 +766,19 @@ A thin control-plane Hono app: durable state lives in Postgres, agent turns run 
 Scheduled incident-telemetry tasks use an explicit `incident_telemetry`
 execution class plus a contracts-owned preflight declaration. Core admission
 accepts only requirements already present in the task's exact resources, MCP
-servers, and resolved first-party tool policy. Before dispatch can create a run
-or session, the worker revalidates those selections together with active
-rig/credential-hook metadata, attached variable-set names and variable
-names, a targeted Prometheus query route, and configured alert-series label
-metadata. The evaluator is pure and metadata-only: it cannot discover broad
-endpoints, fetch `/metrics`, decrypt a value, inspect ambient worker
-credentials, or expose private configuration in its fixed blocker result.
-Ordinary scheduled tasks omit both fields and retain their existing path.
+servers, resolved first-party tool policy, and required first-party permissions.
+Before dispatch can create a run or session, the worker revalidates those
+selections together with passing rig verification health, exact credential-hook
+metadata, attached variable-set names and variable names, a targeted Prometheus
+query route, and configured alert-series label metadata. New responders use the
+rig's current active version; existing and reusable responders use their frozen
+exact rig version even after another version becomes active. A valid structured
+alert on a legacy task without the declaration fails closed before authority,
+admission, run, session, or retrieval work. The evaluator is pure and
+metadata-only: it cannot discover broad endpoints, fetch `/metrics`, decrypt a
+value, inspect ambient worker credentials, or expose private configuration in
+its fixed blocker result. Ordinary tasks and malformed/non-alert legacy metadata
+retain their existing path.
 
 The official Gmail MCP stays on the generic capability/connection path, but it
 is personal-only: each workspace member authorizes their own mailbox, and both

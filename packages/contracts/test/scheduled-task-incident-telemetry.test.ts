@@ -14,6 +14,7 @@ const preflight = {
   requiredResources: [repository],
   requiredMcpServerIds: ["cloud-observability"],
   requiredFirstPartyMcpTools: ["github_repositories_list"],
+  requiredFirstPartyMcpPermissions: ["github:use"],
   requiredRig: {
     name: "incident-response",
     credentialHookIds: ["azure-monitor"],
