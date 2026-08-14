@@ -208,7 +208,7 @@ export type SessionCreatorOption = {
  * Loaded creator choices with identity-specific labels only when frozen display
  * labels collide. The subject ID remains opaque; it is displayed, not parsed.
  */
-export function sessionCreatorOptions(sessions: Session[]): SessionCreatorOption[] {
+export function sessionCreatorLabelMap(sessions: Session[]): ReadonlyMap<string, string> {
   const byKey = new Map<
     string,
     { label: string; kind: Session["createdBy"]["kind"]; subjectId: string }
@@ -226,18 +226,25 @@ export function sessionCreatorOptions(sessions: Session[]): SessionCreatorOption
     labelCounts.set(creator.label, (labelCounts.get(creator.label) ?? 0) + 1);
   }
 
-  return [...byKey.entries()]
-    .map(([value, creator]) => ({
-      value,
-      label:
-        labelCounts.get(creator.label) === 1
-          ? creator.label
-          : `${creator.label} · ${creator.kind === "service" ? "Service" : "Subject"} · ${creator.subjectId}`,
-    }))
-    .sort(
-      (left, right) =>
-        left.label.localeCompare(right.label) || left.value.localeCompare(right.value),
-    );
+  return new Map(
+    [...byKey.entries()]
+      .map(([value, creator]) => ({
+        value,
+        label:
+          labelCounts.get(creator.label) === 1
+            ? creator.label
+            : `${creator.label} · ${creator.kind === "service" ? "Service" : "Subject"} · ${creator.subjectId}`,
+      }))
+      .sort(
+        (left, right) =>
+          left.label.localeCompare(right.label) || left.value.localeCompare(right.value),
+      )
+      .map((creator) => [creator.value, creator.label]),
+  );
+}
+
+export function sessionCreatorOptions(sessions: Session[]): SessionCreatorOption[] {
+  return [...sessionCreatorLabelMap(sessions)].map(([value, label]) => ({ value, label }));
 }
 
 function browseTimestamp(session: Session, field: SessionBrowseDateField): number {
@@ -276,8 +283,12 @@ export function filterSessionsForBrowse(
 export function groupSessionsForBrowse(
   sessions: Session[],
   groupBy: Exclude<SessionBrowseGroupBy, "activity">,
-  now: Date = new Date(),
+  options: {
+    now?: Date;
+    creatorLabels?: ReadonlyMap<string, string>;
+  } = {},
 ): SessionForest {
+  const now = options.now ?? new Date();
   const running = sessions
     .filter((session) => isRunningStatus(session.status))
     .sort(compareSessionActivity)
@@ -320,9 +331,7 @@ export function groupSessionsForBrowse(
     };
   }
 
-  const creatorLabels = new Map(
-    sessionCreatorOptions(sessions).map((creator) => [creator.value, creator.label]),
-  );
+  const creatorLabels = options.creatorLabels ?? sessionCreatorLabelMap(sessions);
   const creators = new Map<string, { label: string; sessions: Session[] }>();
   for (const session of rest) {
     const key = sessionCreatorKey(session);

@@ -4,6 +4,7 @@ import type { Session } from "@/types";
 import {
   filterSessionsForBrowse,
   groupSessionsForBrowse,
+  sessionCreatorLabelMap,
   sessionCreatorLabel,
   sessionCreatorOptions,
 } from "./sessions-group";
@@ -82,10 +83,10 @@ describe("session browse projections", () => {
     });
 
     expect(
-      groupSessionsForBrowse([grace, ada], "creator", NOW).grouped.map((g) => g.label),
+      groupSessionsForBrowse([grace, ada], "creator", { now: NOW }).grouped.map((g) => g.label),
     ).toEqual(["Ada Lovelace", "Grace Hopper"]);
     expect(
-      groupSessionsForBrowse([grace, ada], "created", NOW).grouped.map((g) => g.label),
+      groupSessionsForBrowse([grace, ada], "created", { now: NOW }).grouped.map((g) => g.label),
     ).toEqual(["Created today", "Created earlier"]);
   });
 
@@ -104,10 +105,12 @@ describe("session browse projections", () => {
       { value: "subject:tenant-b:alex", label: "Alex · Subject · tenant-b:alex" },
     ]);
     expect(
-      groupSessionsForBrowse([firstAlex, secondAlex], "creator", NOW).grouped.map((group) => ({
-        key: group.group,
-        label: group.label,
-      })),
+      groupSessionsForBrowse([firstAlex, secondAlex], "creator", { now: NOW }).grouped.map(
+        (group) => ({
+          key: group.group,
+          label: group.label,
+        }),
+      ),
     ).toEqual([
       {
         key: "creator:subject:tenant-a:alex",
@@ -116,6 +119,37 @@ describe("session browse projections", () => {
       {
         key: "creator:subject:tenant-b:alex",
         label: "Alex · Subject · tenant-b:alex",
+      },
+    ]);
+  });
+
+  test("reuses complete creator labels after filtering and excluding pins", () => {
+    const firstAlex = session({
+      id: "first-alex",
+      createdBy: { kind: "subject", subjectId: "tenant-a:alex", label: "Alex" },
+    });
+    const pinnedAlex = session({
+      id: "pinned-alex",
+      pinned: true,
+      createdBy: { kind: "subject", subjectId: "tenant-b:alex", label: "Alex" },
+    });
+    const complete = [firstAlex, pinnedAlex];
+    const creatorLabels = sessionCreatorLabelMap(complete);
+    const groupedSubset = filterSessionsForBrowse(complete, {
+      creator: "subject:tenant-a:alex",
+      dateField: "activity",
+      dateRange: "any",
+      now: NOW,
+    }).filter((candidate) => !candidate.pinned);
+
+    expect(
+      groupSessionsForBrowse(groupedSubset, "creator", { now: NOW, creatorLabels }).grouped.map(
+        (group) => ({ key: group.group, label: group.label }),
+      ),
+    ).toEqual([
+      {
+        key: "creator:subject:tenant-a:alex",
+        label: "Alex · Subject · tenant-a:alex",
       },
     ]);
   });

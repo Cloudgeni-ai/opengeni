@@ -65,7 +65,8 @@ describe("session control surface architecture", () => {
 
   test("keeps the loaded creator picker identifiable and reachable", async () => {
     const list = await source("components/rail/session-list.tsx");
-    expect(list).toContain("sessionCreatorOptions(allSessions)");
+    expect(list).toContain("sessionCreatorLabelMap(allSessions)");
+    expect(list).toContain("{ creatorLabels }");
     expect(list).toContain(
       'className="max-h-(--radix-dropdown-menu-content-available-height) w-52 overflow-x-hidden overflow-y-auto"',
     );

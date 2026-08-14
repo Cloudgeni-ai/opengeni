@@ -98,7 +98,7 @@ import {
   groupSessionsForRail,
   mergeSessionForRail,
   relativeTimeLabel,
-  sessionCreatorOptions,
+  sessionCreatorLabelMap,
   visibleForestRows,
   visibleTreeRows,
   type SessionTreeNode,
@@ -333,9 +333,10 @@ export function SessionList() {
     }
     return [...source.values()];
   }, [pinOverrides, serverSessions]);
+  const creatorLabels = useMemo(() => sessionCreatorLabelMap(allSessions), [allSessions]);
   const creatorOptions = useMemo(() => {
-    return sessionCreatorOptions(allSessions);
-  }, [allSessions]);
+    return [...creatorLabels].map(([value, label]) => ({ value, label }));
+  }, [creatorLabels]);
   const browseSessions = useMemo(
     () =>
       filterSessionsForBrowse(allSessions, {
@@ -525,8 +526,9 @@ export function SessionList() {
         : groupSessionsForBrowse(
             browseSessions.filter((session) => !session.pinned),
             browseGroupBy,
+            { creatorLabels },
           ),
-    [browseGroupBy, browseSessions, railSections.ordinary],
+    [browseGroupBy, browseSessions, creatorLabels, railSections.ordinary],
   );
   const pinnedNodes = railSections.pinned;
   const channelMode = hierarchyMode && channels.length > 0;
