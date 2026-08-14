@@ -938,7 +938,12 @@ caller-selected receipt URL or digest. The workflow re-runs the public package
 gates, verifies npm `gitHead` and integrity, publishes or reconciles the exact
 candidate chart, promotes the receipt's unchanged manifests to version and
 full-source-SHA tags, and writes one source-bound package/image/chart BOM. It
-deliberately does not create or update `latest`, and its immutable distribution
+also retains the candidate's verified amd64/arm64 native artifact-runtime inputs
+as `opengeni-artifact-runtime-<full-source-sha>.tgz` with a portable SHA-256
+sidecar. Source builders can therefore reproduce API, worker, materializer, and
+sandbox images after the short-lived Actions artifact expires without weakening
+the runtime integrity chain or rebuilding foreign-architecture binaries.
+It deliberately does not create or update `latest`, and its immutable distribution
 receipt makes no hosted Workbench, staging, production, or canary claim.
 
 An application-only embedded release additionally supplies the exact source SHA
@@ -1050,15 +1055,26 @@ byte for byte and fails instead of overwriting them. No moving BOM alias is
 created. Ordinary pushes to `main` can open/update the Version PR but cannot
 publish.
 
-The stock sandbox remains a separate workload image. The public release binds
-its immutable digest and its exact native artifact-runtime inputs to the same
-source SHA. Build it only with the verified `.release/artifact-runtime` bundle:
+The stock sandbox remains a separate workload image. The embedded public release
+binds its exact native artifact-runtime inputs to the same source SHA. Verify and
+extract that release asset so it creates `.release/artifact-runtime`, then build
+all source images only with that bundle:
 
 ```bash
+sha256sum --check "opengeni-artifact-runtime-${SOURCE_SHA}.tgz.sha256"
+tar -xzf "opengeni-artifact-runtime-${SOURCE_SHA}.tgz" -C .release
+
 docker build \
-  --build-arg OPENGENI_SOURCE_SHA="$(git rev-parse HEAD)" \
+  --build-arg OPENGENI_SERVER_VERSION="${SOURCE_SHA:0:12}" \
+  -f docker/opengeni.Dockerfile \
+  --target api \
+  -t opengeni-api:local-"${SOURCE_SHA:0:12}" \
+  .
+
+docker build \
+  --build-arg OPENGENI_SOURCE_SHA="$SOURCE_SHA" \
   -f docker/sandbox.Dockerfile \
-  -t opengeni-sandbox:local-"$(git rev-parse --short=12 HEAD)" \
+  -t opengeni-sandbox:local-"${SOURCE_SHA:0:12}" \
   .
 ```
 
