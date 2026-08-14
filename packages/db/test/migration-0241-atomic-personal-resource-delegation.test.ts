@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { acquireBlankTestDatabase } from "@opengeni/testing";
+import { sql as drizzleSql } from "drizzle-orm";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
-import { createDb, createSession, transitionSessionVisibility } from "../src";
+import { createDb, createSession, withWorkspaceSubjectSessionActivityRls } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
@@ -808,14 +809,20 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         where id = ${drift.directGrant}
       `;
 
-      await transitionSessionVisibility(client.db, {
-        workspaceId: drift.targetWorkspace,
-        sessionId: drift.session,
-        actorSubjectId: drift.subject,
-        targetVisibility: "user_private",
-        expectedAuthorityEpoch: 1,
-        operationKey: `delegation-${crypto.randomUUID()}`,
-      });
+      await withWorkspaceSubjectSessionActivityRls(
+        client.db,
+        drift.targetWorkspace,
+        drift.subject,
+        async (tx) =>
+          await tx.execute(drizzleSql`
+            select * from transition_session_visibility(
+              ${drift.account}::uuid, ${drift.targetWorkspace}::uuid,
+              ${drift.session}::uuid, ${drift.subject}, 'user_private', 1,
+              ${`delegation-${crypto.randomUUID()}`},
+              'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+            )
+          `),
+      );
       await expect(resolve()).rejects.toThrow("snapshot is no longer live");
     } finally {
       await client.close();
