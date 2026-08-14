@@ -51,12 +51,15 @@ function alertMetadata(
 describe("scheduled alert occurrence identity", () => {
   test("canonicalizes simultaneous/redelivered forms without hashing prompt text", () => {
     const workspaceId = crypto.randomUUID();
+    const scheduledTaskId = crypto.randomUUID();
     const first = scheduledAlertOccurrenceIdentity({
       workspaceId,
+      scheduledTaskId,
       metadata: alertMetadata(),
     });
     const reordered = scheduledAlertOccurrenceIdentity({
       workspaceId,
+      scheduledTaskId,
       metadata: alertMetadata({
         labels: {
           service: "worker-turn",
@@ -67,11 +70,18 @@ describe("scheduled alert occurrence identity", () => {
     });
     const resolved = scheduledAlertOccurrenceIdentity({
       workspaceId,
+      scheduledTaskId,
       metadata: alertMetadata({ status: "resolved" }),
+    });
+    const paddedStart = scheduledAlertOccurrenceIdentity({
+      workspaceId,
+      scheduledTaskId,
+      metadata: alertMetadata({ startsAt: "  2026-08-13T15:10:29Z  " }),
     });
 
     expect(first?.sessionCreateIdempotencyKey).toBe(reordered?.sessionCreateIdempotencyKey);
     expect(resolved?.sessionCreateIdempotencyKey).toBe(first?.sessionCreateIdempotencyKey);
+    expect(paddedStart?.sessionCreateIdempotencyKey).toBe(first?.sessionCreateIdempotencyKey);
     expect(first?.sessionCreateIdempotencyKey).toMatch(
       /^scheduled-alert-occurrence:v1:[0-9a-f]{64}$/,
     );
@@ -80,16 +90,23 @@ describe("scheduled alert occurrence identity", () => {
     );
   });
 
-  test("separates starts, provider fingerprints, labels, providers, workspaces, and reopenings", () => {
+  test("separates tasks, exact starts, provider fingerprints, labels, providers, workspaces, and reopenings", () => {
     const workspaceId = crypto.randomUUID();
-    const key = (metadata: Record<string, unknown>, selectedWorkspaceId = workspaceId) =>
+    const scheduledTaskId = crypto.randomUUID();
+    const key = (
+      metadata: Record<string, unknown>,
+      selectedWorkspaceId = workspaceId,
+      selectedScheduledTaskId = scheduledTaskId,
+    ) =>
       scheduledAlertOccurrenceIdentity({
         workspaceId: selectedWorkspaceId,
+        scheduledTaskId: selectedScheduledTaskId,
         metadata,
       })?.sessionCreateIdempotencyKey;
     const original = key(alertMetadata());
 
     expect(key(alertMetadata({ startsAt: "2026-08-13T16:10:29Z" }))).not.toBe(original);
+    expect(key(alertMetadata({ startsAt: "2026-08-13T17:10:29+02:00" }))).not.toBe(original);
     expect(key(alertMetadata({ fingerprint: "provider-fingerprint-2" }))).not.toBe(original);
     expect(
       key(
@@ -104,6 +121,7 @@ describe("scheduled alert occurrence identity", () => {
     ).not.toBe(original);
     expect(key(alertMetadata({ provider: "other-alert-provider" }))).not.toBe(original);
     expect(key(alertMetadata(), crypto.randomUUID())).not.toBe(original);
+    expect(key(alertMetadata(), workspaceId, crypto.randomUUID())).not.toBe(original);
 
     const resolved = key(alertMetadata({ status: "resolved" }));
     const reopened = key(
@@ -118,6 +136,7 @@ describe("scheduled alert occurrence identity", () => {
 
   test("fails open to ordinary per-run sessions for incomplete or malformed declarations", () => {
     const workspaceId = crypto.randomUUID();
+    const scheduledTaskId = crypto.randomUUID();
     for (const metadata of [
       {},
       { alert: "not-an-object" },
@@ -146,7 +165,18 @@ describe("scheduled alert occurrence identity", () => {
         },
       },
     ]) {
-      expect(scheduledAlertOccurrenceIdentity({ workspaceId, metadata })).toBeNull();
+      expect(
+        scheduledAlertOccurrenceIdentity({ workspaceId, scheduledTaskId, metadata }),
+      ).toBeNull();
+    }
+    for (const invalidScheduledTaskId of [" ", "x".repeat(257)]) {
+      expect(
+        scheduledAlertOccurrenceIdentity({
+          workspaceId,
+          scheduledTaskId: invalidScheduledTaskId,
+          metadata: alertMetadata(),
+        }),
+      ).toBeNull();
     }
   });
 });
@@ -262,21 +292,24 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
     ).toEqual([first.sessionId, first.sessionId]);
   });
 
-  test("simultaneous delivery through distinct tasks converges on one canonical session", async () => {
-    if (!shared || !client) return;
+  test("simultaneous delivery for one task converges with exact run provenance", async () => {
+    if (!shared || !client || !admin) return;
     const workspace = await workspaceFixture();
-    const firstTask = await taskFixture(workspace);
-    const secondTask = await taskFixture(workspace);
+    const task = await taskFixture(workspace);
     const worker = activities();
+    const producerKeys = [
+      `simultaneous-first-${crypto.randomUUID()}`,
+      `simultaneous-second-${crypto.randomUUID()}`,
+    ];
 
     const results = await Promise.all(
-      [firstTask, secondTask].map(
-        async (task) =>
+      producerKeys.map(
+        async (producerKey) =>
           await worker.dispatchScheduledTaskRun({
             workspaceId: workspace.workspaceId,
             taskId: task.id,
             triggerType: "scheduled",
-            producerKey: `simultaneous-${task.id}`,
+            producerKey,
           }),
       ),
     );
@@ -298,18 +331,54 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
     expect(updates).toHaveLength(2);
     const updatePayloads = updates.map((event) => event.payload as Record<string, unknown>);
     expect(new Set(updatePayloads.map((payload) => payload.updateId)).size).toBe(2);
-    const taskRuns = (
-      await Promise.all(
-        [firstTask, secondTask].map(
-          async (task) =>
-            await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10),
-        ),
-      )
-    ).flat();
+    const taskRuns = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+    expect(taskRuns).toHaveLength(2);
     expect(new Set(updatePayloads.map((payload) => payload.sourceId))).toEqual(
       new Set(taskRuns.map((run) => run.id)),
     );
+    const producerRows = await admin<{ id: string; producerKey: string }[]>`
+      select id, producer_key as "producerKey"
+      from scheduled_task_runs
+      where workspace_id = ${workspace.workspaceId}
+        and task_id = ${task.id}`;
+    expect(new Set(producerRows.map((row) => row.id))).toEqual(
+      new Set(taskRuns.map((run) => run.id)),
+    );
+    expect(new Set(producerRows.map((row) => row.producerKey))).toEqual(new Set(producerKeys));
     expect(updates.every((event) => event.sequence > (goal?.sequence ?? 1))).toBe(true);
+  });
+
+  test("distinct task definitions keep separate responder roots", async () => {
+    if (!shared || !client || !admin) return;
+    const workspace = await workspaceFixture();
+    const tasks = [await taskFixture(workspace), await taskFixture(workspace)];
+    const worker = activities();
+
+    const results = await Promise.all(
+      tasks.map(
+        async (task) =>
+          await worker.dispatchScheduledTaskRun({
+            workspaceId: workspace.workspaceId,
+            taskId: task.id,
+            triggerType: "scheduled",
+            producerKey: `distinct-task-${task.id}`,
+          }),
+      ),
+    );
+
+    expect(new Set(results.map((result) => result.sessionId)).size).toBe(2);
+    expect(results.map((result) => result.action)).toEqual(["start", "start"]);
+    for (const [index, task] of tasks.entries()) {
+      const taskRuns = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+      expect(taskRuns).toHaveLength(1);
+      expect(taskRuns[0]?.sessionId).toBe(results[index]?.sessionId);
+    }
+    const [count] = await admin<{ count: number }[]>`
+      select count(*)::int as count
+      from sessions
+      where workspace_id = ${workspace.workspaceId}
+        and create_idempotency_key like 'scheduled-alert-occurrence:v1:%'`;
+    expect(count?.count).toBe(2);
   });
 
   test("an atomic multi-dispatch race creates exactly one responder root", async () => {

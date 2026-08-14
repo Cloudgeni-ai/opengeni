@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+const MAX_SCHEDULED_TASK_ID_BYTES = 256;
 const MAX_PROVIDER_BYTES = 256;
 const MAX_FINGERPRINT_BYTES = 1_024;
 const MAX_LABELS = 256;
@@ -28,8 +29,12 @@ export type ScheduledAlertOccurrenceIdentity = {
  */
 export function scheduledAlertOccurrenceIdentity(input: {
   workspaceId: string;
+  scheduledTaskId: string;
   metadata: Record<string, unknown>;
 }): ScheduledAlertOccurrenceIdentity | null {
+  const scheduledTaskId = boundedString(input.scheduledTaskId, MAX_SCHEDULED_TASK_ID_BYTES);
+  if (!scheduledTaskId) return null;
+
   const alert = record(input.metadata.alert);
   if (!alert) return null;
 
@@ -51,6 +56,7 @@ export function scheduledAlertOccurrenceIdentity(input: {
       JSON.stringify({
         version: 1,
         workspaceId: input.workspaceId,
+        scheduledTaskId,
         provider,
         fingerprint,
         startsAt,
@@ -78,9 +84,11 @@ function boundedString(value: unknown, maxBytes: number): string | null {
 }
 
 function canonicalTimestamp(value: unknown): string | null {
-  if (typeof value !== "string" || !OFFSET_TIMESTAMP.test(value)) return null;
-  const parsed = new Date(value);
-  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!OFFSET_TIMESTAMP.test(trimmed)) return null;
+  const parsed = new Date(trimmed);
+  return Number.isFinite(parsed.getTime()) ? trimmed : null;
 }
 
 function canonicalLabels(value: unknown): Array<readonly [string, string]> | null {

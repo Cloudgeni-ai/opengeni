@@ -278,6 +278,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             task.runMode === "new_session_per_run"
               ? scheduledAlertOccurrenceIdentity({
                   workspaceId: task.workspaceId,
+                  scheduledTaskId: task.id,
                   metadata: task.metadata,
                 })
               : null;
