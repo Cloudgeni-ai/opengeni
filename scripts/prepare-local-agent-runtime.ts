@@ -41,8 +41,8 @@ export async function sha256File(path: string): Promise<string> {
   return hasher.digest("hex");
 }
 
-export function localRuntimeBuildId(sourceIdentity: string): string {
-  return `local-${process.platform}-${process.arch}-${sourceIdentity.slice(0, 20)}`;
+export function localRuntimeBuildId(identityDigest: string): string {
+  return `local-${process.platform}-${process.arch}-${identityDigest.slice(0, 20)}`;
 }
 
 async function gitOutput(args: string[]): Promise<Uint8Array> {

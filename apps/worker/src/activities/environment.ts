@@ -21,7 +21,6 @@ import {
 } from "@opengeni/contracts";
 import {
   mintSandboxCodemodeToken,
-  type MintedSandboxCodemodeToken,
   type SandboxCodemodeAuthority,
 } from "@opengeni/runtime/sandbox";
 import {

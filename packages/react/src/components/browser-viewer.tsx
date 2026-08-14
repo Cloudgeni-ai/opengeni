@@ -155,10 +155,6 @@ export function BrowserViewer({
     ...override,
     enabled: enabled && profiles.identities.length > 0,
   });
-  const activeProfiles = useMemo(
-    () => profiles.identities.filter((identity) => identity.status === "active"),
-    [profiles.identities],
-  );
   const createRegistryBrowser = registry.create;
   const loadProfileRevisions = profiles.revisions;
   const liveSessions = useMemo(

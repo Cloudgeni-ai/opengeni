@@ -191,23 +191,11 @@ async function main(): Promise<void> {
     ? [gnuTimeExecutable, "-v", "-o", temporaryTimePath, "--", ...command]
     : command;
   const useProcessGroup = process.platform !== "win32";
-  const child = spawn(wrapped[0] as string, wrapped.slice(1), {
-    cwd: process.cwd(),
-    env: process.env,
-    stdio: "inherit",
-    detached: useProcessGroup,
-  });
-  const sampler = setInterval(() => {
-    const current = cgroupSnapshot().memoryBytes;
-    if (current !== null && (peakMemoryBytes === null || current > peakMemoryBytes)) {
-      peakMemoryBytes = current;
-    }
-  }, 25);
-  sampler.unref();
+  let child: ReturnType<typeof spawn> | null = null;
   let forwardedSignal: string | null = null;
-  let timedOut = false;
   let escalation: ReturnType<typeof setTimeout> | null = null;
   const signalChild = (signal: NodeJS.Signals): void => {
+    if (!child) return;
     if (useProcessGroup && child.pid) process.kill(-child.pid, signal);
     else child.kill(signal);
   };
@@ -219,7 +207,7 @@ async function main(): Promise<void> {
       // The group may have settled between signal delivery and forwarding. Try
       // the direct child as a final best effort (Windows always takes this path).
       try {
-        child.kill(signal);
+        child?.kill(signal);
       } catch {
         // The child has already settled.
       }
@@ -237,8 +225,27 @@ async function main(): Promise<void> {
   };
   const onSigint = (): void => forward("SIGINT");
   const onSigterm = (): void => forward("SIGTERM");
+  // Own cancellation before launch. A very fast child can otherwise signal
+  // readiness before these handlers exist, letting cancellation terminate this
+  // wrapper before it persists the terminal profile.
   process.once("SIGINT", onSigint);
   process.once("SIGTERM", onSigterm);
+  child = spawn(wrapped[0] as string, wrapped.slice(1), {
+    cwd: process.cwd(),
+    env: process.env,
+    stdio: "inherit",
+    detached: useProcessGroup,
+  });
+  const runningChild = child;
+  if (forwardedSignal) signalChild(forwardedSignal as NodeJS.Signals);
+  const sampler = setInterval(() => {
+    const current = cgroupSnapshot().memoryBytes;
+    if (current !== null && (peakMemoryBytes === null || current > peakMemoryBytes)) {
+      peakMemoryBytes = current;
+    }
+  }, 25);
+  sampler.unref();
+  let timedOut = false;
   const deadline = setTimeout(() => {
     timedOut = true;
     forward("SIGTERM");
@@ -259,10 +266,10 @@ async function main(): Promise<void> {
       settled = true;
       resolveResult(value);
     };
-    child.once("error", (error: NodeJS.ErrnoException) => {
+    runningChild.once("error", (error: NodeJS.ErrnoException) => {
       settle({ code: 127, signal: null, spawnErrorCode: error.code ?? "spawn_error" });
     });
-    child.once("close", (code, signal) => {
+    runningChild.once("close", (code, signal) => {
       settle({ code, signal, spawnErrorCode: null });
     });
   });
@@ -272,32 +279,32 @@ async function main(): Promise<void> {
   let processGroupSettledNaturally: boolean | null = null;
   let processGroupLeakDetected = false;
   let processGroupSettled = true;
-  if (useProcessGroup && child.pid) {
-    processGroupObservedAfterLeaderExit = processGroupExists(child.pid);
+  if (useProcessGroup && runningChild.pid) {
+    processGroupObservedAfterLeaderExit = processGroupExists(runningChild.pid);
     if (!forwardedSignal && processGroupObservedAfterLeaderExit) {
       // `close` proves the direct leader and its stdio have closed, not that
       // every descendant has finished normal teardown. In particular, a
       // just-exited grandchild may remain visible as a zombie until the runner
       // init reaps it. Give the complete group one bounded chance to settle on
       // its own before classifying and terminating a persistent orphan.
-      processGroupSettledNaturally = await waitForProcessGroupExit(child.pid, naturalSettleMs);
+      processGroupSettledNaturally = await waitForProcessGroupExit(runningChild.pid, naturalSettleMs);
       if (!processGroupSettledNaturally) {
         processGroupLeakDetected = true;
         try {
-          process.kill(-child.pid, "SIGTERM");
+          process.kill(-runningChild.pid, "SIGTERM");
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
         }
       }
     }
-    processGroupSettled = await waitForProcessGroupExit(child.pid, killGraceMs);
+    processGroupSettled = await waitForProcessGroupExit(runningChild.pid, killGraceMs);
     if (!processGroupSettled) {
       try {
-        process.kill(-child.pid, "SIGKILL");
+        process.kill(-runningChild.pid, "SIGKILL");
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
       }
-      processGroupSettled = await waitForProcessGroupExit(child.pid, killGraceMs);
+      processGroupSettled = await waitForProcessGroupExit(runningChild.pid, killGraceMs);
     }
   }
   const forwardedSignalNumber = forwardedSignal
