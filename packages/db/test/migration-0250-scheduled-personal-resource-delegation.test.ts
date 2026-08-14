@@ -73,7 +73,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
       }
       return;
     }
-    const schema = `ope233_${crypto.randomUUID().replaceAll("-", "")}`.slice(0, 40);
+    const schema = `scheduled_personal_${crypto.randomUUID().replaceAll("-", "")}`.slice(0, 40);
     const sql = postgres(blank.databaseUrl, { max: 2, prepare: false });
     try {
       await migrate(blank.databaseUrl, schema);
@@ -170,7 +170,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
           created_by_subject_id, variable_set_id, metadata
         ) values (
           ${fixture.accountId}, ${fixture.targetWorkspaceId}, 'legacy personal task', 'active',
-          '{"type":"manual"}'::jsonb, ${`ope233-legacy-${crypto.randomUUID()}`},
+          '{"type":"manual"}'::jsonb, ${`scheduled-personal-legacy-${crypto.randomUUID()}`},
           'new_session_per_run', 'allow_concurrent',
           '{"prompt":"legacy","resources":[],"tools":[],"metadata":{}}'::jsonb,
           'subject', ${fixture.subjectId}, ${fixture.variableSetId}, '{}'::jsonb
@@ -195,7 +195,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
             workspaceId: fixture.targetWorkspaceId,
             taskId: legacyTask!.id,
             triggerType: "scheduled",
-            producerKey: "ope233-pre-migration-paused",
+            producerKey: "scheduled-personal-pre-migration-paused",
           }),
         ),
       ).toContain("scheduled personal-resource task has no authority snapshot");
@@ -210,7 +210,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
             workspaceId: fixture.targetWorkspaceId,
             taskId: legacyTask!.id,
             triggerType: "scheduled",
-            producerKey: "ope233-old-writer-reactivated",
+            producerKey: "scheduled-personal-old-writer-reactivated",
           }),
         ),
       ).toContain("scheduled personal-resource task has no authority snapshot");
@@ -239,7 +239,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
         name: "created by another human",
         status: "active",
         schedule: { type: "manual" },
-        temporalScheduleId: `ope233-rollback-${crypto.randomUUID()}`,
+        temporalScheduleId: `scheduled-personal-rollback-${crypto.randomUUID()}`,
         runMode: "new_session_per_run",
         overlapPolicy: "allow_concurrent",
         agentConfig: {
@@ -308,7 +308,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
         workspaceId: fixture.targetWorkspaceId,
         taskId: createdByOtherHuman.id,
         triggerType: "scheduled",
-        producerKey: "ope233-cross-human-restored",
+        producerKey: "scheduled-personal-cross-human-restored",
       });
       expect(
         await getScheduledTaskRunPersonalResourceAuthority(client.db, {
@@ -349,7 +349,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
         name: "scheduled personal authority",
         status: "active",
         schedule: { type: "manual" },
-        temporalScheduleId: `ope233-${crypto.randomUUID()}`,
+        temporalScheduleId: `scheduled-personal-${crypto.randomUUID()}`,
         runMode: "new_session_per_run",
         overlapPolicy: "allow_concurrent",
         agentConfig: {
@@ -368,13 +368,13 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
         workspaceId: fixture.targetWorkspaceId,
         taskId: task.id,
         triggerType: "scheduled",
-        producerKey: "ope233-producer",
+        producerKey: "scheduled-personal-producer",
       });
       const replay = await createScheduledTaskRun(client.db, {
         workspaceId: fixture.targetWorkspaceId,
         taskId: task.id,
         triggerType: "scheduled",
-        producerKey: "ope233-producer",
+        producerKey: "scheduled-personal-producer",
       });
       expect(replay.id).toBe(firstRun.id);
       const firstAuthority = await getScheduledTaskRunPersonalResourceAuthority(client.db, {
@@ -407,7 +407,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
             workspaceId: fixture.targetWorkspaceId,
             taskId: task.id,
             triggerType: "scheduled",
-            producerKey: "ope233-revoked",
+            producerKey: "scheduled-personal-revoked",
           }),
         ),
       ).toContain("scheduled personal-resource authority snapshot is no longer live");
@@ -428,7 +428,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
             workspaceId: fixture.targetWorkspaceId,
             taskId: task.id,
             triggerType: "scheduled",
-            producerKey: "ope233-membership-lost",
+            producerKey: "scheduled-personal-membership-lost",
           }),
         ),
       ).toContain("scheduled personal-resource authority snapshot is no longer live");
@@ -448,7 +448,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
         workspaceId: fixture.targetWorkspaceId,
         taskId: task.id,
         triggerType: "scheduled",
-        producerKey: "ope233-revised",
+        producerKey: "scheduled-personal-revised",
       });
       expect(
         (
@@ -469,7 +469,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
             name: "cross-human scheduled authority",
             status: "active",
             schedule: { type: "manual" },
-            temporalScheduleId: `ope233-cross-human-${crypto.randomUUID()}`,
+            temporalScheduleId: `scheduled-personal-cross-human-${crypto.randomUUID()}`,
             runMode: "new_session_per_run",
             overlapPolicy: "allow_concurrent",
             agentConfig: { prompt: "must fail", resources: [], tools: [], metadata: {} },
@@ -531,7 +531,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
         name: "scheduled once authority",
         status: "active",
         schedule: { type: "manual" },
-        temporalScheduleId: `ope233-once-${crypto.randomUUID()}`,
+        temporalScheduleId: `scheduled-personal-once-${crypto.randomUUID()}`,
         runMode: "existing_session",
         overlapPolicy: "allow_concurrent",
         agentConfig: { prompt: "use once authority", resources: [], tools: [], metadata: {} },
@@ -544,7 +544,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
         workspaceId: fixture.targetWorkspaceId,
         taskId: task.id,
         triggerType: "scheduled",
-        producerKey: "ope233-once-run",
+        producerKey: "scheduled-personal-once-run",
       });
       expect(await grantAndReceiptState(admin, fixture.grantId)).toEqual({
         status: "consumed",
@@ -562,7 +562,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
           initiator_subject_id, initiating_human_subject_id
         ) values (
           ${turnId}, ${fixture.accountId}, ${fixture.targetWorkspaceId}, ${session.id},
-          ${crypto.randomUUID()}, 'ope233-once-workflow', 'running', 1, 1,
+          ${crypto.randomUUID()}, 'scheduled-personal-once-workflow', 'running', 1, 1,
           'scheduled once attempt', 'test-model', 'medium', 'standard', 'modal',
           'service', 'scheduler', ${fixture.subjectId}
         )
@@ -580,7 +580,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
           scheduled_task_run_id
         ) values (
           ${fixture.accountId}, ${fixture.targetWorkspaceId}, ${session.id},
-          'scheduled_occurrence', 'info', ${run.id}, ${`ope233-once:${run.id}`},
+          'scheduled_occurrence', 'info', ${run.id}, ${`scheduled-personal-once:${run.id}`},
           'scheduled once attempt', ${scheduledPayload}::jsonb,
           '{}'::jsonb, 'pending', ${turnId}, ${run.id}
         )
@@ -647,7 +647,7 @@ async function createAuthorityFixture(sql: postgres.Sql): Promise<{
   const subjectId = `human:${crypto.randomUUID()}`;
   const otherSubjectId = `human:${crypto.randomUUID()}`;
   const [account] = await sql<Array<{ id: string }>>`
-    insert into managed_accounts (name) values (${`ope233-${crypto.randomUUID()}`}) returning id
+    insert into managed_accounts (name) values (${`scheduled-personal-${crypto.randomUUID()}`}) returning id
   `;
   const [personalWorkspace] = await sql<Array<{ id: string }>>`
     insert into workspaces (account_id, name) values (${account!.id}, 'personal') returning id
@@ -760,7 +760,7 @@ async function insertScheduledAttempt(
       ) values (
         ${input.attemptId}, ${input.fixture.accountId},
         ${input.fixture.targetWorkspaceId}, ${input.sessionId}, ${input.turnId},
-        ${input.executionGeneration}, 'ope233-once-workflow',
+        ${input.executionGeneration}, 'scheduled-personal-once-workflow',
         ${`run-${input.attemptId}`}, ${`activity-${input.attemptId}`}, 1,
         ${input.authorityEpoch}, ${input.authorityVisibility},
         ${input.authorityOwnerOrganizationMembershipId}, '{}'::jsonb, '[]'::jsonb
