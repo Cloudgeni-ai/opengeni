@@ -35,7 +35,7 @@ describe("sandbox observability contract", () => {
         condition?: string;
       }>;
     };
-    expect(chart.version).toBe("0.1.5");
+    expect(chart.version).toBe("0.1.6");
     expect(chart.dependencies).toEqual([
       {
         name: "kube-prometheus-stack",
@@ -129,13 +129,13 @@ describe("sandbox observability contract", () => {
       "opengeni_retained_process_reconciliation_total",
       "opensandbox_pool_status_available",
       "opensandbox_pool_spec_buffer_min",
-      "opensandbox_batchsandbox_status_phase",
-      "kube_pod_status_unschedulable",
+      "opengeni:opensandbox_batchsandboxes:fresh_max",
+      "opengeni:opensandbox_workload_pods:fresh_max",
       "opengeni_sandbox_provider_api_throttles_total",
       "opengeni_sandbox_ttl_renewals_total",
       "controller_runtime_reconcile_errors_total",
-      "opensandbox_batchsandbox_finalizer_info",
-      "opensandbox_batchsandbox_spec_expire_time_seconds",
+      "opengeni:opensandbox_cleanup_stuck:fresh_max",
+      "opengeni:opensandbox_expiration_overdue:fresh_max",
     ]) {
       expect(expressions, `missing sandbox dashboard signal ${required}`).toContain(required);
     }
@@ -143,7 +143,7 @@ describe("sandbox observability contract", () => {
     expect(expressions).not.toMatch(/session_id|workspace_id|sandbox_id|provider_instance_id/);
   });
 
-  test("the OpenSandbox monitoring overlay exports bounded CR and controller signals", async () => {
+  test("the OpenSandbox monitoring overlay exports Pool and controller signals only", async () => {
     const values = Bun.YAML.parse(await Bun.file("deploy/observability/values.yaml").text()) as any;
     const overlay = Bun.YAML.parse(
       await Bun.file("deploy/observability/values.opensandbox.yaml").text(),
@@ -161,28 +161,35 @@ describe("sandbox observability contract", () => {
       "spec_buffer_min",
       "status_allocated",
       "status_available",
-      "opensandbox_batchsandbox",
-      "deletion_timestamp_seconds",
-      "finalizer_info",
-      "spec_expire_time_seconds",
-      "status_phase",
     ]) {
       expect(config).toContain(signal);
     }
+    expect(config).not.toContain("opensandbox_batchsandbox");
     expect(kubeStateMetrics.rbac.extraRules).toContainEqual({
       apiGroups: ["sandbox.opensandbox.io"],
-      resources: ["batchsandboxes", "pools"],
+      resources: ["pools"],
       verbs: ["list", "watch"],
     });
     for (const signal of [
       "kube_pod_container_status_restarts_total",
-      "kube_pod_container_status_waiting_reason",
-      "kube_pod_status_unschedulable",
-      "opensandbox_batchsandbox_finalizer_info",
       "opensandbox_pool_status_available",
     ]) {
       expect(kubeStateMetrics.metricAllowlist).toContain(signal);
     }
+    expect(kubeStateMetrics.metricAllowlist).not.toContain(
+      "opensandbox_batchsandbox_finalizer_info",
+    );
+    expect(kubeStateMetrics.prometheus.monitor.metricRelabelings).toContainEqual({
+      action: "drop",
+      sourceLabels: ["namespace", "__name__"],
+      regex: "opensandbox;kube_pod_.*",
+    });
+    expect(
+      values["kube-prometheus-stack"].kubelet.serviceMonitor.cAdvisorMetricRelabelings,
+    ).toContainEqual({ action: "drop", sourceLabels: ["namespace"], regex: "^opensandbox$" });
+    expect(
+      values["kube-prometheus-stack"].kubelet.serviceMonitor.probesMetricRelabelings,
+    ).toContainEqual({ action: "drop", sourceLabels: ["namespace"], regex: "^opensandbox$" });
 
     const monitor = await Bun.file(
       "deploy/observability/templates/opensandbox-controller-servicemonitor.yaml",
@@ -240,6 +247,7 @@ describe("sandbox observability contract", () => {
       "OpenGeniOpenSandboxApiThrottled",
       "OpenGeniOpenSandboxTtlRenewalFailed",
       "OpenGeniOpenSandboxPoolDepleted",
+      "OpenGeniOpenSandboxInventoryStale",
       "OpenGeniOpenSandboxPodPending",
       "OpenGeniOpenSandboxImagePullFailed",
       "OpenGeniOpenSandboxControllerError",
@@ -290,6 +298,26 @@ describe("sandbox observability contract", () => {
         "opengeni_sandbox_leases_expired_draining",
         "expired_drains",
       ],
+      [
+        "opengeni:opensandbox_batchsandboxes:fresh_max",
+        "opengeni_opensandbox_batchsandboxes",
+        "opensandbox_kubernetes",
+      ],
+      [
+        "opengeni:opensandbox_workload_pods:fresh_max",
+        "opengeni_opensandbox_workload_pods",
+        "opensandbox_kubernetes",
+      ],
+      [
+        "opengeni:opensandbox_cleanup_stuck:fresh_max",
+        "opengeni_opensandbox_cleanup_stuck",
+        "opensandbox_kubernetes",
+      ],
+      [
+        "opengeni:opensandbox_expiration_overdue:fresh_max",
+        "opengeni_opensandbox_expiration_overdue",
+        "opensandbox_kubernetes",
+      ],
     ] as const;
     for (const [record, family, domain] of mappings) {
       const start = source.indexOf(`- record: ${record}`);
@@ -327,6 +355,16 @@ describe("sandbox observability contract", () => {
         `absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="${domain}"})`,
       );
     }
+    const openSandboxStale = source.slice(
+      source.indexOf("- alert: OpenGeniOpenSandboxInventoryStale"),
+      source.indexOf("- alert: OpenGeniOpenSandboxPodPending"),
+    );
+    expect(openSandboxStale).toContain(
+      'absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"})',
+    );
+    expect(source).toContain(
+      'opengeni_sandbox_inventory_refresh_timestamp_seconds{domain!="opensandbox_kubernetes"}',
+    );
   });
 
   test("custom chart rules append after the canonical safety catalog", async () => {

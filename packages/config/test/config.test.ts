@@ -1688,6 +1688,24 @@ describe("backend-gated sandbox required-credential validation", () => {
     };
     expect(() => withEnv(active, () => getSettings())).not.toThrow();
     expect(withEnv(active, () => getSettings()).openSandboxUseServerProxy).toBe(true);
+    expect(
+      withEnv(
+        {
+          ...active,
+          OPENGENI_OPENSANDBOX_KUBERNETES_INVENTORY_NAMESPACE: "opensandbox",
+        },
+        () => getSettings(),
+      ).openSandboxKubernetesInventoryNamespace,
+    ).toBe("opensandbox");
+    expect(() =>
+      withEnv(
+        {
+          ...active,
+          OPENGENI_OPENSANDBOX_KUBERNETES_INVENTORY_NAMESPACE: "../opensandbox",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow();
     expect(() =>
       withEnv(
         { ...active, OPENGENI_OPENSANDBOX_IMAGE: "registry.example.com/opengeni:latest" },

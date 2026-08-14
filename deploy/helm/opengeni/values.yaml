@@ -15,6 +15,15 @@ serviceAccount:
   annotations: {}
   automountServiceAccountToken: false
 
+# Optional read-only, same-cluster Kubernetes inventory for the OpenSandbox
+# backend. These values are inert unless config.OPENGENI_SANDBOX_BACKEND is
+# exactly "opensandbox". The control worker receives one explicit projected
+# token; the ServiceAccount's global automount default remains false.
+opensandbox:
+  kubernetesInventory:
+    enabled: true
+    namespace: opensandbox
+
 # Optional release-local Pod priority tiers. They do not reserve or cap CPU or
 # memory. They tell the kubelet which OpenGeni roles to evict first when the
 # node is under pressure. `Never` keeps priority from preempting a running pod

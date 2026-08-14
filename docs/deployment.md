@@ -1230,8 +1230,10 @@ bun run deployment:observability -- --profile single-node
 
 On a cluster that explicitly selects `sandbox.backend=opensandbox`, use
 `--opensandbox`. The additional values overlay enables kube-state-metrics for
-the pinned `Pool` and `BatchSandbox` CRDs plus a `ServiceMonitor` for the
-controller metrics Service. The base wrapper leaves this optional integration
+the pinned `Pool` CRD plus a `ServiceMonitor` for the controller metrics
+Service. The OpenGeni control worker separately projects BatchSandbox and
+workload-Pod state into fixed-label aggregate gauges through namespace-scoped,
+list-only Kubernetes RBAC. The base wrapper leaves this optional integration
 off, so clusters without OpenSandbox CRDs retain the prior monitoring behavior.
 
 The wrapper plan installs only the monitoring platform; it never reconciles
@@ -1438,7 +1440,10 @@ warming failures, Pool depletion, Pending and unschedulable workload Pods,
 immutable-image pull failures, controller reconcile/readiness/restarts,
 provider and controller Kubernetes-API 429s, TTL-renewal failures, stuck
 deletion finalizers, and BatchSandboxes surviving their provider expiry.
-Opaque lifecycle IDs stay in correlated worker logs and are not metric labels.
+Per-workload thresholds use fresh fixed-label aggregates from the control
+worker. Raw BatchSandbox, workload-Pod, and container series in the
+`opensandbox` namespace are dropped before TSDB ingestion; opaque lifecycle IDs
+stay in correlated worker logs and are not metric labels.
 
 For the custom-Kubernetes portability path, `deploy/stacks/k3s-source.lock`
 pins the installer, checksum manifests, and amd64/arm64 binaries for k3s

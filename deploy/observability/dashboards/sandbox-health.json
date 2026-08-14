@@ -683,7 +683,7 @@
       "id": 29,
       "type": "timeseries",
       "title": "OpenSandbox workload state",
-      "description": "BatchSandbox phases plus Kubernetes Pending, unschedulable, and immutable-image pull failures in the OpenSandbox data namespace.",
+      "description": "Fresh fixed-label aggregates from the control worker's list-only OpenSandbox Kubernetes inventory. Per-BatchSandbox and workload-Pod identifiers are deliberately excluded from Prometheus.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": {
@@ -693,28 +693,28 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (phase) (opensandbox_batchsandbox_status_phase{namespace=\"opensandbox\"} == 1)",
+          "expr": "opengeni:opensandbox_batchsandboxes:fresh_max",
           "legendFormat": "BatchSandbox {{phase}}",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "B",
-          "expr": "sum(kube_pod_status_phase{namespace=\"opensandbox\",phase=\"Pending\"} == 1)",
+          "expr": "opengeni:opensandbox_workload_pods:fresh_max{condition=\"pending\"}",
           "legendFormat": "Pods Pending",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "C",
-          "expr": "sum(kube_pod_status_unschedulable{namespace=\"opensandbox\"} == 1)",
+          "expr": "opengeni:opensandbox_workload_pods:fresh_max{condition=\"unschedulable\"}",
           "legendFormat": "Pods unschedulable",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "D",
-          "expr": "sum(kube_pod_container_status_waiting_reason{namespace=\"opensandbox\",reason=~\"ErrImagePull|ImagePullBackOff|InvalidImageName\"} == 1)",
+          "expr": "opengeni:opensandbox_workload_pods:fresh_max{condition=\"image_pull\"}",
           "legendFormat": "Image pull failures",
           "editorMode": "code",
           "range": true
@@ -762,7 +762,7 @@
       "id": 31,
       "type": "timeseries",
       "title": "OpenSandbox controller and cleanup",
-      "description": "Controller reconcile failures, restarts, deleting BatchSandboxes with finalizers, and resources surviving provider expiry.",
+      "description": "Controller reconcile failures and restarts plus fresh fixed-label counts of cleanup-stuck and expiration-overdue BatchSandboxes.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": {
@@ -786,14 +786,14 @@
         },
         {
           "refId": "C",
-          "expr": "count((time() - opensandbox_batchsandbox_deletion_timestamp_seconds{namespace=\"opensandbox\"} > 300) and on (namespace, batchsandbox, customresource_group, customresource_version, customresource_kind) opensandbox_batchsandbox_finalizer_info{namespace=\"opensandbox\"})",
+          "expr": "opengeni:opensandbox_cleanup_stuck:fresh_max",
           "legendFormat": "stuck finalizers",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "D",
-          "expr": "count(time() - opensandbox_batchsandbox_spec_expire_time_seconds{namespace=\"opensandbox\"} > 180)",
+          "expr": "opengeni:opensandbox_expiration_overdue:fresh_max",
           "legendFormat": "expiry overdue",
           "editorMode": "code",
           "range": true

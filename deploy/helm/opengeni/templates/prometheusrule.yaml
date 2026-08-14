@@ -73,6 +73,36 @@ spec:
               and on (job, instance)
               (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="expired_drains"} < {{ $inventoryFreshnessSeconds }})
             )
+        {{- if $opensandboxEnabled }}
+        - record: opengeni:opensandbox_batchsandboxes:fresh_max
+          expr: |
+            max by (phase) (
+              opengeni_opensandbox_batchsandboxes
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"} < {{ $inventoryFreshnessSeconds }})
+            )
+        - record: opengeni:opensandbox_workload_pods:fresh_max
+          expr: |
+            max by (condition) (
+              opengeni_opensandbox_workload_pods
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"} < {{ $inventoryFreshnessSeconds }})
+            )
+        - record: opengeni:opensandbox_cleanup_stuck:fresh_max
+          expr: |
+            max(
+              opengeni_opensandbox_cleanup_stuck
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"} < {{ $inventoryFreshnessSeconds }})
+            )
+        - record: opengeni:opensandbox_expiration_overdue:fresh_max
+          expr: |
+            max(
+              opengeni_opensandbox_expiration_overdue
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"} < {{ $inventoryFreshnessSeconds }})
+            )
+        {{- end }}
         # Node-relative protection cannot rely on a container memory limit: the
         # single-node profile intentionally leaves the resource-based turn worker
         # unbounded so Temporal can tune concurrency against real headroom. These
@@ -220,8 +250,20 @@ spec:
           annotations:
             summary: An OpenSandbox Pool has depleted its available capacity
             description: Available Pool Pods are below the configured warm buffer or the Pool is fully allocated at PoolMax.
+        - alert: OpenGeniOpenSandboxInventoryStale
+          expr: |
+            min(
+              time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"}
+            ) > {{ $inventoryFreshnessSeconds }}
+            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"})
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: OpenSandbox workload inventory telemetry is stale or absent
+            description: No control replica has completed a fresh bounded Kubernetes projection. Workload threshold alerts intentionally fail closed until the list-only inventory refresh recovers.
         - alert: OpenGeniOpenSandboxPodPending
-          expr: sum by (namespace) (kube_pod_status_phase{namespace="opensandbox",phase="Pending"} == 1) > 0
+          expr: opengeni:opensandbox_workload_pods:fresh_max{condition="pending"} > 0
           for: 10m
           labels:
             severity: warning
@@ -229,7 +271,7 @@ spec:
             summary: An OpenSandbox workload Pod has remained Pending
             description: Inspect the matching BatchSandbox, scheduler reason, image state, node-pool capacity, Pod/IP limits, and resource requests.
         - alert: OpenGeniOpenSandboxImagePullFailed
-          expr: sum by (namespace) (kube_pod_container_status_waiting_reason{namespace="opensandbox",reason=~"ErrImagePull|ImagePullBackOff|InvalidImageName"} == 1) > 0
+          expr: opengeni:opensandbox_workload_pods:fresh_max{condition="image_pull"} > 0
           for: 5m
           labels:
             severity: warning
@@ -252,7 +294,7 @@ spec:
             summary: The OpenSandbox controller is unavailable or repeatedly failing
             description: The pinned controller metrics endpoint reports reconcile errors; Kubernetes readiness and restart truth remain independent backstops.
         - alert: OpenGeniOpenSandboxCapacityExhausted
-          expr: sum by (namespace) (kube_pod_status_unschedulable{namespace="opensandbox"} == 1) > 0
+          expr: opengeni:opensandbox_workload_pods:fresh_max{condition="unschedulable"} > 0
           for: 5m
           labels:
             severity: critical
@@ -260,30 +302,21 @@ spec:
             summary: OpenSandbox workloads are unschedulable from cluster capacity exhaustion
             description: Inspect node-pool maximums, Pod/IP ceilings, quota, CPU, memory, ephemeral storage, taints, and selectors before increasing create concurrency.
         - alert: OpenGeniOpenSandboxCleanupStuck
-          expr: |
-            (
-              time() - opensandbox_batchsandbox_deletion_timestamp_seconds{namespace="opensandbox"} > 300
-            )
-            and on (namespace, batchsandbox, customresource_group, customresource_version, customresource_kind)
-            (
-              sum by (namespace, batchsandbox, customresource_group, customresource_version, customresource_kind) (
-                opensandbox_batchsandbox_finalizer_info{namespace="opensandbox"}
-              ) > 0
-            )
+          expr: opengeni:opensandbox_cleanup_stuck:fresh_max > 0
           for: 5m
           labels:
             severity: critical
           annotations:
             summary: OpenSandbox cleanup is blocked by a BatchSandbox finalizer
-            description: An exact BatchSandbox has remained deleting with one or more finalizers. Inspect controller health and the named workload before any manual finalizer action.
+            description: At least one BatchSandbox has remained deleting with finalizers past the cleanup threshold. Use Kubernetes inventory to identify the exact resource before any manual finalizer action.
         - alert: OpenGeniOpenSandboxExpirationOverdue
-          expr: time() - opensandbox_batchsandbox_spec_expire_time_seconds{namespace="opensandbox"} > 180
+          expr: opengeni:opensandbox_expiration_overdue:fresh_max > 0
           for: 5m
           labels:
             severity: critical
           annotations:
             summary: An OpenSandbox BatchSandbox survived beyond its provider expiry
-            description: The provider TTL cleanup backstop missed its 180-second acceptance bound. Verify controller health, finalizers, and exact resource ownership.
+            description: The bounded inventory reports at least one BatchSandbox beyond the 180-second provider TTL cleanup bound. Verify controller health, finalizers, and exact resource ownership in Kubernetes.
         {{- end }}
         - alert: OpenGeniSandboxOperationFailureRatio
           expr: |
@@ -340,7 +373,7 @@ spec:
         - alert: OpenGeniSandboxInventoryProjectionStale
           expr: |
             min by (domain) (
-              time() - opengeni_sandbox_inventory_refresh_timestamp_seconds
+              time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain!="opensandbox_kubernetes"}
             ) > {{ $inventoryFreshnessSeconds }}
             or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="leases"})
             or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="checkpoint_artifacts"})

@@ -877,6 +877,15 @@ const SettingsSchema = z.object({
     .string()
     .regex(/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/)
     .optional(),
+  // Optional same-cluster, read-only observability projection. The application
+  // chart sets this only on the control worker and mounts a dedicated projected
+  // service-account token; non-Kubernetes and remote-provider deployments omit it.
+  openSandboxKubernetesInventoryNamespace: z
+    .string()
+    .min(1)
+    .max(63)
+    .regex(/^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/)
+    .optional(),
   // --- sandbox ownership inversion (P1.2 rollout flag, default OFF) ---
   // The keystone flag for the stateless resume-by-id model. When FALSE the
   // agent-turn path is BYTE-FOR-BYTE today's build-and-discard behavior (no
@@ -2309,6 +2318,9 @@ export function getSettings(): Settings {
     openSandboxTtlSeconds: optional("OPENGENI_OPENSANDBOX_TTL_SECONDS"),
     openSandboxUseServerProxy: optional("OPENGENI_OPENSANDBOX_USE_SERVER_PROXY"),
     openSandboxPoolRef: optional("OPENGENI_OPENSANDBOX_POOL_REF"),
+    openSandboxKubernetesInventoryNamespace: optional(
+      "OPENGENI_OPENSANDBOX_KUBERNETES_INVENTORY_NAMESPACE",
+    ),
     sandboxOwnershipEnabled: optional("OPENGENI_SANDBOX_OWNERSHIP_ENABLED"),
     rigVerificationLeaseOwnershipEnabled: optional(
       "OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED",

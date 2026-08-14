@@ -5,6 +5,11 @@ import type { EventLogger } from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
 import type { CompanyBrainContributionReceipt } from "./model-context-contributions";
 import {
+  OPENSANDBOX_BATCHSANDBOX_PHASES,
+  OPENSANDBOX_WORKLOAD_POD_CONDITIONS,
+  type OpenSandboxKubernetesInventory,
+} from "./opensandbox-kubernetes-inventory";
+import {
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
   modelUsageTokenCountOrNull,
   type RuntimeMetricsHooks,
@@ -658,12 +663,45 @@ export function recordSandboxLeaseGauges(
   }
 }
 
+export function recordOpenSandboxKubernetesInventoryGauges(
+  observability: Observability,
+  inventory: OpenSandboxKubernetesInventory,
+): void {
+  for (const phase of OPENSANDBOX_BATCHSANDBOX_PHASES) {
+    observability.setGauge({
+      name: "opengeni_opensandbox_batchsandboxes",
+      help: "Current OpenSandbox BatchSandboxes by bounded lifecycle phase.",
+      labels: { phase },
+      value: inventory.batchSandboxPhases[phase],
+    });
+  }
+  for (const condition of OPENSANDBOX_WORKLOAD_POD_CONDITIONS) {
+    observability.setGauge({
+      name: "opengeni_opensandbox_workload_pods",
+      help: "Current OpenSandbox workload Pods by bounded operational condition.",
+      labels: { condition },
+      value: inventory.workloadPodConditions[condition],
+    });
+  }
+  observability.setGauge({
+    name: "opengeni_opensandbox_cleanup_stuck",
+    help: "Current OpenSandbox BatchSandboxes deleting past the cleanup threshold with finalizers.",
+    value: inventory.cleanupStuck,
+  });
+  observability.setGauge({
+    name: "opengeni_opensandbox_expiration_overdue",
+    help: "Current OpenSandbox BatchSandboxes still present past the provider-expiry threshold.",
+    value: inventory.expirationOverdue,
+  });
+}
+
 export const SANDBOX_INVENTORY_PROJECTION_DOMAINS = [
   "leases",
   "checkpoint_artifacts",
   "rotation_backlog",
   "retained_processes",
   "expired_drains",
+  "opensandbox_kubernetes",
 ] as const;
 
 export type SandboxInventoryProjectionDomain =

@@ -524,6 +524,58 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     }
   });
 
+  test("ownership-off refreshes bounded OpenSandbox Kubernetes inventory without provider mutation", async () => {
+    if (!available) return;
+    const settings = testSettings({
+      sandboxBackend: "opensandbox",
+      openSandboxBaseUrl: "http://opensandbox-server.opensandbox-system.svc.cluster.local",
+      openSandboxApiKey: "test-key",
+      openSandboxImage: `registry.example.com/opengeni@sha256:${"a".repeat(64)}`,
+      openSandboxKubernetesInventoryNamespace: "opensandbox",
+      webSearchEnabled: false,
+      sandboxOwnershipEnabled: false,
+      sandboxLeaseReaperPeriodMs: 30_000,
+    });
+    const observability = createObservability(settings, { component: "worker-test" });
+    const spy = makeTerminateSpy();
+    let inventoryReads = 0;
+    const { reapSandboxLeases } = createSandboxLeaseActivities(
+      reaperServices(settings, observability),
+      {
+        terminateBox: spy.fn,
+        inspectOpenSandboxKubernetesInventory: async ({ namespace }) => {
+          inventoryReads += 1;
+          expect(namespace).toBe("opensandbox");
+          return {
+            batchSandboxPhases: {
+              pending: 2,
+              running: 3,
+              pausing: 0,
+              paused: 0,
+              resuming: 0,
+              failed: 1,
+              unknown: 0,
+            },
+            workloadPodConditions: { pending: 2, image_pull: 1, unschedulable: 1 },
+            cleanupStuck: 1,
+            expirationOverdue: 1,
+          };
+        },
+      },
+    );
+
+    await reapSandboxLeases();
+    const metrics = await observability.prometheusMetrics();
+
+    expect(inventoryReads).toBe(1);
+    expect(spy.calls).toHaveLength(0);
+    expect(metrics).toContain(
+      'opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes",',
+    );
+    expect(metrics).toMatch(/opengeni_opensandbox_batchsandboxes\{[^}]*phase="running"[^}]*\} 3\b/);
+    expect(metrics).toMatch(/opengeni_opensandbox_cleanup_stuck\{[^}]*\} 1\b/);
+  });
+
   test("(1) one pass reaps stale holders and bounded subsequent passes terminate every due box", async () => {
     if (!available) return;
     const spy = makeTerminateSpy();

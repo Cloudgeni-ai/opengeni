@@ -86,10 +86,17 @@ describe("turn-capacity Prometheus alerts", () => {
         ],
       ],
       [
-        "OpenGeniOpenSandboxPodPending",
-        ['kube_pod_status_phase{namespace="opensandbox",phase="Pending"}'],
+        "OpenGeniOpenSandboxInventoryStale",
+        ['opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"}'],
       ],
-      ["OpenGeniOpenSandboxImagePullFailed", ["ErrImagePull|ImagePullBackOff|InvalidImageName"]],
+      [
+        "OpenGeniOpenSandboxPodPending",
+        ['opengeni:opensandbox_workload_pods:fresh_max{condition="pending"}'],
+      ],
+      [
+        "OpenGeniOpenSandboxImagePullFailed",
+        ['opengeni:opensandbox_workload_pods:fresh_max{condition="image_pull"}'],
+      ],
       [
         "OpenGeniOpenSandboxControllerError",
         [
@@ -100,18 +107,12 @@ describe("turn-capacity Prometheus alerts", () => {
       ],
       [
         "OpenGeniOpenSandboxCapacityExhausted",
-        ['kube_pod_status_unschedulable{namespace="opensandbox"}'],
+        ['opengeni:opensandbox_workload_pods:fresh_max{condition="unschedulable"}'],
       ],
-      [
-        "OpenGeniOpenSandboxCleanupStuck",
-        [
-          "opensandbox_batchsandbox_deletion_timestamp_seconds",
-          "opensandbox_batchsandbox_finalizer_info",
-        ],
-      ],
+      ["OpenGeniOpenSandboxCleanupStuck", ["opengeni:opensandbox_cleanup_stuck:fresh_max"]],
       [
         "OpenGeniOpenSandboxExpirationOverdue",
-        ["opensandbox_batchsandbox_spec_expire_time_seconds"],
+        ["opengeni:opensandbox_expiration_overdue:fresh_max"],
       ],
     ]);
 
@@ -124,6 +125,7 @@ describe("turn-capacity Prometheus alerts", () => {
     expect(template).toContain(
       "The pinned controller metrics endpoint reports reconcile errors; Kubernetes readiness and restart truth remain independent backstops.",
     );
+    expect(template).not.toMatch(/opensandbox_batchsandbox_(?:status|deletion|finalizer|spec)/);
   });
 });
 

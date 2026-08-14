@@ -70,6 +70,9 @@ kube-prometheus-stack:
           sourceLabels: [__name__]
           regex: '^(?:container_(?:cpu_(?:usage_seconds_total|cfs_periods_total|cfs_throttled_periods_total)|fs_(?:reads|writes)(?:_bytes)?_total|memory_(?:cache|rss|working_set_bytes|swap)|network_(?:receive|transmit)_(?:bytes_total|packets_total|packets_dropped_total))|machine_(?:cpu_cores|memory_bytes))$'
         - action: drop
+          sourceLabels: [namespace]
+          regex: '^opensandbox$'
+        - action: drop
           sourceLabels: [__name__, interface]
           regex: 'container_network_.*;(cali|cilium|cni|lxc|nodelocaldns|tunl).*'
         - action: drop
@@ -79,6 +82,9 @@ kube-prometheus-stack:
         - action: keep
           sourceLabels: [__name__]
           regex: '^(?:prober_probe_total)$'
+        - action: drop
+          sourceLabels: [namespace]
+          regex: '^opensandbox$'
       metricRelabelings:
         - action: drop
           sourceLabels: [__name__, le]
@@ -213,7 +219,7 @@ kube-prometheus-stack:
     rbac:
       extraRules:
         - apiGroups: ["sandbox.opensandbox.io"]
-          resources: ["batchsandboxes", "pools"]
+          resources: ["pools"]
           verbs: ["list", "watch"]
     customResourceState:
       enabled: false
@@ -260,63 +266,6 @@ kube-prometheus-stack:
                     type: Gauge
                     gauge:
                       path: [status, available]
-            - groupVersionKind:
-                group: sandbox.opensandbox.io
-                version: v1alpha1
-                kind: BatchSandbox
-              metricNamePrefix: opensandbox_batchsandbox
-              labelsFromPath:
-                namespace: [metadata, namespace]
-                batchsandbox: [metadata, name]
-              metrics:
-                - name: created_seconds
-                  help: OpenSandbox BatchSandbox creation timestamp.
-                  each:
-                    type: Gauge
-                    gauge:
-                      path: [metadata, creationTimestamp]
-                - name: deletion_timestamp_seconds
-                  help: OpenSandbox BatchSandbox deletion timestamp when cleanup is active.
-                  errorLogV: 10
-                  each:
-                    type: Gauge
-                    gauge:
-                      path: [metadata, deletionTimestamp]
-                - name: finalizer_info
-                  help: OpenSandbox BatchSandbox finalizers present during cleanup.
-                  each:
-                    type: Info
-                    info:
-                      path: [metadata, finalizers]
-                      labelsFromPath:
-                        finalizer: []
-                - name: spec_expire_time_seconds
-                  help: OpenSandbox BatchSandbox provider expiration timestamp.
-                  errorLogV: 10
-                  each:
-                    type: Gauge
-                    gauge:
-                      path: [spec, expireTime]
-                - name: status_replicas
-                  help: OpenSandbox BatchSandbox observed Pod replicas.
-                  each:
-                    type: Gauge
-                    gauge:
-                      path: [status, replicas]
-                - name: status_ready
-                  help: OpenSandbox BatchSandbox ready Pods.
-                  each:
-                    type: Gauge
-                    gauge:
-                      path: [status, ready]
-                - name: status_phase
-                  help: OpenSandbox BatchSandbox lifecycle phase.
-                  each:
-                    type: StateSet
-                    stateSet:
-                      labelName: phase
-                      path: [status, phase]
-                      list: [Pending, Succeed, Pausing, Paused, Resuming, Failed]
     metricAllowlist:
       - kube_daemonset_status_current_number_scheduled
       - kube_daemonset_status_desired_number_scheduled
@@ -377,13 +326,6 @@ kube-prometheus-stack:
       - kube_statefulset_status_replicas_ready
       - kube_statefulset_status_replicas_updated
       - kube_statefulset_status_update_revision
-      - opensandbox_batchsandbox_created_seconds
-      - opensandbox_batchsandbox_deletion_timestamp_seconds
-      - opensandbox_batchsandbox_finalizer_info
-      - opensandbox_batchsandbox_spec_expire_time_seconds
-      - opensandbox_batchsandbox_status_phase
-      - opensandbox_batchsandbox_status_ready
-      - opensandbox_batchsandbox_status_replicas
       - opensandbox_pool_spec_buffer_min
       - opensandbox_pool_spec_pool_max
       - opensandbox_pool_status_allocated
@@ -400,6 +342,9 @@ kube-prometheus-stack:
         # for every pod. The pinned mixin consumes only SchedulingGated; retain
         # that exact exception and allow future reasons through for review.
         metricRelabelings:
+          - action: drop
+            sourceLabels: [namespace, __name__]
+            regex: 'opensandbox;kube_pod_.*'
           - action: drop
             sourceLabels: [__name__, reason]
             regex: 'kube_pod_status_reason;(?:Evicted|NodeAffinity|NodeLost|PreemptionByScheduler|Shutdown|TerminationByKubelet|UnexpectedAdmissionError)'

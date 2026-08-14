@@ -113,6 +113,7 @@ import {
   recordCreditBalanceGauges,
   recordCreditMicros,
   recordExpiredDrainingSandboxLeaseGauges,
+  recordOpenSandboxKubernetesInventoryGauges,
   recordRetainedProcessInventoryGauges,
   recordRetainedProcessReconciliation,
   recordSandboxCheckpointArtifactGauges,
@@ -127,6 +128,10 @@ import {
   recordSandboxRotationBacklogGauges,
   recordTurnsQueuedGauge,
 } from "../observability-metrics";
+import {
+  inspectOpenSandboxKubernetesInventory,
+  type OpenSandboxKubernetesInventory,
+} from "../opensandbox-kubernetes-inventory";
 import { providerIdentityFromResumeState } from "../sandbox-routing";
 
 export { sandboxLeaseTelemetryKey } from "@opengeni/observability";
@@ -218,6 +223,10 @@ export type SweepModalOrphansFn = (
   observability: ActivityServices["observability"],
 ) => Promise<number>;
 
+export type InspectOpenSandboxKubernetesInventoryFn = (input: {
+  namespace: string;
+}) => Promise<OpenSandboxKubernetesInventory>;
+
 export type SandboxLeaseActivityOptions = {
   /** Override the provider terminate (tests spy this; defaults to the real
    *  resume-by-id + provider stop()). */
@@ -225,6 +234,8 @@ export type SandboxLeaseActivityOptions = {
   /** Override the provider-side Modal orphan sweep (tests spy this; defaults to
    *  Modal list+tag comparison when Modal is configured). */
   sweepModalOrphans?: SweepModalOrphansFn;
+  /** Override the read-only bounded OpenSandbox Kubernetes projection. */
+  inspectOpenSandboxKubernetesInventory?: InspectOpenSandboxKubernetesInventoryFn;
   /** Override only the read-only provider process probe. The canonical DB
    * settlement remains real in tests and production. */
   probeRetainedProcess?: RetainedProcessProbeFn;
@@ -437,6 +448,8 @@ export function createSandboxLeaseActivities(
       ));
   const sweepModalOrphans: SweepModalOrphansFn =
     options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
+  const inspectOpenSandboxInventory =
+    options.inspectOpenSandboxKubernetesInventory ?? inspectOpenSandboxKubernetesInventory;
   const probeRetainedProcess = options.probeRetainedProcess ?? probeRetainedProcessAtProvider;
   const probeDrainableProvider = options.probeDrainableProvider ?? probeDrainableProviderReadiness;
   async function prepareSandboxLeaseSweep(): Promise<SandboxLeaseSweepPlan> {
@@ -614,7 +627,12 @@ export function createSandboxLeaseActivities(
       if (!settings.sandboxOwnershipEnabled) {
         // Inventory remains useful while provider ownership is intentionally
         // disabled, and this scheduled activity is its single projection owner.
-        await refreshQueueLeaseAndCreditGauges(db, observability);
+        await refreshQueueLeaseAndCreditGauges(
+          db,
+          settings,
+          observability,
+          inspectOpenSandboxInventory,
+        );
         return {
           metered,
           forceDrained,
@@ -683,7 +701,12 @@ export function createSandboxLeaseActivities(
         },
       );
 
-      await refreshQueueLeaseAndCreditGauges(db, observability);
+      await refreshQueueLeaseAndCreditGauges(
+        db,
+        settings,
+        observability,
+        inspectOpenSandboxInventory,
+      );
 
       if (
         input.examined > 0 ||
@@ -1533,7 +1556,9 @@ async function accrueWarmTick(
 
 async function refreshQueueLeaseAndCreditGauges(
   db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
   observability: ActivityServices["observability"],
+  inspectOpenSandboxInventory: InspectOpenSandboxKubernetesInventoryFn,
 ): Promise<void> {
   await Promise.all([
     (async () => {
@@ -1584,6 +1609,24 @@ async function refreshQueueLeaseAndCreditGauges(
         await countExpiredDrainingSandboxLeases(db),
       );
     }),
+    ...(settings.sandboxBackend === "opensandbox" &&
+    settings.openSandboxKubernetesInventoryNamespace
+      ? [
+          refreshSandboxInventoryGauge(
+            observability,
+            "opensandbox_kubernetes",
+            "OpenSandbox Kubernetes",
+            async () => {
+              recordOpenSandboxKubernetesInventoryGauges(
+                observability,
+                await inspectOpenSandboxInventory({
+                  namespace: settings.openSandboxKubernetesInventoryNamespace!,
+                }),
+              );
+            },
+          ),
+        ]
+      : []),
     (async () => {
       try {
         recordCreditBalanceGauges(observability, await listCreditBalancesByAccount(db));
