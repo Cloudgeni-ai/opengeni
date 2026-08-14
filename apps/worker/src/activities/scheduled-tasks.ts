@@ -567,6 +567,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               if (task.runMode === "reusable_session") {
                 await updateScheduledTask(dispatchDb, task.workspaceId, task.id, {
                   reusableSessionId: session.id,
+                  ...(runPersonalResourceAuthority
+                    ? {
+                        clonePersonalResourceAuthorityFromRevision:
+                          runPersonalResourceAuthority.taskAuthorityRevision,
+                      }
+                    : {}),
                 });
               }
               if (sessionCreated) {

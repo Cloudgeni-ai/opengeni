@@ -797,6 +797,88 @@ EXCEPTION WHEN OTHERS THEN
 END
 $clone_scheduled_task_personal_resource_authority$;
 
+CREATE OR REPLACE FUNCTION fence_scheduled_task_personal_resource_execution_update()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fence_scheduled_task_personal_resource_execution_update$
+DECLARE
+  execution_changed boolean;
+  has_personal_authority boolean := false;
+  capability_inserted boolean := false;
+  affected integer;
+BEGIN
+  IF NEW.authority_revision IS DISTINCT FROM OLD.authority_revision
+    AND NEW.authority_revision <> OLD.authority_revision + 1
+  THEN
+    RAISE EXCEPTION 'scheduled personal-resource authority revision update is invalid'
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- Name, status, and timestamps do not affect execution. Every mutable field
+  -- that changes when/how/where the task executes or which instructions and
+  -- authority snapshots it carries is fenced here, including the worker-owned
+  -- reusable-session materialization pointer.
+  execution_changed :=
+    NEW.schedule IS DISTINCT FROM OLD.schedule
+    OR NEW.temporal_schedule_id IS DISTINCT FROM OLD.temporal_schedule_id
+    OR NEW.run_mode IS DISTINCT FROM OLD.run_mode
+    OR NEW.overlap_policy IS DISTINCT FROM OLD.overlap_policy
+    OR NEW.action IS DISTINCT FROM OLD.action
+    OR NEW.agent_config IS DISTINCT FROM OLD.agent_config
+    OR NEW.personal_connection_delegations IS DISTINCT FROM OLD.personal_connection_delegations
+    OR NEW.xai_provider_account_authority_snapshot IS DISTINCT FROM
+      OLD.xai_provider_account_authority_snapshot
+    OR NEW.reusable_session_id IS DISTINCT FROM OLD.reusable_session_id
+    OR NEW.variable_set_id IS DISTINCT FROM OLD.variable_set_id
+    OR NEW.rig_id IS DISTINCT FROM OLD.rig_id
+    OR NEW.metadata IS DISTINCT FROM OLD.metadata;
+
+  IF NOT execution_changed THEN
+    RETURN NEW;
+  END IF;
+
+  INSERT INTO opengeni_private.scheduled_personal_resource_capabilities (
+    backend_pid, transaction_id, capability_kind
+  ) VALUES (pg_backend_pid(), pg_current_xact_id(), 'task_write')
+  ON CONFLICT DO NOTHING;
+  GET DIAGNOSTICS affected = ROW_COUNT;
+  capability_inserted := affected = 1;
+
+  SELECT EXISTS (
+    SELECT 1
+    FROM scheduled_task_personal_resource_authorities authority
+    WHERE authority.task_id = OLD.id
+  ) INTO has_personal_authority;
+
+  IF capability_inserted THEN
+    DELETE FROM opengeni_private.scheduled_personal_resource_capabilities
+    WHERE backend_pid = pg_backend_pid()
+      AND transaction_id = pg_current_xact_id_if_assigned()
+      AND capability_kind = 'task_write';
+    capability_inserted := false;
+  END IF;
+
+  IF has_personal_authority THEN
+    -- A current writer already supplies OLD + 1 and freezes/clones that exact
+    -- revision in the same transaction. A rolling legacy writer supplies no
+    -- revision, so advance it here and leave no matching snapshot: run
+    -- admission then fails closed instead of reusing stale personal authority.
+    NEW.authority_revision := OLD.authority_revision + 1;
+  END IF;
+  RETURN NEW;
+EXCEPTION WHEN OTHERS THEN
+  IF capability_inserted THEN
+    DELETE FROM opengeni_private.scheduled_personal_resource_capabilities
+    WHERE backend_pid = pg_backend_pid()
+      AND transaction_id = pg_current_xact_id_if_assigned()
+      AND capability_kind = 'task_write';
+  END IF;
+  RAISE;
+END
+$fence_scheduled_task_personal_resource_execution_update$;
+
 CREATE OR REPLACE FUNCTION admit_scheduled_task_run_personal_resources()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -817,6 +899,10 @@ BEGIN
     AND task.account_id = NEW.account_id
     AND task.workspace_id = NEW.workspace_id
   FOR SHARE;
+
+  IF task_row.status <> 'active' THEN
+    RAISE EXCEPTION 'scheduled task is not active' USING ERRCODE = '55000';
+  END IF;
 
   INSERT INTO opengeni_private.scheduled_personal_resource_capabilities (
     backend_pid, transaction_id, capability_kind
@@ -1247,6 +1333,10 @@ EXCEPTION WHEN OTHERS THEN
 END
 $validate_scheduled_task_attempt_personal_resources$;
 
+CREATE TRIGGER scheduled_task_personal_resource_execution_revision
+BEFORE UPDATE ON "scheduled_tasks"
+FOR EACH ROW EXECUTE FUNCTION fence_scheduled_task_personal_resource_execution_update();
+
 CREATE TRIGGER scheduled_task_run_personal_resource_admission
 AFTER INSERT ON "scheduled_task_runs"
 FOR EACH ROW EXECUTE FUNCTION admit_scheduled_task_run_personal_resources();
@@ -1332,6 +1422,11 @@ BEGIN
     data_schema
   );
   EXECUTE format(
+    'ALTER FUNCTION %1$I.fence_scheduled_task_personal_resource_execution_update() '
+      || 'SET search_path = pg_catalog, %1$I, pg_temp',
+    data_schema
+  );
+  EXECUTE format(
     'ALTER FUNCTION %1$I.admit_scheduled_task_run_personal_resources() '
       || 'SET search_path = pg_catalog, %1$I, pg_temp',
     data_schema
@@ -1359,6 +1454,7 @@ REVOKE ALL ON FUNCTION freeze_scheduled_task_personal_resources(uuid, uuid, uuid
 REVOKE ALL ON FUNCTION clone_scheduled_task_personal_resource_authority(
   uuid, uuid, uuid, bigint, bigint
 ) FROM PUBLIC;
+REVOKE ALL ON FUNCTION fence_scheduled_task_personal_resource_execution_update() FROM PUBLIC;
 REVOKE ALL ON FUNCTION scheduled_task_run_personal_resource_authority(uuid, uuid, uuid)
   FROM PUBLIC;
 REVOKE ALL ON FUNCTION admit_scheduled_task_run_personal_resources() FROM PUBLIC;
