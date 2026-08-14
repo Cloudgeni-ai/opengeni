@@ -1,10 +1,19 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   createDb,
+  claimSessionWorkForAttempt,
+  createRig,
+  createRigChange,
+  createRigVersion,
+  createRigVersionForChangePromotion,
   createScheduledTask,
+  createSession,
   getSession,
+  listEnabledMcpCapabilityServerIds,
   listSessionEvents,
   listScheduledTaskRuns,
+  updateScheduledTask,
+  updateRigChangeStatus,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -15,6 +24,7 @@ import {
 } from "@opengeni/testing";
 import postgres from "postgres";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
+import { validateIncidentTelemetrySystemUpdateAuthority } from "../src/activities/incident-telemetry-authority";
 import type { ActivityServices } from "../src/activities/types";
 import { scheduledAlertOccurrenceIdentity } from "../src/scheduled-alert-occurrence";
 
@@ -88,6 +98,11 @@ describe("scheduled alert occurrence identity", () => {
     expect(first?.sessionCreateIdempotencyKey).not.toContain(
       "OpenGeniTurnWorkerMemoryConsumesReserve",
     );
+    expect(first?.labels).toEqual({
+      alertname: "OpenGeniTurnWorkerMemoryConsumesReserve",
+      service: "worker-turn",
+      severity: "warning",
+    });
   });
 
   test("separates tasks, exact starts, provider fingerprints, labels, providers, workspaces, and reopenings", () => {
@@ -171,7 +186,11 @@ describe("scheduled alert occurrence identity", () => {
       alertMetadata({ startsAt: `2026-08-13T15:10:29.${"1".repeat(257)}Z` }),
     ]) {
       expect(
-        scheduledAlertOccurrenceIdentity({ workspaceId, scheduledTaskId, metadata }),
+        scheduledAlertOccurrenceIdentity({
+          workspaceId,
+          scheduledTaskId,
+          metadata,
+        }),
       ).toBeNull();
     }
     for (const invalidScheduledTaskId of [" ", "x".repeat(257)]) {
@@ -226,28 +245,94 @@ async function workspaceFixture() {
 async function taskFixture(
   workspace: Awaited<ReturnType<typeof workspaceFixture>>,
   metadata = alertMetadata(),
+  options: {
+    incidentDeclaration?: boolean;
+    underCapable?: boolean;
+    requiredMcpServerId?: string;
+    runMode?: "new_session_per_run" | "reusable_session" | "existing_session";
+    responderSessionId?: string;
+    rig?: { id: string; name: string; credentialHookId: string };
+    availableSeriesLabels?: string[];
+  } = {},
 ) {
-  return await createScheduledTask(client!.db, {
+  const runMode = options.runMode ?? "new_session_per_run";
+  const requiredMcpServerId = options.underCapable
+    ? "missing-observability"
+    : (options.requiredMcpServerId ?? null);
+  const created = await createScheduledTask(client!.db, {
     ...workspace,
     name: `scheduled alert ${crypto.randomUUID()}`,
     status: "active",
     schedule: { type: "manual" },
     temporalScheduleId: `scheduled-alert-${crypto.randomUUID()}`,
-    runMode: "new_session_per_run",
+    runMode,
     overlapPolicy: "allow_concurrent",
     agentConfig: {
       prompt: "Handle the exact structured alert occurrence without parsing this prompt.",
       resources: [],
-      tools: [],
+      tools: requiredMcpServerId ? [{ kind: "mcp" as const, id: requiredMcpServerId }] : [],
       metadata: { purpose: "incident-response" },
+      ...(options.incidentDeclaration === false
+        ? {}
+        : {
+            executionClass: "incident_telemetry" as const,
+            incidentTelemetryPreflight: {
+              requiredResources: [],
+              requiredMcpServerIds: requiredMcpServerId ? [requiredMcpServerId] : [],
+              requiredFirstPartyMcpTools: requiredMcpServerId ? [] : ["sessions_list"],
+              requiredFirstPartyMcpPermissions: requiredMcpServerId ? [] : ["sessions:read"],
+              requiredRig: options.rig
+                ? {
+                    name: options.rig.name,
+                    credentialHookIds: [options.rig.credentialHookId],
+                  }
+                : null,
+              requiredVariableSetNames: [],
+              requiredVariableNames: [],
+              dataSource: {
+                kind: "prometheus" as const,
+                queryPath: "/api/v1/query" as const,
+                workspaceLabel: "workspace_id",
+                alertSelectorLabels: ["alertname"],
+                route: requiredMcpServerId
+                  ? { kind: "mcp" as const, serverId: requiredMcpServerId }
+                  : {
+                      kind: "first_party" as const,
+                      tool: "sessions_list" as const,
+                    },
+                requiredSeries: [
+                  {
+                    metric: "opengeni_alert_occurrence",
+                    labels: ["workspace_id", "alertname"],
+                  },
+                ],
+                availableSeries: [
+                  {
+                    metric: "opengeni_alert_occurrence",
+                    labels: options.availableSeriesLabels ?? ["workspace_id", "alertname"],
+                  },
+                ],
+              },
+            },
+          }),
       goal: {
         text: "Resolve the exact alert occurrence.",
         successCriteria: "The alert is resolved or an exact blocker is recorded.",
         maxAutoContinuations: 2,
       },
     },
+    ...(runMode === "existing_session" && options.responderSessionId
+      ? { targetSessionId: options.responderSessionId }
+      : {}),
+    ...(options.rig ? { rigId: options.rig.id } : {}),
     metadata,
   });
+  if (runMode === "reusable_session" && options.responderSessionId) {
+    return await updateScheduledTask(client!.db, workspace.workspaceId, created.id, {
+      reusableSessionId: options.responderSessionId,
+    });
+  }
+  return created;
 }
 
 function activities() {
@@ -265,6 +350,814 @@ function activities() {
 }
 
 describe("scheduled alert canonical responder session (real PostgreSQL)", () => {
+  async function installTrustedCapabilityMcpServer(
+    workspace: Awaited<ReturnType<typeof workspaceFixture>>,
+    serverId: string,
+  ) {
+    const capabilityId = `mcp:workspace-default-${crypto.randomUUID()}`;
+    const endpoint = `https://example.com/${serverId}`;
+    await admin!`
+      insert into capability_catalog_items (
+        id,
+        account_id,
+        workspace_id,
+        kind,
+        source,
+        name,
+        endpoint_url,
+        auth_model,
+        auth_kind,
+        provider_domain,
+        mcp_url,
+        metadata
+      ) values (
+        ${capabilityId},
+        null,
+        null,
+        'mcp',
+        'registry',
+        ${capabilityId},
+        ${endpoint},
+        null,
+        'none',
+        ${`${crypto.randomUUID()}.example.com`},
+        ${endpoint},
+        ${admin!.json({
+          mcpProbe: { status: "real" },
+          mcpServerId: serverId,
+        })}
+      )`;
+    await admin!`
+      insert into capability_installations (
+        account_id,
+        workspace_id,
+        capability_id,
+        kind,
+        status,
+        config,
+        metadata
+      ) values (
+        ${workspace.accountId},
+        ${workspace.workspaceId},
+        ${capabilityId},
+        'mcp',
+        'active',
+        '{}'::jsonb,
+        ${admin!.json({ mcpConnectivity: { status: "ok" } })}
+      )`;
+  }
+
+  test("matches canonical registry API-key trim trust without exposing contract text", async () => {
+    if (!shared || !client || !admin) return;
+    const workspace = await workspaceFixture();
+    const install = async (input: {
+      id: string;
+      source?: string;
+      authKind?: string | null;
+      authModel?: string | null;
+      metadata: Record<string, unknown>;
+      config?: Record<string, unknown>;
+    }) => {
+      const source = input.source ?? "registry";
+      const endpoint = `https://example.com/${input.id}`;
+      await admin!`
+        insert into capability_catalog_items (
+          id,
+          account_id,
+          workspace_id,
+          kind,
+          source,
+          name,
+          endpoint_url,
+          auth_model,
+          auth_kind,
+          provider_domain,
+          mcp_url,
+          metadata
+        ) values (
+          ${input.id},
+          null,
+          null,
+          'mcp',
+          ${source},
+          ${input.id},
+          ${endpoint},
+          ${input.authModel ?? null},
+          ${input.authKind ?? null},
+          ${source === "registry" ? `${crypto.randomUUID()}.example.com` : null},
+          ${source === "registry" ? endpoint : null},
+          ${admin!.json(input.metadata)}
+        )`;
+      await admin!`
+        insert into capability_installations (
+          account_id,
+          workspace_id,
+          capability_id,
+          kind,
+          status,
+          config,
+          metadata
+        ) values (
+          ${workspace.accountId},
+          ${workspace.workspaceId},
+          ${input.id},
+          'mcp',
+          'active',
+          ${admin!.json(input.config ?? {})},
+          ${admin!.json({ mcpConnectivity: { status: "ok" } })}
+        )`;
+    };
+    const trustedMetadata = (serverId: string, scheme: string) => ({
+      mcpProbe: { status: "real" },
+      authContract: { headerName: "Authorization", scheme },
+      mcpServerId: serverId,
+    });
+    const credentialConfig = { headersEncrypted: { Authorization: "ciphertext" } };
+
+    await install({
+      id: `mcp:trim-valid-${crypto.randomUUID()}`,
+      authKind: "api_key",
+      authModel: "credential_ref",
+      metadata: trustedMetadata("trim-valid", " \tBearer\n"),
+      config: credentialConfig,
+    });
+    await install({
+      id: `mcp:trim-tab-${crypto.randomUUID()}`,
+      authKind: "api_key",
+      authModel: "credential_ref",
+      metadata: trustedMetadata("trim-tab", "\t"),
+      config: credentialConfig,
+    });
+    await install({
+      id: `mcp:trim-newline-${crypto.randomUUID()}`,
+      authKind: "api_key",
+      authModel: "credential_ref",
+      metadata: trustedMetadata("trim-newline", "\n\r"),
+      config: credentialConfig,
+    });
+    await install({
+      id: `mcp:trim-mixed-${crypto.randomUUID()}`,
+      authKind: "api_key",
+      authModel: "credential_ref",
+      metadata: trustedMetadata("trim-mixed", " \t\n\r\u00a0\ufeff"),
+      config: credentialConfig,
+    });
+    await install({
+      id: `mcp:legacy-${crypto.randomUUID()}`,
+      authKind: "api_key",
+      authModel: "credential_ref",
+      metadata: { mcpServerId: "legacy-active" },
+      config: credentialConfig,
+    });
+    await install({
+      id: `mcp:configured-${crypto.randomUUID()}`,
+      source: "configured",
+      metadata: { mcpServerId: "configured-active" },
+    });
+
+    const ids = await listEnabledMcpCapabilityServerIds(client.db, workspace.workspaceId);
+    expect(ids).toContain("trim-valid");
+    expect(ids).toContain("legacy-active");
+    expect(ids).toContain("configured-active");
+    expect(ids).not.toContain("trim-tab");
+    expect(ids).not.toContain("trim-newline");
+    expect(ids).not.toContain("trim-mixed");
+  });
+
+  test("legacy structured alerts block before any run, session, event, usage, or task mutation", async () => {
+    if (!shared || !client || !admin) return;
+    const workspace = await workspaceFixture();
+    const task = await taskFixture(workspace, alertMetadata(), {
+      incidentDeclaration: false,
+    });
+    const [before] = await admin<
+      {
+        runs: number;
+        sessions: number;
+        events: number;
+        usage: number;
+        taskUpdatedAt: Date;
+      }[]
+    >`
+      select
+        (select count(*)::int from scheduled_task_runs where workspace_id = ${workspace.workspaceId}) as runs,
+        (select count(*)::int from sessions where workspace_id = ${workspace.workspaceId}) as sessions,
+        (select count(*)::int from session_events where workspace_id = ${workspace.workspaceId}) as events,
+        (select count(*)::int from usage_events where workspace_id = ${workspace.workspaceId}) as usage,
+        (select updated_at from scheduled_tasks where workspace_id = ${workspace.workspaceId} and id = ${task.id}) as "taskUpdatedAt"`;
+
+    const result = await activities().dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `legacy-preflight-${crypto.randomUUID()}`,
+    });
+    expect(result).toEqual({
+      action: "blocked",
+      reason: "incident_preflight_metadata_missing",
+    });
+
+    const [after] = await admin<
+      {
+        runs: number;
+        sessions: number;
+        events: number;
+        usage: number;
+        taskUpdatedAt: Date;
+      }[]
+    >`
+      select
+        (select count(*)::int from scheduled_task_runs where workspace_id = ${workspace.workspaceId}) as runs,
+        (select count(*)::int from sessions where workspace_id = ${workspace.workspaceId}) as sessions,
+        (select count(*)::int from session_events where workspace_id = ${workspace.workspaceId}) as events,
+        (select count(*)::int from usage_events where workspace_id = ${workspace.workspaceId}) as usage,
+        (select updated_at from scheduled_tasks where workspace_id = ${workspace.workspaceId} and id = ${task.id}) as "taskUpdatedAt"`;
+    expect(after).toEqual(before);
+    expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toEqual([]);
+  });
+
+  test("admits capable responders in all four scheduled run modes", async () => {
+    if (!shared || !client) return;
+    const workspace = await workspaceFixture();
+    const existingResponder = async (label: string) =>
+      await createSession(client.db, {
+        ...workspace,
+        initialMessage: label,
+        resources: [],
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+    const existing = await existingResponder("existing incident responder");
+    const reusable = await existingResponder("reusable incident responder");
+    const cases = [
+      {
+        label: "new_session_per_run",
+        task: await taskFixture(workspace),
+        expectedAction: "start",
+      },
+      {
+        label: "reusable_session:new",
+        task: await taskFixture(workspace, alertMetadata(), {
+          runMode: "reusable_session",
+        }),
+        expectedAction: "start",
+      },
+      {
+        label: "existing_session",
+        task: await taskFixture(workspace, alertMetadata(), {
+          runMode: "existing_session",
+          responderSessionId: existing.id,
+        }),
+        expectedAction: "signal",
+      },
+      {
+        label: "reusable_session:existing",
+        task: await taskFixture(workspace, alertMetadata(), {
+          runMode: "reusable_session",
+          responderSessionId: reusable.id,
+        }),
+        expectedAction: "signal",
+      },
+    ] as const;
+
+    for (const candidate of cases) {
+      const result = await activities().dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: candidate.task.id,
+        triggerType: "scheduled",
+        producerKey: `four-mode-${candidate.label}-${crypto.randomUUID()}`,
+      });
+      expect(result.action, candidate.label).toBe(candidate.expectedAction);
+    }
+  });
+
+  test("admits current dynamic defaults for existing and reusable workspace-default responders", async () => {
+    if (!shared || !client) return;
+    const workspace = await workspaceFixture();
+    const workspaceDefaultResponder = async (label: string) =>
+      await createSession(client.db, {
+        ...workspace,
+        initialMessage: label,
+        resources: [],
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+    const existing = await workspaceDefaultResponder("existing workspace-default responder");
+    const reusable = await workspaceDefaultResponder("reusable workspace-default responder");
+    const dynamicServerId = `dynamic-observability-${crypto.randomUUID()}`;
+
+    // The capability becomes a current workspace default only after the
+    // sessions are created, so their stored tool refs cannot mask the parity.
+    await installTrustedCapabilityMcpServer(workspace, dynamicServerId);
+
+    const tasks = [
+      await taskFixture(workspace, alertMetadata(), {
+        runMode: "existing_session",
+        responderSessionId: existing.id,
+        requiredMcpServerId: dynamicServerId,
+      }),
+      await taskFixture(workspace, alertMetadata(), {
+        runMode: "reusable_session",
+        responderSessionId: reusable.id,
+        requiredMcpServerId: dynamicServerId,
+      }),
+    ];
+
+    for (const task of tasks) {
+      expect(
+        (
+          await activities().dispatchScheduledTaskRun({
+            workspaceId: workspace.workspaceId,
+            taskId: task.id,
+            triggerType: "scheduled",
+            producerKey: `workspace-default-${task.id}`,
+          })
+        ).action,
+      ).toBe("signal");
+    }
+  });
+
+  test("blocks under-capable responders without run or delivery side effects in all four modes", async () => {
+    if (!shared || !client || !admin) return;
+    const workspace = await workspaceFixture();
+    const existing = await createSession(client.db, {
+      ...workspace,
+      initialMessage: "existing under-capable responder",
+      resources: [],
+      tools: [{ kind: "mcp", id: "opengeni" }],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const reusable = await createSession(client.db, {
+      ...workspace,
+      initialMessage: "reusable under-capable responder",
+      resources: [],
+      tools: [{ kind: "mcp", id: "opengeni" }],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const tasks = [
+      await taskFixture(workspace, alertMetadata(), { underCapable: true }),
+      await taskFixture(workspace, alertMetadata(), {
+        runMode: "reusable_session",
+        underCapable: true,
+      }),
+      await taskFixture(workspace, alertMetadata(), {
+        runMode: "existing_session",
+        responderSessionId: existing.id,
+        underCapable: true,
+      }),
+      await taskFixture(workspace, alertMetadata(), {
+        runMode: "reusable_session",
+        responderSessionId: reusable.id,
+        underCapable: true,
+      }),
+    ];
+    const [before] = await admin<{ runs: number; events: number; usage: number }[]>`
+      select
+        (select count(*)::int from scheduled_task_runs where workspace_id = ${workspace.workspaceId}) as runs,
+        (select count(*)::int from session_events where workspace_id = ${workspace.workspaceId}) as events,
+        (select count(*)::int from usage_events where workspace_id = ${workspace.workspaceId}) as usage`;
+
+    for (const task of tasks) {
+      expect(
+        await activities().dispatchScheduledTaskRun({
+          workspaceId: workspace.workspaceId,
+          taskId: task.id,
+          triggerType: "scheduled",
+          producerKey: `four-mode-block-${task.id}`,
+        }),
+      ).toEqual({
+        action: "blocked",
+        reason: "incident_responder_under_capable",
+      });
+    }
+
+    const [after] = await admin<{ runs: number; events: number; usage: number }[]>`
+      select
+        (select count(*)::int from scheduled_task_runs where workspace_id = ${workspace.workspaceId}) as runs,
+        (select count(*)::int from session_events where workspace_id = ${workspace.workspaceId}) as events,
+        (select count(*)::int from usage_events where workspace_id = ${workspace.workspaceId}) as usage`;
+    expect(after).toEqual(before);
+  });
+
+  test("rolls back every durable dispatch mutation when authority narrows at final settlement", async () => {
+    if (!shared || !client || !admin) return;
+    const snapshot = async (workspaceId: string) => {
+      const [row] = await admin!<
+        {
+          runs: unknown;
+          sessions: unknown;
+          events: unknown;
+          updates: unknown;
+          goals: unknown;
+          usage: unknown;
+          tasks: unknown;
+        }[]
+      >`
+        select
+          (select coalesce(jsonb_agg(to_jsonb(value) order by value.id), '[]'::jsonb)
+             from (select * from scheduled_task_runs where workspace_id = ${workspaceId}) value) as runs,
+          (select coalesce(jsonb_agg(to_jsonb(value) order by value.id), '[]'::jsonb)
+             from (select id, status, last_sequence, first_party_mcp_tools,
+                          tool_policy_version, updated_at
+                     from sessions where workspace_id = ${workspaceId}) value) as sessions,
+          (select coalesce(jsonb_agg(to_jsonb(value) order by value.id), '[]'::jsonb)
+             from (select * from session_events where workspace_id = ${workspaceId}) value) as events,
+          (select coalesce(jsonb_agg(to_jsonb(value) order by value.id), '[]'::jsonb)
+             from (select * from session_system_updates where workspace_id = ${workspaceId}) value) as updates,
+          (select coalesce(jsonb_agg(to_jsonb(value) order by value.id), '[]'::jsonb)
+             from (select * from session_goals where workspace_id = ${workspaceId}) value) as goals,
+          (select coalesce(jsonb_agg(to_jsonb(value) order by value.id), '[]'::jsonb)
+             from (select * from usage_events where workspace_id = ${workspaceId}) value) as usage,
+          (select coalesce(jsonb_agg(to_jsonb(value) order by value.id), '[]'::jsonb)
+             from (select id, reusable_session_id, updated_at
+                     from scheduled_tasks where workspace_id = ${workspaceId}) value) as tasks`;
+      return row!;
+    };
+
+    for (const mode of [
+      "new_session_per_run",
+      "reusable_session:new",
+      "existing_session",
+      "reusable_session:existing",
+    ] as const) {
+      const workspace = await workspaceFixture();
+      const existing = mode.includes("existing")
+        ? await createSession(client.db, {
+            ...workspace,
+            initialMessage: `${mode} responder`,
+            resources: [],
+            tools: [{ kind: "mcp", id: "opengeni" }],
+            metadata: {},
+            model: "scripted-model",
+            sandboxBackend: "none",
+          })
+        : null;
+      const task = await taskFixture(workspace, alertMetadata(), {
+        runMode:
+          mode === "new_session_per_run"
+            ? "new_session_per_run"
+            : mode === "existing_session"
+              ? "existing_session"
+              : "reusable_session",
+        ...(existing ? { responderSessionId: existing.id } : {}),
+      });
+      const suffix = crypto.randomUUID().replaceAll("-", "");
+      const functionName = `incident_authority_narrow_${suffix}`;
+      const triggerName = `incident_authority_narrow_${suffix}`;
+      const triggerTable = existing ? "scheduled_task_runs" : "sessions";
+      const body = existing
+        ? `begin
+             if new.workspace_id = '${workspace.workspaceId}'::uuid then
+               update sessions
+                  set first_party_mcp_tools = '[]'::jsonb,
+                      tool_policy_version = tool_policy_version + 1
+                where workspace_id = new.workspace_id
+                  and id = '${existing.id}'::uuid;
+             end if;
+             return new;
+           end`
+        : `begin
+             if new.workspace_id = '${workspace.workspaceId}'::uuid then
+               new.first_party_mcp_tools := '[]'::jsonb;
+               new.tool_policy_version := new.tool_policy_version + 1;
+             end if;
+             return new;
+           end`;
+      await admin.unsafe(
+        `create function ${functionName}() returns trigger language plpgsql as $$ ${body} $$`,
+      );
+      await admin.unsafe(
+        `create trigger ${triggerName} before insert on ${triggerTable} for each row execute function ${functionName}()`,
+      );
+      try {
+        const before = await snapshot(workspace.workspaceId);
+        expect(
+          await activities().dispatchScheduledTaskRun({
+            workspaceId: workspace.workspaceId,
+            taskId: task.id,
+            triggerType: "scheduled",
+            producerKey: `late-authority-${mode}-${crypto.randomUUID()}`,
+          }),
+          mode,
+        ).toEqual({
+          action: "blocked",
+          reason: "incident_responder_under_capable",
+        });
+        expect(await snapshot(workspace.workspaceId), mode).toEqual(before);
+      } finally {
+        await admin.unsafe(`drop trigger if exists ${triggerName} on ${triggerTable}`);
+        await admin.unsafe(`drop function if exists ${functionName}()`);
+      }
+    }
+  });
+
+  test("blocks workspace-only and mismatched series with zero durable dispatch side effects", async () => {
+    if (!shared || !client || !admin) return;
+    const workspace = await workspaceFixture();
+    const tasks = [
+      await taskFixture(workspace, alertMetadata(), {
+        availableSeriesLabels: ["workspace_id"],
+      }),
+      await taskFixture(workspace, alertMetadata(), {
+        availableSeriesLabels: ["workspace_id", "service"],
+      }),
+    ];
+    const snapshot = async () => {
+      const [row] = await admin!<
+        {
+          runs: number;
+          sessions: number;
+          events: number;
+          turns: number;
+          updates: number;
+          goals: number;
+          usage: number;
+        }[]
+      >`
+        select
+          (select count(*)::int from scheduled_task_runs where workspace_id = ${workspace.workspaceId}) as runs,
+          (select count(*)::int from sessions where workspace_id = ${workspace.workspaceId}) as sessions,
+          (select count(*)::int from session_events where workspace_id = ${workspace.workspaceId}) as events,
+          (select count(*)::int from session_turns where workspace_id = ${workspace.workspaceId}) as turns,
+          (select count(*)::int from session_system_updates where workspace_id = ${workspace.workspaceId}) as updates,
+          (select count(*)::int from session_goals where workspace_id = ${workspace.workspaceId}) as goals,
+          (select count(*)::int from usage_events where workspace_id = ${workspace.workspaceId}) as usage`;
+      return row!;
+    };
+    const before = await snapshot();
+
+    for (const task of tasks) {
+      expect(
+        await activities().dispatchScheduledTaskRun({
+          workspaceId: workspace.workspaceId,
+          taskId: task.id,
+          triggerType: "scheduled",
+          producerKey: `series-block-${task.id}`,
+        }),
+      ).toEqual({
+        action: "blocked",
+        reason: "incident_data_source_unsuitable",
+      });
+    }
+
+    expect(await snapshot()).toEqual(before);
+  });
+
+  test("rejects a source-frozen responder when authority narrows before claim", async () => {
+    if (!shared || !client || !admin) return;
+    const workspace = await workspaceFixture();
+    const task = await taskFixture(workspace);
+    const dispatch = await activities().dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `authority-fence-${crypto.randomUUID()}`,
+    });
+    expect(dispatch.action).toBe("start");
+    if (dispatch.action !== "start") return;
+
+    await admin!`
+      update sessions
+      set first_party_mcp_tools = '[]'::jsonb,
+          tool_policy_version = tool_policy_version + 1
+      where workspace_id = ${workspace.workspaceId} and id = ${dispatch.sessionId}`;
+
+    const claim = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+      sessionId: dispatch.sessionId,
+      workflowId: dispatch.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+      validatePendingSystemUpdateAuthority: async (tx, update) =>
+        await validateIncidentTelemetrySystemUpdateAuthority({
+          db: tx,
+          settings: testSettings({
+            databaseUrl: shared!.appUrl,
+            sandboxBackend: "none",
+          }),
+          workspaceId: workspace.workspaceId,
+          sessionId: dispatch.sessionId,
+          update,
+        }),
+    });
+    expect(claim).toEqual({ action: "unclaimed", reason: "no-work" });
+
+    const [run] = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+    expect(run?.status).toBe("failed");
+    const [state] = await admin!<{ state: string; turns: number }[]>`
+      select
+        (select state from session_system_updates
+         where workspace_id = ${workspace.workspaceId}
+           and session_id = ${dispatch.sessionId}
+           and kind = 'scheduled_occurrence'
+         order by created_at desc limit 1) as state,
+        (select count(*)::int from session_turns
+         where workspace_id = ${workspace.workspaceId}
+           and session_id = ${dispatch.sessionId}) as turns`;
+    expect(state).toEqual({ state: "failed", turns: 0 });
+  });
+
+  test("rejects source-frozen work when task policy or exact selector values change", async () => {
+    if (!shared || !client) return;
+    for (const change of ["policy", "selector"] as const) {
+      const workspace = await workspaceFixture();
+      const task = await taskFixture(workspace);
+      const dispatch = await activities().dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `task-fence-${change}-${crypto.randomUUID()}`,
+      });
+      expect(dispatch.action, change).toBe("start");
+      if (dispatch.action !== "start") continue;
+
+      if (change === "policy") {
+        await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
+          agentConfig: {
+            ...task.agentConfig,
+            incidentTelemetryPreflight: {
+              ...task.agentConfig.incidentTelemetryPreflight!,
+              requiredFirstPartyMcpTools: ["github_repositories_list"],
+            },
+          },
+        });
+      } else {
+        await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
+          metadata: alertMetadata({
+            labels: {
+              alertname: "A-Different-Exact-Alert",
+              severity: "warning",
+              service: "worker-turn",
+            },
+          }),
+        });
+      }
+
+      const claim = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+        sessionId: dispatch.sessionId,
+        workflowId: dispatch.workflowId,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+        validatePendingSystemUpdateAuthority: async (tx, update) =>
+          await validateIncidentTelemetrySystemUpdateAuthority({
+            db: tx,
+            settings: testSettings({
+              databaseUrl: shared!.appUrl,
+              sandboxBackend: "none",
+            }),
+            workspaceId: workspace.workspaceId,
+            sessionId: dispatch.sessionId,
+            update,
+          }),
+      });
+      expect(claim, change).toEqual({ action: "unclaimed", reason: "no-work" });
+      const [run] = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+      expect(run?.status, change).toBe("failed");
+    }
+  });
+
+  test("claims an unchanged source-frozen capable responder", async () => {
+    if (!shared || !client) return;
+    const workspace = await workspaceFixture();
+    const task = await taskFixture(workspace);
+    const dispatch = await activities().dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `authority-fence-valid-${crypto.randomUUID()}`,
+    });
+    expect(dispatch.action).toBe("start");
+    if (dispatch.action !== "start") return;
+
+    const claim = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+      sessionId: dispatch.sessionId,
+      workflowId: dispatch.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+      validatePendingSystemUpdateAuthority: async (tx, update) =>
+        await validateIncidentTelemetrySystemUpdateAuthority({
+          db: tx,
+          settings: testSettings({
+            databaseUrl: shared!.appUrl,
+            sandboxBackend: "none",
+          }),
+          workspaceId: workspace.workspaceId,
+          sessionId: dispatch.sessionId,
+          update,
+        }),
+    });
+    expect(claim.action).toBe("claimed");
+  });
+
+  test("blocks an active but unverified incident rig before creating a run or session", async () => {
+    if (!shared || !client) return;
+    const workspace = await workspaceFixture();
+    const rig = await createRig(client.db, {
+      ...workspace,
+      name: `unverified-incident-${crypto.randomUUID()}`,
+      initialVersion: { credentialHooks: ["azure-monitor"] },
+    });
+    const task = await taskFixture(workspace, alertMetadata(), {
+      rig: { id: rig.id, name: rig.name, credentialHookId: "azure-monitor" },
+    });
+
+    expect(
+      await activities().dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `unverified-rig-${crypto.randomUUID()}`,
+      }),
+    ).toEqual({
+      action: "blocked",
+      reason: "incident_responder_under_capable",
+    });
+    expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toEqual([]);
+  });
+
+  test("accepts a passing frozen rig version after a newer version becomes active", async () => {
+    if (!shared || !client) return;
+    const workspace = await workspaceFixture();
+    const rig = await createRig(client.db, {
+      ...workspace,
+      name: `frozen-incident-${crypto.randomUUID()}`,
+      initialVersion: { credentialHooks: ["azure-monitor"] },
+    });
+    const change = await createRigChange(client.db, {
+      ...workspace,
+      rigId: rig.id,
+      baseVersionId: rig.activeVersion!.id,
+      kind: "definition_edit",
+      payload: { credentialHooks: ["azure-monitor"] },
+    });
+    await updateRigChangeStatus(client.db, workspace.workspaceId, change.id, {
+      status: "proposed",
+      verification: {
+        startedAt: "2026-08-14T00:00:00.000Z",
+        finishedAt: "2026-08-14T00:01:00.000Z",
+        passed: true,
+        checkResults: [],
+      },
+    });
+    const promoted = await createRigVersionForChangePromotion(
+      client.db,
+      workspace.workspaceId,
+      rig.id,
+      change.id,
+      {
+        expectedActiveVersionId: rig.activeVersion!.id,
+        credentialHooks: ["azure-monitor"],
+      },
+    );
+    const responder = await createSession(client.db, {
+      ...workspace,
+      initialMessage: "frozen verified incident responder",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      rigId: rig.id,
+      rigVersionId: promoted.version.id,
+    });
+    await createRigVersion(
+      client.db,
+      workspace.workspaceId,
+      rig.id,
+      { credentialHooks: ["azure-monitor"] },
+      { activate: true },
+    );
+    const task = await taskFixture(workspace, alertMetadata(), {
+      runMode: "existing_session",
+      responderSessionId: responder.id,
+      rig: { id: rig.id, name: rig.name, credentialHookId: "azure-monitor" },
+    });
+
+    expect(
+      (
+        await activities().dispatchScheduledTaskRun({
+          workspaceId: workspace.workspaceId,
+          taskId: task.id,
+          triggerType: "scheduled",
+          producerKey: `frozen-rig-${crypto.randomUUID()}`,
+        })
+      ).action,
+    ).toBe("signal");
+  });
+
   test("redelivery reuses one canonical session and preserves the exact prompt", async () => {
     if (!shared || !client) return;
     const workspace = await workspaceFixture();

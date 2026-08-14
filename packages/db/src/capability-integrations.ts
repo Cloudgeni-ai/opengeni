@@ -640,6 +640,176 @@ export async function listInstalledApiIntegrations(
       );
 }
 
+type ApiIntegrationServerAuthorityMetadata = {
+  serverId: string;
+  connectionId: string | null;
+  providerDomain: string;
+  connectionKind: string | null;
+  subjectScope: "workspace" | "subject";
+};
+
+async function listInstalledApiIntegrationServerAuthorityMetadataInRlsContext(
+  scopedDb: Database,
+  workspaceId: string,
+  subjectId?: string,
+): Promise<ApiIntegrationServerAuthorityMetadata[]> {
+  const rows = await scopedDb
+    .select({
+      serverId: schema.integrationFacetBindings.runtimeKey,
+      connectionId: schema.integrationFacetBindings.connectionId,
+      providerDomain: schema.capabilityIntegrationFacets.providerDomain,
+      connectionKind: sql<
+        string | null
+      >`${schema.integrationFacetBindings.config} ->> 'connectionKind'`,
+      subjectScope: sql<
+        string | null
+      >`${schema.integrationFacetBindings.config} ->> 'subjectScope'`,
+    })
+    .from(schema.integrationFacetBindings)
+    .innerJoin(
+      schema.integrationFacetDefinitions,
+      eq(schema.integrationFacetDefinitions.id, schema.integrationFacetBindings.facetDefinitionId),
+    )
+    .innerJoin(
+      schema.capabilityIntegrationFacets,
+      eq(
+        schema.capabilityIntegrationFacets.facetId,
+        schema.integrationFacetDefinitions.integrationFacetId,
+      ),
+    )
+    .innerJoin(
+      schema.capabilityFacetInstallations,
+      eq(
+        schema.capabilityFacetInstallations.id,
+        schema.integrationFacetBindings.integrationFacetInstallationId,
+      ),
+    )
+    .innerJoin(
+      schema.capabilityPluginInstallations,
+      eq(
+        schema.capabilityPluginInstallations.id,
+        schema.capabilityFacetInstallations.pluginInstallationId,
+      ),
+    )
+    .innerJoin(
+      schema.capabilityApiFacets,
+      eq(schema.capabilityApiFacets.integrationFacetId, schema.capabilityIntegrationFacets.facetId),
+    )
+    .where(
+      and(
+        eq(schema.capabilityPluginInstallations.workspaceId, workspaceId),
+        eq(schema.capabilityPluginInstallations.status, "active"),
+        eq(schema.capabilityFacetInstallations.status, "active"),
+        eq(schema.integrationFacetDefinitions.kind, "tools"),
+        eq(schema.integrationFacetBindings.status, "active"),
+        sql`${schema.integrationFacetBindings.runtimeKey} is not null`,
+        sql`exists (
+          select 1 from ${schema.capabilityComponentOwners} owner
+          where owner.facet_installation_id = ${schema.capabilityFacetInstallations.id}
+            and ${effectiveCapabilityOwnerSql(sql`owner.owner_kind`, sql`owner.owner_id`)}
+        )`,
+        sql`exists (
+          select 1 from ${schema.integrationFacetBindingOwners} owner
+          where owner.binding_id = ${schema.integrationFacetBindings.id}
+            and ${effectiveCapabilityOwnerSql(sql`owner.owner_kind`, sql`owner.owner_id`)}
+        )`,
+        sql`exists (
+          select 1 from ${schema.capabilityFacetInstallations} api_installation
+          where api_installation.plugin_installation_id = ${schema.capabilityPluginInstallations.id}
+            and api_installation.facet_id = ${schema.capabilityApiFacets.facetId}
+            and api_installation.status = 'active'
+        )`,
+        subjectId
+          ? sql`(
+              ${schema.integrationFacetBindings.connectionId} is null
+              or exists (
+                select 1 from ${schema.connections} connection
+                where connection.id = ${schema.integrationFacetBindings.connectionId}
+                  and (connection.subject_id is null or connection.subject_id = ${subjectId})
+              )
+            )`
+          : sql`(
+              ${schema.integrationFacetBindings.connectionId} is null
+              or exists (
+                select 1 from ${schema.connections} connection
+                where connection.id = ${schema.integrationFacetBindings.connectionId}
+                  and connection.subject_id is null
+              )
+            )`,
+      ),
+    );
+  return rows.flatMap((row) =>
+    row.serverId
+      ? [
+          {
+            serverId: row.serverId,
+            connectionId: row.connectionId,
+            providerDomain: row.providerDomain,
+            connectionKind: row.connectionKind,
+            subjectScope: row.subjectScope === "subject" ? "subject" : "workspace",
+          },
+        ]
+      : [],
+  );
+}
+
+/**
+ * Exact runnable API-integration server ids for a scheduled service run.
+ * Only runtime ids and the minimum delegation-matching metadata are selected;
+ * no integration definition, credential, token, endpoint, or tool schema is
+ * materialized before incident admission.
+ */
+export async function listInstalledApiIntegrationServerIdsForDelegations(
+  db: Database,
+  workspaceId: string,
+  delegations: readonly {
+    serverId: string;
+    connectionId: string;
+    providerDomain: string;
+    ownerSubjectId: string;
+    kind?: string | undefined;
+  }[],
+): Promise<string[]> {
+  const workspace = await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) =>
+      await listInstalledApiIntegrationServerAuthorityMetadataInRlsContext(scopedDb, workspaceId),
+  );
+  const byServerId = new Set(workspace.map((entry) => entry.serverId));
+  const owners = [...new Set(delegations.map((delegation) => delegation.ownerSubjectId))];
+  for (const ownerSubjectId of owners) {
+    const ownerEntries = await withWorkspaceSubjectRls(
+      db,
+      workspaceId,
+      ownerSubjectId,
+      async (scopedDb) =>
+        await listInstalledApiIntegrationServerAuthorityMetadataInRlsContext(
+          scopedDb,
+          workspaceId,
+          ownerSubjectId,
+        ),
+    );
+    const exact = delegations.filter((delegation) => delegation.ownerSubjectId === ownerSubjectId);
+    for (const entry of ownerEntries) {
+      if (
+        entry.subjectScope === "subject" &&
+        entry.connectionId &&
+        exact.some(
+          (delegation) =>
+            delegation.serverId === entry.serverId &&
+            delegation.connectionId === entry.connectionId &&
+            delegation.providerDomain.toLowerCase() === entry.providerDomain.toLowerCase() &&
+            (delegation.kind ?? "") === (entry.connectionKind ?? ""),
+        )
+      ) {
+        byServerId.add(entry.serverId);
+      }
+    }
+  }
+  return [...byServerId];
+}
+
 /**
  * Read installed API Integrations from a transaction that already carries the
  * workspace RLS context. This is intentionally separate from the public
