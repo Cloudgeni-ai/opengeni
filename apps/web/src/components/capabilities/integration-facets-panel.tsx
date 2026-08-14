@@ -15,6 +15,7 @@ import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
 import { useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent } from "react";
 import { toast } from "sonner";
 
+import type { GoogleDriveKnowledgeSourceDialogProps } from "@/components/capabilities/google-drive-knowledge-source-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -46,19 +47,7 @@ type FacetMutationToken = {
   generation: number;
   sequence: number;
 };
-type GoogleDriveDialogProps = {
-  client: OpenGeniCoreClient;
-  workspaceId: string;
-  instance: ApiIntegrationInstallationSummary;
-  entry: FacetEntry | null;
-  canManage: boolean;
-  canManagePersonalDestination: boolean;
-  canManageWorkspaceDestination: boolean;
-  canManageOrganizationDestination: boolean;
-  onClose: () => void;
-  onBusyChange: (busy: boolean) => void;
-  onSaved: (binding: IntegrationFacetBindingSummary) => void;
-};
+type GoogleDriveDialogProps = GoogleDriveKnowledgeSourceDialogProps;
 
 const KIND_DETAILS: Record<
   IntegrationFacetDefinitionSummary["kind"],
@@ -124,13 +113,11 @@ export function IntegrationFacetsPanel({
   const nextMutationSequence = useRef(0);
   const mutationSequenceByFacet = useRef(new Map<string, number>());
   const loadPromise = useRef<Promise<void> | null>(null);
-  const googleDriveMutationToken = useRef<FacetMutationToken | null>(null);
 
   useEffect(() => {
     ++operationGeneration.current;
     mutationSequenceByFacet.current.clear();
     loadPromise.current = null;
-    googleDriveMutationToken.current = null;
     setData(null);
     setLoading(false);
     setError(null);
@@ -153,7 +140,6 @@ export function IntegrationFacetsPanel({
     if (loadPromise.current) return await loadPromise.current;
     const generation = ++operationGeneration.current;
     mutationSequenceByFacet.current.clear();
-    googleDriveMutationToken.current = null;
     setBusyFacetKeys(new Set());
     const pending = (async () => {
       setLoading(true);
@@ -417,23 +403,16 @@ export function IntegrationFacetsPanel({
           canManagePersonalDestination={canManagePersonalDestination}
           canManageWorkspaceDestination={canManageWorkspaceDestination}
           canManageOrganizationDestination={canManageOrganizationDestination}
-          onClose={() => setGoogleDriveEditor(null)}
-          onBusyChange={(busy) => {
-            if (busy) {
-              googleDriveMutationToken.current = beginMutation(
-                googleDriveEditor.definition.facetKey,
-              );
-              return;
-            }
-            const token = googleDriveMutationToken.current;
-            googleDriveMutationToken.current = null;
-            if (token !== null) finishMutation(token);
-          }}
-          onSaved={(binding) => {
-            const token = googleDriveMutationToken.current;
-            if (token !== null) {
-              applyMutationBinding(token, binding);
-            }
+          onClose={() =>
+            setGoogleDriveEditor((current) => (current === googleDriveEditor ? null : current))
+          }
+          onMutationStart={() => {
+            const token = beginMutation(googleDriveEditor.definition.facetKey);
+            return {
+              apply: (binding) => applyMutationBinding(token, binding),
+              isCurrent: () => isCurrentMutation(token),
+              finish: () => finishMutation(token),
+            };
           }}
         />
       ) : null}

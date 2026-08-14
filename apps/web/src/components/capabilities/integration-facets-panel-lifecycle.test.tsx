@@ -10,6 +10,10 @@ import type {
   IntegrationInstanceFacetsResponse,
 } from "@/types";
 
+import type {
+  GoogleDriveFacetMutation,
+  GoogleDriveKnowledgeSourceDialogProps,
+} from "./google-drive-knowledge-source-dialog";
 import { IntegrationFacetsPanel } from "./integration-facets-panel";
 
 beforeAll(() => {
@@ -182,7 +186,163 @@ describe("Integration Facet lifecycle state", () => {
       await rendered.unmount();
     }
   });
+
+  test("keeps an older Google Drive success and close scoped to its originating instance", async () => {
+    const instanceA = instance;
+    const instanceB = {
+      ...instance,
+      instanceId: "00000000-0000-4000-8000-000000000204",
+      instanceKey: "operations",
+      displayName: "Inventory — Operations",
+      instanceVersion: 2,
+    };
+    const activeA = binding("active", 1, "drive-content", "202");
+    const pausedA = binding("paused", 2, "drive-content", "202");
+    const activeB = binding("active", 1, "drive-content", "205");
+    const pausedB = binding("paused", 2, "drive-content", "205");
+    const listIntegrationFacets = mock(
+      async (_workspaceId: string, _capabilityId: string, instanceKey: string) =>
+        googleDriveResponse(
+          instanceKey === instanceA.instanceKey ? instanceA : instanceB,
+          {
+            [instanceA.instanceKey]: activeA,
+            [instanceB.instanceKey]: activeB,
+          }[instanceKey]!,
+        ),
+    );
+    let dialogA: GoogleDriveKnowledgeSourceDialogProps | null = null;
+    let dialogB: GoogleDriveKnowledgeSourceDialogProps | null = null;
+    const GoogleDriveDialog = (props: GoogleDriveKnowledgeSourceDialogProps) => {
+      if (props.instance.instanceKey === instanceA.instanceKey) dialogA = props;
+      else dialogB = props;
+      return <div data-google-drive-dialog={props.instance.instanceKey} />;
+    };
+    const client = { listIntegrationFacets } as unknown as OpenGeniCoreClient;
+    const rendered = await renderPanel({ client, instance: instanceA, GoogleDriveDialog });
+    try {
+      await openGoogleDriveEditor(rendered.container, instanceA.instanceKey);
+      let oldMutation!: GoogleDriveFacetMutation;
+      await act(async () => {
+        oldMutation = requiredDialog(dialogA).onMutationStart();
+      });
+
+      await rendered.rerender({ client, instance: instanceB, GoogleDriveDialog });
+      await openGoogleDriveEditor(rendered.container, instanceB.instanceKey);
+      const currentDialog = requiredDialog(dialogB);
+      let currentMutation!: GoogleDriveFacetMutation;
+      await act(async () => {
+        currentMutation = currentDialog.onMutationStart();
+      });
+
+      let oldApplied = true;
+      await act(async () => {
+        oldApplied = oldMutation.apply(pausedA);
+        requiredDialog(dialogA).onClose();
+        oldMutation.finish();
+      });
+
+      expect(oldApplied).toBe(false);
+      expect(currentMutation.isCurrent()).toBe(true);
+      expect(
+        rendered.container.querySelector(`[data-google-drive-dialog="${instanceB.instanceKey}"]`),
+      ).not.toBeNull();
+      expect(requiredFacet(rendered.container, "drive-content").textContent).toContain("Active");
+
+      await act(async () => {
+        expect(currentMutation.apply(pausedB)).toBe(true);
+        currentDialog.onClose();
+        currentMutation.finish();
+      });
+      await waitFor(
+        () =>
+          requiredFacet(rendered.container, "drive-content").textContent?.includes("Paused") ===
+          true,
+      );
+
+      expect(rendered.container.querySelector("[data-google-drive-dialog]")).toBeNull();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("does not let an older Google Drive finally consume a newer instance mutation", async () => {
+    const instanceA = instance;
+    const instanceB = {
+      ...instance,
+      instanceId: "00000000-0000-4000-8000-000000000304",
+      instanceKey: "operations",
+      displayName: "Inventory — Operations",
+      instanceVersion: 2,
+    };
+    const activeA = binding("active", 1, "drive-content", "302");
+    const activeB = binding("active", 1, "drive-content", "305");
+    const pausedB = binding("paused", 2, "drive-content", "305");
+    const listIntegrationFacets = mock(
+      async (_workspaceId: string, _capabilityId: string, instanceKey: string) =>
+        googleDriveResponse(
+          instanceKey === instanceA.instanceKey ? instanceA : instanceB,
+          {
+            [instanceA.instanceKey]: activeA,
+            [instanceB.instanceKey]: activeB,
+          }[instanceKey]!,
+        ),
+    );
+    let dialogA: GoogleDriveKnowledgeSourceDialogProps | null = null;
+    let dialogB: GoogleDriveKnowledgeSourceDialogProps | null = null;
+    const GoogleDriveDialog = (props: GoogleDriveKnowledgeSourceDialogProps) => {
+      if (props.instance.instanceKey === instanceA.instanceKey) dialogA = props;
+      else dialogB = props;
+      return <div data-google-drive-dialog={props.instance.instanceKey} />;
+    };
+    const client = { listIntegrationFacets } as unknown as OpenGeniCoreClient;
+    const rendered = await renderPanel({ client, instance: instanceA, GoogleDriveDialog });
+    try {
+      await openGoogleDriveEditor(rendered.container, instanceA.instanceKey);
+      let oldMutation!: GoogleDriveFacetMutation;
+      await act(async () => {
+        oldMutation = requiredDialog(dialogA).onMutationStart();
+      });
+
+      await rendered.rerender({ client, instance: instanceB, GoogleDriveDialog });
+      await openGoogleDriveEditor(rendered.container, instanceB.instanceKey);
+      let currentMutation!: GoogleDriveFacetMutation;
+      await act(async () => {
+        currentMutation = requiredDialog(dialogB).onMutationStart();
+      });
+
+      await act(async () => oldMutation.finish());
+
+      expect(currentMutation.isCurrent()).toBe(true);
+      await act(async () => {
+        expect(currentMutation.apply(pausedB)).toBe(true);
+        currentMutation.finish();
+      });
+      await waitFor(
+        () =>
+          requiredFacet(rendered.container, "drive-content").textContent?.includes("Paused") ===
+          true,
+      );
+    } finally {
+      await rendered.unmount();
+    }
+  });
 });
+
+async function openGoogleDriveEditor(container: ParentNode, instanceKey: string): Promise<void> {
+  await act(async () => button(container, "Manage facets").click());
+  await waitFor(() => facet(container, "drive-content") !== null);
+  await act(async () => button(requiredFacet(container, "drive-content"), "Edit").click());
+  await waitFor(
+    () => container.querySelector(`[data-google-drive-dialog="${instanceKey}"]`) !== null,
+  );
+}
+
+function requiredDialog(
+  dialog: GoogleDriveKnowledgeSourceDialogProps | null,
+): GoogleDriveKnowledgeSourceDialogProps {
+  if (!dialog) throw new Error("Missing Google Drive dialog props");
+  return dialog;
+}
 
 async function renderPanel(props: Partial<ComponentProps<typeof IntegrationFacetsPanel>> = {}) {
   const container = document.createElement("div");
@@ -265,6 +425,29 @@ function response(
       },
       binding: bindingValue,
     })),
+  };
+}
+
+function googleDriveResponse(
+  targetInstance: ApiIntegrationInstallationSummary,
+  bindingValue: IntegrationFacetBindingSummary,
+): IntegrationInstanceFacetsResponse {
+  return {
+    capabilityId: targetInstance.capabilityId,
+    instanceKey: targetInstance.instanceKey,
+    providerDomain: targetInstance.providerDomain,
+    connectionId: targetInstance.connectionId,
+    facets: [
+      {
+        definition: {
+          facetKey: "drive-content",
+          kind: "knowledge_source",
+          configSchema: { type: "object", properties: {} },
+          capabilities: { provider: "google-drive" },
+        },
+        binding: bindingValue,
+      },
+    ],
   };
 }
 
