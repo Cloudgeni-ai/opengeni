@@ -35,7 +35,7 @@ import type {
   SandboxSessionState,
 } from "@openai/agents/sandbox";
 import { serializeManifestRecord } from "@openai/agents-core/sandbox/internal";
-import { PROVIDER_REGISTRY } from "./providers";
+import { isProviderApiThrottleError, PROVIDER_REGISTRY } from "./providers";
 import { ensureModalRegistryImage } from "./providers/modal";
 import type { ProviderRegistration } from "./providers/types";
 import { sandboxBackendForSdkBackendId } from "./select";
@@ -99,6 +99,7 @@ export {
   PROVIDER_REGISTRY,
   assertProviderRegistryInvariants,
   buildImmutableProviderImage,
+  isProviderApiThrottleError,
   prepareProviderForTeardownAfterCapture,
   providerSupportsImmutableImageBuild,
   renewSandboxProviderExpiration,
@@ -1772,6 +1773,12 @@ export async function establishSandboxSessionFromEnvelope(
         "failed",
         createStarted,
       );
+      recordSandboxProviderApiThrottleMetric(
+        opts.metrics,
+        restoreClient.backendId,
+        "create",
+        error,
+      );
       if (
         createImageSource !== "provider_immutable" ||
         backend !== "modal" ||
@@ -1823,6 +1830,12 @@ export async function establishSandboxSessionFromEnvelope(
           "logical",
           "failed",
           fallbackStarted,
+        );
+        recordSandboxProviderApiThrottleMetric(
+          opts.metrics,
+          fallbackClient.backendId,
+          "create",
+          fallbackError,
         );
         throw fallbackError;
       }
@@ -2105,6 +2118,20 @@ function recordSandboxCreateMetric(
       outcome,
       durationSeconds: Math.max(0, (Date.now() - startedMs) / 1000),
     });
+  } catch {
+    // Metrics emission must not affect sandbox lifecycle.
+  }
+}
+
+function recordSandboxProviderApiThrottleMetric(
+  metrics: RuntimeMetricsHooks | undefined,
+  backend: string,
+  operation: "create" | "renew",
+  error: unknown,
+): void {
+  if (!isProviderApiThrottleError(error)) return;
+  try {
+    metrics?.onSandboxProviderApiThrottle?.({ backend, operation });
   } catch {
     // Metrics emission must not affect sandbox lifecycle.
   }

@@ -439,9 +439,15 @@ describe("deployment contract", () => {
       "create secret generic opensandbox-api-key",
     );
     expect(dependency?.installCommands.join("\n")).toContain(
+      "kubectl apply -f deploy/stacks/opensandbox-controller-metrics-service.yaml",
+    );
+    expect(dependency?.installCommands.join("\n")).toContain(
       "opensandbox-batchsandbox-template.azure.yaml",
     );
     expect(dependency?.verifyCommands.join("\n")).toContain("grep -qx ClusterIP");
+    expect(dependency?.verifyCommands.join("\n")).toContain(
+      "get svc opensandbox-controller-metrics",
+    );
     expect(dependency?.destroyCommands.join("\n")).toContain(
       "delete crd batchsandboxes.sandbox.opensandbox.io",
     );
@@ -520,6 +526,10 @@ describe("deployment contract", () => {
     expect(values).toContain('containerdSocketPath: ""');
     expect(values).toContain('commitJobTimeout: ""');
     expect(values).toContain("sandbox_create_timeout_seconds = 900");
+    expect(values).toContain("metrics:");
+    expect(values).toContain("enabled: true");
+    expect(values).toContain("port: 8080");
+    expect(values).toContain("secure: false");
     expect(values).not.toContain("sandbox-registry.cn-");
   });
 

@@ -12,6 +12,7 @@ interface Args {
   grafanaPodSelector: string;
   grafanaSidecarContainer: string;
   grafanaDashboardDirectory: string;
+  opensandbox: boolean;
   skipLiveApis: boolean;
 }
 
@@ -38,7 +39,7 @@ interface Service {
 const dashboardDirectory = "deploy/observability/dashboards";
 const monitoringSelector = "opengeni.ai/monitoring=enabled";
 const dashboardSelector = "opengeni.ai/dashboard-source=canonical";
-const requiredRules = [
+const baseRequiredRules = [
   "opengeni:sandbox_leases:fresh_max",
   "opengeni:sandbox_checkpoint_artifacts:fresh_max",
   "opengeni:workload_node:present",
@@ -60,8 +61,20 @@ const requiredRules = [
   "OpenGeniNodeContainerRuntimeErrors",
   "OpenGeniNodeNotReady",
 ] as const;
+const opensandboxRequiredRules = [
+  "OpenGeniOpenSandboxApiThrottled",
+  "OpenGeniOpenSandboxTtlRenewalFailed",
+  "OpenGeniOpenSandboxPoolDepleted",
+  "OpenGeniOpenSandboxPodPending",
+  "OpenGeniOpenSandboxImagePullFailed",
+  "OpenGeniOpenSandboxControllerError",
+  "OpenGeniOpenSandboxCapacityExhausted",
+  "OpenGeniOpenSandboxCleanupStuck",
+  "OpenGeniOpenSandboxExpirationOverdue",
+] as const;
 
 const args = parseArgs(process.argv.slice(2));
+const requiredRules = [...baseRequiredRules, ...(args.opensandbox ? opensandboxRequiredRules : [])];
 const sourceRevision = args.sourceRevision ?? process.env.OPENGENI_SOURCE_REVISION ?? gitHead();
 const chartDefinition = Bun.YAML.parse(
   await Bun.file("deploy/observability/Chart.yaml").text(),
@@ -166,6 +179,16 @@ const requiredPlatformServiceMonitors = requiredPlatformApplicationNames.map((ap
   );
   return matches[0] as { metadata: KubernetesMetadata };
 });
+if (args.opensandbox) {
+  const matches = platformServiceMonitors.filter((serviceMonitor) =>
+    serviceMonitor.metadata.name.endsWith("-opensandbox-controller"),
+  );
+  assert(
+    matches.length === 1,
+    `expected one selected OpenSandbox controller ServiceMonitor, found ${matches.length}`,
+  );
+  requiredPlatformServiceMonitors.push(matches[0] as { metadata: KubernetesMetadata });
+}
 
 const prometheusRules = kubectlJson<
   KubernetesList<{
@@ -288,6 +311,7 @@ console.log(
         .sort(),
       prometheusRules: prometheusRules.map((item) => item.metadata.name).sort(),
       liveApisVerified: !args.skipLiveApis,
+      opensandboxVerified: args.opensandbox,
     },
     null,
     2,
@@ -486,12 +510,17 @@ function parseArgs(values: string[]): Args {
     grafanaPodSelector: "app.kubernetes.io/name=grafana",
     grafanaSidecarContainer: "grafana",
     grafanaDashboardDirectory: "/tmp/dashboards/OpenGeni",
+    opensandbox: false,
     skipLiveApis: false,
   };
   for (let index = 0; index < values.length; index += 1) {
     const value = values[index];
     if (value === "--skip-live-apis") {
       out.skipLiveApis = true;
+      continue;
+    }
+    if (value === "--opensandbox") {
+      out.opensandbox = true;
       continue;
     }
     const [key, inline] = value.split("=", 2);

@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseOpenSandboxConformanceArgs } from "./opensandbox-conformance";
-import { executeBounded, parseOpenSandboxLoadArgs, percentile } from "./opensandbox-load-profile";
+import {
+  executeBounded,
+  loadProfilePassed,
+  parseOpenSandboxLoadArgs,
+  percentile,
+} from "./opensandbox-load-profile";
 import {
   forbiddenEnvironmentNames,
   parseOpenSandboxClusterVerificationArgs,
@@ -61,6 +66,27 @@ describe("OpenSandbox operator harnesses", () => {
     });
     expect(peak).toBe(4);
     expect(percentile([1, 2, 3, 4, 5], 95)).toBe(5);
+  });
+
+  test("cannot pass a load profile while exact cleanup failed or retained sessions remain", () => {
+    expect(
+      loadProfilePassed({
+        successRate: 1,
+        minimumSuccessRate: 0.99,
+        exactDeleteAttempted: 50,
+        exactDeleteSucceeded: 49,
+        retainedSessions: 1,
+      }),
+    ).toBe(false);
+    expect(
+      loadProfilePassed({
+        successRate: 0.998,
+        minimumSuccessRate: 0.99,
+        exactDeleteAttempted: 500,
+        exactDeleteSucceeded: 500,
+        retainedSessions: 0,
+      }),
+    ).toBe(true);
   });
 
   test("detects forbidden control-plane credentials in sandbox Pod env", () => {

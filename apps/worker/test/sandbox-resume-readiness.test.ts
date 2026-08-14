@@ -171,6 +171,21 @@ describe("sandbox exec readiness", () => {
     expect((error as Error).message).not.toContain("capacity");
   });
 
+  test("bounds an OpenSandbox exec RPC that never returns", async () => {
+    const pending = new Promise<never>(() => undefined);
+    const error = await waitForSandboxExecReadiness(
+      established("opensandbox", () => pending),
+      10,
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(SandboxWarmingTimeoutError);
+    expect(error).toMatchObject({
+      backend: "opensandbox",
+      timeoutMs: 10,
+      stage: "exec_readiness",
+    });
+  });
+
   test("does not probe synchronous backends", async () => {
     let called = false;
     await waitForSandboxExecReadiness(

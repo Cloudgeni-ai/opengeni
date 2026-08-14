@@ -1969,6 +1969,7 @@ function platformDependencyPlans(contract: DeploymentContract): PlatformDependen
         `kubectl create namespace ${dataplaneNamespace} --dry-run=client -o yaml | kubectl apply -f -`,
         `kubectl -n ${opensandboxNamespace} create secret generic opensandbox-api-key --from-literal=api-key="$OPENGENI_OPENSANDBOX_API_KEY" --dry-run=client -o yaml | kubectl apply -f -`,
         `kubectl apply -f ${batchSandboxTemplate}`,
+        "kubectl apply -f deploy/stacks/opensandbox-controller-metrics-service.yaml",
         `helm upgrade --install opensandbox ${chartArchive} --namespace ${opensandboxNamespace} --values deploy/stacks/official-opensandbox.values.yaml --post-renderer scripts/operator/opensandbox-image-post-renderer.sh --wait --timeout 15m`,
       ],
       verifyCommands: [
@@ -1976,6 +1977,7 @@ function platformDependencyPlans(contract: DeploymentContract): PlatformDependen
         `kubectl -n ${opensandboxNamespace} rollout status deployment/opensandbox-controller-manager --timeout=300s`,
         `kubectl -n ${opensandboxNamespace} rollout status deployment/opensandbox-server --timeout=300s`,
         `kubectl -n ${opensandboxNamespace} get svc opensandbox-server -o jsonpath='{.spec.type}' | grep -qx ClusterIP`,
+        `kubectl -n ${opensandboxNamespace} get svc opensandbox-controller-metrics -o jsonpath='{.spec.type}' | grep -qx ClusterIP`,
         `kubectl -n ${opensandboxNamespace} get secret opensandbox-api-key -o jsonpath='{.data.api-key}' | grep -q .`,
         `kubectl get crd batchsandboxes.sandbox.opensandbox.io pools.sandbox.opensandbox.io sandboxsnapshots.sandbox.opensandbox.io`,
       ],

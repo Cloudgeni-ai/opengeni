@@ -19,6 +19,7 @@ import {
   prepareProviderForTeardownAfterCapture,
   providerSupportsImmutableImageBuild,
   providerWorkspaceCapturePolicy,
+  renewSandboxProviderExpiration,
   sandboxBackendForSdkBackendId,
   sdkBackendIdForSandboxBackend,
   selectBackend,
@@ -76,6 +77,33 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
       if (backend === "modal") continue;
       expect(providerSupportsImmutableImageBuild(backend)).toBe(false);
     }
+  });
+
+  test("renewal metrics classify one exact OpenSandbox throttle without changing failure semantics", async () => {
+    const original = PROVIDER_REGISTRY.opensandbox.renewExpiration;
+    const renewals: Array<{ backend: string; outcome: "completed" | "failed" }> = [];
+    const throttles: Array<{ backend: string; operation: "create" | "renew" }> = [];
+    try {
+      PROVIDER_REGISTRY.opensandbox.renewExpiration = async () => {
+        throw { statusCode: 429 };
+      };
+      await expect(
+        renewSandboxProviderExpiration({
+          backend: "opensandbox",
+          settings: testSettings(CREDS.opensandbox),
+          instanceId: "sandbox-1",
+          metrics: {
+            onSandboxTtlRenewal: (input) => renewals.push(input),
+            onSandboxProviderApiThrottle: (input) => throttles.push(input),
+          },
+        }),
+      ).rejects.toMatchObject({ statusCode: 429 });
+    } finally {
+      PROVIDER_REGISTRY.opensandbox.renewExpiration = original;
+    }
+
+    expect(renewals).toEqual([{ backend: "opensandbox", outcome: "failed" }]);
+    expect(throttles).toEqual([{ backend: "opensandbox", operation: "renew" }]);
   });
 
   test("product and SDK backend identities round-trip through one canonical mapping", () => {

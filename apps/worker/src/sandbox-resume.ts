@@ -935,6 +935,7 @@ export async function resumeBoxForTurn(
       backend: target.backend,
       settings,
       instanceId: target.instanceId,
+      ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
     })
       .then(() => {
         providerRenewedAtMs = Date.now();

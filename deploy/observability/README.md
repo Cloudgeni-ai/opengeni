@@ -23,6 +23,8 @@ The wrapper is intentionally separate from `deploy/helm/opengeni`:
 - a default `StorageClass`, or an overlay that sets one explicitly
 - enough capacity for the selected profile
 - no second Prometheus Operator managing the same cluster-scoped resources
+- for `--opensandbox`, the pinned OpenSandbox CRDs and
+  `opensandbox-controller-metrics` Service installed before the wrapper
 
 The dependency is exactly pinned in `Chart.yaml` and `Chart.lock`. Use
 `helm dependency build deploy/observability`; do not replace the pin with a
@@ -69,6 +71,17 @@ bun run deployment:observability -- \
   --json
 ```
 
+Add `--opensandbox` when the cluster uses the optional OpenSandbox backend:
+
+```bash
+bun run deployment:observability -- --profile single-node --opensandbox
+```
+
+That flag adds `values.opensandbox.yaml`, enabling the exact
+`Pool`/`BatchSandbox` custom-resource metrics and the pinned controller
+`ServiceMonitor`. The base profile leaves those integrations disabled so a
+cluster without the optional CRDs remains unaffected.
+
 The plan deliberately installs only the wrapper. It never upgrades or rolls
 back OpenGeni application workloads and never executes application hooks. After
 the wrapper is ready, include `opengeni.values.example.yaml` in the next
@@ -93,6 +106,10 @@ helm upgrade --install opengeni-observability deploy/observability \
   --set-string kube-prometheus-stack.prometheus.prometheusSpec.externalLabels.environment=self-hosted \
   --wait --timeout 20m
 ```
+
+For an OpenSandbox cluster, add
+`--values deploy/observability/values.opensandbox.yaml` after installing the
+OpenSandbox chart and `deploy/stacks/opensandbox-controller-metrics-service.yaml`.
 
 For a new or existing OpenGeni installation, include
 `deploy/observability/opengeni.values.example.yaml` in the ordinary application
@@ -122,6 +139,9 @@ It verifies:
 - the bundled Grafana, kube-state-metrics, and node-exporter ServiceMonitors
   carry the same discovery label and have healthy live targets;
 - required rules are declared and loaded by the live Prometheus API;
+- when the OpenSandbox overlay is enabled, controller reconcile/Kubernetes API
+  metrics and bounded `Pool`/`BatchSandbox` state are scraped without opaque
+  sandbox, workspace, session, or attempt IDs as metric labels;
 - Grafana is healthy and its finite startup provisioner has copied the exact files.
 
 `--skip-live-apis` is available only for object-level diagnostics; it is an

@@ -3,7 +3,7 @@
   "title": "OpenGeni · Sandbox Health",
   "description": "Provider operations, sandbox lifecycle, durable recovery, and reconciliation. Database inventory panels admit only fresh projections and never sum replicated control-worker gauges.",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "graphTooltip": 1,
   "timezone": "browser",
@@ -510,6 +510,186 @@
         }
       ],
       "gridPos": { "x": 0, "y": 57, "w": 24, "h": 8 }
+    },
+    {
+      "id": 22,
+      "type": "row",
+      "title": "OpenSandbox Kubernetes provider",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": { "x": 0, "y": 65, "w": 24, "h": 1 }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "OpenSandbox Pool capacity",
+      "description": "Observed Pool total, allocated, and available Pods against the configured warm buffer and hard Pool maximum.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "opensandbox_pool_status_available{namespace=\"opensandbox\"}",
+          "legendFormat": "{{pool}} available",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "opensandbox_pool_status_allocated{namespace=\"opensandbox\"}",
+          "legendFormat": "{{pool}} allocated",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "opensandbox_pool_status_total{namespace=\"opensandbox\"}",
+          "legendFormat": "{{pool}} total",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "D",
+          "expr": "opensandbox_pool_spec_buffer_min{namespace=\"opensandbox\"}",
+          "legendFormat": "{{pool}} buffer min",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "E",
+          "expr": "opensandbox_pool_spec_pool_max{namespace=\"opensandbox\"}",
+          "legendFormat": "{{pool}} pool max",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 66, "w": 12, "h": 8 }
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "OpenSandbox workload state",
+      "description": "BatchSandbox phases plus Kubernetes Pending, unschedulable, and immutable-image pull failures in the OpenSandbox data namespace.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (phase) (opensandbox_batchsandbox_status_phase{namespace=\"opensandbox\"} == 1)",
+          "legendFormat": "BatchSandbox {{phase}}",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "sum(kube_pod_status_phase{namespace=\"opensandbox\",phase=\"Pending\"} == 1)",
+          "legendFormat": "Pods Pending",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "sum(kube_pod_status_unschedulable{namespace=\"opensandbox\"} == 1)",
+          "legendFormat": "Pods unschedulable",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "D",
+          "expr": "sum(kube_pod_container_status_waiting_reason{namespace=\"opensandbox\",reason=~\"ErrImagePull|ImagePullBackOff|InvalidImageName\"} == 1)",
+          "legendFormat": "Image pull failures",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 12, "y": 66, "w": 12, "h": 8 }
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "OpenSandbox API and TTL reliability",
+      "description": "Provider-facing HTTP 429s, controller Kubernetes-client 429s, and exact TTL renewal outcomes. Opaque sandbox IDs remain in correlated logs, never metric labels.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (operation) (increase(opengeni_sandbox_provider_api_throttles_total{backend=\"opensandbox\"}[$__rate_interval]))",
+          "legendFormat": "provider 429 {{operation}}",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(rest_client_requests_total{namespace=\"opensandbox-system\",code=\"429\"}[$__rate_interval]))",
+          "legendFormat": "controller K8s API 429",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (outcome) (increase(opengeni_sandbox_ttl_renewals_total{backend=\"opensandbox\"}[$__rate_interval]))",
+          "legendFormat": "TTL {{outcome}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 74, "w": 12, "h": 8 }
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "OpenSandbox controller and cleanup",
+      "description": "Controller reconcile failures, restarts, deleting BatchSandboxes with finalizers, and resources surviving provider expiry.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(controller_runtime_reconcile_errors_total{namespace=\"opensandbox-system\"}[$__rate_interval]))",
+          "legendFormat": "reconcile errors",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(kube_pod_container_status_restarts_total{namespace=\"opensandbox-system\",pod=~\"opensandbox-controller-manager-.*\",container=\"manager\"}[$__rate_interval]))",
+          "legendFormat": "controller restarts",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "count((time() - opensandbox_batchsandbox_deletion_timestamp_seconds{namespace=\"opensandbox\"} > 300) and on (namespace, batchsandbox, customresource_group, customresource_version, customresource_kind) opensandbox_batchsandbox_finalizer_info{namespace=\"opensandbox\"})",
+          "legendFormat": "stuck finalizers",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "D",
+          "expr": "count(time() - opensandbox_batchsandbox_spec_expire_time_seconds{namespace=\"opensandbox\"} > 180)",
+          "legendFormat": "expiry overdue",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 12, "y": 74, "w": 12, "h": 8 }
     }
   ]
 }

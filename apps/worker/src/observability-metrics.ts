@@ -116,6 +116,20 @@ export function runtimeMetricsHooksForObservability(
         labels: { backend, stage },
       });
     },
+    onSandboxProviderApiThrottle: ({ backend, operation }) => {
+      observability.incrementCounter({
+        name: "opengeni_sandbox_provider_api_throttles_total",
+        help: "Total sandbox provider API throttle responses.",
+        labels: { backend, operation },
+      });
+    },
+    onSandboxTtlRenewal: ({ backend, outcome }) => {
+      observability.incrementCounter({
+        name: "opengeni_sandbox_ttl_renewals_total",
+        help: "Total renewable sandbox provider TTL refresh attempts.",
+        labels: { backend, outcome },
+      });
+    },
     onSandboxOp: ({ backend, op, outcome, code, healed, durationSeconds, replyBytes }) => {
       observability.incrementCounter({
         name: "opengeni_machine_op_total",

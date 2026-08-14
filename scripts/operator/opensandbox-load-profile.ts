@@ -342,13 +342,33 @@ async function main(): Promise<void> {
     samples,
     verdict: {
       minimumSuccessRate: args.minimumSuccessRate,
-      passed: successRate >= args.minimumSuccessRate,
+      passed: loadProfilePassed({
+        successRate,
+        minimumSuccessRate: args.minimumSuccessRate,
+        exactDeleteAttempted: cleanupResult.exactDeleteAttempted,
+        exactDeleteSucceeded: cleanupResult.exactDeleteSucceeded,
+        retainedSessions: sessions.filter(Boolean).length,
+      }),
     },
   };
   const text = `${JSON.stringify(artifact, null, 2)}\n`;
   if (args.output) await writeFile(args.output, text, { mode: 0o600 });
   console.log(text.trimEnd());
   if (!artifact.verdict.passed) process.exitCode = 2;
+}
+
+export function loadProfilePassed(input: {
+  successRate: number;
+  minimumSuccessRate: number;
+  exactDeleteAttempted: number;
+  exactDeleteSucceeded: number;
+  retainedSessions: number;
+}): boolean {
+  return (
+    input.successRate >= input.minimumSuccessRate &&
+    input.exactDeleteSucceeded === input.exactDeleteAttempted &&
+    input.retainedSessions === 0
+  );
 }
 
 function statistics(values: number[]) {

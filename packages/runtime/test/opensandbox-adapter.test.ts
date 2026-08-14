@@ -563,6 +563,70 @@ describe("OpenSandbox adapter", () => {
     expect(fake.calls).toEqual(["createSandbox"]);
   });
 
+  test("archive restore keeps cleanup paths until its internal command is terminal", async () => {
+    const fake = new FakeOpenSandbox();
+    fake.holdCommand();
+    const session = await createClient(fake).create();
+    const originalSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((handler: () => void, timeout?: number) =>
+      originalSetTimeout(handler, timeout === 120_000 ? 0 : timeout)) as typeof setTimeout;
+    let settled = false;
+    let failure: unknown;
+
+    try {
+      const hydration = session.hydrateWorkspace(new Uint8Array([1, 2, 3])).then(
+        () => {
+          settled = true;
+        },
+        (error: unknown) => {
+          settled = true;
+          failure = error;
+        },
+      );
+      await Bun.sleep(20);
+
+      expect(fake.calls).toContain("command:run");
+      expect(settled).toBe(false);
+      expect(
+        [...fake.files.keys()].filter((path) => path.startsWith("/tmp/opengeni-private/restore-")),
+      ).toHaveLength(1);
+
+      fake.resolveCommand?.();
+      await hydration;
+
+      expect(failure).toBeUndefined();
+      expect(settled).toBe(true);
+      expect(
+        [...fake.files.keys()].filter((path) => path.startsWith("/tmp/opengeni-private/restore-")),
+      ).toHaveLength(0);
+    } finally {
+      fake.resolveCommand?.();
+      globalThis.setTimeout = originalSetTimeout;
+    }
+  });
+
+  test("archive restore polls an exact uncertain execution before cleanup", async () => {
+    const fake = new FakeOpenSandbox();
+    fake.commandFailureAfterInit = new Error("synthetic restore transport loss");
+    fake.commandStatus = {
+      running: false,
+      exitCode: 17,
+      content: "provider command content must stay private",
+      error: "provider restore failed",
+    };
+    const session = await createClient(fake).create();
+
+    await expect(session.hydrateWorkspace(new Uint8Array([1, 2, 3]))).rejects.toBeInstanceOf(
+      SandboxArchiveError,
+    );
+
+    expect(fake.calls.filter((call) => call === "command:run")).toHaveLength(1);
+    expect(fake.calls.filter((call) => call === "command:status:exec-1")).toHaveLength(1);
+    expect(
+      [...fake.files.keys()].filter((path) => path.startsWith("/tmp/opengeni-private/restore-")),
+    ).toHaveLength(0);
+  });
+
   test("archive restore replaces a non-root workspace without writing its parent", async () => {
     const temporary = await mkdtemp(join(tmpdir(), "opengeni-osb-restore-"));
     const readonlyParent = join(temporary, "readonly-parent");

@@ -11,6 +11,7 @@ import {
   SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND,
   SandboxBackend,
 } from "@opengeni/contracts";
+import type { RuntimeMetricsHooks } from "../../metrics";
 import { assertDescriptorRegistryInvariants } from "../capabilities";
 import { blaxelProvider } from "./blaxel";
 import { cloudflareProvider } from "./cloudflare";
@@ -176,13 +177,54 @@ export async function renewSandboxProviderExpiration(input: {
   backend: SandboxBackend;
   settings: Settings;
   instanceId: string;
+  metrics?: RuntimeMetricsHooks;
 }): Promise<boolean> {
   const registration = PROVIDER_REGISTRY[input.backend];
   const renew = registration.renewExpiration;
   if (!renew) return false;
   registration.validateCredentials(input.settings);
-  await renew({ settings: input.settings, instanceId: input.instanceId });
-  return true;
+  try {
+    await renew({ settings: input.settings, instanceId: input.instanceId });
+    recordProviderRenewalMetric(input.metrics, input.backend, "completed");
+    return true;
+  } catch (error) {
+    recordProviderRenewalMetric(input.metrics, input.backend, "failed");
+    if (isProviderApiThrottleError(error)) {
+      try {
+        input.metrics?.onSandboxProviderApiThrottle?.({
+          backend: input.backend,
+          operation: "renew",
+        });
+      } catch {
+        // Metrics emission must not affect provider lifecycle.
+      }
+    }
+    throw error;
+  }
+}
+
+export function isProviderApiThrottleError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as {
+    status?: unknown;
+    statusCode?: unknown;
+    response?: { status?: unknown };
+  };
+  return (
+    candidate.status === 429 || candidate.statusCode === 429 || candidate.response?.status === 429
+  );
+}
+
+function recordProviderRenewalMetric(
+  metrics: RuntimeMetricsHooks | undefined,
+  backend: SandboxBackend,
+  outcome: "completed" | "failed",
+): void {
+  try {
+    metrics?.onSandboxTtlRenewal?.({ backend, outcome });
+  } catch {
+    // Metrics emission must not affect provider lifecycle.
+  }
 }
 
 export async function buildImmutableProviderImage(input: {

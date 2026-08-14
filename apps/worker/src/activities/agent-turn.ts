@@ -3463,6 +3463,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let modelRunSettings: Settings = settings;
     const publishSandboxLifecycleEvents = async (sandbox: ResumedTurnSandbox): Promise<void> => {
       const established = sandbox.established;
+      observability.info("sandbox provider session established", {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId,
+        attemptId: input.attemptId,
+        sandboxGroupId,
+        leaseEpoch: sandbox.leaseEpoch,
+        backend: established.backendId,
+        sandboxId: established.instanceId,
+        origin: established.origin ?? "resumed",
+      });
       if (publish && established.origin && established.origin !== "resumed") {
         const lifecycleEvents: Array<{
           type: "sandbox.box.lost" | "sandbox.box.created";
@@ -3556,6 +3567,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           backend: providerBackend,
           settings,
           instanceId: sandbox.established.instanceId,
+          metrics: runtimeMetricsHooksForObservability(observability),
         })
           .then(() => {
             providerRenewedAtMs = Date.now();

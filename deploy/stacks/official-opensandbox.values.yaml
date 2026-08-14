@@ -10,6 +10,10 @@ opensandbox-controller:
       burst: 200
     leaderElection:
       enabled: true
+    metrics:
+      enabled: true
+      port: 8080
+      secure: false
     resources:
       requests:
         cpu: 50m

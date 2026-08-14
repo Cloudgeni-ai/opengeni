@@ -14,6 +14,11 @@ export type RuntimeMetricsHooks = {
     backend: string;
     stage: "exec_readiness" | "sibling_warming";
   }) => void;
+  onSandboxProviderApiThrottle?: (input: {
+    backend: string;
+    operation: "create" | "renew";
+  }) => void;
+  onSandboxTtlRenewal?: (input: { backend: string; outcome: "completed" | "failed" }) => void;
   /**
    * One completed Connected Machine (selfhosted) control op — the out-of-band
    * telemetry twin of the in-band fault rendering. `code` is the typed wire-code

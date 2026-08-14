@@ -2,6 +2,7 @@ export type ObservabilityStackProfile = "single-node" | "production";
 
 interface ObservabilityStackOptions {
   profile?: ObservabilityStackProfile;
+  opensandbox?: boolean;
   namespace?: string;
   releaseName?: string;
   appNamespace?: string;
@@ -16,8 +17,9 @@ export interface ObservabilityStackPlan {
   appNamespace: string;
   appReleaseName: string;
   environment: string;
+  opensandbox: boolean;
   chartPath: "deploy/observability";
-  chartVersion: "0.1.4";
+  chartVersion: "0.1.5";
   kubePrometheusStackVersion: "87.16.1";
   valuesFiles: string[];
   applicationValuesFile: "deploy/observability/opengeni.values.example.yaml";
@@ -34,6 +36,7 @@ interface Args {
   appNamespace: string;
   appReleaseName: string;
   environment?: string;
+  opensandbox: boolean;
   json: boolean;
 }
 
@@ -46,6 +49,7 @@ if (import.meta.main) {
     appNamespace: args.appNamespace,
     appReleaseName: args.appReleaseName,
     environment: args.environment,
+    opensandbox: args.opensandbox,
   });
 
   if (args.json) {
@@ -87,9 +91,13 @@ export function observabilityStackPlanFor(
   const environment = validateEnvironment(
     input.environment ?? (profile === "production" ? "production" : "self-hosted"),
   );
+  const opensandbox = input.opensandbox ?? false;
   const profileValues =
     profile === "production" ? "deploy/observability/values.production.example.yaml" : null;
-  const valuesFiles = profileValues ? [profileValues] : [];
+  const valuesFiles = [
+    ...(profileValues ? [profileValues] : []),
+    ...(opensandbox ? ["deploy/observability/values.opensandbox.yaml"] : []),
+  ];
   const valuesArgs = valuesFiles.map((path) => ` --values ${path}`).join("");
   const revisionExpression = "${OPENGENI_SOURCE_REVISION:-$(git rev-parse HEAD)}";
   const sourceRevision = `"opengeni.sourceRevision=${revisionExpression}"`;
@@ -102,8 +110,9 @@ export function observabilityStackPlanFor(
     appNamespace,
     appReleaseName,
     environment,
+    opensandbox,
     chartPath: "deploy/observability",
-    chartVersion: "0.1.4",
+    chartVersion: "0.1.5",
     kubePrometheusStackVersion: "87.16.1",
     valuesFiles,
     applicationValuesFile: "deploy/observability/opengeni.values.example.yaml",
@@ -117,11 +126,14 @@ export function observabilityStackPlanFor(
       `helm upgrade --install ${releaseName} deploy/observability --namespace ${namespace}${valuesArgs} --set-string kube-prometheus-stack.prometheus.prometheusSpec.externalLabels.environment=${environment} --set-string ${sourceRevision} --set-string ${grafanaSourceRevision} --wait --timeout 20m`,
     ],
     verifyCommands: [
-      `bun run deployment:observability-verify -- --namespace ${namespace} --release ${releaseName} --app-namespace ${appNamespace}`,
+      `bun run deployment:observability-verify -- --namespace ${namespace} --release ${releaseName} --app-namespace ${appNamespace}${opensandbox ? " --opensandbox" : ""}`,
     ],
     destroyCommands: [`helm uninstall ${releaseName} --namespace ${namespace} --ignore-not-found`],
     notes: [
       "The observability wrapper installs kube-prometheus-stack separately from the OpenGeni application chart.",
+      opensandbox
+        ? "OpenSandbox monitoring is enabled: install the pinned OpenSandbox CRDs and controller metrics Service before this wrapper."
+        : "OpenSandbox custom-resource and controller monitoring remains disabled unless --opensandbox is selected.",
       "Install the wrapper first so the Prometheus Operator CRDs exist before the OpenGeni chart renders ServiceMonitor and PrometheusRule resources.",
       "Integrate deploy/observability/opengeni.values.example.yaml into the next ordinary OpenGeni application release with its exact chart version and authoritative values; the observability plan never upgrades or rolls back application workloads and never runs application hooks.",
       "Prometheus discovers monitoring resources only in namespaces labeled opengeni.ai/monitoring=enabled.",
@@ -170,6 +182,7 @@ function parseArgs(values: string[]): Args {
     releaseName: "opengeni-observability",
     appNamespace: "opengeni",
     appReleaseName: "opengeni",
+    opensandbox: false,
     json: false,
   };
 
@@ -177,6 +190,10 @@ function parseArgs(values: string[]): Args {
     const value = values[index];
     if (value === "--json") {
       out.json = true;
+      continue;
+    }
+    if (value === "--opensandbox") {
+      out.opensandbox = true;
       continue;
     }
     const [key, inline] = value.split("=", 2);

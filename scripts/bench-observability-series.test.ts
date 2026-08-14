@@ -59,6 +59,24 @@ describe("observability series projection", () => {
     }
   });
 
+  test("retains the bounded OpenSandbox Kubernetes failure signals", () => {
+    for (const metric of [
+      "kube_pod_container_status_restarts_total",
+      "kube_pod_container_status_waiting_reason",
+      "kube_pod_status_unschedulable",
+      "opensandbox_batchsandbox_deletion_timestamp_seconds",
+      "opensandbox_batchsandbox_finalizer_info",
+      "opensandbox_batchsandbox_spec_expire_time_seconds",
+      "opensandbox_batchsandbox_status_phase",
+      "opensandbox_pool_spec_buffer_min",
+      "opensandbox_pool_spec_pool_max",
+      "opensandbox_pool_status_allocated",
+      "opensandbox_pool_status_available",
+    ]) {
+      expect(retainedByProfile("kube-state-metrics", { __name__: metric }, values)).toBe(true);
+    }
+  });
+
   test("compares like-for-like instantaneous series instead of stale head state", () => {
     expect(MIN_INSTANT_SERIES_REDUCTION).toBe(4);
     expect(reductionRatio(80_000, 20_000)).toBe(4);

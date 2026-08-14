@@ -1,0 +1,10 @@
+# Opt-in OpenSandbox control-plane and custom-resource monitoring. Install the
+# pinned OpenSandbox CRDs before applying this overlay.
+opengeni:
+  opensandbox:
+    enabled: true
+
+kube-prometheus-stack:
+  kube-state-metrics:
+    customResourceState:
+      enabled: true

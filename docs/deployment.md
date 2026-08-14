@@ -1225,6 +1225,12 @@ Print the ordered install plan with:
 bun run deployment:observability -- --profile single-node
 ```
 
+On a cluster that explicitly selects `sandbox.backend=opensandbox`, use
+`--opensandbox`. The additional values overlay enables kube-state-metrics for
+the pinned `Pool` and `BatchSandbox` CRDs plus a `ServiceMonitor` for the
+controller metrics Service. The base wrapper leaves this optional integration
+off, so clusters without OpenSandbox CRDs retain the prior monitoring behavior.
+
 The wrapper plan installs only the monitoring platform; it never reconciles
 OpenGeni workloads and never runs application hooks. After it is ready, include
 `deploy/observability/opengeni.values.example.yaml` in the next ordinary
@@ -1373,6 +1379,8 @@ contract explicitly selects `sandbox.backend=opensandbox`. The stack wrapper:
   `deploy/stacks/opensandbox-source.lock`;
 - installs the official upstream controller/server chart into
   `opensandbox-system`, with sandbox CRs and Pods in `opensandbox`;
+- enables the controller's native metrics endpoint and installs a private
+  `opensandbox-controller-metrics` ClusterIP Service;
 - keeps the lifecycle service `ClusterIP`-only and loads its API key from the
   `opensandbox-api-key` Secret;
 - uses the lifecycle server's private in-cluster proxy for exec, files, and
@@ -1413,6 +1421,21 @@ helm template opensandbox .agent/generated/opensandbox/opensandbox-0.2.0.tgz \
   --values deploy/stacks/official-opensandbox.values.yaml \
   --post-renderer scripts/operator/opensandbox-image-post-renderer.sh
 ```
+
+When the optional observability wrapper is used, install it after the
+OpenSandbox CRDs and metrics Service:
+
+```bash
+kubectl apply -f deploy/stacks/opensandbox-controller-metrics-service.yaml
+bun run deployment:observability -- --profile single-node --opensandbox
+```
+
+The OpenGeni `PrometheusRule` then adds backend-fenced alerts for create and
+warming failures, Pool depletion, Pending and unschedulable workload Pods,
+immutable-image pull failures, controller reconcile/readiness/restarts,
+provider and controller Kubernetes-API 429s, TTL-renewal failures, stuck
+deletion finalizers, and BatchSandboxes surviving their provider expiry.
+Opaque lifecycle IDs stay in correlated worker logs and are not metric labels.
 
 For the custom-Kubernetes portability path, `deploy/stacks/k3s-source.lock`
 pins the installer, checksum manifests, and amd64/arm64 binaries for k3s

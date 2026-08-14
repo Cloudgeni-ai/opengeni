@@ -670,6 +670,66 @@ export class OpenSandboxSession {
     return process;
   }
 
+  private async settleTransportUncertainProcess(process: RetainedProcess): Promise<ProcessOutcome> {
+    const executionId = process.executionId ?? (await process.executionIdReady);
+    if (!executionId) {
+      throw new SandboxProviderError(
+        "OpenSandbox internal command lost its provider execution identity",
+      );
+    }
+    const provider = await this.ensureStarted();
+    while (true) {
+      try {
+        const status = await provider.commands.getCommandStatus(executionId);
+        if (status.running === false) {
+          if (status.error) {
+            process.events.push({ stream: "stderr", text: `${status.error}\n` });
+          }
+          process.settled = true;
+          process.transportUncertain = false;
+          this.processesByOpId.delete(process.opId);
+          return {
+            exitCode: status.exitCode ?? 1,
+            ...(status.error ? { error: status.error } : {}),
+          };
+        }
+      } catch {
+        // The provider accepted this exact execution before transport loss. Keep
+        // polling its immutable execution ID instead of replaying or cleaning
+        // paths that the still-running command may be mutating.
+      }
+      await delay(DEFAULT_WRITE_STDIN_YIELD_TIME_MS);
+    }
+  }
+
+  private async execToCompletion(args: ExecCommandArgs): Promise<SandboxExecResult> {
+    if (args.tty) {
+      throw new SandboxUnsupportedFeatureError(
+        "OpenSandbox v1 does not expose a bidirectional PTY; run the command with tty=false.",
+      );
+    }
+    assertRunAsUnsupported(args.runAs);
+    if (args.workdir) workspacePath(args.workdir);
+    const process = this.beginCommand(args);
+    let outcome = await process.completed;
+    if (outcome.uncertain) {
+      outcome = await this.settleTransportUncertainProcess(process);
+    }
+    const consumed = consumeProcessOutput(process);
+    const output = truncateOutput(consumed.output, args.maxOutputTokens);
+    if (outcome.error && !process.executionId) throw outcome.error;
+    return {
+      output: output.text,
+      stdout: consumed.stdout,
+      stderr: consumed.stderr,
+      wallTimeSeconds: elapsedSeconds(process.startedAt),
+      exitCode: outcome.exitCode,
+      ...(output.originalTokenCount !== undefined
+        ? { originalTokenCount: output.originalTokenCount }
+        : {}),
+    };
+  }
+
   async exec(args: ExecCommandArgs): Promise<SandboxExecResult> {
     if (args.tty) {
       throw new SandboxUnsupportedFeatureError(
@@ -1069,9 +1129,8 @@ export class OpenSandboxSession {
           : `mv -- ${shellQuote(temp)} ${shellQuote(target)}`,
         subpath ? `rm -rf -- ${shellQuote(temp)}` : ":",
       ].join("\n");
-      const result = await this.exec({
+      const result = await this.execToCompletion({
         cmd: script,
-        yieldTimeMs: 120_000,
         maxOutputTokens: 2_000,
       });
       if (typeof result.exitCode !== "number" || result.exitCode !== 0) {
@@ -1150,9 +1209,8 @@ if find . -xdev -mindepth 1 ! -type f ! -type d -print -quit | grep -q .; then
 fi
 tar ${excludeArgs.join(" ")} --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner --hard-dereference --format=gnu -cf ${shellQuote(archivePath)} .`;
     try {
-      const result = await this.exec({
+      const result = await this.execToCompletion({
         cmd: script,
-        yieldTimeMs: 120_000,
         maxOutputTokens: 1_000,
       });
       if (result.exitCode !== 0) {
@@ -1213,9 +1271,8 @@ tar ${excludeArgs.join(" ")} --sort=name --mtime='@0' --owner=0 --group=0 --nume
       shellQuote(excluded),
     ].join(" ");
     try {
-      const result = await this.exec({
+      const result = await this.execToCompletion({
         cmd: command,
-        yieldTimeMs: 120_000,
         maxOutputTokens: 2_000,
       });
       if (result.exitCode !== 0) {

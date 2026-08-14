@@ -3,6 +3,7 @@
 {{- $inventoryFreshnessSeconds := int (default 300 ((.Values.observability).prometheusRule).inventoryFreshnessSeconds) }}
 {{- $reaperPeriodMs := int (default "30000" (index .Values.config "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS")) }}
 {{- $fullName := include "opengeni.fullname" . }}
+{{- $opensandboxEnabled := eq (default "none" (index .Values.config "OPENGENI_SANDBOX_BACKEND")) "opensandbox" }}
 {{- if le $inventoryFreshnessSeconds 0 }}
 {{- fail "observability.prometheusRule.inventoryFreshnessSeconds must be positive" }}
 {{- end }}
@@ -142,6 +143,109 @@ spec:
             severity: warning
           annotations:
             summary: OpenGeni observed a sandbox warming timeout
+        {{- if $opensandboxEnabled }}
+        - alert: OpenGeniOpenSandboxApiThrottled
+          expr: |
+            sum(increase(opengeni_sandbox_provider_api_throttles_total{backend="opensandbox"}[10m])) > 0
+            or
+            sum(increase(rest_client_requests_total{namespace="opensandbox-system",code="429"}[10m])) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenSandbox API requests are being throttled
+            description: OpenGeni received an HTTP 429 while creating or renewing an OpenSandbox sandbox. Inspect server and Kubernetes API capacity before retry pressure grows.
+        - alert: OpenGeniOpenSandboxTtlRenewalFailed
+          expr: sum(increase(opengeni_sandbox_ttl_renewals_total{backend="opensandbox",outcome="failed"}[10m])) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: OpenSandbox TTL renewal failed
+            description: An exact live OpenSandbox instance could not refresh its provider expiry. Correlate the worker log by workspace, sandbox group, lease epoch, attempt, and opaque sandbox ID before the provider TTL elapses.
+        - alert: OpenGeniOpenSandboxPoolDepleted
+          expr: |
+            (
+              opensandbox_pool_status_available{namespace="opensandbox"}
+              < opensandbox_pool_spec_buffer_min{namespace="opensandbox"}
+            )
+            or
+            (
+              opensandbox_pool_status_available{namespace="opensandbox"} == 0
+              and opensandbox_pool_status_allocated{namespace="opensandbox"} >= opensandbox_pool_spec_pool_max{namespace="opensandbox"}
+              and opensandbox_pool_spec_pool_max{namespace="opensandbox"} > 0
+            )
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: An OpenSandbox Pool has depleted its available capacity
+            description: Available Pool Pods are below the configured warm buffer or the Pool is fully allocated at PoolMax.
+        - alert: OpenGeniOpenSandboxPodPending
+          expr: sum by (namespace) (kube_pod_status_phase{namespace="opensandbox",phase="Pending"} == 1) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: An OpenSandbox workload Pod has remained Pending
+            description: Inspect the matching BatchSandbox, scheduler reason, image state, node-pool capacity, Pod/IP limits, and resource requests.
+        - alert: OpenGeniOpenSandboxImagePullFailed
+          expr: sum by (namespace) (kube_pod_container_status_waiting_reason{namespace="opensandbox",reason=~"ErrImagePull|ImagePullBackOff|InvalidImageName"} == 1) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: An OpenSandbox workload cannot pull its immutable image
+            description: Inspect registry reachability, digest existence, pull credentials, and node cache state without logging credential material.
+        - alert: OpenGeniOpenSandboxControllerError
+          expr: |
+            sum(increase(controller_runtime_reconcile_errors_total{namespace="opensandbox-system"}[10m])) > 0
+            or
+            absent(kube_pod_status_ready{namespace="opensandbox-system",pod=~"opensandbox-controller-manager-.*",condition="true"}) == 1
+            or
+            sum(kube_pod_status_ready{namespace="opensandbox-system",pod=~"opensandbox-controller-manager-.*",condition="true"} == 1) < 1
+            or
+            sum(increase(kube_pod_container_status_restarts_total{namespace="opensandbox-system",pod=~"opensandbox-controller-manager-.*",container="manager"}[10m])) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: The OpenSandbox controller is unavailable or repeatedly failing
+            description: The pinned controller metrics endpoint reports reconcile errors; Kubernetes readiness and restart truth remain independent backstops.
+        - alert: OpenGeniOpenSandboxCapacityExhausted
+          expr: sum by (namespace) (kube_pod_status_unschedulable{namespace="opensandbox"} == 1) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: OpenSandbox workloads are unschedulable from cluster capacity exhaustion
+            description: Inspect node-pool maximums, Pod/IP ceilings, quota, CPU, memory, ephemeral storage, taints, and selectors before increasing create concurrency.
+        - alert: OpenGeniOpenSandboxCleanupStuck
+          expr: |
+            (
+              time() - opensandbox_batchsandbox_deletion_timestamp_seconds{namespace="opensandbox"} > 300
+            )
+            and on (namespace, batchsandbox, customresource_group, customresource_version, customresource_kind)
+            (
+              sum by (namespace, batchsandbox, customresource_group, customresource_version, customresource_kind) (
+                opensandbox_batchsandbox_finalizer_info{namespace="opensandbox"}
+              ) > 0
+            )
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: OpenSandbox cleanup is blocked by a BatchSandbox finalizer
+            description: An exact BatchSandbox has remained deleting with one or more finalizers. Inspect controller health and the named workload before any manual finalizer action.
+        - alert: OpenGeniOpenSandboxExpirationOverdue
+          expr: time() - opensandbox_batchsandbox_spec_expire_time_seconds{namespace="opensandbox"} > 180
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: An OpenSandbox BatchSandbox survived beyond its provider expiry
+            description: The provider TTL cleanup backstop missed its 180-second acceptance bound. Verify controller health, finalizers, and exact resource ownership.
+        {{- end }}
         - alert: OpenGeniSandboxOperationFailureRatio
           expr: |
             (

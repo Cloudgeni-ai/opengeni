@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensandbox-controller-metrics
+  namespace: opensandbox-system
+  labels:
+    app.kubernetes.io/name: opensandbox
+    app.kubernetes.io/component: controller-metrics
+    app.kubernetes.io/part-of: opensandbox
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: opensandbox
+    app.kubernetes.io/instance: opensandbox
+    control-plane: controller-manager
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+      protocol: TCP
