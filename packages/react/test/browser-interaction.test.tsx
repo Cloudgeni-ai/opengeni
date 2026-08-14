@@ -2147,7 +2147,7 @@ describe("BrowserViewer", () => {
     await actRun(() => clean!.click());
     await flush(30);
 
-    expect(sequence).toEqual(["computer:Browser computer", "browser"]);
+    expect(sequence).toEqual(["computer:Browser desktop", "browser"]);
     expect(createRequests).toHaveLength(1);
     expect(createRequests[0]).toMatchObject({
       sessionId: SESSION_ID,
@@ -2158,7 +2158,7 @@ describe("BrowserViewer", () => {
       placement: created.placement,
     });
     const openComputer = [...rendered.container.querySelectorAll("button")].find(
-      (button) => button.textContent?.trim() === "Computer",
+      (button) => button.textContent?.trim() === "Desktop",
     );
     expect(openComputer).toBeDefined();
     await actRun(() => openComputer!.click());
@@ -2283,7 +2283,7 @@ describe("BrowserViewer", () => {
     expect(notifications).toEqual([
       {
         kind: "info",
-        message: "Browser opened. Computer view is unavailable on this placement.",
+        message: "Browser opened. Desktop view is unavailable on this placement.",
       },
     ]);
     await rendered.unmount();
@@ -2366,7 +2366,7 @@ describe("BrowserViewer", () => {
     });
     expect(linkedComputerCreates).toEqual([
       {
-        name: "cloudgeni.ai computer",
+        name: "cloudgeni.ai desktop",
         placement: { kind: "attached_device", deviceId: device.id },
       },
     ]);

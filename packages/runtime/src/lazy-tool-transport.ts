@@ -9,11 +9,8 @@ import {
   type StreamEvent,
   type Tool,
 } from "@openai/agents";
-import {
-  DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
-  modelToolOutputSerializationBudgetTokens,
-} from "@opengeni/codex";
 import { isSearchableMcpFunctionTool, searchMcpTools, searchToolPool } from "./codex-tool-search";
+import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "./mcp-network";
 
 /** Provider-contained progressive-disclosure strategy for one resolved turn. */
 export type LazyToolTransport = "codex_native" | "openai_native" | "generic_dispatch";
@@ -21,6 +18,7 @@ export type LazyToolTransport = "codex_native" | "openai_native" | "generic_disp
 const TOOL_SEARCH_NAME = "tool_search";
 const TOOL_INVOKE_NAME = "tool_invoke";
 const DISPATCH_MARKER_KEY = "opengeni.lazy_dispatch.v1";
+const SEARCH_MARKER_KEY = "opengeni.lazy_search.v1";
 
 const SEARCH_DESCRIPTION =
   "Search the currently authorized tools by capability. Describe what you need to do in plain language. Returns only matching tool names and input schemas.";
@@ -71,6 +69,11 @@ type CloneCapableAgent = {
 type GenericDispatchMarker = {
   version: 1;
   arguments: string;
+};
+
+type GenericSearchMarker = {
+  version: 1;
+  output: string;
 };
 
 type FunctionCallItem = {
@@ -141,17 +144,12 @@ export class LazyToolRuntime {
   constructor(
     readonly transport: Exclude<LazyToolTransport, "codex_native">,
     private readonly mcpServerIds: ReadonlySet<string>,
-    modelToolOutputTruncationTokens = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
   ) {
-    this.genericSearchResultMaxBytes =
-      modelToolOutputSerializationBudgetTokens(modelToolOutputTruncationTokens) * 4;
     this.controlTools =
       transport === "openai_native"
         ? [this.buildNativeSearchTool()]
         : [this.buildGenericSearchTool(), this.buildGenericInvokeTool()];
   }
-
-  private readonly genericSearchResultMaxBytes: number;
 
   refresh(tools: Tool[]): void {
     for (const tool of tools) {
@@ -216,6 +214,18 @@ export class LazyToolRuntime {
       : searchMcpTools(this.currentTools, rawArguments, this.mcpServerIds);
   }
 
+  genericSearchOutput(rawArguments: unknown): string {
+    const definitions: Record<string, unknown>[] = [];
+    for (const tool of this.search(rawArguments)) {
+      const definition = modelVisibleToolDefinition(tool);
+      if (!definition) continue;
+      const candidate = JSON.stringify({ tools: [...definitions, definition] });
+      if (Buffer.byteLength(candidate) > MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES) continue;
+      definitions.push(definition);
+    }
+    return JSON.stringify({ tools: definitions });
+  }
+
   private buildNativeSearchTool(): Tool {
     return toolSearchTool({
       execution: "client",
@@ -236,23 +246,7 @@ export class LazyToolRuntime {
       description: SEARCH_DESCRIPTION,
       parameters: SEARCH_PARAMETERS as never,
       strict: false,
-      execute: (input: unknown) => {
-        const emptyResult = JSON.stringify({ tools: [] });
-        if (Buffer.byteLength(emptyResult) > this.genericSearchResultMaxBytes) {
-          return "{}";
-        }
-        const definitions: Record<string, unknown>[] = [];
-        for (const tool of this.search(input)) {
-          const definition = modelVisibleToolDefinition(tool);
-          if (!definition) continue;
-          const candidate = JSON.stringify({ tools: [...definitions, definition] });
-          if (Buffer.byteLength(candidate) > this.genericSearchResultMaxBytes) continue;
-          definitions.push(definition);
-        }
-        // Always return complete JSON. Never let ordinary function-output
-        // truncation silently mutate a disclosed schema.
-        return definitions.length === 0 ? emptyResult : JSON.stringify({ tools: definitions });
-      },
+      execute: (input: unknown) => this.genericSearchOutput(input),
     }) as unknown as Tool;
   }
 
@@ -287,9 +281,8 @@ export function installLazyToolRuntime(
   agent: CloneCapableAgent,
   transport: Exclude<LazyToolTransport, "codex_native">,
   mcpServerIds: ReadonlySet<string>,
-  modelToolOutputTruncationTokens = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
 ): LazyToolRuntime {
-  const runtime = new LazyToolRuntime(transport, mcpServerIds, modelToolOutputTruncationTokens);
+  const runtime = new LazyToolRuntime(transport, mcpServerIds);
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;
 }
@@ -329,6 +322,7 @@ function restoredProviderData(providerData: unknown): Record<string, unknown> | 
   if (!isRecord(providerData)) return undefined;
   const restored = { ...providerData };
   delete restored[DISPATCH_MARKER_KEY];
+  delete restored[SEARCH_MARKER_KEY];
   return Object.keys(restored).length > 0 ? restored : undefined;
 }
 
@@ -349,18 +343,56 @@ export function restoreGenericDispatchHistoryItem<T>(candidate: T): T {
   if (!isRecord(candidate) || candidate.type !== "function_call") return candidate;
   const providerData = isRecord(candidate.providerData) ? candidate.providerData : undefined;
   const marker = providerData?.[DISPATCH_MARKER_KEY];
-  if (!isRecord(marker) || marker.version !== 1 || typeof marker.arguments !== "string") {
+  const hasDispatchMarker =
+    isRecord(marker) && marker.version === 1 && typeof marker.arguments === "string";
+  const searchMarker = providerData?.[SEARCH_MARKER_KEY];
+  const hasSearchMarker =
+    isRecord(searchMarker) && searchMarker.version === 1 && typeof searchMarker.output === "string";
+  if (!hasDispatchMarker && !hasSearchMarker) {
     return candidate;
   }
-  const restored = {
-    ...candidate,
-    name: TOOL_INVOKE_NAME,
-    arguments: marker.arguments,
-  } as Record<string, unknown>;
+  const restored = { ...candidate } as Record<string, unknown>;
+  if (hasDispatchMarker) {
+    restored.name = TOOL_INVOKE_NAME;
+    restored.arguments = marker.arguments;
+  }
   const cleanProviderData = restoredProviderData(providerData);
   if (cleanProviderData) restored.providerData = cleanProviderData;
   else delete restored.providerData;
   return restored as T;
+}
+
+function callId(candidate: Record<string, unknown>): string | null {
+  if (typeof candidate.callId === "string") return candidate.callId;
+  return typeof candidate.call_id === "string" ? candidate.call_id : null;
+}
+
+function restoreGenericSearchResults(input: ModelRequest["input"]): ModelRequest["input"] {
+  if (!Array.isArray(input)) return input;
+  const disclosures = new Map<string, string>();
+  for (const candidate of input) {
+    if (!isRecord(candidate) || candidate.type !== "function_call") continue;
+    const id = callId(candidate);
+    const marker = isRecord(candidate.providerData)
+      ? candidate.providerData[SEARCH_MARKER_KEY]
+      : undefined;
+    if (id && isRecord(marker) && marker.version === 1 && typeof marker.output === "string") {
+      disclosures.set(id, marker.output);
+    }
+  }
+  if (disclosures.size === 0) return input;
+  let changed = false;
+  const restored = input.map((candidate) => {
+    if (!isRecord(candidate) || candidate.type !== "function_call_result") {
+      return candidate;
+    }
+    const id = callId(candidate);
+    const output = id ? disclosures.get(id) : undefined;
+    if (output === undefined || candidate.output === output) return candidate;
+    changed = true;
+    return { ...candidate, output };
+  });
+  return changed ? restored : input;
 }
 
 /** Restore every historical generic-dispatch call to its provider-visible transcript. */
@@ -374,6 +406,22 @@ export function restoreGenericDispatchHistoryItems(
 
 function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRuntime): unknown {
   if (!isRecord(candidate) || candidate.type !== "function_call") return candidate;
+  if (candidate.name === TOOL_SEARCH_NAME && typeof candidate.arguments === "string") {
+    const providerData = isRecord(candidate.providerData) ? candidate.providerData : {};
+    if (SEARCH_MARKER_KEY in providerData) {
+      throw new Error("Provider function call collided with OpenGeni lazy-search metadata");
+    }
+    return {
+      ...candidate,
+      providerData: {
+        ...providerData,
+        [SEARCH_MARKER_KEY]: {
+          version: 1,
+          output: runtime.genericSearchOutput(candidate.arguments),
+        } satisfies GenericSearchMarker,
+      },
+    };
+  }
   if (candidate.name !== TOOL_INVOKE_NAME || typeof candidate.arguments !== "string") {
     return candidate;
   }
@@ -414,11 +462,12 @@ export function transformGenericDispatchResponse(
 }
 
 function prepareLazyToolRequest(request: ModelRequest, runtime: LazyToolRuntime): ModelRequest {
+  const input = restoreGenericSearchResults(request.input);
   return {
     ...request,
     // Historical generic-dispatch calls must be restored even after switching
     // the current turn to native OpenAI search.
-    input: restoreGenericDispatchHistory(request.input),
+    input: restoreGenericDispatchHistory(input),
     tools: request.tools.filter((tool) => !runtime.shouldHideSerializedTool(tool)),
   };
 }

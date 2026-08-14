@@ -211,10 +211,10 @@ export function useComputerFrameStream(
           const frame = await decodeComputerFrameMessage(bytes);
           if (disposed || source !== socket) continue;
           if (frame.computerSessionId !== computerSessionId || frame.targetId !== targetId) {
-            throw new Error("computer frame belongs to another resource");
+            throw new Error("desktop frame belongs to another resource");
           }
           if (!controllerGeneration || frame.controllerGeneration !== controllerGeneration) {
-            throw new Error("computer frame belongs to a stale controller");
+            throw new Error("desktop frame belongs to a stale controller");
           }
           const key = `${computerSessionId}:${targetId}:${frame.controllerGeneration}:${frame.targetGeneration}`;
           if (latestRef.current.key === key && frame.sequence <= latestRef.current.sequence)
@@ -246,7 +246,7 @@ export function useComputerFrameStream(
           if (disposed || source !== socket) return;
           let frameBytes = bytes;
           if (activeStream?.kind === "relay") {
-            if (bytes.length < 1) throw new Error("computer relay returned an empty message");
+            if (bytes.length < 1) throw new Error("desktop relay returned an empty message");
             const tag = bytes[0];
             const body = bytes.subarray(1);
             if (tag === RELAY_TAG_OPEN_ACK) {
@@ -255,7 +255,7 @@ export function useComputerFrameStream(
                 activeAttachment = null;
                 activeStream = null;
                 attachmentExpiresAt = 0;
-                throw new Error(ack.error?.message ?? "computer stream was rejected by the relay");
+                throw new Error(ack.error?.message ?? "desktop stream was rejected by the relay");
               }
               relayAccepted = true;
               return;
@@ -269,7 +269,7 @@ export function useComputerFrameStream(
               attachmentExpiresAt = 0;
               lastRelaySequence = null;
               relayAccepted = false;
-              fail(new Error("Computer frame source ended."), false);
+              fail(new Error("Desktop frame source ended."), false);
               return;
             }
             if (tag !== RELAY_TAG_FRAME || !relayAccepted) return;
@@ -290,7 +290,7 @@ export function useComputerFrameStream(
 
     const onError = (source: ComputerFrameWebSocket) => {
       if (source !== socket) return;
-      fail(new Error("Computer view lost connection."));
+      fail(new Error("Desktop view lost connection."));
     };
 
     const onClose = (source: ComputerFrameWebSocket) => {
@@ -363,7 +363,7 @@ export function useComputerFrameStream(
           attachment.computerSessionId !== computerSessionId ||
           attachment.targetId !== targetId
         ) {
-          throw new Error("computer attachment does not match the requested resource");
+          throw new Error("desktop attachment does not match the requested resource");
         }
         controllerGeneration = attachment.controllerGeneration;
         activeAttachment = attachment;
@@ -430,5 +430,5 @@ async function messageBytes(value: unknown): Promise<Uint8Array> {
   if (typeof Blob !== "undefined" && value instanceof Blob) {
     return new Uint8Array(await value.arrayBuffer());
   }
-  throw new Error("computer frame stream returned a non-binary message");
+  throw new Error("desktop frame stream returned a non-binary message");
 }

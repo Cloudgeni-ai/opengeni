@@ -39,6 +39,25 @@ RUN set -eux; \
 
 FROM oven/bun:1.3.14 AS bun-runtime
 
+FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS anydoc-runtime-builder
+
+ARG TARGETARCH
+WORKDIR /src
+COPY docker/anydoc/package.json docker/anydoc/bun.lock ./
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) node_arch=x64 ;; \
+      arm64) node_arch=arm64 ;; \
+      *) echo "unsupported AnyDoc OCI architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    bun install --frozen-lockfile --production --os=linux --cpu="$node_arch"; \
+    runtime=/out/node_modules/@firecrawl; \
+    install -d -m 0755 "$runtime"; \
+    cp -a node_modules/@firecrawl/anydoc "$runtime/anydoc"; \
+    cp -a "node_modules/@firecrawl/anydoc-linux-${node_arch}-gnu" \
+      "$runtime/anydoc-linux-${node_arch}-gnu"; \
+    test "$(bun -e 'const value=await Bun.file("node_modules/@firecrawl/anydoc/package.json").json();process.stdout.write(value.version)')" = 0.1.8
+
 FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS browserd-source-build
 
 WORKDIR /src
@@ -174,7 +193,7 @@ RUN set -eux; \
         xvfb x11-utils x11-xserver-utils x11-apps xauth \
         xkb-data x11-xkb-utils \
         xfce4 xfce4-terminal dbus-x11 \
-        at-spi2-core \
+        at-spi2-core libgtk-3-bin python3-gi gir1.2-gtk-3.0 \
         tini \
         x11vnc \
         xdotool scrot ffmpeg \
@@ -360,6 +379,9 @@ COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni
 COPY --from=browserd-build /out/SHA256SUMS /usr/local/share/opengeni/browserd-SHA256SUMS
 COPY docker/browserd-THIRD-PARTY-NOTICES /usr/local/share/opengeni/browserd-THIRD-PARTY-NOTICES
 COPY --from=browserd-build /out/codemode-runtime /opt/opengeni/codemode-runtime
+COPY --from=anydoc-runtime-builder /out /opt/opengeni/anydoc
+COPY docker/anydoc/LICENSE /usr/local/share/licenses/anydoc/LICENSE
+COPY docker/anydoc/THIRD-PARTY-NOTICES /usr/local/share/opengeni/anydoc-THIRD-PARTY-NOTICES
 RUN set -eux; \
     chmod 0755 /usr/local/bin/opengeni-desktop-up /usr/local/bin/opengeni-desktop-down \
                /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down \
@@ -370,8 +392,15 @@ RUN set -eux; \
                /usr/local/lib/opengeni/opengeni-computer-native; \
     chmod 0755 /opt/opengeni/ogtool/bin/ogtool.cjs; \
     ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \
+    chmod 0755 /opt/opengeni/anydoc/node_modules/@firecrawl/anydoc/cli.js; \
+    ln -s /opt/opengeni/anydoc/node_modules/@firecrawl/anydoc/cli.js /usr/local/bin/anydoc; \
     node --check /opt/opengeni/ogtool/bin/ogtool.cjs; \
     test -n "$(ogtool --version)"; \
+    test "$(anydoc --version)" = 0.1.8; \
+    printf 'name,value\nalpha,42\n' >/tmp/anydoc-smoke.csv; \
+    anydoc /tmp/anydoc-smoke.csv | grep -q alpha; \
+    printf '{\\rtf1\\ansi AnyDoc smoke}' >/tmp/anydoc-smoke.rtf; \
+    anydoc /tmp/anydoc-smoke.rtf | grep -q 'AnyDoc smoke'; \
     NODE_PATH=/opt/opengeni/codemode-runtime/node_modules bun -e 'const module = await import("@opengeni/codemode"); if (typeof module.CodemodeClient !== "function" || typeof module.openGeni !== "object") process.exit(1)'; \
     bash -n /usr/local/bin/opengeni-desktop-up; \
     bash -n /usr/local/bin/opengeni-desktop-down; \

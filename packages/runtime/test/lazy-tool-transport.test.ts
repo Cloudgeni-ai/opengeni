@@ -19,8 +19,10 @@ import {
   installLazyToolRuntime,
   restoreGenericDispatchHistory,
   restoreGenericDispatchHistoryItems,
+  transformGenericDispatchResponse,
 } from "../src/lazy-tool-transport";
 import { boundModelToolOutputItem } from "@opengeni/codex";
+import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "../src/mcp-network";
 
 const SERVER_ID = "connected_tools";
 const WEATHER_TOOL = `${SERVER_ID}__weather_lookup`;
@@ -602,11 +604,11 @@ describe("generic lazy tool dispatch", () => {
     expect(JSON.stringify(projected)).not.toContain("opengeni.lazy_dispatch.v1");
   });
 
-  test("bounds generic search disclosure before output truncation", async () => {
+  test("preserves large generic search schemas across ordinary output truncation", async () => {
     const tools = Array.from({ length: 8 }, (_, index) =>
       tool({
         name: `${SERVER_ID}__weather_${index}`,
-        description: `weather capability ${"x".repeat(2_500)}`,
+        description: `weather capability ${index} ${"x".repeat(50_000)}`,
         parameters: {
           type: "object",
           properties: { city: { type: "string" } },
@@ -617,16 +619,12 @@ describe("generic lazy tool dispatch", () => {
         execute: () => "unused",
       }),
     ) as unknown as Tool[];
-    const runtime = installLazyToolRuntime(
-      {
-        async getAllTools() {
-          return tools;
-        },
+    const fakeAgent = {
+      async getAllTools() {
+        return tools;
       },
-      "generic_dispatch",
-      new Set([SERVER_ID]),
-      1_000,
-    );
+    };
+    const runtime = installLazyToolRuntime(fakeAgent, "generic_dispatch", new Set([SERVER_ID]));
     runtime.refresh(tools);
     const searchTool = runtime.controlTools.find(
       (candidate) => candidate.type === "function" && candidate.name === "tool_search",
@@ -641,45 +639,47 @@ describe("generic lazy tool dispatch", () => {
     const parsed = JSON.parse(String(output)) as { tools: unknown[] };
     expect(parsed.tools.length).toBeGreaterThan(0);
     expect(parsed.tools.length).toBeLessThan(tools.length);
+    expect(Buffer.byteLength(String(output))).toBeGreaterThan(48_000);
+    expect(Buffer.byteLength(String(output))).toBeLessThanOrEqual(
+      MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES,
+    );
 
     const item = { type: "function_call_result", callId: "search-1", output };
-    expect(boundModelToolOutputItem(item, 1_000)).toBe(item);
-
-    const tinyRuntime = installLazyToolRuntime(
-      {
-        async getAllTools() {
-          return tools;
-        },
-      },
-      "generic_dispatch",
-      new Set([SERVER_ID]),
-      1,
-    );
-    tinyRuntime.refresh(tools);
-    const tinySearch = tinyRuntime.controlTools.find(
-      (candidate) => candidate.type === "function" && candidate.name === "tool_search",
-    );
-    if (!tinySearch || tinySearch.type !== "function") throw new Error("missing tiny tool_search");
-    const tinyOutput = await tinySearch.invoke(
-      {} as never,
-      JSON.stringify({ query: "weather capability" }),
-      undefined as never,
-    );
-    expect(tinyOutput).toBe("{}");
-    const tinyItem = { type: "function_call_result", callId: "search-tiny", output: tinyOutput };
-    expect(boundModelToolOutputItem(tinyItem, 1)).toBe(tinyItem);
-
-    // Planted negative: the previous unbounded disclosure is mutated by the
-    // ordinary output truncator, corrupting at least one returned schema.
-    const unbounded = JSON.stringify({
-      tools: runtime.search({ query: "weather capability", limit: 20 }).map(serializedFunction),
-    });
-    const truncated = boundModelToolOutputItem(
-      { ...item, output: unbounded },
-      1_000,
-    ) as typeof item;
-    expect(truncated.output).not.toBe(unbounded);
+    const truncated = boundModelToolOutputItem(item, 10_000) as typeof item;
+    expect(truncated.output).not.toBe(output);
     expect(String(truncated.output)).toContain("tokens truncated");
+
+    const args = JSON.stringify({ query: "weather capability", limit: 20 });
+    const marked = transformGenericDispatchResponse(
+      {
+        usage: new Usage(),
+        output: [
+          {
+            type: "function_call",
+            callId: "search-1",
+            name: "tool_search",
+            arguments: args,
+          },
+        ],
+      },
+      runtime,
+    ).output[0]!;
+    const inner = new CapturingModel();
+    const wrapped = await new LazyToolModelProvider(providerFor(inner), runtime).getModel("test");
+    const visible = await fakeAgent.getAllTools(undefined);
+    await wrapped.getResponse({
+      ...baseRequest(visible.map(serializedFunction)),
+      input: [marked, truncated] as ModelRequest["input"],
+    });
+
+    const providerInput = inner.requests[0]!.input as Array<Record<string, unknown>>;
+    const providerCall = providerInput.find((candidate) => candidate.type === "function_call");
+    const providerResult = providerInput.find(
+      (candidate) => candidate.type === "function_call_result",
+    );
+    expect(providerCall?.providerData).toBeUndefined();
+    expect(providerResult?.output).toBe(output);
+    expect(() => JSON.parse(String(providerResult?.output))).not.toThrow();
   });
 
   test("reserves only the control names installed by each transport", () => {
