@@ -603,7 +603,7 @@
       "id": 26,
       "type": "timeseries",
       "title": "Unknown logical provision failure ratio",
-      "description": "Unknown failures divided by all actual failed logical provisions. The OPE-247 production target is below 1%; expected transitions are excluded.",
+      "description": "Unknown failures divided by all actual failed logical provisions. The production target is below 1%; expected transitions are excluded.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
       "options": {
