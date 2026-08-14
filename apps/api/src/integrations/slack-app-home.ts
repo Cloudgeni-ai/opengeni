@@ -16,6 +16,7 @@ export type SlackAppHomeOpenedEvent = {
   eventId: string;
   slackTeamId: string;
   slackUserId: string;
+  viewHash: string | null;
 };
 
 export function slackAppHomeOpenedEvent(payload: unknown): SlackAppHomeOpenedEvent | null {
@@ -26,8 +27,9 @@ export function slackAppHomeOpenedEvent(payload: unknown): SlackAppHomeOpenedEve
   const eventId = boundedId(envelope.event_id, 256);
   const slackTeamId = boundedId(envelope.team_id, 64);
   const slackUserId = boundedId(event.user, 64);
+  const viewHash = boundedOptionalId(record(event.view)?.hash, 256);
   if (!eventId || !slackTeamId || !slackUserId) return null;
-  return { eventId, slackTeamId, slackUserId };
+  return { eventId, slackTeamId, slackUserId, viewHash };
 }
 
 /** URL-only App Home buttons are acknowledged but never become Slack commands. */
@@ -284,6 +286,11 @@ function boundedId(value: unknown, maxBytes: number): string | null {
     Buffer.byteLength(value, "utf8") <= maxBytes
     ? value
     : null;
+}
+
+function boundedOptionalId(value: unknown, maxBytes: number): string | null {
+  if (value === undefined || value === null) return null;
+  return boundedId(value, maxBytes);
 }
 
 function record(value: unknown): Record<string, unknown> | null {

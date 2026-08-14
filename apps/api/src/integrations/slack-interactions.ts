@@ -32,13 +32,16 @@ import {
   advanceSlackInteractionDelivery,
   bindSlackInteractionSession,
   cancelSlackUserLinkAccessRequest,
+  claimSlackAppHomeRefresh,
   claimSlackInteractionDelivery,
   claimSlackInteractionProgressDelivery,
   claimSlackInteractionInbox,
   closeSlackInteractionDelivery,
   completeSlackUserLinkAccessIfGranted,
+  decodeSessionListCursor,
   deferSlackInteractionDelivery,
   deleteSlackBotUserLink,
+  enqueueSlackAppHomeRefresh,
   enqueueSlackInteractionInbox,
   getConnectionMetadata,
   getOrCreateSlackInteraction,
@@ -65,12 +68,14 @@ import {
   reopenSlackInteractionDelivery,
   reserveSlackInteractionActionHandles,
   releaseSlackInteractionDelivery,
+  releaseSlackAppHomeRefresh,
   releaseSlackInteractionInbox,
   requestSlackUserLinkWorkspaceAccess,
   resolveSlackInstallationRoute,
   saveSlackInteractionInboxReactionCheckpoint,
   saveSlackSharedTaskOrigin,
   settleSlackInteractionInbox,
+  settleSlackAppHomeRefresh,
   settleSlackInteractionActionHandles,
   listSessionsForSubject,
   SessionListAccessError,
@@ -78,6 +83,7 @@ import {
   prepareSlackUserLinkAccessRequest,
   SlackUserLinkAccessPersistenceError,
   type SlackInstallationRoute,
+  type SlackAppHomeRefresh,
   type SlackInteraction,
   type SlackInteractionActionHandle,
   type SlackInteractionActionKind,
@@ -109,7 +115,6 @@ import {
   buildSlackAppHomeBlocks,
   isSlackAppHomeLinkAction,
   slackAppHomeOpenedEvent,
-  type SlackAppHomeOpenedEvent,
 } from "./slack-app-home";
 import { importSlackReactionImage, type ImportedSlackReactionImage } from "../slack-reaction-files";
 
@@ -136,6 +141,7 @@ const MAX_SLACK_REACTION_IMAGE_AGGREGATE_BYTES = 16 * 1024 * 1024;
 const MAX_PROGRESS_MESSAGES = 3;
 const SLACK_USER_LINK_TTL_MS = 15 * 60_000;
 const INBOX_LEASE_MS = 30_000;
+const APP_HOME_LEASE_MS = 300_000;
 const DELIVERY_LEASE_MS = 30_000;
 const MAX_DELIVERY_ATTEMPTS = 8;
 const MAX_DELIVERY_RETRY_MS = 5 * 60_000;
@@ -370,7 +376,15 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     const event = record(payload.event);
     const appHomeEvent = slackAppHomeOpenedEvent(payload);
     if (appHomeEvent) {
-      await publishSlackAppHome(deps, installation, appHomeEvent);
+      await enqueueSlackAppHomeRefresh(deps.db, {
+        accountId: installation.accountId,
+        workspaceId: installation.workspaceId,
+        connectionId: installation.connectionId,
+        slackTeamId: appHomeEvent.slackTeamId,
+        slackUserId: appHomeEvent.slackUserId,
+        providerEventId: appHomeEvent.eventId,
+        providerViewHash: appHomeEvent.viewHash,
+      });
       return c.json({ ok: true });
     }
     if (event?.type === "reaction_added") {
@@ -803,13 +817,13 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
 async function publishSlackAppHome(
   deps: ApiRouteDeps,
   installation: SlackInstallationRoute,
-  event: SlackAppHomeOpenedEvent,
+  refresh: SlackAppHomeRefresh,
 ): Promise<void> {
   const link = await getSlackBotUserLink(
     deps.db,
     installation.workspaceId,
     installation.connectionId,
-    event.slackUserId,
+    refresh.slackUserId,
   );
   const grant = link
     ? await getWorkspaceGrant(deps.db, link.subjectId, installation.workspaceId, {
@@ -828,14 +842,20 @@ async function publishSlackAppHome(
       subjectId: "service:slack-app-home",
     });
     await client.publishHomeView({
-      userId: event.slackUserId,
+      userId: refresh.slackUserId,
+      hash: refresh.providerViewHash,
       blocks: buildSlackAppHomeAccessBlocks({
         title: link ? "OpenGeni access needed" : "Connect your OpenGeni account",
         message: link
           ? "Your Slack identity is linked, but it does not currently have access to this OpenGeni workspace."
           : "Link this Slack identity to see your active tasks, requests, and recent results here.",
         actionLabel: link ? "Request access" : "Connect OpenGeni",
-        actionUrl: slackAppHomeLinkUrl(deps, installation, event.slackTeamId, event.slackUserId),
+        actionUrl: slackAppHomeLinkUrl(
+          deps,
+          installation,
+          refresh.slackTeamId,
+          refresh.slackUserId,
+        ),
       }),
     });
     return;
@@ -850,24 +870,38 @@ async function publishSlackAppHome(
   // Host session authorization is resolved at publication time, before the
   // database query, so App Home cannot leak rows through a stale broad list.
   const authorizationScope = await requireSessionAuthorizationListScope(deps, grant, "core");
-  let page: Awaited<ReturnType<typeof listSessionsForSubject>>;
+  const sessions: Awaited<ReturnType<typeof listSessionsForSubject>>["sessions"] = [];
   try {
-    page = await listSessionsForSubject(deps.db, installation.workspaceId, {
-      subjectId: grant.subjectId,
-      limit: 30,
-      materializeSnapshot: false,
-      ...(authorizationScope ? { authorizationScope } : {}),
-    });
+    let cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
+    do {
+      const page = await listSessionsForSubject(deps.db, installation.workspaceId, {
+        subjectId: grant.subjectId,
+        limit: 500,
+        ...(cursor ? { cursor } : {}),
+        ...(authorizationScope ? { authorizationScope } : {}),
+      });
+      if (!cursor) sessions.push(...page.pinned);
+      sessions.push(...page.sessions);
+      if (!page.nextCursor) break;
+      cursor = decodeSessionListCursor(page.nextCursor) ?? undefined;
+      if (!cursor) throw new Error("Slack App Home session cursor was invalid");
+    } while (cursor);
   } catch (error) {
     if (!(error instanceof SessionListAccessError)) throw error;
     await client.publishHomeView({
-      userId: event.slackUserId,
+      userId: refresh.slackUserId,
+      hash: refresh.providerViewHash,
       blocks: buildSlackAppHomeAccessBlocks({
         title: "OpenGeni access changed",
         message:
           "Your current OpenGeni access could not be verified. Reconnect before tasks are shown here.",
         actionLabel: "Reconnect OpenGeni",
-        actionUrl: slackAppHomeLinkUrl(deps, installation, event.slackTeamId, event.slackUserId),
+        actionUrl: slackAppHomeLinkUrl(
+          deps,
+          installation,
+          refresh.slackTeamId,
+          refresh.slackUserId,
+        ),
       }),
     });
     return;
@@ -876,7 +910,7 @@ async function publishSlackAppHome(
     deps.db,
     installation.workspaceId,
     installation.connectionId,
-    event.slackUserId,
+    refresh.slackUserId,
   );
   const currentGrant = currentLink
     ? await getWorkspaceGrant(deps.db, currentLink.subjectId, installation.workspaceId, {
@@ -891,13 +925,19 @@ async function publishSlackAppHome(
     !hasPermission(currentGrant.permissions, "sessions:read")
   ) {
     await client.publishHomeView({
-      userId: event.slackUserId,
+      userId: refresh.slackUserId,
+      hash: refresh.providerViewHash,
       blocks: buildSlackAppHomeAccessBlocks({
         title: "OpenGeni access changed",
         message:
           "Your current OpenGeni access could not be verified. Reconnect before tasks are shown here.",
         actionLabel: "Reconnect OpenGeni",
-        actionUrl: slackAppHomeLinkUrl(deps, installation, event.slackTeamId, event.slackUserId),
+        actionUrl: slackAppHomeLinkUrl(
+          deps,
+          installation,
+          refresh.slackTeamId,
+          refresh.slackUserId,
+        ),
       }),
     });
     return;
@@ -912,7 +952,8 @@ async function publishSlackAppHome(
     slackSessionAuthorizationScopeKey(authorizationScope)
   ) {
     await client.publishHomeView({
-      userId: event.slackUserId,
+      userId: refresh.slackUserId,
+      hash: refresh.providerViewHash,
       blocks: buildSlackAppHomeAccessBlocks({
         title: "OpenGeni access changed",
         message:
@@ -924,9 +965,10 @@ async function publishSlackAppHome(
     return;
   }
   await client.publishHomeView({
-    userId: event.slackUserId,
+    userId: refresh.slackUserId,
+    hash: refresh.providerViewHash,
     blocks: buildSlackAppHomeBlocks({
-      sessions: [...page.pinned, ...page.sessions],
+      sessions,
       workspaceUrl: slackWorkspaceUrl(deps, installation.workspaceId),
       sessionUrl: (sessionId) => slackSessionUrl(deps, installation.workspaceId, sessionId),
     }),
@@ -934,6 +976,63 @@ async function publishSlackAppHome(
 }
 
 export async function drainSlackInteractionsOnce(deps: ApiRouteDeps): Promise<boolean> {
+  const appHomeHolder = crypto.randomUUID();
+  const refresh = await claimSlackAppHomeRefresh(deps.db, appHomeHolder, APP_HOME_LEASE_MS);
+  if (refresh) {
+    try {
+      const installation = await resolveSlackInstallationRoute(deps.db, refresh.slackTeamId);
+      if (
+        !installation ||
+        installation.accountId !== refresh.accountId ||
+        installation.workspaceId !== refresh.workspaceId ||
+        installation.connectionId !== refresh.connectionId
+      ) {
+        throw new SlackInteractionPermanentError("slack_app_home_installation_changed");
+      }
+      await publishSlackAppHome(deps, installation, refresh);
+      await settleSlackAppHomeRefresh(deps.db, {
+        refresh,
+        claimHolderId: appHomeHolder,
+      });
+    } catch (error) {
+      const code = safeErrorCode(error);
+      console.error("[slack-interactions] App Home refresh failed", {
+        workspaceId: refresh.workspaceId,
+        connectionId: refresh.connectionId,
+        slackUserId: refresh.slackUserId,
+        providerEventId: refresh.providerEventId,
+        desiredRevision: refresh.desiredRevision,
+        attemptCount: refresh.attemptCount,
+        errorCode: code,
+      });
+      if (error instanceof SlackBotProviderError && error.code === "hash_conflict") {
+        await settleSlackAppHomeRefresh(deps.db, {
+          refresh,
+          claimHolderId: appHomeHolder,
+          errorCode: code,
+        });
+      } else if (
+        refresh.attemptCount >= 5 ||
+        error instanceof SlackInteractionPermanentError ||
+        permanentSlackDeliveryError(error)
+      ) {
+        await settleSlackAppHomeRefresh(deps.db, {
+          refresh,
+          claimHolderId: appHomeHolder,
+          errorCode: code,
+        });
+      } else {
+        await releaseSlackAppHomeRefresh(deps.db, {
+          refresh,
+          claimHolderId: appHomeHolder,
+          errorCode: code,
+          retryAt: new Date(Date.now() + slackDeliveryRetryMs(error, refresh.attemptCount)),
+        });
+      }
+    }
+    return true;
+  }
+
   const holder = crypto.randomUUID();
   const entry = await claimSlackInteractionInbox(deps.db, holder, INBOX_LEASE_MS);
   if (entry) {

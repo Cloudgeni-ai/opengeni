@@ -8,26 +8,31 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import {
   bindSlackInteractionSession,
+  claimSlackAppHomeRefresh,
   claimSlackInteractionInbox,
   createConnection,
   createDb,
   createSession,
   createSessionWithIdempotencyKeyResult,
+  enqueueSlackAppHomeRefresh,
   enqueueSlackInteractionInbox,
   getOrCreateSlackInteraction,
   getSlackInteractionActionHandle,
   getSessionForSubject,
   grantWorkspaceAccess,
   listSessionsForSubject,
+  releaseSlackAppHomeRefresh,
   releaseSlackInteractionInbox,
   reserveSlackInteractionActionHandles,
   resolveSlackInstallationRoute,
   saveSlackInteractionInboxReactionCheckpoint,
+  settleSlackAppHomeRefresh,
   settleSlackInteractionInbox,
   settleSlackInteractionActionHandles,
   type Database,
   type DbClient,
 } from "../src/index";
+import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const migrationPath = new URL("../drizzle/0150_slack_task_interactions.sql", import.meta.url)
@@ -40,6 +45,10 @@ const nativeActionMigrationPath = new URL(
 ).pathname;
 const fileFactMigrationPath = new URL("../drizzle/0229_slack_inbox_file_fact.sql", import.meta.url)
   .pathname;
+const appHomeMigrationPath = new URL(
+  "../drizzle/0244_slack_app_home_refresh_queue.sql",
+  import.meta.url,
+).pathname;
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -201,6 +210,18 @@ describe("Slack interaction migration and durable database boundary", () => {
     expect(sql).toContain('ADD COLUMN "has_files" boolean NOT NULL DEFAULT false');
     expect(sql).not.toContain("jsonb");
     expect(sql).not.toContain("provider payload");
+  });
+
+  test("adds a coalesced FORCE-RLS Slack App Home refresh authority", async () => {
+    const sql = await readFile(appHomeMigrationPath, "utf8");
+    expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
+    expect(sql).toContain('CREATE TABLE "slack_app_home_refreshes"');
+    expect(sql).toContain("FORCE ROW LEVEL SECURITY");
+    expect(sql).toContain("claim_slack_app_home_refresh");
+    expect(sql).toContain("FOR UPDATE SKIP LOCKED");
+    expect(sql).toContain('"processed_revision" < "desired_revision"');
+    expect(FORCE_RLS_TABLES).toContain("slack_app_home_refreshes");
+    expect(RUNTIME_FULL_DML_TABLES).toContain("slack_app_home_refreshes");
   });
 
   test("enforces FORCE RLS and grants only the declared runtime DML", async () => {
@@ -402,6 +423,82 @@ describe("Slack interaction migration and durable database boundary", () => {
       from slack_interaction_inbox
       where id = ${first.entry.id}`;
     expect(settled).toEqual({ status: "failed", reaction_context_checkpoint: null });
+  });
+
+  test("coalesces and serializes Slack App Home refresh revisions per user", async () => {
+    if (!available) return;
+    const target = await workspace("app-home-refresh");
+    const connection = await botConnection(target, "T_APP_HOME", {
+      botId: "B_APP_HOME",
+      botUserId: "U_APP_HOME_BOT",
+    });
+    const input = {
+      ...target,
+      connectionId: connection.id,
+      slackTeamId: "T_APP_HOME",
+      slackUserId: "U_APP_HOME_VIEWER",
+      providerEventId: "E_APP_HOME_1",
+      providerViewHash: "hash-1",
+    };
+    const first = await enqueueSlackAppHomeRefresh(db, input);
+    const duplicate = await enqueueSlackAppHomeRefresh(db, input);
+    expect(first).toMatchObject({ desiredRevision: 1, processedRevision: 0 });
+    expect(duplicate).toMatchObject({ id: first.id, desiredRevision: 1 });
+
+    const holderA = crypto.randomUUID();
+    const claimedA = await claimSlackAppHomeRefresh(db, holderA, 300_000);
+    expect(claimedA).toMatchObject({ id: first.id, desiredRevision: 1, attemptCount: 1 });
+    const newer = await enqueueSlackAppHomeRefresh(db, {
+      ...input,
+      providerEventId: "E_APP_HOME_2",
+      providerViewHash: "hash-2",
+    });
+    expect(newer).toMatchObject({
+      id: first.id,
+      desiredRevision: 2,
+      claimHolderId: holderA,
+    });
+    expect(await claimSlackAppHomeRefresh(db, crypto.randomUUID(), 300_000)).toBeNull();
+    expect(
+      await settleSlackAppHomeRefresh(db, {
+        refresh: claimedA!,
+        claimHolderId: holderA,
+      }),
+    ).toBe(true);
+
+    const holderB = crypto.randomUUID();
+    const claimedB = await claimSlackAppHomeRefresh(db, holderB, 300_000);
+    expect(claimedB).toMatchObject({
+      id: first.id,
+      providerEventId: "E_APP_HOME_2",
+      providerViewHash: "hash-2",
+      desiredRevision: 2,
+      processedRevision: 1,
+      attemptCount: 1,
+    });
+    expect(
+      await releaseSlackAppHomeRefresh(db, {
+        refresh: claimedB!,
+        claimHolderId: holderB,
+        errorCode: "retryable_test",
+        retryAt: new Date(Date.now() + 1_000),
+      }),
+    ).toBe(true);
+    expect(await claimSlackAppHomeRefresh(db, crypto.randomUUID(), 300_000)).toBeNull();
+    await admin`
+      update slack_app_home_refreshes
+      set retry_at = now() - interval '1 second'
+      where id = ${first.id}`;
+    const holderC = crypto.randomUUID();
+    const claimedC = await claimSlackAppHomeRefresh(db, holderC, 300_000);
+    expect(claimedC).toMatchObject({ id: first.id, desiredRevision: 2, attemptCount: 2 });
+    expect(
+      await settleSlackAppHomeRefresh(db, {
+        refresh: claimedC!,
+        claimHolderId: holderC,
+      }),
+    ).toBe(true);
+    expect(await claimSlackAppHomeRefresh(db, crypto.randomUUID(), 300_000)).toBeNull();
   });
 
   test("bounds reaction checkpoints and rejects them on non-reaction or terminal inbox rows", async () => {

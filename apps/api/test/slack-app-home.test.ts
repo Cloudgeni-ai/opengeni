@@ -14,12 +14,18 @@ describe("Slack App Home projection", () => {
         type: "event_callback",
         team_id: "T_WORKSPACE",
         event_id: "Ev_OPENED",
-        event: { type: "app_home_opened", user: "U_VIEWER", tab: "home" },
+        event: {
+          type: "app_home_opened",
+          user: "U_VIEWER",
+          tab: "home",
+          view: { hash: "1730000000.123456" },
+        },
       }),
     ).toEqual({
       eventId: "Ev_OPENED",
       slackTeamId: "T_WORKSPACE",
       slackUserId: "U_VIEWER",
+      viewHash: "1730000000.123456",
     });
     expect(
       slackAppHomeOpenedEvent({
@@ -37,6 +43,14 @@ describe("Slack App Home projection", () => {
         event: { type: "app_home_opened", user: "U_VIEWER", tab: "home" },
       }),
     ).toBeNull();
+    expect(
+      slackAppHomeOpenedEvent({
+        type: "event_callback",
+        team_id: "T_WORKSPACE",
+        event_id: "Ev_NO_VIEW",
+        event: { type: "app_home_opened", user: "U_VIEWER", tab: "home" },
+      }),
+    ).toMatchObject({ viewHash: null });
   });
 
   test("recognizes only inert App Home URL controls", () => {

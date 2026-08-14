@@ -1390,6 +1390,73 @@ export const slackInteractionInbox = pgTable(
   }),
 );
 
+// Coalesced private App Home refresh authority. One row per installed Slack
+// connection/user serializes provider replacement calls while allowing event
+// retries and newer opens to converge on the latest requested revision.
+export const slackAppHomeRefreshes = pgTable(
+  "slack_app_home_refreshes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    slackTeamId: text("slack_team_id").notNull(),
+    slackUserId: text("slack_user_id").notNull(),
+    providerEventId: text("provider_event_id").notNull(),
+    providerViewHash: text("provider_view_hash"),
+    desiredRevision: integer("desired_revision").notNull().default(1),
+    processedRevision: integer("processed_revision").notNull().default(0),
+    claimHolderId: uuid("claim_holder_id"),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    retryAt: timestamp("retry_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    connectionUser: uniqueIndex("slack_app_home_refreshes_connection_user_uq").on(
+      table.connectionId,
+      table.slackUserId,
+    ),
+    pending: index("slack_app_home_refreshes_pending_idx")
+      .on(table.retryAt, table.updatedAt, table.id)
+      .where(sql`${table.processedRevision} < ${table.desiredRevision}`),
+    workspaceAccount: foreignKey({
+      name: "slack_app_home_refreshes_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    bounds: check(
+      "slack_app_home_refreshes_bounds_check",
+      sql`octet_length(${table.slackTeamId}) between 1 and 64
+        and octet_length(${table.slackUserId}) between 1 and 64
+        and octet_length(${table.providerEventId}) between 1 and 256
+        and (${table.providerViewHash} is null
+          or octet_length(${table.providerViewHash}) between 1 and 256)
+        and (${table.lastErrorCode} is null
+          or octet_length(${table.lastErrorCode}) between 1 and 128)`,
+    ),
+    revisions: check(
+      "slack_app_home_refreshes_revisions_check",
+      sql`${table.desiredRevision} > 0
+        and ${table.processedRevision} >= 0
+        and ${table.processedRevision} <= ${table.desiredRevision}
+        and ${table.attemptCount} >= 0`,
+    ),
+    claim: check(
+      "slack_app_home_refreshes_claim_check",
+      sql`(${table.claimHolderId} is null) = (${table.claimExpiresAt} is null)`,
+    ),
+  }),
+);
+
 export const slackInteractions = pgTable(
   "slack_interactions",
   {

@@ -494,13 +494,15 @@ export class OpenGeniSlackBotClient {
    * naturally convergent replace operation: Slack event retries may safely
    * repeat the exact bounded view without creating duplicate provider state.
    */
-  async publishHomeView(input: { userId: string; blocks: SlackHomeBlock[] }) {
+  async publishHomeView(input: { userId: string; blocks: SlackHomeBlock[]; hash?: string | null }) {
     const userId = requiredSlackString(input.userId, "user_id");
     const blocks = validateSlackHomeBlocks(input.blocks);
+    const hash = input.hash ? requiredSlackString(input.hash, "hash") : null;
     return await this.withAudit("home.publish", async (headers) => {
       const payload = await this.call(headers, "views.publish", {
         user_id: userId,
         view: JSON.stringify({ type: "home", blocks }),
+        ...(hash ? { hash } : {}),
       });
       return {
         viewId: requiredSlackString(slackRecord(payload.view)?.id, "view.id"),
