@@ -42,7 +42,7 @@
 use core::ffi::{c_ulong, c_void};
 use std::sync::{mpsc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 mod ax;
 mod ax_element;
@@ -721,7 +721,6 @@ fn cgimage_to_rgba(image: &CGImage) -> Result<RgbaFrame, String> {
 const MAX_INPUT_BATCH: usize = 16;
 const MAX_TEXT_UTF16_UNITS: usize = 16 * 1024;
 const MAX_PREPARED_EVENTS: usize = 128;
-const INPUT_CONFIRM_TIMEOUT: Duration = Duration::from_millis(250);
 const INPUT_CONFIRM_POLL: Duration = Duration::from_millis(1);
 
 static INPUT_SEAT: Mutex<()> = Mutex::new(());
@@ -1381,7 +1380,13 @@ fn post_prepared(prepared: &PreparedInput) -> Result<(), MacFfiError> {
                 .to_string(),
         ));
     }
-    let initial_synthetic = prepared.monitor.synthetic_generation()?;
+    // `CGEventPost` is a synchronous CoreGraphics queue-handoff primitive with
+    // no fallible return. Do not manufacture a stronger receipt from passive
+    // event taps or HID counters: macOS deliberately does not loop same-process
+    // posted events through that tap, and counters omit Unicode payload events
+    // and modifier transitions. The independent monitor still fences physical
+    // user input before, during, and immediately after the bounded dispatch;
+    // application state/pixels are the end-to-end effect confirmation.
     for (posted, event) in prepared.events.iter().enumerate() {
         if prepared.monitor.external_generation()? != initial_external {
             return if posted == 0 {
@@ -1399,21 +1404,7 @@ fn post_prepared(prepared: &PreparedInput) -> Result<(), MacFfiError> {
         CGEvent::post(CGEventTapLocation::HIDEventTap, Some(event));
     }
 
-    let expected = initial_synthetic.saturating_add(prepared.events.len() as u64);
-    let deadline = Instant::now() + INPUT_CONFIRM_TIMEOUT;
-    while prepared.monitor.synthetic_generation()? < expected {
-        if prepared.monitor.external_generation()? != initial_external {
-            return Err(MacFfiError::OutcomeUnknown(
-                "physical input overlapped an automated input batch after dispatch".to_string(),
-            ));
-        }
-        if Instant::now() >= deadline {
-            return Err(MacFfiError::OutcomeUnknown(
-                "CoreGraphics did not confirm the complete automated input batch".to_string(),
-            ));
-        }
-        thread::sleep(INPUT_CONFIRM_POLL);
-    }
+    thread::sleep(INPUT_CONFIRM_POLL);
     if prepared.monitor.external_generation()? != initial_external {
         return Err(MacFfiError::OutcomeUnknown(
             "physical input overlapped an automated input batch".to_string(),
@@ -1447,5 +1438,16 @@ mod input_tests {
         assert!(parse_key_chord("Command+").is_err());
         assert!(parse_key_chord("A+B").is_err());
         assert!(parse_key_chord("Command+Command+A").is_err());
+    }
+
+    #[test]
+    #[ignore = "posts one harmless F16 chord to the active macOS login seat"]
+    fn live_core_graphics_confirms_named_key_batch() {
+        inject(&InputEvent::Key {
+            text: None,
+            named: Some("F16".to_string()),
+            action: KeyAction::Press,
+        })
+        .expect("CoreGraphics should accept both F16 events as one bounded batch");
     }
 }
