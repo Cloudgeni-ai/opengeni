@@ -2979,6 +2979,10 @@ describe("release approval provenance", () => {
     await expect(
       verifyApprovedMerge({ env: approvalEnv(), fetchImpl: stale.fetchImpl }),
     ).rejects.toThrow("did not review the exact PR head");
+    const sameSecond = approvalFixture({ reviewTime: "2026-07-23T12:00:00Z" });
+    await expect(
+      verifyApprovedMerge({ env: approvalEnv(), fetchImpl: sameSecond.fetchImpl }),
+    ).rejects.toThrow("was not submitted before merge");
     const late = approvalFixture({ reviewTime: "2026-07-23T12:01:00Z" });
     await expect(
       verifyApprovedMerge({ env: approvalEnv(), fetchImpl: late.fetchImpl }),
