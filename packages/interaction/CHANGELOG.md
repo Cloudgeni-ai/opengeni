@@ -1,5 +1,44 @@
 # @opengeni/interaction
 
+## 0.4.3
+
+### Patch Changes
+
+- Updated dependencies [448117d]
+  - @opengeni/contracts@1.0.1
+
+## 0.4.2
+
+### Patch Changes
+
+- Updated dependencies [083387e]
+- Updated dependencies [11913b7]
+  - @opengeni/contracts@1.0.0
+
+## 0.4.1
+
+### Patch Changes
+
+- Updated dependencies [d86610d]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+  - @opengeni/contracts@0.50.0
+
+## 0.4.0
+
+### Minor Changes
+
+- b0b2bed: Add unified browser and computer interaction APIs, reusable browser identities, native input, live streaming, and React viewer controls across managed sandboxes and connected machines.
+
+### Patch Changes
+
+- Updated dependencies [b0b2bed]
+  - @opengeni/contracts@0.49.0
+
 ## 0.3.3
 
 ### Patch Changes

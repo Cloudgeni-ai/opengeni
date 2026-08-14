@@ -151,6 +151,7 @@ async function run(
   runner: InMemoryMachineRunner,
   op: RunOnOp,
   timeouts: { controlTimeoutMs?: number; execTimeoutMs?: number } = {},
+  transientExecEnvironment?: Readonly<Record<string, string>>,
 ): Promise<RunOnResult> {
   return executeRunOnSelfhostedMachine(
     {
@@ -160,6 +161,7 @@ async function run(
       relay: { host: "relay.test", tls: true },
       controlTimeoutMs: timeouts.controlTimeoutMs ?? 30_000,
       execTimeoutMs: timeouts.execTimeoutMs ?? 120_000,
+      ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
     },
     TARGET,
     op,
@@ -167,6 +169,27 @@ async function run(
 }
 
 describe("run_on Connected Machine exec receipts", () => {
+  test("projects exact-attempt values only onto the one-off child exec", async () => {
+    const runner = new InMemoryMachineRunner({
+      inspect: { durationMs: 1, exitCode: 0 },
+    });
+    const environment = {
+      OPENGENI_CODEMODE_URL: "https://control.example/v1/workspaces/test/codemode",
+      OPENGENI_CODEMODE_TOKEN: "attempt-bearer",
+    } as const;
+
+    await run(runner, { kind: "exec", cmd: "inspect" }, {}, environment);
+
+    const request = runner.requests[0]?.req;
+    expect(request?.op?.$case).toBe("exec");
+    if (request?.op?.$case !== "exec") throw new Error("expected exec request");
+    expect(request.op.exec.env).toEqual(environment);
+    expect(environment).toEqual({
+      OPENGENI_CODEMODE_URL: "https://control.example/v1/workspaces/test/codemode",
+      OPENGENI_CODEMODE_TOKEN: "attempt-bearer",
+    });
+  });
+
   test("<deadline exit 0 and nonzero preserve exact terminal status", async () => {
     const runner = new InMemoryMachineRunner({
       clean: { durationMs: 119_999, exitCode: 0, stdout: "clean\n" },

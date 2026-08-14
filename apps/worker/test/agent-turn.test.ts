@@ -63,6 +63,7 @@ import {
   escapedMcpTimeoutRecoveryFailure,
   filterUnmaterializedSandboxFileDownloads,
   finalizeDurableTurnOpStreams,
+  connectedSubscriptionImageGenerationAuthority,
   historyRowsToAppend,
   hostedWebSearchForTurn,
   isLazySandboxProvisionRetryable,
@@ -82,6 +83,7 @@ import {
   processCompactionModelUsageEvent,
   processModelResponseTerminalEvent,
   persistOrSignalSessionAttemptQuiescence,
+  preClaimAdmissionFailure,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryCountFromMetadata,
   providerRetryAfterMs,
@@ -89,6 +91,8 @@ import {
   requiresSignedFileResourceDownloads,
   resolveActiveSandboxBackend,
   runMandatoryHistoryPersistenceStep,
+  sandboxEstablishPolicyDecision,
+  sandboxFileMaterializationOutcome,
   safeErrorDiagnostic,
   sandboxArtifactRuntimeAdmission,
   sandboxDeadlineRotationRecoveryDelayMs,
@@ -102,7 +106,7 @@ import {
   lazyToolTransportForTurn,
   turnExecutionPolicyBillingIdentity,
   turnOperationCancellationFailure,
-  unavailableMcpTurnInstructions,
+  unavailableMcpOperationalContext,
   waitForTurnOperation,
   waitForTurnFinalizerStep,
   waitForTurnStreamCleanup,
@@ -193,10 +197,10 @@ describe("Connected Machine durable stream finalization", () => {
   });
 });
 
-describe("disconnected MCP turn instructions", () => {
+describe("disconnected MCP operational context", () => {
   test("warns the model without exposing an unbounded unavailable registry", () => {
     expect(
-      unavailableMcpTurnInstructions({
+      unavailableMcpOperationalContext({
         droppedIds: ["cap-linear", "cap-slack"],
         droppedCount: 4,
       }),
@@ -206,11 +210,11 @@ describe("disconnected MCP turn instructions", () => {
   });
 
   test("is absent when no selected server was dropped", () => {
-    expect(unavailableMcpTurnInstructions({ droppedIds: [], droppedCount: 0 })).toBeUndefined();
+    expect(unavailableMcpOperationalContext({ droppedIds: [], droppedCount: 0 })).toBeUndefined();
   });
 
   test("keeps a generic warning when legacy ids cannot be projected safely", () => {
-    expect(unavailableMcpTurnInstructions({ droppedIds: [], droppedCount: 1 })).toContain(
+    expect(unavailableMcpOperationalContext({ droppedIds: [], droppedCount: 1 })).toContain(
       "1 unavailable server(s)",
     );
   });
@@ -713,9 +717,9 @@ describe("accepted turn execution identity", () => {
     expect(
       turnExecutionPolicyBillingIdentity({
         ...base,
-        productModelId: "supergrok/grok-4.5",
+        productModelId: "supergrok/grok-4.6",
         providerId: "supergrok-subscription",
-        upstreamModelId: "grok-4.5",
+        upstreamModelId: "grok-4.6",
         credentialSource: { kind: "connected_subscription", provider: "xai" },
         billing: { upstreamPayer: "connected_subscription", metering: "external" },
       }),
@@ -2550,6 +2554,59 @@ describe("on-turn recording gate (selfhosted machines have no in-box capture plu
 });
 
 describe("lazy sandbox provisioner single-flight", () => {
+  test("file materialization metrics fail when any download fails softly", () => {
+    expect(sandboxFileMaterializationOutcome([])).toBe("completed");
+    expect(
+      sandboxFileMaterializationOutcome([
+        {
+          fileId: "file-1",
+          filename: "input.pdf",
+          path: "/workspace/input.pdf",
+          reason: "provider returned unavailable",
+        },
+      ]),
+    ).toBe("failed");
+  });
+
+  test("establish policy reports the first bounded eager reason", () => {
+    const base = {
+      lazyEnabled: true,
+      machinePrimary: false,
+      sandboxBackend: "docker" as const,
+      hasInitialRunCredentialMaterial: false,
+      generatedVideoFileCount: 0,
+      hasSignedFileResources: false,
+    };
+
+    expect(sandboxEstablishPolicyDecision(base)).toEqual({
+      policy: "on-demand",
+      reason: "eligible",
+    });
+    expect(sandboxEstablishPolicyDecision({ ...base, lazyEnabled: false })).toEqual({
+      policy: "eager",
+      reason: "lazy_disabled",
+    });
+    expect(sandboxEstablishPolicyDecision({ ...base, machinePrimary: true })).toEqual({
+      policy: "eager",
+      reason: "machine_primary",
+    });
+    expect(sandboxEstablishPolicyDecision({ ...base, sandboxBackend: "none" })).toEqual({
+      policy: "eager",
+      reason: "backend_none",
+    });
+    expect(
+      sandboxEstablishPolicyDecision({ ...base, hasInitialRunCredentialMaterial: true }),
+    ).toEqual({ policy: "eager", reason: "initial_run_credentials" });
+    expect(sandboxEstablishPolicyDecision({ ...base, generatedVideoFileCount: 1 })).toEqual({
+      policy: "eager",
+      reason: "generated_video_files",
+    });
+    expect(sandboxEstablishPolicyDecision({ ...base, hasSignedFileResources: true })).toEqual({
+      policy: "eager",
+      reason: "signed_file_resources",
+    });
+  });
+
   test("deadline rotation uses only short anti-churn pacing", () => {
     expect(
       sandboxDeadlineRotationRecoveryDelayMs({
@@ -3768,6 +3825,76 @@ describe("transient provider error classifier", () => {
     expect(agentRunFailurePayload(mandatory).retryable).toBeUndefined();
   });
 
+  test("exports only retry-safe admission truth to Temporal history", () => {
+    const deadlock = new SessionEventPersistenceError({
+      code: "db_deadlock",
+      sqlState: "40P01",
+      stage: "session_attempts.claim",
+      eventTypes: ["session.turn.attempt_claimed"],
+      correlationId: "corr-preclaim",
+      attempts: 3,
+      retryOutcome: "exhausted",
+      database: { table: "session_turn_attempts" },
+    });
+    expect(preClaimAdmissionFailure(deadlock)).toMatchObject({
+      type: "OpenGeniPreClaimFailure",
+      nonRetryable: true,
+      details: [{ disposition: "retryable", code: "db_deadlock" }],
+    });
+    const connectionLoss = new SessionEventPersistenceError({
+      code: "db_failure",
+      sqlState: "08006",
+      stage: "session_attempts.claim",
+      eventTypes: ["session.turn.attempt_claimed"],
+      correlationId: "corr-connection-loss",
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      database: {},
+    });
+    expect(preClaimAdmissionFailure(connectionLoss)).toMatchObject({
+      details: [{ disposition: "retryable", code: "db_failure" }],
+    });
+    const rawConnectionLoss = Object.assign(new Error("SECRET socket detail"), {
+      code: "CONNECTION_CLOSED",
+      errno: "CONNECTION_CLOSED",
+    });
+    expect(preClaimAdmissionFailure(rawConnectionLoss)).toMatchObject({
+      details: [{ disposition: "retryable", code: "db_failure" }],
+    });
+    expect(JSON.stringify(preClaimAdmissionFailure(rawConnectionLoss))).not.toContain("SECRET");
+    expect(
+      preClaimAdmissionFailure(
+        Object.assign(new Error("SECRET nested socket detail"), {
+          cause: { code: "ECONNRESET" },
+        }),
+      ),
+    ).toMatchObject({
+      details: [{ disposition: "retryable", code: "db_failure" }],
+    });
+    const constraint = new SessionEventPersistenceError({
+      code: "db_failure",
+      sqlState: "23505",
+      stage: "session_attempts.claim",
+      eventTypes: ["session.turn.attempt_claimed"],
+      correlationId: "corr-constraint",
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      database: { constraint: "session_turn_attempts_pkey" },
+    });
+    expect(preClaimAdmissionFailure(constraint)).toMatchObject({
+      details: [{ disposition: "permanent", code: "db_failure" }],
+    });
+    expect(preClaimAdmissionFailure(new Error("SECRET malformed metadata"))).toMatchObject({
+      type: "OpenGeniPreClaimFailure",
+      nonRetryable: true,
+      message: "Agent turn admission failed before attempt claim.",
+      details: [{ disposition: "permanent", code: "claim_invariant" }],
+    });
+    expect(
+      JSON.stringify(preClaimAdmissionFailure(new Error("SECRET malformed metadata"))),
+    ).not.toContain("SECRET");
+  });
+
   test("retains an exact database cause internally but sanitizes the session payload", async () => {
     const syntheticValue = ["synthetic", "worker", "db", "123456"].join("-");
     const source = Object.assign(new Error(`Failed query containing ${syntheticValue}`), {
@@ -4264,6 +4391,21 @@ describe("hostedWebSearchForTurn (provider support)", () => {
   test("applies the deployment capability gate to the legacy built-in path", () => {
     expect(hostedWebSearchForTurn(null, true)).toBe(true);
     expect(hostedWebSearchForTurn(null, false)).toBe(false);
+  });
+});
+
+describe("connectedSubscriptionImageGenerationAuthority", () => {
+  test("omits the optional tool when delegated model authority has no connected credential", () => {
+    expect(connectedSubscriptionImageGenerationAuthority({}, null)).toBeNull();
+    expect(connectedSubscriptionImageGenerationAuthority(null, "credential-id")).toBeNull();
+  });
+
+  test("exposes the optional tool only with both execution context and credential identity", () => {
+    const context = { getToken: true };
+    expect(connectedSubscriptionImageGenerationAuthority(context, "credential-id")).toEqual({
+      credentialContext: context,
+      credentialId: "credential-id",
+    });
   });
 });
 

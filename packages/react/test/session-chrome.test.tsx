@@ -55,8 +55,14 @@ function queue(overrides: Partial<UseTurnQueueResult> = {}): UseTurnQueueResult 
   return {
     snapshot: null,
     queue: [
-      fakeTurn({ id: "11111111-1111-4111-8111-111111111111", prompt: "first queued prompt" }),
-      fakeTurn({ id: "22222222-2222-4222-8222-222222222222", prompt: "second queued prompt" }),
+      fakeTurn({
+        id: "11111111-1111-4111-8111-111111111111",
+        prompt: "first queued prompt",
+      }),
+      fakeTurn({
+        id: "22222222-2222-4222-8222-222222222222",
+        prompt: "second queued prompt",
+      }),
     ],
     pendingInputs: [],
     pendingInputAttachment: null,
@@ -125,6 +131,8 @@ function goal(overrides: Partial<UseGoalResult["goal"]> = {}): UseGoalResult {
     pausedReason: null,
     createdBy: "api" as const,
     version: 1,
+    objectiveRevision: 1,
+    mutationPolicy: "preserve_intent" as const,
     autoContinuations: 2,
     noProgressStreak: 0,
     maxAutoContinuations: null,
@@ -565,7 +573,11 @@ describe("SessionChrome", () => {
     mounted = await renderComponent(
       <SessionChrome
         queue={queue({
-          queue: [fakeTurn({ prompt: "Queued prompt that should wrap on a narrow rail" })],
+          queue: [
+            fakeTurn({
+              prompt: "Queued prompt that should wrap on a narrow rail",
+            }),
+          ],
         })}
         composer={composer()}
         goal={goal()}

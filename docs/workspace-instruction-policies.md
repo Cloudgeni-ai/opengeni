@@ -182,9 +182,11 @@ CORE:
 5. workspace preference descriptors;
 6. immutable initiating-user preference descriptors;
 7. matching session role policy;
-8. session and exact-turn instructions;
+8. durable session instructions;
 9. selected skills and repository/tool substrate;
 10. bounded retrieved memory/knowledge.
+
+Per-message `modelContext` is outside this authority block. It enters only as ordinary chronological user-role content attached to its accepted message and cannot modify governance or the persistent instruction prefix.
 
 The company profile is the separate account-scoped authority documented in
 [`company-profile.md`](company-profile.md). It does not turn company facts into

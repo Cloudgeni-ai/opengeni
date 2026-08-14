@@ -72,6 +72,10 @@ import { createActivityTestHarness as createWorkerActivities } from "../../apps/
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { PROVIDER_BACKPRESSURE_DELAY_MS } from "../../apps/worker/src/activities/agent-turn";
 import {
+  PRE_CLAIM_FAILURE_MESSAGE,
+  PRE_CLAIM_FAILURE_TYPE,
+} from "../../apps/worker/src/activities/types";
+import {
   loadWorkspaceEnvironmentForRun,
   sandboxEnvironmentForRun,
 } from "../../apps/worker/src/activities/environment";
@@ -1650,7 +1654,12 @@ describe("worker activities integration", () => {
         workflowId: "workflow-missing-session",
         workflowRunId: crypto.randomUUID(),
       }),
-    ).rejects.toThrow("Session not found");
+    ).rejects.toMatchObject({
+      message: PRE_CLAIM_FAILURE_MESSAGE,
+      type: PRE_CLAIM_FAILURE_TYPE,
+      nonRetryable: true,
+      details: [{ disposition: "permanent", code: "claim_invariant" }],
+    });
     await Bun.sleep(0);
 
     expect(exported).toHaveLength(1);
@@ -1722,7 +1731,12 @@ describe("worker activities integration", () => {
         workflowId: "workflow-status-update-fails",
         workflowRunId: crypto.randomUUID(),
       }),
-    ).rejects.toThrow("status update failed");
+    ).rejects.toMatchObject({
+      message: PRE_CLAIM_FAILURE_MESSAGE,
+      type: PRE_CLAIM_FAILURE_TYPE,
+      nonRetryable: true,
+      details: [{ disposition: "permanent", code: "claim_invariant" }],
+    });
 
     const eventTypes = (
       await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50)

@@ -55,6 +55,7 @@ import {
   AgentBrowserJsonRunner,
   assertAgentBrowserSocketPath,
   browserProfileCryptoPolicy,
+  reapManagedBrowserProcesses,
 } from "./runner";
 import { SqliteBrowserOperationJournal } from "./journal";
 import { SqliteBrowserProtectedAuthJournal } from "./protected-auth-journal";
@@ -344,6 +345,9 @@ export class BrowserSupervisor {
     });
     await chmod(supervisor.rootDirectory, 0o700);
     await chmod(supervisor.socketRootDirectory, 0o700);
+    if (!options.createDriver) {
+      await reapManagedBrowserProcesses(supervisor.rootDirectory);
+    }
     return supervisor;
   }
 

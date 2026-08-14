@@ -8,6 +8,12 @@ import type {
   ToolRef,
 } from "@opengeni/contracts";
 import {
+  GOOGLE_DRIVE_PROVIDER_DOMAIN,
+  GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+  GoogleDriveConnectionMetadata,
+  googleDriveScopesAllowCapability,
+} from "@opengeni/contracts/google-drive";
+import {
   getSessionTurnPersonalConnectionDelegations,
   getConnectionMetadata,
   getSocialConnection,
@@ -250,9 +256,53 @@ export function personalConnectionDelegationsFromParent(input: {
   return [
     ...mcp,
     ...input.parentDelegations
-      .filter((item) => item.connectionType === "social" || item.connectionType === "atlassian")
+      .filter(
+        (item) =>
+          item.connectionType === "social" ||
+          item.connectionType === "atlassian" ||
+          item.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+      )
       .map((item) => ({ ...item })),
   ];
+}
+
+/**
+ * Freezes Google Drive publishing only when one exact subject-owned connection
+ * is eligible. Multiple writable Google accounts are intentionally ambiguous:
+ * callers must narrow the connection before a later turn can advertise or use
+ * the private publication tool.
+ */
+export function googleDrivePublicationDelegationFromVisibleConnections(input: {
+  subjectId: string;
+  connections: ConnectionMetadata[];
+}): McpPersonalConnectionDelegation | null {
+  const eligible = input.connections.filter((connection) => {
+    if (
+      connection.subjectId !== input.subjectId ||
+      connection.status !== "active" ||
+      connection.kind !== "oauth2" ||
+      !sameProviderDomain(connection.providerDomain, GOOGLE_DRIVE_PROVIDER_DOMAIN) ||
+      !googleDriveScopesAllowCapability(connection.grantedScopes, "publish_file")
+    ) {
+      return false;
+    }
+    const metadata = GoogleDriveConnectionMetadata.safeParse(connection.metadata);
+    return Boolean(
+      metadata.success &&
+      metadata.data.outputDestination &&
+      metadata.data.lifecycle?.state !== "paused" &&
+      (!metadata.data.lifecycle || metadata.data.lifecycle.state === "active"),
+    );
+  });
+  if (eligible.length !== 1) return null;
+  const connection = eligible[0]!;
+  return {
+    serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+    connectionId: connection.id,
+    ownerSubjectId: input.subjectId,
+    providerDomain: connection.providerDomain,
+    kind: connection.kind,
+  };
 }
 
 export function personalConnectionDelegationsEqual(
@@ -324,9 +374,22 @@ export function withFrozenPersonalConnectionDelegations(input: {
     let effectiveRequest = request;
     if (request.connectionRef.subjectScope === "subject") {
       const config = input.settings.mcpServers.find((server) => server.id === request.serverId);
+      const publicationDelegations =
+        request.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID &&
+        sameProviderDomain(request.connectionRef.providerDomain, GOOGLE_DRIVE_PROVIDER_DOMAIN)
+          ? input.personalConnectionDelegations.filter(
+              (candidate) =>
+                candidate.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID &&
+                sameProviderDomain(candidate.providerDomain, GOOGLE_DRIVE_PROVIDER_DOMAIN) &&
+                candidate.kind === "oauth2" &&
+                request.connectionRef.kind === "oauth2",
+            )
+          : [];
       const delegation = config
         ? personalConnectionDelegationForServer(input.personalConnectionDelegations, config)
-        : null;
+        : publicationDelegations.length === 1
+          ? publicationDelegations[0]!
+          : null;
       if (!delegation || !(await input.ownerHasWorkspaceMembership(delegation.ownerSubjectId))) {
         return personalAuthorityUnavailable(request);
       }
@@ -374,15 +437,23 @@ export async function freezePersonalConnectionDelegations(input: {
     return includeFirstPartyConnections
       ? inherited
       : inherited.filter(
-          (item) => item.connectionType !== "social" && item.connectionType !== "atlassian",
+          (item) =>
+            item.connectionType !== "social" &&
+            item.connectionType !== "atlassian" &&
+            item.serverId !== GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
         );
   }
   const membership = await getWorkspaceGrant(input.db, input.source.subjectId, input.workspaceId);
   if (!membership) return [];
+  const visibleConnections = await listConnectionsMetadata(
+    input.db,
+    input.workspaceId,
+    input.source.subjectId,
+  );
   const mcp = personalConnectionDelegationsFromVisibleConnections({
     servers,
     subjectId: input.source.subjectId,
-    connections: await listConnectionsMetadata(input.db, input.workspaceId, input.source.subjectId),
+    connections: visibleConnections,
   });
   if (!includeFirstPartyConnections) return mcp;
   const ownerSubjectId = input.source.subjectId;
@@ -399,16 +470,19 @@ export async function freezePersonalConnectionDelegations(input: {
     if (!prior || connection.updatedAt > prior.updatedAt)
       latest.set(connection.provider, connection);
   }
-  const personalAtlassian = (
-    await listConnectionsMetadata(input.db, input.workspaceId, ownerSubjectId)
-  ).filter(
+  const personalAtlassian = visibleConnections.filter(
     (connection) =>
       connection.subjectId === ownerSubjectId &&
       connection.status === "active" &&
       sameProviderDomain(connection.providerDomain, "api.atlassian.com"),
   );
+  const googleDrivePublication = googleDrivePublicationDelegationFromVisibleConnections({
+    subjectId: ownerSubjectId,
+    connections: visibleConnections,
+  });
   return [
     ...mcp,
+    ...(googleDrivePublication ? [googleDrivePublication] : []),
     ...[...latest.values()].map((connection) => ({
       serverId: `social:${connection.provider}`,
       connectionId: connection.id,

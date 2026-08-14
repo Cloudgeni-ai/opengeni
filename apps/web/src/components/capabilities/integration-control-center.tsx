@@ -19,6 +19,7 @@ import {
   customApiSourceFromDraft,
   initialCustomApiFlowState,
 } from "@/components/capabilities/custom-api-flow";
+import type { IntegrationConnectRequest } from "@/components/capabilities/integration-connect-dialog";
 import type { IntegrationRemoveTarget } from "@/components/capabilities/integration-control-center-view";
 import { useAppContext } from "@/context";
 import { hasAccountPermission } from "@/lib/permissions";
@@ -149,8 +150,7 @@ export function IntegrationControlCenter({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [setupDefinition, setSetupDefinition] = useState<IntegrationDefinitionSummary | null>(null);
-  const [displayName, setDisplayName] = useState("");
-  const [ownership, setOwnership] = useState<ConnectionOwnership>("personal");
+  const [setupInitialAccountLabel, setSetupInitialAccountLabel] = useState("");
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [callbackBusy, setCallbackBusy] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<IntegrationRemoveTarget | null>(null);
@@ -160,6 +160,8 @@ export function IntegrationControlCenter({
     initialCustomApiFlowState,
   );
   const callbackHandled = useRef(false);
+  const setupInstanceKeyRef = useRef<string | null>(null);
+  const setupTriggerRef = useRef<HTMLElement | null>(null);
   const removeTriggerRef = useRef<HTMLElement | null>(null);
   const focusFallbackRef = useRef<HTMLElement | null>(null);
 
@@ -261,9 +263,13 @@ export function IntegrationControlCenter({
 
   function openSetup(definition: IntegrationDefinitionSummary) {
     const count = instancesByDefinition.get(definition.id)?.length ?? 0;
+    const active = document.activeElement;
+    setupTriggerRef.current = active instanceof HTMLElement ? active : null;
+    setupInstanceKeyRef.current = `account-${crypto.randomUUID()}`;
     setSetupDefinition(definition);
-    setDisplayName(count === 0 ? definition.name : `${definition.name} — Account ${count + 1}`);
-    setOwnership("personal");
+    setSetupInitialAccountLabel(
+      count === 0 ? definition.name : `${definition.name} — Account ${count + 1}`,
+    );
   }
 
   async function startOAuth(
@@ -301,9 +307,7 @@ export function IntegrationControlCenter({
       window.location.assign(response.authorizationUrl);
     } catch (error) {
       setBusyKey(null);
-      toast.error("Couldn't start account connection", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      throw error;
     }
   }
 
@@ -317,13 +321,19 @@ export function IntegrationControlCenter({
       toast.error("This instance cannot be reconnected automatically");
       return;
     }
-    await startOAuth(definition, {
-      instanceKey: instance.instanceKey,
-      displayName: instance.displayName,
-      ownership: instance.ownership,
-      connectionId: instance.connectionId,
-      expectedInstanceVersion: instance.instanceVersion,
-    });
+    try {
+      await startOAuth(definition, {
+        instanceKey: instance.instanceKey,
+        displayName: instance.displayName,
+        ownership: instance.ownership,
+        connectionId: instance.connectionId,
+        expectedInstanceVersion: instance.instanceVersion,
+      });
+    } catch (error) {
+      toast.error("Couldn't start account connection", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   async function previewRemove(instance: ApiIntegrationInstallationSummary) {
@@ -517,15 +527,22 @@ export function IntegrationControlCenter({
     dispatchCustomApi({ type: "tools", selectedTools: next });
   }
 
-  function connectSetup() {
-    if (!setupDefinition || !displayName.trim() || !canManage) return;
-    const definition = setupDefinition;
-    setSetupDefinition(null);
-    void startOAuth(definition, {
-      instanceKey: `account-${crypto.randomUUID()}`,
-      displayName: displayName.trim(),
-      ownership,
+  async function connectSetup(request: IntegrationConnectRequest) {
+    if (!setupDefinition || !canManage) {
+      throw new Error("A workspace administrator must connect this account.");
+    }
+    const instanceKey = setupInstanceKeyRef.current;
+    if (!instanceKey) throw new Error("The connection journey is no longer current.");
+    await startOAuth(setupDefinition, {
+      instanceKey,
+      displayName: request.accountLabel,
+      ownership: request.ownership,
     });
+  }
+
+  function closeSetup() {
+    setSetupDefinition(null);
+    setupInstanceKeyRef.current = null;
   }
 
   return (
@@ -554,8 +571,7 @@ export function IntegrationControlCenter({
         busyKey={busyKey}
         callbackBusy={callbackBusy}
         setupDefinition={setupDefinition}
-        displayName={displayName}
-        ownership={ownership}
+        setupInitialAccountLabel={setupInitialAccountLabel}
         removeTarget={removeTarget}
         customApi={customApi}
         embedded={embedded}
@@ -564,13 +580,12 @@ export function IntegrationControlCenter({
         onOpenSetup={openSetup}
         onReconnect={(instance) => void reconnect(instance)}
         onPreviewRemove={(instance) => void previewRemove(instance)}
-        onSetupClose={() => setSetupDefinition(null)}
-        onDisplayNameChange={setDisplayName}
-        onOwnershipChange={setOwnership}
+        onSetupClose={closeSetup}
         onConnectSetup={connectSetup}
         onRemoveClose={() => setRemoveTarget(null)}
         onRemoveInstance={removeInstance}
         removeTriggerRef={removeTriggerRef}
+        setupTriggerRef={setupTriggerRef}
         focusFallbackRef={focusFallbackRef}
         onOpenCustomApi={openCustomApi}
         onUpdateCustomApi={(instance) => editCustomApi(instance, "update")}

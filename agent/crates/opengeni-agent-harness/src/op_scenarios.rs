@@ -27,10 +27,15 @@ const BIG_CREDIT: u64 = 64 * 1024 * 1024;
 impl Harness {
     /// The op driver + a fresh collector for one op on the primary agent.
     async fn op_rig(&self, op_id: &str) -> Result<(OpDriver, Arc<OpCollector>), String> {
-        let driver = OpDriver::new(self.driver.raw_client(), self.agents[0].agent_id());
+        let driver = OpDriver::new(self.driver.raw_client(), &self.agents[0]);
         let collector = Arc::new(
-            OpCollector::attach(&self.driver.raw_client(), self.agents[0].agent_id(), op_id)
-                .await?,
+            OpCollector::attach(
+                &self.driver.raw_client(),
+                self.agents[0].agent_id(),
+                self.agents[0].connection_instance_id(),
+                op_id,
+            )
+            .await?,
         );
         Ok((driver, collector))
     }
@@ -409,11 +414,16 @@ impl Harness {
             .await
             .expect("override agent");
         let op_id = "e4-accumulate";
-        let driver = OpDriver::new(self.driver.raw_client(), agent_a.agent_id());
+        let driver = OpDriver::new(self.driver.raw_client(), &agent_a);
         let collector = Arc::new(
-            OpCollector::attach(&self.driver.raw_client(), agent_a.agent_id(), op_id)
-                .await
-                .expect("collector"),
+            OpCollector::attach(
+                &self.driver.raw_client(),
+                agent_a.agent_id(),
+                agent_a.connection_instance_id(),
+                op_id,
+            )
+            .await
+            .expect("collector"),
         );
         // A bounded, PACED producer: 96 x 64 KiB (= 6 MiB) over ~5s, so the
         // detach lands mid-stream and the bulk of the output accumulates
@@ -481,11 +491,16 @@ impl Harness {
             .await
             .expect("override agent b");
         let op_b = "e4-park";
-        let driver_b = OpDriver::new(self.driver.raw_client(), agent_b.agent_id());
+        let driver_b = OpDriver::new(self.driver.raw_client(), &agent_b);
         let collector_b = Arc::new(
-            OpCollector::attach(&self.driver.raw_client(), agent_b.agent_id(), op_b)
-                .await
-                .expect("collector b"),
+            OpCollector::attach(
+                &self.driver.raw_client(),
+                agent_b.agent_id(),
+                agent_b.connection_instance_id(),
+                op_b,
+            )
+            .await
+            .expect("collector b"),
         );
         let acker_b = grant_all_acks(
             driver_b.clone(),
@@ -898,7 +913,7 @@ impl Harness {
             .spawn_override_agent(92, "registry_tombstone_ttl_ms=2000")
             .await
             .expect("override agent");
-        let driver9 = OpDriver::new(self.driver.raw_client(), agent.agent_id());
+        let driver9 = OpDriver::new(self.driver.raw_client(), &agent);
         let op9 = "e9-tombstone";
         let marker9 = agent
             .work_dir()
@@ -922,9 +937,14 @@ impl Harness {
         // After the TTL, the SAME id runs normally.
         tokio::time::sleep(Duration::from_secs(2)).await;
         let collector9 = Arc::new(
-            OpCollector::attach(&self.driver.raw_client(), agent.agent_id(), op9)
-                .await
-                .expect("collector9"),
+            OpCollector::attach(
+                &self.driver.raw_client(),
+                agent.agent_id(),
+                agent.connection_instance_id(),
+                op9,
+            )
+            .await
+            .expect("collector9"),
         );
         let fresh = driver9
             .start_exec(op9, &format!("echo x >> {marker9}; printf ran"), 0, 0)
@@ -982,15 +1002,19 @@ impl Harness {
             )
             .await
             .expect("override agent");
-        let driver = OpDriver::new(self.driver.raw_client(), agent.agent_id());
+        let driver = OpDriver::new(self.driver.raw_client(), &agent);
 
         // Three completed, never-final-acked ops overflow the cap of 2.
         for i in 0..3 {
             let op_id = format!("e10-op-{i}");
-            let collector =
-                OpCollector::attach(&self.driver.raw_client(), agent.agent_id(), &op_id)
-                    .await
-                    .expect("collector");
+            let collector = OpCollector::attach(
+                &self.driver.raw_client(),
+                agent.agent_id(),
+                agent.connection_instance_id(),
+                &op_id,
+            )
+            .await
+            .expect("collector");
             let started = driver
                 .start_exec(&op_id, &format!("printf out-{i}"), 0, 0)
                 .await
@@ -1031,13 +1055,25 @@ impl Harness {
             .await
             .expect("start");
         assert!(matches!(&started, OpReply::Started(s) if s.accepted));
+        let prior_beats = self.collector.beat_count(agent.agent_id());
         agent.kill_now().await;
         agent.relaunch().expect("relaunch");
-        let restarted_typed = wait_for_query(&driver, op_r, Duration::from_secs(20), |status| {
-            status.state == OpState::Lost as i32
-                && status.lost_reason == OpLostReason::AgentRestarted as i32
-        })
-        .await;
+        let relaunched = self
+            .collector
+            .wait_for_beats(agent.agent_id(), prior_beats + 1, Duration::from_secs(15))
+            .await;
+        if relaunched {
+            if let Some(instance) = self.collector.connection_instance_id(agent.agent_id()) {
+                agent.bind_connection_instance(instance);
+            }
+        }
+        let restarted_driver = OpDriver::new(self.driver.raw_client(), &agent);
+        let restarted_typed =
+            wait_for_query(&restarted_driver, op_r, Duration::from_secs(20), |status| {
+                status.state == OpState::Lost as i32
+                    && status.lost_reason == OpLostReason::AgentRestarted as i32
+            })
+            .await;
         drop(agent);
 
         let verdicts = self.assertable(vec![
@@ -1161,7 +1197,7 @@ impl Harness {
         index: usize,
         overrides: &str,
     ) -> Result<DisposableAgent, String> {
-        let agent = DisposableAgent::spawn_with_env(
+        let mut agent = DisposableAgent::spawn_with_env(
             self.agent_binary.clone(),
             index,
             &self.nats.url(),
@@ -1182,6 +1218,16 @@ impl Harness {
                 agent.log_tail(40)
             ));
         }
+        let instance = self
+            .collector
+            .connection_instance_id(agent.agent_id())
+            .ok_or_else(|| {
+                format!(
+                    "override agent {} heartbeat had no exact process subject",
+                    agent.agent_id()
+                )
+            })?;
+        agent.bind_connection_instance(instance);
         Ok(agent)
     }
 }

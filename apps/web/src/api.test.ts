@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import {
   authHeadersForAccessKey,
   configureClientAuth,
@@ -147,7 +148,7 @@ describe("web API auth helpers", () => {
     );
     expect(request!.init?.credentials).toBe("include");
     expect(new Headers(request!.init?.headers).get("x-opengeni-api-contract")).toBe(
-      "2026-08-social-provider-tools-v1",
+      OPENGENI_API_CONTRACT_REVISION,
     );
     expect(new Headers(request!.init?.headers).get("authorization")).toBeNull();
     expect(new Headers(request!.init?.headers).get("x-opengeni-access-key")).toBeNull();
@@ -205,7 +206,7 @@ describe("createOpenGeniClient", () => {
     expect(request!.init?.credentials).toBe("include");
     expect(new Headers(request!.init?.headers).get("x-opengeni-access-key")).toBe("secret-key");
     expect(new Headers(request!.init?.headers).get("x-opengeni-api-contract")).toBe(
-      "2026-08-social-provider-tools-v1",
+      OPENGENI_API_CONTRACT_REVISION,
     );
   });
 

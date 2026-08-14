@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Connect Chrome · OpenGeni</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+        background: #090b0f;
+        color: #eef0f4;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 32px;
+      }
+      main {
+        width: min(520px, 100%);
+        border: 1px solid #282d36;
+        border-radius: 16px;
+        background: #11151b;
+        padding: 28px;
+        box-shadow: 0 24px 70px #0008;
+      }
+      .icon {
+        display: grid;
+        place-items: center;
+        width: 40px;
+        height: 40px;
+        border: 1px solid #303641;
+        border-radius: 11px;
+        background: #181d25;
+        font-size: 19px;
+      }
+      h1 {
+        margin: 18px 0 8px;
+        font-size: 22px;
+        letter-spacing: -0.02em;
+      }
+      p,
+      li {
+        color: #aeb5c0;
+        line-height: 1.55;
+        font-size: 14px;
+      }
+      ol {
+        margin: 20px 0;
+        padding-left: 22px;
+      }
+      li {
+        padding: 4px 0;
+      }
+      code {
+        color: #e7eaf0;
+        background: #202631;
+        border-radius: 5px;
+        padding: 2px 5px;
+      }
+      a {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        height: 38px;
+        padding: 0 15px;
+        border-radius: 9px;
+        background: #f1f4f8;
+        color: #101319;
+        text-decoration: none;
+        font-size: 14px;
+        font-weight: 650;
+      }
+      small {
+        display: block;
+        margin-top: 16px;
+        color: #747d8b;
+        line-height: 1.45;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="icon" aria-hidden="true">◎</div>
+      <h1>Connect this Chrome profile</h1>
+      <p>
+        The OpenGeni machine agent is ready. Chrome requires you to approve an extension once for
+        each profile you want agents to use.
+      </p>
+      <ol>
+        <li>Download and extract the extension.</li>
+        <li>
+          Open <code>chrome://extensions</code>, enable <strong>Developer mode</strong>, then choose
+          <strong>Load unpacked</strong>.
+        </li>
+        <li>
+          Select the extracted <code>opengeni-browser-extension</code> folder. The profile then
+          appears in OpenGeni automatically.
+        </li>
+      </ol>
+      <a href="/opengeni-browser-extension.tar" download>Download OpenGeni Browser</a>
+      <small
+        >A future Chrome Web Store listing can replace this manual development install. Existing
+        tabs are never attached until an agent explicitly uses this profile.</small
+      >
+    </main>
+  </body>
+</html>

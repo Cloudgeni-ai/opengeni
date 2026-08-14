@@ -1,3 +1,4 @@
+import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import type { ComposerDraft, SessionGoal, SessionTurn } from "@opengeni/sdk";
 import type { SessionClientLike } from "../src/client";
 
@@ -23,7 +24,7 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
     getClientConfig: async () =>
       ({
         deploymentRevision: "test",
-        apiContractRevision: "2026-08-social-provider-tools-v1",
+        apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         defaultModel: "model-x",
         allowedModels: ["model-x"],
         models: [],
@@ -33,10 +34,15 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
         fileUploads: { enabled: false, maxSizeBytes: 0 },
         productAccessMode: "local",
         auth: { mode: "none" },
-        structuredServices: { fileSystem: false, git: false, terminalEvents: false },
+        structuredServices: {
+          fileSystem: false,
+          git: false,
+          terminalEvents: false,
+        },
       }) as never,
     getComposerDraft: async () => emptyDraft,
     listEvents: async () => [],
+    listSiteAuthConnections: async () => ({ revision: 0, connections: [] }),
     saveComposerDraft: async (_workspaceId: string, _sessionId: string, request: any) => ({
       ...emptyDraft,
       ...request,
@@ -60,7 +66,9 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
         request.requests.map(async (item) => ({
           status: await target.gitStatus(workspaceId, sessionId, item.status, options),
           ...(item.diff
-            ? { diff: await target.gitDiff(workspaceId, sessionId, item.diff, options) }
+            ? {
+                diff: await target.gitDiff(workspaceId, sessionId, item.diff, options),
+              }
             : {}),
         })),
       ),
@@ -127,6 +135,8 @@ export function fakeGoal(overrides: Partial<SessionGoal> = {}): SessionGoal {
     pausedReason: null,
     createdBy: "api",
     version: 1,
+    objectiveRevision: 1,
+    mutationPolicy: "preserve_intent",
     autoContinuations: 3,
     noProgressStreak: 1,
     maxAutoContinuations: null,

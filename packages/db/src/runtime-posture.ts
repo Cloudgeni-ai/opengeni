@@ -44,6 +44,22 @@ const DEDICATED_ARTIFACT_CAPABILITY_ROUTINES = new Set<string>([
 
 const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE =
   "knowledge_source_sync_lock_authority(uuid, uuid, uuid)";
+const GOOGLE_DRIVE_FILE_AUTHORIZATION_ROUTINE =
+  "google_drive_file_authorized(uuid, uuid, text, uuid)";
+const GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE =
+  "google_drive_document_citation(uuid, uuid, text, uuid, uuid)";
+const GOOGLE_DRIVE_AUTHORITY_TABLES = [
+  "connections",
+  "files",
+  "google_drive_object_acl_evidence",
+  "google_drive_object_acl_principals",
+  "knowledge_document_versions",
+  "knowledge_providers",
+  "knowledge_source_objects",
+  "knowledge_source_sync_index_obligations",
+  "knowledge_source_sync_states",
+  "knowledge_sources",
+] as const;
 const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
   "knowledge_sources",
   "knowledge_source_objects",
@@ -71,6 +87,11 @@ const CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES = [
 const SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE =
   "session_private_actor_visible(uuid, uuid, uuid, text)";
 const SESSION_REFERENCE_VISIBLE_ROUTINE = "session_reference_visible(uuid, uuid, uuid)";
+const TASK_NOTE_CAPABILITY_ROUTINES = [
+  "create_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, integer)",
+  "archive_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text)",
+  "list_task_notes_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, boolean, integer)",
+] as const;
 const TRANSITION_SESSION_VISIBILITY_ROUTINE =
   "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)";
 const FORK_SESSION_CONTENT_ROUTINE =
@@ -80,6 +101,7 @@ const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
+  ...TASK_NOTE_CAPABILITY_ROUTINES,
 ]);
 const XAI_CREATE_CREDENTIAL_ROUTINE =
   "create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone)";
@@ -104,6 +126,8 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   XAI_AUTHORITY_LIVE_ROUTINE,
   XAI_CREATE_CREDENTIAL_ROUTINE,
   XAI_DISCONNECT_CREDENTIAL_ROUTINE,
+  GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE,
+  GOOGLE_DRIVE_FILE_AUTHORIZATION_ROUTINE,
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
   ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
@@ -208,6 +232,8 @@ export const FORCE_RLS_TABLES = [
   "generated_video_artifacts",
   "github_installation_repositories",
   "github_installations",
+  "google_drive_object_acl_evidence",
+  "google_drive_object_acl_principals",
   "host_export_config",
   "host_export_consumers",
   "host_export_cursor_state",
@@ -286,6 +312,7 @@ export const FORCE_RLS_TABLES = [
   "session_attempt_tool_catalogs",
   "session_command_receipts",
   "session_events",
+  "session_goal_revisions",
   "session_goals",
   "session_history_items",
   "session_human_input_requests",
@@ -308,6 +335,7 @@ export const FORCE_RLS_TABLES = [
   "session_workflow_wake_outbox",
   "sessions",
   "site_auth_connections",
+  "slack_app_home_refreshes",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
   "slack_bot_update_operations",
@@ -325,6 +353,9 @@ export const FORCE_RLS_TABLES = [
   "slack_user_link_access_requests",
   "social_connections",
   "social_posts",
+  "task_note_events",
+  "task_note_write_capabilities",
+  "task_notes",
   "temporal_schedule_cleanup_outbox",
   "transcription_recording_chunks",
   "transcription_recording_objects",
@@ -490,6 +521,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "session_turns",
   "session_workflow_wake_outbox",
   "sessions",
+  "slack_app_home_refreshes",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
   "slack_bot_update_operations",
@@ -569,6 +601,8 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "editable_artifact_transactions",
   "editable_artifact_undo_claims",
   "editable_artifact_versions",
+  "google_drive_object_acl_evidence",
+  "google_drive_object_acl_principals",
   "knowledge_change_proposals",
   "knowledge_claim_evidence",
   "knowledge_claim_relations",
@@ -587,6 +621,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "preference_registry_preferences",
   "preference_registry_revisions",
   "session_attempt_tool_catalogs",
+  "session_goal_revisions",
   "session_spawn_denials",
   "slack_shared_task_origins",
   "slack_user_link_access_request_operations",
@@ -653,6 +688,9 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_user_resource_grants",
   "organization_user_retention_policies",
   "session_visibility_write_capabilities",
+  "task_note_events",
+  "task_note_write_capabilities",
+  "task_notes",
 ] as const;
 
 export type RuntimeTableDmlPrivilege = "SELECT" | "INSERT" | "UPDATE" | "DELETE";
@@ -1246,7 +1284,33 @@ export function evaluateRuntimeDatabasePosture(
     } else if (!routine.securityDefiner) {
       violations.push(`target-schema runtime capability ${routine.name} is not SECURITY DEFINER`);
     }
-    if (routine.name === KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE) {
+    if (
+      routine.name === GOOGLE_DRIVE_FILE_AUTHORIZATION_ROUTINE ||
+      routine.name === GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE
+    ) {
+      const missingAuthorityTables = GOOGLE_DRIVE_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = GOOGLE_DRIVE_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
+      }
+    } else if (routine.name === KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE) {
       const missingAuthorityTables = KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES.filter(
         (tableName) => !tableByName.has(tableName),
       );

@@ -1,6 +1,8 @@
 import {
   settleSessionAttemptInterruptions,
   applySessionTurnSettlement,
+  enqueueSessionWorkflowWake,
+  failSessionWorkBeforeAttemptClaim,
   requestSessionTurnRecovery,
   recoverSessionDispatch,
   reconcileSessionAttemptQuiescence,
@@ -26,6 +28,7 @@ import type {
   ExpireSessionInteractionInterventionResult,
   PeekSessionWorkInput,
   FailSessionAttemptInput,
+  FailSessionAttemptResult,
   SettleSessionInterruptionsInput,
   MarkSessionIdleInput,
   PersistSessionAttemptQuiescenceInput,
@@ -40,6 +43,8 @@ import type {
 export type SessionStateActivityOverrides = Partial<{
   settleSessionAttemptInterruptions: typeof settleSessionAttemptInterruptions;
   applySessionTurnSettlement: typeof applySessionTurnSettlement;
+  enqueueSessionWorkflowWake: typeof enqueueSessionWorkflowWake;
+  failSessionWorkBeforeAttemptClaim: typeof failSessionWorkBeforeAttemptClaim;
   requestSessionTurnRecovery: typeof requestSessionTurnRecovery;
   recoverSessionDispatch: typeof recoverSessionDispatch;
   reconcileSessionAttemptQuiescence: typeof reconcileSessionAttemptQuiescence;
@@ -73,6 +78,10 @@ export function createSessionStateActivities(
     overrides.settleSessionAttemptInterruptions ?? settleSessionAttemptInterruptions;
   const applySessionTurnSettlementFn =
     overrides.applySessionTurnSettlement ?? applySessionTurnSettlement;
+  const enqueueSessionWorkflowWakeFn =
+    overrides.enqueueSessionWorkflowWake ?? enqueueSessionWorkflowWake;
+  const failSessionWorkBeforeAttemptClaimFn =
+    overrides.failSessionWorkBeforeAttemptClaim ?? failSessionWorkBeforeAttemptClaim;
   const requestSessionTurnRecoveryFn =
     overrides.requestSessionTurnRecovery ?? requestSessionTurnRecovery;
   const recoverSessionDispatchFn = overrides.recoverSessionDispatch ?? recoverSessionDispatch;
@@ -100,19 +109,73 @@ export function createSessionStateActivities(
   const notifyParentOfChildIdleFn = overrides.notifyParentOfChildIdle ?? notifyParentOfChildIdle;
   const recordTurnsQueuedGaugeFn = overrides.recordTurnsQueuedGauge ?? recordTurnsQueuedGauge;
 
-  async function failSessionAttempt(input: FailSessionAttemptInput): Promise<void> {
+  async function failSessionAttempt(
+    input: FailSessionAttemptInput,
+  ): Promise<FailSessionAttemptResult> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
     const session = await requireSessionFn(db, input.workspaceId, input.sessionId);
-    if (session.status === "failed") {
-      return;
+    if (session.status === "failed" || session.status === "cancelled") {
+      // The activity may be retried after failure settlement committed but its
+      // response or event fanout was lost. Preserve terminal session truth so
+      // the workflow cannot interpret an idle peek as permission to synthesize
+      // an active-goal continuation.
+      return { action: "terminal" };
     }
+    const workflowId =
+      input.workflowId ?? session.temporalWorkflowId ?? `session-${input.sessionId}`;
     const turn = await getSessionTurnForAttemptFn(
       db,
       input.workspaceId,
       input.sessionId,
       input.attemptId,
     );
-    if (!turn) return;
+    if (!turn) {
+      const attempt = await getSessionAttemptActivityRefFn(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        attemptId: input.attemptId,
+        temporalWorkflowId: workflowId,
+      });
+      if (attempt) return { action: "stale" };
+
+      if (input.preClaimFailureDisposition === "permanent" && input.trigger) {
+        const failed = await failSessionWorkBeforeAttemptClaimFn(db, input.workspaceId, {
+          accountId: input.accountId,
+          sessionId: input.sessionId,
+          workflowId,
+          trigger: input.trigger,
+          error: input.error ?? "Agent turn admission failed before attempt claim.",
+        });
+        if (failed.action === "terminal") return { action: "terminal" };
+        if (failed.action === "stale") return { action: "stale" };
+        await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, failed.events);
+        if (failed.turnId) {
+          await deliverFailedChildTurnToParentFn(
+            { db, bus, settings, observability, wakeSessionWorkflow },
+            input.workspaceId,
+            input.sessionId,
+            failed.turnId,
+          );
+        }
+        return { action: "failed" };
+      }
+
+      const requestedRetryDelayMs = input.retryDelayMs;
+      const retryDelayMs =
+        typeof requestedRetryDelayMs === "number" && Number.isFinite(requestedRetryDelayMs)
+          ? Math.max(1_000, Math.min(60_000, Math.trunc(requestedRetryDelayMs)))
+          : 60_000;
+      await enqueueSessionWorkflowWakeFn(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        temporalWorkflowId: workflowId,
+        reason: "turn_activity_failed_before_attempt_claim",
+        notBefore: new Date(Date.now() + retryDelayMs),
+      });
+      return { action: "unclaimed" };
+    }
     const trigger = await getSessionEventFn(db, input.workspaceId, turn.triggerEventId);
     const result = await applySessionTurnSettlementFn(db, input.workspaceId, {
       sessionId: input.sessionId,
@@ -135,7 +198,7 @@ export function createSessionStateActivities(
       ],
     });
     if (result.action === "stale") {
-      return;
+      return { action: "stale" };
     }
     await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
     await deliverFailedChildTurnToParentFn(
@@ -144,6 +207,7 @@ export function createSessionStateActivities(
       input.sessionId,
       turn.id,
     );
+    return { action: "failed" };
   }
 
   async function settleSessionInterruptions(

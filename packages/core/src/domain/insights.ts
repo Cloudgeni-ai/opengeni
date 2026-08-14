@@ -7,6 +7,7 @@ import {
 import {
   aggregateModelCallFacts,
   aggregateModelCallFactsByDay,
+  aggregateModelCallFactsByHour,
   aggregateRootSessionDrivers,
   aggregateScheduleFacts,
   aggregateSessionDepth,
@@ -15,6 +16,7 @@ import {
   countScheduledTaskFires,
   countSessionsAttachedToGroups,
   enumerateUtcDays,
+  enumerateUtcHours,
   listFloorSessions,
   listLiveWarmLeases,
   listModelCallFacets,
@@ -23,6 +25,7 @@ import {
   requireWorkspace,
   sumUsageQuantity,
   sumUsageQuantityByDay,
+  sumUsageQuantityByHour,
   sumUsageQuantityInRange,
   type Database,
 } from "@opengeni/db";
@@ -82,29 +85,29 @@ function resolveRangeWindow(
       since = startOfUtcDay(now);
       rangeLabel = "Today (UTC)";
       priorLabel = "Prior equal window";
-      seriesLabel = "Credit $ (UTC day)";
-      cacheSeriesLabel = "Cache hit %";
+      seriesLabel = "Credit $ / UTC hour";
+      cacheSeriesLabel = "Cache hit % / UTC hour";
       break;
     case "week":
       since = new Date(startOfUtcDay(now).getTime() - 6 * 24 * 60 * 60 * 1000);
       rangeLabel = "Last 7 days (UTC)";
       priorLabel = "Prior 7 days";
-      seriesLabel = "Credit $ / day";
-      cacheSeriesLabel = "Cache hit % / day";
+      seriesLabel = "Credit $ / UTC day";
+      cacheSeriesLabel = "Cache hit % / UTC day";
       break;
     case "month":
       since = startOfUtcMonth(now);
       rangeLabel = "This month (UTC)";
       priorLabel = "Prior equal window";
-      seriesLabel = "Credit $ / day";
-      cacheSeriesLabel = "Cache hit % / day";
+      seriesLabel = "Credit $ / UTC day";
+      cacheSeriesLabel = "Cache hit % / UTC day";
       break;
     case "ytd":
       since = startOfUtcYear(now);
       rangeLabel = "Year to date (UTC)";
       priorLabel = "Prior equal window";
-      seriesLabel = "Credit $ / day";
-      cacheSeriesLabel = "Cache hit % / day";
+      seriesLabel = "Credit $ / UTC day";
+      cacheSeriesLabel = "Cache hit % / UTC day";
       break;
     default: {
       const _exhaustive: never = range;
@@ -182,6 +185,10 @@ export async function getWorkspaceInsights(
   const model = input.model?.trim() || null;
   const modelFilterActive = Boolean(provider || model);
   const filter = { provider, model };
+  const aggregateFactsForSeries =
+    input.range === "today" ? aggregateModelCallFactsByHour : aggregateModelCallFactsByDay;
+  const sumUsageForSeries =
+    input.range === "today" ? sumUsageQuantityByHour : sumUsageQuantityByDay;
 
   const [
     workspaceCreditMicros,
@@ -242,19 +249,19 @@ export async function getWorkspaceInsights(
       until: window.priorUntil,
       ...filter,
     }),
-    aggregateModelCallFactsByDay(db, {
+    aggregateFactsForSeries(db, {
       workspaceId: input.workspaceId,
       since: window.since,
       until: window.until,
       ...filter,
     }),
-    sumUsageQuantityByDay(db, {
+    sumUsageForSeries(db, {
       workspaceId: input.workspaceId,
       eventType: "sandbox.warm_seconds",
       since: window.since,
       until: window.until,
     }),
-    sumUsageQuantityByDay(db, {
+    sumUsageForSeries(db, {
       workspaceId: input.workspaceId,
       eventType: "model.cost",
       since: window.since,
@@ -382,9 +389,12 @@ export async function getWorkspaceInsights(
   const priorCacheInputTokens = priorModelRows.reduce((sum, row) => sum + row.cacheInputTokens, 0);
   const priorCalls = priorModelRows.reduce((sum, row) => sum + row.calls, 0);
 
-  const days = enumerateUtcDays(window.since, window.until);
-  const series = days.map((day) => {
-    const facts = factDays.get(day) ?? {
+  const buckets =
+    input.range === "today"
+      ? enumerateUtcHours(window.since, window.until)
+      : enumerateUtcDays(window.since, window.until);
+  const series = buckets.map((bucket) => {
+    const facts = factDays.get(bucket) ?? {
       costMicros: 0,
       estimatedProviderCostMicros: 0,
       estimatedProviderCostKnownCalls: 0,
@@ -401,13 +411,13 @@ export async function getWorkspaceInsights(
     };
     const modelCostMicros = modelFilterActive
       ? facts.costMicros
-      : (costDays.get(day) ?? facts.costMicros);
+      : (costDays.get(bucket) ?? facts.costMicros);
     return {
-      label: day.slice(5),
+      label: input.range === "today" ? bucket.slice(11) : bucket.slice(5),
       modelCostUsd: microsToUsd(modelCostMicros),
       estimatedProviderUsd: microsToUsd(facts.estimatedProviderCostMicros),
       estimatedProviderCostKnownCalls: facts.estimatedProviderCostKnownCalls,
-      warmSeconds: warmDays.get(day) ?? 0,
+      warmSeconds: warmDays.get(bucket) ?? 0,
       inputTokens: facts.inputTokens,
       outputTokens: facts.outputTokens,
       cachedTokens: facts.cachedTokens,

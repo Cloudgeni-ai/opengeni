@@ -13,6 +13,16 @@ import {
 
 const user = (content: string) => ({ type: "message", role: "user", content });
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
+const ACCOUNT_ID = "00000000-0000-4000-8000-000000000000";
+const SUBJECT_ID = "user:attachment-authority";
+
+function fileAuthority(workspaceId: string): {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+} {
+  return { accountId: ACCOUNT_ID, workspaceId, subjectId: SUBJECT_ID };
+}
 
 const file = (
   id: string,
@@ -258,11 +268,15 @@ describe("durable attachment history projection", () => {
         ],
       },
     ];
-    const getFiles = spyOn(opengeniDb, "getFiles").mockResolvedValue([image, pdf, notes]);
+    const getFilesForSubject = spyOn(opengeniDb, "getFilesForSubject").mockResolvedValue([
+      image,
+      pdf,
+      notes,
+    ]);
     const reads: string[] = [];
     const projector = createModelHistoryAttachmentProjector(
       {} as Database,
-      image.workspaceId,
+      fileAuthority(image.workspaceId),
       { supportsImageInput: true, inputFileMediaTypes: ["application/pdf"] },
       async (asset) => {
         reads.push(asset.id);
@@ -283,10 +297,10 @@ describe("durable attachment history projection", () => {
       expect(second).toEqual(first);
       expect(new Set(reads)).toEqual(new Set([image.id, pdf.id]));
       expect(reads).toHaveLength(2);
-      expect(getFiles).toHaveBeenCalledTimes(1);
+      expect(getFilesForSubject).toHaveBeenCalledTimes(1);
       expect(history[0]?.[MODEL_ATTACHMENT_REFS_FIELD]).toHaveLength(3);
     } finally {
-      getFiles.mockRestore();
+      getFilesForSubject.mockRestore();
     }
   });
 
@@ -302,11 +316,11 @@ describe("durable attachment history projection", () => {
         [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: image.id }],
       },
     ];
-    const getFiles = spyOn(opengeniDb, "getFiles").mockResolvedValue([image]);
+    const getFilesForSubject = spyOn(opengeniDb, "getFilesForSubject").mockResolvedValue([image]);
     let reads = 0;
     const projector = createModelHistoryAttachmentProjector(
       {} as Database,
-      image.workspaceId,
+      fileAuthority(image.workspaceId),
       { supportsImageInput: false, inputFileMediaTypes: [] },
       async () => {
         reads += 1;
@@ -320,11 +334,11 @@ describe("durable attachment history projection", () => {
       expect(JSON.stringify(projected)).not.toContain("data:image");
       expect(JSON.stringify(projected)).toContain("a.png (image/png)");
       expect(reads).toBe(0);
-      expect(getFiles).toHaveBeenCalledTimes(1);
+      expect(getFilesForSubject).toHaveBeenCalledTimes(1);
 
       const restored = await createModelHistoryAttachmentProjector(
         {} as Database,
-        image.workspaceId,
+        fileAuthority(image.workspaceId),
         { supportsImageInput: true, inputFileMediaTypes: [] },
         async () => {
           reads += 1;
@@ -334,30 +348,99 @@ describe("durable attachment history projection", () => {
       expect(JSON.stringify(restored)).toContain("data:image/png;base64,aW1hZ2U=");
       expect(history[0]?.[MODEL_ATTACHMENT_REFS_FIELD]).toHaveLength(1);
       expect(reads).toBe(1);
-      expect(getFiles).toHaveBeenCalledTimes(2);
+      expect(getFilesForSubject).toHaveBeenCalledTimes(2);
     } finally {
-      getFiles.mockRestore();
+      getFilesForSubject.mockRestore();
     }
   });
 
   test("no-ref giant-history fast path returns the original array without I/O", async () => {
     const history = Array.from({ length: 100_000 }, (_, index) => user(`message ${index}`));
-    const getFiles = spyOn(opengeniDb, "getFiles").mockResolvedValue([]);
+    const getFilesForSubject = spyOn(opengeniDb, "getFilesForSubject").mockResolvedValue([]);
     const projector = createModelHistoryAttachmentProjector(
       {} as Database,
-      "00000000-0000-4000-8000-000000000001",
+      fileAuthority("00000000-0000-4000-8000-000000000001"),
       { supportsImageInput: false, inputFileMediaTypes: [] },
     );
     try {
       expect(await projector(history)).toBe(history);
-      expect(getFiles).not.toHaveBeenCalled();
+      expect(getFilesForSubject).not.toHaveBeenCalled();
     } finally {
-      getFiles.mockRestore();
+      getFilesForSubject.mockRestore();
     }
   });
 });
 
 describe("turnInput attachment projection", () => {
+  test("reports bounded history subphases without letting diagnostics change input", async () => {
+    const workspaceId = "00000000-0000-4000-8000-000000000030";
+    const sessionId = "00000000-0000-4000-8000-000000000031";
+    const phases: string[] = [];
+    const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockResolvedValue([]);
+    const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
+    const runtime = {
+      prepareInput: async () => ({ input: [], persistedHistoryCount: 1 }),
+    } as unknown as OpenGeniRuntime;
+
+    try {
+      const prepared = await turnInput(
+        {} as Database,
+        runtime,
+        {},
+        {
+          id: "00000000-0000-4000-8000-000000000032",
+          workspaceId,
+          sessionId,
+          sequence: 1,
+          type: "user.message",
+          payload: { text: "measure history", resources: [] },
+          occurredAt: "2026-08-13T00:00:00.000Z",
+        },
+        {
+          turnId: "00000000-0000-4000-8000-000000000033",
+          fileAuthority: { accountId: ACCOUNT_ID, subjectId: SUBJECT_ID },
+          providerApi: "responses",
+          loadActiveHistory: async () => [
+            {
+              id: "00000000-0000-4000-8000-000000000034",
+              position: 0,
+              item: user("measure history"),
+              providerArtifactInvalidatedAt: null,
+            },
+          ],
+          onPreparationPhase: (measurement) => {
+            phases.push(measurement.phase);
+            expect(measurement.outcome).toBe("completed");
+            expect(measurement.durationSeconds).toBeGreaterThanOrEqual(0);
+            if (measurement.phase === "provider_projection") {
+              throw new Error("diagnostic sink unavailable");
+            }
+          },
+        },
+      );
+
+      expect(prepared.persistedHistoryCount).toBe(1);
+      expect(new Set(phases)).toEqual(
+        new Set([
+          "system_update_load",
+          "current_attachment_resolution",
+          "durable_history_load",
+          "sandbox_envelope_load",
+          "canonical_projection",
+          "provider_projection",
+          "attachment_ref_projection",
+          "screenshot_materialization",
+          "model_attachment_projection",
+          "runtime_input_assembly",
+          "artifact_candidate_scan",
+        ]),
+      );
+    } finally {
+      listUpdates.mockRestore();
+      getEnvelope.mockRestore();
+    }
+  });
+
   test("accepts annotation-only user-message triggers backed by canonical history", async () => {
     const workspaceId = "00000000-0000-4000-8000-000000000040";
     const sessionId = "00000000-0000-4000-8000-000000000041";
@@ -388,6 +471,7 @@ describe("turnInput attachment projection", () => {
         },
         {
           turnId: "00000000-0000-4000-8000-000000000043",
+          fileAuthority: { accountId: ACCOUNT_ID, subjectId: SUBJECT_ID },
           providerApi: "responses",
           loadActiveHistory: async () => [
             {
@@ -414,8 +498,10 @@ describe("turnInput attachment projection", () => {
     };
     const storedUser = user("inspect the diagram");
     let preparedInput: AgentSegmentInput | undefined;
-    const requireFile = spyOn(opengeniDb, "requireFile").mockResolvedValue(image);
-    const getFiles = spyOn(opengeniDb, "getFiles").mockResolvedValue([image]);
+    const requireFileForSubject = spyOn(opengeniDb, "requireFileForSubject").mockResolvedValue(
+      image,
+    );
+    const getFilesForSubject = spyOn(opengeniDb, "getFilesForSubject").mockResolvedValue([image]);
     const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockResolvedValue([]);
     const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItemsPaged").mockResolvedValue([
       {
@@ -452,10 +538,11 @@ describe("turnInput attachment projection", () => {
         },
         {
           turnId: "00000000-0000-4000-8000-000000000053",
+          fileAuthority: { accountId: ACCOUNT_ID, subjectId: SUBJECT_ID },
           providerApi: "responses",
           projectModelHistory: createModelHistoryAttachmentProjector(
             {} as Database,
-            image.workspaceId,
+            fileAuthority(image.workspaceId),
             { supportsImageInput: true, inputFileMediaTypes: [] },
             async () => imageBytes,
           ),
@@ -479,11 +566,11 @@ describe("turnInput attachment projection", () => {
         ],
       });
       expect(storedUser).toEqual(user("inspect the diagram"));
-      expect(requireFile).toHaveBeenCalledTimes(1);
-      expect(getFiles).toHaveBeenCalledTimes(1);
+      expect(requireFileForSubject).toHaveBeenCalledTimes(1);
+      expect(getFilesForSubject).toHaveBeenCalledTimes(1);
     } finally {
-      requireFile.mockRestore();
-      getFiles.mockRestore();
+      requireFileForSubject.mockRestore();
+      getFilesForSubject.mockRestore();
       listUpdates.mockRestore();
       getHistory.mockRestore();
       getEnvelope.mockRestore();
@@ -515,7 +602,7 @@ describe("turnInput attachment projection", () => {
         providerArtifactInvalidatedAt: null,
       },
     ]);
-    const getFiles = spyOn(opengeniDb, "getFiles").mockResolvedValue([image]);
+    const getFilesForSubject = spyOn(opengeniDb, "getFilesForSubject").mockResolvedValue([image]);
     const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
     const runtime = {
       prepareInput: async (_agent: unknown, input: AgentSegmentInput) => {
@@ -540,10 +627,11 @@ describe("turnInput attachment projection", () => {
         },
         {
           turnId: "00000000-0000-4000-8000-000000000059",
+          fileAuthority: { accountId: ACCOUNT_ID, subjectId: SUBJECT_ID },
           providerApi: "responses",
           projectModelHistory: createModelHistoryAttachmentProjector(
             {} as Database,
-            image.workspaceId,
+            fileAuthority(image.workspaceId),
             { supportsImageInput: true, inputFileMediaTypes: [] },
             async () => imageBytes,
           ),
@@ -560,12 +648,12 @@ describe("turnInput attachment projection", () => {
           ],
         },
       ]);
-      expect(getFiles).toHaveBeenCalledTimes(1);
+      expect(getFilesForSubject).toHaveBeenCalledTimes(1);
       expect(storedUser[MODEL_ATTACHMENT_REFS_FIELD]).toEqual([{ kind: "file", fileId: image.id }]);
     } finally {
       listUpdates.mockRestore();
       getHistory.mockRestore();
-      getFiles.mockRestore();
+      getFilesForSubject.mockRestore();
       getEnvelope.mockRestore();
     }
   });
@@ -609,11 +697,13 @@ describe("turnInput attachment projection", () => {
     try {
       await turnInput({} as Database, runtime, {}, trigger, {
         turnId: projectedTurnId,
+        fileAuthority: { accountId: ACCOUNT_ID, subjectId: SUBJECT_ID },
         recovering: true,
         providerApi: "responses",
       });
       await turnInput({} as Database, runtime, {}, trigger, {
         turnId: laterTurnId,
+        fileAuthority: { accountId: ACCOUNT_ID, subjectId: SUBJECT_ID },
         providerApi: "responses",
       });
 

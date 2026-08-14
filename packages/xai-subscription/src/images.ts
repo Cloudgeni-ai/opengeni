@@ -1,6 +1,7 @@
 import { pinnedFetch, readJsonBase64Field, readResponseTextBounded } from "@opengeni/network";
 
 import {
+  XAI_CLIENT_VERSION,
   XAI_IMAGE_MODEL,
   XAI_IMAGE_REQUEST_TIMEOUT_MS,
   XAI_PUBLIC_API_BASE_URL,
@@ -13,6 +14,11 @@ const XAI_IMAGE_RESPONSE_MAX_BYTES = 90 * 1024 * 1024;
 const XAI_IMAGE_MAX_BYTES = 64 * 1024 * 1024;
 const XAI_IMAGE_ERROR_MAX_BYTES = 64 * 1024;
 
+export type XaiImageReference = Readonly<{
+  mediaType: "image/png" | "image/jpeg" | "image/webp";
+  bytes: Uint8Array;
+}>;
+
 const defaultImageFetch: XaiFetchLike = async (input, init) =>
   await pinnedFetch(
     input,
@@ -23,12 +29,14 @@ const defaultImageFetch: XaiFetchLike = async (input, init) =>
 
 export type XaiGeneratedImage = {
   bytes: Uint8Array;
-  declaredMediaType: "image/png";
+  declaredMediaType: "image/png" | "image/jpeg" | "image/webp";
 };
 
 export async function generateXaiSubscriptionImage(input: {
   prompt: string;
   aspectRatio?: string;
+  references?: readonly XaiImageReference[];
+  sessionId?: string;
   getToken: () => Promise<XaiSubscriptionTokenSnapshot>;
   refresh: () => Promise<XaiSubscriptionTokenSnapshot>;
   abortSignal?: AbortSignal;
@@ -46,7 +54,14 @@ export async function generateXaiSubscriptionImage(input: {
     ? AbortSignal.any([input.abortSignal, deadline.signal])
     : deadline.signal;
   const fetchImpl = input.fetch ?? defaultImageFetch;
-  const url = `${(input.baseUrl ?? XAI_PUBLIC_API_BASE_URL).replace(/\/+$/, "")}/images/generations`;
+  const references = input.references ?? [];
+  if (references.length > 3) {
+    throw new XaiSubscriptionError(
+      "provider_rejected",
+      "xAI image editing supports at most three references",
+    );
+  }
+  const url = `${(input.baseUrl ?? XAI_PUBLIC_API_BASE_URL).replace(/\/+$/, "")}/images/${references.length > 0 ? "edits" : "generations"}`;
   const request = async (token: XaiSubscriptionTokenSnapshot): Promise<Response> =>
     await fetchImpl(url, {
       method: "POST",
@@ -55,15 +70,35 @@ export async function generateXaiSubscriptionImage(input: {
         accept: "application/json",
         authorization: `Bearer ${token.accessToken}`,
         "content-type": "application/json",
+        "user-agent": `opengeni/${XAI_CLIENT_VERSION}`,
+        "x-grok-client-version": XAI_CLIENT_VERSION,
+        "x-grok-client-identifier": "opengeni",
+        ...(input.sessionId ? { "x-grok-session-id": input.sessionId } : {}),
       },
-      body: JSON.stringify({
-        model: XAI_IMAGE_MODEL,
-        prompt: input.prompt,
-        n: 1,
-        aspect_ratio: input.aspectRatio ?? "auto",
-        resolution: "1k",
-        response_format: "b64_json",
-      }),
+      body: JSON.stringify(
+        references.length > 0
+          ? {
+              model: XAI_IMAGE_MODEL,
+              prompt: input.prompt,
+              n: 1,
+              resolution: "1k",
+              response_format: "b64_json",
+              ...(references.length === 1
+                ? { image: referencePayload(references[0]!) }
+                : {
+                    images: references.map(referencePayload),
+                    aspect_ratio: input.aspectRatio ?? "auto",
+                  }),
+            }
+          : {
+              model: XAI_IMAGE_MODEL,
+              prompt: input.prompt,
+              n: 1,
+              aspect_ratio: input.aspectRatio ?? "auto",
+              resolution: "1k",
+              response_format: "b64_json",
+            },
+      ),
       signal,
     });
   try {
@@ -93,10 +128,36 @@ export async function generateXaiSubscriptionImage(input: {
       label: "xAI image generation",
       signal,
     });
-    return { bytes, declaredMediaType: "image/png" };
+    return { bytes, declaredMediaType: detectImageMediaType(bytes) };
   } finally {
     clearTimeout(timer);
   }
+}
+
+function referencePayload(reference: XaiImageReference): { url: string } {
+  return {
+    url: `data:${reference.mediaType};base64,${Buffer.from(reference.bytes).toString("base64")}`,
+  };
+}
+
+function detectImageMediaType(bytes: Uint8Array): XaiGeneratedImage["declaredMediaType"] {
+  if (
+    bytes.byteLength >= 8 &&
+    [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((byte, index) => bytes[index] === byte)
+  ) {
+    return "image/png";
+  }
+  if (bytes.byteLength >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (
+    bytes.byteLength >= 12 &&
+    String.fromCharCode(...bytes.subarray(0, 4)) === "RIFF" &&
+    String.fromCharCode(...bytes.subarray(8, 12)) === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  throw new XaiSubscriptionError("invalid_response", "xAI returned an unsupported image format");
 }
 
 function boundedMessage(body: string): string {

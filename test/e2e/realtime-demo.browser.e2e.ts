@@ -95,6 +95,15 @@ describe("public realtime React demo browser acceptance", () => {
     expect(await existing.getByTestId("realtime-mute-controls").count()).toBe(1);
     await capture(page, "04-active-desktop.png");
 
+    const humanInput = existing.locator("[data-human-input-surface]");
+    await humanInput.getByText("Choose the next environment", { exact: true }).waitFor();
+    expect(await primary.getAttribute("data-phase")).toBe("listening");
+    await humanInput.getByRole("radio", { name: /Staging/ }).check();
+    await capture(page, "04b-realtime-with-structured-question.png");
+    await humanInput.getByRole("button", { name: "Continue" }).click();
+    await existing.locator("[data-human-input-surface]").waitFor({ state: "detached" });
+    expect(await primary.getAttribute("data-phase")).toBe("listening");
+
     const microphone = existing.getByRole("button", { name: "Mute microphone" });
     const output = existing.getByRole("button", { name: "Mute voice audio" });
     await microphone.click();

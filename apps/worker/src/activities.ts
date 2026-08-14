@@ -38,6 +38,8 @@ export type {
   PersistSessionAttemptQuiescenceInput,
   ReconcileSessionAttemptQuiescenceInput,
   ReconcileSessionAttemptQuiescenceResult,
+  FailSessionAttemptInput,
+  FailSessionAttemptResult,
   RunKnowledgeSourceSyncBatchInput,
   RunKnowledgeSourceSyncBatchResult,
   RunAgentTurnInput,

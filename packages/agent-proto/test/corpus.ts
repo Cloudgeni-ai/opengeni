@@ -107,5 +107,9 @@ export function canonicalHello(): Hello {
     },
     updateChannel: "stable",
     resumeToken: "resume-token-1",
+    binarySha256: "",
+    completedUpdateOperationId: "",
+    completedUpdateTargetVersion: "",
+    completedUpdateBinarySha256: "",
   };
 }

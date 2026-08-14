@@ -16,7 +16,7 @@ use opengeni_agent_proto::v1::{
 use prost::bytes::Bytes;
 use prost::Message as _;
 
-use crate::agent::WORKSPACE_ID;
+use crate::agent::{DisposableAgent, WORKSPACE_ID};
 
 /// A typed reply to an op-lifecycle request.
 #[derive(Debug)]
@@ -53,11 +53,12 @@ pub struct OpDriver {
 impl OpDriver {
     /// Builds the driver for one agent.
     #[must_use]
-    pub fn new(client: async_nats::Client, agent_id: &str) -> Self {
+    pub fn new(client: async_nats::Client, agent: &DisposableAgent) -> Self {
+        let prefix = agent.subject_prefix();
         Self {
             client,
-            rpc_subject: format!("agent.{WORKSPACE_ID}.{agent_id}.rpc"),
-            ack_subject: format!("agent.{WORKSPACE_ID}.{agent_id}.ack"),
+            rpc_subject: format!("{prefix}.rpc"),
+            ack_subject: format!("{prefix}.ack"),
         }
     }
 
@@ -214,9 +215,12 @@ impl OpCollector {
     pub async fn attach(
         client: &async_nats::Client,
         agent_id: &str,
+        connection_instance_id: &str,
         op_id: &str,
     ) -> Result<Self, String> {
-        let subject = format!("agent.{WORKSPACE_ID}.{agent_id}.op.{op_id}");
+        let subject = format!(
+            "agent.{WORKSPACE_ID}.{agent_id}.connection.{connection_instance_id}.op.{op_id}"
+        );
         let mut subscriber = client
             .subscribe(subject)
             .await

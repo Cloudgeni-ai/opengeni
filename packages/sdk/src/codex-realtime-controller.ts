@@ -33,6 +33,7 @@ import type {
   GatewayRealtimeConnectResponse,
   EndSessionRealtimeRequest,
   RenewSessionRealtimeRequest,
+  SessionRealtimeInboundEntry,
   SessionRealtimeMode,
   SessionRealtimeModel,
   SessionRealtimeMutationResponse,
@@ -50,6 +51,27 @@ export const CODEX_REALTIME_NEGOTIATION_TIMEOUT_MS = 20_000;
 const DEFAULT_CONNECTION_ROTATION_INTERVAL_MS = 15 * 60_000;
 const DEFAULT_RECONNECT_BACKOFF_MS = [250, 1_000, 2_000, 5_000] as const;
 const OWNER_RECORD_VERSION = 1;
+const OWNER_DELEGATION_REPLAY_VERSION = 1;
+const OWNER_DELEGATION_REPLAY_MAX_CALLS = 4_096;
+const OWNER_DELEGATION_REPLAY_MAX_BYTES = 4 * 1024 * 1024;
+const SESSION_REALTIME_INBOUND_ENTRY_KEYS = new Set([
+  "operationId",
+  "kind",
+  "role",
+  "providerEventId",
+  "delegationItemId",
+  "text",
+  "payload",
+  "modelContext",
+]);
+const SESSION_REALTIME_INBOUND_KINDS = new Set([
+  "user_transcript",
+  "assistant_transcript",
+  "delegation_call",
+  "interruption",
+  "error",
+]);
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 export type CodexRealtimeControllerStatus =
   | "idle"
@@ -123,6 +145,12 @@ export type CodexRealtimeControllerClient = {
     request: GatewayRealtimeConnectRequest,
     options?: { signal?: AbortSignal | undefined },
   ): Promise<GatewayRealtimeConnectResponse>;
+  negotiateXaiSubscriptionRealtime?(
+    workspaceId: string,
+    sessionId: string,
+    request: GatewayRealtimeConnectRequest,
+    options?: { signal?: AbortSignal | undefined },
+  ): Promise<GatewayRealtimeConnectResponse>;
   activateCodexRealtimeConnection(
     workspaceId: string,
     sessionId: string,
@@ -149,7 +177,9 @@ export type CodexRealtimeOwnerStorage = Pick<Storage, "getItem" | "setItem" | "r
 
 /** Canonical browser-owner storage namespace for a public realtime model. */
 export function sessionRealtimeOwnerStorageNamespace(model: SessionRealtimeModel): string {
-  return model === "gpt-live-1-boulder-alpha" ? "codex-realtime-owner" : "gateway-realtime-owner";
+  if (model === "gpt-live-1-boulder-alpha") return "codex-realtime-owner";
+  if (model === "supergrok/grok-voice-think-fast-2.0") return "xai-realtime-owner";
+  return "gateway-realtime-owner";
 }
 
 /** Canonical browser-owner storage key shared by the SDK controller and React facade. */
@@ -205,6 +235,8 @@ export type CreateCodexRealtimeControllerOptions = {
   model?: SessionRealtimeModel | undefined;
   ownerStorageNamespace?: string | undefined;
   startTransport?: RealtimeControllerTransportStarter | undefined;
+  /** Model-visible application context captured with each durable realtime message. */
+  getModelContext?: (() => string | undefined) | undefined;
 };
 
 export type RealtimeControllerTransportStarter = (input: {
@@ -250,6 +282,13 @@ type OwnerRecord = {
   operationId: string;
   browserInstanceId: string;
   ownerKey: string;
+  delegationReplay?: OwnerDelegationReplay | undefined;
+};
+
+type OwnerDelegationReplay = {
+  version: typeof OWNER_DELEGATION_REPLAY_VERSION;
+  acceptedDelegationItemIds: string[];
+  pendingDelegations: SessionRealtimeInboundEntry[];
 };
 
 type ConnectionRuntime = {
@@ -330,6 +369,59 @@ export function createCodexRealtimeController(
   let recoveryTerminal = false;
   let mutationTail = Promise.resolve();
   let connectionTask: Promise<void> | null = null;
+  const acceptedDelegationItemIds = new Set(
+    owner?.delegationReplay?.acceptedDelegationItemIds ?? [],
+  );
+  const pendingDelegations = new Map(
+    (owner?.delegationReplay?.pendingDelegations ?? []).flatMap((entry) =>
+      entry.delegationItemId ? [[entry.delegationItemId, entry] as const] : [],
+    ),
+  );
+
+  const invalidateStoredOwner = (): void => {
+    try {
+      storage?.removeItem(storageKey);
+    } catch {
+      // Best effort only. The bridge still fails closed and retains the exact
+      // in-memory snapshot for this controller's bounded recovery attempts.
+    }
+  };
+
+  const persistDelegationReplay = (input: {
+    acceptedDelegationItemIds: ReadonlySet<string>;
+    pendingDelegations: ReadonlyMap<string, SessionRealtimeInboundEntry>;
+  }): void => {
+    if (!owner || !storage) return;
+    const delegationReplay: OwnerDelegationReplay = {
+      version: OWNER_DELEGATION_REPLAY_VERSION,
+      acceptedDelegationItemIds: [...input.acceptedDelegationItemIds],
+      pendingDelegations: [...input.pendingDelegations.values()],
+    };
+    if (
+      delegationReplay.pendingDelegations.length > CODEX_REALTIME_V3_PENDING_MAX_ENTRIES ||
+      delegationReplay.acceptedDelegationItemIds.length +
+        delegationReplay.pendingDelegations.length >
+        OWNER_DELEGATION_REPLAY_MAX_CALLS
+    ) {
+      invalidateStoredOwner();
+      throw new Error("Realtime delegation replay journal exceeded its call limit");
+    }
+    const next: OwnerRecord = { ...owner, delegationReplay };
+    const serialized = JSON.stringify(next);
+    if (new TextEncoder().encode(serialized).byteLength > OWNER_DELEGATION_REPLAY_MAX_BYTES) {
+      invalidateStoredOwner();
+      throw new Error("Realtime delegation replay journal exceeded its byte limit");
+    }
+    try {
+      storage.setItem(storageKey, serialized);
+    } catch (error) {
+      // Never leave older ownership proof reloadable without the delegation
+      // snapshot that the active bridge just froze.
+      invalidateStoredOwner();
+      throw error;
+    }
+    owner = next;
+  };
 
   const publish = (patch: Partial<CodexRealtimeControllerSnapshot>): void => {
     state = { ...state, ...patch };
@@ -414,6 +506,8 @@ export function createCodexRealtimeController(
   const clearOwner = (): void => {
     owner = null;
     storage?.removeItem(storageKey);
+    acceptedDelegationItemIds.clear();
+    pendingDelegations.clear();
   };
 
   const transitionEnded = (message = "Realtime mode ended"): void => {
@@ -454,16 +548,26 @@ export function createCodexRealtimeController(
       publish({ microphone: "active" });
       return acquired;
     } catch (error) {
-      if (error instanceof CodexRealtimeMicrophoneError) {
-        const kind = error.code === "permission_denied" ? "permission_failure" : "device_failure";
+      const microphoneError =
+        error instanceof CodexRealtimeMicrophoneError
+          ? error
+          : signal.aborted && state.microphone === "acquiring"
+            ? new CodexRealtimeMicrophoneError(
+                "acquisition_failed",
+                "Microphone did not become available before voice startup timed out",
+              )
+            : null;
+      if (microphoneError) {
+        const kind =
+          microphoneError.code === "permission_denied" ? "permission_failure" : "device_failure";
         publish({
-          microphone: error.code,
+          microphone: microphoneError.code,
           status: state.mode?.state === "active" ? "recovering" : "error",
-          diagnostic: diagnostic(kind, error.message, true),
-          error: error.message,
+          diagnostic: diagnostic(kind, microphoneError.message, true),
+          error: microphoneError.message,
         });
       }
-      throw error;
+      throw microphoneError ?? error;
     }
   };
 
@@ -506,7 +610,10 @@ export function createCodexRealtimeController(
       });
       return;
     }
-    publish({ audibleOutput: next, ...(next === "audible" ? { error: null } : {}) });
+    publish({
+      audibleOutput: next,
+      ...(next === "audible" ? { error: null } : {}),
+    });
   };
 
   const startActiveIntervals = (): void => {
@@ -893,6 +1000,10 @@ export function createCodexRealtimeController(
         sync: async (request) =>
           await syncForGeneration(targetGeneration, activated.mode.id, request),
         randomUUID,
+        ...(options.getModelContext ? { getModelContext: options.getModelContext } : {}),
+        acceptedDelegationItemIds,
+        pendingDelegations,
+        onDelegationReplayStateChange: persistDelegationReplay,
         onSnapshot: (nextBridge) => {
           if (active?.generation === targetGeneration) publish({ bridge: nextBridge });
         },
@@ -1079,7 +1190,12 @@ export function createCodexRealtimeController(
           await handleConnectionFailure(error, "reconnect", false);
         } else {
           clearOwner();
-          publish({ status: "error", realtimeId: null, mode: null, error: safeError(error) });
+          publish({
+            status: "error",
+            realtimeId: null,
+            mode: null,
+            error: safeError(error),
+          });
         }
         throw error;
       }
@@ -1155,7 +1271,11 @@ export function createCodexRealtimeController(
       closed = false;
       stopping = false;
       owner = record;
-      publish({ status: "recovering", realtimeId: lifecycle.realtimeId, error: null });
+      publish({
+        status: "recovering",
+        realtimeId: lifecycle.realtimeId,
+        error: null,
+      });
       connectionTask = begin(record, true)
         .then(() => undefined)
         .catch(async (error) => {
@@ -1359,8 +1479,13 @@ function readOwnerRecord(
 ): OwnerRecord | null {
   const raw = storage?.getItem(key);
   if (!raw) return null;
+  if (new TextEncoder().encode(raw).byteLength > OWNER_DELEGATION_REPLAY_MAX_BYTES) {
+    storage?.removeItem(key);
+    return null;
+  }
   try {
     const parsed = recordValue(JSON.parse(raw));
+    const delegationReplay = readOwnerDelegationReplay(parsed?.delegationReplay);
     if (
       parsed?.version !== OWNER_RECORD_VERSION ||
       parsed.workspaceId !== scope.workspaceId ||
@@ -1368,16 +1493,118 @@ function readOwnerRecord(
       !stringValue(parsed.operationId) ||
       !stringValue(parsed.browserInstanceId) ||
       !stringValue(parsed.ownerKey) ||
-      String(parsed.ownerKey).length < 32
+      String(parsed.ownerKey).length < 32 ||
+      delegationReplay === null
     ) {
       storage?.removeItem(key);
       return null;
     }
-    return parsed as OwnerRecord;
+    return {
+      ...(parsed as Omit<OwnerRecord, "delegationReplay">),
+      ...(delegationReplay ? { delegationReplay } : {}),
+    };
   } catch {
     storage?.removeItem(key);
     return null;
   }
+}
+
+function readOwnerDelegationReplay(value: unknown): OwnerDelegationReplay | undefined | null {
+  if (value === undefined) return undefined;
+  const record = recordValue(value);
+  if (
+    record?.version !== OWNER_DELEGATION_REPLAY_VERSION ||
+    !Array.isArray(record.acceptedDelegationItemIds) ||
+    !Array.isArray(record.pendingDelegations) ||
+    record.acceptedDelegationItemIds.length + record.pendingDelegations.length >
+      OWNER_DELEGATION_REPLAY_MAX_CALLS ||
+    record.pendingDelegations.length > CODEX_REALTIME_V3_PENDING_MAX_ENTRIES
+  ) {
+    return null;
+  }
+  const acceptedDelegationItemIds: string[] = [];
+  const accepted = new Set<string>();
+  for (const candidate of record.acceptedDelegationItemIds) {
+    if (typeof candidate !== "string" || candidate.length < 1 || candidate.length > 1_024) {
+      return null;
+    }
+    if (!accepted.has(candidate)) {
+      accepted.add(candidate);
+      acceptedDelegationItemIds.push(candidate);
+    }
+  }
+  const pendingDelegations: SessionRealtimeInboundEntry[] = [];
+  const pendingIds = new Set<string>();
+  for (const candidate of record.pendingDelegations) {
+    const parsed = readSessionRealtimeInboundEntry(candidate);
+    if (
+      !parsed ||
+      parsed.kind !== "delegation_call" ||
+      !parsed.delegationItemId ||
+      accepted.has(parsed.delegationItemId) ||
+      pendingIds.has(parsed.delegationItemId)
+    ) {
+      return null;
+    }
+    pendingIds.add(parsed.delegationItemId);
+    pendingDelegations.push(parsed);
+  }
+  const replay: OwnerDelegationReplay = {
+    version: OWNER_DELEGATION_REPLAY_VERSION,
+    acceptedDelegationItemIds,
+    pendingDelegations,
+  };
+  if (
+    new TextEncoder().encode(JSON.stringify(replay)).byteLength > OWNER_DELEGATION_REPLAY_MAX_BYTES
+  ) {
+    return null;
+  }
+  return replay;
+}
+
+function readSessionRealtimeInboundEntry(value: unknown): SessionRealtimeInboundEntry | null {
+  const record = recordValue(value);
+  if (
+    !record ||
+    Object.keys(record).some((key) => !SESSION_REALTIME_INBOUND_ENTRY_KEYS.has(key)) ||
+    typeof record.operationId !== "string" ||
+    !UUID_PATTERN.test(record.operationId) ||
+    typeof record.kind !== "string" ||
+    !SESSION_REALTIME_INBOUND_KINDS.has(record.kind) ||
+    !optionalNullableEnum(record.role, ["user", "assistant"]) ||
+    !optionalNullableBoundedString(record.providerEventId, 1_024) ||
+    !optionalNullableBoundedString(record.delegationItemId, 1_024) ||
+    !optionalNullableBoundedString(record.text, 131_072) ||
+    (record.payload !== undefined && recordValue(record.payload) === null) ||
+    !optionalModelContext(record.modelContext)
+  ) {
+    return null;
+  }
+  return record as SessionRealtimeInboundEntry;
+}
+
+function optionalNullableEnum(value: unknown, allowed: readonly string[]): boolean {
+  return (
+    value === undefined || value === null || (typeof value === "string" && allowed.includes(value))
+  );
+}
+
+function optionalNullableBoundedString(value: unknown, maxLength: number): boolean {
+  return (
+    value === undefined ||
+    value === null ||
+    (typeof value === "string" && value.length <= maxLength)
+  );
+}
+
+function optionalModelContext(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (typeof value === "string" &&
+      value.length >= 1 &&
+      value.length <= 32_768 &&
+      value.trim() === value)
+  );
 }
 
 function defaultStorage(): CodexRealtimeOwnerStorage | undefined {

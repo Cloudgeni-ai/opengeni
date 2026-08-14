@@ -445,7 +445,10 @@ async function withFacetOperation<T extends Record<string, unknown>>(
           .for("update")
           .limit(1);
         if (existing) {
-          if (existing.requestDigest !== requestDigest) {
+          if (
+            existing.createdBySubjectId !== input.subjectId ||
+            existing.requestDigest !== requestDigest
+          ) {
             throw new IntegrationFacetOperationIdempotencyError(
               "Integration facet idempotency key was reused",
             );

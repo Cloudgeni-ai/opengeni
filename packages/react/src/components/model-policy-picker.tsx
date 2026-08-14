@@ -65,6 +65,7 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
   billingHints: {
     opengeni_credits: "Will use credits",
     codex_subscription: "ChatGPT / Codex plan",
+    supergrok_subscription: "SuperGrok / xAI plan",
     byok: "Billed to your AI Gateway",
   },
 };
@@ -132,6 +133,17 @@ function ChatGptMark(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function XaiMark(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 466.04 516.93" fill="currentColor" aria-hidden="true" {...props}>
+      <polygon points="0.12 182.71 234.14 516.92 338.15 516.92 104.13 182.71 0.12 182.71" />
+      <polygon points="0 516.92 104.08 516.92 156.08 442.67 104.04 368.34 0 516.92" />
+      <polygon points="466.04 0 361.96 0 182.1 256.86 234.15 331.18 466.04 0" />
+      <polygon points="380.78 516.92 466.04 516.92 466.04 37.16 380.78 158.92 380.78 516.92" />
+    </svg>
+  );
+}
+
 export function BillingClassMark(props: {
   billingClass: PickerBillingClass;
   className?: string | undefined;
@@ -140,6 +152,7 @@ export function BillingClassMark(props: {
   const labels: Record<PickerBillingClass, string> = {
     opengeni_credits: "OpenGeni",
     codex_subscription: "Codex",
+    supergrok_subscription: "SuperGrok",
     byok: "Bring your own key",
   };
   const label = props["aria-label"] ?? labels[props.billingClass];
@@ -162,6 +175,8 @@ export function BillingClassMark(props: {
         <OpenGeniMark className={mark} />
       ) : props.billingClass === "codex_subscription" ? (
         <ChatGptMark className={mark} />
+      ) : props.billingClass === "supergrok_subscription" ? (
+        <XaiMark className={mark} />
       ) : (
         <KeyRoundIcon className={mark} aria-hidden />
       )}

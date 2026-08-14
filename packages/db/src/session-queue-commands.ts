@@ -1414,7 +1414,7 @@ export async function submitHumanPromptInTransaction(
     expectedDraftRevision?: number | null;
     text: string;
     annotations?: TimelineAnnotation[];
-    turnInstructions?: string | null;
+    modelContext?: string | null;
     resources: ResourceRef[];
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
@@ -1458,7 +1458,7 @@ export async function submitHumanPromptInTransaction(
     expectedDraftRevision: input.expectedDraftRevision ?? null,
     text: input.text,
     annotations,
-    turnInstructions: input.turnInstructions ?? null,
+    modelContext: input.modelContext ?? null,
     resources: withCanonicalResourceMountPaths(input.resources),
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
@@ -1626,7 +1626,7 @@ export async function submitHumanPromptInTransaction(
   }
 
   let editedSourceTurn: QueuedTurnRow | undefined;
-  let editedSourceTurnInstructions: string | null | undefined;
+  let editedSourceModelContext: string | null | undefined;
   if (draft?.sourceTurnId) {
     const sourceLocks = await lockSessionEventWriteRows(db, {
       workspaceId: input.workspaceId,
@@ -1661,14 +1661,11 @@ export async function submitHumanPromptInTransaction(
         },
       );
     }
-    // This is the sole private-instruction source for an edited replacement.
-    // It is deliberately held separately from the public draft and event
-    // projections below. The public draft is expected to differ after editing;
-    // source identity is fenced by its exact withdrawn row version, not by
-    // comparing the replacement content with the old prompt. A client-supplied
-    // instruction value must never override the private source value.
+    // Preserve the non-rendered message segment when editing only the visible
+    // draft. Source identity is fenced by the exact withdrawn row version; a
+    // replacement request cannot accidentally detach or replace its context.
     editedSourceTurn = sourceTurn;
-    editedSourceTurnInstructions = sourceTurn.turnInstructions ?? null;
+    editedSourceModelContext = sourceTurn.modelContext ?? null;
   }
 
   for (const update of input.mcpCredentialUpdates ?? []) {
@@ -1725,6 +1722,10 @@ export async function submitHumanPromptInTransaction(
   const acceptedEventId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
+  const effectiveModelContext =
+    editedSourceModelContext !== undefined
+      ? editedSourceModelContext
+      : (input.modelContext ?? null);
   let sequence = session.lastSequence;
   const eventValues: SessionEventInsertWithPayload[] = [
     {
@@ -1747,6 +1748,7 @@ export async function submitHumanPromptInTransaction(
             }
           : {}),
         ...(input.resources.length ? { resources: input.resources } : {}),
+        ...(effectiveModelContext ? { modelContext: effectiveModelContext } : {}),
         ...(input.model ? { model: input.model } : {}),
         ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
         ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
@@ -1773,10 +1775,7 @@ export async function submitHumanPromptInTransaction(
           position: input.delivery === "steer" ? 0 : existingQueued.length + 1,
           prompt: input.text,
           annotations,
-          turnInstructions:
-            editedSourceTurnInstructions !== undefined
-              ? editedSourceTurnInstructions
-              : (input.turnInstructions ?? null),
+          modelContext: effectiveModelContext,
           resources: input.resources,
           tools: [],
           toolsProvided: false,

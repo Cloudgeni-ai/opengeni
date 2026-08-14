@@ -57,7 +57,7 @@ import {
 export type RealtimeModelOption = {
   id: SessionRealtimeModel;
   label: string;
-  provider: "OpenGeni" | "Connected Codex" | "Your Gateway";
+  provider: "OpenGeni" | "Connected Codex" | "Connected SuperGrok" | "Your Gateway";
   description: string;
   available: boolean;
   unavailableReason: string | null;
@@ -74,7 +74,12 @@ const CODEX_LIVE_MODEL: RealtimeModelOption = {
   recommended: false,
 };
 
-const REALTIME_MODEL_PROVIDERS = ["OpenGeni", "Connected Codex", "Your Gateway"] as const;
+const REALTIME_MODEL_PROVIDERS = [
+  "OpenGeni",
+  "Connected Codex",
+  "Connected SuperGrok",
+  "Your Gateway",
+] as const;
 type RealtimeModelProvider = (typeof REALTIME_MODEL_PROVIDERS)[number];
 
 const REALTIME_PROVIDER_META: Record<
@@ -86,11 +91,114 @@ const REALTIME_PROVIDER_META: Record<
     billingClass: "codex_subscription",
     hint: "ChatGPT / Codex plan",
   },
+  "Connected SuperGrok": {
+    billingClass: "supergrok_subscription",
+    hint: "SuperGrok / xAI plan",
+  },
   "Your Gateway": { billingClass: "byok", hint: "Billed to your AI Gateway" },
 };
 const REALTIME_MODEL_STORAGE_PREFIX = "opengeni:realtime-model";
+const REALTIME_MODEL_CATALOG_CACHE_TTL_MS = 60_000;
+const REALTIME_MODEL_CATALOG_CACHE_MAX_WORKSPACES = 64;
 
 type RealtimeControllerClient = EmbeddedRealtimeSessionClientLike & SessionRealtimeClientLike;
+
+type RealtimeModelCatalogCacheEntry =
+  | { state: "loading"; promise: Promise<RealtimeModelOption[]> }
+  | { state: "ready"; models: RealtimeModelOption[]; expiresAt: number };
+
+// Scope advisory availability to the exact client object and workspace. The
+// server still authorizes every realtime operation; changing principals should
+// replace the client just as it does for the rest of the SDK state.
+const realtimeModelCatalogCache = new WeakMap<
+  RealtimeControllerClient,
+  Map<string, RealtimeModelCatalogCacheEntry>
+>();
+
+function realtimeModelFallback(codexConnected: boolean): RealtimeModelOption[] {
+  return [
+    {
+      ...CODEX_LIVE_MODEL,
+      available: codexConnected,
+      unavailableReason: codexConnected ? null : CODEX_LIVE_MODEL.unavailableReason,
+    },
+  ];
+}
+
+function realtimeModelCatalogCacheFor(
+  client: RealtimeControllerClient,
+): Map<string, RealtimeModelCatalogCacheEntry> {
+  const existing = realtimeModelCatalogCache.get(client);
+  if (existing) return existing;
+  const created = new Map<string, RealtimeModelCatalogCacheEntry>();
+  realtimeModelCatalogCache.set(client, created);
+  return created;
+}
+
+function readCachedRealtimeModelCatalog(
+  client: RealtimeControllerClient,
+  workspaceId: string,
+  now = Date.now(),
+): RealtimeModelOption[] | null {
+  const cache = realtimeModelCatalogCache.get(client);
+  const entry = cache?.get(workspaceId);
+  if (!entry || entry.state === "loading") return null;
+  if (entry.expiresAt > now) return entry.models;
+  cache?.delete(workspaceId);
+  return null;
+}
+
+function pruneRealtimeModelCatalogCache(
+  cache: Map<string, RealtimeModelCatalogCacheEntry>,
+  now: number,
+): void {
+  for (const [workspaceId, entry] of cache) {
+    if (entry.state === "ready" && entry.expiresAt <= now) cache.delete(workspaceId);
+  }
+  while (cache.size >= REALTIME_MODEL_CATALOG_CACHE_MAX_WORKSPACES) {
+    const oldestWorkspaceId = cache.keys().next().value;
+    if (oldestWorkspaceId === undefined) return;
+    cache.delete(oldestWorkspaceId);
+  }
+}
+
+function loadRealtimeModelCatalog(
+  client: RealtimeControllerClient,
+  workspaceId: string,
+): Promise<RealtimeModelOption[]> | null {
+  const load = client.getWorkspaceRealtimeModelCatalog;
+  if (!load) return null;
+  const now = Date.now();
+  const cache = realtimeModelCatalogCacheFor(client);
+  const entry = cache.get(workspaceId);
+  if (entry?.state === "loading") return entry.promise;
+  if (entry?.state === "ready" && entry.expiresAt > now) return Promise.resolve(entry.models);
+  if (entry) cache.delete(workspaceId);
+  pruneRealtimeModelCatalogCache(cache, now);
+
+  const promise = load
+    .call(client, workspaceId)
+    .then((response) => response.models.map(toRealtimeModelOption))
+    .then((models) => {
+      const current = cache.get(workspaceId);
+      if (current?.state === "loading" && current.promise === promise) {
+        cache.delete(workspaceId);
+        cache.set(workspaceId, {
+          state: "ready",
+          models,
+          expiresAt: Date.now() + REALTIME_MODEL_CATALOG_CACHE_TTL_MS,
+        });
+      }
+      return models;
+    })
+    .catch((error: unknown) => {
+      const current = cache.get(workspaceId);
+      if (current?.state === "loading" && current.promise === promise) cache.delete(workspaceId);
+      throw error;
+    });
+  cache.set(workspaceId, { state: "loading", promise });
+  return promise;
+}
 
 export type SessionRealtimeControllerFactory = (
   options: CreateSessionRealtimeControllerOptions,
@@ -129,6 +237,8 @@ export function useSessionRealtime(options: {
   model?: SessionRealtimeModel | undefined;
   modelAvailable?: boolean | undefined;
   modelUnavailableReason?: string | null | undefined;
+  /** Model-visible application context captured with each durable realtime message. */
+  getModelContext?: (() => string | undefined) | undefined;
   /** Deterministic browser-test/demo seam. Production hosts should use the SDK default. */
   controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }) {
@@ -140,8 +250,14 @@ export function useSessionRealtime(options: {
   const audioRef = useRef<HTMLAudioElement>(null);
   const controllerRef = useRef<SessionRealtimeController | null>(null);
   const controllerModelRef = useRef<SessionRealtimeModel | null>(null);
+  const modelContextProviderRef = useRef(options.getModelContext);
+  modelContextProviderRef.current = options.getModelContext;
   const [snapshot, setSnapshot] = useState<SessionRealtimeControllerSnapshot>(() => ({
-    status: hasStoredSessionRealtimeOwnerProof({ workspaceId, sessionId: options.sessionId, model })
+    status: hasStoredSessionRealtimeOwnerProof({
+      workspaceId,
+      sessionId: options.sessionId,
+      model,
+    })
       ? "recovering"
       : "idle",
     realtimeId: null,
@@ -180,6 +296,7 @@ export function useSessionRealtime(options: {
           sessionId: options.sessionId,
           ...(audioRef.current ? { remoteAudio: audioRef.current } : {}),
           model,
+          getModelContext: () => modelContextProviderRef.current?.(),
         });
         controllerRef.current = controller;
         controllerModelRef.current = model;
@@ -293,6 +410,8 @@ export function SessionRealtimeControl(props: {
   events: SessionEvent[];
   eventsReady: boolean;
   codexConnected: boolean;
+  /** Model-visible application context captured with each durable realtime message. */
+  getModelContext?: (() => string | undefined) | undefined;
   realtimeAutostartModel?: SessionRealtimeModel | undefined;
   onRealtimeAutostartConsumed?: (() => void) | undefined;
   /** Host hides dictate (and can choreograph layout) while realtime voice is live. */
@@ -398,31 +517,52 @@ export function useRealtimeModelSelection(options: {
     workspaceId: options.workspaceId,
   });
   const activeModel = options.activeModel;
-  const [catalog, setCatalog] = useState<RealtimeModelOption[]>(() => [
-    {
-      ...CODEX_LIVE_MODEL,
-      available: options.codexConnected,
-      unavailableReason: options.codexConnected ? null : CODEX_LIVE_MODEL.unavailableReason,
-    },
-  ]);
-  const [selectedModelId, setSelectedModelId] = useState<SessionRealtimeModel>(
-    () => readRealtimeModelPreference(workspaceId) ?? CODEX_LIVE_MODEL.id,
+  const initialCachedCatalog = readCachedRealtimeModelCatalog(client, workspaceId);
+  const [catalog, setCatalog] = useState<RealtimeModelOption[]>(
+    () => initialCachedCatalog ?? realtimeModelFallback(options.codexConnected),
   );
+  const catalogScopeRef = useRef({
+    client,
+    workspaceId,
+    source: initialCachedCatalog ? ("cache" as const) : ("fallback" as const),
+  });
+  const [selectedModelId, setSelectedModelId] = useState<SessionRealtimeModel>(() => {
+    const preferred = readRealtimeModelPreference(workspaceId) ?? CODEX_LIVE_MODEL.id;
+    if (!initialCachedCatalog) return preferred;
+    if (initialCachedCatalog.some((model) => model.id === preferred && model.available)) {
+      return preferred;
+    }
+    return initialCachedCatalog.find((model) => model.available)?.id ?? CODEX_LIVE_MODEL.id;
+  });
 
   useEffect(() => {
     let disposed = false;
-    const load = client.getWorkspaceRealtimeModelCatalog;
-    if (!load) return;
-    void load
-      .call(client, workspaceId)
-      .then((response) => {
+    const applyCatalog = (models: RealtimeModelOption[]) => {
+      catalogScopeRef.current = { client, workspaceId, source: "cache" };
+      setCatalog(models);
+      setSelectedModelId((current) => {
+        if (models.some((model) => model.id === current && model.available)) return current;
+        return models.find((model) => model.available)?.id ?? CODEX_LIVE_MODEL.id;
+      });
+    };
+    const cached = readCachedRealtimeModelCatalog(client, workspaceId);
+    if (cached) {
+      const scope = catalogScopeRef.current;
+      if (
+        scope.client !== client ||
+        scope.workspaceId !== workspaceId ||
+        scope.source !== "cache"
+      ) {
+        applyCatalog(cached);
+      }
+      return;
+    }
+    const loading = loadRealtimeModelCatalog(client, workspaceId);
+    if (!loading) return;
+    void loading
+      .then((models) => {
         if (disposed) return;
-        const models = response.models.map(toRealtimeModelOption);
-        setCatalog(models);
-        setSelectedModelId((current) => {
-          if (models.some((model) => model.id === current && model.available)) return current;
-          return models.find((model) => model.available)?.id ?? CODEX_LIVE_MODEL.id;
-        });
+        applyCatalog(models);
       })
       .catch(() => undefined);
     return () => {
@@ -684,7 +824,13 @@ export function RealtimeVoiceControl(props: {
                 opacity: 1,
                 transition: reduceMotion
                   ? { duration: 0 }
-                  : { delay: 0.32, type: "spring", stiffness: 320, damping: 30, mass: 0.8 },
+                  : {
+                      delay: 0.32,
+                      type: "spring",
+                      stiffness: 320,
+                      damping: 30,
+                      mass: 0.8,
+                    },
               }}
               {...(reduceMotion
                 ? {}
@@ -1160,7 +1306,11 @@ function statusContent(
         };
       }
       if (!canStart && admissionBlocker) {
-        return { phase: "unavailable", label: "Voice unavailable", detail: admissionBlocker };
+        return {
+          phase: "unavailable",
+          label: "Voice unavailable",
+          detail: admissionBlocker,
+        };
       }
       return {
         phase: "idle",
@@ -1268,7 +1418,11 @@ function RealtimeStatusDot(props: { phase: RealtimeVisualPhase; reduceMotion: bo
         <motion.span
           className="absolute inset-0 rounded-full bg-og-status-running"
           animate={{ opacity: [0.45, 0], scale: [1, 2.2] }}
-          transition={{ duration: 1.4, ease: "easeOut", repeat: Number.POSITIVE_INFINITY }}
+          transition={{
+            duration: 1.4,
+            ease: "easeOut",
+            repeat: Number.POSITIVE_INFINITY,
+          }}
         />
       ) : null}
       <span
@@ -1343,6 +1497,7 @@ function isRealtimeModel(value: string | null): value is SessionRealtimeModel {
     value === "opengeni-gateway/openai/gpt-realtime-2.1" ||
     value === "opengeni-gateway/openai/gpt-realtime-mini" ||
     value === "opengeni-gateway/xai/grok-voice-think-fast-2.0" ||
+    value === "supergrok/grok-voice-think-fast-2.0" ||
     value === "workspace-gateway/openai/gpt-realtime-2.1" ||
     value === "workspace-gateway/openai/gpt-realtime-mini" ||
     value === "workspace-gateway/xai/grok-voice-think-fast-2.0"

@@ -304,6 +304,17 @@ export {
   withCodemodeTokenClient,
 } from "./codemode-token";
 
+// Exact-attempt Codemode authority. Shared by ordinary turn execution and
+// one-off Connected Machine execution so neither surface can drift into a
+// second token shape or lifetime.
+export {
+  CODEMODE_TOKEN_TTL_SECONDS,
+  mintSandboxCodemodeToken,
+  type CodemodeAuthorityScope,
+  type SandboxCodemodeAuthority,
+  type MintedSandboxCodemodeToken,
+} from "./codemode-authority";
+
 // The Channel-B pixel DATA PLANE (P4.2). Resolves the provider's scoped tunnel
 // for port 6080 (client → provider-tunnel direct), assembles the WS URL, and
 // mints the scoped stream token. Called API-direct on the resumed handle.
@@ -369,7 +380,7 @@ export {
 
 // The selfhosted (bring-your-own-compute) control surface (M3). The NATS-backed
 // `SelfhostedSession` presents the SAME structural exec/fs/git surface as Modal
-// over a `ControlRpc` seam (request/reply on `agent.<ws>.<id>.rpc`, encoded via
+// over a `ControlRpc` seam (request/reply on the exact claimed process subject, encoded via
 // `@opengeni/agent-proto`). agent-offline is NEVER a NotFound — the lease never
 // cold-creates a rival for a user's real machine. The real NATS transport +
 // Accounts land in M4 behind the SAME `ControlRpc`.
@@ -439,6 +450,7 @@ export {
   type SelfhostedImageOutput,
   type SelfhostedOpStreamDeps,
 } from "./selfhosted/session";
+export type { SelfhostedConnectionBinding } from "./routing/backend-resolver";
 // The op-stream exec transport (op-stream protocol v1.1 — streaming exec to a
 // Connected Machine runner). The worker injects `NatsOpStreamTransport` (over
 // the same bus connection as the control rpc) plus an `OpStreamJournal`

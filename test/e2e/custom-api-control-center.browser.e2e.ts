@@ -5,6 +5,7 @@ import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const evidenceDir = new URL("../../.agent/evidence/capabilities-custom-api/", import.meta.url)
@@ -15,7 +16,7 @@ const subjectId = "user:capabilities-browser";
 const financeConnectionId = "00000000-0000-4000-8000-000000000619";
 const salesConnectionId = "00000000-0000-4000-8000-000000000620";
 const gmailConnectionId = "00000000-0000-4000-8000-000000000621";
-const apiContractRevision = "2026-08-social-provider-tools-v1";
+const apiContractRevision = OPENGENI_API_CONTRACT_REVISION;
 let webBaseUrl = "";
 
 type UiState = {
@@ -24,6 +25,12 @@ type UiState = {
   dense: boolean;
   loading: boolean;
   mailInboxBinding: ReturnType<typeof mailInboxBinding> | null;
+  oauthFailuresRemaining: number;
+  oauthStarts: Array<{
+    definitionId: string;
+    ownership: "personal" | "workspace";
+    returnPath: string;
+  }>;
 };
 
 describe("custom API control center browser acceptance", () => {
@@ -261,6 +268,146 @@ describe("custom API control center browser acceptance", () => {
       await context.close();
     }
   }, 60_000);
+
+  test("pass 7: guided Gmail setup reviews access and retries one exact account", async () => {
+    const context = await browser.newContext({ viewport: { width: 1180, height: 960 } });
+    const page = await context.newPage();
+    const state = readyState();
+    try {
+      await installApi(page, state);
+      await openCapabilities(page);
+      await setTheme(page, "light");
+
+      const gmailCard = page.locator("article").filter({
+        has: page.getByRole("heading", { name: "Gmail", exact: true }),
+      });
+      const addAccount = gmailCard.getByRole("button", { name: "Add another account" });
+      await addAccount.click();
+      let dialog = page.getByRole("dialog");
+      await expectVisible(dialog);
+      expect(await dialog.getByLabel("Account label").inputValue()).toBe("Gmail — Account 2");
+      expect(
+        await dialog
+          .getByLabel("Account label")
+          .evaluate((element) => element === document.activeElement),
+      ).toBe(true);
+      await expectText(dialog.locator('[aria-current="step"]'), "Account");
+      expect(await dialog.locator('input[value="personal"]').isChecked()).toBe(true);
+      await expectText(dialog, "Only your sessions and work explicitly delegated from you");
+      await expectText(dialog, "Authorized workspace members and workspace automations");
+      await dialog.getByLabel("Account label").press("Tab");
+      expect(
+        await dialog
+          .locator('input[value="personal"]')
+          .evaluate((element) => element === document.activeElement),
+      ).toBe(true);
+      await page.keyboard.press("ArrowRight");
+      expect(await dialog.locator('input[value="workspace"]').isChecked()).toBe(true);
+      await page.keyboard.press("ArrowLeft");
+      expect(await dialog.locator('input[value="personal"]').isChecked()).toBe(true);
+
+      const rawScope = dialog.getByText("https://mail.google.com/", { exact: true });
+      expect(await rawScope.isVisible()).toBe(false);
+      await dialog.getByLabel("Account label").fill("Gmail — Product");
+      await dialog.getByText("Workspace", { exact: true }).click();
+      await dialog.getByLabel("Account label").press("Enter");
+      await expectText(dialog, "What agents can do");
+      await expectText(dialog, "Draft and send messages");
+      expect(await rawScope.isVisible()).toBe(false);
+      await dialog.getByText("Technical details", { exact: true }).click();
+      expect(await rawScope.isVisible()).toBe(true);
+      await dialog.getByRole("button", { name: "Continue" }).click();
+      await expectText(dialog, "Review the connection");
+      await expectText(dialog, "Gmail — Product");
+      await expectText(dialog, "Workspace — shared with authorized workspace members");
+      await dialog.getByRole("button", { name: "Back" }).click();
+      await expectText(dialog, "What agents can do");
+      await page.keyboard.press("Escape");
+      await dialog.waitFor({ state: "hidden" });
+      expect(await addAccount.evaluate((element) => element === document.activeElement)).toBe(true);
+
+      await addAccount.click();
+      dialog = page.getByRole("dialog");
+      expect(await dialog.getByLabel("Account label").inputValue()).toBe("Gmail — Account 2");
+      await dialog.getByRole("button", { name: "Continue" }).click();
+      await dialog.getByRole("button", { name: "Continue" }).click();
+      state.oauthFailuresRemaining = 1;
+      await dialog.getByRole("button", { name: "Continue to Google" }).click();
+      await expectText(dialog.getByRole("alert"), "Check your network and try again");
+      expect((await dialog.getByRole("alert").textContent()) ?? "").not.toContain(
+        "provider-oauth-debug-body",
+      );
+      await expectText(
+        page.locator('[data-integration-instance="account-finance"]'),
+        "Gmail — Finance",
+      );
+      expect(state.oauthStarts).toHaveLength(1);
+
+      await assertAccessibleAndBounded(page, '[role="dialog"]');
+      await page.screenshot({
+        path: `${evidenceDir}pass-7-guided-connect-retry.png`,
+        fullPage: true,
+      });
+      await dialog.getByRole("button", { name: "Try again" }).click();
+      await page.waitForURL(`${webBaseUrl}/provider-consent`);
+      expect(state.oauthStarts).toHaveLength(2);
+      const firstReturn = new URL(state.oauthStarts[0]!.returnPath, webBaseUrl);
+      const retriedReturn = new URL(state.oauthStarts[1]!.returnPath, webBaseUrl);
+      expect(firstReturn.searchParams.get("api_integration_instance")).toMatch(/^account-/);
+      expect(retriedReturn.searchParams.get("api_integration_instance")).toBe(
+        firstReturn.searchParams.get("api_integration_instance"),
+      );
+      expect(retriedReturn.searchParams.get("api_integration_name")).toBe("Gmail — Account 2");
+      expect(state.oauthStarts[1]).toMatchObject({
+        definitionId: "google-gmail",
+        ownership: "personal",
+      });
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("pass 8: mobile permission-disabled journey remains usable and bounded", async () => {
+    const context = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+      colorScheme: "dark",
+      forcedColors: "active",
+      reducedMotion: "reduce",
+    });
+    const page = await context.newPage();
+    try {
+      await installApi(page, { ...readyState(), canManage: false });
+      await openCapabilities(page);
+      await setTheme(page, "dark");
+
+      const reviewSetup = page.getByRole("button", { name: "Review Gmail setup" });
+      expect(await reviewSetup.isDisabled()).toBe(false);
+      await reviewSetup.click();
+      const dialog = page.getByRole("dialog");
+      await expectText(dialog, "Administrator setup is required");
+      expect(await dialog.locator('input[value="personal"]').isDisabled()).toBe(true);
+      expect(await dialog.locator('input[value="workspace"]').isDisabled()).toBe(true);
+      expect(await dialog.getByRole("button", { name: "Continue" }).isDisabled()).toBe(true);
+      const box = await dialog.boundingBox();
+      expect(box?.width ?? 0).toBeLessThanOrEqual(390);
+      expect(box?.height ?? 0).toBeLessThanOrEqual(844);
+      await assertAccessibleAndBounded(page, '[role="dialog"]');
+      await page.screenshot({
+        path: `${evidenceDir}pass-8-mobile-permission-forced-colors.png`,
+        fullPage: true,
+      });
+
+      await page.keyboard.press("Escape");
+      await dialog.waitFor({ state: "hidden" });
+      expect(await reviewSetup.evaluate((element) => element === document.activeElement)).toBe(
+        true,
+      );
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
 });
 
 function readyState(): UiState {
@@ -270,6 +417,8 @@ function readyState(): UiState {
     dense: false,
     loading: false,
     mailInboxBinding: null,
+    oauthFailuresRemaining: 0,
+    oauthStarts: [],
   };
 }
 
@@ -301,6 +450,13 @@ async function expectCustomInstances(page: Page): Promise<void> {
 }
 
 async function installApi(page: Page, state: UiState): Promise<void> {
+  await page.route(`${webBaseUrl}/provider-consent`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: "<!doctype html><title>Provider consent</title><h1>Provider consent</h1>",
+    }),
+  );
   await page.route("http://127.0.0.1:9/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -359,6 +515,23 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
       if (state.loading) await new Promise((resolve) => setTimeout(resolve, 8_000));
       return json({ integrations: instances(state.dense) });
+    }
+    if (
+      request.method() === "POST" &&
+      url.pathname === `/v1/workspaces/${workspaceId}/integrations/oauth/start`
+    ) {
+      state.oauthStarts.push(
+        request.postDataJSON() as {
+          definitionId: string;
+          ownership: "personal" | "workspace";
+          returnPath: string;
+        },
+      );
+      if (state.oauthFailuresRemaining > 0) {
+        state.oauthFailuresRemaining -= 1;
+        return json({ message: "provider-oauth-debug-body" }, 503);
+      }
+      return json({ authorizationUrl: `${webBaseUrl}/provider-consent` });
     }
     if (
       request.method() === "GET" &&
@@ -497,6 +670,30 @@ function workspace() {
 }
 
 function integrationDefinitions() {
+  const scopes: Record<string, string[]> = {
+    "google-gmail": ["openid", "email", "profile", "https://mail.google.com/"],
+    "google-drive": ["openid", "email", "profile", "https://www.googleapis.com/auth/drive"],
+    "microsoft-outlook-mail": [
+      "offline_access",
+      "User.Read",
+      "Mail.ReadWrite",
+      "Mail.Send",
+      "MailboxSettings.ReadWrite",
+    ],
+    "microsoft-outlook-calendar": ["offline_access", "User.Read", "Calendars.ReadWrite"],
+    "microsoft-outlook-contacts": [
+      "offline_access",
+      "User.Read",
+      "Contacts.ReadWrite",
+      "People.Read.All",
+    ],
+    "microsoft-onedrive": [
+      "offline_access",
+      "User.Read",
+      "Files.ReadWrite.All",
+      "Sites.ReadWrite.All",
+    ],
+  };
   return [
     ["google-gmail", "Gmail", "google", "gmail.googleapis.com"],
     ["google-drive", "Google Drive", "google", "www.googleapis.com"],
@@ -510,7 +707,7 @@ function integrationDefinitions() {
     summary: `${name} Integration Definition`,
     protocol: "openapi",
     provider: { id: providerId, domain: providerDomain },
-    authentication: { kind: "oauth2", scopes: ["read"] },
+    authentication: { kind: "oauth2", scopes: scopes[id!] ?? [] },
     facets: id === "google-gmail" ? gmailFacetDefinitions() : [],
   }));
 }

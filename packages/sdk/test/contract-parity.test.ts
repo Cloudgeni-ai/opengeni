@@ -640,7 +640,10 @@ describe("SDK / contracts parity", () => {
       pinned: false,
       status: "archived",
     };
-    const settings: UpdateWorkspaceSettingsRequest = { memoryEnabled: true };
+    const settings: UpdateWorkspaceSettingsRequest = {
+      memoryEnabled: true,
+      memoryPromptMode: "retrieval_only",
+    };
     expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateKnowledgeMemoryRequest.safeParse(update).success).toBe(true);
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(settings).success).toBe(true);
@@ -777,6 +780,14 @@ describe("SDK / contracts parity", () => {
           allowScreenControl: false,
           sharedSessionCount: 2,
           lastSeenAt: "2026-06-26T00:00:00.000Z",
+          connectionAuthority: {
+            state: "active",
+            generation: 2,
+            supersededCount: 1,
+            leaseExpiresAt: "2026-06-26T00:01:00.000Z",
+            duplicateRunnerDeniedCount: 1,
+            duplicateRunnerDeniedAt: "2026-06-26T00:00:30.000Z",
+          },
           metrics: sample,
         },
       ],

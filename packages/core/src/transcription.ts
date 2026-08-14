@@ -19,6 +19,8 @@ export type TranscriptionLimits = {
 export type TranscriptionRequest = {
   workspaceId: string;
   accountId: string;
+  /** Authenticated human/service subject used for provider-account authority. */
+  subjectId: string;
   audio: Uint8Array;
   mimeType: string;
   /** Optional client-reported duration; enforced as a soft ceiling before upstream. */
@@ -87,6 +89,7 @@ export function statusForVoiceInputError(code: VoiceInputErrorCode): number {
 /** Optional workspace scope for readiness checks during provider selection. */
 export type TranscriptionAvailabilityContext = {
   workspaceId?: string | undefined;
+  subjectId?: string | undefined;
 };
 
 /**
@@ -109,6 +112,8 @@ export type TranscriptionProvider = {
     mimeType: string;
     filename: string;
     workspaceId: string;
+    accountId: string;
+    subjectId: string;
     requestId: string;
     signal?: AbortSignal | undefined;
   }): Promise<{ text: string; languages: string[] }>;

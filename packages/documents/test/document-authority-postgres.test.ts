@@ -3,10 +3,13 @@ import { createDb } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   addDocumentToBase,
+  browseEffectiveKnowledge,
   deleteDocumentFromBase,
+  getEffectiveKnowledgeRecord,
   getDocumentChunk,
   moveDocumentToBase,
   queueDocumentForReindex,
+  searchEffectiveKnowledge,
   searchEffectiveDocuments,
   searchDocuments,
 } from "../src";
@@ -207,6 +210,17 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
     ).rejects.toThrow("organization document mutations require exact account authority");
 
     for (const client of [forced, scoped]) {
+      const subjectlessOrganizationResults = await searchDocuments(client.db, {
+        accountId: origin.accountId,
+        workspaceId: origin.workspaceId,
+        query: "organization",
+        mode: "keyword",
+        limit: 50,
+      });
+      expect(subjectlessOrganizationResults.map((result) => result.documentId)).toContain(
+        organization.documentId,
+      );
+
       const originResults = await searchDocuments(client.db, {
         accountId: origin.accountId,
         workspaceId: origin.workspaceId,
@@ -246,6 +260,75 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
       expect(effectiveAll.map((result) => result.documentId).sort()).toEqual(
         [organization.documentId, workspace.documentId, personal.documentId].sort(),
       );
+      const knowledge = await searchEffectiveKnowledge(client.db, {
+        accountId: origin.accountId,
+        workspaceId: origin.workspaceId,
+        query: "authoritycommon",
+        mode: "keyword",
+        limit: 50,
+        initiatingSubjectId: "user:alice",
+        surface: "agent",
+      });
+      expect(knowledge.results.map((result) => result.record.id).sort()).toEqual(
+        [organization.chunkId, workspace.chunkId, personal.chunkId]
+          .map((id) => `document_chunk:${id}`)
+          .sort(),
+      );
+      expect(JSON.stringify(knowledge)).not.toContain("user:alice");
+      expect(knowledge.results[0]?.record).toMatchObject({
+        kind: "document_chunk",
+        content: { format: "markdown" },
+        lifecycle: { state: "active" },
+      });
+
+      await expect(
+        getEffectiveKnowledgeRecord(client.db, {
+          accountId: origin.accountId,
+          workspaceId: origin.workspaceId,
+          initiatingSubjectId: "user:alice",
+          id: `document_chunk:${personal.chunkId}`,
+        }),
+      ).resolves.toMatchObject({
+        id: `document_chunk:${personal.chunkId}`,
+        authority: { kind: "personal" },
+        links: [
+          {
+            relation: "parent",
+            target: { kind: "knowledge", id: `document:${personal.documentId}` },
+          },
+        ],
+      });
+      await expect(
+        getEffectiveKnowledgeRecord(client.db, {
+          accountId: origin.accountId,
+          workspaceId: origin.workspaceId,
+          initiatingSubjectId: "user:bob",
+          id: `document_chunk:${personal.chunkId}`,
+        }),
+      ).resolves.toBeNull();
+
+      const browse = await browseEffectiveKnowledge(client.db, {
+        accountId: origin.accountId,
+        workspaceId: origin.workspaceId,
+        initiatingSubjectId: "user:alice",
+        limit: 50,
+      });
+      expect(browse.records.map((record) => record.id).sort()).toEqual(
+        [organization.documentId, workspace.documentId, personal.documentId]
+          .map((id) => `document:${id}`)
+          .sort(),
+      );
+      expect(JSON.stringify(browse)).not.toContain("user:alice");
+      const contents = await browseEffectiveKnowledge(client.db, {
+        accountId: origin.accountId,
+        workspaceId: origin.workspaceId,
+        initiatingSubjectId: "user:alice",
+        parentId: `document:${personal.documentId}`,
+        limit: 50,
+      });
+      expect(contents.records.map((record) => record.id)).toEqual([
+        `document_chunk:${personal.chunkId}`,
+      ]);
 
       const siblingResults = await searchDocuments(client.db, {
         accountId: sibling.accountId,
@@ -275,6 +358,23 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
       expect(siblingEffective.map((result) => result.documentId)).not.toContain(
         otherPersonal.documentId,
       );
+      const siblingBrowse = await browseEffectiveKnowledge(client.db, {
+        accountId: sibling.accountId,
+        workspaceId: sibling.workspaceId,
+        initiatingSubjectId: "user:alice",
+        limit: 50,
+      });
+      expect(siblingBrowse.records.map((record) => record.id)).toEqual([
+        `document:${organization.documentId}`,
+      ]);
+      const inaccessibleTraversal = await browseEffectiveKnowledge(client.db, {
+        accountId: sibling.accountId,
+        workspaceId: sibling.workspaceId,
+        initiatingSubjectId: "user:alice",
+        parentId: `document:${personal.documentId}`,
+        limit: 50,
+      });
+      expect(inaccessibleTraversal).toEqual({ records: [], nextCursor: null, hasMore: false });
 
       await expect(
         getDocumentChunk(client.db, sibling.accountId, sibling.workspaceId, organization.chunkId, {

@@ -557,7 +557,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     );
     if (!info || !isVisibleTarget(info)) return null;
     const state = await this.ensureTargetState(info);
-    await this.refreshFrame(state);
+    // A JavaScript dialog blocks ordinary page-domain inspection. Keep the
+    // event-derived target/document/frame generations authoritative until the
+    // dialog is handled; otherwise the controller's generic pre-dispatch
+    // target validation can fail before `handle_dialog` reaches Chromium.
+    if (!state.dialog) await this.refreshFrame(state);
     return this.targetFromInfo(info, state);
   }
 

@@ -67,6 +67,11 @@ export type CodexRequestOpaqueArtifacts = {
   fingerprints: readonly string[];
 };
 
+export type CodexRequestPreparationPhase =
+  | "transport_entry"
+  | "credential_ready"
+  | "wire_request_ready";
+
 export type CodexRequestContext = {
   clientVersion: string;
   /**
@@ -103,6 +108,8 @@ export type CodexRequestContext = {
    * swallowed by the transport and it must never receive request bodies/auth.
    */
   onModelRequestDiagnostic?: (event: CodexModelRequestEvent) => void;
+  /** Bounded synchronous checkpoints for pre-network request preparation. */
+  onRequestPreparationDiagnostic?: (phase: CodexRequestPreparationPhase) => void;
   /** Worker-owned durable audit sink; payloads never contain request bodies or auth. */
   onModelRequestEvent?: (event: CodexModelRequestEvent) => Promise<void> | void;
   /** Exact opaque artifacts on the normalized wire request, never their ciphertext. */

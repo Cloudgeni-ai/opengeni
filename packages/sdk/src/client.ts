@@ -233,6 +233,7 @@ import type {
   MachineMetricsSeriesResponse,
   RemoveEnrollmentRequest,
   RemoveEnrollmentResponse,
+  UpdateMachineAgentResponse,
   // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
@@ -280,6 +281,7 @@ import type {
   SessionEventListOptions,
   SessionEventPage,
   SessionGoal,
+  SessionGoalRevision,
   SessionHumanInputRequest,
   SessionLineageResponse,
   SessionRealtimeMutationResponse,
@@ -357,6 +359,7 @@ import type {
   UpdateKnowledgeMemoryRequest,
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
+  ApplySessionGoalRevisionRequest,
   UpdateSessionRequest,
   UpdateSessionToolPolicyRequest,
   UpdateVariableSetRequest,
@@ -491,8 +494,8 @@ export type OpenGeniRequestOptions = {
 export type SendMessageInput = {
   text: string;
   annotations?: SubmittedTimelineAnnotation[];
-  /** System instructions scoped to this exact turn; never visible timeline text. */
-  turnInstructions?: string;
+  /** Model-visible application context attached to this exact user message; omitted by standard timeline rendering. */
+  modelContext?: string;
   resources?: ResourceRef[];
   tools?: ToolRef[];
   model?: string;
@@ -1058,6 +1061,22 @@ export class OpenGeniClient {
     );
   }
 
+  /** Mint a short-lived browser token from a connected SuperGrok account. */
+  async negotiateXaiSubscriptionRealtime(
+    workspaceId: string,
+    sessionId: string,
+    request: GatewayRealtimeConnectRequest,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<GatewayRealtimeConnectResponse> {
+    return await this.requestJson<GatewayRealtimeConnectResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/supergrok`,
+      request,
+      {},
+      { signal: options.signal },
+    );
+  }
+
   /** Promote a negotiated connection only after its browser data channel is ready. */
   async activateCodexRealtimeConnection(
     workspaceId: string,
@@ -1178,6 +1197,19 @@ export class OpenGeniClient {
     );
   }
 
+  /** Ask one authoritative Connected Machine runner to drain accepted work and
+   * install the exact signed version promoted for its channel. Progress is read
+   * from `listMachines`; completion requires the successor build identity. */
+  async updateMachineAgent(
+    workspaceId: string,
+    enrollmentId: string,
+  ): Promise<UpdateMachineAgentResponse> {
+    return await this.requestJson<UpdateMachineAgentResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/update`,
+    );
+  }
+
   /**
    * Read the downsampled (~1/min) metrics series for ONE machine over a time
    * window (default 1h). The samples are oldest-first (a left-to-right chart).
@@ -1199,8 +1231,9 @@ export class OpenGeniClient {
   /**
    * Remove one connected self-hosted machine enrollment. The control-plane
    * operation works while the agent is offline, revokes future reconnects,
-   * retains history, and returns a typed blocker when active route/lease or
-   * recovery dependencies make removal unsafe. `idempotencyKey` is replay-safe.
+   * retains history, and atomically detaches idle dependent sessions (a
+   * machine-home session becomes `backend:none`). Active turns, live leases,
+   * and recovery work remain typed blockers. `idempotencyKey` is replay-safe.
    */
   async removeEnrollment(
     workspaceId: string,
@@ -1886,7 +1919,10 @@ export class OpenGeniClient {
     );
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+      throw await apiErrorFromResponse(response, {
+        method: "GET",
+        correlationId,
+      });
     }
     if (!response.body) {
       throw new OpenGeniApiError(response.status, "SSE response did not include a readable body");
@@ -1968,6 +2004,26 @@ export class OpenGeniClient {
     return await this.requestJson<SessionGoal>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`,
+      request,
+    );
+  }
+
+  async listGoalRevisions(workspaceId: string, sessionId: string): Promise<SessionGoalRevision[]> {
+    return await this.requestJson<SessionGoalRevision[]>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions`,
+    );
+  }
+
+  async applyGoalRevision(
+    workspaceId: string,
+    sessionId: string,
+    revisionId: string,
+    request: ApplySessionGoalRevisionRequest,
+  ): Promise<SessionGoal> {
+    return await this.requestJson<SessionGoal>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions/${revisionId}/apply`,
       request,
     );
   }
@@ -5132,7 +5188,10 @@ export class OpenGeniClient {
     capabilityId: string,
     instanceKey: string,
     facetKey: string,
-    options: { parentId?: string | undefined; pageToken?: string | undefined } = {},
+    options: {
+      parentId?: string | undefined;
+      pageToken?: string | undefined;
+    } = {},
   ): Promise<GoogleDriveBrowseResponse> {
     const query = new URLSearchParams();
     if (options.parentId) query.set("parentId", options.parentId);

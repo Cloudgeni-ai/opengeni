@@ -42,6 +42,20 @@ export OPENGENI_SANDBOX_DESKTOP_ENABLED
 export OPENGENI_SANDBOX_DESKTOP_INTERACTIVE
 export OPENGENI_COMPUTER_USE_ENABLED
 
+# Local development must exercise the same durable same-session ownership path
+# as managed deployments. The config-library defaults stay fail-closed, while
+# an explicit false remains authoritative for legacy-path regression tests.
+# Lazy provisioning keeps sandbox creation/resume off the first-model critical
+# path; the first actual sandbox operation establishes the box single-flight.
+if [ -z "${OPENGENI_SANDBOX_OWNERSHIP_ENABLED:-}" ]; then
+  OPENGENI_SANDBOX_OWNERSHIP_ENABLED=true
+fi
+if [ -z "${OPENGENI_SANDBOX_LAZY_PROVISION:-}" ]; then
+  OPENGENI_SANDBOX_LAZY_PROVISION=true
+fi
+export OPENGENI_SANDBOX_OWNERSHIP_ENABLED
+export OPENGENI_SANDBOX_LAZY_PROVISION
+
 # The Modal SDK natively supports MODAL_TOKEN_* and ~/.modal.toml, while the
 # deployment-facing OpenGeni config intentionally requires explicit credentials.
 # Bridge those standard local sources for this dev process only; never persist
@@ -179,27 +193,81 @@ reuse_runtime_ports=0
 if [ -f .env.runtime ] &&
   [ "$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' .env.runtime | tail -1)" = "$COMPOSE_PROJECT_NAME" ] &&
   [ -n "$(docker compose ps -q 2>/dev/null)" ]; then
-  set -a
-  # shellcheck disable=SC1091
-  . ./.env.runtime
-  set +a
+  # Reuse only generated port assignments. Sourcing the whole runtime file
+  # resurrects stale derived URLs and silently overrides newer operator values
+  # from .env (notably remote-reachable Connected Machine endpoints).
+  for runtime_port_var in \
+    OPENGENI_POSTGRES_HOST_PORT \
+    OPENGENI_NATS_HOST_PORT \
+    OPENGENI_NATS_MONITOR_HOST_PORT \
+    OPENGENI_TEMPORAL_HOST_PORT \
+    OPENGENI_MINIO_HOST_PORT \
+    OPENGENI_MINIO_CONSOLE_HOST_PORT \
+    OPENGENI_API_PORT \
+    OPENGENI_WORKER_HTTP_PORT \
+    OPENGENI_TURN_WORKER_HTTP_PORT \
+    OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT \
+    OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT \
+    OPENGENI_WEB_PORT \
+    OPENGENI_RELAY_HOST_PORT; do
+    runtime_port_value="$(
+      sed -n "s/^${runtime_port_var}=//p" .env.runtime | tail -1
+    )"
+    if [ -n "$runtime_port_value" ]; then
+      printf -v "$runtime_port_var" '%s' "$runtime_port_value"
+      export "$runtime_port_var"
+    fi
+  done
   reuse_runtime_ports=1
 fi
 
+netcat_probe_supported=0
+if command -v nc >/dev/null 2>&1; then
+  # `nc` is not one implementation: some installed variants reject `-z` or
+  # `-w`. Prove both flags once from its own help before trusting an exit status;
+  # an option-parse failure must use the fallback probes below.
+  nc_help="$(nc -h 2>&1 || true)"
+  if printf '%s\n' "$nc_help" | grep -Eq '(^|[[:space:]])-z([[:space:],]|$)' &&
+    printf '%s\n' "$nc_help" | grep -Eq '(^|[[:space:]])-w([[:space:],]|$)'; then
+    netcat_probe_supported=1
+  fi
+fi
+
 port_available() {
-  if command -v lsof >/dev/null 2>&1; then
-    ! lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
-    return
-  fi
-  if command -v ss >/dev/null 2>&1; then
-    ! ss -H -ltn "sport = :$1" | grep -q .
-    return
-  fi
-  if command -v netstat >/dev/null 2>&1; then
-    ! netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[:.])$1$"
+  # Every host service below binds 127.0.0.1. Probe that exact socket instead of
+  # asking lsof to enumerate the entire host: lsof can block for minutes when an
+  # unrelated OrbStack/NFS mount is degraded, making one worktree appear hung
+  # while merely selecting ports. Prove a compatible netcat first, then use
+  # bash's exact loopback socket fallback.
+  if [ "$netcat_probe_supported" = "1" ]; then
+    ! nc -z -w 1 127.0.0.1 "$1" >/dev/null 2>&1
     return
   fi
   ! (echo >"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1
+}
+
+# Validate and briefly claim the exact configured address, rather than assuming
+# a loopback port probe represents a Tailscale address or another local bind.
+relay_bind_available() {
+  OPENGENI_LOCAL_RELAY_BIND="$1" bun -e '
+    import { createServer } from "node:net";
+    const value = Bun.env.OPENGENI_LOCAL_RELAY_BIND?.trim() ?? "";
+    const bracketed = value.match(/^\[([^\]]+)]:(\d+)$/);
+    const plain = value.match(/^([^:]+):(\d+)$/);
+    const match = bracketed ?? plain;
+    if (!match) throw new Error("OPENGENI_RELAY_BIND must be host:port (IPv6 must use brackets)");
+    const port = Number(match[2]);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+      throw new Error("OPENGENI_RELAY_BIND port must be between 1 and 65535");
+    }
+    const server = createServer();
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen({ host: match[1], port, exclusive: true }, resolve);
+    });
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    process.stdout.write(String(port));
+  '
 }
 
 # Ports already claimed by this run (avoids MinIO data/console sharing one bind).
@@ -303,17 +371,29 @@ choose_port OPENGENI_TURN_WORKER_HTTP_PORT 8002
 choose_port OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT 9465
 choose_port OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT 9466
 choose_port OPENGENI_WEB_PORT 3000
+if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "modal" ]; then
+  choose_port OPENGENI_SANDBOX_EDGE_PORT 10080
+fi
 if [ "${OPENGENI_SANDBOX_SELFHOSTED_ENABLED:-false}" = "true" ]; then
-  choose_port OPENGENI_RELAY_HOST_PORT 8280
+  if [ -n "${OPENGENI_RELAY_BIND:-}" ]; then
+    if ! explicit_relay_port="$(relay_bind_available "$OPENGENI_RELAY_BIND")"; then
+      echo "Configured OPENGENI_RELAY_BIND=${OPENGENI_RELAY_BIND} is invalid or unavailable." >&2
+      exit 1
+    fi
+    if port_claimed "$explicit_relay_port"; then
+      echo "Configured OPENGENI_RELAY_BIND=${OPENGENI_RELAY_BIND} conflicts with another local service." >&2
+      exit 1
+    fi
+    OPENGENI_RELAY_HOST_PORT="$explicit_relay_port"
+    export OPENGENI_RELAY_HOST_PORT
+    claim_port "$explicit_relay_port"
+  else
+    choose_port OPENGENI_RELAY_HOST_PORT 8280
+  fi
 fi
 
 pids=()
-owned_ngrok_tunnel_name=""
 cleanup() {
-  if [ -n "$owned_ngrok_tunnel_name" ]; then
-    curl -fsS -X DELETE "http://127.0.0.1:4040/api/tunnels/${owned_ngrok_tunnel_name}" \
-      >/dev/null 2>&1 || true
-  fi
   if [ "${#pids[@]}" -gt 0 ]; then
     kill "${pids[@]}" >/dev/null 2>&1 || true
   fi
@@ -484,68 +564,80 @@ if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "modal" ]; then
     [ "$sandbox_object_host" = "localhost" ] ||
     [[ "$sandbox_object_host" = *.ngrok-free.app ]] ||
     [[ "$sandbox_object_host" = *.ngrok-free.dev ]] ||
-    [[ "$sandbox_object_host" = *.ngrok.io ]]; then
-    if ! command -v ngrok >/dev/null 2>&1; then
-      echo "Modal local development needs ngrok or an externally reachable OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT." >&2
+    [[ "$sandbox_object_host" = *.ngrok.io ]] ||
+    [[ "$sandbox_object_host" = *.trycloudflare.com ]]; then
+    needs_modal_object_route=1
+  else
+    needs_modal_object_route=0
+  fi
+
+  # The API/worker live on the developer host while Modal executes remotely.
+  # Publish one exact worktree-scoped edge for presigned objects plus
+  # MCP/Codemode; browser/UI origins and Connected Machine enrollment remain
+  # unchanged.
+  mcp_host="$({
+    OPENGENI_LOCAL_MCP_URL="${OPENGENI_MCP_URL:-http://127.0.0.1:${OPENGENI_API_PORT}}" bun -e '
+      const url = new URL(Bun.env.OPENGENI_LOCAL_MCP_URL.replace("{workspaceId}", "workspace"));
+      process.stdout.write(url.hostname.toLowerCase());
+    '
+  })"
+  if [ -z "${OPENGENI_MCP_URL:-}" ] ||
+    [ "$mcp_host" = "127.0.0.1" ] ||
+    [ "$mcp_host" = "localhost" ] ||
+    [ "$mcp_host" = "host.docker.internal" ] ||
+    [[ "$mcp_host" = *.ngrok-free.app ]] ||
+    [[ "$mcp_host" = *.ngrok-free.dev ]] ||
+    [[ "$mcp_host" = *.ngrok.io ]] ||
+    [[ "$mcp_host" = *.trycloudflare.com ]]; then
+    needs_modal_api_route=1
+  else
+    needs_modal_api_route=0
+  fi
+
+  if [ "$needs_modal_object_route" = "1" ] || [ "$needs_modal_api_route" = "1" ]; then
+    if ! command -v cloudflared >/dev/null 2>&1; then
+      echo "Modal local development needs cloudflared or explicit sandbox-reachable object and MCP endpoints." >&2
       exit 1
     fi
-
-    ngrok_tunnel_url() {
-      local tunnels
-      tunnels="$(curl -fsS http://127.0.0.1:4040/api/tunnels 2>/dev/null || true)"
-      if [ -z "$tunnels" ]; then
-        return 0
-      fi
-      OPENGENI_NGROK_TUNNELS="$tunnels" OPENGENI_NGROK_TARGET_PORT="$OPENGENI_MINIO_HOST_PORT" bun -e '
-        const value = JSON.parse(Bun.env.OPENGENI_NGROK_TUNNELS);
-        const port = Bun.env.OPENGENI_NGROK_TARGET_PORT;
-        const tunnel = value.tunnels?.find((candidate) => {
-          try {
-            const target = new URL(candidate.config?.addr);
-            return (target.port || (target.protocol === "https:" ? "443" : "80")) === port;
-          } catch {
-            return false;
-          }
-        });
-        if (typeof tunnel?.public_url === "string" && tunnel.public_url.startsWith("https://")) {
-          process.stdout.write(tunnel.public_url);
-        }
-      '
+    mkdir -p .opengeni
+    edge_log=".opengeni/cloudflared-sandbox-edge.log"
+    : >"$edge_log"
+    OPENGENI_SANDBOX_EDGE_API_ORIGIN="http://127.0.0.1:${OPENGENI_API_PORT}" \
+      OPENGENI_SANDBOX_EDGE_OBJECT_ORIGIN="http://127.0.0.1:${OPENGENI_MINIO_HOST_PORT}" \
+      bun scripts/dev-sandbox-edge.ts &
+    pids+=("$!")
+    for _attempt in $(seq 1 100); do
+      curl -fsS "http://127.0.0.1:${OPENGENI_SANDBOX_EDGE_PORT}/__opengeni_edge_health" \
+        >/dev/null 2>&1 && break
+      sleep 0.05
+    done
+    curl -fsS "http://127.0.0.1:${OPENGENI_SANDBOX_EDGE_PORT}/__opengeni_edge_health" \
+      >/dev/null || {
+      echo "Could not start the local Modal sandbox edge." >&2
+      exit 1
     }
-
-    sandbox_object_tunnel_url="$(ngrok_tunnel_url)"
-    if [ -z "$sandbox_object_tunnel_url" ]; then
-      if curl -fsS http://127.0.0.1:4040/api/tunnels >/dev/null 2>&1; then
-        owned_ngrok_tunnel_name="opengeni-${COMPOSE_PROJECT_NAME}-minio"
-        ngrok_request="$({
-          OPENGENI_NGROK_NAME="$owned_ngrok_tunnel_name" OPENGENI_NGROK_TARGET_PORT="$OPENGENI_MINIO_HOST_PORT" bun -e '
-            process.stdout.write(JSON.stringify({
-              name: Bun.env.OPENGENI_NGROK_NAME,
-              proto: "http",
-              addr: `http://127.0.0.1:${Bun.env.OPENGENI_NGROK_TARGET_PORT}`,
-            }));
-          '
-        })"
-        curl -fsS -X POST -H "content-type: application/json" --data "$ngrok_request" \
-          http://127.0.0.1:4040/api/tunnels >/dev/null
-      else
-        mkdir -p .opengeni
-        ngrok http "http://127.0.0.1:${OPENGENI_MINIO_HOST_PORT}" \
-          --log ".opengeni/ngrok-object-storage.log" --log-format json &
-        pids+=("$!")
-      fi
-      for _attempt in $(seq 1 100); do
-        sandbox_object_tunnel_url="$(ngrok_tunnel_url)"
-        [ -n "$sandbox_object_tunnel_url" ] && break
-        sleep 0.1
-      done
-    fi
-    if [ -z "$sandbox_object_tunnel_url" ]; then
-      echo "Could not establish the Modal-to-MinIO development tunnel." >&2
+    cloudflared tunnel --no-autoupdate \
+      --url "http://127.0.0.1:${OPENGENI_SANDBOX_EDGE_PORT}" \
+      --logfile "$edge_log" --loglevel info >/dev/null 2>&1 &
+    pids+=("$!")
+    sandbox_edge_url=""
+    for _attempt in $(seq 1 200); do
+      sandbox_edge_url="$(grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' "$edge_log" | tail -n 1 || true)"
+      [ -n "$sandbox_edge_url" ] && break
+      sleep 0.1
+    done
+    if [ -z "$sandbox_edge_url" ]; then
+      echo "Could not establish the remote Modal sandbox edge." >&2
       exit 1
     fi
-    export OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT="$sandbox_object_tunnel_url"
-    echo "  modal-object-storage=${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}"
+    if [ "$needs_modal_object_route" = "1" ]; then
+      export OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT="$sandbox_edge_url"
+      echo "  modal-object-storage=${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}"
+    fi
+    if [ "$needs_modal_api_route" = "1" ]; then
+      export OPENGENI_MCP_URL="${sandbox_edge_url}/v1/workspaces/{workspaceId}/mcp"
+      echo "  modal-opengeni-api=${sandbox_edge_url}"
+    fi
   fi
 fi
 
@@ -574,7 +666,19 @@ if [ "${OPENGENI_SANDBOX_SELFHOSTED_ENABLED:-false}" = "true" ] &&
       process.stdout.write(`${url.hostname}\t${port}\n`);
     '
   )
-  if [ "$relay_hostname" = "127.0.0.1" ] || [ "$relay_hostname" = "localhost" ]; then
+  if [ -n "${OPENGENI_RELAY_BIND:-}" ]; then
+    # An operator may advertise this development relay through a non-loopback
+    # interface (for example the host's Tailscale address) while binding the
+    # process to 0.0.0.0. Treat an explicit bind as ownership of the local relay
+    # instead of assuming every non-loopback URL belongs to an external service.
+    OPENGENI_RELAY_TOKEN_SECRET="${OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET:-${OPENGENI_STREAM_TOKEN_SECRET:-${OPENGENI_DELEGATION_SECRET:-}}}"
+    if [ -z "$OPENGENI_RELAY_TOKEN_SECRET" ]; then
+      echo "Connected-machine local relay requires OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET or OPENGENI_STREAM_TOKEN_SECRET." >&2
+      exit 1
+    fi
+    export OPENGENI_RELAY_BIND OPENGENI_RELAY_TOKEN_SECRET
+    start_local_relay=1
+  elif [ "$relay_hostname" = "127.0.0.1" ] || [ "$relay_hostname" = "localhost" ]; then
     OPENGENI_RELAY_BIND="127.0.0.1:${relay_port}"
     OPENGENI_RELAY_TOKEN_SECRET="${OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET:-${OPENGENI_STREAM_TOKEN_SECRET:-${OPENGENI_DELEGATION_SECRET:-}}}"
     if [ -z "$OPENGENI_RELAY_TOKEN_SECRET" ]; then
@@ -711,6 +815,8 @@ fi
   printf 'OPENGENI_DOCKER_NETWORK=%s\n' "${OPENGENI_DOCKER_NETWORK}"
   printf 'OPENGENI_DOCKER_IMAGE=%s\n' "${OPENGENI_DOCKER_IMAGE:-opengeni-sandbox:local}"
   printf 'OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=%s\n' "${OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED:-false}"
+  printf 'OPENGENI_SANDBOX_OWNERSHIP_ENABLED=%s\n' "${OPENGENI_SANDBOX_OWNERSHIP_ENABLED}"
+  printf 'OPENGENI_SANDBOX_LAZY_PROVISION=%s\n' "${OPENGENI_SANDBOX_LAZY_PROVISION}"
   printf 'OPENGENI_POSTGRES_HOST_PORT=%s\n' "${OPENGENI_POSTGRES_HOST_PORT}"
   printf 'OPENGENI_NATS_HOST_PORT=%s\n' "${OPENGENI_NATS_HOST_PORT}"
   printf 'OPENGENI_NATS_MONITOR_HOST_PORT=%s\n' "${OPENGENI_NATS_MONITOR_HOST_PORT}"
@@ -724,6 +830,9 @@ fi
   printf 'OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT=%s\n' "${OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT}"
   printf 'OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT=%s\n' "${OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT}"
   printf 'OPENGENI_WEB_PORT=%s\n' "${OPENGENI_WEB_PORT}"
+  if [ -n "${OPENGENI_SANDBOX_EDGE_PORT:-}" ]; then
+    printf 'OPENGENI_SANDBOX_EDGE_PORT=%s\n' "${OPENGENI_SANDBOX_EDGE_PORT}"
+  fi
   if [ "${OPENGENI_SANDBOX_SELFHOSTED_ENABLED:-false}" = "true" ]; then
     printf 'OPENGENI_RELAY_HOST_PORT=%s\n' "${OPENGENI_RELAY_HOST_PORT}"
     printf 'OPENGENI_SELFHOSTED_NATS_URL=%s\n' "${OPENGENI_SELFHOSTED_NATS_URL}"
@@ -741,6 +850,9 @@ fi
   printf 'OPENGENI_OBJECT_STORAGE_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_ENDPOINT}"
   printf 'OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT}"
   printf 'OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}"
+  if [ -n "${OPENGENI_MCP_URL:-}" ]; then
+    printf 'OPENGENI_MCP_URL=%s\n' "${OPENGENI_MCP_URL}"
+  fi
   printf 'OPENGENI_CODEX_SUBSCRIPTION_ENABLED=%s\n' "${OPENGENI_CODEX_SUBSCRIPTION_ENABLED}"
   printf 'NODE_ENV=%s\n' "${NODE_ENV}"
   printf 'OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST=%s\n' "${OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST}"
@@ -809,6 +921,13 @@ pids+=("$!")
 (cd apps/worker && bun run start:artifact-outbox) &
 pids+=("$!")
 
+# The web setup surface serves the unpacked Chrome bridge archive directly from
+# apps/browser-extension/dist. Starting Vite without the package build leaves a
+# perfectly healthy machine agent advertising browserBridge=true while the
+# only way to attach an existing Chrome profile returns 503. Keep the dev-stack
+# launcher aligned with apps/web's own dev script and fail before Vite starts if
+# the deterministic extension artifact cannot be produced.
+bun run --cwd apps/browser-extension build
 (cd apps/web && bun x vite dev --port "${OPENGENI_WEB_PORT}" --host 0.0.0.0) &
 pids+=("$!")
 

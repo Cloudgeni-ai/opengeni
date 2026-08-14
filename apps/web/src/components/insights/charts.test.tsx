@@ -79,4 +79,36 @@ describe("AreaChart", () => {
       container.remove();
     }
   });
+
+  test("clips the active hover band to the chart plotting area", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          <AreaChart
+            labels={["00:00", "01:00", "02:00"]}
+            series={[
+              {
+                id: "tokens",
+                label: "Tokens",
+                values: [1, 2, 3],
+                className: "text-brand",
+              },
+            ]}
+          />,
+        );
+      });
+
+      const clipPath = container.querySelector("clipPath");
+      const highlight = container.querySelector('[data-chart-plot-highlight="clipped"]');
+      expect(clipPath).not.toBeNull();
+      expect(highlight?.getAttribute("clip-path")).toBe(`url(#${clipPath?.id})`);
+      expect(container.querySelector("svg")?.classList.contains("overflow-hidden")).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
 });

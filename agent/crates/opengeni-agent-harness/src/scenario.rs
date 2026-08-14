@@ -71,7 +71,7 @@ impl Harness {
             agents.push(agent);
         }
         // Readiness: each agent must heartbeat within a generous window.
-        for agent in &agents {
+        for agent in &mut agents {
             let ready = collector
                 .wait_for_beats(agent.agent_id(), 1, Duration::from_secs(15))
                 .await;
@@ -83,6 +83,15 @@ impl Harness {
                     agent.log_tail(40)
                 ));
             }
+            let instance = collector
+                .connection_instance_id(agent.agent_id())
+                .ok_or_else(|| {
+                    format!(
+                        "agent {} heartbeat had no exact process subject",
+                        agent.agent_id()
+                    )
+                })?;
+            agent.bind_connection_instance(instance);
         }
         tracing::info!(
             count = agents.len(),
@@ -609,6 +618,11 @@ impl Harness {
             Duration::from_secs(15),
         )
         .await;
+        if first_beat.is_some() {
+            if let Some(instance) = self.collector.connection_instance_id(&agent_id) {
+                self.agents[0].bind_connection_instance(instance);
+            }
+        }
 
         verdicts.push(Verdict {
             check: "a hard SIGKILL of the agent leaves NO orphaned exec compute".to_string(),
@@ -638,6 +652,7 @@ impl Harness {
                 Duration::from_secs(10),
             )
             .await;
+        let subject = self.agents[0].rpc_subject();
         let marker_b = unique_marker(&work, "ca-term");
         crate::proc::register_marker(&marker_b);
         let inflight_b = spawn_inflight(&self.driver, &subject, &marker_b, 30);

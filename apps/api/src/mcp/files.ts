@@ -1,5 +1,5 @@
 import type { AccessGrant } from "@opengeni/contracts";
-import { requireFile } from "@opengeni/db";
+import { requireFileForSubject } from "@opengeni/db";
 import { hasPermission, type ApiRouteDeps } from "@opengeni/core";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
@@ -37,7 +37,12 @@ export function buildFilesMcpServer(deps: ApiRouteDeps, grant: AccessGrant): Mcp
       if (!deps.objectStorage) {
         throw new Error("object storage is not configured");
       }
-      const file = await requireFile(deps.db, grant.workspaceId, fileId);
+      const file = await requireFileForSubject(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
+        fileId,
+      });
       if (file.status !== "ready") {
         throw new Error(`file is ${file.status}`);
       }

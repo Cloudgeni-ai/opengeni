@@ -1,5 +1,85 @@
 # @opengeni/runtime
 
+## 1.0.1
+
+### Patch Changes
+
+- Updated dependencies [8bb860b]
+- Updated dependencies [448117d]
+  - @opengeni/sdk@1.0.1
+  - @opengeni/contracts@1.0.1
+  - @opengeni/codemode@0.4.4
+  - @opengeni/config@0.16.4
+
+## 1.0.0
+
+### Major Changes
+
+- 083387e: Replace the removed per-turn `turnInstructions` system-prefix contract with generic per-message `modelContext` content. This is a breaking release-train cutover: old mutating clients are rejected after migration 0240. Context now enters canonical user history without standard timeline rendering, preserves the persistent prompt-cache prefix, and works across initial, queued, steer, realtime delegation, and transcript handoff paths.
+
+### Patch Changes
+
+- 11913b7: Add separately consented Google Drive editable-artifact publishing with an explicit writable destination, connector-action approval policy, Google-native conversion, and retry-safe provider reconciliation.
+- Updated dependencies [083387e]
+- Updated dependencies [11913b7]
+  - @opengeni/contracts@1.0.0
+  - @opengeni/sdk@1.0.0
+  - @opengeni/codemode@0.4.3
+  - @opengeni/config@0.16.3
+
+## 0.23.1
+
+### Patch Changes
+
+- 944be7f: Reduce and attribute turn startup latency with lazy sandbox defaults for local development, bounded validator reuse, parallel durable input reads, exact stale-Docker recovery, and low-cardinality worker, runtime, credential, and provider preparation diagnostics.
+- Updated dependencies [944be7f]
+  - @opengeni/codemode@0.4.2
+  - @opengeni/codex@0.2.17
+  - @opengeni/config@0.16.2
+  - @opengeni/sdk@0.57.0
+
+## 0.23.0
+
+### Minor Changes
+
+- 478d7fe: Persist exact accepted-turn goal authority, separate semantic goal revisions
+  from execution progress, and add policy-controlled rewrite proposals with API,
+  SDK, MCP, and runtime support.
+
+### Patch Changes
+
+- d86610d: Prevent deterministic model-generated worker-spawn failures, hide exhausted nested-agent creation, and show bounded structured session orchestration diagnostics in worker timeline rows while preserving the advanced public REST/SDK create contract.
+- d86610d: Add opt-in document-parsing guidance for the pinned AnyDoc sandbox runtime.
+- d86610d: Reissue the complete MCP result fidelity release source after the prior automated Version PR was merged without the required provider-native approval.
+- 478d7fe: Add a reversible workspace memory prompt mode that removes the legacy standing memory block, keeps preference observations out of agent behavioral authority, contains company-profile context for child agents, and reports metadata-only model-context contribution telemetry.
+- Updated dependencies [d86610d]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+  - @opengeni/contracts@0.50.0
+  - @opengeni/sdk@0.57.0
+  - @opengeni/config@0.16.1
+  - @opengeni/codemode@0.4.1
+
+## 0.22.0
+
+### Minor Changes
+
+- b0b2bed: Add unified browser and computer interaction APIs, reusable browser identities, native input, live streaming, and React viewer controls across managed sandboxes and connected machines.
+
+### Patch Changes
+
+- a01170c: Reissue the embedded distribution through corrected source-bound candidate receipt validation.
+- Updated dependencies [b0b2bed]
+  - @opengeni/agent-proto@0.5.0
+  - @opengeni/codemode@0.4.0
+  - @opengeni/config@0.16.0
+  - @opengeni/contracts@0.49.0
+  - @opengeni/sdk@0.56.0
+
 ## 0.21.2
 
 ### Patch Changes

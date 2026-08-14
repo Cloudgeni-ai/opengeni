@@ -364,9 +364,25 @@ export const AttachedBrowserDevice = z
   });
 export type AttachedBrowserDevice = z.infer<typeof AttachedBrowserDevice>;
 
+/** One enrolled machine agent currently reporting its browser-bridge inventory.
+ * A bridge with zero devices is operational but has no Chrome profile connected
+ * through the OpenGeni extension yet. */
+export const AttachedBrowserBridge = z
+  .object({
+    enrollmentId: z.string().uuid(),
+    state: z.enum(["online", "offline"]),
+    bridgeGeneration: opaqueGeneration,
+    inventoryRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    connectedProfileCount: z.number().int().nonnegative().max(10_000),
+    lastSeenAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type AttachedBrowserBridge = z.infer<typeof AttachedBrowserBridge>;
+
 export const AttachedBrowserDeviceListResponse = z
   .object({
     revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    bridges: z.array(AttachedBrowserBridge).max(10_000),
     devices: z.array(AttachedBrowserDevice).max(10_000),
   })
   .strict();
@@ -2161,6 +2177,41 @@ export const BrowserActionBatch = z
     }
   });
 export type BrowserActionBatch = z.infer<typeof BrowserActionBatch>;
+
+/** Secret-safe projection of a connected-machine control failure carried in a
+ * standard API error envelope. The outer envelope owns HTTP status, retryability,
+ * and public request correlation; this preserves the exact failing control class
+ * and optional inner request id without exposing subjects, local paths, or tokens. */
+export const InteractionControlFailureCode = z.enum([
+  "unknown",
+  "unsupported",
+  "os",
+  "not_found",
+  "consent_required",
+  "timeout",
+  "draining",
+  "protocol",
+  "stream",
+  "agent_offline",
+  "fenced",
+  "payload_too_large",
+]);
+export type InteractionControlFailureCode = z.infer<typeof InteractionControlFailureCode>;
+
+export const InteractionControlFailureDetails = z
+  .object({
+    interactionLayer: z.literal("connected_machine"),
+    interactionSurface: z.enum(["browser", "computer"]),
+    controlFailureCode: InteractionControlFailureCode,
+    controlRequestId: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[A-Za-z0-9._:-]+$/u)
+      .optional(),
+  })
+  .strict();
+export type InteractionControlFailureDetails = z.infer<typeof InteractionControlFailureDetails>;
 
 export const InteractionError = z
   .object({

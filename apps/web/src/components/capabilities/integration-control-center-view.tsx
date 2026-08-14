@@ -1,64 +1,41 @@
 import {
   AlertTriangleIcon,
-  CalendarDaysIcon,
   CheckCircle2Icon,
   CloudIcon,
-  ContactRoundIcon,
-  HardDriveIcon,
   Layers3Icon,
   Loader2Icon,
-  MailIcon,
   PlusIcon,
   RefreshCwIcon,
-  ShieldCheckIcon,
   Trash2Icon,
-  UserRoundIcon,
-  UsersRoundIcon,
 } from "lucide-react";
 import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
-import type { ComponentType, FormEvent, RefObject } from "react";
+import type { RefObject } from "react";
 
 import { CustomApiSection } from "@/components/capabilities/custom-api-section";
 import { CustomApiSetupDialog } from "@/components/capabilities/custom-api-setup-dialog";
 import type { CustomApiFlowState } from "@/components/capabilities/custom-api-flow";
 import { GoogleDriveKnowledgeSourceDialog } from "@/components/capabilities/google-drive-knowledge-source-dialog";
+import {
+  IntegrationConnectDialog,
+  IntegrationExperienceIcon,
+  type IntegrationConnectRequest,
+} from "@/components/capabilities/integration-connect-dialog";
 import { IntegrationFacetsPanel } from "@/components/capabilities/integration-facets-panel";
+import { integrationExperience } from "@/components/capabilities/integration-experience";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import type {
   ApiIntegrationInstallationSummary,
   IntegrationDefinitionSummary,
   ConnectionMetadata,
-  ConnectionOwnership,
 } from "@/types";
 
 export type IntegrationRemoveTarget = {
   instance: ApiIntegrationInstallationSummary;
   removesDefinition: boolean;
-};
-
-type DefinitionVisual = { icon: ComponentType<{ className?: string }> };
-
-const DEFINITION_VISUALS: Record<string, DefinitionVisual> = {
-  "google-gmail": { icon: MailIcon },
-  "google-drive": { icon: HardDriveIcon },
-  "microsoft-outlook-mail": { icon: MailIcon },
-  "microsoft-outlook-calendar": { icon: CalendarDaysIcon },
-  "microsoft-outlook-contacts": { icon: ContactRoundIcon },
-  "microsoft-onedrive": { icon: CloudIcon },
 };
 
 export function IntegrationControlCenterView({
@@ -77,8 +54,7 @@ export function IntegrationControlCenterView({
   busyKey,
   callbackBusy,
   setupDefinition,
-  displayName,
-  ownership,
+  setupInitialAccountLabel,
   removeTarget,
   customApi,
   embedded,
@@ -88,12 +64,11 @@ export function IntegrationControlCenterView({
   onReconnect,
   onPreviewRemove,
   onSetupClose,
-  onDisplayNameChange,
-  onOwnershipChange,
   onConnectSetup,
   onRemoveClose,
   onRemoveInstance,
   removeTriggerRef,
+  setupTriggerRef,
   focusFallbackRef,
   onOpenCustomApi,
   onUpdateCustomApi,
@@ -121,8 +96,7 @@ export function IntegrationControlCenterView({
   busyKey: string | null;
   callbackBusy: boolean;
   setupDefinition: IntegrationDefinitionSummary | null;
-  displayName: string;
-  ownership: ConnectionOwnership;
+  setupInitialAccountLabel: string;
   removeTarget: IntegrationRemoveTarget | null;
   customApi: CustomApiFlowState;
   embedded: boolean;
@@ -132,12 +106,11 @@ export function IntegrationControlCenterView({
   onReconnect: (instance: ApiIntegrationInstallationSummary) => void;
   onPreviewRemove: (instance: ApiIntegrationInstallationSummary) => void;
   onSetupClose: () => void;
-  onDisplayNameChange: (value: string) => void;
-  onOwnershipChange: (value: ConnectionOwnership) => void;
-  onConnectSetup: () => void;
+  onConnectSetup: (request: IntegrationConnectRequest) => Promise<void>;
   onRemoveClose: () => void;
   onRemoveInstance: () => Promise<boolean>;
   removeTriggerRef: RefObject<HTMLElement | null>;
+  setupTriggerRef: RefObject<HTMLElement | null>;
   focusFallbackRef: RefObject<HTMLElement | null>;
   onOpenCustomApi: () => void;
   onUpdateCustomApi: (instance: ApiIntegrationInstallationSummary) => void;
@@ -150,11 +123,6 @@ export function IntegrationControlCenterView({
   onCustomApiBack: () => void;
   onCustomApiToggleTool: (toolId: string, selected: boolean) => void;
 }) {
-  function submitSetup(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    onConnectSetup();
-  }
-
   return (
     <section
       ref={focusFallbackRef}
@@ -275,82 +243,17 @@ export function IntegrationControlCenterView({
         />
       ) : null}
 
-      <Dialog open={setupDefinition !== null} onOpenChange={(open) => !open && onSetupClose()}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>
-              {setupDefinition ? `Connect ${setupDefinition.name}` : "Connect service"}
-            </DialogTitle>
-            <DialogDescription>
-              Name this account so agents and teammates can choose the right one without seeing
-              credentials.
-            </DialogDescription>
-          </DialogHeader>
-          <form className="grid gap-5" onSubmit={submitSetup}>
-            <div className="grid gap-1.5">
-              <Label htmlFor="integration-instance-name">Account label</Label>
-              <Input
-                id="integration-instance-name"
-                value={displayName}
-                onChange={(event) => onDisplayNameChange(event.target.value)}
-                placeholder="e.g. Gmail — Finance"
-                autoFocus
-                maxLength={200}
-              />
-              <p className="text-2xs text-fg-subtle">
-                Labels are editable presentation; the underlying runtime identity remains stable.
-              </p>
-            </div>
-
-            <fieldset className="grid gap-2">
-              <legend className="text-xs font-medium text-fg-muted">
-                Who can use this account?
-              </legend>
-              <div className="grid gap-2 sm:grid-cols-2">
-                <OwnershipChoice
-                  selected={ownership === "personal"}
-                  icon={UserRoundIcon}
-                  title="Personal"
-                  description="Only you and explicitly delegated runs"
-                  onClick={() => onOwnershipChange("personal")}
-                />
-                <OwnershipChoice
-                  selected={ownership === "workspace"}
-                  icon={UsersRoundIcon}
-                  title="Workspace"
-                  description="Available to authorized workspace members"
-                  onClick={() => onOwnershipChange("workspace")}
-                />
-              </div>
-            </fieldset>
-
-            <details className="group rounded-lg border border-border bg-bg p-3">
-              <summary className="cursor-pointer text-xs font-medium text-fg-muted">
-                Permissions requested
-              </summary>
-              <p className="mt-2 break-words font-mono text-2xs leading-5 text-fg-subtle">
-                {setupDefinition?.authentication.scopes.join(", ")}
-              </p>
-            </details>
-
-            {!canManage ? (
-              <p className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs leading-5 text-fg-muted">
-                Ask a workspace administrator to add this account.
-              </p>
-            ) : null}
-
-            <DialogFooter>
-              <Button type="button" variant="ghost" onClick={onSetupClose}>
-                Cancel
-              </Button>
-              <Button type="submit" disabled={!canManage || !displayName.trim()}>
-                <ShieldCheckIcon />
-                Continue to provider
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+      <IntegrationConnectDialog
+        open={setupDefinition !== null}
+        definition={setupDefinition}
+        initialAccountLabel={setupInitialAccountLabel}
+        canConnectPersonal={canManage}
+        canConnectWorkspace={canManage}
+        restoreFocusRef={setupTriggerRef}
+        restoreFocusFallbackRef={focusFallbackRef}
+        onOpenChange={(open) => !open && onSetupClose()}
+        onConnect={onConnectSetup}
+      />
 
       <ConfirmDialog
         open={removeTarget !== null}
@@ -415,14 +318,14 @@ function DefinitionCard({
   onReconnect: (instance: ApiIntegrationInstallationSummary) => void;
   onRemove: (instance: ApiIntegrationInstallationSummary) => void;
 }) {
-  const Icon = (DEFINITION_VISUALS[definition.id] ?? { icon: CloudIcon }).icon;
+  const experience = integrationExperience(definition);
   const connectionById = new Map((connections ?? []).map((entry) => [entry.id, entry]));
   return (
     <article className="relative flex h-full flex-col overflow-hidden rounded-xl border border-border bg-bg/50 p-4 transition-colors hover:border-border-strong">
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-3">
           <span className="grid size-10 shrink-0 place-items-center rounded-xl border border-brand/20 bg-brand/5 text-brand shadow-sm">
-            <Icon className="size-5" />
+            <IntegrationExperienceIcon icon={experience.icon} className="size-5" />
           </span>
           <div className="min-w-0">
             <h3 className="truncate text-sm font-semibold text-fg">{definition.name}</h3>
@@ -432,7 +335,7 @@ function DefinitionCard({
           </div>
         </div>
         <Badge variant="outline" className="bg-surface/50 text-2xs text-fg-subtle">
-          {definition.provider.id === "google" ? "Google" : "Microsoft"}
+          {experience.providerName}
         </Badge>
       </div>
 
@@ -539,47 +442,21 @@ function DefinitionCard({
         variant={instances.length > 0 ? "outline" : "default"}
         size="sm"
         className="mt-auto w-full"
-        disabled={!canManage || busyKey !== null}
+        disabled={busyKey !== null}
         onClick={onAdd}
       >
         <PlusIcon />
-        {instances.length > 0 ? "Add another account" : `Connect ${definition.name}`}
+        {!canManage
+          ? `Review ${definition.name} setup`
+          : instances.length > 0
+            ? "Add another account"
+            : `Connect ${definition.name}`}
       </Button>
+      {!canManage ? (
+        <p className="mt-2 text-center text-2xs leading-4 text-fg-subtle">
+          A workspace administrator must complete the connection.
+        </p>
+      ) : null}
     </article>
-  );
-}
-
-function OwnershipChoice({
-  selected,
-  icon: Icon,
-  title,
-  description,
-  onClick,
-}: {
-  selected: boolean;
-  icon: ComponentType<{ className?: string }>;
-  title: string;
-  description: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={selected}
-      onClick={onClick}
-      className={cn(
-        "rounded-xl border p-3 text-left transition-colors",
-        selected
-          ? "border-brand bg-brand/5 shadow-sm"
-          : "border-border bg-surface/50 hover:border-border-strong",
-      )}
-    >
-      <span className="flex items-center gap-2 text-sm font-semibold text-fg">
-        <Icon className={cn("size-4", selected ? "text-brand" : "text-fg-subtle")} />
-        {title}
-      </span>
-      <span className="mt-1 block text-2xs leading-4 text-fg-muted">{description}</span>
-    </button>
   );
 }

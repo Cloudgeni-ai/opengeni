@@ -27,6 +27,20 @@ export class InteractionDefiniteDriverError extends Error {
   }
 }
 
+/** Driver proof that dispatch occurred but the exact native outcome could not
+ * be confirmed. Unlike an arbitrary transport exception, this preserves the
+ * adapter's bounded, user-actionable diagnosis without pretending certainty. */
+export class InteractionOutcomeUnknownDriverError extends Error {
+  constructor(
+    readonly code: InteractionError["code"],
+    message: string,
+    readonly retryable = false,
+  ) {
+    super(message);
+    this.name = "InteractionOutcomeUnknownDriverError";
+  }
+}
+
 export type InteractionCoreCommand = {
   operationId: string;
   controllerGeneration: string;
@@ -315,6 +329,16 @@ export class InteractionControllerCore<
         return await this.settle(
           entry,
           this.makeReceipt(command, "failed", dispatchedAt, this.timestamp(), null, {
+            code: error.code,
+            message: error.message,
+            retryable: error.retryable,
+          }),
+        );
+      }
+      if (error instanceof InteractionOutcomeUnknownDriverError) {
+        return await this.settle(
+          entry,
+          this.makeReceipt(command, "outcome_unknown", dispatchedAt, this.timestamp(), null, {
             code: error.code,
             message: error.message,
             retryable: error.retryable,

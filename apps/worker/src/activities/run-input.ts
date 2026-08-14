@@ -8,13 +8,13 @@ import {
 import { createHash } from "node:crypto";
 import {
   getActiveSessionHistoryItemsPaged,
-  getFiles,
+  getFilesForSubject,
   getLatestRunState,
   getHumanInputResumeForEvent,
   getSandboxSessionEnvelope,
   getSessionEvent,
   listSessionSystemUpdatesForTurn,
-  requireFile,
+  requireFileForSubject,
   type Database,
 } from "@opengeni/db";
 import {
@@ -76,16 +76,65 @@ export type PreparedTurnInput = {
 
 export type TurnInputOptions = {
   turnId: string;
+  /** Frozen initiating-human authority for every model-visible file read. */
+  fileAuthority: { accountId: string; subjectId: string | null };
   recovering?: boolean;
   unavailableSandboxFilesNote?: string;
   runCredentialsNote?: string;
+  mcpAvailabilityNote?: string;
   providerApi: HistoryProviderApi;
   projectCanonicalHistory?: ModelHistoryAttachmentProjector;
   materializeModelHistory?: ModelHistoryAttachmentProjector;
   materializeSerializedRunState?: (serialized: string) => Promise<string>;
   projectModelHistory?: ModelHistoryAttachmentProjector;
   loadActiveHistory?: typeof getActiveSessionHistoryItemsPaged;
+  /** Bounded critical-path timings; telemetry failures never affect preparation. */
+  onPreparationPhase?: (measurement: HistoryPreparationPhaseMeasurement) => void;
 };
+
+export type HistoryPreparationPhase =
+  | "system_update_load"
+  | "current_attachment_resolution"
+  | "durable_history_load"
+  | "sandbox_envelope_load"
+  | "canonical_projection"
+  | "provider_projection"
+  | "attachment_ref_projection"
+  | "screenshot_materialization"
+  | "model_attachment_projection"
+  | "runtime_input_assembly"
+  | "artifact_candidate_scan";
+
+export type HistoryPreparationPhaseMeasurement = {
+  phase: HistoryPreparationPhase;
+  outcome: "completed" | "failed";
+  durationSeconds: number;
+};
+
+async function measureHistoryPreparationPhase<T>(
+  options: Pick<TurnInputOptions, "onPreparationPhase">,
+  phase: HistoryPreparationPhase,
+  operation: () => T | Promise<T>,
+): Promise<T> {
+  const startedAt = performance.now();
+  let outcome: HistoryPreparationPhaseMeasurement["outcome"] = "completed";
+  try {
+    return await operation();
+  } catch (error) {
+    outcome = "failed";
+    throw error;
+  } finally {
+    try {
+      options.onPreparationPhase?.({
+        phase,
+        outcome,
+        durationSeconds: (performance.now() - startedAt) / 1_000,
+      });
+    } catch {
+      // Diagnostics must not change durable history or provider input.
+    }
+  }
+}
 
 export const MAX_INLINE_MODEL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
@@ -244,6 +293,9 @@ function attachmentRefsFromItem(item: Record<string, unknown>): FileResourceRef[
 }
 
 function attachmentUnavailableText(ref: FileResourceRef, file: FileAsset | undefined): string {
+  if (!file) {
+    return `[Attachment unavailable or no longer authorized: ${ref.fileId}.]`;
+  }
   const filename = file?.safeFilename ?? ref.fileId;
   const mediaType = file?.contentType ?? "unknown type";
   const path = file ? sandboxFilePath(ref, file) : `/workspace/${resourceMountPath(ref)}`;
@@ -261,7 +313,7 @@ function attachmentUnavailableText(ref: FileResourceRef, file: FileAsset | undef
  */
 export function createModelHistoryAttachmentProjector(
   db: Database,
-  workspaceId: string,
+  authority: { accountId: string; workspaceId: string; subjectId: string | null },
   policy: ModelAttachmentInputPolicy,
   readFileBytes?: (file: FileAsset) => Promise<Uint8Array>,
 ): ModelHistoryAttachmentProjector {
@@ -288,7 +340,10 @@ export function createModelHistoryAttachmentProjector(
 
     const unknownIds = orderedFileIds.filter((id) => !fileById.has(id) && !missingFileIds.has(id));
     if (unknownIds.length > 0) {
-      const files = await getFiles(db, workspaceId, unknownIds);
+      const files = await getFilesForSubject(db, {
+        ...authority,
+        fileIds: unknownIds,
+      });
       for (const file of files) fileById.set(file.id, file);
       for (const id of unknownIds) {
         if (!fileById.has(id)) missingFileIds.add(id);
@@ -378,11 +433,16 @@ export async function turnInput(
   if (!trigger) {
     throw new Error("Missing trigger event");
   }
-  const updates = await listSessionSystemUpdatesForTurn(
-    db,
-    trigger.workspaceId,
-    trigger.sessionId,
-    options.turnId,
+  const updates = await measureHistoryPreparationPhase(
+    options,
+    "system_update_load",
+    async () =>
+      await listSessionSystemUpdatesForTurn(
+        db,
+        trigger.workspaceId,
+        trigger.sessionId,
+        options.turnId,
+      ),
   );
   if (updates.length > 0) {
     const historyItemIds = new Set(
@@ -401,6 +461,7 @@ export async function turnInput(
       : undefined,
     options.unavailableSandboxFilesNote,
     options.runCredentialsNote,
+    options.mcpAvailabilityNote,
   );
   if (trigger.type === "user.message") {
     const payload = trigger.payload as {
@@ -413,10 +474,17 @@ export async function turnInput(
       throw new Error("user.message payload is missing text and annotations");
     }
     const resources = Array.isArray(payload.resources) ? (payload.resources as ResourceRef[]) : [];
-    const fileAttachments = await resolveUserMessageFileAttachments(
-      db,
-      trigger.workspaceId,
-      resources,
+    const fileAttachments = await measureHistoryPreparationPhase(
+      options,
+      "current_attachment_resolution",
+      async () =>
+        await resolveUserMessageFileAttachments(
+          db,
+          options.fileAuthority.accountId,
+          trigger.workspaceId,
+          options.fileAuthority.subjectId,
+          resources,
+        ),
     );
     const attachmentContext = userMessageAttachmentsContext(fileAttachments);
     return await messageInput(
@@ -432,6 +500,7 @@ export async function turnInput(
       options.materializeModelHistory,
       options.projectModelHistory,
       options.loadActiveHistory,
+      options,
     );
   }
   if (trigger.type === "system.update.delivered") {
@@ -451,6 +520,7 @@ export async function turnInput(
       options.materializeModelHistory,
       options.projectModelHistory,
       options.loadActiveHistory,
+      options,
     );
   }
   if (trigger.type === "user.approvalDecision") {
@@ -536,56 +606,103 @@ async function messageInput(
   materializeModelHistory?: ModelHistoryAttachmentProjector,
   projectModelHistory?: ModelHistoryAttachmentProjector,
   loadActiveHistory: typeof getActiveSessionHistoryItemsPaged = getActiveSessionHistoryItemsPaged,
+  preparationOptions: Pick<TurnInputOptions, "onPreparationPhase"> = {},
 ): Promise<PreparedTurnInput> {
-  const stored = await loadActiveHistory(db, trigger.workspaceId, trigger.sessionId);
-  const envelope = await getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId);
-  const canonicalView = projectRejectedProviderArtifacts(stored);
-  const canonicalProviderView = projectCanonicalHistory
-    ? await projectCanonicalHistory(canonicalView)
-    : canonicalView;
-  const providerView = projectHistoryForProvider(canonicalProviderView, providerApi);
-  const referencedHistory = withCurrentUserAttachmentRefs(providerView, currentAttachmentRefs);
-  const materializedHistory = materializeModelHistory
-    ? await materializeModelHistory(referencedHistory)
-    : referencedHistory;
-  const historyItems = projectModelHistory
-    ? await projectModelHistory(materializedHistory)
-    : materializedHistory;
-  const prepared = await runtime.prepareInput(agent, {
-    kind: "message",
-    ...(text ? { text } : {}),
-    ...(internalContext ? { internalContext } : {}),
-    historyItems: historyItems as any,
-    sandboxEnvelope: envelope,
-    ...(projectModelHistory ? { modelInputAlreadyProjected: true } : {}),
-  });
-  const preparedItems = Array.isArray(prepared.input)
-    ? new Set(prepared.input)
-    : new Set<unknown>();
+  const [stored, envelope] = await Promise.all([
+    measureHistoryPreparationPhase(preparationOptions, "durable_history_load", async () =>
+      loadActiveHistory(db, trigger.workspaceId, trigger.sessionId),
+    ),
+    measureHistoryPreparationPhase(preparationOptions, "sandbox_envelope_load", async () =>
+      getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId),
+    ),
+  ]);
+  const canonicalView = await measureHistoryPreparationPhase(
+    preparationOptions,
+    "canonical_projection",
+    async () => {
+      const active = projectRejectedProviderArtifacts(stored);
+      return projectCanonicalHistory ? await projectCanonicalHistory(active) : active;
+    },
+  );
+  const providerView = await measureHistoryPreparationPhase(
+    preparationOptions,
+    "provider_projection",
+    () => projectHistoryForProvider(canonicalView, providerApi),
+  );
+  const referencedHistory = await measureHistoryPreparationPhase(
+    preparationOptions,
+    "attachment_ref_projection",
+    () => withCurrentUserAttachmentRefs(providerView, currentAttachmentRefs),
+  );
+  const materializedHistory = await measureHistoryPreparationPhase(
+    preparationOptions,
+    "screenshot_materialization",
+    async () =>
+      materializeModelHistory
+        ? await materializeModelHistory(referencedHistory)
+        : referencedHistory,
+  );
+  const historyItems = await measureHistoryPreparationPhase(
+    preparationOptions,
+    "model_attachment_projection",
+    async () =>
+      projectModelHistory ? await projectModelHistory(materializedHistory) : materializedHistory,
+  );
+  const prepared = await measureHistoryPreparationPhase(
+    preparationOptions,
+    "runtime_input_assembly",
+    async () =>
+      await runtime.prepareInput(agent, {
+        kind: "message",
+        ...(text ? { text } : {}),
+        ...(internalContext ? { internalContext } : {}),
+        historyItems: historyItems as any,
+        sandboxEnvelope: envelope,
+        ...(projectModelHistory ? { modelInputAlreadyProjected: true } : {}),
+      }),
+  );
+  const providerArtifactCandidates = await measureHistoryPreparationPhase(
+    preparationOptions,
+    "artifact_candidate_scan",
+    () => {
+      const preparedItems = Array.isArray(prepared.input)
+        ? new Set(prepared.input)
+        : new Set<unknown>();
+      return {
+        knownHistoryItemIds: stored.map((row) => row.id),
+        historyItemIds: stored
+          .filter(
+            (row) =>
+              row.providerArtifactInvalidatedAt === null &&
+              hasOpaqueProviderArtifact(row.item) &&
+              preparedItems.has(row.item),
+          )
+          .map((row) => row.id),
+      };
+    },
+  );
   return {
     input: prepared,
     persistedHistoryCount: prepared.persistedHistoryCount,
-    providerArtifactCandidates: {
-      knownHistoryItemIds: stored.map((row) => row.id),
-      historyItemIds: stored
-        .filter(
-          (row) =>
-            row.providerArtifactInvalidatedAt === null &&
-            hasOpaqueProviderArtifact(row.item) &&
-            preparedItems.has(row.item),
-        )
-        .map((row) => row.id),
-    },
+    providerArtifactCandidates,
   };
 }
 
 export async function userMessageTextWithAttachments(
   db: Database,
+  accountId: string,
   workspaceId: string,
+  subjectId: string | null,
   text: string,
   resources: ResourceRef[],
 ): Promise<string> {
-  const fileAttachments = await resolveUserMessageFileAttachments(db, workspaceId, resources);
+  const fileAttachments = await resolveUserMessageFileAttachments(
+    db,
+    accountId,
+    workspaceId,
+    subjectId,
+    resources,
+  );
   const attachmentContext = userMessageAttachmentsContext(fileAttachments);
   return attachmentContext ? [text, "", attachmentContext].join("\n") : text;
 }
@@ -597,13 +714,20 @@ type UserMessageFileAttachment = {
 
 async function resolveUserMessageFileAttachments(
   db: Database,
+  accountId: string,
   workspaceId: string,
+  subjectId: string | null,
   resources: ResourceRef[],
 ): Promise<UserMessageFileAttachment[]> {
   const attachments: UserMessageFileAttachment[] = [];
   for (const resource of resources) {
     if (resource.kind !== "file") continue;
-    const file = await requireFile(db, workspaceId, resource.fileId);
+    const file = await requireFileForSubject(db, {
+      accountId,
+      workspaceId,
+      subjectId,
+      fileId: resource.fileId,
+    });
     attachments.push({ resource, file });
   }
   return attachments;

@@ -43,6 +43,7 @@ export * from "./transcription";
 // fleet tools, the machines REST route, and the rest of the sandbox layer.
 export * from "./sandbox/fleet";
 export * from "./sandbox/routing";
+export * from "./sandbox/runtime-settings";
 
 // Access layer (transport-neutral grant resolution + permission checks).
 export * from "./access";
@@ -71,6 +72,7 @@ export * from "./domain/durable-learning-slack-publication";
 export * from "./domain/slack-publication-secret-safety";
 export * from "./domain/company-profile-durable-learning-adapter";
 export * from "./domain/slack-bot";
+export * from "./domain/conversation-integrations";
 export * from "./domain/fiken";
 export * from "./domain/workspace-members";
 export * from "./domain/video-generation";

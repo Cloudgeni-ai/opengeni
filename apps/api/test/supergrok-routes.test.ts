@@ -88,12 +88,12 @@ const xaiFetch: typeof fetch = async (input, init) => {
       name: "Owner",
     });
   }
-  if (url.endsWith("/models-v2")) {
+  if (url.endsWith("/models")) {
     return Response.json({
       data: [
         {
-          id: "grok-4.5",
-          name: "Grok 4.5",
+          id: "grok-4.6",
+          name: "Grok 4.6",
           contextWindow: 256_000,
           apiBackend: "responses",
         },
@@ -352,7 +352,7 @@ describe("SuperGrok subscription routes", () => {
         subject: "xai-user-1",
         scope: "workspace",
       },
-      models: [{ id: "supergrok/grok-4.5", provider: "supergrok" }],
+      models: [{ id: "supergrok/grok-4.6", provider: "supergrok" }],
     });
 
     const renamed = await request(`/supergrok/accounts/${connected.accountId}`, {

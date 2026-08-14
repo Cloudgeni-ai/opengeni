@@ -64,7 +64,10 @@ describe("SuperGrok image adapter", () => {
       },
       generate: async (input) => {
         generatedInput = input;
-        return { bytes: Uint8Array.of(1, 2, 3), declaredMediaType: "image/png" };
+        return {
+          bytes: Uint8Array.of(1, 2, 3),
+          declaredMediaType: "image/png",
+        };
       },
     };
 
@@ -78,39 +81,47 @@ describe("SuperGrok image adapter", () => {
     expect(execution?.providerBindingHash).toMatch(/^[0-9a-f]{64}$/);
     expect(JSON.stringify(execution)).not.toContain(baseInput().credentialId);
     expect(generatedInput?.prompt).toBe("A clean architectural sketch");
-    expect(await generatedInput?.getToken()).toEqual({ accessToken: "access", userId: "xai-user" });
+    expect(await generatedInput?.getToken()).toEqual({
+      accessToken: "access",
+      userId: "xai-user",
+    });
     expect(await generatedInput?.refresh()).toEqual({
       accessToken: "refresh",
       userId: "xai-user",
     });
   });
 
-  test("fails before provider admission when reference images are supplied", async () => {
-    let executed = false;
-    await expect(
-      executeXaiSubscriptionImageGeneration(
-        {
-          ...baseInput(),
-          references: [
-            {
-              mediaType: "image/png",
-              bytes: Uint8Array.of(1),
-              sizeBytes: 1,
-              sha256: "a".repeat(64),
-            },
-          ],
-        },
-        {
-          execute: async () => {
-            executed = true;
-            return receipt as never;
+  test("passes sealed reference images to the xAI edit route", async () => {
+    let generatedInput: Parameters<XaiImageGenerationPorts["generate"]>[0] | null = null;
+    const result = await executeXaiSubscriptionImageGeneration(
+      {
+        ...baseInput(),
+        references: [
+          {
+            mediaType: "image/png",
+            bytes: Uint8Array.of(1),
+            sizeBytes: 1,
+            sha256: "a".repeat(64),
           },
-          generate: async () => {
-            throw new Error("provider should not run");
-          },
+        ],
+      },
+      {
+        execute: async (input) => {
+          await input.generate();
+          return receipt as never;
         },
-      ),
-    ).rejects.toThrow("does not support reference images");
-    expect(executed).toBe(false);
+        generate: async (input) => {
+          generatedInput = input;
+          return {
+            bytes: Uint8Array.of(1, 2, 3),
+            declaredMediaType: "image/png",
+          };
+        },
+      },
+    );
+    expect(result).toBe(receipt);
+    expect(generatedInput?.references).toEqual([
+      { mediaType: "image/png", bytes: Uint8Array.of(1) },
+    ]);
   });
 });

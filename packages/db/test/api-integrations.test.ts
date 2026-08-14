@@ -824,6 +824,27 @@ describe("API Integration persistence", () => {
       configureIntegrationFacet(client.db, {
         accountId: first.accountId,
         workspaceId: first.workspaceId,
+        subjectId: "user:api-integration-facet-other-admin",
+        capabilityId: googleInput.capabilityId,
+        instanceKey: "finance",
+        facetKey: "drive-content",
+        displayName: "Finance source",
+        config: {
+          sources: [
+            {
+              sourceId: "folder:finance",
+              sourceKind: "folder",
+              includeDescendants: true,
+            },
+          ],
+        },
+        idempotencyKey: configureKey,
+      }),
+    ).rejects.toBeInstanceOf(IntegrationFacetOperationIdempotencyError);
+    await expect(
+      configureIntegrationFacet(client.db, {
+        accountId: first.accountId,
+        workspaceId: first.workspaceId,
         subjectId: first.subjectId,
         capabilityId: googleInput.capabilityId,
         instanceKey: "finance",

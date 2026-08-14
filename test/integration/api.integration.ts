@@ -906,6 +906,7 @@ describe("API component integration", () => {
 
     const grant = {
       ...baseGrant,
+      principalKind: "agent_attempt" as const,
       metadata: {
         delegated: true,
         sessionId: session.id,
@@ -948,13 +949,26 @@ describe("API component integration", () => {
     expect(pausedGoal.resource.state).toBe("paused");
     expect(JSON.stringify(pausedGoal)).not.toContain("waiting on upstream fix");
 
-    const replacedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_set", {
+    await expect(
+      callMcpTool(mcp, "goal_set", {
+        text: "upstream fixed; finish the job",
+      }),
+    ).rejects.toThrow("use goal_update to revise it");
+    const revisedWhilePaused = await callMcpTool<{
+      version: number;
+      text: string;
+      outcome: string;
+    }>(mcp, "goal_update", {
       text: "upstream fixed; finish the job",
+      expectedObjectiveRevision: 2,
+      changeKind: "refinement",
+      rationale: "the upstream blocker cleared without changing the objective",
+      idempotencyKey: crypto.randomUUID(),
     });
-    expect(replacedGoal).toMatchObject({
-      outcome: "updated",
-      resource: { state: "active" },
-      facts: { replaced: true },
+    expect(revisedWhilePaused).toMatchObject({
+      version: 4,
+      text: "upstream fixed; finish the job",
+      outcome: "applied",
     });
 
     const completedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_complete", {
@@ -975,7 +989,14 @@ describe("API component integration", () => {
     const events = await listSessionEvents(dbClient.db, baseGrant.workspaceId, session.id);
     expect(
       events.filter((event) => event.type.startsWith("goal.")).map((event) => event.type),
-    ).toEqual(["goal.set", "goal.updated", "goal.paused", "goal.set", "goal.completed"]);
+    ).toEqual([
+      "goal.set",
+      "goal.updated",
+      "goal.progress",
+      "goal.paused",
+      "goal.updated",
+      "goal.completed",
+    ]);
     expect((await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id))?.status).toBe(
       "completed",
     );
@@ -8695,13 +8716,17 @@ describe("API component integration", () => {
       permissions: ["workspace:read", "sessions:create", "sessions:read"] as Permission[],
     };
     const managerMcp = buildOpenGeniMcpServer(mcpDeps, managerGrant);
-    await expect(
-      callMcpTool(managerMcp, "session_create", {
+    await expectMcpOrchestrationFailure(
+      managerMcp,
+      "session_create",
+      {
         initialMessage: "spawn an over-privileged worker",
         model: "scripted-model",
         firstPartyMcpPermissions: ["environments:manage"],
-      }),
-    ).rejects.toThrow("cannot grant first-party MCP permission beyond the creating grant");
+      },
+      "session_create_forbidden",
+      "cannot grant first-party MCP permission beyond the creating grant",
+    );
     const spawnedReceipt = await callMcpTool<McpMutationReceiptType>(managerMcp, "session_create", {
       initialMessage: "spawn a delegated worker",
       model: "scripted-model",
@@ -9587,15 +9612,19 @@ describe("API component integration", () => {
 
     // Omission inherits the manager's exact effective set. If that set lacks
     // goals:manage, a goal-bearing child is rejected instead of being widened.
-    await expect(
-      callMcpTool(managerMcp, "session_create", {
+    await expectMcpOrchestrationFailure(
+      managerMcp,
+      "session_create",
+      {
         initialMessage: "spawn an under-authorized goal worker",
         model: "scripted-model",
         sandboxBackend: "none",
         sandbox: "new",
         goal: { text: "fleet healthy" },
-      }),
-    ).rejects.toThrow("goal-bearing sessions require goals:manage");
+      },
+      "session_create_rejected",
+      "goal-bearing sessions require goals:manage",
+    );
 
     const authorizedParent = await createSession(dbClient.db, {
       accountId: grant.accountId,
@@ -9641,16 +9670,20 @@ describe("API component integration", () => {
 
     // Even an authorized creator cannot ask for a goal while explicitly
     // narrowing goals:manage out of the child token.
-    await expect(
-      callMcpTool(authorizedMcp, "session_create", {
+    await expectMcpOrchestrationFailure(
+      authorizedMcp,
+      "session_create",
+      {
         initialMessage: "narrow away goal authority",
         model: "scripted-model",
         sandboxBackend: "none",
         sandbox: "new",
         goal: { text: "fleet healthy" },
         firstPartyMcpPermissions: ["workspace:read"],
-      }),
-    ).rejects.toThrow("goal-bearing sessions require goals:manage");
+      },
+      "session_create_rejected",
+      "goal-bearing sessions require goals:manage",
+    );
   });
 
   test("manager MCP session tools enforce environment attachment permission and billing limits", async () => {
@@ -9686,13 +9719,17 @@ describe("API component integration", () => {
       permissions: ["workspace:read", "sessions:create"] as Permission[],
     };
     const spawnOnlyMcp = buildOpenGeniMcpServer(mcpDeps, spawnOnlyGrant);
-    await expect(
-      callMcpTool(spawnOnlyMcp, "session_create", {
+    await expectMcpOrchestrationFailure(
+      spawnOnlyMcp,
+      "session_create",
+      {
         initialMessage: "exfiltrate",
         model: "scripted-model",
         environmentId: environment.id,
-      }),
-    ).rejects.toThrow("missing permission: variable-sets:use (deprecated alias: environments:use)");
+      },
+      "session_create_forbidden",
+      "missing permission: variable-sets:use (deprecated alias: environments:use)",
+    );
 
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
     const attachedReceipt = await callMcpTool<McpMutationReceiptType>(mcp, "session_create", {
@@ -9706,13 +9743,17 @@ describe("API component integration", () => {
       attachedReceipt.resource.id,
     );
     expect(attached.variableSetId).toBe(environment.id);
-    await expect(
-      callMcpTool(mcp, "session_create", {
+    await expectMcpOrchestrationFailure(
+      mcp,
+      "session_create",
+      {
         initialMessage: "unknown environment",
         model: "scripted-model",
         environmentId: crypto.randomUUID(),
-      }),
-    ).rejects.toThrow("unknown variableSetId");
+      },
+      "session_create_rejected",
+      "unknown variableSetId",
+    );
 
     // The successful create recorded one agent_run.created usage event, so a
     // one-run monthly cap now blocks both spawn and send-message.
@@ -9730,18 +9771,26 @@ describe("API component integration", () => {
       },
       grant,
     );
-    await expect(
-      callMcpTool(limitedMcp, "session_create", {
+    await expectMcpOrchestrationFailure(
+      limitedMcp,
+      "session_create",
+      {
         initialMessage: "over the cap",
         model: "scripted-model",
-      }),
-    ).rejects.toThrow("monthly agent run limit reached");
-    await expect(
-      callMcpTool(limitedMcp, "session_send_message", {
+      },
+      "session_create_limit_exceeded",
+      "monthly agent run limit reached",
+    );
+    await expectMcpOrchestrationFailure(
+      limitedMcp,
+      "session_send_message",
+      {
         sessionId: attached.id,
         text: "over the cap",
-      }),
-    ).rejects.toThrow("monthly agent run limit reached");
+      },
+      "session_send_message_limit_exceeded",
+      "monthly agent run limit reached",
+    );
   });
 
   test("manager MCP session_create forwards targetSandboxId to the domain (create-time machine targeting)", async () => {
@@ -9781,14 +9830,18 @@ describe("API component integration", () => {
     // which PROVES the value flowed end-to-end. Before the fix the unknown key
     // was dropped and this create would have succeeded, silently swallowing the
     // agent's machine-targeting request.
-    await expect(
-      callMcpTool(mcp, "session_create", {
+    await expectMcpOrchestrationFailure(
+      mcp,
+      "session_create",
+      {
         initialMessage: "pin to a machine",
         model: "scripted-model",
         sandboxBackend: "none",
-        targetSandboxId: crypto.randomUUID(),
-      }),
-    ).rejects.toThrow(/cannot target a machine for a session with no sandbox/);
+        machineTarget: { targetSandboxId: crypto.randomUUID() },
+      },
+      "session_create_rejected",
+      "cannot target a machine for a session with no sandbox",
+    );
   });
 
   test("manager MCP environment tools set variables write-only and create environments by name", async () => {
@@ -10000,6 +10053,7 @@ describe("API component integration", () => {
     }
     const liveGrant = {
       ...grant,
+      principalKind: "agent_attempt" as const,
       metadata: {
         delegated: true,
         sessionId: session.id,
@@ -10044,6 +10098,7 @@ describe("API component integration", () => {
     const foreignGrant = await bootstrapMcpGrant(dbClient.db);
     const wrongWorkspace = buildOpenGeniMcpServer(mcpDeps, {
       ...foreignGrant,
+      principalKind: "agent_attempt" as const,
       metadata: liveGrant.metadata,
     });
     await expect(
@@ -10671,6 +10726,38 @@ async function callMcpTool<T = unknown>(
     throw new Error(`MCP tool returned no text: ${name}`);
   }
   return JSON.parse(text) as T;
+}
+
+async function expectMcpOrchestrationFailure(
+  server: unknown,
+  name: "session_create" | "session_send_message",
+  args: Record<string, unknown>,
+  code: string,
+  message: string,
+): Promise<void> {
+  const result = await (
+    server as {
+      _registeredTools?: Record<
+        string,
+        {
+          handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown>;
+        }
+      >;
+    }
+  )._registeredTools?.[name]?.handler(args, {});
+  expect(result).toMatchObject({
+    isError: true,
+    structuredContent: { error: { code } },
+  });
+  const structured = (
+    result as { structuredContent?: { error?: { code?: string; message?: string } } }
+  ).structuredContent;
+  expect(structured?.error?.message).toContain(message);
+  expect(new TextEncoder().encode(structured?.error?.message ?? "").byteLength).toBeLessThanOrEqual(
+    1_024,
+  );
+  const text = (result as { content?: Array<{ text?: string }> }).content?.[0]?.text;
+  expect(text ? JSON.parse(text) : null).toEqual(structured);
 }
 
 class FakeWorkflowClient implements SessionWorkflowClient {

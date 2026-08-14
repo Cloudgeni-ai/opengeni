@@ -50,6 +50,10 @@ const workerDeathTestTimeoutMs = 360_000;
 // ceiling that covers that scheduling variance without changing any runtime
 // timeout, retry contract, or behavioral assertion.
 const temporalWorkflowTestTimeoutMs = 60_000;
+// This proof spans initial activity admission, cancellation-wait observation,
+// and replacement admission. Each phase gets the same loaded-runner allowance
+// above; the outer ceiling leaves enough room for two delayed polls plus drain.
+const quiescenceReceiptTestTimeoutMs = 120_000;
 const workflowDefinitionsPath = new URL("../../apps/worker/src/workflows.ts", import.meta.url)
   .pathname;
 const legacySandboxReaperWorkflowPath = new URL(
@@ -199,7 +203,7 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "does not retry failed agent activities",
+    "re-peeks after a legacy activity worker returns void without redispatching settled work",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
@@ -223,6 +227,7 @@ describe("Temporal workflow integration", () => {
       const run = worker.run();
       try {
         const client = new Client({ connection });
+        const startedAt = Date.now();
         const handle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
           workflowId: `wf-${crypto.randomUUID()}`,
@@ -237,6 +242,122 @@ describe("Temporal workflow integration", () => {
         await handle.result();
         expect(attempts).toBe(1);
         expect(failures).toHaveLength(1);
+        expect(Date.now() - startedAt).toBeGreaterThanOrEqual(900);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "backs off and reclaims the same turn when failure happens before attempt claim",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const turn = queuedTurn("event-1");
+      const attempts: string[] = [];
+      const failures: Array<{ attemptId: string; retryDelayMs?: number }> = [];
+      let admission!: ReturnType<typeof createTurnAdmission>;
+      admission = createTurnAdmission([turn], async (input) => {
+        attempts.push(input.attemptId);
+        if (attempts.length === 1) {
+          admission.recover();
+          throw new Error("synthetic pre-claim persistence failure");
+        }
+        return { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async (input: { attemptId: string; retryDelayMs?: number }) => {
+          failures.push(input);
+          return { action: "unclaimed" as const };
+        },
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const startedAt = Date.now();
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: `wf-${crypto.randomUUID()}`,
+          args: [
+            {
+              ...scope,
+              sessionId: crypto.randomUUID(),
+              initialEventId: "event-1",
+            },
+          ],
+        });
+        await handle.result();
+
+        expect(attempts).toHaveLength(2);
+        expect(attempts[1]).not.toBe(attempts[0]);
+        expect(failures).toHaveLength(1);
+        expect(failures[0]).toMatchObject({
+          attemptId: attempts[0],
+          retryDelayMs: 1_000,
+        });
+        expect(Date.now() - startedAt).toBeGreaterThanOrEqual(900);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "does not continue an active goal after terminal failure truth already committed",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      let attempts = 0;
+      let failureSettlements = 0;
+      let goalChecks = 0;
+      const admission = createTurnAdmission([queuedTurn("event-1")], async () => {
+        attempts += 1;
+        throw new Error("response lost after terminal failure settlement");
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => {
+          failureSettlements += 1;
+          return { action: "terminal" as const };
+        },
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
+        maybeContinueGoal: async () => {
+          goalChecks += 1;
+          return { action: "continue" as const };
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: `wf-${crypto.randomUUID()}`,
+          args: [
+            {
+              ...scope,
+              sessionId: crypto.randomUUID(),
+              initialEventId: "event-1",
+            },
+          ],
+        });
+        await handle.result();
+
+        expect(attempts).toBe(1);
+        expect(failureSettlements).toBe(1);
+        expect(goalChecks).toBe(0);
       } finally {
         worker.shutdown();
         await run;
@@ -822,14 +943,23 @@ describe("Temporal workflow integration", () => {
           args: [{ ...scope, sessionId, initialEventId: first.triggerEventId }],
         });
         wakeWorkflow = async () => await handle.signal("queueChanged");
-        await waitFor(() => runs.length === 1);
+        await waitFor(() => runs.length === 1, {
+          timeoutMs: temporalWorkflowTestTimeoutMs,
+          describe: () => "initial turn activity was not admitted",
+        });
         queuedTurns.push(second);
         await handle.signal("userMessage", second.triggerEventId);
         await handle.signal("sessionControl", "control-event");
-        await waitFor(() => cancellationWaitPeeks > 0);
+        await waitFor(() => cancellationWaitPeeks > 0, {
+          timeoutMs: temporalWorkflowTestTimeoutMs,
+          describe: () => "workflow did not observe the durable cancellation-wait boundary",
+        });
         expect(runs).toHaveLength(1);
         allowFirstRunToFinish = true;
-        await waitFor(() => runs.length === 2);
+        await waitFor(() => runs.length === 2, {
+          timeoutMs: temporalWorkflowTestTimeoutMs,
+          describe: () => "replacement turn was not admitted after the quiescence receipt",
+        });
         expect(controls).toEqual([
           { ...scope, sessionId, attemptId: expect.any(String), workflowId },
         ]);
@@ -842,7 +972,7 @@ describe("Temporal workflow integration", () => {
         await run;
       }
     },
-    temporalWorkflowTestTimeoutMs,
+    quiescenceReceiptTestTimeoutMs,
   );
 
   test(

@@ -631,11 +631,12 @@ describe("productLabelForModelId", () => {
 });
 
 describe("productShortLabelForModelId", () => {
-  test("curates compact GPT-5.6 product labels and leaves others unset", () => {
+  test("curates compact GPT-5.6 and Grok product labels and leaves others unset", () => {
     expect(productShortLabelForModelId("gpt-5.6-sol")).toBe("5.6 Sol");
     expect(productShortLabelForModelId("codex/gpt-5.6-sol")).toBe("5.6 Sol");
     expect(productShortLabelForModelId("gpt-5.6-luna")).toBe("5.6 Luna");
     expect(productShortLabelForModelId("gpt-5.6-terra")).toBe("5.6 Terra");
+    expect(productShortLabelForModelId("grok-4.6")).toBe("4.6");
     expect(productShortLabelForModelId("gpt-5.4-mini")).toBeNull();
   });
 });
@@ -649,18 +650,8 @@ describe("configuredModels", () => {
       },
       () => getSettings(),
     );
-    const settings = withXaiSubscriptionCatalogProvider(base, [
-      {
-        slug: "grok-4.5",
-        name: "Grok 4.5 Live",
-        contextWindowTokens: 300_000,
-        effectiveContextWindowTokens: 285_000,
-        autoCompactTokenLimit: 240_000,
-        maxCompletionTokens: 16_384,
-        apiBackend: "responses",
-      },
-    ]);
-    const resolved = resolveModelProvider(settings, "supergrok/grok-4.5")!;
+    const settings = withXaiSubscriptionCatalogProvider(base);
+    const resolved = resolveModelProvider(settings, "supergrok/grok-4.6")!;
     expect(resolved.provider).toMatchObject({
       id: "supergrok-subscription",
       kind: "xai-subscription",
@@ -668,18 +659,27 @@ describe("configuredModels", () => {
       baseUrl: "https://cli-chat-proxy.grok.com/v1",
     });
     expect(resolved.model).toMatchObject({
-      id: "supergrok/grok-4.5",
-      upstreamModelId: "grok-4.5",
-      label: "Grok 4.5 Live",
-      contextWindowTokens: 300_000,
-      effectiveContextWindowTokens: 285_000,
-      autoCompactTokenLimit: 240_000,
+      id: "supergrok/grok-4.6",
+      upstreamModelId: "grok-4.6",
+      label: "Grok 4.6",
+      shortLabel: "4.6",
+      contextWindowTokens: 500_000,
+      effectiveContextWindowTokens: 475_000,
+      autoCompactTokenLimit: 400_000,
       credentialSource: { kind: "connected_subscription", provider: "xai" },
       billing: { upstreamPayer: "connected_subscription", metering: "external" },
     });
     expect(resolved.model.capabilities.hostedTools.webSearch.runnable).toBe(true);
     expect(resolved.model.capabilities.hostedTools.xSearch.runnable).toBe(true);
     expect(resolved.model.capabilities.hostedTools.imageGeneration.runnable).toBe(true);
+    expect(resolved.model.capabilities.reasoning).toMatchObject({
+      efforts: ["low", "medium", "high", "xhigh"],
+      defaultEffort: "high",
+    });
+    expect(resolved.model.capabilities.latencyModes).toEqual([
+      { id: "standard", upstream: "supported", runnable: true },
+      { id: "fast", upstream: "supported", runnable: true },
+    ]);
   });
 
   test("the built-in never claims a supergrok/ id", () => {
@@ -692,9 +692,9 @@ describe("configuredModels", () => {
     );
     const settings = withXaiSubscriptionCatalogProvider({
       ...base,
-      openaiModel: "supergrok/grok-4.5",
+      openaiModel: "supergrok/grok-4.6",
     });
-    const matches = configuredModels(settings).filter((model) => model.id === "supergrok/grok-4.5");
+    const matches = configuredModels(settings).filter((model) => model.id === "supergrok/grok-4.6");
     expect(matches).toHaveLength(1);
     expect(matches[0]!.providerId).toBe("supergrok-subscription");
   });
@@ -1507,6 +1507,7 @@ describe("configuredModelPricing", () => {
     expect(serviceTierForLatencyMode("openai", "fast")).toBe("fast");
     expect(serviceTierForLatencyMode("azure", "fast")).toBe("priority");
     expect(serviceTierForLatencyMode("codex-subscription", "fast")).toBe("priority");
+    expect(serviceTierForLatencyMode("supergrok-subscription", "fast")).toBe("priority");
     expect(serviceTierForLatencyMode("openai", "standard")).toBeUndefined();
     expect(responseSatisfiesLatencyMode("fast", "fast")).toBe(true);
     expect(responseSatisfiesLatencyMode("fast", "priority")).toBe(true);
@@ -1718,7 +1719,7 @@ function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
 describe("policyProviderIdForModel", () => {
   test("supergrok/ id attributes to the subscription provider even on base settings", () => {
     const settings = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
-    expect(policyProviderIdForModel(settings, "supergrok/grok-4.5")).toBe("supergrok-subscription");
+    expect(policyProviderIdForModel(settings, "supergrok/grok-4.6")).toBe("supergrok-subscription");
   });
   // The attribution the workspace model policy evaluates MUST agree with the
   // real router on every path — especially the two that historically leaked:

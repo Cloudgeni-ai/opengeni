@@ -1,6 +1,7 @@
 //! The control-RPC dispatch table.
 //!
-//! A [`ControlRequest`] arrives on the agent's `agent.<ws>.<id>.rpc` subject
+//! A [`ControlRequest`] arrives on the agent's exact claimed process subject
+//! (`agent.<ws>.<id>.connection.<instance>.rpc`)
 //! (§10.1). [`dispatch`] decodes its `op` oneof, calls the matching
 //! [`Platform`](opengeni_agent_platform::Platform) method, and builds a
 //! [`ControlResponse`] that carries the same `request_id` and either the typed
@@ -118,6 +119,7 @@ pub async fn dispatch<P: Platform>(
 
 /// The actual oneof match. Separate from [`dispatch`] only to share the body with
 /// the sync [`dispatch_bytes`] entrypoint.
+#[allow(clippy::too_many_lines)]
 async fn dispatch_future<P: Platform>(
     request: ControlRequest,
     platform: &Arc<P>,
@@ -159,6 +161,10 @@ async fn dispatch_future<P: Platform>(
                 "hello/resume/update_may_proceed are agent-initiated, not inbound ops",
             )
         }
+        Op::AgentUpdateApply(_) => protocol_error(
+            request_id,
+            "agent_update_apply must be handled by the process supervisor",
+        ),
 
         // --- op-stream (v1.1): wire types exist, no runtime serves them yet ----
         // The runner does not advertise `Capabilities.op_stream`, so a compliant
@@ -449,6 +455,25 @@ pub fn breaker_reply_error(
                  this signals a pathological backlog, not normal load; retry, and expect \
                  host-capacity telemetry to explain the pressure"
             ),
+            retryable: true,
+            detail,
+        }),
+        result: None,
+    }
+}
+
+/// Typed retryable refusal while a process-global self-update drains accepted
+/// work. Liveness and op-control remain available; only new work is rejected.
+#[must_use]
+pub fn update_draining_reply(request_id: String, op_label: &str) -> ControlResponse {
+    let mut detail = std::collections::HashMap::new();
+    detail.insert("op".to_string(), op_label.to_string());
+    detail.insert("reason".to_string(), "agent_update".to_string());
+    ControlResponse {
+        request_id,
+        error: Some(AgentError {
+            code: ErrorCode::Draining as i32,
+            message: "the runner is draining accepted work for a verified self-update; retry on the successor process".to_string(),
             retryable: true,
             detail,
         }),

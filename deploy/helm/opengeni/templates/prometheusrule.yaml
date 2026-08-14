@@ -459,6 +459,39 @@ spec:
           annotations:
             summary: OpenGeni Connected Machine healed-fault rate is elevated (leading indicator)
         # ── Worker fleet ─────────────────────────────────────────────────────
+        # Google Drive scheduled knowledge sync. Every rule is fenced to the
+        # exact namespace, Helm release, configured environment, and provider.
+        - alert: OpenGeniGoogleDriveSyncFailureRatio
+          expr: |
+            (
+              sum(increase(opengeni_knowledge_source_sync_runs_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="google_drive",outcome="failed"}[15m]))
+              /
+              clamp_min(sum(increase(opengeni_knowledge_source_sync_runs_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="google_drive"}[15m])), 1)
+            ) > 0.2
+            and on()
+            sum(increase(opengeni_knowledge_source_sync_runs_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="google_drive"}[15m])) >= 5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Google Drive knowledge-sync failures exceed 20%
+            description: Inspect bounded failure reasons, provider retry, reconnect-required, and explicit limit-hit series before changing retry or source budgets.
+        - alert: OpenGeniGoogleDriveReconnectRequired
+          expr: |
+            sum(increase(opengeni_knowledge_source_sync_reconnect_required_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="google_drive"}[15m])) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: A Google Drive source requires connector reconnection
+            description: Reconnect through the normal user-owned connection lifecycle; never copy tokens or provider responses into operator evidence.
+        - alert: OpenGeniGoogleDriveSyncLimitReached
+          expr: |
+            sum by (limit) (increase(opengeni_knowledge_source_sync_limit_hits_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="google_drive"}[30m])) > 0
+          labels:
+            severity: info
+          annotations:
+            summary: A Google Drive sync reached an explicit resource limit
+            description: Inspect the limit label and source size before approving any configuration increase.
         # Eligible backlog and slot saturation are correlated on one exact
         # scrape identity before fleet aggregation. Paused human prompts never
         # enter these Temporal activity-queue signals.

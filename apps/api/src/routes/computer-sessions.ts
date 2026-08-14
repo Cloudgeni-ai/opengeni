@@ -36,7 +36,7 @@ import {
   findComputerSessionControlRecordByOperation,
   getAttachedBrowserDevice,
   getComputerSessionControlRecord,
-  getEnrollment,
+  getLiveEnrollmentConnection,
   getSession,
   listComputerSessions,
   prepareComputerSessionCreate,
@@ -52,6 +52,7 @@ import {
   requireAccessGrant,
   requireSessionAuthorization,
   relayConfigFromSettings,
+  resolveSessionSandboxRuntime,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   type ApiRouteDeps,
@@ -84,6 +85,7 @@ import {
 import { withCachedController } from "../controller-data-plane";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { allowedCorsOrigin } from "../http/cors";
+import { interactionControlApiError } from "../http/interaction-control-error";
 import { observeComputerActionResult, observeLifecycleResult } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 
@@ -463,6 +465,28 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         "computer.attach",
         async ({ client, sessionClient, record, binding, placement }) => {
           if (origin) await client.addAllowedOrigins([origin]);
+          const reference = {
+            computerSessionId,
+            controllerGeneration: binding.controllerGeneration,
+          };
+          const target = (await sessionClient.listTargets()).find(
+            (candidate) => candidate.id === request.targetId,
+          );
+          if (!target) {
+            throw new BrowserControlRequestError(404, {
+              code: "target_not_found",
+              message: "computer target does not exist",
+              retryable: false,
+            });
+          }
+          if (target.kind === "app") {
+            throw new BrowserControlRequestError(409, {
+              code: "unsupported",
+              message:
+                "application targets support semantic control but do not provide a visual stream; select a window or screen",
+              retryable: false,
+            });
+          }
           const grantId = randomUUID();
           const expiresAt = new Date(Date.now() + request.expiresInSeconds * 1_000).toISOString();
           const token = deriveComputerViewGrantToken({
@@ -477,21 +501,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             grantId,
             expiresAt,
           });
-          const reference = {
-            computerSessionId,
-            controllerGeneration: binding.controllerGeneration,
-          };
           await client.createComputerViewGrant(reference, { grantId, token, expiresAt });
-          const target = (await sessionClient.listTargets()).find(
-            (candidate) => candidate.id === request.targetId,
-          );
-          if (!target) {
-            throw new BrowserControlRequestError(404, {
-              code: "target_not_found",
-              message: "computer target does not exist",
-              retryable: false,
-            });
-          }
           const relaySecret = placement.session.openComputerFrames
             ? resolveStreamTokenSecret(deps.settings)
             : null;
@@ -510,10 +520,14 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
               ...(request.stream ? { stream: request.stream } : {}),
             });
           } catch (error) {
+            const publicFailure = interactionControlApiError(error, "computer");
             console.error("computer frame relay open failed", {
               computerSessionId,
               targetId: request.targetId,
-              failure: error instanceof Error ? error.message : String(error),
+              failureCode: publicFailure?.details?.controlFailureCode ?? "unclassified",
+              retryable: publicFailure?.retryable ?? false,
+              outcomeUnknown: publicFailure?.outcomeUnknown ?? false,
+              controlRequestId: publicFailure?.details?.controlRequestId ?? null,
             });
             throw error;
           }
@@ -765,18 +779,19 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       if (device.state !== "connected") {
         throw new ComputerSessionStateError("Attached browser machine is disconnected");
       }
-      const enrollment = await getEnrollment(
+      const enrollment = await getLiveEnrollmentConnection(
         deps.db,
         sourceSession.workspaceId,
         device.enrollmentId,
       );
-      if (!enrollment || enrollment.status !== "active") {
+      if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
         throw new ComputerSessionStateError("Attached browser machine is unavailable");
       }
       assertPlacementInstance(expectedPlacementInstanceId, device.connectionGeneration);
       const built = await buildSelfhostedBackendSession({
         workspaceId: sourceSession.workspaceId,
         agentId: device.enrollmentId,
+        connectionInstanceId: enrollment.connectionInstanceId,
         relay: relayConfigFromSettings(deps.settings),
         controlRpcFactory: () => new NatsControlRpc(async () => deps.bus.getRequestConnection()),
         epoch: 0,
@@ -1127,6 +1142,11 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     if (!placement.lease?.instanceId) {
       throw new ComputerSessionStateError("ComputerSession lease placement is unavailable");
     }
+    const sandboxRuntime = await resolveSessionSandboxRuntime(
+      deps.db,
+      deps.settings,
+      sourceSession,
+    );
     const acquired = await acquireLease(deps.db, {
       accountId: grant.accountId,
       workspaceId: sourceSession.workspaceId,
@@ -1136,8 +1156,8 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       subjectId: sourceSession.id,
       backend: placement.lease.backend,
       os: placement.lease.os,
-      image: placement.lease.image,
-      rigVersionId: placement.lease.rigVersionId,
+      image: sandboxRuntime.image,
+      rigVersionId: sourceSession.rigVersionId,
       leaseTtlMs: deps.settings.sandboxLeaseTtlMs,
       expectedEpoch: placement.lease.leaseEpoch,
       waitSignal,
@@ -1541,6 +1561,8 @@ function interactionFailure(error: unknown) {
 }
 
 function computerRouteError(error: unknown): HTTPException {
+  const connectedMachineError = interactionControlApiError(error, "computer");
+  if (connectedMachineError) return connectedMachineError;
   if (error instanceof HTTPException) return error;
   if (error instanceof ComputerSessionNotFoundError) {
     return new HTTPException(404, { message: error.message, cause: error });

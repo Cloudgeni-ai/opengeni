@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Permission } from "@opengeni/contracts";
+import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
 import {
   capabilityErrorToast,
@@ -1335,7 +1336,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
   function clientConfig(patch: Partial<ClientConfig> = {}): ClientConfig {
     return {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-08-social-provider-tools-v1",
+      apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol"],
       models: [],

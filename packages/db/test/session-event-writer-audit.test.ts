@@ -159,6 +159,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
   },
   "packages/db/src/index.ts#updateSessionGoalWithEvent": {
+    inserts: 3,
+    contract: "canonical",
+  },
+  "packages/db/src/index.ts#recordSessionGoalProgressWithEvent": {
     inserts: 1,
     contract: "canonical",
   },
@@ -178,6 +182,11 @@ const expectedWriters: Record<string, ExpectedWriter> = {
   "packages/db/src/index.ts#claimSessionWorkForAttempt": {
     inserts: 4,
     contract: "canonical",
+  },
+  "packages/db/src/index.ts#failSessionWorkBeforeAttemptClaim": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
   },
   "packages/db/src/index.ts#commitSessionAttemptQuiescence": {
     inserts: 2,
@@ -312,6 +321,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
     "armCodexCapacityWait",
     "armXaiCapacityWait",
     "cancelSessionSubtreeInTransaction",
+    "failSessionWorkBeforeAttemptClaim",
     "supersedeSessionCurrentDirectionInTransaction",
     "settleSessionAttemptInterruptions",
     "applySessionTurnSettlement",
@@ -330,7 +340,7 @@ const expectedOutboxWriters: Record<
     inserts: 1,
     contract: "child_lifecycle",
   },
-  "packages/db/src/index.ts#enqueueFailedChildOutboxForTurnTx": {
+  "packages/db/src/index.ts#enqueueFailedChildOutboxTx": {
     inserts: 1,
     contract: "owned_child_lifecycle",
   },
@@ -344,7 +354,15 @@ const expectedOutboxWriters: Record<
   },
 };
 
-const expectedFailedChildOutboxCallers = ["applySessionTurnSettlement", "recoverSessionDispatch"];
+const expectedFailedChildOutboxCallers = [
+  "applySessionTurnSettlement",
+  "failSessionWorkBeforeAttemptClaim",
+  "recoverSessionDispatch",
+];
+const expectedSharedFailedChildOutboxCallers = [
+  "enqueueFailedChildOutboxForTurnTx",
+  "enqueueFailedChildOutboxWithoutTurnTx",
+];
 const expectedCancelledChildOutboxCallers = ["cancelSessionSubtreeInTransaction"];
 
 function productionTypeScriptFiles(): string[] {
@@ -684,6 +702,7 @@ describe("session_events writer inventory", () => {
       { count: number; sourceFile: SourceFile; functionNode: FunctionLikeDeclaration }
     >();
     const failedChildOutboxCallers = new Set<string>();
+    const sharedFailedChildOutboxCallers = new Set<string>();
     const cancelledChildOutboxCallers = new Set<string>();
 
     for (const path of productionTypeScriptFiles()) {
@@ -734,8 +753,15 @@ describe("session_events writer inventory", () => {
           if (called && ownedSuffixCallers.has(called) && enclosing) {
             ownedSuffixCallers.get(called)!.add(enclosing.name);
           }
-          if (called === "enqueueFailedChildOutboxForTurnTx" && enclosing) {
+          if (
+            (called === "enqueueFailedChildOutboxForTurnTx" ||
+              called === "enqueueFailedChildOutboxWithoutTurnTx") &&
+            enclosing
+          ) {
             failedChildOutboxCallers.add(enclosing.name);
+          }
+          if (called === "enqueueFailedChildOutboxTx" && enclosing) {
+            sharedFailedChildOutboxCallers.add(enclosing.name);
           }
           if (called === "enqueueCancelledChildOutboxInTransaction" && enclosing) {
             cancelledChildOutboxCallers.add(enclosing.name);
@@ -839,6 +865,9 @@ describe("session_events writer inventory", () => {
     expect([...failedChildOutboxCallers].sort()).toEqual(
       [...expectedFailedChildOutboxCallers].sort(),
     );
+    expect([...sharedFailedChildOutboxCallers].sort()).toEqual(
+      [...expectedSharedFailedChildOutboxCallers].sort(),
+    );
     expect([...cancelledChildOutboxCallers].sort()).toEqual(
       [...expectedCancelledChildOutboxCallers].sort(),
     );
@@ -866,8 +895,19 @@ describe("session_events writer inventory", () => {
       expect(functionCalls(callerNode, "lockChildLifecycleOutboxWriteRowsTx")).toBe(true);
       expect(functionCalls(callerNode, "retrySessionActivityRls")).toBe(true);
       const firstLock = callPositions(callerNode, "lockChildLifecycleOutboxWriteRowsTx")[0];
-      const enqueue = callPositions(callerNode, "enqueueFailedChildOutboxForTurnTx")[0];
-      expect(firstLock).toBeLessThan(enqueue!);
+      const enqueue = Math.min(
+        ...callPositions(callerNode, "enqueueFailedChildOutboxForTurnTx"),
+        ...callPositions(callerNode, "enqueueFailedChildOutboxWithoutTurnTx"),
+      );
+      expect(Number.isFinite(enqueue)).toBe(true);
+      expect(firstLock).toBeLessThan(enqueue);
+    }
+    for (const caller of expectedSharedFailedChildOutboxCallers) {
+      const definitions = functionDefinitions.get(caller) ?? [];
+      expect(definitions).toHaveLength(1);
+      expect(
+        callPositions(definitions[0]!.functionNode, "enqueueFailedChildOutboxTx"),
+      ).toHaveLength(1);
     }
     for (const caller of expectedCancelledChildOutboxCallers) {
       const definitions = functionDefinitions.get(caller) ?? [];

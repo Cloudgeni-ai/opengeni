@@ -30,7 +30,7 @@ import type { Session } from "@opengeni/contracts";
 import {
   acquireLease,
   getSandboxSessionEnvelope,
-  getEnrollment,
+  getLiveEnrollmentConnection,
   getSandbox,
   loadWorkspaceEnvironmentForRun,
   markWarmLeaseInstanceLost,
@@ -66,14 +66,22 @@ import {
   ChannelAValidationError,
   BrowserControlRequestError,
   BrowserControlTransportError,
+  SelfhostedControlError,
+  agentErrorToControlError,
   codemodeTokenFileFromEnvironment,
+  offlineAgentError,
   withCodemodeTokenSession,
   withRunCredentialsSession,
   type ChannelASession,
   type EstablishedSandboxSession,
   type RoutingSandboxSession,
 } from "@opengeni/runtime/sandbox";
-import { relayConfigFromSettings, wrapChannelABoxWithRouting } from "@opengeni/core";
+import {
+  providerSettingsForSessionSandboxRuntime,
+  relayConfigFromSettings,
+  resolveSessionSandboxRuntime,
+  wrapChannelABoxWithRouting,
+} from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
 
 export type ChannelAServices = {
@@ -588,6 +596,24 @@ async function withChannelAOperation<T>(
       ctx.waitSignal?.throwIfAborted();
       const pointer = await readActiveSandbox(db, workspaceId, session.id);
       if (!pointer?.activeSandboxId) {
+        // A machine-home session with no selected machine uses the deployment's
+        // managed group box, exactly like the worker turn path. Keep the durable
+        // home label honest; only this request's effective backend changes.
+        if (settings.sandboxBackend !== "none" && settings.sandboxBackend !== "selfhosted") {
+          return await withChannelAOperation(
+            services,
+            {
+              ...ctx,
+              session: {
+                ...session,
+                sandboxBackend: settings.sandboxBackend,
+                sandboxOs: "linux",
+              },
+            },
+            readOnly,
+            fn,
+          );
+        }
         throw new HTTPException(409, {
           message: "machine-home session has no active Connected Machine",
         });
@@ -598,10 +624,19 @@ async function withChannelAOperation<T>(
           message: "machine-home session points to an unavailable Connected Machine",
         });
       }
-      const enrollment = await getEnrollment(db, workspaceId, sandbox.enrollmentId);
+      const enrollment = await getLiveEnrollmentConnection(db, workspaceId, sandbox.enrollmentId);
+      if (!enrollment?.connectionInstanceId) {
+        // Preserve causal machine liveness through Channel-A. Generic callers
+        // retain the established 409 mapping below; Browser/Computer callers can
+        // project the same bounded `agent_offline` contract as control RPC.
+        throw agentErrorToControlError(
+          offlineAgentError("Connected Machine has no live runner connection", true),
+        );
+      }
       const built = await buildSelfhostedBackendSession({
         workspaceId,
         agentId: sandbox.enrollmentId,
+        connectionInstanceId: enrollment.connectionInstanceId,
         relay: relayConfigFromSettings(settings),
         controlRpcFactory: () => new NatsControlRpc(async () => bus.getRequestConnection()),
         epoch: pointer.activeEpoch,
@@ -665,6 +700,12 @@ async function withChannelAOperation<T>(
     }
   }
 
+  // One session has one logical runtime across turns and every API-direct
+  // surface. Without this, Terminal/Files/Browser/Computer/viewers could rearm
+  // a stale deployment image after the worker had resolved a newer Pack/Rig or
+  // deployment image for the same durable sandbox group.
+  const sandboxRuntime = await resolveSessionSandboxRuntime(db, settings, session);
+
   const release = async (): Promise<void> => {
     await releaseLeaseHolder(db, {
       accountId,
@@ -693,6 +734,8 @@ async function withChannelAOperation<T>(
       subjectId: session.id,
       backend: session.sandboxBackend,
       os: session.sandboxOs,
+      image: sandboxRuntime.image,
+      rigVersionId: session.rigVersionId,
       leaseTtlMs,
       warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
       captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
@@ -747,7 +790,7 @@ async function withChannelAOperation<T>(
   ): Promise<{ established: EstablishedSandboxSession; cacheKey: string }> => {
     const cacheKey = establishedHandleCacheKey(workspaceId, session.id, live);
     const establish = () =>
-      establishSandboxSessionFromEnvelope(settings, live.resumeState, {
+      establishSandboxSessionFromEnvelope(sandboxRuntime.settings, live.resumeState, {
         sessionId: session.id,
         recovery: "resume-only",
         backendOverride: session.sandboxBackend,
@@ -802,9 +845,13 @@ async function withChannelAOperation<T>(
       // resume_state is the lease's authoritative box descriptor; the session
       // `_sandbox` envelope is only the per-session fallback.
       try {
+        const providerSettings = await providerSettingsForSessionSandboxRuntime(
+          sandboxRuntime,
+          session.sandboxBackend,
+        );
         const result = await establishApiSandboxSpawner({
           db,
-          settings,
+          settings: providerSettings,
           accountId,
           workspaceId,
           sandboxGroupId,
@@ -1011,6 +1058,8 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
     return new HTTPException(409, { message: error.message });
   if (error instanceof SandboxProviderReadLockUnavailableError)
     return new HTTPException(503, { message: error.message });
+  if (error instanceof SelfhostedControlError && error.agentOffline)
+    return new HTTPException(409, { message: error.message, cause: error });
   if (error instanceof ChannelAUnavailableError)
     return new HTTPException(503, { message: error.message });
   if (error instanceof ChannelAValidationError)

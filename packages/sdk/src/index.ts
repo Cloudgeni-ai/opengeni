@@ -96,7 +96,10 @@ export type {
   CreateCodexRealtimeControllerOptions,
   RealtimeControllerTransportStarter,
 } from "./codex-realtime-controller";
-export { createGatewayRealtimeTransportStarter } from "./gateway-realtime-transport";
+export {
+  createGatewayRealtimeTransportStarter,
+  createXaiSubscriptionRealtimeTransportStarter,
+} from "./gateway-realtime-transport";
 export { projectSessionRealtimeLifecycle } from "./codex-realtime-lifecycle";
 export type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecycle";
 // Provider-neutral Browser/Computer resource client + bounded frame protocol.
@@ -892,6 +895,12 @@ export type {
   MetricSample,
   MachineState,
   MachineKind,
+  MachineConnectionAuthority,
+  MachineRuntimeCapabilities,
+  MachineUpdateStatus,
+  MachineUpdateState,
+  MachineRuntime,
+  UpdateMachineAgentResponse,
   MachineView,
   MachinesResponse,
   MachineMetricsSeriesResponse,

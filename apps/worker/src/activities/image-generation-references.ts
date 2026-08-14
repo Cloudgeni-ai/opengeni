@@ -1,5 +1,5 @@
 import { type ImageGenerationReference, type FileAsset } from "@opengeni/contracts";
-import { getGeneratedImageArtifact, requireFile, type Database } from "@opengeni/db";
+import { getGeneratedImageArtifact, requireFileForSubject, type Database } from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
 import { validateGeneratedImage, type GeneratedImageMediaType } from "./generated-images";
 
@@ -23,7 +23,9 @@ export type SandboxImageReferenceReader = (path: string, maxBytes: number) => Pr
 export async function resolveImageGenerationReferences(input: {
   db: Database;
   objectStorage: ObjectStorage;
+  accountId: string;
   workspaceId: string;
+  subjectId: string | null;
   references: readonly ImageGenerationReference[];
   readSandboxFile?: SandboxImageReferenceReader;
 }): Promise<ResolvedImageGenerationReference[]> {
@@ -57,7 +59,9 @@ async function referenceBytes(
   input: {
     db: Database;
     objectStorage: ObjectStorage;
+    accountId: string;
     workspaceId: string;
+    subjectId: string | null;
     readSandboxFile?: SandboxImageReferenceReader;
   },
   reference: ImageGenerationReference,
@@ -73,7 +77,12 @@ async function referenceBytes(
 
   const file =
     reference.kind === "file"
-      ? await requireFile(input.db, input.workspaceId, reference.fileId)
+      ? await requireFileForSubject(input.db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          fileId: reference.fileId,
+        })
       : await artifactFile(input.db, input.workspaceId, reference.artifactId);
   if (file.status !== "ready" || !file.sha256) {
     throw new Error("Image reference file is not durably ready");

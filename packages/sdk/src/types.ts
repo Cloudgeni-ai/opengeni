@@ -125,6 +125,8 @@ export type SessionRealtimeInboundEntry = {
   delegationItemId?: string | null | undefined;
   text?: string | null | undefined;
   payload?: Record<string, unknown> | undefined;
+  /** Model-visible application context attached to this exact realtime message. */
+  modelContext?: string | undefined;
 };
 
 export type SyncSessionRealtimeLedgerRequest = {
@@ -148,6 +150,7 @@ export type SyncSessionRealtimeLedgerResponse = {
 
 export type SessionRealtimeModel =
   | "gpt-live-1-boulder-alpha"
+  | "supergrok/grok-voice-think-fast-2.0"
   | "opengeni-gateway/openai/gpt-realtime-2.1"
   | "opengeni-gateway/openai/gpt-realtime-mini"
   | "opengeni-gateway/xai/grok-voice-think-fast-2.0"
@@ -158,7 +161,7 @@ export type SessionRealtimeModel =
 export type WorkspaceRealtimeModelCatalogItem = {
   id: SessionRealtimeModel;
   label: string;
-  provider: "OpenGeni" | "Connected Codex" | "Your Gateway";
+  provider: "OpenGeni" | "Connected Codex" | "Connected SuperGrok" | "Your Gateway";
   description: string;
   available: boolean;
   unavailableReason: string | null;
@@ -527,6 +530,7 @@ export type GoalSpec = {
   text: string;
   successCriteria?: string | undefined;
   maxAutoContinuations?: number | undefined;
+  mutationPolicy?: SessionGoalMutationPolicy | undefined;
 };
 
 export type SessionMcpServerInput = {
@@ -741,8 +745,9 @@ export type GoogleDriveConnectionMetadata = {
   googleEmail: string;
   googleDisplayName: string | null;
   verifiedAt: string;
-  accessMode: "metadata_readonly" | "readonly";
+  accessMode: "file_only" | "metadata_readonly" | "readonly";
   lifecycle?: GoogleDriveConnectionLifecycle | undefined;
+  outputDestination?: GoogleDriveOutputDestination | undefined;
   documentDestination?: ConnectorDocumentDestination | undefined;
   selectedSources?: GoogleDriveSelectedSource[] | undefined;
   /** @deprecated Read selectedSources; retained while existing connections migrate. */
@@ -750,8 +755,17 @@ export type GoogleDriveConnectionMetadata = {
   [key: string]: unknown;
 };
 
+export type GoogleDriveOutputDestination = {
+  folderId: string;
+  folderName: string;
+  driveId: string | null;
+  location: "my_drive" | "shared_drive";
+  selectedAt: string;
+};
+
 export type GoogleDriveOAuthStartRequest = {
   connectionId?: string | undefined;
+  capability?: "source_read" | "publish" | undefined;
 };
 
 export type GoogleDriveOAuthStartResponse = {
@@ -839,12 +853,18 @@ export type AtlassianConnectionMetadata = {
   selectedSources: AtlassianSelectedSource[];
   [key: string]: unknown;
 };
-export type AtlassianOAuthStartResponse = { authorizationUrl: string; expiresAt: string };
+export type AtlassianOAuthStartResponse = {
+  authorizationUrl: string;
+  expiresAt: string;
+};
 export type AtlassianLifecycleActionRequest = {
   action: "pause" | "resume";
   expectedVersion: number;
 };
-export type AtlassianDisconnectRequest = { expectedVersion: number; idempotencyKey: string };
+export type AtlassianDisconnectRequest = {
+  expectedVersion: number;
+  idempotencyKey: string;
+};
 export type AtlassianBrowseItem = {
   id: string;
   cloudId: string;
@@ -1123,7 +1143,11 @@ export type AgentTopologySession = {
   parentSessionId: string | null;
   rootSessionId: string;
   nestedAgentDepth: number;
-  ancestorPath: Array<{ id: string; title: string | null; titleTruncated: boolean }>;
+  ancestorPath: Array<{
+    id: string;
+    title: string | null;
+    titleTruncated: boolean;
+  }>;
   status: SessionStatus;
   pause: {
     state: "active" | "paused";
@@ -1366,6 +1390,9 @@ export const SESSION_EVENT_TYPES = [
   "artifact.created",
   "goal.set",
   "goal.updated",
+  "goal.progress",
+  "goal.rewrite.proposed",
+  "goal.rewrite.rejected",
   "goal.completed",
   "goal.paused",
   "goal.resumed",
@@ -2255,8 +2282,8 @@ export type CreateSessionRequest = {
   initialMessage?: string | undefined;
   /** Create an idle session shell so realtime voice can be the first interaction. */
   startMode?: "realtime" | undefined;
-  /** System instructions scoped to the initial turn; never visible timeline text. */
-  turnInstructions?: string | undefined;
+  /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
+  modelContext?: string | undefined;
   // Per-session agent persona/system instructions (org-visible metadata, not a
   // secret). Delivered system-level, composed AFTER the per-workspace persona —
   // how a host supplies per-agent-type prompts without leaking them into the
@@ -2374,6 +2401,7 @@ export type FirstPartyMcpToolName =
   | "set_session_title"
   | "goal_set"
   | "goal_update"
+  | "goal_progress"
   | "goal_complete"
   | "goal_pause"
   | "memory_search"
@@ -2381,6 +2409,9 @@ export type FirstPartyMcpToolName =
   | "memory_correct"
   | "preference_registry_summary"
   | "preference_registry_get"
+  | "task_notes_list"
+  | "task_note_save"
+  | "task_note_archive"
   | "sandboxes_list"
   | "sandbox_attach"
   | "sandbox_swap"
@@ -2965,7 +2996,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-social-provider-tools-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-model-context-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -2987,6 +3018,13 @@ export type ClientConfig = {
   defaultReasoningEffort: ReasoningEffort;
   allowedReasoningEfforts: ReasoningEffort[];
   mcpServers: { id: string; name: string }[];
+  /** Deployment defaults and hard maximum for built-in OpenGeni session tools. */
+  firstPartyMcpTools?:
+    | {
+        default: FirstPartyMcpToolName[];
+        allowed: FirstPartyMcpToolName[];
+      }
+    | undefined;
   fileUploads: { enabled: boolean; maxSizeBytes: number };
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
@@ -3191,6 +3229,8 @@ export type Workspace = {
 
 export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
+  /** Reversible Memory V1 prompt composition rollout. */
+  memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -3225,6 +3265,7 @@ export type WorkspaceVoiceInputSettings = {
 
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
+  memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -3357,6 +3398,39 @@ export type SessionGoalStatus = "active" | "paused" | "completed";
 
 export type SessionGoalCreatedBy = "api" | "agent" | "scheduled_task";
 
+export type SessionGoalMutationPolicy =
+  | "review_changes"
+  | "preserve_intent"
+  | "autonomous_adaptation";
+
+export type SessionGoalChangeKind = "refinement" | "adaptation" | "replacement";
+
+export type SessionGoalRevision = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  goalId: string;
+  disposition: "applied" | "proposed" | "rejected";
+  changeKind: SessionGoalChangeKind;
+  baseObjectiveRevision: number;
+  resultObjectiveRevision: number | null;
+  text: string;
+  successCriteria: string | null;
+  mutationPolicy: SessionGoalMutationPolicy;
+  rationale: string;
+  actor: "agent" | "api" | "scheduled_task";
+  actorTurnId: string | null;
+  actorAttemptId: string | null;
+  proposalId: string | null;
+  createdAt: string;
+};
+
+export type ApplySessionGoalRevisionRequest = {
+  expectedObjectiveRevision: number;
+  rationale?: string | undefined;
+};
+
 export type SessionGoalContinuationState =
   | "inactive"
   | "scheduled"
@@ -3400,6 +3474,8 @@ export type SessionGoal = {
   pausedReason: string | null;
   createdBy: SessionGoalCreatedBy;
   version: number;
+  objectiveRevision: number;
+  mutationPolicy: SessionGoalMutationPolicy;
   autoContinuations: number;
   noProgressStreak: number;
   maxAutoContinuations: number | null;
@@ -3410,10 +3486,18 @@ export type SessionGoal = {
   updatedAt: string;
 };
 
-export type UpdateSessionGoalRequest = {
-  status: "paused" | "active";
-  rationale?: string | undefined;
-};
+export type UpdateSessionGoalRequest =
+  | {
+      status: "paused" | "active";
+      rationale?: string | undefined;
+    }
+  | {
+      text: string;
+      successCriteria?: string | null | undefined;
+      mutationPolicy?: SessionGoalMutationPolicy | undefined;
+      rationale: string;
+      expectedObjectiveRevision: number;
+    };
 
 export type UpdateSessionRequest = {
   title: string;
@@ -4166,7 +4250,10 @@ export type UpdateVideoGenerationPolicyRequest = {
   defaultModelId: string | null;
 };
 
-export type VideoGenerationFundingSource = "opengeni_credits" | "workspace_gateway";
+export type VideoGenerationFundingSource =
+  | "opengeni_credits"
+  | "workspace_gateway"
+  | "supergrok_subscription";
 
 export type VideoGenerationFundingOption = {
   source: VideoGenerationFundingSource;
@@ -5931,7 +6018,7 @@ export type UserMessageEventInput = {
   payload: {
     text: string;
     annotations?: SubmittedTimelineAnnotation[] | undefined;
-    turnInstructions?: string | undefined;
+    modelContext?: string | undefined;
     resources?: ResourceRef[] | undefined;
     model?: string | undefined;
     reasoningEffort?: ReasoningEffort | undefined;
@@ -6000,6 +6087,65 @@ export type MachineState =
 
 export type MachineKind = "modal" | "selfhosted";
 
+export type MachineConnectionAuthority = {
+  state: "not_applicable" | "unclaimed" | "active" | "expired";
+  generation: number;
+  supersededCount: number;
+  leaseExpiresAt: string | null;
+  duplicateRunnerDeniedCount: number;
+  duplicateRunnerDeniedAt: string | null;
+};
+
+export type MachineRuntimeCapabilities = {
+  exec: boolean;
+  filesystem: boolean;
+  git: boolean;
+  pty: boolean;
+  desktop: boolean;
+  opStream: boolean;
+  browserBridge: boolean;
+};
+
+export type MachineUpdateStatus =
+  | "requested"
+  | "accepted"
+  | "waiting_for_idle"
+  | "downloading"
+  | "verifying"
+  | "applying"
+  | "restarting"
+  | "succeeded"
+  | "failed";
+
+export type MachineUpdateState = {
+  operationId: string;
+  status: MachineUpdateStatus;
+  targetVersion: string;
+  expectedBinarySha256: string | null;
+  errorCode: string | null;
+  retryable: boolean;
+  rolledBack: boolean;
+  requestedAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+};
+
+export type MachineRuntime = {
+  installedVersion: string | null;
+  binarySha256: string | null;
+  updateChannel: "stable" | "beta" | null;
+  desiredVersion: string | null;
+  versionState: "unknown" | "current" | "outdated" | "ahead" | "updating" | "update_failed";
+  capabilities: MachineRuntimeCapabilities;
+  update: MachineUpdateState | null;
+};
+
+export type UpdateMachineAgentResponse = {
+  operationId: string;
+  accepted: boolean;
+  targetVersion: string;
+};
+
 /** A machine as the Machines dashboard renders it (an enrolled selfhosted machine
  *  or the session's synthetic Modal group box, `isSessionGroup: true`). */
 export type MachineView = {
@@ -6023,6 +6169,11 @@ export type MachineView = {
   allowScreenControl: boolean;
   sharedSessionCount: number;
   lastSeenAt: string | null;
+  /** Secret-free single-runner authority diagnostics. */
+  connectionAuthority: MachineConnectionAuthority;
+  /** Exact build/update truth. Null means the runner predates runtime Hello
+   * reporting or this is a managed-session group without a connected agent. */
+  runtime: MachineRuntime | null;
   metrics: MetricSample | null;
 };
 

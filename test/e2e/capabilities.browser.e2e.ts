@@ -5,6 +5,7 @@ import { mkdir, readdir, readFile } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 
 import { freePort, runCommand, startProcess, type StartedProcess } from "@opengeni/testing";
+import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const workspaceId = "00000000-0000-4000-8000-000000000017";
@@ -17,7 +18,7 @@ const driveConnectionId = "00000000-0000-4000-8000-000000000130";
 const driveInstanceId = "00000000-0000-4000-8000-000000000131";
 const evidenceDir = new URL("../../.agent/evidence/capabilities-focus/", import.meta.url).pathname;
 const mobbinEvidenceDir = new URL("../../.agent/evidence/mobbin-mcp/", import.meta.url).pathname;
-const apiContractRevision = "2026-08-social-provider-tools-v1";
+const apiContractRevision = OPENGENI_API_CONTRACT_REVISION;
 
 type CapabilityState = {
   enabled: boolean;

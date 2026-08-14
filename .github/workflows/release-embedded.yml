@@ -411,6 +411,34 @@ jobs:
           bun install --frozen-lockfile
           bun run build:packages
 
+      - name: Download and verify source-bound artifact runtime inputs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          set -euo pipefail
+          artifact_name="artifact-runtime-containers-${SOURCE_SHA}"
+          runtime_root=".release/artifact-runtime"
+          archive=".release/opengeni-artifact-runtime-${SOURCE_SHA}.tgz"
+          rm -rf "$runtime_root"
+          gh run download "$CANDIDATE_RUN_ID" \
+            --name "$artifact_name" \
+            --dir "$runtime_root"
+          for architecture in amd64 arm64; do
+            bun scripts/verify-artifact-runtime-container-inputs.ts \
+              --root "$GITHUB_WORKSPACE/$runtime_root" \
+              --source-sha "$SOURCE_SHA" \
+              --architecture "$architecture"
+          done
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -C .release -cf - artifact-runtime \
+            | gzip -n > "$archive"
+          printf '%s  %s\n' \
+            "$(sha256sum "$archive" | awk '{print $1}')" \
+            "$(basename "$archive")" \
+            > "${archive}.sha256"
+
       - name: Restore the controller after package preparation
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -609,15 +637,18 @@ jobs:
         run: |
           set -euo pipefail
           images="$(jq -c '[.images | to_entries[] | .value]' evidence/release-candidate.json)"
-          OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA" \
-          OPENGENI_RELEASE_BOM_VERSION="$RELEASE_VERSION" \
-          OPENGENI_RELEASE_BOM_PACKAGES="$BOM_PACKAGES" \
-          OPENGENI_RELEASE_BOM_IMAGES="$images" \
-          OPENGENI_RELEASE_BOM_CHART="$RELEASE_CHART" \
-          (cd .release/controller && bun scripts/release-bom.ts)
+          (
+            export OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA"
+            export OPENGENI_RELEASE_BOM_VERSION="$RELEASE_VERSION"
+            export OPENGENI_RELEASE_BOM_PACKAGES="$BOM_PACKAGES"
+            export OPENGENI_RELEASE_BOM_IMAGES="$images"
+            export OPENGENI_RELEASE_BOM_CHART="$RELEASE_CHART"
+            cd .release/controller
+            bun scripts/release-bom.ts
+          )
           printf '%s  %s\n' \
             "$(sha256sum evidence/release-bom.json | awk '{print $1}')" \
-            evidence/release-bom.json \
+            release-bom.json \
             > evidence/release-bom.sha256
 
       - name: Compare an existing immutable distribution before image mutation
@@ -642,9 +673,15 @@ jobs:
               --dir .release/existing-release/assets \
               --pattern release-bom.json \
               --pattern release-bom.sha256 \
+              --pattern "opengeni-artifact-runtime-${SOURCE_SHA}.tgz" \
+              --pattern "opengeni-artifact-runtime-${SOURCE_SHA}.tgz.sha256" \
               --pattern "opengeni-${RELEASE_VERSION}.tgz"
             cmp evidence/release-bom.json .release/existing-release/assets/release-bom.json
             cmp evidence/release-bom.sha256 .release/existing-release/assets/release-bom.sha256
+            cmp ".release/opengeni-artifact-runtime-${SOURCE_SHA}.tgz" \
+              ".release/existing-release/assets/opengeni-artifact-runtime-${SOURCE_SHA}.tgz"
+            cmp ".release/opengeni-artifact-runtime-${SOURCE_SHA}.tgz.sha256" \
+              ".release/existing-release/assets/opengeni-artifact-runtime-${SOURCE_SHA}.tgz.sha256"
             cmp ".release/opengeni-${RELEASE_VERSION}.tgz" \
               ".release/existing-release/assets/opengeni-${RELEASE_VERSION}.tgz"
             echo "exists=true" >> "$GITHUB_OUTPUT"
@@ -728,6 +765,8 @@ jobs:
             evidence/package-publication-verified.json
             evidence/release-packages-verified.json
             .release/opengeni-${{ steps.meta.outputs.version }}.tgz
+            .release/opengeni-artifact-runtime-${{ inputs.source_sha }}.tgz
+            .release/opengeni-artifact-runtime-${{ inputs.source_sha }}.tgz.sha256
           if-no-files-found: error
           retention-days: 90
 
@@ -751,9 +790,11 @@ jobs:
               evidence/release-bom.json \
               evidence/release-bom.sha256 \
               ".release/opengeni-${RELEASE_VERSION}.tgz" \
+              ".release/opengeni-artifact-runtime-${SOURCE_SHA}.tgz" \
+              ".release/opengeni-artifact-runtime-${SOURCE_SHA}.tgz.sha256" \
               --target "$SOURCE_SHA" \
               --title "OpenGeni embedded distribution ${RELEASE_VERSION} (${SOURCE_SHA::12})" \
-              --notes "Source-bound npm packages, Helm chart, images, and BOM for embedded consumers." \
+              --notes "Source-bound npm packages, Helm chart, images, native runtime build inputs, and BOM for embedded consumers." \
               --latest=false
           else
             echo "immutable distribution preflight produced an invalid state" >&2

@@ -463,7 +463,10 @@ describe("durable session tool-policy updates", () => {
         deps(secondDb, bus),
         grant(owner.workspaceId, owner.accountId),
         raceChild.id,
-        explicitTools([OPENGENI], 1),
+        {
+          ...explicitTools([OPENGENI], 1),
+          firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+        },
       ),
     ]);
     expect(parentUpdate.toolPolicyVersion).toBe(2);

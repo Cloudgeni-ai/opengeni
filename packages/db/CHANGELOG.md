@@ -1,5 +1,84 @@
 # @opengeni/db
 
+## 1.0.1
+
+### Patch Changes
+
+- 448117d: Enforce fresh per-object Google Drive ACL authorization across Knowledge
+  retrieval and every file-byte consumer, and project only reauthorized,
+  principal-free provider citations.
+- Updated dependencies [448117d]
+  - @opengeni/contracts@1.0.1
+  - @opengeni/codemode@0.4.4
+  - @opengeni/config@0.16.4
+
+## 1.0.0
+
+### Major Changes
+
+- 083387e: Replace the removed per-turn `turnInstructions` system-prefix contract with generic per-message `modelContext` content. This is a breaking release-train cutover: old mutating clients are rejected after migration 0240. Context now enters canonical user history without standard timeline rendering, preserves the persistent prompt-cache prefix, and works across initial, queued, steer, realtime delegation, and transcript handoff paths.
+
+### Patch Changes
+
+- 11913b7: Add separately consented Google Drive editable-artifact publishing with an explicit writable destination, connector-action approval policy, Google-native conversion, and retry-safe provider reconciliation.
+- Updated dependencies [083387e]
+- Updated dependencies [11913b7]
+  - @opengeni/contracts@1.0.0
+  - @opengeni/codemode@0.4.3
+  - @opengeni/config@0.16.3
+
+## 0.36.1
+
+### Patch Changes
+
+- 499c70c: Retry transient pre-inference attempt claims atomically, durably re-wake a
+  logical turn when its activity failed before creating an attempt, and preserve
+  the requested backoff deadline once older workflow-wake revisions are delivered.
+  Still-open legacy workflow histories and every effectively active durable work
+  shape whose prior wake was delivered now retain the same recovery obligation:
+  queued/recovering turns, accepted approval responses, released capacity waits,
+  manual compaction, and pending internal updates. Held, paused, live-attempt, and
+  already-pending wake states remain untouched.
+  Terminal failure retries also close the workflow without synthesizing an
+  active-goal continuation.
+- Updated dependencies [944be7f]
+  - @opengeni/codemode@0.4.2
+  - @opengeni/codex@0.2.17
+  - @opengeni/config@0.16.2
+
+## 0.36.0
+
+### Minor Changes
+
+- 478d7fe: Add explicit, bounded root-task-tree coordination note tools with exact-attempt authority, private-session visibility, expiry, immutable create/archive receipts, and safe retry semantics.
+- 478d7fe: Persist exact accepted-turn goal authority, separate semantic goal revisions
+  from execution progress, and add policy-controlled rewrite proposals with API,
+  SDK, MCP, and runtime support.
+
+### Patch Changes
+
+- d86610d: Show elapsed UTC-hour buckets for the Insights Today range while retaining UTC-day buckets for longer ranges.
+- 478d7fe: Add a reversible workspace memory prompt mode that removes the legacy standing memory block, keeps preference observations out of agent behavioral authority, contains company-profile context for child agents, and reports metadata-only model-context contribution telemetry.
+- Updated dependencies [d86610d]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+  - @opengeni/contracts@0.50.0
+  - @opengeni/config@0.16.1
+  - @opengeni/codemode@0.4.1
+
+## 0.35.1
+
+### Patch Changes
+
+- Updated dependencies [b0b2bed]
+  - @opengeni/codemode@0.4.0
+  - @opengeni/config@0.16.0
+  - @opengeni/contracts@0.49.0
+
 ## 0.35.0
 
 ### Minor Changes

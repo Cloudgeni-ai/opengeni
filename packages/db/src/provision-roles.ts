@@ -615,6 +615,28 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.create_task_note_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,integer)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.create_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.archive_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.list_task_notes_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, boolean, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.workspace_instruction_policy_get_or_create_snapshot(uuid,uuid,uuid,uuid,uuid,integer)',
         ${literal(schema)}
       )
@@ -731,6 +753,42 @@ BEGIN
       );
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION %I.knowledge_source_sync_lock_authority(uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    -- Migration 0243 adds the exact Google Drive object authorization and
+    -- safe-citation projections. Re-converge both capabilities for the same
+    -- supported migrate-then-provision order without granting direct mutation
+    -- of their append-only ACL evidence tables.
+    IF to_regprocedure(
+      format(
+        '%I.google_drive_file_authorized(uuid,uuid,text,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.google_drive_file_authorized(uuid, uuid, text, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.google_drive_file_authorized(uuid, uuid, text, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.google_drive_document_citation(uuid,uuid,text,uuid,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.google_drive_document_citation(uuid, uuid, text, uuid, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.google_drive_document_citation(uuid, uuid, text, uuid, uuid) TO %I',
         ${literal(schema)},
         ${literal(role)}
       );

@@ -147,6 +147,12 @@ e2e(
         message: "Name?",
         defaultPrompt: "Ada",
       });
+      const targetWhilePrompting = await driver.target(asking.target.id);
+      expect(targetWhilePrompting).toMatchObject({
+        id: asking.target.id,
+        targetGeneration: asking.target.targetGeneration,
+        documentGeneration: asking.target.documentGeneration,
+      });
       const answered = await driver.dispatch(
         command(asking, {
           type: "handle_dialog",

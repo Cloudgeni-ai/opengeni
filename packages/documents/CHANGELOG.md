@@ -1,5 +1,65 @@
 # @opengeni/documents
 
+## 0.5.41
+
+### Patch Changes
+
+- 448117d: Enforce fresh per-object Google Drive ACL authorization across Knowledge
+  retrieval and every file-byte consumer, and project only reauthorized,
+  principal-free provider citations.
+- Updated dependencies [448117d]
+  - @opengeni/contracts@1.0.1
+  - @opengeni/db@1.0.1
+  - @opengeni/config@0.16.4
+  - @opengeni/storage@0.2.96
+
+## 0.5.40
+
+### Patch Changes
+
+- Updated dependencies [083387e]
+- Updated dependencies [11913b7]
+  - @opengeni/contracts@1.0.0
+  - @opengeni/db@1.0.0
+  - @opengeni/config@0.16.3
+  - @opengeni/storage@0.2.95
+
+## 0.5.39
+
+### Patch Changes
+
+- Updated dependencies [499c70c]
+  - @opengeni/db@0.36.1
+  - @opengeni/config@0.16.2
+  - @opengeni/storage@0.2.94
+
+## 0.5.38
+
+### Patch Changes
+
+- 478d7fe: Add permission-first agent Knowledge search, exact fetch, and cursor-bounded browsing over authorized Documents.
+- Updated dependencies [d86610d]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+  - @opengeni/contracts@0.50.0
+  - @opengeni/db@0.36.0
+  - @opengeni/config@0.16.1
+  - @opengeni/storage@0.2.93
+
+## 0.5.37
+
+### Patch Changes
+
+- Updated dependencies [b0b2bed]
+  - @opengeni/config@0.16.0
+  - @opengeni/contracts@0.49.0
+  - @opengeni/db@0.35.1
+  - @opengeni/storage@0.2.92
+
 ## 0.5.36
 
 ### Patch Changes

@@ -3,6 +3,7 @@ import {
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
   configuredModels,
+  resolveFirstPartyMcpToolPolicy,
   withCodexCatalogProvider,
   withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
@@ -14,6 +15,7 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
   resolveWorkspaceMemoryEnabled,
+  resolveWorkspaceMemoryPromptMode,
   VOICE_INPUT_ACCEPTED_MIME_TYPES,
   TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
   type AccessGrant,
@@ -21,7 +23,7 @@ import {
 } from "@opengeni/contracts";
 import {
   createDocumentServices,
-  getDocument,
+  getDocumentForIndexing,
   indexDocumentNow,
   type DocumentServices,
 } from "@opengeni/documents";
@@ -146,7 +148,7 @@ export {
 export { workflowIdForSession } from "@opengeni/core";
 export { replaySessionEvents, sseSessionStream, sseWorkspaceControlStream } from "./http/sse";
 
-export const API_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
+export const API_MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024;
 
 /** Effective Hono bodyLimit — API JSON ceiling or voice multipart + multipart overhead. */
 export function apiRequestBodyLimitBytes(settings: {
@@ -202,9 +204,12 @@ export function createAppComposition(deps: AppDependencies): {
       if (context.accountId !== accountId) {
         throw new Error("document account/workspace authority mismatch");
       }
-      const claimedDocument = await getDocument(deps.db, workspaceId, documentId, {
-        viewerSubjectId: authoritySubjectId,
-      });
+      // This is a metadata-only authority-tuple fence. Workspace and
+      // organization documents intentionally have no authority subject, so a
+      // viewer-scoped public read cannot supply the immutable human needed for
+      // Drive ACL evaluation. The byte boundary below reconstructs that
+      // subject from the stored document through indexDocumentNow.
+      const claimedDocument = await getDocumentForIndexing(deps.db, workspaceId, documentId);
       if (
         !claimedDocument ||
         claimedDocument.authorityKind !== authorityKind ||
@@ -499,6 +504,7 @@ export function createAppComposition(deps: AppDependencies): {
           id: server.id,
           name: server.name ?? server.id,
         })),
+        firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings),
         fileUploads: {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
@@ -591,12 +597,14 @@ export function createAppComposition(deps: AppDependencies): {
       }
       const workspace = await getWorkspace(routeDeps.db, workspaceId);
       const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
+      const workspaceMemoryPromptMode = resolveWorkspaceMemoryPromptMode(workspace?.settings);
       const transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,
       });
       const mcp = buildOpenGeniMcpServer(routeDeps, grant, {
         requestOrigin: new URL(c.req.url).origin,
         workspaceMemoryEnabled,
+        workspaceMemoryPromptMode,
       });
       await mcp.connect(transport);
       return await transport.handleRequest(boundedRequest);
@@ -739,7 +747,9 @@ export function createAppComposition(deps: AppDependencies): {
             ? (boundedPublicMessage(apiError.message) ?? "Request failed.")
             : publicErrorMessage(error, status),
         retryable: apiError?.retryable ?? retryableHttpStatus(status),
-        ...(mutationOutcomeUnknown(error, c.req.method) ? { outcomeUnknown: true } : {}),
+        ...((apiError?.outcomeUnknown ?? mutationOutcomeUnknown(error, c.req.method))
+          ? { outcomeUnknown: true }
+          : {}),
         requestId,
         ...(apiError?.details ? { details: apiError.details } : {}),
       },
