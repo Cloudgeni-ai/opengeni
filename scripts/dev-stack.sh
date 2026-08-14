@@ -921,6 +921,13 @@ pids+=("$!")
 (cd apps/worker && bun run start:artifact-outbox) &
 pids+=("$!")
 
+# The web setup surface serves the unpacked Chrome bridge archive directly from
+# apps/browser-extension/dist. Starting Vite without the package build leaves a
+# perfectly healthy machine agent advertising browserBridge=true while the
+# only way to attach an existing Chrome profile returns 503. Keep the dev-stack
+# launcher aligned with apps/web's own dev script and fail before Vite starts if
+# the deterministic extension artifact cannot be produced.
+bun run --cwd apps/browser-extension build
 (cd apps/web && bun x vite dev --port "${OPENGENI_WEB_PORT}" --host 0.0.0.0) &
 pids+=("$!")
 

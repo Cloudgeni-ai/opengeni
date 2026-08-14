@@ -596,6 +596,24 @@ async function withChannelAOperation<T>(
       ctx.waitSignal?.throwIfAborted();
       const pointer = await readActiveSandbox(db, workspaceId, session.id);
       if (!pointer?.activeSandboxId) {
+        // A machine-home session with no selected machine uses the deployment's
+        // managed group box, exactly like the worker turn path. Keep the durable
+        // home label honest; only this request's effective backend changes.
+        if (settings.sandboxBackend !== "none" && settings.sandboxBackend !== "selfhosted") {
+          return await withChannelAOperation(
+            services,
+            {
+              ...ctx,
+              session: {
+                ...session,
+                sandboxBackend: settings.sandboxBackend,
+                sandboxOs: "linux",
+              },
+            },
+            readOnly,
+            fn,
+          );
+        }
         throw new HTTPException(409, {
           message: "machine-home session has no active Connected Machine",
         });
