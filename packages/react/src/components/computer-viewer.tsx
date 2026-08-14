@@ -63,6 +63,9 @@ export type ComputerViewerProps = EmbeddedComputerInteractionClientOverride & {
   /** Host navigation request for one exact ComputerSession. */
   requestedComputerSessionId?: string | null | undefined;
   requestedComputerRequestId?: string | number | null | undefined;
+  /** Restore and report the Desktop session selected in this task's dock. */
+  initialComputerSessionId?: string | null | undefined;
+  onComputerSessionIdChange?: ((computerSessionId: string | null) => void) | undefined;
 };
 
 type ComputerSelection = { sessionId: string; pinned: boolean } | null;
@@ -79,6 +82,8 @@ export function ComputerViewer({
   renderEmpty,
   requestedComputerSessionId,
   requestedComputerRequestId,
+  initialComputerSessionId,
+  onComputerSessionIdChange,
   ...override
 }: ComputerViewerProps) {
   const registry = useComputerSessions({ ...override, sessionId, enabled });
@@ -106,7 +111,16 @@ export function ComputerViewer({
       liveRelevant.length > 0 ? liveRelevant : recentRelevantFailure ? [recentRelevantFailure] : [],
     [liveRelevant, recentRelevantFailure],
   );
-  const [selection, setSelection] = useState<ComputerSelection>(null);
+  const [selection, setSelection] = useState<ComputerSelection>(() =>
+    initialComputerSessionId ? { sessionId: initialComputerSessionId, pinned: true } : null,
+  );
+  const selectComputerSession = useCallback(
+    (next: ComputerSelection) => {
+      setSelection(next);
+      onComputerSessionIdChange?.(next?.sessionId ?? null);
+    },
+    [onComputerSessionIdChange],
+  );
   const interventions = useInteractionInterventions({
     ...override,
     enabled,
@@ -139,10 +153,13 @@ export function ComputerViewer({
     autoCreateSessionRef.current = null;
     emptyCatalogConfirmationRef.current = null;
     setCreateError(null);
-    setSelection(null);
-  }, [sessionId]);
+    setSelection(
+      initialComputerSessionId ? { sessionId: initialComputerSessionId, pinned: true } : null,
+    );
+  }, [initialComputerSessionId, sessionId]);
 
   useEffect(() => {
+    if (!enabled || registry.loading) return;
     const requested = requestedComputerSessionId
       ? (liveSessions.find((session) => session.id === requestedComputerSessionId) ?? null)
       : null;
@@ -151,7 +168,7 @@ export function ComputerViewer({
       : null;
     if (requested && requestKey && handledRequestRef.current !== requestKey) {
       handledRequestRef.current = requestKey;
-      setSelection({ sessionId: requested.id, pinned: true });
+      selectComputerSession({ sessionId: requested.id, pinned: true });
       return;
     }
 
@@ -162,15 +179,24 @@ export function ComputerViewer({
     if (selection?.pinned && selectedStillLive) return;
     const preferred = relevant[0] ?? null;
     if (!preferred) {
-      if (selection) setSelection(null);
+      if (selection) selectComputerSession(null);
       return;
     }
     if (!selectedStillLive || !selection?.pinned) {
       if (selection?.sessionId !== preferred.id || selection.pinned) {
-        setSelection({ sessionId: preferred.id, pinned: false });
+        selectComputerSession({ sessionId: preferred.id, pinned: false });
       }
     }
-  }, [liveSessions, relevant, requestedComputerRequestId, requestedComputerSessionId, selection]);
+  }, [
+    liveSessions,
+    enabled,
+    registry.loading,
+    relevant,
+    requestedComputerRequestId,
+    requestedComputerSessionId,
+    selectComputerSession,
+    selection,
+  ]);
 
   const selectedRegistrySession = useMemo(
     () => liveSessions.find((session) => session.id === selection?.sessionId) ?? null,
@@ -282,7 +308,7 @@ export function ComputerViewer({
     setCreating(true);
     void createSession({ sessionId, name: "Desktop" })
       .then((response) => {
-        setSelection({ sessionId: response.session.id, pinned: false });
+        selectComputerSession({ sessionId: response.session.id, pinned: false });
       })
       .catch((cause) => {
         const error = cause instanceof Error ? cause : new Error("Could not open a desktop.");
@@ -293,7 +319,7 @@ export function ComputerViewer({
         createInFlightRef.current = false;
         setCreating(false);
       });
-  }, [createSession, notifyError, sessionId]);
+  }, [createSession, notifyError, selectComputerSession, sessionId]);
 
   useEffect(() => {
     // Once this task's Desktop has been observed, a later transient empty
@@ -449,10 +475,10 @@ export function ComputerViewer({
         refreshing={registry.refreshing}
         interventionCounts={interventionCounts}
         onSelect={(computerSessionId) =>
-          setSelection({ sessionId: computerSessionId, pinned: true })
+          selectComputerSession({ sessionId: computerSessionId, pinned: true })
         }
         onFollow={() => {
-          if (relevant[0]) setSelection({ sessionId: relevant[0].id, pinned: false });
+          if (relevant[0]) selectComputerSession({ sessionId: relevant[0].id, pinned: false });
         }}
         onCreate={createComputer}
         onRefresh={() => void Promise.all([refreshRegistry(), refreshComputer()])}
