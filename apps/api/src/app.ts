@@ -23,7 +23,7 @@ import {
 } from "@opengeni/contracts";
 import {
   createDocumentServices,
-  getDocument,
+  getDocumentForIndexing,
   indexDocumentNow,
   type DocumentServices,
 } from "@opengeni/documents";
@@ -204,9 +204,12 @@ export function createAppComposition(deps: AppDependencies): {
       if (context.accountId !== accountId) {
         throw new Error("document account/workspace authority mismatch");
       }
-      const claimedDocument = await getDocument(deps.db, workspaceId, documentId, {
-        viewerSubjectId: authoritySubjectId,
-      });
+      // This is a metadata-only authority-tuple fence. Workspace and
+      // organization documents intentionally have no authority subject, so a
+      // viewer-scoped public read cannot supply the immutable human needed for
+      // Drive ACL evaluation. The byte boundary below reconstructs that
+      // subject from the stored document through indexDocumentNow.
+      const claimedDocument = await getDocumentForIndexing(deps.db, workspaceId, documentId);
       if (
         !claimedDocument ||
         claimedDocument.authorityKind !== authorityKind ||

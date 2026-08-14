@@ -13,7 +13,7 @@ import {
   NewSessionDraftAccessError,
   newSessionDraftToolsProvided,
   publicNewSessionDraftOptions,
-  requireFile,
+  requireFileForSubject,
   saveNewSessionDraftInTransaction,
   withWorkspaceSubjectRls,
 } from "@opengeni/db";
@@ -88,7 +88,12 @@ async function hydrateNewSessionDraft(
       continue;
     }
     try {
-      const file = await requireFile(deps.db, workspaceId, resource.fileId);
+      const file = await requireFileForSubject(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        fileId: resource.fileId,
+      });
       if (file.status === "ready") resources.push(resource);
     } catch {
       // Missing, foreign, failed, and pending files are stale draft state.
@@ -209,7 +214,7 @@ export async function saveActorNewSessionDraft(
   if (resources.some((resource) => resource.kind === "file") && !deps.objectStorage) {
     throw new HTTPException(503, { message: "object storage is not configured" });
   }
-  await validateFileResources(deps.db, workspaceId, resources);
+  await validateFileResources(deps.db, grant.accountId, workspaceId, grant.subjectId, resources);
   assertConfiguredModel(deps.settings, input.model);
   await assertWorkspaceModelPolicyAllows(deps.db, deps.settings, workspaceId, input.model);
 
