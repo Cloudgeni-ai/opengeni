@@ -38,6 +38,23 @@ export type IntegrationRemoveTarget = {
   removesDefinition: boolean;
 };
 
+export function canManageApiIntegrationCredential(input: {
+  definitionId: string;
+  ownership: "none" | "personal" | "workspace";
+  canManage: boolean;
+  canManageOrganizationDestination: boolean;
+}): boolean {
+  return (
+    input.canManage &&
+    input.ownership !== "none" &&
+    !(
+      input.definitionId === "google-drive" &&
+      input.ownership === "workspace" &&
+      !input.canManageOrganizationDestination
+    )
+  );
+}
+
 export function IntegrationControlCenterView({
   client,
   workspaceId,
@@ -248,7 +265,16 @@ export function IntegrationControlCenterView({
         definition={setupDefinition}
         initialAccountLabel={setupInitialAccountLabel}
         canConnectPersonal={canManage}
-        canConnectWorkspace={canManage}
+        canConnectWorkspace={
+          setupDefinition
+            ? canManageApiIntegrationCredential({
+                definitionId: setupDefinition.id,
+                ownership: "workspace",
+                canManage,
+                canManageOrganizationDestination,
+              })
+            : canManage
+        }
         restoreFocusRef={setupTriggerRef}
         restoreFocusFallbackRef={focusFallbackRef}
         onOpenChange={(open) => !open && onSetupClose()}
@@ -396,7 +422,15 @@ function DefinitionCard({
                     type="button"
                     variant="ghost"
                     size="xs"
-                    disabled={!canManage || busyKey !== null}
+                    disabled={
+                      busyKey !== null ||
+                      !canManageApiIntegrationCredential({
+                        definitionId: definition.id,
+                        ownership: instance.ownership,
+                        canManage,
+                        canManageOrganizationDestination,
+                      })
+                    }
                     aria-label={`Reconnect ${instance.displayName}`}
                     onClick={() => onReconnect(instance)}
                   >

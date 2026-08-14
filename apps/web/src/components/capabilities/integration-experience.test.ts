@@ -57,6 +57,28 @@ describe("integration experience descriptors", () => {
       oauthScopes: ["openid", "crm.objects.contacts.write"],
     });
   });
+
+  test("presents Google Drive as a read-only knowledge source", () => {
+    const experience = integrationExperience({
+      id: "google-drive",
+      name: "Google Drive",
+      summary: "Read files and folders for knowledge sources.",
+      provider: { id: "google", domain: "www.googleapis.com" },
+      authentication: {
+        scopes: ["https://www.googleapis.com/auth/drive.readonly"],
+      },
+    });
+    const copy = JSON.stringify(experience);
+
+    expect(experience.permissions.map((item) => item.label)).toContain("Read Google Drive files");
+    expect(copy).toContain("read-only");
+    expect(experience.permissionSummary).toContain(
+      "does not expose create, update, delete, or sharing mutations",
+    );
+    expect(experience.capabilities.map((item) => item.title).join(" ")).not.toMatch(
+      /create|edit|update|delete|share/i,
+    );
+  });
 });
 
 function gmailDefinition(): IntegrationDefinitionSummary {

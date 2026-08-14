@@ -773,6 +773,22 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    IF to_regprocedure(
+      format(
+        '%I.google_drive_workspace_account_admin_authorized(uuid,uuid,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.google_drive_workspace_account_admin_authorized(uuid, uuid, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.google_drive_workspace_account_admin_authorized(uuid, uuid, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
     IF to_regprocedure(format('%I.ensure_canonical_human_identity(text,text)', ${literal(schema)})) IS NOT NULL THEN
       EXECUTE format(
         'REVOKE ALL ON FUNCTION %I.ensure_canonical_human_identity(text, text) FROM PUBLIC',

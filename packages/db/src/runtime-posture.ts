@@ -50,6 +50,8 @@ const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
 ] as const;
 const MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE =
   "ensure_managed_human_personal_workspace(uuid, text, uuid)";
+const GOOGLE_DRIVE_ACCOUNT_ADMIN_AUTHORITY_ROUTINE =
+  "google_drive_workspace_account_admin_authorized(uuid, uuid, text)";
 const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
   "organization_memberships",
   "organization_user_retention_policies",
@@ -107,6 +109,7 @@ const XAI_AUTHORITY_TABLES = [
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   FORK_SESSION_CONTENT_ROUTINE,
+  GOOGLE_DRIVE_ACCOUNT_ADMIN_AUTHORITY_ROUTINE,
   XAI_AUTHORITY_LIVE_ROUTINE,
   XAI_CREATE_CREDENTIAL_ROUTINE,
   XAI_DISCONNECT_CREDENTIAL_ROUTINE,
@@ -1283,7 +1286,10 @@ export function evaluateRuntimeDatabasePosture(
           );
         }
       }
-    } else if (routine.name === MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE) {
+    } else if (
+      routine.name === MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE ||
+      routine.name === GOOGLE_DRIVE_ACCOUNT_ADMIN_AUTHORITY_ROUTINE
+    ) {
       const authorityTables = MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES.filter(
         (tableName) => tableByName.has(tableName),
       ).map((tableName) => tableByName.get(tableName)!);

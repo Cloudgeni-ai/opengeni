@@ -25,6 +25,7 @@ import {
   encryptEnvironmentValue,
   getConnectionMetadata,
   getWorkspaceGrant,
+  hasCurrentAccountAdminForWorkspaceCredential,
   loadConnectionCredentialForBroker,
   persistProviderOAuthConnection,
 } from "@opengeni/db";
@@ -71,6 +72,7 @@ type ProviderOAuthState = {
   connectionId?: string;
   connectionVersion?: number;
   expectedProviderPrincipalId?: string;
+  workspaceGoogleDriveAccountAdmin?: true;
   nonce: string;
   iat: number;
 };
@@ -119,6 +121,7 @@ export async function startApiIntegrationProviderOAuth(
     subjectId: string;
     requestUrl: string;
     payload: ApiIntegrationOAuthStartRequest;
+    canManageWorkspaceGoogleDriveCredential: boolean;
   },
 ): Promise<OAuthStartResponse> {
   const definition = requiredDefinition(input.payload.definitionId);
@@ -156,6 +159,13 @@ export async function startApiIntegrationProviderOAuth(
     });
   }
   const ownership = existingOwnership ?? input.payload.ownership ?? "personal";
+  const workspaceGoogleDriveCredential =
+    definition.id === "google-drive" && ownership === "workspace";
+  if (workspaceGoogleDriveCredential && !input.canManageWorkspaceGoogleDriveCredential) {
+    throw new HTTPException(403, {
+      message: "missing permission: account:admin",
+    });
+  }
   const authorizeScopes = uniqueStrings([
     ...(existing?.grantedScopes ?? []),
     ...definition.authentication.scopes,
@@ -188,6 +198,7 @@ export async function startApiIntegrationProviderOAuth(
           expectedProviderPrincipalId: existingMetadata!.providerPrincipalId,
         }
       : {}),
+    ...(workspaceGoogleDriveCredential ? { workspaceGoogleDriveAccountAdmin: true } : {}),
   });
   const authorizationUrl = new URL(definition.authentication.authorizationUrl);
   authorizationUrl.searchParams.set("response_type", "code");
@@ -513,7 +524,12 @@ function readProviderOAuthState(raw: string | undefined, settings: Settings): Pr
     returnPath: safeReturnPath(requiredStateString(payload.returnPath)),
     ...(connectionId ? { connectionId, connectionVersion: connectionVersion! } : {}),
     ...(optionalString(payload.expectedProviderPrincipalId)
-      ? { expectedProviderPrincipalId: optionalString(payload.expectedProviderPrincipalId)! }
+      ? {
+          expectedProviderPrincipalId: optionalString(payload.expectedProviderPrincipalId)!,
+        }
+      : {}),
+    ...(payload.workspaceGoogleDriveAccountAdmin === true
+      ? { workspaceGoogleDriveAccountAdmin: true as const }
       : {}),
     nonce: requiredStateString(payload.nonce),
     iat,
@@ -645,7 +661,15 @@ async function providerFetch(
 
 async function requireProviderOAuthGrant(
   deps: ApiRouteDeps,
-  state: Pick<ProviderOAuthState, "accountId" | "workspaceId" | "subjectId">,
+  state: Pick<
+    ProviderOAuthState,
+    | "accountId"
+    | "workspaceId"
+    | "subjectId"
+    | "ownership"
+    | "definitionId"
+    | "workspaceGoogleDriveAccountAdmin"
+  >,
 ): Promise<void> {
   const grant = await getWorkspaceGrant(deps.db, state.subjectId, state.workspaceId);
   if (
@@ -654,6 +678,14 @@ async function requireProviderOAuthGrant(
     !hasPermission(grant.permissions, "connections:write")
   ) {
     throw new ProviderOAuthCallbackError("connection_conflict");
+  }
+  if (state.definitionId === "google-drive" && state.ownership === "workspace") {
+    if (
+      state.workspaceGoogleDriveAccountAdmin !== true ||
+      !(await hasCurrentAccountAdminForWorkspaceCredential(deps.db, state))
+    ) {
+      throw new ProviderOAuthCallbackError("connection_conflict");
+    }
   }
 }
 
@@ -713,11 +745,15 @@ function providerOAuthFailureReason(error: unknown): ProviderOAuthFailureReason 
 
 function safeReturnPath(value: string): string {
   if (!value.startsWith("/") || value.startsWith("//")) {
-    throw new HTTPException(400, { message: "OAuth returnPath must be a relative path" });
+    throw new HTTPException(400, {
+      message: "OAuth returnPath must be a relative path",
+    });
   }
   const parsed = new URL(value, "https://opengeni.local");
   if (parsed.origin !== "https://opengeni.local" || parsed.pathname.startsWith("//")) {
-    throw new HTTPException(400, { message: "OAuth returnPath must be a relative path" });
+    throw new HTTPException(400, {
+      message: "OAuth returnPath must be a relative path",
+    });
   }
   return `${parsed.pathname}${parsed.search}${parsed.hash}`;
 }

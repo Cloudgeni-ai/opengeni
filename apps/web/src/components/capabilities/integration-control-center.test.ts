@@ -4,6 +4,7 @@ import {
   apiIntegrationOAuthReturnPath,
   pendingApiIntegrationOAuth,
 } from "./integration-control-center";
+import { canManageApiIntegrationCredential } from "./integration-control-center-view";
 
 describe("API integration OAuth continuation", () => {
   test("preserves unrelated route state while replacing stale callback parameters", () => {
@@ -76,5 +77,42 @@ describe("API integration OAuth continuation", () => {
       connectionId: null,
       reason: "cancelled",
     });
+  });
+});
+
+describe("API integration credential authority", () => {
+  test("requires account admin only for workspace-owned Google Drive credentials", () => {
+    expect(
+      canManageApiIntegrationCredential({
+        definitionId: "google-drive",
+        ownership: "workspace",
+        canManage: true,
+        canManageOrganizationDestination: false,
+      }),
+    ).toBe(false);
+    expect(
+      canManageApiIntegrationCredential({
+        definitionId: "google-drive",
+        ownership: "personal",
+        canManage: true,
+        canManageOrganizationDestination: false,
+      }),
+    ).toBe(true);
+    expect(
+      canManageApiIntegrationCredential({
+        definitionId: "google-gmail",
+        ownership: "workspace",
+        canManage: true,
+        canManageOrganizationDestination: false,
+      }),
+    ).toBe(true);
+    expect(
+      canManageApiIntegrationCredential({
+        definitionId: "google-drive",
+        ownership: "workspace",
+        canManage: true,
+        canManageOrganizationDestination: true,
+      }),
+    ).toBe(true);
   });
 });

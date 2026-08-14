@@ -230,6 +230,16 @@ fallback and is not mutated. Generic browser editing refuses required object or
 array fields unless a provider-specific flow owns them, so OneDrive and future
 rich schemas cannot be submitted as silently incomplete primitive config.
 
+The curated Google Drive definition is a read-only source preset. It requests
+`drive.readonly` and compiles only an explicit definition-owned allowlist of
+Drive read operations; newly published Discovery methods do not silently become
+tools, and create/update/delete/share methods are absent rather than left to
+fail at OAuth authorization. Workspace-owned Drive credential install,
+replacement/reconnect, callback completion, and disconnect require literal
+`account:admin`; generic `connections:write` and `workspace:admin` remain
+insufficient. Personal instances and ordinary use of an existing configured
+source retain their existing authority.
+
 The Definition inventory returns only safe public metadata (id, label, provider
 family/domain, protocol, summary, requested scope names, and immutable facet
 schemas/capability facts). Deployment OAuth client identifiers, secrets, and
@@ -491,7 +501,7 @@ Ordinary new sessions include two first-party OpenGeni tools:
   metadata. Search is deterministic, excludes untrusted registry rows, and
   prefers exact, enabled, verified, and built-in matches. Agents should search
   by the outcome they need (for example, `GitHub repositories`, `product
-  analytics`, or `Slack notifications`) rather than guessing an MCP endpoint.
+analytics`, or `Slack notifications`) rather than guessing an MCP endpoint.
 - `capability_authorization_request` posts one `tool.auth_needed`-style card to
   the current session for an exact catalog result. Calling it does not install,
   enable, connect, or grant anything. The exact turn attempt fences the event,
@@ -507,8 +517,8 @@ never enter the event or model-visible tool result. Existing explicit session
 tool policies remain exact and do not silently gain the two discovery tools.
 
 GitHub is the first fully specialized adapter. Search prefers the built-in
-  native GitHub connection recommendation, checks the live workspace binding,
-  and reports it ready only when an active owner-authorized installation exists. Otherwise the
+native GitHub connection recommendation, checks the live workspace binding,
+and reports it ready only when an active owner-authorized installation exists. Otherwise the
 human click mints fresh `github:manage` owner-consent state and carries only a
 validated same-workspace session return path across GitHub redirects. The agent
 never receives `github:manage`, an installation token, the signed browser state,

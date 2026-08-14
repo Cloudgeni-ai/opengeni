@@ -17,6 +17,7 @@ export type IntegrationDefinitionSource =
   | Readonly<{
       kind: "google_discovery";
       url: string;
+      operationIds?: readonly string[];
     }>
   | Readonly<{
       kind: "openapi";
@@ -166,6 +167,20 @@ const mailboxFacets = (
 const googleDiscoveryUrl = (service: string, version: string): string =>
   `https://www.googleapis.com/discovery/v1/apis/${service}/${version}/rest`;
 
+const GOOGLE_DRIVE_READ_OPERATION_IDS = [
+  "drive.about.get",
+  "drive.changes.getStartPageToken",
+  "drive.changes.list",
+  "drive.drives.get",
+  "drive.drives.list",
+  "drive.files.download",
+  "drive.files.export",
+  "drive.files.get",
+  "drive.files.list",
+  "drive.permissions.get",
+  "drive.permissions.list",
+] as const;
+
 const googleOAuth = (scopes: readonly string[]): IntegrationDefinitionOAuth2Authentication => ({
   kind: "oauth2",
   provider: "google",
@@ -178,12 +193,16 @@ const googleOAuth = (scopes: readonly string[]): IntegrationDefinitionOAuth2Auth
 export const GOOGLE_DRIVE_INTEGRATION_DEFINITION: IntegrationDefinition = {
   id: "google-drive",
   name: "Google Drive",
-  summary: "Files, folders, permissions, and shared drives.",
+  summary: "Read files, folders, permissions, and shared drives for knowledge sources.",
   protocol: "openapi",
   provider: { id: "google", domain: "www.googleapis.com" },
-  source: { kind: "google_discovery", url: googleDiscoveryUrl("drive", "v3") },
+  source: {
+    kind: "google_discovery",
+    url: googleDiscoveryUrl("drive", "v3"),
+    operationIds: GOOGLE_DRIVE_READ_OPERATION_IDS,
+  },
   baseUrl: "https://www.googleapis.com/drive/v3/",
-  authentication: googleOAuth(["https://www.googleapis.com/auth/drive"]),
+  authentication: googleOAuth(["https://www.googleapis.com/auth/drive.readonly"]),
   healthCheck: {
     operationKey: "drive.about.get",
     arguments: { query: { fields: "user" } },
@@ -363,17 +382,36 @@ export function filterOpenApiDocumentForDefinition(
   document: Record<string, unknown>,
   definition: IntegrationDefinition,
 ): Record<string, unknown> {
-  if (definition.source.kind !== "openapi" || !definition.source.operationPathPrefixes?.length) {
+  const operationPathPrefixes =
+    definition.source.kind === "openapi" ? definition.source.operationPathPrefixes : undefined;
+  const operationIds =
+    definition.source.kind === "google_discovery" ? definition.source.operationIds : undefined;
+  if (!operationPathPrefixes?.length && !operationIds?.length) {
     return document;
   }
-  const operationPathPrefixes = definition.source.operationPathPrefixes;
   if (!isRecord(document.paths)) {
     throw new IntegrationProtocolError("openapi_paths", "OpenAPI document has no paths object");
   }
+  const operationIdSet = new Set(operationIds ?? []);
   const paths = Object.fromEntries(
-    Object.entries(document.paths).filter(([path]) =>
-      operationPathPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`)),
-    ),
+    Object.entries(document.paths).flatMap(([path, rawPath]): [string, unknown][] => {
+      if (
+        operationPathPrefixes?.length &&
+        !operationPathPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
+      ) {
+        return [];
+      }
+      if (!operationIds?.length) return [[path, rawPath]];
+      if (!isRecord(rawPath)) return [];
+      const filteredPath = Object.fromEntries(
+        Object.entries(rawPath).filter(([, operation]) => {
+          return (
+            isRecord(operation) && operationIdSet.has(stringValue(operation.operationId) ?? "")
+          );
+        }),
+      );
+      return Object.keys(filteredPath).length > 0 ? [[path, filteredPath]] : [];
+    }),
   );
   if (Object.keys(paths).length === 0) {
     throw new IntegrationProtocolError(

@@ -90,7 +90,10 @@ async function resolveDefinition(
   );
   let document: Record<string, unknown>;
   if (definition.source.kind === "google_discovery") {
-    document = googleDiscoveryToOpenApi(JSON.parse(new TextDecoder().decode(bytes)));
+    document = filterOpenApiDocumentForDefinition(
+      googleDiscoveryToOpenApi(JSON.parse(new TextDecoder().decode(bytes))),
+      definition,
+    );
   } else {
     document = filterOpenApiDocumentForDefinition(parseOpenApiDocument(bytes), definition);
   }

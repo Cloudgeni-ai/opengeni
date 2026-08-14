@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 
 import {
+  GOOGLE_DRIVE_INTEGRATION_DEFINITION,
   GOOGLE_GMAIL_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
@@ -12,11 +13,13 @@ import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   signDelegatedAccessToken,
+  type Permission,
 } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
   createDb,
   deleteWorkspace,
+  ensureManagedAccessForUserWithOrganizationMemberships,
   listConnectionsMetadata,
   loadConnectionCredentialForBroker,
   type DbClient,
@@ -112,15 +115,42 @@ async function freshWorkspace() {
   });
   const grant = access.workspaceGrants[0]!;
   workspaceIds.push(grant.workspaceId);
-  return { accountId: grant.accountId, workspaceId: grant.workspaceId, subjectId };
+  return {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId,
+  };
 }
 
-async function bearer(workspace: Awaited<ReturnType<typeof freshWorkspace>>): Promise<string> {
+async function freshManagedWorkspace() {
+  const userId = `provider-oauth-${crypto.randomUUID()}`;
+  const access = await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
+    userId,
+    email: `${userId}@example.com`,
+    name: "Provider OAuth managed user",
+  });
+  const grant = access.accessContext.workspaceGrants.find(
+    (candidate) => candidate.workspaceId === access.accessContext.defaultWorkspaceId,
+  )!;
+  for (const workspaceGrant of access.accessContext.workspaceGrants) {
+    workspaceIds.push(workspaceGrant.workspaceId);
+  }
+  return {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
+  };
+}
+
+async function bearer(
+  workspace: Awaited<ReturnType<typeof freshWorkspace>>,
+  permissions: Permission[] = ["connections:read", "connections:write", "workspace:read"],
+): Promise<string> {
   return `Bearer ${await signDelegatedAccessToken(DELEGATION_SECRET, {
     accountId: workspace.accountId,
     workspaceId: workspace.workspaceId,
     subjectId: workspace.subjectId,
-    permissions: ["connections:read", "connections:write", "workspace:read"],
+    permissions,
     principalKind: "human_session",
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   })}`;
@@ -232,13 +262,14 @@ async function start(
   fixture: ReturnType<typeof providerFixture>,
   workspace: Awaited<ReturnType<typeof freshWorkspace>>,
   payload: Record<string, unknown>,
+  permissions?: Permission[],
 ) {
   const response = await testApp(fixture).request(
     `/v1/workspaces/${workspace.workspaceId}/integrations/oauth/start`,
     {
       method: "POST",
       headers: {
-        authorization: await bearer(workspace),
+        authorization: await bearer(workspace, permissions),
         "content-type": "application/json",
         "x-opengeni-access-key": EDGE_ACCESS_KEY,
         [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
@@ -246,8 +277,30 @@ async function start(
       body: JSON.stringify(payload),
     },
   );
-  const body = (await response.json()) as { authorizationUrl?: string; error?: unknown };
+  const body = (await response.json()) as {
+    authorizationUrl?: string;
+    error?: unknown;
+  };
   return { response, authorizationUrl: body.authorizationUrl ?? "", body };
+}
+
+async function disconnect(
+  fixture: ReturnType<typeof providerFixture>,
+  workspace: Awaited<ReturnType<typeof freshWorkspace>>,
+  connectionId: string,
+  permissions?: Permission[],
+) {
+  return await testApp(fixture).request(
+    `/v1/workspaces/${workspace.workspaceId}/connections/${connectionId}`,
+    {
+      method: "DELETE",
+      headers: {
+        authorization: await bearer(workspace, permissions),
+        "x-opengeni-access-key": EDGE_ACCESS_KEY,
+        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+      },
+    },
+  );
 }
 
 async function callback(
@@ -262,6 +315,135 @@ async function callback(
 }
 
 describe("API Integration provider OAuth", () => {
+  test("requires literal account admin for workspace Google Drive and revalidates it before callback exchange", async () => {
+    if (!available) return;
+    const ordinary = await freshWorkspace();
+    const ordinaryFixture = providerFixture();
+    const workspaceDenied = await start(
+      ordinaryFixture,
+      ordinary,
+      {
+        definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+        ownership: "workspace",
+      },
+      ["connections:read", "connections:write", "workspace:read", "workspace:admin"],
+    );
+    expect(workspaceDenied.response.status).toBe(403);
+    expect(workspaceDenied.body).toMatchObject({
+      error: { message: expect.stringContaining("account:admin") },
+    });
+
+    ordinaryFixture.googlePlans.push({
+      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "personal-drive-refresh",
+    });
+    const personalStart = await start(ordinaryFixture, ordinary, {
+      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      ownership: "personal",
+    });
+    expect(personalStart.response.status).toBe(200);
+    const personalCallback = await callback(
+      ordinaryFixture,
+      new URL(personalStart.authorizationUrl).searchParams.get("state")!,
+    );
+    expect(
+      new URL(personalCallback.headers.get("location")!).searchParams.get("integration_oauth"),
+    ).toBe("success");
+
+    const managed = await freshManagedWorkspace();
+    const managedFixture = providerFixture();
+    managedFixture.googlePlans.push({
+      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "must-not-persist",
+    });
+    const managedStart = await start(
+      managedFixture,
+      managed,
+      {
+        definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+        ownership: "workspace",
+      },
+      ["account:admin", "connections:read", "connections:write", "workspace:read"],
+    );
+    expect(managedStart.response.status).toBe(200);
+    await shared!.admin`
+      update organization_memberships
+      set status = 'suspended', authorization_revision = authorization_revision + 1,
+          updated_at = now()
+      where account_id = ${managed.accountId} and subject_id = ${managed.subjectId}
+    `;
+    const revokedCallback = await callback(
+      managedFixture,
+      new URL(managedStart.authorizationUrl).searchParams.get("state")!,
+    );
+    expect(new URL(revokedCallback.headers.get("location")!).searchParams.get("reason")).toBe(
+      "connection_conflict",
+    );
+    expect(managedFixture.tokenRequests).toHaveLength(0);
+  }, 60_000);
+
+  test("requires literal account admin to disconnect workspace Google Drive without changing personal disconnect", async () => {
+    if (!available) return;
+    const managed = await freshManagedWorkspace();
+    const workspaceFixture = providerFixture();
+    workspaceFixture.googlePlans.push({
+      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "workspace-drive-refresh",
+    });
+    const workspaceStart = await start(
+      workspaceFixture,
+      managed,
+      {
+        definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+        ownership: "workspace",
+      },
+      ["account:admin", "connections:read", "connections:write", "workspace:read"],
+    );
+    const workspaceCallback = await callback(
+      workspaceFixture,
+      new URL(workspaceStart.authorizationUrl).searchParams.get("state")!,
+    );
+    expect(
+      new URL(workspaceCallback.headers.get("location")!).searchParams.get("integration_oauth"),
+    ).toBe("success");
+    const workspaceConnection = (
+      await listConnectionsMetadata(client.db, managed.workspaceId, managed.subjectId)
+    )[0]!;
+    const workspaceDenied = await disconnect(workspaceFixture, managed, workspaceConnection.id, [
+      "connections:read",
+      "connections:write",
+      "workspace:read",
+      "workspace:admin",
+    ]);
+    expect(workspaceDenied.status).toBe(403);
+    expect(await workspaceDenied.json()).toMatchObject({
+      error: { message: expect.stringContaining("account:admin") },
+    });
+
+    const personal = await freshWorkspace();
+    const personalFixture = providerFixture();
+    personalFixture.googlePlans.push({
+      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "personal-drive-refresh",
+    });
+    const personalStart = await start(personalFixture, personal, {
+      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      ownership: "personal",
+    });
+    await callback(
+      personalFixture,
+      new URL(personalStart.authorizationUrl).searchParams.get("state")!,
+    );
+    const personalConnection = (
+      await listConnectionsMetadata(client.db, personal.workspaceId, personal.subjectId)
+    )[0]!;
+    const personalDisconnected = await disconnect(personalFixture, personal, personalConnection.id);
+    expect(personalDisconnected.status).toBe(200);
+    expect(await personalDisconnected.json()).toMatchObject({
+      connection: { id: personalConnection.id, status: "revoked" },
+    });
+  }, 60_000);
+
   test("connects a Google definition with signed PKCE state and no callback perimeter credential", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -343,7 +525,9 @@ describe("API Integration provider OAuth", () => {
           "x-opengeni-access-key": EDGE_ACCESS_KEY,
           [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
         },
-        body: JSON.stringify({ credential: { access_token: "bypass-attempt" } }),
+        body: JSON.stringify({
+          credential: { access_token: "bypass-attempt" },
+        }),
       },
     );
     expect(genericPatch.status).toBe(422);

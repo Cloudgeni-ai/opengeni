@@ -1919,6 +1919,29 @@ export async function getWorkspaceGrant(
     : null;
 }
 
+/**
+ * Re-resolve the current literal account-admin authority for a provider OAuth
+ * callback that cannot rely on the browser's original authenticated request.
+ * The signed OAuth state proves the start-time decision; this read proves the
+ * exact subject still has a current durable account authority source. Managed
+ * humans require their active organization membership, while local/configured
+ * accounts retain their canonical operator-owned account source.
+ */
+export async function hasCurrentAccountAdminForWorkspaceCredential(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<boolean> {
+  const [row] = await rawRows<{ authorized: boolean }>(
+    db,
+    sql`select google_drive_workspace_account_admin_authorized(
+      ${input.accountId}::uuid,
+      ${input.workspaceId}::uuid,
+      ${input.subjectId}::text
+    ) as authorized`,
+  );
+  return row?.authorized === true;
+}
+
 export async function listWorkspaceMembers(
   db: Database,
   workspaceId: string,
