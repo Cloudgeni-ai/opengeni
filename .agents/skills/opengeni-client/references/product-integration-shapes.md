@@ -111,14 +111,14 @@ matching contracts:
 | --- | --- | --- | --- |
 | Stable workspace persona | workspace `agentInstructions` | every session in workspace | No |
 | Agent role/persona refinement | session `instructions` | one session | No, but session metadata is org-visible |
-| Current route/selection/viewport snapshot | `turnInstructions` | one accepted turn | No |
+| Current route/selection/viewport snapshot | `modelContext` | one accepted message | No in the standard timeline; yes in full audit data |
 | What the user said | message text / `initialMessage` | durable conversation | Yes |
 
 Use `requestedSessionId` plus a stable `idempotencyKey` when the product must
 persist its own link before the first OpenGeni turn can run. The ID is
 correlation, not authorization.
 
-Turn context is a snapshot, not a substitute for tools. If the agent needs
+`modelContext` is ordinary user-role model content, not a system instruction or secret. It is a snapshot, not a substitute for tools. If the agent needs
 current product state or must mutate product data, expose a tenant-scoped MCP
 server. Keep tool outputs machine-useful; the product may render a separate,
 more concise user-facing projection.

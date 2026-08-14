@@ -7,6 +7,7 @@ export type GoogleDriveProviderOperation =
   | "list_changes"
   | "get_file"
   | "list_children"
+  | "list_permissions"
   | "download"
   | "export";
 

@@ -219,6 +219,8 @@ function googleFixture(
         mimeType: "application/vnd.google-apps.folder",
         modifiedTime: "2026-07-31T06:00:00.000Z",
         webViewLink: "https://drive.google.com/drive/folders/folder-1",
+        trashed: false,
+        capabilities: { canAddChildren: true },
       });
     }
     if (url.pathname === "/drive/v3/files/0AF9DylqqXWK2Uk9PVA") {
@@ -229,6 +231,8 @@ function googleFixture(
         driveId: "0AF9DylqqXWK2Uk9PVA",
         modifiedTime: "2026-07-31T06:00:00.000Z",
         webViewLink: "https://drive.google.com/drive/folders/0AF9DylqqXWK2Uk9PVA",
+        trashed: false,
+        capabilities: { canAddChildren: true },
       });
     }
     if (url.pathname === "/drive/v3/drives/0AF9DylqqXWK2Uk9PVA") {
@@ -269,6 +273,7 @@ async function startConnection(
   workspace: { accountId: string; workspaceId: string },
   googleDriveFetch: typeof globalThis.fetch,
   connectionId?: string,
+  capability: "source_read" | "publish" = "source_read",
 ) {
   const response = await app(googleDriveFetch).request(
     `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/install`,
@@ -282,7 +287,7 @@ async function startConnection(
         "content-type": "application/json",
         [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       },
-      body: JSON.stringify(connectionId ? { connectionId } : {}),
+      body: JSON.stringify({ ...(connectionId ? { connectionId } : {}), capability }),
     },
   );
   const body = (await response.json()) as { authorizationUrl?: string };
@@ -327,6 +332,63 @@ describe("Google Drive local source preview", () => {
     expect(url.searchParams.get("redirect_uri")).toBe(
       "http://127.0.0.1:8000/v1/integrations/google-drive/callback",
     );
+  });
+
+  test("requests drive.file independently and activates only an explicit writable destination", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const source = await connect(workspace, googleFixture());
+    const google = googleFixture({
+      scopes: [GOOGLE_DRIVE_READONLY_SCOPE, GOOGLE_DRIVE_FILE_SCOPE],
+    });
+    const start = await startConnection(workspace, google.fetch, source.connection.id, "publish");
+    expect(start.response.status).toBe(200);
+    const authorizationUrl = new URL(start.authorizationUrl);
+    expect(authorizationUrl.searchParams.get("scope")).toBe(GOOGLE_DRIVE_FILE_SCOPE);
+    expect(authorizationUrl.searchParams.get("include_granted_scopes")).toBe("true");
+    expect(authorizationUrl.searchParams.get("trigger_onepick")).toBe("true");
+    expect(authorizationUrl.searchParams.get("allow_folder_selection")).toBe("true");
+    expect(authorizationUrl.searchParams.get("allow_multiple")).toBe("false");
+    expect(authorizationUrl.searchParams.get("mimetypes")).toBe(
+      "application/vnd.google-apps.folder",
+    );
+    const state = authorizationUrl.searchParams.get("state");
+    const callback = await app(google.fetch).request(
+      `/v1/integrations/google-drive/callback?code=fixture-code&picked_file_ids=folder-1&state=${encodeURIComponent(state!)}`,
+    );
+    expect(callback.headers.get("location")).toContain("google_drive=connected");
+    const [connection] = await listConnectionsMetadata(
+      client.db,
+      workspace.workspaceId,
+      "subject-a",
+    );
+    expect(connection).toMatchObject({
+      id: source.connection.id,
+      grantedScopes: [GOOGLE_DRIVE_READONLY_SCOPE, GOOGLE_DRIVE_FILE_SCOPE].sort(),
+      metadata: {
+        accessMode: "readonly",
+        outputDestination: {
+          folderId: "folder-1",
+          folderName: "Product",
+          driveId: null,
+          location: "my_drive",
+        },
+      },
+    });
+    const policies = await shared!.admin<
+      Array<{ policy: string; server_id: string; tool_name: string; action_name: string }>
+    >`
+      select policy, server_id, tool_name, action_name
+      from connector_action_policies
+      where workspace_id = ${workspace.workspaceId} and connection_id = ${connection!.id}`;
+    expect(policies).toEqual([
+      {
+        policy: "ask",
+        server_id: "google-drive-publishing",
+        tool_name: "google_drive_publish_file",
+        action_name: "create",
+      },
+    ]);
   });
 
   test("binds encrypted credentials to the initiating subject and returns to the web origin", async () => {
@@ -390,7 +452,7 @@ describe("Google Drive local source preview", () => {
     const connected = await connect(workspace, google);
     expect(connected.callback.headers.get("location")).toContain("google_drive=connected");
     expect(connected.connection).toMatchObject({
-      grantedScopes: ["openid", GOOGLE_DRIVE_FULL_SCOPE],
+      grantedScopes: ["openid", GOOGLE_DRIVE_FULL_SCOPE].sort(),
       metadata: { accessMode: "readonly" },
     });
     expect(google.apiAuthorizationHeaders).toEqual(["Bearer google-access-token"]);

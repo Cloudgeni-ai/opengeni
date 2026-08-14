@@ -11,6 +11,7 @@ import {
   AttemptToolEnvironment,
   createAttemptToolEnvironment,
   parseVerifiedAttemptToolCatalog,
+  type AttemptToolAuthorization,
   type AttemptToolDefinition,
   type AttemptToolScope,
 } from "@opengeni/codemode";
@@ -1364,6 +1365,12 @@ export type ConnectorActionPolicyHooks = {
   complete: (input: { requestId: string; outcome: "completed" | "uncertain" }) => Promise<void>;
 };
 
+/** Exact private binding for one attempt-local model tool backed by a connector action. */
+export type AttemptConnectorActionBinding = {
+  modelName: string;
+  call: (approvalId: string, arguments_: unknown) => ConnectorActionToolCall;
+};
+
 export type BuildAgentOptions = {
   model?: Model;
   /** Attach the built-in structured human-input tool. Default: enabled. */
@@ -1488,6 +1495,8 @@ export type BuildAgentOptions = {
   resolvedMcpConnectionIds?: ReadonlyMap<string, string>;
   /** Attempt-bound connector Allow/Ask/Block enforcement and safe audit hooks. */
   connectorActionPolicy?: ConnectorActionPolicyHooks;
+  /** Private connector identities for exact-name attempt-local model tools. */
+  attemptConnectorActionBindings?: readonly AttemptConnectorActionBinding[];
   // Workspace Memory V1 working-set block, resolved by the worker per turn.
   // Composed after the workspace persona/CORE/codemode substrate and before
   // per-session instructions. Omitted/blank ⇒ byte-identical instructions.
@@ -1566,9 +1575,6 @@ export type BuildAgentOptions = {
   // timeline message. Omitted ⇒ the composed instructions are byte-identical to
   // a workspace-only persona.
   sessionInstructions?: string;
-  // Host context for this exact accepted turn. Composed system-level after the
-  // durable session persona and omitted from all later turns.
-  turnInstructions?: string;
   /**
    * Exact Skill activations admitted for this turn. Optional/domain Skills
    * enter only through an explicit installation, Pack owner, or session
@@ -1702,12 +1708,6 @@ export function appendSessionInstructions(composed: string, sessionInstructions?
   return trimmed ? `${composed} ${trimmed}` : composed;
 }
 
-/** Append system instructions that apply to this exact turn only. */
-export function appendTurnInstructions(composed: string, turnInstructions?: string): string {
-  const trimmed = turnInstructions?.trim();
-  return trimmed ? `${composed} ${trimmed}` : composed;
-}
-
 /**
  * Append the standing goal accepted with this logical turn. The worker passes
  * the persisted turn snapshot, never the mutable current goal head, so queued
@@ -1768,19 +1768,16 @@ function composedPersistentAgentInstructions(
     // authority is active for this exact attempt.
     return appendPersistentSessionSettings(
       appendSessionGoal(
-        appendTurnInstructions(
-          appendSessionInstructions(
-            appendWorkspaceMemory(
-              appendGitCredentialBindingInstructions(
-                appendCodemodeInstructions(personaAndCore, codemodeIsAvailable(options)),
-                options.gitCredentialBindings,
-                options.activeSandboxBackend,
-              ),
-              options.workspaceMemory,
+        appendSessionInstructions(
+          appendWorkspaceMemory(
+            appendGitCredentialBindingInstructions(
+              appendCodemodeInstructions(personaAndCore, codemodeIsAvailable(options)),
+              options.gitCredentialBindings,
+              options.activeSandboxBackend,
             ),
-            options.sessionInstructions,
+            options.workspaceMemory,
           ),
-          options.turnInstructions,
+          options.sessionInstructions,
         ),
         options.goalSnapshot,
       ),
@@ -1796,12 +1793,9 @@ function composedPersistentAgentInstructions(
       appendCodemodeInstructions(
         appendPersistentSessionSettings(
           appendSessionGoal(
-            appendTurnInstructions(
-              appendSessionInstructions(
-                appendWorkspaceGovernance(personaAndCore, options.workspaceGovernance),
-                options.sessionInstructions,
-              ),
-              options.turnInstructions,
+            appendSessionInstructions(
+              appendWorkspaceGovernance(personaAndCore, options.workspaceGovernance),
+              options.sessionInstructions,
             ),
             options.goalSnapshot,
           ),
@@ -2222,6 +2216,11 @@ export function buildOpenGeniAgent(
       options.connectorActionPolicy,
       options.resolvedMcpConnectionIds,
     );
+    installAttemptConnectorActionPolicy(
+      agent as unknown as ApprovalCapableAgent,
+      options.attemptConnectorActionBindings ?? [],
+      options.connectorActionPolicy,
+    );
     installInteractionInterventionPolicy(agent as unknown as ApprovalCapableAgent);
     return agent;
   }
@@ -2338,6 +2337,11 @@ export function buildOpenGeniAgent(
     settings,
     options.connectorActionPolicy,
     options.resolvedMcpConnectionIds,
+  );
+  installAttemptConnectorActionPolicy(
+    agent as unknown as ApprovalCapableAgent,
+    options.attemptConnectorActionBindings ?? [],
+    options.connectorActionPolicy,
   );
   installInteractionInterventionPolicy(agent as unknown as ApprovalCapableAgent);
   return agent;
@@ -2559,6 +2563,104 @@ function installMcpApprovalPolicy(
     agent.clone = (config: unknown) => {
       const cloned = originalClone(config);
       installMcpApprovalPolicy(cloned, policies, connectorActionPolicy);
+      return cloned;
+    };
+  }
+}
+
+/**
+ * Apply durable connector policy to exact-name, attempt-local tools. Their
+ * private connection binding is host-owned and intentionally absent from the
+ * frozen model/Codemode catalog and tool arguments.
+ */
+function installAttemptConnectorActionPolicy(
+  agent: ApprovalCapableAgent,
+  bindings: readonly AttemptConnectorActionBinding[],
+  connectorActionPolicy?: ConnectorActionPolicyHooks,
+): void {
+  if (bindings.length === 0) return;
+  const byModelName = new Map<string, AttemptConnectorActionBinding>();
+  for (const binding of bindings) {
+    if (byModelName.has(binding.modelName)) {
+      throw new Error(`Duplicate attempt connector action binding: ${binding.modelName}`);
+    }
+    byModelName.set(binding.modelName, binding);
+  }
+  const listMcpTools = agent.getMcpTools.bind(agent);
+  agent.getMcpTools = async (resolutionContext: unknown) => {
+    const tools = await listMcpTools(resolutionContext);
+    return tools.map((tool) => {
+      if (tool.type !== "function") return tool;
+      const binding = byModelName.get(tool.name);
+      if (!binding) return tool;
+      const originalNeedsApproval = tool.needsApproval.bind(tool);
+      const originalInvoke = tool.invoke.bind(tool);
+      return {
+        ...tool,
+        needsApproval: async (
+          runContext: Parameters<typeof originalNeedsApproval>[0],
+          parsedInput: Parameters<typeof originalNeedsApproval>[1],
+          callId: Parameters<typeof originalNeedsApproval>[2],
+        ) => {
+          if (!connectorActionPolicy) {
+            throw new Error("Attempt connector action policy is unavailable");
+          }
+          if (!callId) {
+            throw new Error("Attempt connector action is missing its durable approval identity");
+          }
+          const preparation = await connectorActionPolicy.prepare(
+            binding.call(callId, parsedInput),
+          );
+          if (!preparation.managed || preparation.decision === "block") return false;
+          return (
+            preparation.decision === "ask" ||
+            (await originalNeedsApproval(runContext, parsedInput, callId))
+          );
+        },
+        invoke: async (runContext, input, details) => {
+          if (!connectorActionPolicy) {
+            throw new Error("Attempt connector action policy is unavailable");
+          }
+          const callId = details?.toolCall?.callId;
+          if (!callId) {
+            throw new Error("Attempt connector action was not executed: missing durable identity");
+          }
+          let parsedInput: unknown;
+          try {
+            parsedInput = JSON.parse(input) as unknown;
+          } catch {
+            throw new Error("Attempt connector action was not executed: malformed tool input");
+          }
+          const admission = await connectorActionPolicy.begin(binding.call(callId, parsedInput));
+          if (!admission.allowed) {
+            throw new Error(`Attempt connector action was not executed: ${admission.reason}`);
+          }
+          if (!admission.managed) {
+            throw new Error("Attempt connector action has no explicit execution policy");
+          }
+          try {
+            const output = await originalInvoke(runContext, input, details);
+            await connectorActionPolicy.complete({
+              requestId: admission.requestId,
+              outcome: "completed",
+            });
+            return output;
+          } catch {
+            await connectorActionPolicy.complete({
+              requestId: admission.requestId,
+              outcome: "uncertain",
+            });
+            throw new Error("Attempt connector action failed after execution began");
+          }
+        },
+      };
+    });
+  };
+  const originalClone = agent.clone?.bind(agent);
+  if (originalClone) {
+    agent.clone = (config: unknown) => {
+      const cloned = originalClone(config);
+      installAttemptConnectorActionPolicy(cloned, bindings, connectorActionPolicy);
       return cloned;
     };
   }
@@ -3028,6 +3130,8 @@ export type PrepareToolsOptions = {
    * and exact attempt catalog; this is not a second tool registry.
    */
   attemptToolDefinitions?: readonly AttemptToolDefinition[];
+  /** Host authorization applied after catalog/input validation and before execution. */
+  attemptToolAuthorize?: AttemptToolAuthorization;
 };
 
 async function measureToolPreparationPhase<T>(
@@ -3553,6 +3657,7 @@ async function prepareAttemptToolEnvironment(
     scope,
     generation: options.attemptToolCatalogGeneration ?? 1,
     definitions: [...perServerDefinitions.flat(), ...(options.attemptToolDefinitions ?? [])],
+    ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
   });
   const subjectId = options.subjectId ?? "worker:mcp-model";
   for (const { server } of preparedServers) {

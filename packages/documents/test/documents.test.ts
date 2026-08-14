@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
 import {
   DeterministicEmbeddingProvider,
   HeuristicCurationProvider,
@@ -19,6 +20,26 @@ import {
 } from "../src";
 
 describe("documents", () => {
+  test("authorizes source bytes with the immutable initiating subject before add and index", async () => {
+    const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+    const add = source.slice(
+      source.indexOf("export async function addDocumentToBase"),
+      source.indexOf("export async function moveDocumentToBase"),
+    );
+    expect(add).toContain("subjectId: fileAuthoritySubjectId");
+    expect(add).toContain("createdBy: fileAuthoritySubjectId");
+    expect(add).toContain("document file authority must match the exact initiating subject");
+    const indexStart = source.indexOf("export async function indexDocumentNow");
+    const index = source.slice(
+      indexStart,
+      source.indexOf("export async function searchDocuments", indexStart),
+    );
+    expect(index).toContain("subjectId: cleanString(document.createdBy) ?? null");
+    const readyFile = source.slice(source.indexOf("async function requireReadyFile"));
+    expect(readyFile).toContain("getFilesForSubject(db");
+    expect(readyFile).not.toContain("requireFile(db");
+  });
+
   test("binds opaque Knowledge browse cursors to subject, parent, and filters", () => {
     const scope = {
       accountId: "11111111-1111-4111-8111-111111111111",

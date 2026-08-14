@@ -202,19 +202,19 @@ describe("immutable session turn initiators", () => {
     ).toEqual(winningDelegations);
   });
 
-  test("initial-turn repair uses the winning create instructions, not the retrying caller", async () => {
+  test("initial-turn repair uses the winning create model context, not the retrying caller", async () => {
     const grant = await fixture();
     const idempotencyKey = crypto.randomUUID();
     const first = await createSessionWithIdempotencyKey(client.db, {
       ...sessionInput(grant),
-      initialTurnInstructions: "Use the winning host context.",
+      initialModelContext: "Use the winning host context.",
       createIdempotencyKey: idempotencyKey,
     });
     expect(first.created).toBe(true);
 
     const retry = await createSessionWithIdempotencyKey(client.db, {
       ...sessionInput(grant),
-      initialTurnInstructions: "This retry must never replace the winner.",
+      initialModelContext: "This retry must never replace the winner.",
       createIdempotencyKey: idempotencyKey,
     });
     expect(retry.created).toBe(false);
@@ -229,14 +229,16 @@ describe("immutable session turn initiators", () => {
     if (!started.turn) throw new Error("initial turn was not created");
     const [frozenTurn] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db
-        .select({ turnInstructions: schema.sessionTurns.turnInstructions })
+        .select({ modelContext: schema.sessionTurns.modelContext })
         .from(schema.sessionTurns)
         .where(eq(schema.sessionTurns.id, started.turn!.id)),
     );
-    expect(frozenTurn?.turnInstructions).toBe("Use the winning host context.");
+    expect(frozenTurn?.modelContext).toBe("Use the winning host context.");
     const userMessageEvent = started.events.find((event) => event.type === "user.message");
     if (!userMessageEvent) throw new Error("visible user event was not created");
-    expect(userMessageEvent.payload).not.toHaveProperty("turnInstructions");
+    expect(userMessageEvent.payload).toMatchObject({
+      modelContext: "Use the winning host context.",
+    });
   });
 
   test("Send and Steer capture their actor while queue Edit preserves the original actor", async () => {

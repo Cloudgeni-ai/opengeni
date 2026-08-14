@@ -9,7 +9,9 @@ import {
   getRigName,
   getRigVersion,
   getSandbox,
+  getFilesForSubject,
   readActiveSandbox,
+  requireFileForSubject,
   setActiveSandbox,
   requireFile,
   getSessionEvent,
@@ -168,6 +170,7 @@ import {
   type ModelCallUsageInput,
   type ModelCallUsageNormalization,
   type BuildAgentOptions,
+  type AttemptConnectorActionBinding,
   type ConnectorActionPolicyHooks,
   type TurnToolCancellationFence,
   type BackendUnresolvableCode,
@@ -181,6 +184,12 @@ import {
   deleteRecordingArtifacts,
   stopRecording as stopRecordingOnBox,
 } from "@opengeni/runtime";
+import {
+  authorizeGoogleDrivePublicationAttempt,
+  createGoogleDrivePublicationAttemptTool,
+  googleDrivePublicationConnectorCall,
+  resolveGoogleDrivePublicationTarget,
+} from "./google-drive-publication";
 import { connectionTokenResolverForTurn } from "./mcp-credentials";
 import { buildApiIntegrationServersForTurn } from "./api-integrations";
 import {
@@ -668,7 +677,7 @@ export function providerRetryAfterMs(error: unknown, nowMs = Date.now()): number
  * this notice prevents a graceful runtime drop from becoming a silent source-
  * of-truth substitution or a false claim that the disconnected system was read.
  */
-export function unavailableMcpTurnInstructions(input: {
+export function unavailableMcpOperationalContext(input: {
   droppedIds: readonly string[];
   droppedCount: number;
 }): string | undefined {
@@ -4183,6 +4192,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
       let installedApiIntegrations: readonly ApiIntegrationRuntime[] = [];
       const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
+      const fileAuthoritySubjectId = turn.initiatingHumanSubjectId ?? null;
       const mcpSettings = await settingsWithEnabledCapabilityMcpServers(
         db,
         input.workspaceId,
@@ -5500,9 +5510,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       modelCanReceiveRetainedSessionImages = supportsImageInput;
       const attachmentProjector = createModelHistoryAttachmentProjector(
         db,
-        input.workspaceId,
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: fileAuthoritySubjectId,
+        },
         modelInputPolicy,
-        objectStorage ? (file) => objectStorage.getFileBytes(file) : undefined,
+        objectStorage
+          ? async (file) => {
+              await requireFileForSubject(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                subjectId: fileAuthoritySubjectId,
+                fileId: file.id,
+              });
+              return await objectStorage.getFileBytes(file);
+            }
+          : undefined,
       );
       const modelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
         projectModelInputForCapabilities(await attachmentProjector(items), modelInputPolicy);
@@ -6103,7 +6127,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         availableMcpServerIds: runSettings.mcpServers.map((server) => server.id),
         defaultMcpServerIds: defaultSessionMcpServerIds(capabilitySettings.mcpServers),
       });
-      const mcpAvailabilityInstructions = unavailableMcpTurnInstructions({
+      const mcpAvailabilityNote = unavailableMcpOperationalContext({
         droppedIds: resolvedToolPolicy.effectivePolicy.droppedIds,
         droppedCount: resolvedToolPolicy.effectivePolicy.counts.dropped,
       });
@@ -6328,6 +6352,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (activeSandboxBackend !== "selfhosted") {
         await assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources);
       }
+      await assertFileResourcesRemainAuthorized(
+        db,
+        input.accountId,
+        input.workspaceId,
+        fileAuthoritySubjectId,
+        turnResources,
+      );
       const authorizeGitHubTokenMint: GitHubTokenMintAuthorization = async (selection) => {
         await assertGitHubTokenMintSelectionAuthorized(
           db,
@@ -7040,7 +7071,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               runSettings,
               db,
               objectStorage,
+              input.accountId,
               input.workspaceId,
+              fileAuthoritySubjectId,
               turnResources,
               activeSandboxBackend ?? groupBoxBackend,
             ),
@@ -7131,6 +7164,37 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         return result;
       };
+      const connectorActionIdentity = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: turn.id,
+        attemptId: input.attemptId,
+        executionGeneration,
+        initiator: {
+          kind: turn.initiator.kind,
+          subjectId: turn.initiator.subjectId,
+        },
+      } as const;
+      const googleDrivePublicationTarget = objectStorage
+        ? await resolveGoogleDrivePublicationTarget(
+            db,
+            input.workspaceId,
+            personalConnectionDelegations,
+          )
+        : null;
+      const googleDrivePublicationTool =
+        objectStorage && googleDrivePublicationTarget
+          ? createGoogleDrivePublicationAttemptTool({
+              db,
+              objectStorage,
+              identity: connectorActionIdentity,
+              subjectId: googleDrivePublicationTarget.ownerSubjectId,
+              target: googleDrivePublicationTarget,
+              resolveCredential,
+              ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
+            })
+          : null;
       const publishToolAuthNeeded = async (payload: ToolAuthNeededPayload): Promise<void> => {
         if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
           return;
@@ -7189,6 +7253,51 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         runSettings,
         session.firstPartyMcpTools,
       );
+      const googleDrivePublicationAllowed =
+        selectedFirstPartyMcpTools.includes("editable_artifact_export") &&
+        selectedFirstPartyMcpTools.includes("editable_artifact_export_status") &&
+        (!session.firstPartyMcpPermissions?.length ||
+          (session.firstPartyMcpPermissions.includes("artifacts:read") &&
+            session.firstPartyMcpPermissions.includes("artifacts:publish")));
+      const googleDriveConnectorBindings: readonly AttemptConnectorActionBinding[] =
+        googleDrivePublicationTool && googleDrivePublicationTarget && googleDrivePublicationAllowed
+          ? [
+              {
+                modelName: googleDrivePublicationTool.modelName,
+                call: (approvalId, arguments_) =>
+                  googleDrivePublicationConnectorCall(
+                    googleDrivePublicationTarget,
+                    arguments_,
+                    approvalId,
+                  ),
+              },
+            ]
+          : [];
+      const attemptToolDefinitions = [
+        ...createFirstPartyInteractionAttemptToolDefinitions({
+          settings: runSettings,
+          scope: {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            attemptId: input.attemptId,
+            executionGeneration,
+          },
+          ...(session.firstPartyMcpPermissions?.length
+            ? { permissions: session.firstPartyMcpPermissions }
+            : {}),
+          selectedTools: selectedFirstPartyMcpTools,
+          subjectId: "worker:first-party-mcp",
+          subjectLabel: "OpenGeni worker",
+          ...(interactionInterventionResume
+            ? { interventionResume: interactionInterventionResume }
+            : {}),
+        }),
+        ...(googleDrivePublicationTool && googleDrivePublicationAllowed
+          ? [googleDrivePublicationTool]
+          : []),
+      ];
       recordTurnStartupPhase(observability, {
         phase: "tool_context_preparation",
         provider: turnExecutionPolicy.providerId,
@@ -7239,26 +7348,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             firstPartyTools: selectedFirstPartyMcpTools,
             nestedAgentDepth: session.nestedAgentDepth,
             effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
-            attemptToolDefinitions: createFirstPartyInteractionAttemptToolDefinitions({
-              settings: runSettings,
-              scope: {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: turn.id,
-                attemptId: input.attemptId,
-                executionGeneration,
-              },
-              ...(session.firstPartyMcpPermissions?.length
-                ? { permissions: session.firstPartyMcpPermissions }
-                : {}),
-              selectedTools: selectedFirstPartyMcpTools,
-              subjectId: "worker:first-party-mcp",
-              subjectLabel: "OpenGeni worker",
-              ...(interactionInterventionResume
-                ? { interventionResume: interactionInterventionResume }
-                : {}),
-            }),
+            attemptToolDefinitions,
+            ...(googleDrivePublicationTarget && googleDrivePublicationAllowed
+              ? {
+                  attemptToolAuthorize: async ({ call }) => {
+                    if (
+                      call.caller.kind !== "codemode" ||
+                      call.identity.serverId !== "google-drive-publishing" ||
+                      call.identity.toolName !== "google_drive_publish_file"
+                    ) {
+                      return;
+                    }
+                    await authorizeGoogleDrivePublicationAttempt({
+                      db,
+                      identity: connectorActionIdentity,
+                      target: googleDrivePublicationTarget,
+                      approvalId: call.operationId,
+                      arguments: call.arguments,
+                    });
+                  },
+                }
+              : {}),
           }),
           cancellationSignal,
           async (latePreparedTools) => await latePreparedTools.close().catch(() => undefined),
@@ -7338,7 +7448,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         await resolveImageGenerationReferences({
           db,
           objectStorage: objectStorage!,
+          accountId: input.accountId,
           workspaceId: input.workspaceId,
+          subjectId: fileAuthoritySubjectId,
           references,
           readSandboxFile: async (path, maxBytes) => {
             const imageReferenceSession = (setupBoxSession ??
@@ -7648,18 +7760,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turnExecutionPolicy.providerId,
         turnExecutionPolicy.latencyMode,
       );
-      const connectorActionIdentity = {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId,
-        attemptId: input.attemptId,
-        executionGeneration,
-        initiator: {
-          kind: turn.initiator.kind,
-          subjectId: turn.initiator.subjectId,
-        },
-      } as const;
       const connectorActionPolicy: ConnectorActionPolicyHooks = {
         prepare: async (call) =>
           await prepareConnectorActionApproval(db, connectorActionIdentity, call),
@@ -7751,6 +7851,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             mcpServers: preparedTools.mcpServers,
             resolvedMcpConnectionIds: preparedTools.resolvedMcpConnectionIds,
             connectorActionPolicy,
+            attemptConnectorActionBindings: googleDriveConnectorBindings,
             // LIVE by-reference connector namespaces (fills during this turn's
             // codex_apps tools/list): the codex tool_search description reads it per
             // model call so the model sees the account's real connected sources.
@@ -7831,15 +7932,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // Composed system-level AFTER the workspace persona so it refines it for
             // this one session; absent ⇒ byte-identical to today's composition.
             ...(session.instructions ? { sessionInstructions: session.instructions } : {}),
-            // Exact host context captured when this turn was accepted. It is
-            // system-level and disappears with the turn rather than entering chat.
-            ...(turn.turnInstructions || mcpAvailabilityInstructions
-              ? {
-                  turnInstructions: [turn.turnInstructions, mcpAvailabilityInstructions]
-                    .filter((value): value is string => Boolean(value))
-                    .join(" "),
-                }
-              : {}),
             ...workspaceEnvironmentOption,
             // RIG RUNTIME (M3): the doctrine block, the setup-script hook (only when
             // the frozen version carries a non-empty script), and the rig credential
@@ -8551,9 +8643,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         try {
           const prepared = await turnInput(db, runtime, agent, trigger, {
             turnId: activeTurnId,
+            fileAuthority: {
+              accountId: input.accountId,
+              subjectId: fileAuthoritySubjectId,
+            },
             recovering: turn.executionGeneration > 1,
             ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
             ...(runCredentialsNote ? { runCredentialsNote } : {}),
+            ...(mcpAvailabilityNote ? { mcpAvailabilityNote } : {}),
             providerApi,
             projectCanonicalHistory: generatedImageHistoryProjector,
             materializeModelHistory: materializeScreenshotHistory,
@@ -11581,6 +11678,28 @@ async function assertGitHubResourcesRemainAuthorized(
   }
 }
 
+async function assertFileResourcesRemainAuthorized(
+  db: ActivityServices["db"],
+  accountId: string,
+  workspaceId: string,
+  subjectId: string | null,
+  resources: ResourceRef[],
+): Promise<void> {
+  const fileIds = resources.flatMap((resource) =>
+    resource.kind === "file" ? [resource.fileId] : [],
+  );
+  if (fileIds.length === 0) return;
+  const authorized = await getFilesForSubject(db, {
+    accountId,
+    workspaceId,
+    subjectId,
+    fileIds,
+  });
+  if (authorized.length !== new Set(fileIds).size) {
+    throw new Error("One or more file resources are unavailable or no longer authorized");
+  }
+}
+
 async function assertGitHubTokenMintSelectionAuthorized(
   db: Parameters<typeof areGitHubRepositoriesAllowedForWorkspace>[0],
   workspaceId: string,
@@ -12494,7 +12613,9 @@ async function sandboxFileDownloadsForRun(
   settings: Settings,
   db: ActivityServices["db"],
   objectStorage: ObjectStorage | null,
+  accountId: string,
   workspaceId: string,
+  subjectId: string | null,
   resources: ResourceRef[],
   activeSandboxBackend: Settings["sandboxBackend"] = settings.sandboxBackend,
 ): Promise<SandboxFileDownload[]> {
@@ -12515,7 +12636,12 @@ async function sandboxFileDownloadsForRun(
   const downloadStorage = objectStorageForSandboxDownloads(settings, objectStorage);
   const downloads: SandboxFileDownload[] = [];
   for (const resource of fileResources) {
-    const file = await requireFile(db, workspaceId, resource.fileId);
+    const file = await requireFileForSubject(db, {
+      accountId,
+      workspaceId,
+      subjectId,
+      fileId: resource.fileId,
+    });
     const url = await downloadStorage.createGetUrl({ key: file.objectKey });
     downloads.push({
       fileId: file.id,

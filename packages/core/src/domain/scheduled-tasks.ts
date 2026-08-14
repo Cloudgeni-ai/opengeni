@@ -813,7 +813,13 @@ async function validateScheduledTaskAgentConfig(input: {
   if (resources.some((resource) => resource.kind === "file") && !input.objectStorage) {
     throw new HTTPException(503, { message: "object storage is not configured" });
   }
-  await validateFileResources(input.db, input.workspaceId, resources);
+  await validateFileResources(
+    input.db,
+    input.grant.accountId,
+    input.workspaceId,
+    input.grant.subjectId,
+    resources,
+  );
   if (input.payload.agentConfig.slackBotConnectionId) {
     await validateOpenGeniSlackBotConnectionSelection(
       input.db,

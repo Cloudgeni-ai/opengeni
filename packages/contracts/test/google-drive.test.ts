@@ -49,6 +49,7 @@ describe("Google Drive OAuth scope capabilities", () => {
         accessMode: "readonly",
         capabilities: [
           "picker_file_read",
+          ...(scope === GOOGLE_DRIVE_FULL_SCOPE ? (["publish_file"] as const) : []),
           "source_metadata_discovery",
           "source_content_read",
           "recursive_source_sync",
@@ -63,8 +64,8 @@ describe("Google Drive OAuth scope capabilities", () => {
       capabilities: ["source_metadata_discovery"],
     });
     expect(googleDriveOAuthScopeDecision([GOOGLE_DRIVE_FILE_SCOPE])).toEqual({
-      accessMode: null,
-      capabilities: ["picker_file_read"],
+      accessMode: "file_only",
+      capabilities: ["picker_file_read", "publish_file"],
     });
     expect(
       googleDriveOAuthScopeDecision([
@@ -73,7 +74,7 @@ describe("Google Drive OAuth scope capabilities", () => {
       ]),
     ).toEqual({
       accessMode: "metadata_readonly",
-      capabilities: ["picker_file_read", "source_metadata_discovery"],
+      capabilities: ["picker_file_read", "publish_file", "source_metadata_discovery"],
     });
   });
 

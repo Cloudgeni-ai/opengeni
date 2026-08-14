@@ -132,6 +132,7 @@ describe("release schema contract", () => {
       "0237_interaction_transition_reaper.sql",
       "0238_supergrok_realtime_model.sql",
       "0239_supergrok_video_funding.sql",
+      "0240_model_context_user_messages.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -162,11 +163,23 @@ describe("release schema contract", () => {
       sha256: "fbe4c79cb20c809767dad12e697ab6ad1becfc8b03eb314cbda38d6069a258f1",
       deploymentMode: "rolling",
     });
+    const modelContextCutover = completeSourceContract.migrations.find(
+      (migration) => migration.path === "0240_model_context_user_messages.sql",
+    );
+    if (modelContextCutover) {
+      expect(modelContextCutover).toMatchObject({ deploymentMode: "maintenance" });
+      expect(completeSourceContract.latestMigration).toBe(modelContextCutover.path);
+    }
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
+      if (migrations.has("0243_google_drive_object_acl_authority.sql")) {
+        return includesActivation
+          ? "8d30a981d2a744a263e660ab21eeaa0a1071e7afe71b771bbc81151a79330fa4"
+          : "2a39ec3cb579dad4f4fc17040cac665b88b39f24871a2462b17286d3925a4378";
+      }
       if (migrations.has("0238_recover_unclaimed_session_turns.sql")) {
         return includesActivation
           ? "67209db60dbc5556cd8ec6bd89fdc037ecf12f27a16ceb2739d179b623126b0b"
@@ -467,45 +480,48 @@ describe("release schema contract", () => {
         (migrations.has("0236_browser_identity_lifecycle.sql") ? 1 : 0) +
         (migrations.has("0225_session_visibility_fork_activation.sql") ? 1 : 0) +
         (migrations.has("0236_session_visibility_slack_policy.sql") ? 1 : 0) +
-        (migrations.has("0238_recover_unclaimed_session_turns.sql") ? 1 : 0),
+        (migrations.has("0238_recover_unclaimed_session_turns.sql") ? 1 : 0) +
+        (migrations.has("0243_google_drive_object_acl_authority.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(sessionVisibilityContractHash(false) ?? currentMainContractHash);
     expect(contract.latestMigration).toBe(
-      migrations.has("0238_recover_unclaimed_session_turns.sql")
-        ? "0238_recover_unclaimed_session_turns.sql"
-        : migrations.has("0236_session_visibility_slack_policy.sql")
-          ? "0236_session_visibility_slack_policy.sql"
-          : migrations.has("0235_canonical_human_login_bindings.sql")
-            ? "0235_canonical_human_login_bindings.sql"
-            : migrations.has("0234_xai_subscription_authority.sql")
-              ? "0234_xai_subscription_authority.sql"
-              : migrations.has("0233_skill_and_integration_authority_cutover.sql")
-                ? "0233_skill_and_integration_authority_cutover.sql"
-                : migrations.has("0232_integration_facet_authority_cutover.sql")
-                  ? "0232_integration_facet_authority_cutover.sql"
-                  : migrations.has("0231_integration_definition_identity_cutover.sql")
-                    ? "0231_integration_definition_identity_cutover.sql"
-                    : migrations.has("0230_user_scoped_variable_sets_rigs.sql")
-                      ? "0230_user_scoped_variable_sets_rigs.sql"
-                      : migrations.has("0228_slack_task_policy.sql")
-                        ? "0228_slack_task_policy.sql"
-                        : migrations.has("0229_slack_inbox_file_fact.sql")
-                          ? "0229_slack_inbox_file_fact.sql"
-                          : migrations.has("0227_slack_native_actions.sql")
-                            ? "0227_slack_native_actions.sql"
-                            : migrations.has("0224_slack_post_outcome_reconciliation.sql")
-                              ? "0224_slack_post_outcome_reconciliation.sql"
-                              : migrations.has("0223_sessions_channel_fk_validate.sql")
-                                ? "0223_sessions_channel_fk_validate.sql"
-                                : migrations.has("0221_sessions_channel_index.sql")
-                                  ? "0221_sessions_channel_index.sql"
-                                  : migrations.has("0220_memory_slack_append_only_cascade.sql")
-                                    ? "0220_memory_slack_append_only_cascade.sql"
-                                    : migrations.has("0219_site_auth_maintenance_sessions.sql")
-                                      ? "0219_site_auth_maintenance_sessions.sql"
-                                      : migrations.has("0218_organization_tenancy_foundation.sql")
-                                        ? "0218_organization_tenancy_foundation.sql"
-                                        : "0217_capability_definition_delete_authority.sql",
+      migrations.has("0243_google_drive_object_acl_authority.sql")
+        ? "0243_google_drive_object_acl_authority.sql"
+        : migrations.has("0238_recover_unclaimed_session_turns.sql")
+          ? "0238_recover_unclaimed_session_turns.sql"
+          : migrations.has("0236_session_visibility_slack_policy.sql")
+            ? "0236_session_visibility_slack_policy.sql"
+            : migrations.has("0235_canonical_human_login_bindings.sql")
+              ? "0235_canonical_human_login_bindings.sql"
+              : migrations.has("0234_xai_subscription_authority.sql")
+                ? "0234_xai_subscription_authority.sql"
+                : migrations.has("0233_skill_and_integration_authority_cutover.sql")
+                  ? "0233_skill_and_integration_authority_cutover.sql"
+                  : migrations.has("0232_integration_facet_authority_cutover.sql")
+                    ? "0232_integration_facet_authority_cutover.sql"
+                    : migrations.has("0231_integration_definition_identity_cutover.sql")
+                      ? "0231_integration_definition_identity_cutover.sql"
+                      : migrations.has("0230_user_scoped_variable_sets_rigs.sql")
+                        ? "0230_user_scoped_variable_sets_rigs.sql"
+                        : migrations.has("0228_slack_task_policy.sql")
+                          ? "0228_slack_task_policy.sql"
+                          : migrations.has("0229_slack_inbox_file_fact.sql")
+                            ? "0229_slack_inbox_file_fact.sql"
+                            : migrations.has("0227_slack_native_actions.sql")
+                              ? "0227_slack_native_actions.sql"
+                              : migrations.has("0224_slack_post_outcome_reconciliation.sql")
+                                ? "0224_slack_post_outcome_reconciliation.sql"
+                                : migrations.has("0223_sessions_channel_fk_validate.sql")
+                                  ? "0223_sessions_channel_fk_validate.sql"
+                                  : migrations.has("0221_sessions_channel_index.sql")
+                                    ? "0221_sessions_channel_index.sql"
+                                    : migrations.has("0220_memory_slack_append_only_cascade.sql")
+                                      ? "0220_memory_slack_append_only_cascade.sql"
+                                      : migrations.has("0219_site_auth_maintenance_sessions.sql")
+                                        ? "0219_site_auth_maintenance_sessions.sql"
+                                        : migrations.has("0218_organization_tenancy_foundation.sql")
+                                          ? "0218_organization_tenancy_foundation.sql"
+                                          : "0217_capability_definition_delete_authority.sql",
     );
     expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
       sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",
@@ -690,6 +706,12 @@ describe("release schema contract", () => {
     if (migrations.has("0238_recover_unclaimed_session_turns.sql")) {
       expect(migrations.get("0238_recover_unclaimed_session_turns.sql")).toMatchObject({
         sha256: "7d63ad62f2dc91f8c5de87b95a35a366d4b23d4fc76f320b5376ef2412a2002d",
+        deploymentMode: "rolling",
+      });
+    }
+    if (migrations.has("0243_google_drive_object_acl_authority.sql")) {
+      expect(migrations.get("0243_google_drive_object_acl_authority.sql")).toMatchObject({
+        sha256: "1cc4b297460ba64d252230ceddc9eaaf4d6ea9b02afcd56518900d5b569bfcfe",
         deploymentMode: "rolling",
       });
     }

@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   GOOGLE_DRIVE_ACCESS_DISCLOSURE,
   GOOGLE_DRIVE_APP_DESCRIPTION,
+  GOOGLE_DRIVE_PUBLISHING_DISCLOSURE,
   GOOGLE_DRIVE_SYNC_BEHAVIOR,
 } from "@/lib/google-drive-connection";
 
@@ -22,6 +23,10 @@ describe("Google Drive connector truthfulness copy", () => {
     expect(GOOGLE_DRIVE_ACCESS_DISCLOSURE).toContain("boundaries you select");
     expect(GOOGLE_DRIVE_ACCESS_DISCLOSURE).toContain("tokens stay encrypted on the server");
     expect(GOOGLE_DRIVE_ACCESS_DISCLOSURE).toContain("cannot create, edit, or delete");
+    expect(GOOGLE_DRIVE_ACCESS_DISCLOSURE).toContain("separate publishing consent");
+    expect(GOOGLE_DRIVE_PUBLISHING_DISCLOSURE).toContain("drive.file");
+    expect(GOOGLE_DRIVE_PUBLISHING_DISCLOSURE).toContain("ask before writing by default");
+    expect(GOOGLE_DRIVE_PUBLISHING_DISCLOSURE).toContain("does not widen source-sync boundaries");
   });
 
   test("describes scheduled repair scans instead of a Changes-only flow", () => {

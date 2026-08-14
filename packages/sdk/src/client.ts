@@ -493,8 +493,8 @@ export type OpenGeniRequestOptions = {
 export type SendMessageInput = {
   text: string;
   annotations?: SubmittedTimelineAnnotation[];
-  /** System instructions scoped to this exact turn; never visible timeline text. */
-  turnInstructions?: string;
+  /** Model-visible application context attached to this exact user message; omitted by standard timeline rendering. */
+  modelContext?: string;
   resources?: ResourceRef[];
   tools?: ToolRef[];
   model?: string;

@@ -46,6 +46,7 @@ import {
   createSlackUserLinkToken,
   drainSlackInteractionsOnce,
   registerSlackInteractionRoutes,
+  SLACK_SESSION_INSTRUCTIONS,
   verifySlackUserLinkToken,
 } from "../src/integrations/slack-interactions";
 
@@ -1273,14 +1274,18 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       {
         first_party_mcp_tools: string[];
         initial_message: string;
+        initial_model_context: string | null;
+        instructions: string | null;
         model: string;
       }[]
     >`
-      select first_party_mcp_tools, initial_message, model
+      select first_party_mcp_tools, initial_message, initial_model_context, instructions, model
       from sessions
       where workspace_id = ${value.owner.workspaceId}
         and id = ${route!.session_id}`;
     expect(session!.first_party_mcp_tools).toEqual([...DEFAULT_FIRST_PARTY_MCP_TOOLS]);
+    expect(session!.initial_model_context).toBeNull();
+    expect(session!.instructions).toBe(SLACK_SESSION_INSTRUCTIONS);
     expect(session!.model).toBe("gpt-5.6-terra");
     expect(session!.initial_message).toContain("[reacted message]");
     expect(session!.initial_message).toContain("Compare the logs and propose the safest rollback.");

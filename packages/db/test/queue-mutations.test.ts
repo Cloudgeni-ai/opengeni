@@ -263,13 +263,13 @@ describe("canonical queue commands", () => {
     expect(withdrawn).toEqual({ status: "withdrawn_for_edit", reason: "withdrawn_for_edit" });
   });
 
-  test("Edit then Send copies private source instructions without exposing them or accepting an override", async () => {
+  test("Edit then Send preserves source model context in full audit data and rejects an override", async () => {
     const value = await fixture();
-    const privateInstructions = "host-only record context: source-42";
+    const sourceModelContext = "host-only record context: source-42";
     await withWorkspaceRls(client.db, value.grant.workspaceId!, async (db) => {
       await db
         .update(schema.sessionTurns)
-        .set({ turnInstructions: privateInstructions })
+        .set({ modelContext: sourceModelContext })
         .where(eq(schema.sessionTurns.id, value.turns[1]!.id));
     });
     const edited = await withWorkspaceSubjectRls(
@@ -327,7 +327,7 @@ describe("canonical queue commands", () => {
       reasoningEffort: savedEdit.reasoningEffort as ReasoningEffort,
       reasoningEffortFallback: "medium" as const,
       source: "user" as const,
-      turnInstructions: "client must not replace source instructions",
+      modelContext: "client must not replace source instructions",
     };
     const submitted = await withWorkspaceSubjectRls(
       client.db,
@@ -339,26 +339,26 @@ describe("canonical queue commands", () => {
     const [stored] = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
       db
         .select({
-          turnInstructions: schema.sessionTurns.turnInstructions,
+          modelContext: schema.sessionTurns.modelContext,
           prompt: schema.sessionTurns.prompt,
         })
         .from(schema.sessionTurns)
         .where(eq(schema.sessionTurns.id, submitted.turnId)),
     );
     expect(stored).toEqual({
-      turnInstructions: privateInstructions,
+      modelContext: sourceModelContext,
       prompt: savedEdit.text,
     });
 
     const publicTurn = await getSessionTurn(client.db, value.grant.workspaceId!, submitted.turnId);
-    expect(publicTurn).not.toHaveProperty("turnInstructions");
+    expect(publicTurn).not.toHaveProperty("modelContext");
     const publicTurns = await listSessionTurns(
       client.db,
       value.grant.workspaceId!,
       value.session.id,
     );
     expect(publicTurns.find((turn) => turn.id === submitted.turnId)).not.toHaveProperty(
-      "turnInstructions",
+      "modelContext",
     );
     const queue = await getSessionQueueSnapshot(
       client.db,
@@ -366,20 +366,12 @@ describe("canonical queue commands", () => {
       value.session.id,
     );
     expect(queue?.items.find((turn) => turn.id === submitted.turnId)).not.toHaveProperty(
-      "turnInstructions",
+      "modelContext",
     );
     const events = await storedEvents(value.grant.workspaceId!, submitted.eventIds);
-    expect(
-      events.every((event) => !JSON.stringify(event.payload).includes(privateInstructions)),
-    ).toBe(true);
-    expect(
-      events.every(
-        (event) =>
-          typeof event.payload !== "object" ||
-          event.payload === null ||
-          !Object.hasOwn(event.payload, "turnInstructions"),
-      ),
-    ).toBe(true);
+    expect(events.find((event) => event.type === "user.message")?.payload).toMatchObject({
+      modelContext: sourceModelContext,
+    });
 
     const replay = await withWorkspaceSubjectRls(
       client.db,
@@ -408,7 +400,7 @@ describe("canonical queue commands", () => {
             operationKey: crypto.randomUUID(),
             delivery: "send",
             text: "direct prompt",
-            turnInstructions: "direct explicit context",
+            modelContext: "direct explicit context",
             resources: [],
             reasoningEffortFallback: "medium",
             source: "user",
@@ -417,11 +409,11 @@ describe("canonical queue commands", () => {
     );
     const [directStored] = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
       db
-        .select({ turnInstructions: schema.sessionTurns.turnInstructions })
+        .select({ modelContext: schema.sessionTurns.modelContext })
         .from(schema.sessionTurns)
         .where(eq(schema.sessionTurns.id, direct.turnId)),
     );
-    expect(directStored?.turnInstructions).toBe("direct explicit context");
+    expect(directStored?.modelContext).toBe("direct explicit context");
 
     const edited = await withWorkspaceSubjectRls(
       client.db,
@@ -467,7 +459,7 @@ describe("canonical queue commands", () => {
             reasoningEffort: edited.draft.reasoningEffort as ReasoningEffort,
             reasoningEffortFallback: "medium",
             source: "user",
-            turnInstructions: "must be ignored",
+            modelContext: "must be ignored",
           }),
         ),
       ),

@@ -156,7 +156,7 @@ import {
   MODEL_ATTACHMENT_REFS_FIELD,
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
   TimelineAnnotations,
-  renderTimelineAnnotationsForModel,
+  renderUserMessageContentForModel,
   SessionMcpApprovalPolicy as SessionMcpApprovalPolicySchema,
   RequestHumanInteractionToolInput,
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -4331,7 +4331,7 @@ export type EnqueueSessionTurnInput = {
   temporalWorkflowId: string;
   source: SessionTurnSource;
   prompt: string;
-  turnInstructions?: string | null;
+  modelContext?: string | null;
   resources: ResourceRef[];
   tools: ToolRef[];
   toolsProvided?: boolean;
@@ -4350,12 +4350,8 @@ export type EnqueueSessionTurnInput = {
   placement?: "head" | "tail";
 };
 
-/**
- * Worker-only turn projection. Host instructions are durable execution input,
- * never part of the public SessionTurn/queue/HTTP contract.
- */
+/** Worker-only turn projection with causal authority omitted from public APIs. */
 export type SessionTurnForExecution = SessionTurn & {
-  turnInstructions: string | null;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
   /** Worker-only causal authority; never inferred from the current worker. */
   initiatingHumanSubjectId: string | null;
@@ -4581,6 +4577,89 @@ export async function requireFile(
   return file;
 }
 
+/**
+ * Subject-bound file read for user-visible and model-injection surfaces. The
+ * database predicate returns true for ordinary workspace files, but Drive-
+ * derived bytes require current per-object ACL evidence for every protecting
+ * mapping. Missing/stale/mixed denied mappings therefore look not found.
+ */
+export async function requireFileForSubject(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string | null;
+    fileId: string;
+  },
+): Promise<FileAsset> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
+      const subjectIdSql = input.subjectId === null ? sql`NULL::text` : sql`${input.subjectId}`;
+      const [row] = await scopedDb
+        .select()
+        .from(schema.files)
+        .where(
+          and(
+            eq(schema.files.accountId, input.accountId),
+            eq(schema.files.workspaceId, input.workspaceId),
+            eq(schema.files.id, input.fileId),
+            sql`google_drive_file_authorized(
+              ${input.accountId}::uuid,
+              ${input.workspaceId}::uuid,
+              ${subjectIdSql},
+              ${input.fileId}::uuid
+            )`,
+          ),
+        )
+        .limit(1);
+      if (!row) throw new Error(`File not found: ${input.fileId}`);
+      return mapFile(row);
+    },
+  );
+}
+
+/** Batch form of requireFileForSubject for durable model-history projection. */
+export async function getFilesForSubject(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string | null;
+    fileIds: readonly string[];
+  },
+): Promise<FileAsset[]> {
+  const ids = [...new Set(input.fileIds)];
+  if (ids.length === 0) return [];
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
+      const subjectIdSql = input.subjectId === null ? sql`NULL::text` : sql`${input.subjectId}`;
+      const rows = await scopedDb
+        .select()
+        .from(schema.files)
+        .where(
+          and(
+            eq(schema.files.accountId, input.accountId),
+            eq(schema.files.workspaceId, input.workspaceId),
+            inArray(schema.files.id, ids),
+            sql`google_drive_file_authorized(
+              ${input.accountId}::uuid,
+              ${input.workspaceId}::uuid,
+              ${subjectIdSql},
+              ${schema.files.id}
+            )`,
+          ),
+        );
+      return rows.map(mapFile);
+    },
+  );
+}
+
 /** One RLS-scoped query for all attachment metadata needed by a model turn. */
 export async function getFiles(
   db: Database,
@@ -4603,6 +4682,7 @@ export function durableUserHistoryItem(
   prompt: string,
   resources: readonly ResourceRef[],
   annotations: readonly TimelineAnnotation[] = [],
+  modelContext?: string | null,
 ): Record<string, unknown> {
   const attachmentRefs = resources.filter(
     (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file",
@@ -4610,7 +4690,7 @@ export function durableUserHistoryItem(
   return {
     type: "message",
     role: "user",
-    content: renderTimelineAnnotationsForModel(prompt, annotations),
+    content: renderUserMessageContentForModel(prompt, annotations, modelContext),
     ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
     ...(annotations.length > 0
       ? {
@@ -22578,6 +22658,122 @@ export async function upsertConnectorActionPolicy(
   );
 }
 
+/**
+ * Install a risk-appropriate connector default without overwriting an explicit
+ * user choice that already exists for the same immutable connector action.
+ */
+export async function ensureConnectorActionPolicyDefault(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+    serverId: string;
+    toolName: string;
+    actionName: string;
+    policy: ConnectorActionPolicyDecision;
+  },
+): Promise<{
+  policy: typeof schema.connectorActionPolicies.$inferSelect;
+  changed: boolean;
+}> {
+  const scope = {
+    connectionId: boundedConnectorActionText(
+      input.connectionId,
+      "connector connection id",
+      CONNECTOR_ACTION_CONNECTION_ID_MAX,
+    ),
+    serverId: boundedConnectorActionText(
+      input.serverId,
+      "connector server id",
+      CONNECTOR_ACTION_SERVER_ID_MAX,
+    ),
+    toolName: boundedConnectorActionText(
+      input.toolName,
+      "connector tool name",
+      CONNECTOR_ACTION_NAME_MAX,
+    ),
+    actionName: boundedConnectorActionText(
+      input.actionName,
+      "connector action name",
+      CONNECTOR_ACTION_NAME_MAX,
+    ),
+  };
+  const subjectId = boundedConnectorActionText(input.subjectId, "policy actor", 1024);
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await assertWorkspaceAccountPairInScope(tx, input.accountId, input.workspaceId);
+        const [inserted] = await tx
+          .insert(schema.connectorActionPolicies)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            ...scope,
+            policy: input.policy,
+            createdBySubjectId: subjectId,
+            updatedBySubjectId: subjectId,
+          })
+          .onConflictDoNothing({
+            target: [
+              schema.connectorActionPolicies.workspaceId,
+              schema.connectorActionPolicies.connectionId,
+              schema.connectorActionPolicies.serverId,
+              schema.connectorActionPolicies.toolName,
+              schema.connectorActionPolicies.actionName,
+            ],
+          })
+          .returning();
+        if (!inserted) {
+          const [existing] = await tx
+            .select()
+            .from(schema.connectorActionPolicies)
+            .where(
+              and(
+                eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+                eq(schema.connectorActionPolicies.connectionId, scope.connectionId),
+                eq(schema.connectorActionPolicies.serverId, scope.serverId),
+                eq(schema.connectorActionPolicies.toolName, scope.toolName),
+                eq(schema.connectorActionPolicies.actionName, scope.actionName),
+              ),
+            )
+            .limit(1);
+          if (!existing) throw new Error("Failed to reconcile connector action policy default");
+          return { policy: existing, changed: false };
+        }
+        await tx.insert(schema.auditEvents).values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId,
+              action: "connector.action.policy_changed",
+              targetType: "connector_action_policy",
+              targetId: inserted.id,
+              metadata: {
+                connectionId: inserted.connectionId,
+                serverId: inserted.serverId,
+                toolName: inserted.toolName,
+                actionName: inserted.actionName,
+                policy: inserted.policy,
+                version: inserted.version,
+                previousPolicy: null,
+                previousVersion: null,
+                source: "connector_default",
+              },
+            },
+            "metadata",
+            "metadataCodecVersion",
+          ),
+        );
+        return { policy: inserted, changed: true };
+      }),
+  );
+}
+
 export async function prepareConnectorActionApproval(
   db: Database,
   identity: ConnectorActionAttemptIdentity,
@@ -22916,7 +23112,7 @@ export type SessionCreateInput = {
   accountId: string;
   workspaceId: string;
   initialMessage: string;
-  initialTurnInstructions?: string | null;
+  initialModelContext?: string | null;
   resources: ResourceRef[];
   skills?: SessionSkill[];
   tools?: ToolRef[];
@@ -23366,7 +23562,7 @@ async function createSessionInTransaction(
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             initialMessage: input.initialMessage,
-            initialTurnInstructions: input.initialTurnInstructions ?? null,
+            initialModelContext: input.initialModelContext ?? null,
             resources: input.resources,
             skills: input.skills ?? [],
             tools: input.tools ?? [],
@@ -46371,6 +46567,9 @@ export async function initializeSessionStartAtomically(
                     type: "user.message",
                     payload: {
                       ...initialPayload,
+                      ...(session.initialModelContext
+                        ? { modelContext: session.initialModelContext }
+                        : {}),
                       initiator: creator.initiator,
                     },
                     clientEventId: input.clientEventId ?? `session-initial:${session.id}`,
@@ -46426,7 +46625,7 @@ export async function initializeSessionStartAtomically(
                   source: "user",
                   position: queueTailPosition,
                   prompt: canonicalInitialMessage,
-                  turnInstructions: session.initialTurnInstructions ?? null,
+                  modelContext: session.initialModelContext ?? null,
                   resources: session.resources,
                   tools: session.tools,
                   toolsProvided: session.toolPolicy?.mode === "explicit",
@@ -46627,7 +46826,7 @@ export async function enqueueSessionTurn(
                 source: input.source,
                 position,
                 prompt: input.prompt,
-                turnInstructions: input.turnInstructions ?? null,
+                modelContext: input.modelContext ?? null,
                 resources: input.resources,
                 tools: input.tools,
                 toolsProvided: input.toolsProvided ?? false,
@@ -48378,6 +48577,7 @@ export async function claimSessionWorkForAttempt(
                 fromPostgresLosslessText(row.prompt, row.promptCodecVersion),
                 Array.isArray(row.resources) ? (row.resources as ResourceRef[]) : [],
                 TimelineAnnotations.parse(row.annotations),
+                row.modelContext,
               ),
             },
             "item",
@@ -55758,7 +55958,6 @@ function mapSessionTurnForExecution(
 ): SessionTurnForExecution {
   return {
     ...mapSessionTurn(row),
-    turnInstructions: row.turnInstructions ?? null,
     initiatingHumanSubjectId: row.initiatingHumanSubjectId ?? null,
     personalConnectionDelegations: parsedPersonalConnectionDelegations(
       row.personalConnectionDelegations,

@@ -169,6 +169,7 @@ import type {
   WorkspaceRegisteredPack,
   WorkspaceRealtimeModelCatalogResponse,
 } from "@opengeni/sdk";
+import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import type { SessionClientLike } from "@opengeni/react";
 import type { MachinesResponse } from "@opengeni/react/machines";
 
@@ -3970,7 +3971,7 @@ const ACCOUNT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
  */
 const CLIENT_CONFIG: ClientConfig = {
   deploymentRevision: "demo",
-  apiContractRevision: "2026-08-social-provider-tools-v1",
+  apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
   defaultModel: "gpt-5.6-sol",
   allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
   models: [

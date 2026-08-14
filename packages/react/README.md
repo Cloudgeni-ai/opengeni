@@ -353,7 +353,9 @@ exported `EmbeddedRealtimeSessionClientLike` requires only catalog, begin,
 Codex/Gateway negotiation, activation, heartbeat, ledger sync, and end. For
 custom layouts, use `useSessionRealtime`, `useRealtimeModelSelection`,
 `RealtimeVoiceControl`, and `RealtimeModelPickerMenu`; the batteries-included
-wrappers remain the recommended path.
+wrappers remain the recommended path. Concurrent catalog reads are deduplicated
+per client and workspace, and successful results are reused for a short bounded
+window so embedded controls can remount without refetching.
 
 The reference consumer is `demo/realtime.html`. Run `bun run demo` from
 `packages/react`, then open `http://localhost:3100/realtime.html?mode=mock` for
