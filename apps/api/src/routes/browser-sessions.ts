@@ -95,6 +95,7 @@ import {
   findBrowserDownloadSave,
   getBrowserSessionControlRecord,
   getComputerSessionControlRecord,
+  getBrowserIdentity,
   getBrowserPrivateCheckpointAuthority,
   getAttachedBrowserDevice,
   getBrowserRevisionArtifactAuthority,
@@ -326,6 +327,20 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         const parsed = BrowserSessionMutationResponse.parse(prepared);
         observeLifecycleResult(deps.observability, startedAtMs, parsed);
         return context.json(parsed, 200);
+      }
+
+      // Reject an unavailable explicit identity before acquiring or waking the
+      // browser placement. prepareBrowserSessionCreate repeats this check in its
+      // transaction, so an archive racing this preflight is still fenced.
+      if (!existing && request.identityId) {
+        const identity = await getBrowserIdentity(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          identityId: request.identityId,
+        });
+        if (identity.status !== "active") {
+          throw new BrowserIdentityStateError("BrowserIdentity is archived");
+        }
       }
 
       const sourceSession = await requireSourceSession(deps, workspaceId, request.sessionId);

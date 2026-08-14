@@ -103,6 +103,18 @@ describe("BrowserSession route discipline", () => {
     expect(attachment).toContain("client.addAllowedOrigins([origin])");
   });
 
+  test("rejects archived identities before acquiring a browser placement", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const createStart = source.indexOf('app.post("/v1/workspaces/:workspaceId/browser-sessions"');
+    const createEnd = source.indexOf("app.get(", createStart);
+    const create = source.slice(createStart, createEnd);
+    expect(create).toContain("await getBrowserIdentity(deps.db");
+    expect(create.indexOf("await getBrowserIdentity(deps.db")).toBeLessThan(
+      create.indexOf("await withBrowserPlacement("),
+    );
+    expect(create).toContain('identity.status !== "active"');
+  });
+
   test("admits every controller call through the durable generation fence", async () => {
     const source = await readFile(routeUrl, "utf8");
     expect(source).toContain("touchBrowserSessionController(deps.db");

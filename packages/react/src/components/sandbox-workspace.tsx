@@ -218,6 +218,47 @@ function sandboxProvisionInFlight(events: SessionEvent[]): boolean {
   return inFlight;
 }
 
+/**
+ * Whether this session currently owns an admitted agent turn. Automatic live
+ * Files/Git reads pause across the whole turn: command boundaries are not a safe
+ * gap because the next tool can dispatch before a remote provider read releases
+ * its sandbox holder. Existing/captured content remains usable, and the terminal
+ * turn event resumes one authoritative refresh.
+ */
+function workspaceTurnInFlight(events: SessionEvent[]): boolean {
+  const activeTurnIds = new Set<string>();
+  let anonymousTurnInFlight = false;
+  let sessionOwnsWorkspace = false;
+  for (const event of events) {
+    if (event.type === "session.status.changed") {
+      const status =
+        event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+          ? (event.payload as Record<string, unknown>).status
+          : null;
+      sessionOwnsWorkspace = status === "running" || status === "recovering";
+      continue;
+    }
+    if (event.type === "turn.started") {
+      if (event.turnId) activeTurnIds.add(event.turnId);
+      else anonymousTurnInFlight = true;
+      continue;
+    }
+    if (
+      event.type !== "turn.completed" &&
+      event.type !== "turn.failed" &&
+      event.type !== "turn.cancelled" &&
+      event.type !== "turn.superseded"
+    ) {
+      continue;
+    }
+    if (event.turnId) activeTurnIds.delete(event.turnId);
+    else anonymousTurnInFlight = false;
+  }
+  // The retained event window preserves the latest status even after a very
+  // long turn has evicted its original turn.started event.
+  return sessionOwnsWorkspace || anonymousTurnInFlight || activeTurnIds.size > 0;
+}
+
 export type WorkspaceMachine = {
   /** Whether at least one built-in workbench surface is enabled. */
   enabled: boolean;
@@ -276,7 +317,8 @@ export type UseSandboxWorkspaceTabsResult = {
   /** Changes | Files | Terminal | Browser | Desktop (capability-gated where noted). */
   tabs: WorkspaceTab[];
   /** The source-driven default tab: Changes when the first authoritative capture
-   *  or live Git result has changes, else Files (a host `initialTab` overrides).
+   *  has changes, else Files (a host `initialTab` overrides). Choosing a tab
+   *  never performs hidden live workspace I/O.
    *  null while that source resolves, or permanently when neither Changes nor
    *  Files is enabled; the choice latches once. */
   defaultTab: string | null;
@@ -359,6 +401,7 @@ export function useSandboxWorkspaceTabs(
   const resolvedActiveTab = activeTab ?? initialTab;
   const changesActive = resolvedActiveTab === WORKBENCH_TAB_CHANGES;
   const filesActive = resolvedActiveTab === WORKBENCH_TAB_FILES;
+  const turnInFlight = workspaceTurnInFlight(events);
   const surfaceIdentity = WORKBENCH_SURFACES.filter((surface) => surfaceSet.has(surface)).join(",");
 
   // The two box-warming INTENTS, each off by default and each
@@ -512,7 +555,11 @@ export function useSandboxWorkspaceTabs(
     // No passive Channel-A reads while cold, even after a conclusive capture
     // miss. A missing capture gets an explicit "Open live workspace" gate.
     enabled: filesEnabled && (captureAvailable || (fileSystemOn && liveWorkspaceExpected)),
-    active: filesActive,
+    // A cold sandbox can become warm while the first agent command still owns
+    // startup. Do not race that command with an automatic Files read. Keeping
+    // this fence at turn scope also avoids unsafe millisecond gaps between
+    // sequential tool calls; rendered state and explicit user actions remain.
+    active: filesActive && !turnInFlight,
     repoPaths,
     liveness: liveIoLiveness,
     capture: captureState.capture,
@@ -553,10 +600,11 @@ export function useSandboxWorkspaceTabs(
         : changesComparison === "branch"
           ? workspaceDataEnabled && (captureSupportsBranch || (gitOn && liveWorkspaceExpected))
           : workspaceDataEnabled && gitOn && liveWorkspaceExpected,
-    // Before the dock chooses its source-driven default, Git is the sole probe
-    // that may need to resolve that choice on a live workspace. Files remains
-    // dormant, avoiding the old duplicate full-tree read.
-    active: changesActive || resolvedActiveTab === null,
+    // Live Git belongs to the visible Changes surface. In particular, do not
+    // turn an unresolved/default tab into a hidden provider read: that races the
+    // agent's own sandbox commands and used to refresh after every tool output
+    // even while Files was visibly selected.
+    active: changesActive && !turnInFlight,
     repoPaths,
     liveness: liveIoLiveness,
     comparison: changesComparison,
@@ -605,14 +653,12 @@ export function useSandboxWorkspaceTabs(
   });
   const workspaceWaking = chip.state === "waking";
 
-  // The pre-paint default tab is decided from the first AUTHORITATIVE workspace
-  // source. A capture wins immediately on the cold/offline fast path; a warm box
-  // waits for live Git so a prior snapshot can never outrank the current tree.
-  // When the GET says no capture exists, `fileCount: 0` does NOT itself mean the
-  // working tree is clean. A captured-revision announce can
-  // resolve Changes earlier, but a pure embedder with no event preload still gets
-  // the correct live default. The choice latches once so later edits never steal
-  // the user's current tab.
+  // The pre-paint default comes only from the durable capture. Default selection
+  // must never dispatch live provider work: a live Git probe can overlap the
+  // agent's first command, and an uncontrolled dock used to keep that probe
+  // active forever after it visibly selected Files. A capture with reviewable
+  // changes opens Changes; no capture (or an empty one) opens Files. The choice
+  // latches once so later edits never steal the user's current tab.
   const defaultIdentity = `${sessionId}\u0000${surfaceIdentity}`;
   const defaultTabRef = useRef<{ identity: string; value: string | null }>({
     identity: defaultIdentity,
@@ -621,62 +667,25 @@ export function useSandboxWorkspaceTabs(
   if (defaultTabRef.current.identity !== defaultIdentity) {
     defaultTabRef.current = { identity: defaultIdentity, value: null };
   }
-  const captureIsAuthoritative =
-    !liveWorkspaceExpected && (liveness !== undefined || caps.error !== null);
   const captureHasChanges =
     (captureState.fileCount ?? 0) > 0 ||
     (captureState.capture?.repos.some((repo) => (repo.branchDiff?.length ?? 0) > 0) ?? false);
   const captureUnavailable =
     (captureState.fileCount === 0 && !captureHasChanges) || captureState.error !== null;
-  const implicitBranchFallbackPending =
-    changesComparison === "branch" &&
-    git.error !== null &&
-    storedChangesComparison?.sessionId !== sessionId;
   if (defaultTabRef.current.value === null) {
     if (initialTab && (!isWorkbenchSurface(initialTab) || surfaceSet.has(initialTab))) {
       defaultTabRef.current.value = initialTab;
-    } else if (git.source === "live") {
-      defaultTabRef.current.value = sourceDrivenDefaultTab(
-        git.diff.length > 0,
-        changesEnabled,
-        filesEnabled,
-      );
-    } else if (
-      captureIsAuthoritative &&
-      captureState.fileCount !== null &&
-      captureState.available
-    ) {
+    } else if (captureState.fileCount !== null && captureState.available) {
       defaultTabRef.current.value = sourceDrivenDefaultTab(
         captureHasChanges,
         changesEnabled,
         filesEnabled,
       );
-    } else if (
-      captureIsAuthoritative &&
-      captureUnavailable &&
-      initialWorkspaceTab(events) === WORKBENCH_TAB_CHANGES
-    ) {
+    } else if (captureUnavailable && initialWorkspaceTab(events) === WORKBENCH_TAB_CHANGES) {
       defaultTabRef.current.value = sourceDrivenDefaultTab(true, changesEnabled, filesEnabled);
-    } else if (captureUnavailable && caps.error) {
-      // The Changes surface owns the truthful sandbox-unavailable state + retry.
-      // Files would misleadingly describe this as a missing filesystem.
-      defaultTabRef.current.value = sourceDrivenDefaultTab(true, changesEnabled, filesEnabled);
-    } else if (captureIsAuthoritative && captureState.fileCount !== null && captureUnavailable) {
-      // No durable review surface exists and the machine is resting. Files owns
-      // the explicit wake gate; do not issue a live Git probe merely to choose a
-      // tab.
-      defaultTabRef.current.value = sourceDrivenDefaultTab(false, changesEnabled, filesEnabled);
-    } else if (captureState.available && git.error && captureState.fileCount !== null) {
-      // A warm live read failed but the durable capture is intact: retain an
-      // immediate, deterministic review surface instead of hanging unresolved.
-      defaultTabRef.current.value = sourceDrivenDefaultTab(
-        captureHasChanges,
-        changesEnabled,
-        filesEnabled,
-      );
-    } else if (captureUnavailable && git.error && !implicitBranchFallbackPending) {
-      // No capture and live Git failed: Files is the least surprising fallback
-      // after the implicit branch-to-working fallback has also had its chance.
+    } else if (captureState.fileCount !== null || captureState.error !== null) {
+      // No durable review surface exists. Files owns the explicit live-workspace
+      // gate; a user can open Changes deliberately if they need a fresh Git read.
       defaultTabRef.current.value = sourceDrivenDefaultTab(false, changesEnabled, filesEnabled);
     }
   }
@@ -917,7 +926,7 @@ export type SandboxWorkspaceProps = ClientOverride & {
   /** Host tabs injected AFTER the workbench tabs (e.g. a "Debug" tab). */
   trailingTabs?: WorkspaceTab[] | undefined;
   /** Override the pre-paint default tab (e.g. a host landing tab id). When
-   *  omitted the workbench decides from capture, then live Git when no capture exists. */
+   *  omitted the workbench decides from the durable workspace capture. */
   initialTab?: string | undefined;
   /** Host-routed notifications (no toast dependency in the package). */
   onNotify?: ((notification: WorkspaceNotification) => void) | undefined;
@@ -1051,6 +1060,13 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     (tab: string) => setStoredSelection({ sessionId, tab }),
     [sessionId],
   );
+  useEffect(() => {
+    if (selectedTab !== null || defaultTab === null) return;
+    // Once the source-driven choice resolves, make it the real controlled
+    // selection. Without this handoff the dock could visibly show Files while
+    // the data hooks continued treating the selection as unresolved.
+    setStoredSelection({ sessionId, tab: defaultTab });
+  }, [defaultTab, selectedTab, sessionId]);
 
   return (
     <WorkspaceDock

@@ -233,12 +233,14 @@ export function useSandboxGit(
   // survive renders, so they must be fenced/reset when that identity changes.
   const refreshGenerationRef = useRef(0);
   const refreshAbortRef = useRef<AbortController | null>(null);
+  const refreshInFlightRef = useRef<Promise<void> | null>(null);
+  const refreshPendingRef = useRef(false);
+  const refreshWorkerEpochRef = useRef(0);
   const lastChangeRef = useRef(0);
-  const commandRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const eventRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const refresh = useCallback(async () => {
+  const performRefresh = useCallback(async () => {
     if (!sessionId) return;
-    refreshAbortRef.current?.abort();
     const refreshAbort = new AbortController();
     refreshAbortRef.current = refreshAbort;
     const generation = (refreshGenerationRef.current += 1);
@@ -377,6 +379,32 @@ export function useSandboxGit(
     comparison,
   ]);
 
+  // Provider reads cannot be undispatched after they reach a remote sandbox.
+  // Keep exactly one refresh in flight and collapse any burst of invalidations
+  // into one trailing read. Aborting and replacing every tool-output refresh
+  // used to leave several Modal reads contending for the same provider lock.
+  const performRefreshRef = useRef(performRefresh);
+  performRefreshRef.current = performRefresh;
+  const refresh = useCallback(async () => {
+    refreshPendingRef.current = true;
+    const existing = refreshInFlightRef.current;
+    if (existing) return await existing;
+
+    const workerEpoch = refreshWorkerEpochRef.current;
+    const run = (async () => {
+      while (refreshPendingRef.current && refreshWorkerEpochRef.current === workerEpoch) {
+        refreshPendingRef.current = false;
+        await performRefreshRef.current();
+      }
+    })();
+    refreshInFlightRef.current = run;
+    try {
+      await run;
+    } finally {
+      if (refreshInFlightRef.current === run) refreshInFlightRef.current = null;
+    }
+  }, []);
+
   // Serve the requested review scope from a capture when that scope exists.
   const seedFromCapture = useCallback(
     (manifest: WorkspaceCaptureManifest) => {
@@ -432,9 +460,17 @@ export function useSandboxGit(
     // true data-identity change clears rendered state and the event high-water mark.
     refreshAbortRef.current?.abort();
     refreshAbortRef.current = null;
+    refreshPendingRef.current = false;
     refreshGenerationRef.current += 1;
     const identityChanged = previousIdentityRef.current !== identityKey;
     previousIdentityRef.current = identityKey;
+    if (identityChanged) {
+      // Different sessions target different provider identities. Fence the old
+      // worker and let the new session load immediately instead of waiting for a
+      // stuck request that has already been aborted.
+      refreshWorkerEpochRef.current += 1;
+      refreshInFlightRef.current = null;
+    }
     if (identityChanged || !enabled) {
       lastChangeRef.current = 0;
       setDiff([]);
@@ -466,6 +502,7 @@ export function useSandboxGit(
     return () => {
       refreshAbortRef.current?.abort();
       refreshAbortRef.current = null;
+      refreshPendingRef.current = false;
       refreshGenerationRef.current += 1;
     };
   }, [
@@ -479,15 +516,15 @@ export function useSandboxGit(
     seedFromCapture,
   ]);
 
-  // git.changed → re-fetch the LIVE diff. Agent tool completion is also an
-  // invalidation point because shell/apply-patch writes can bypass Channel-A and
-  // therefore emit no git.changed event. This is event-driven, never polling.
+  // Structured Git changes are debounced into one live reconcile. Generic
+  // command/tool output performs no provider reads: the canonical turn-end
+  // capture advances `captureRevision`, which refreshes after the burst settles.
   const events = options.events;
   useEffect(() => {
     if (!enabled || !events) {
-      if (commandRefreshTimerRef.current) {
-        clearTimeout(commandRefreshTimerRef.current);
-        commandRefreshTimerRef.current = null;
+      if (eventRefreshTimerRef.current) {
+        clearTimeout(eventRefreshTimerRef.current);
+        eventRefreshTimerRef.current = null;
       }
       return;
     }
@@ -498,43 +535,35 @@ export function useSandboxGit(
       for (const event of events) {
         if (event.sequence > lastChangeRef.current) lastChangeRef.current = event.sequence;
       }
-      if (commandRefreshTimerRef.current) {
-        clearTimeout(commandRefreshTimerRef.current);
-        commandRefreshTimerRef.current = null;
+      if (eventRefreshTimerRef.current) {
+        clearTimeout(eventRefreshTimerRef.current);
+        eventRefreshTimerRef.current = null;
       }
       return;
     }
     let latest = lastChangeRef.current;
-    let immediate = false;
-    let commandDelta = false;
+    let changed = false;
     for (const event of events) {
       if (event.sequence <= latest) continue;
-      if (event.type === "git.changed" || event.type === "agent.toolCall.output") {
+      if (event.type === "git.changed") {
         latest = event.sequence;
-        immediate = true;
-      } else if (event.type === "sandbox.command.output.delta") {
-        latest = event.sequence;
-        commandDelta = true;
+        changed = true;
       }
     }
     if (latest > lastChangeRef.current) {
       lastChangeRef.current = latest;
-      if (immediate) {
-        if (commandRefreshTimerRef.current) clearTimeout(commandRefreshTimerRef.current);
-        commandRefreshTimerRef.current = null;
+      if (!changed) return;
+      if (eventRefreshTimerRef.current) clearTimeout(eventRefreshTimerRef.current);
+      eventRefreshTimerRef.current = setTimeout(() => {
+        eventRefreshTimerRef.current = null;
         if (acceptsEventReadsRef.current) void refresh();
-      } else if (commandDelta && !commandRefreshTimerRef.current) {
-        commandRefreshTimerRef.current = setTimeout(() => {
-          commandRefreshTimerRef.current = null;
-          if (acceptsEventReadsRef.current) void refresh();
-        }, 1_000);
-      }
+      }, 150);
     }
   }, [enabled, active, acceptsEventReads, events, refresh]);
 
   useEffect(
     () => () => {
-      if (commandRefreshTimerRef.current) clearTimeout(commandRefreshTimerRef.current);
+      if (eventRefreshTimerRef.current) clearTimeout(eventRefreshTimerRef.current);
     },
     [],
   );
