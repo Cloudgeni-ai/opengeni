@@ -495,7 +495,11 @@ export class OpenSandboxSession {
             });
           }
           const image = info.image?.uri;
-          if (image && image !== this.state.image) {
+          // Pool-backed BatchSandbox GET responses use "unknown" because the CR records a
+          // poolRef instead of an inline Pod template. Keep direct-image verification strict.
+          const providerReportedImage =
+            image && (this.state.poolRef === null || image !== "unknown") ? image : null;
+          if (providerReportedImage && providerReportedImage !== this.state.image) {
             await provider.close().catch(() => undefined);
             throw new SandboxProviderError("OpenSandbox image changed for the persisted sandbox", {
               sandboxId: this.state.sandboxId,
@@ -505,7 +509,7 @@ export class OpenSandboxSession {
             info.extensions && typeof info.extensions.poolRef === "string"
               ? info.extensions.poolRef
               : null;
-          if (this.state.poolRef !== null && poolRef !== this.state.poolRef) {
+          if (this.state.poolRef !== null && poolRef !== null && poolRef !== this.state.poolRef) {
             await provider.close().catch(() => undefined);
             throw new SandboxProviderError("OpenSandbox pool changed for the persisted sandbox", {
               sandboxId: this.state.sandboxId,

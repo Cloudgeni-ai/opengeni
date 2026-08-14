@@ -38,6 +38,8 @@ class FakeOpenSandbox {
   commandFailureAfterInit: Error | null = null;
   commandStatus = { running: false, exitCode: 0, content: "" };
   lifecycleRequestTimeoutSeconds: number | null = null;
+  reportedImage = IMAGE;
+  reportedExtensions: Record<string, string> = {};
 
   readonly adapterFactory: AdapterFactory;
 
@@ -282,10 +284,10 @@ class FakeOpenSandbox {
   private info(id: string) {
     return {
       id,
-      image: { uri: IMAGE },
+      image: { uri: this.reportedImage },
       entrypoint: ["tail", "-f", "/dev/null"],
       metadata: {},
-      extensions: {},
+      extensions: this.reportedExtensions,
       status: { state: "Running" },
       createdAt: new Date(),
       expiresAt: new Date(Date.now() + 60_000),
@@ -297,7 +299,10 @@ class FakeOpenSandbox {
   }
 }
 
-function createClient(fake: FakeOpenSandbox): OpenSandboxClient {
+function createClient(
+  fake: FakeOpenSandbox,
+  options: { poolRef?: string } = {},
+): OpenSandboxClient {
   return new OpenSandboxClient({
     baseUrl: "https://opensandbox.example.test",
     apiKey: "secret-test-key",
@@ -308,6 +313,7 @@ function createClient(fake: FakeOpenSandbox): OpenSandboxClient {
     resourceLimits: { cpu: "1", memory: "1Gi" },
     resourceRequests: { cpu: "250m", memory: "512Mi" },
     environment: { BASE: "base" },
+    ...(options.poolRef ? { poolRef: options.poolRef } : {}),
     adapterFactory: fake.adapterFactory,
   });
 }
@@ -379,6 +385,36 @@ describe("OpenSandbox adapter", () => {
       SandboxExactResumeInstanceUnavailableError,
     );
     expect(fake.calls.filter((call) => call === "createSandbox")).toHaveLength(1);
+  });
+
+  test("direct exact resume rejects a concrete provider image mismatch", async () => {
+    const fake = new FakeOpenSandbox();
+    const session = await createClient(fake).create();
+    fake.reportedImage = `registry.example.com/opengeni@sha256:${"b".repeat(64)}`;
+
+    await expect(session.start()).rejects.toThrow(/image changed for the persisted sandbox/);
+  });
+
+  test("pool exact resume accepts opaque lifecycle image and missing pool evidence", async () => {
+    const fake = new FakeOpenSandbox();
+    fake.reportedImage = "unknown";
+    const session = await createClient(fake, { poolRef: "warm-pool" }).create();
+
+    expect(fake.createdRequest).toMatchObject({
+      extensions: { poolRef: "warm-pool" },
+    });
+    expect(fake.createdRequest).not.toHaveProperty("image");
+    await session.start();
+    expect(session.state.workspaceReady).toBe(true);
+  });
+
+  test("pool exact resume rejects explicit conflicting provider evidence", async () => {
+    const fake = new FakeOpenSandbox();
+    fake.reportedImage = "unknown";
+    fake.reportedExtensions = { poolRef: "other-pool" };
+    const session = await createClient(fake, { poolRef: "warm-pool" }).create();
+
+    await expect(session.start()).rejects.toThrow(/pool changed for the persisted sandbox/);
   });
 
   test("state codec rejects another provider binding or image", async () => {
