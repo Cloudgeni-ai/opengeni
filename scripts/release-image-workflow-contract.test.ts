@@ -710,6 +710,9 @@ describe("release image workflow contract", () => {
       "Restore the controller after package preparation",
     );
     const registryReconcile = release.indexOf("Reconcile npm package identity");
+    const runtimeInputs = release.indexOf(
+      "Download and verify source-bound artifact runtime inputs",
+    );
     const existingReleasePreflight = release.indexOf(
       "Compare an existing immutable distribution before image mutation",
     );
@@ -731,6 +734,17 @@ describe("release image workflow contract", () => {
     expect(sourceInstall).toBeGreaterThan(candidateReceipt);
     expect(sourceControllerRestore).toBeGreaterThan(sourceInstall);
     expect(packageControllerRestore).toBeGreaterThan(packagePreparation);
+    expect(runtimeInputs).toBeGreaterThan(packagePreparation);
+    expect(packageControllerRestore).toBeGreaterThan(runtimeInputs);
+    expect(existingReleasePreflight).toBeGreaterThan(runtimeInputs);
+    expect(release).toContain('artifact_name="artifact-runtime-containers-${SOURCE_SHA}"');
+    expect(release).toContain('gh run download "$CANDIDATE_RUN_ID"');
+    expect(release).toContain('--source-sha "$SOURCE_SHA"');
+    expect(release).toContain("for architecture in amd64 arm64");
+    expect(release).toContain("opengeni-artifact-runtime-${SOURCE_SHA}.tgz");
+    expect(release).toContain("--sort=name --mtime='UTC 1970-01-01'");
+    expect(release).toContain('"$(basename "$archive")"');
+    expect(release).toContain("release-bom.json \\");
     expect(release).toContain("--kind package");
     expect(release).toContain("CANDIDATE_ARTIFACT_ID:");
     expect(release).toContain("CANDIDATE_ARTIFACT_DIGEST:");
