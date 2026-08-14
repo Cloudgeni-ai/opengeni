@@ -1155,7 +1155,6 @@ export class SandboxChannelAService {
     const privateDirectory = "/tmp/opengeni-private/workspace-imports";
     const configPath = `${privateDirectory}/${operationId}-${transferId}.curl`;
     const config = workspaceImportCurlConfig(source.url);
-    await this.writePlacementPrivate(configPath, config);
     const frame = transferId.replaceAll("-", "");
     const okMarker = `__OPENGENI_WORKSPACE_IMPORT_${frame}_OK__`;
     const conflictMarker = `__OPENGENI_WORKSPACE_IMPORT_${frame}_CONFLICT__`;
@@ -1207,13 +1206,14 @@ export class SandboxChannelAService {
 
     let result: Awaited<ReturnType<SandboxChannelAService["run"]>>;
     try {
+      await this.writePlacementPrivate(configPath, config);
       result = await this.run({
         cmd: internalBashCommand(script),
         yieldTimeMs: 20 * 60_000,
         maxOutputTokens: 2_048,
       });
     } finally {
-      await this.session.deletePlacementPrivate?.(configPath, this.runAs).catch(() => undefined);
+      await this.session.deletePlacementPrivate?.(configPath, this.runAs);
     }
     if (result.sessionId !== undefined) {
       throw new ChannelAUnavailableError("Workspace file import did not settle; retry it.");
