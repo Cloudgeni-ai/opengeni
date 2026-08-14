@@ -282,21 +282,7 @@ function findNodeByPath(nodes: FileTreeNode[], path: string): FileTreeNode | und
   return undefined;
 }
 
-/** Root plus every directory whose children are currently loaded. Re-listing
- * this small visible frontier refreshes agent shell edits without expanding or
- * traversing hidden directories. */
-function loadedDirectoryPaths(nodes: FileTreeNode[]): string[] {
-  const paths = [""];
-  const walk = (list: FileTreeNode[]) => {
-    for (const node of list) {
-      if (node.kind !== "dir" || node.children === undefined) continue;
-      paths.push(node.path);
-      walk(node.children);
-    }
-  };
-  walk(nodes);
-  return paths;
-}
+const FS_LIST_BATCH_REQUEST_LIMIT = 16;
 
 /** Repository paths are capability-advertised and therefore safe to use as a
  * bounded initial lazy-tree frontier. Listing their ancestors concurrently with
@@ -527,9 +513,9 @@ export function useSandboxFiles(
   const lastSeqRef = useRef(0);
   const pendingParentsRef = useRef<Set<string>>(new Set());
   const pendingGitRef = useRef(false);
-  const pendingAgentToolRef = useRef(false);
+  const eventReconcileInFlightRef = useRef<Promise<void> | null>(null);
+  const eventReconcilePendingRef = useRef(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastCommandRefreshAtRef = useRef(0);
 
   // ── Self-emitted fs.changed de-dupe ───────────────────────────────────────
   // Every one of OUR mutations emits an `fs.changed` event back on the live log
@@ -584,34 +570,15 @@ export function useSandboxFiles(
     setGitLoading(true);
     setError(null);
     try {
-      // Start the optional Git tint and the actual directory listing together.
-      // A remote status read must never block the first useful file-tree paint.
+      // Paint the useful file tree before the optional Git tint. Separate remote
+      // requests for one Modal box are deliberately serialized by the API; firing
+      // both here only made the Git request contend with the file request during
+      // cold starts.
       const frontierPaths = initialDirectoryFrontier(rootPath, repoPaths);
       const listRequests = [rootPath, ...frontierPaths].map((path) => ({
         path,
         depth: 1,
       }));
-      const statusPromise =
-        repoPaths.length > 0
-          ? client
-              .gitReadBatch(
-                workspaceId,
-                sessionId,
-                {
-                  requests: repoPaths.map((root) => ({
-                    status: { path: root },
-                  })),
-                },
-                { signal: refreshAbort.signal },
-              )
-              .then((batch) =>
-                batch.results.map((result, index) => ({
-                  root: repoPaths[index] ?? "",
-                  status: result.status,
-                })),
-              )
-              .catch(() => null)
-          : Promise.resolve([]);
       // Root plus the bounded repository frontier share one API request, one
       // direct holder, and one provider attach. The old per-directory fan-out
       // paid that fixed control-plane cost up to nine times on every Files open.
@@ -644,7 +611,27 @@ export function useSandboxFiles(
       setSource("live");
       setLoading(false);
 
-      const statuses = await statusPromise;
+      const statuses =
+        repoPaths.length > 0
+          ? await client
+              .gitReadBatch(
+                workspaceId,
+                sessionId,
+                {
+                  requests: repoPaths.map((root) => ({
+                    status: { path: root },
+                  })),
+                },
+                { signal: refreshAbort.signal },
+              )
+              .then((batch) =>
+                batch.results.map((result, index) => ({
+                  root: repoPaths[index] ?? "",
+                  status: result.status,
+                })),
+              )
+              .catch(() => null)
+          : [];
       if (refreshGenerationRef.current !== generation) return;
       if (statuses) {
         const overlay = new Map<string, FileTreeStatus>();
@@ -888,6 +875,57 @@ export function useSandboxFiles(
     [client, workspaceId, sessionId, applyStatus],
   );
 
+  // Reconcile the visible directory frontier through bounded batch requests.
+  // One tool completion can affect several expanded directories; issuing one
+  // provider request per directory created a self-inflicted lock convoy.
+  const reconcilePaths = useCallback(
+    async (requestedPaths: readonly string[], requestSignal?: AbortSignal) => {
+      if (!sessionId) return;
+      const identityGeneration = identityGenerationRef.current;
+      const identitySignal = identityAbortRef.current.signal;
+      const signal = requestSignal
+        ? AbortSignal.any([identitySignal, requestSignal])
+        : identitySignal;
+      const paths = [...new Set(requestedPaths)].filter((path) =>
+        parentIsLoaded(treeRef.current, path),
+      );
+      for (let offset = 0; offset < paths.length; offset += FS_LIST_BATCH_REQUEST_LIMIT) {
+        const chunk = paths.slice(offset, offset + FS_LIST_BATCH_REQUEST_LIMIT);
+        try {
+          const listed = await client.fsListBatch(
+            workspaceId,
+            sessionId,
+            { requests: chunk.map((path) => ({ path, depth: 1 })) },
+            { signal },
+          );
+          if (identityGenerationRef.current !== identityGeneration) return;
+          setTree((previous) => {
+            let next = previous;
+            for (const [index, path] of chunk.entries()) {
+              const result = listed.results[index];
+              if (!result) continue;
+              const children = (result.root.children ?? []).map((node) => fsNodeToTree(node));
+              if (path === "") {
+                next = mergeRootChildren(next, children);
+              } else {
+                const existing = findNodeByPath(next, path);
+                const merged = existing?.children
+                  ? mergeChildren(existing.children, children)
+                  : children;
+                next = replaceChildren(next, path, merged);
+              }
+            }
+            return applyStatus(next);
+          });
+        } catch {
+          // Reconciliation is best-effort. Preserve the current visible tree and
+          // let the next real event or explicit refresh reconcile it.
+        }
+      }
+    },
+    [client, workspaceId, sessionId, applyStatus],
+  );
+
   // Run a Channel-A op behind an OPTIMISTIC tree edit. `apply` splices the change
   // in immediately (preserving expansion/selection); the op runs in the
   // background; on failure we revert to the pre-op snapshot and surface a toast.
@@ -1107,14 +1145,14 @@ export function useSandboxFiles(
     const identityChanged = previousIdentityRef.current !== identityKey;
     previousIdentityRef.current = identityKey;
     if (identityChanged || !enabled) {
+      if (identityChanged) eventReconcileInFlightRef.current = null;
       identityAbortRef.current.abort();
       identityAbortRef.current = new AbortController();
       identityGenerationRef.current += 1;
       lastSeqRef.current = 0;
       pendingParentsRef.current = new Set();
       pendingGitRef.current = false;
-      pendingAgentToolRef.current = false;
-      lastCommandRefreshAtRef.current = 0;
+      eventReconcilePendingRef.current = false;
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
         debounceRef.current = null;
@@ -1155,6 +1193,7 @@ export function useSandboxFiles(
       refreshAbortRef.current = null;
       refreshGenerationRef.current += 1;
       eventReadAbortRef.current.abort();
+      eventReconcilePendingRef.current = false;
     };
   }, [
     enabled,
@@ -1211,6 +1250,44 @@ export function useSandboxFiles(
     [client, workspaceId, sessionId, repoPaths, applyStatus],
   );
 
+  const performEventReconcile = useCallback(async () => {
+    const parents = pendingParentsRef.current;
+    pendingParentsRef.current = new Set();
+    const wantGit = pendingGitRef.current;
+    pendingGitRef.current = false;
+    const signal = eventReadAbortRef.current.signal;
+    const paths = [...parents];
+
+    // File content is the primary Files-tab result. Reconcile it first, then add
+    // the optional Git tint through a second serial request. This matches the
+    // API's exact-provider serialization instead of making the two reads contend.
+    await reconcilePaths(paths, signal);
+    if (wantGit) await refreshGitOverlay(signal);
+  }, [reconcilePaths, refreshGitOverlay]);
+  const performEventReconcileRef = useRef(performEventReconcile);
+  performEventReconcileRef.current = performEventReconcile;
+  const reconcilePendingEvents = useCallback(async () => {
+    eventReconcilePendingRef.current = true;
+    const existing = eventReconcileInFlightRef.current;
+    if (existing) return await existing;
+    const identityGeneration = identityGenerationRef.current;
+    const run = (async () => {
+      while (
+        eventReconcilePendingRef.current &&
+        identityGenerationRef.current === identityGeneration
+      ) {
+        eventReconcilePendingRef.current = false;
+        await performEventReconcileRef.current();
+      }
+    })();
+    eventReconcileInFlightRef.current = run;
+    try {
+      await run;
+    } finally {
+      if (eventReconcileInFlightRef.current === run) eventReconcileInFlightRef.current = null;
+    }
+  }, []);
+
   // Auto-reconcile on fs/git change notifications — TARGETED, never a root
   // collapse-reload, and de-duped against our OWN mutations.
   //
@@ -1221,6 +1298,8 @@ export function useSandboxFiles(
   //     reconciles ONLY the affected parent directories (in place, expansion
   //     preserved). Bursts are debounced into a single reconcile pass.
   //   • A git.changed just re-tints (refreshes the status overlay) — no fs re-list.
+  //   • Generic command/tool output performs no provider reads. The canonical
+  //     turn-end capture refreshes the root once after the command burst settles.
   const events = options.events;
 
   useEffect(() => {
@@ -1238,12 +1317,11 @@ export function useSandboxFiles(
       }
       pendingParentsRef.current = new Set();
       pendingGitRef.current = false;
-      pendingAgentToolRef.current = false;
+      eventReconcilePendingRef.current = false;
       return;
     }
     let sawNew = false;
     let contentChanged = false;
-    let sawCommandDelta = false;
     for (const event of events) {
       if (event.sequence <= lastSeqRef.current) continue;
       if (event.type === "fs.changed") {
@@ -1273,73 +1351,27 @@ export function useSandboxFiles(
         )
           continue;
         pendingGitRef.current = true;
-      } else if (event.type === "agent.toolCall.output") {
-        // Agent shell/apply-patch writes do not necessarily pass through the
-        // structured FS service, so they may have no fs.changed notification.
-        // A completed tool is a bounded invalidation point: refresh only the
-        // currently-loaded directory frontier, never poll and never traverse a
-        // collapsed subtree.
-        sawNew = true;
-        contentChanged = true;
-        pendingAgentToolRef.current = true;
-        // Shell/apply-patch writes bypass the structured Git service too, so no
-        // git.changed event is guaranteed. Refresh the summary/tints alongside
-        // the visible tree frontier; both remote reads can run concurrently.
-        pendingGitRef.current = true;
-      } else if (event.type === "sandbox.command.output.delta") {
-        // Ordinary shell writes can bypass Channel-A and therefore emit no
-        // fs.changed/git.changed event until the command completes. Reconcile
-        // the visible frontier at most once per second while output streams so
-        // Files and Changes stay useful without turning the dock into polling.
-        sawNew = true;
-        contentChanged = true;
-        sawCommandDelta = true;
-        pendingAgentToolRef.current = true;
-        pendingGitRef.current = true;
       }
     }
     // Advance the high-water mark past everything we've folded.
     for (const event of events)
       if (event.sequence > lastSeqRef.current) lastSeqRef.current = event.sequence;
     if (!sawNew) return;
-    if (contentChanged && !sawCommandDelta) setContentRevision((revision) => revision + 1);
+    if (contentChanged) setContentRevision((revision) => revision + 1);
 
     if (debounceRef.current) clearTimeout(debounceRef.current);
     const identityGeneration = identityGenerationRef.current;
-    const delay = sawCommandDelta
-      ? Math.max(0, 1_000 - (Date.now() - lastCommandRefreshAtRef.current))
-      : 150;
     debounceRef.current = setTimeout(() => {
       debounceRef.current = null;
       if (identityGenerationRef.current !== identityGeneration) return;
       if (!acceptsEventReadsRef.current) {
         pendingParentsRef.current = new Set();
         pendingGitRef.current = false;
-        pendingAgentToolRef.current = false;
         return;
       }
-      if (sawCommandDelta) {
-        lastCommandRefreshAtRef.current = Date.now();
-        setContentRevision((revision) => revision + 1);
-      }
-      const parents = pendingParentsRef.current;
-      pendingParentsRef.current = new Set();
-      const wantGit = pendingGitRef.current;
-      pendingGitRef.current = false;
-      const wantAgentTool = pendingAgentToolRef.current;
-      pendingAgentToolRef.current = false;
-      // Reconcile the changed directories and Git overlay concurrently. Both are
-      // independent remote reads; applyStatus makes their completion order safe.
-      const eventReadSignal = eventReadAbortRef.current.signal;
-      void (async () => {
-        const paths = wantAgentTool ? loadedDirectoryPaths(treeRef.current) : [...parents];
-        await Promise.all([
-          wantGit ? refreshGitOverlay(eventReadSignal) : Promise.resolve(),
-          Promise.all(paths.map((path) => reconcilePath(path, eventReadSignal))),
-        ]);
-      })();
-    }, delay);
-  }, [enabled, active, acceptsEventReads, events, reconcilePath, refreshGitOverlay]);
+      void reconcilePendingEvents();
+    }, 150);
+  }, [enabled, active, acceptsEventReads, events, reconcilePendingEvents]);
 
   useEffect(() => {
     if (active && acceptsEventReads) return;
@@ -1349,7 +1381,7 @@ export function useSandboxFiles(
     }
     pendingParentsRef.current = new Set();
     pendingGitRef.current = false;
-    pendingAgentToolRef.current = false;
+    eventReconcilePendingRef.current = false;
   }, [active, acceptsEventReads]);
 
   useEffect(
@@ -1357,6 +1389,7 @@ export function useSandboxFiles(
       refreshAbortRef.current?.abort();
       identityAbortRef.current.abort();
       eventReadAbortRef.current.abort();
+      eventReconcilePendingRef.current = false;
       identityGenerationRef.current += 1;
       if (debounceRef.current) clearTimeout(debounceRef.current);
     },

@@ -1147,6 +1147,48 @@ describe("useSandboxFiles — capture source", () => {
     await hook.unmount();
   });
 
+  test("generic command and tool output never fans out Files provider reads", async () => {
+    let fsListCalls = 0;
+    let gitBatchCalls = 0;
+    const client = fakeClient({
+      fsList: async () => {
+        fsListCalls += 1;
+        return {
+          root: treeDir("", "", [treeFile("app.py", "app.py", 1)]),
+          revision: 1,
+          truncated: false,
+        };
+      },
+      gitReadBatch: async () => {
+        gitBatchCalls += 1;
+        return { results: [] };
+      },
+    });
+    const hook = await renderHook(
+      (props: { events: SessionEvent[] }) =>
+        useSandboxFiles(SESSION_ID, {
+          ...ctx,
+          client,
+          capture: fakeManifest(),
+          liveness: "warm",
+          events: props.events,
+        }),
+      { events: [] as SessionEvent[] },
+    );
+    await flush();
+    fsListCalls = 0;
+    gitBatchCalls = 0;
+
+    await hook.rerender({
+      events: [fakeEvent(1, "sandbox.command.output.delta"), fakeEvent(2, "agent.toolCall.output")],
+    });
+    await flush(250);
+
+    expect(fsListCalls).toBe(0);
+    expect(gitBatchCalls).toBe(0);
+    await hook.unmount();
+  });
+
   test("warm event reconciliation is cancelled before a draining transition can rearm", async () => {
     let fsListCalls = 0;
     let gitBatchCalls = 0;
@@ -1452,6 +1494,103 @@ describe("useSandboxFiles — capture source", () => {
 // ── use-sandbox-git: source selection + no-flicker ─────────────────────────────
 
 describe("useSandboxGit — capture source", () => {
+  test("rapid structured Git invalidations collapse into one trailing provider read", async () => {
+    let releaseFirst!: () => void;
+    const firstRead = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+    const client = fakeClient({
+      gitStatus: async () => {
+        calls += 1;
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        if (calls === 1) await firstRead;
+        active -= 1;
+        return {
+          isRepo: false,
+          head: null,
+          detached: false,
+          upstream: null,
+          ahead: 0,
+          behind: 0,
+          files: [],
+          revision: calls,
+        };
+      },
+    });
+    const hook = await renderHook(
+      (props: { events: SessionEvent[] }) =>
+        useSandboxGit(SESSION_ID, {
+          ...ctx,
+          client,
+          events: props.events,
+          liveness: "warm",
+        }),
+      { events: [] as SessionEvent[] },
+    );
+    await flush(200);
+
+    await hook.rerender({ events: [fakeEvent(1, "agent.toolCall.output")] });
+    await hook.rerender({
+      events: [
+        fakeEvent(1, "agent.toolCall.output"),
+        fakeEvent(2, "agent.toolCall.output"),
+        fakeEvent(3, "git.changed"),
+      ],
+    });
+    await flush(200);
+    expect(calls).toBe(1);
+    expect(maxActive).toBe(1);
+
+    releaseFirst();
+    await flush(50);
+    expect(calls).toBe(2);
+    expect(maxActive).toBe(1);
+    await hook.unmount();
+  });
+
+  test("generic command and tool output never triggers live Git reads", async () => {
+    let calls = 0;
+    const client = fakeClient({
+      gitStatus: async () => {
+        calls += 1;
+        return {
+          isRepo: false,
+          head: null,
+          detached: false,
+          upstream: null,
+          ahead: 0,
+          behind: 0,
+          files: [],
+          revision: calls,
+        };
+      },
+    });
+    const hook = await renderHook(
+      (props: { events: SessionEvent[] }) =>
+        useSandboxGit(SESSION_ID, {
+          ...ctx,
+          client,
+          events: props.events,
+          liveness: "warm",
+        }),
+      { events: [] as SessionEvent[] },
+    );
+    await flush();
+    calls = 0;
+
+    await hook.rerender({
+      events: [fakeEvent(1, "sandbox.command.output.delta"), fakeEvent(2, "agent.toolCall.output")],
+    });
+    await flush(250);
+
+    expect(calls).toBe(0);
+    await hook.unmount();
+  });
+
   test("cold + capture serves the diff from the capture repo (no gitDiff RPC)", async () => {
     let gitDiffCalls = 0;
     const client = fakeClient({
@@ -1475,7 +1614,7 @@ describe("useSandboxGit — capture source", () => {
         useSandboxGit(SESSION_ID, { ...ctx, client, capture: fakeManifest(), liveness: "cold" }),
       undefined,
     );
-    await flush();
+    await flush(200);
     expect(hook.result.current.source).toBe("capture");
     expect(hook.result.current.capturedAt).toBe("2026-07-08T12:00:00.000Z");
     expect(hook.result.current.isRepo).toBe(true);
@@ -1502,7 +1641,7 @@ describe("useSandboxGit — capture source", () => {
       () => useSandboxGit(SESSION_ID, { ...ctx, client, liveness: "cold" }),
       undefined,
     );
-    await flush();
+    await flush(200);
 
     expect(gitStatusCalls).toBe(0);
     expect(gitDiffCalls).toBe(0);
@@ -1860,7 +1999,7 @@ describe("useSandboxGit — capture source", () => {
       sessionId: SECOND_SESSION_ID,
       events: [fakeEvent(1, "git.changed")],
     });
-    await flush();
+    await flush(200);
 
     expect(hook.result.current.diff.map((file) => file.path)).toEqual(["second-new.ts"]);
     await hook.unmount();
@@ -1907,7 +2046,7 @@ describe("useSandboxGit — capture source", () => {
 
     lineText = "new line";
     await hook.rerender({ events: [fakeEvent(1, "git.changed")] });
-    await flush();
+    await flush(200);
 
     expect(hook.result.current.diff[0]?.hunks[0]?.lines[0]?.text).toBe("new line");
     await hook.unmount();

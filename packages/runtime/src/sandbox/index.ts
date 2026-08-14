@@ -58,6 +58,8 @@ import {
 } from "./workspace-archive";
 import type { RuntimeMetricsHooks } from "../metrics";
 import { normalizeProtocolJsonValue } from "../protocol-json";
+import { sandboxCommandExitCode, sandboxCommandStillRunning } from "./command-result";
+import { parseExecBannerSessionId } from "./exec-banner";
 import { runStateCompatibilityProvider, runStateExposedPortsRecord } from "./run-state-compat";
 
 // Re-export the config-owned environment/port helpers from the leaf so the
@@ -1112,29 +1114,14 @@ export class SandboxExecReadinessError extends Error {
  * without publishing the lease warm before command execution is possible. */
 export const MODAL_EXEC_READINESS_TIMEOUT_MS = 60_000;
 
-function sandboxExecProbeExitCode(result: unknown): number | null {
-  if (typeof result === "string") {
-    const match = result.match(/Process exited with code (-?\d+)/);
-    return match ? Number(match[1]) : null;
-  }
+function sandboxExecProbeSessionId(result: unknown): number | null {
+  if (typeof result === "string") return parseExecBannerSessionId(result);
   if (!result || typeof result !== "object") return null;
-  const candidate = result as {
-    exitCode?: unknown;
-    exit_code?: unknown;
-    code?: unknown;
-    status?: unknown;
-  };
-  for (const value of [candidate.exitCode, candidate.exit_code, candidate.code, candidate.status]) {
-    if (typeof value === "number") return value;
+  const candidate = result as { sessionId?: unknown; session_id?: unknown };
+  for (const value of [candidate.sessionId, candidate.session_id]) {
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return value;
   }
   return null;
-}
-
-function sandboxExecProbeStillRunning(result: unknown): boolean {
-  if (typeof result === "string") return /Process running with session ID \d+/u.test(result);
-  if (!result || typeof result !== "object") return false;
-  const candidate = result as { sessionId?: unknown; session_id?: unknown };
-  return typeof candidate.sessionId === "number" || typeof candidate.session_id === "number";
 }
 
 /** A provider handle is not workspace readiness. Modal can return a handle
@@ -1156,6 +1143,12 @@ export async function verifySandboxExecReadiness(
       yieldTimeMs?: number;
       maxOutputTokens?: number;
     }) => Promise<unknown>;
+    writeStdin?: (args: {
+      sessionId: number;
+      chars?: string;
+      yieldTimeMs?: number;
+      maxOutputTokens?: number;
+    }) => Promise<unknown>;
   };
   const run = session.exec ?? session.execCommand;
   if (!run) {
@@ -1167,33 +1160,45 @@ export async function verifySandboxExecReadiness(
       established.instanceId,
     );
   }
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const result = await Promise.race([
+  const timeoutError = () =>
+    new SandboxExecReadinessError(
+      established.backendId,
+      "exec_probe_timeout",
+      timeoutMs,
+      null,
+      established.instanceId,
+    );
+  const deadline = Date.now() + timeoutMs;
+  const withinDeadline = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw timeoutError();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(timeoutError()), remainingMs);
+          if (timer && "unref" in timer && typeof timer.unref === "function") timer.unref();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+  const execProbe = () =>
+    withinDeadline(() =>
       run.call(session, {
         cmd: "true",
-        yieldTimeMs: 1_000,
+        yieldTimeMs: Math.min(1_000, Math.max(1, deadline - Date.now())),
         maxOutputTokens: 1_000,
       }),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () =>
-            reject(
-              new SandboxExecReadinessError(
-                established.backendId,
-                "exec_probe_timeout",
-                timeoutMs,
-                null,
-                established.instanceId,
-              ),
-            ),
-          timeoutMs,
-        );
-        if (timer && "unref" in timer && typeof timer.unref === "function") timer.unref();
-      }),
-    ]);
-    const exitCode = sandboxExecProbeExitCode(result);
-    if (sandboxExecProbeStillRunning(result) || exitCode !== 0) {
+    );
+
+  let result = await execProbe();
+  while (true) {
+    const exitCode = sandboxCommandExitCode(result);
+    if (exitCode !== null) {
+      if (exitCode === 0) return;
       throw new SandboxExecReadinessError(
         established.backendId,
         "exec_probe_failed",
@@ -1202,8 +1207,25 @@ export async function verifySandboxExecReadiness(
         established.instanceId,
       );
     }
-  } finally {
-    if (timer) clearTimeout(timer);
+
+    const sessionId = sandboxCommandStillRunning(result) ? sandboxExecProbeSessionId(result) : null;
+    const writeStdin = session.writeStdin;
+    if (sessionId !== null && writeStdin) {
+      result = await withinDeadline(() =>
+        writeStdin.call(session, {
+          sessionId,
+          chars: "",
+          yieldTimeMs: Math.min(1_000, Math.max(1, deadline - Date.now())),
+          maxOutputTokens: 1_000,
+        }),
+      );
+      continue;
+    }
+
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw timeoutError();
+    await new Promise((resolve) => setTimeout(resolve, Math.min(100, remainingMs)));
+    result = await execProbe();
   }
 }
 

@@ -810,34 +810,55 @@ describe("useSandboxFiles", () => {
   test("lists the tree (depth 1) and overlays git status, expands lazily", async () => {
     const listCalls: string[] = [];
     let batchCalls = 0;
+    let activeProviderReads = 0;
+    let maxActiveProviderReads = 0;
+    const initialReadOrder: string[] = [];
+    const gitStatus: SessionClientLike["gitStatus"] = async () => ({
+      isRepo: true,
+      head: "main",
+      detached: false,
+      upstream: null,
+      ahead: 0,
+      behind: 0,
+      files: [
+        {
+          path: "src/app.ts",
+          oldPath: null,
+          index: null,
+          worktree: "modified",
+          isConflicted: false,
+        },
+      ],
+      revision: 1,
+    });
     const client = fakeClient({
-      gitStatus: async () => ({
-        isRepo: true,
-        head: "main",
-        detached: false,
-        upstream: null,
-        ahead: 0,
-        behind: 0,
-        files: [
-          {
-            path: "src/app.ts",
-            oldPath: null,
-            index: null,
-            worktree: "modified",
-            isConflicted: false,
-          },
-        ],
-        revision: 1,
-      }),
+      gitStatus,
+      gitReadBatch: async (workspaceId, sessionId, request, options) => {
+        activeProviderReads += 1;
+        maxActiveProviderReads = Math.max(maxActiveProviderReads, activeProviderReads);
+        initialReadOrder.push("git");
+        const results = await Promise.all(
+          request.requests.map(async (item) => ({
+            status: await gitStatus(workspaceId, sessionId, item.status, options),
+          })),
+        );
+        activeProviderReads -= 1;
+        return { results };
+      },
       fsListBatch: async (workspaceId, sessionId, request, options) => {
         batchCalls += 1;
-        return {
+        activeProviderReads += 1;
+        maxActiveProviderReads = Math.max(maxActiveProviderReads, activeProviderReads);
+        initialReadOrder.push("files");
+        const response = {
           results: await Promise.all(
             request.requests.map(
               async (item) => await client.fsList(workspaceId, sessionId, item, options),
             ),
           ),
         };
+        activeProviderReads -= 1;
+        return response;
       },
       fsList: async (_ws, _s, req) => {
         listCalls.push(req?.path ?? "");
@@ -916,6 +937,8 @@ describe("useSandboxFiles", () => {
     // The modified file carries the git-status overlay.
     expect(src?.children?.[0]?.status).toBe("modified");
     expect(batchCalls).toBe(1);
+    expect(maxActiveProviderReads).toBe(1);
+    expect(initialReadOrder.slice(0, 2)).toEqual(["files", "git"]);
     expect(listCalls).toContain("src");
     await hook.unmount();
   });
