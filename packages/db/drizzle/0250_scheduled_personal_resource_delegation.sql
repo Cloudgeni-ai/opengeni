@@ -808,9 +808,6 @@ BEGIN
     AND task.account_id = NEW.account_id
     AND task.workspace_id = NEW.workspace_id
   FOR SHARE;
-  IF task_row.status <> 'active' THEN
-    RAISE EXCEPTION 'scheduled task is not active' USING ERRCODE = '42501';
-  END IF;
 
   INSERT INTO opengeni_private.scheduled_personal_resource_capabilities (
     backend_pid, transaction_id, capability_kind

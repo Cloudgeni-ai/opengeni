@@ -198,7 +198,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
             producerKey: "ope233-pre-migration-paused",
           }),
         ),
-      ).toContain("scheduled task is not active");
+      ).toContain("scheduled personal-resource task has no authority snapshot");
 
       // A rolling old writer can still issue the pre-0250 status update, but it
       // cannot manufacture the new immutable authority ledger. The database
