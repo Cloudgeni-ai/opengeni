@@ -398,7 +398,7 @@ describe("Google Drive local source preview", () => {
     const connected = await connect(workspace, google);
     expect(connected.callback.status).toBe(302);
     expect(connected.callback.headers.get("location")).toBe(
-      `http://127.0.0.1:3000/workspaces/${workspace.workspaceId}/capabilities?google_drive=connected&connectionId=${connected.connection.id}&google_drive_capability=source_read`,
+      `http://127.0.0.1:3000/workspaces/${workspace.workspaceId}/capabilities?google_drive=connected&connectionId=${connected.connection.id}`,
     );
     expect(google.tokenRequests).toHaveLength(1);
     expect(google.tokenRequests[0]?.get("code_verifier")?.length).toBeGreaterThan(40);
