@@ -239,9 +239,17 @@ ALTER TABLE sandbox_provider_loss_receipts FORCE ROW LEVEL SECURITY;
 CREATE POLICY workspace_isolation ON sandbox_provider_loss_teardown_claims
   USING (opengeni_private.workspace_rls_visible(account_id, workspace_id))
   WITH CHECK (opengeni_private.workspace_rls_visible(account_id, workspace_id));
+CREATE POLICY session_visibility_isolation ON sandbox_provider_loss_teardown_claims
+  AS RESTRICTIVE
+  USING (session_reference_visible(account_id, workspace_id, session_id))
+  WITH CHECK (session_reference_visible(account_id, workspace_id, session_id));
 CREATE POLICY workspace_isolation ON sandbox_provider_loss_receipts
   USING (opengeni_private.workspace_rls_visible(account_id, workspace_id))
   WITH CHECK (opengeni_private.workspace_rls_visible(account_id, workspace_id));
+CREATE POLICY session_visibility_isolation ON sandbox_provider_loss_receipts
+  AS RESTRICTIVE
+  USING (session_reference_visible(account_id, workspace_id, session_id))
+  WITH CHECK (session_reference_visible(account_id, workspace_id, session_id));
 
 CREATE OR REPLACE FUNCTION opengeni_private.guard_provider_loss_claim_mutation()
 RETURNS trigger

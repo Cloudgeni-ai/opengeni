@@ -114,8 +114,44 @@ describe("0240 provider-loss receipt protocol", () => {
         order by c.relname
       `;
       expect(Array.from(tables)).toEqual([
-        { relname: "sandbox_provider_loss_receipts", relforcerowsecurity: true },
-        { relname: "sandbox_provider_loss_teardown_claims", relforcerowsecurity: true },
+        {
+          relname: "sandbox_provider_loss_receipts",
+          relforcerowsecurity: true,
+        },
+        {
+          relname: "sandbox_provider_loss_teardown_claims",
+          relforcerowsecurity: true,
+        },
+      ]);
+
+      const sessionVisibilityPolicies = await shared.admin<
+        { tableName: string; expression: string; checkExpression: string }[]
+      >`
+        select
+          target.relname as "tableName",
+          pg_get_expr(policy.polqual, policy.polrelid) as expression,
+          pg_get_expr(policy.polwithcheck, policy.polrelid) as "checkExpression"
+        from pg_policy policy
+        join pg_class target on target.oid = policy.polrelid
+        where target.relname in (
+          'sandbox_provider_loss_teardown_claims',
+          'sandbox_provider_loss_receipts'
+        )
+          and policy.polname = 'session_visibility_isolation'
+          and policy.polpermissive = false
+        order by target.relname
+      `;
+      expect(Array.from(sessionVisibilityPolicies)).toEqual([
+        {
+          tableName: "sandbox_provider_loss_receipts",
+          expression: "session_reference_visible(account_id, workspace_id, session_id)",
+          checkExpression: "session_reference_visible(account_id, workspace_id, session_id)",
+        },
+        {
+          tableName: "sandbox_provider_loss_teardown_claims",
+          expression: "session_reference_visible(account_id, workspace_id, session_id)",
+          checkExpression: "session_reference_visible(account_id, workspace_id, session_id)",
+        },
       ]);
 
       const columns = await shared.admin<
@@ -136,7 +172,11 @@ describe("0240 provider-loss receipt protocol", () => {
           columnName: "admission_id",
           dataType: "uuid",
         },
-        { tableName: "sandbox_provider_loss_receipts", columnName: "claim_id", dataType: "uuid" },
+        {
+          tableName: "sandbox_provider_loss_receipts",
+          columnName: "claim_id",
+          dataType: "uuid",
+        },
         {
           tableName: "sandbox_provider_loss_receipts",
           columnName: "consumed_at",
@@ -206,7 +246,10 @@ describe("0240 provider-loss receipt protocol", () => {
           name: "sandbox_provider_loss_claim_admission_fence",
           tableName: "sandbox_workspace_mutation_admissions",
         },
-        { name: "sandbox_provider_loss_claim_holder_fence", tableName: "sandbox_lease_holders" },
+        {
+          name: "sandbox_provider_loss_claim_holder_fence",
+          tableName: "sandbox_lease_holders",
+        },
         {
           name: "sandbox_provider_loss_claim_mutation_guard",
           tableName: "sandbox_provider_loss_teardown_claims",
@@ -215,8 +258,14 @@ describe("0240 provider-loss receipt protocol", () => {
           name: "sandbox_provider_loss_claim_retained_process_fence",
           tableName: "sandbox_retained_processes",
         },
-        { name: "sandbox_provider_loss_lease_delete_fence", tableName: "sandbox_leases" },
-        { name: "sandbox_provider_loss_lease_mutation_fence", tableName: "sandbox_leases" },
+        {
+          name: "sandbox_provider_loss_lease_delete_fence",
+          tableName: "sandbox_leases",
+        },
+        {
+          name: "sandbox_provider_loss_lease_mutation_fence",
+          tableName: "sandbox_leases",
+        },
         {
           name: "sandbox_provider_loss_receipt_mutation_guard",
           tableName: "sandbox_provider_loss_receipts",
@@ -542,7 +591,10 @@ describe("0240 provider-loss receipt protocol", () => {
       ]);
       expect(concurrentClaims.map((result) => result.status)).toEqual(["claimed", "claimed"]);
       expect(
-        await claimProviderLossTeardown(app.db, { ...claimInput, claimId: randomUUID() }),
+        await claimProviderLossTeardown(app.db, {
+          ...claimInput,
+          claimId: randomUUID(),
+        }),
       ).toEqual({ status: "not_eligible", reason: "claim_race" });
 
       const receiptId = randomUUID();
@@ -1174,7 +1226,10 @@ describe("0240 provider-loss receipt protocol", () => {
           rotation_reason = 'operator'
         where id = ${leaseId}::uuid`;
       const [releasedLease] = await shared.admin<
-        Array<{ rotationRequestedAt: Date | null; rotationReason: string | null }>
+        Array<{
+          rotationRequestedAt: Date | null;
+          rotationReason: string | null;
+        }>
       >`
         select rotation_requested_at as "rotationRequestedAt",
                rotation_reason as "rotationReason"
