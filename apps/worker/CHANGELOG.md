@@ -1,5 +1,26 @@
 # @opengeni/worker-bundle
 
+## 0.20.4
+
+### Patch Changes
+
+- ec00479: Add provider-free Google Drive release-readiness receipts, configurable persisted sync budgets, bounded request retry and timeout handling, and scoped sync health telemetry, dashboards, and alerts.
+- Updated dependencies [e0e0102]
+- Updated dependencies [b2af2df]
+- Updated dependencies [ec00479]
+  - @opengeni/agent-proto@0.5.1
+  - @opengeni/config@0.16.5
+  - @opengeni/contracts@1.0.2
+  - @opengeni/core@1.0.2
+  - @opengeni/db@1.0.2
+  - @opengeni/events@0.3.113
+  - @opengeni/runtime@1.0.2
+  - @opengeni/documents@0.5.42
+  - @opengeni/github@0.4.60
+  - @opengeni/storage@0.2.97
+  - @opengeni/codemode@0.4.5
+  - @opengeni/observability@0.7.8
+
 ## 0.20.3
 
 ### Patch Changes
