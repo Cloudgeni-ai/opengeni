@@ -765,8 +765,8 @@ Scheduled incident-telemetry tasks use an explicit `incident_telemetry`
 execution class plus a contracts-owned preflight declaration. Core admission
 accepts only requirements already present in the task's exact resources, MCP
 servers, and resolved first-party tool policy. Before dispatch can create a run
-or session, the worker revalidates those selections together with active rig
-health/credential-hook metadata, attached variable-set names and variable
+or session, the worker revalidates those selections together with active
+rig/credential-hook metadata, attached variable-set names and variable
 names, a targeted Prometheus query route, and configured alert-series label
 metadata. The evaluator is pure and metadata-only: it cannot discover broad
 endpoints, fetch `/metrics`, decrypt a value, inspect ambient worker

@@ -82,8 +82,8 @@ const rig: Rig = {
     createdAt: new Date(0).toISOString(),
   },
   activeVersionHealth: {
-    checkHealth: "passing",
-    lastVerifiedAt: new Date(0).toISOString(),
+    checkHealth: "unknown",
+    lastVerifiedAt: null,
   },
   versionCount: 1,
   createdAt: new Date(0).toISOString(),

@@ -21,9 +21,6 @@ export type IncidentTelemetryRigMetadata = {
     active: boolean;
     credentialHooks: readonly string[];
   } | null;
-  activeVersionHealth: {
-    checkHealth: string;
-  } | null;
 };
 
 export type IncidentTelemetryVariableSetMetadata = {
@@ -140,13 +137,7 @@ function rigSatisfies(
   rig: IncidentTelemetryRigMetadata | null,
   required: { name: string; credentialHookIds: readonly string[] },
 ): boolean {
-  if (
-    !rig ||
-    rig.name !== required.name ||
-    !rig.activeVersion ||
-    !rig.activeVersion.active ||
-    rig.activeVersionHealth?.checkHealth !== "passing"
-  ) {
+  if (!rig || rig.name !== required.name || !rig.activeVersion || !rig.activeVersion.active) {
     return false;
   }
   const hookIds = new Set(rig.activeVersion.credentialHooks);
