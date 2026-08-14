@@ -2126,7 +2126,7 @@ export async function verifyApprovedMerge(options = {}) {
   invariant(decisions.length > 0, "trusted reviewer did not review the exact PR head");
   const decision = decisions.at(-1);
   invariant(
-    decision.submittedAt <= pullIdentity.mergedAt,
+    decision.submittedAt < pullIdentity.mergedAt,
     "trusted approval was not submitted before merge",
   );
   assertIdentity(decision.review.user, decision.releaseApprover, "trusted reviewer");
