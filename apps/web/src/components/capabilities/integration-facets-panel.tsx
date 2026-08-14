@@ -52,7 +52,7 @@ type GoogleDriveDialogProps = {
   canManageOrganizationDestination: boolean;
   onClose: () => void;
   onBusyChange: (busy: boolean) => void;
-  onSaved: () => Promise<void>;
+  onSaved: (binding: IntegrationFacetBindingSummary) => void;
 };
 
 const KIND_DETAILS: Record<
@@ -175,6 +175,18 @@ export function IntegrationFacetsPanel({
     setForm(facetFormState(entry.definition, entry.binding));
   }
 
+  function applyMutationBinding(
+    facetKey: string,
+    binding: IntegrationFacetBindingSummary | null,
+  ): void {
+    ++loadSequence.current;
+    loadPromise.current = null;
+    setLoading(false);
+    setData((current) =>
+      current ? replaceIntegrationFacetBinding(current, facetKey, binding) : current,
+    );
+  }
+
   async function save(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (!editor) return;
@@ -192,21 +204,7 @@ export function IntegrationFacetsPanel({
           idempotencyKey: crypto.randomUUID(),
         },
       );
-      ++loadSequence.current;
-      loadPromise.current = null;
-      setLoading(false);
-      setData((current) =>
-        current
-          ? {
-              ...current,
-              facets: current.facets.map((entry) =>
-                entry.definition.facetKey === editor.definition.facetKey
-                  ? { ...entry, binding: configured.binding }
-                  : entry,
-              ),
-            }
-          : current,
-      );
+      applyMutationBinding(editor.definition.facetKey, configured.binding);
       setEditor(null);
       toast.success(`${facetTitle(editor.definition)} configured`, {
         description: `This setting applies only to ${instance.displayName}.`,
@@ -228,24 +226,23 @@ export function IntegrationFacetsPanel({
         expectedVersion: entry.binding.version,
         idempotencyKey: crypto.randomUUID(),
       };
-      if (action === "pause") {
-        await client.pauseIntegrationFacet(
-          workspaceId,
-          data!.capabilityId,
-          data!.instanceKey,
-          entry.definition.facetKey,
-          request,
-        );
-      } else {
-        await client.resumeIntegrationFacet(
-          workspaceId,
-          data!.capabilityId,
-          data!.instanceKey,
-          entry.definition.facetKey,
-          request,
-        );
-      }
-      await load();
+      const result =
+        action === "pause"
+          ? await client.pauseIntegrationFacet(
+              workspaceId,
+              data!.capabilityId,
+              data!.instanceKey,
+              entry.definition.facetKey,
+              request,
+            )
+          : await client.resumeIntegrationFacet(
+              workspaceId,
+              data!.capabilityId,
+              data!.instanceKey,
+              entry.definition.facetKey,
+              request,
+            );
+      applyMutationBinding(entry.definition.facetKey, result.binding);
       toast.success(`${facetTitle(entry.definition)} ${action === "pause" ? "paused" : "resumed"}`);
     } catch (lifecycleError) {
       toast.error(`Couldn't ${action} this facet`, {
@@ -261,7 +258,7 @@ export function IntegrationFacetsPanel({
     if (!removeTarget?.binding || !data) return false;
     setBusyFacetKey(removeTarget.definition.facetKey);
     try {
-      await client.removeIntegrationFacet(
+      const result = await client.removeIntegrationFacet(
         workspaceId,
         data.capabilityId,
         data.instanceKey,
@@ -271,8 +268,8 @@ export function IntegrationFacetsPanel({
           idempotencyKey: crypto.randomUUID(),
         },
       );
+      applyMutationBinding(removeTarget.definition.facetKey, result.binding);
       setRemoveTarget(null);
-      await load();
       toast.success(`${facetTitle(removeTarget.definition)} removed`, {
         description: `${instance.displayName} and its Connection remain intact.`,
       });
@@ -375,7 +372,9 @@ export function IntegrationFacetsPanel({
               busy && googleDriveEditor ? googleDriveEditor.definition.facetKey : null,
             )
           }
-          onSaved={load}
+          onSaved={(binding) =>
+            applyMutationBinding(googleDriveEditor.definition.facetKey, binding)
+          }
         />
       ) : null}
 
@@ -390,6 +389,19 @@ export function IntegrationFacetsPanel({
       />
     </>
   );
+}
+
+export function replaceIntegrationFacetBinding(
+  data: IntegrationInstanceFacetsResponse,
+  facetKey: string,
+  binding: IntegrationFacetBindingSummary | null,
+): IntegrationInstanceFacetsResponse {
+  return {
+    ...data,
+    facets: data.facets.map((entry) =>
+      entry.definition.facetKey === facetKey ? { ...entry, binding } : entry,
+    ),
+  };
 }
 
 function FacetRow({

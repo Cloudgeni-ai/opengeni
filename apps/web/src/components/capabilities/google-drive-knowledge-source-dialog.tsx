@@ -55,7 +55,7 @@ export function GoogleDriveKnowledgeSourceDialog({
   canManageOrganizationDestination: boolean;
   onClose: () => void;
   onBusyChange: (busy: boolean) => void;
-  onSaved: () => Promise<void>;
+  onSaved: (binding: IntegrationFacetBindingSummary) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [browseBusy, setBrowseBusy] = useState(false);
@@ -221,7 +221,7 @@ export function GoogleDriveKnowledgeSourceDialog({
     setBusy(true);
     onBusyChange(true);
     try {
-      await client.saveGoogleDriveFacetSource(
+      const result = await client.saveGoogleDriveFacetSource(
         workspaceId,
         instance.capabilityId,
         instance.instanceKey,
@@ -241,7 +241,7 @@ export function GoogleDriveKnowledgeSourceDialog({
           idempotencyKey: crypto.randomUUID(),
         },
       );
-      await onSaved();
+      onSaved(result.binding);
       onClose();
       toast.success("Google Drive locations saved", {
         description: `Only ${instance.displayName} was updated; sibling Drive accounts were unchanged.`,
