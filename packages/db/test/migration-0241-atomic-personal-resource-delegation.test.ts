@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { acquireBlankTestDatabase } from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
-import { createDb, createSession } from "../src";
+import { createDb, createSession, transitionSessionVisibility } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
@@ -353,7 +353,9 @@ describe("migration 0241 atomic personal-resource delegation", () => {
           `;
         expect(variableSets?.count).toBe(1);
         await expect(
-          app`select * from opengeni_private.personal_resource_delegation_capabilities`,
+          Promise.resolve(
+            app`select * from opengeni_private.personal_resource_delegation_capabilities`,
+          ),
         ).rejects.toThrow(/permission denied/iu);
 
         await insertAttempt(
@@ -570,11 +572,13 @@ describe("migration 0241 atomic personal-resource delegation", () => {
           and resource_kind = 'rig'
       `;
       await expect(
-        app`
-          select * from resolve_session_attempt_personal_resources(
-            ${ids.account}, ${ids.targetWorkspace}, ${ids.attemptA}
-          )
-        `,
+        Promise.resolve(
+          app`
+            select * from resolve_session_attempt_personal_resources(
+              ${ids.account}, ${ids.targetWorkspace}, ${ids.attemptA}
+            )
+          `,
+        ),
       ).rejects.toThrow("personal-resource authority snapshot is no longer live");
     } finally {
       await app.end({ timeout: 5 });
@@ -684,6 +688,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
 
     const admin = postgres(blank.databaseUrl, { max: 6, onnotice: () => undefined });
     const scoped = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
+    const client = createDb(blank.databaseUrl, { max: 1 });
     try {
       await migrate(blank.databaseUrl);
       const ids = await createFixture(admin, blank.databaseUrl, "once", {
@@ -747,11 +752,12 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       );
 
       await setRuntimeScope(scoped, drift);
-      const resolve = () => scoped`
-        select * from resolve_session_attempt_personal_resources(
-          ${drift.account}, ${drift.targetWorkspace}, ${drift.attemptA}
-        )
-      `;
+      const resolve = async () =>
+        await scoped`
+          select * from resolve_session_attempt_personal_resources(
+            ${drift.account}, ${drift.targetWorkspace}, ${drift.attemptA}
+          )
+        `;
       expect(await resolve()).toHaveLength(1);
 
       await admin`
@@ -802,15 +808,17 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         where id = ${drift.directGrant}
       `;
 
-      await admin`
-        select * from transition_session_visibility(
-          ${drift.account}, ${drift.targetWorkspace}, ${drift.session},
-          ${drift.subject}, 'user_private', 1, ${`delegation-${crypto.randomUUID()}`},
-          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-        )
-      `;
+      await transitionSessionVisibility(client.db, {
+        workspaceId: drift.targetWorkspace,
+        sessionId: drift.session,
+        actorSubjectId: drift.subject,
+        targetVisibility: "user_private",
+        expectedAuthorityEpoch: 1,
+        operationKey: `delegation-${crypto.randomUUID()}`,
+      });
       await expect(resolve()).rejects.toThrow("snapshot is no longer live");
     } finally {
+      await client.close();
       await scoped.end({ timeout: 5 });
       await admin.end({ timeout: 5 });
     }
