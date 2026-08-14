@@ -9,6 +9,7 @@ import {
 import {
   CONNECTOR_ATTACHMENT_SANITIZED_RESULT_MAX_BYTES,
   PrefixedMcpServer,
+  connectorAttachmentSandboxPath,
   prepareAgentTools,
   projectConnectorAttachmentTransfers,
   type ConnectorAttachmentMaterializationRequest,
@@ -35,7 +36,10 @@ const attachment = {
     expiresAt: "2030-01-02T03:04:05.000Z",
   },
 };
-const sandboxPath = ".opengeni/connector-attachments/example/0123456789abcdef/payload.bin";
+const sandboxPath = connectorAttachmentSandboxPath(
+  { serverId: "connector", connectionId },
+  attachment,
+);
 
 function transferResult(overrides: Record<string, unknown> = {}) {
   return {
@@ -53,6 +57,13 @@ function transferResult(overrides: Record<string, unknown> = {}) {
 
 function matchingReceipt(request?: ConnectorAttachmentMaterializationRequest) {
   const exact = request?.attachments[0] ?? attachment;
+  const exactSandboxPath = connectorAttachmentSandboxPath(
+    {
+      serverId: request?.serverId ?? "connector",
+      connectionId: request?.connectionId ?? connectionId,
+    },
+    exact,
+  );
   return {
     version: 1 as const,
     attachments: [
@@ -62,7 +73,7 @@ function matchingReceipt(request?: ConnectorAttachmentMaterializationRequest) {
         mediaType: exact.mediaType,
         byteSize: exact.byteSize,
         contentSha256: exact.contentSha256,
-        sandboxPath,
+        sandboxPath: exactSandboxPath,
       },
     ],
   };
@@ -100,6 +111,7 @@ describe("connector attachment MCP projection", () => {
       serverId: "connector",
       toolName: "download_attachment",
       operationId,
+      connectionId,
       expectedProvider: "example",
       authorizeAndMaterialize: async (attachments) => {
         callbackRequest = {
@@ -146,6 +158,7 @@ describe("connector attachment MCP projection", () => {
         serverId: "connector",
         toolName: "download_attachment",
         operationId,
+        connectionId,
         expectedProvider: "example",
         authorizeAndMaterialize: async (attachments) =>
           matchingReceipt({
@@ -175,6 +188,7 @@ describe("connector attachment MCP projection", () => {
         serverId: "connector",
         toolName: "download_attachment",
         operationId,
+        connectionId,
         authorizeAndMaterialize: async () => matchingReceipt(),
       }),
     ).rejects.toThrow("rejected");
@@ -188,46 +202,76 @@ describe("connector attachment MCP projection", () => {
           serverId: "connector",
           toolName: "download_attachment",
           operationId,
+          connectionId,
           authorizeAndMaterialize: async () => matchingReceipt(),
         },
       ),
     ).rejects.toThrow("rejected");
   });
 
-  test("rejects signed source credentials copied into public metadata before materialization", async () => {
-    const credential = "abc";
-    let materializerCalled = false;
-    await expect(
-      projectConnectorAttachmentTransfers(
-        transferResult({
-          _meta: {
-            [CONNECTOR_ATTACHMENT_TRANSFER_META_KEY]: {
-              version: 1,
-              attachments: [
-                {
-                  ...attachment,
-                  fileName: `file-${credential}.bin`,
-                  source: {
-                    ...attachment.source,
-                    url: `https://files.example.test/download?sig=${credential}`,
+  test.each(["sig", "auth"])(
+    "rejects short %s source credentials copied into public metadata before materialization",
+    async (credentialName) => {
+      const credential = "abc";
+      let materializerCalled = false;
+      await expect(
+        projectConnectorAttachmentTransfers(
+          transferResult({
+            _meta: {
+              [CONNECTOR_ATTACHMENT_TRANSFER_META_KEY]: {
+                version: 1,
+                attachments: [
+                  {
+                    ...attachment,
+                    fileName: `file-${credential}.bin`,
+                    source: {
+                      ...attachment.source,
+                      url: `https://files.example.test/download?${credentialName}=${credential}`,
+                    },
                   },
-                },
-              ],
+                ],
+              },
+            },
+          }),
+          {
+            serverId: "connector",
+            toolName: "download_attachment",
+            operationId,
+            connectionId,
+            authorizeAndMaterialize: async () => {
+              materializerCalled = true;
+              return matchingReceipt();
             },
           },
-        }),
-        {
-          serverId: "connector",
-          toolName: "download_attachment",
-          operationId,
-          authorizeAndMaterialize: async () => {
-            materializerCalled = true;
-            return matchingReceipt();
-          },
+        ),
+      ).rejects.toThrow("rejected");
+      expect(materializerCalled).toBe(false);
+    },
+  );
+
+  test.each([
+    ["a private signed URL", privateUrl],
+    [
+      "a safe-looking but non-authoritative digest",
+      ".opengeni/connector-attachments/example/ffffffffffffffffffffffffffffffff/payload.bin",
+    ],
+  ])("rejects materializer receipt path containing %s", async (_label, maliciousPath) => {
+    let materializerCalled = false;
+    await expect(
+      projectConnectorAttachmentTransfers(transferResult(), {
+        serverId: "connector",
+        toolName: "download_attachment",
+        operationId,
+        connectionId,
+        authorizeAndMaterialize: async () => {
+          materializerCalled = true;
+          const receipt = matchingReceipt();
+          receipt.attachments[0]!.sandboxPath = maliciousPath;
+          return receipt;
         },
-      ),
+      }),
     ).rejects.toThrow("rejected");
-    expect(materializerCalled).toBe(false);
+    expect(materializerCalled).toBe(true);
   });
 
   test("preserves routed mutation outcome-unknown through the private projection", async () => {
@@ -240,6 +284,7 @@ describe("connector attachment MCP projection", () => {
         serverId: "connector",
         toolName: "download_attachment",
         operationId,
+        connectionId,
         authorizeAndMaterialize: async () => {
           throw uncertain;
         },
@@ -283,6 +328,7 @@ describe("connector attachment MCP projection", () => {
           serverId: "connector",
           toolName: "download_attachment",
           operationId,
+          connectionId,
           authorizeAndMaterialize: async () => matchingReceipt(),
         },
       ),

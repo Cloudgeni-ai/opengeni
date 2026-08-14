@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs"
 import { dirname } from "node:path";
 import { testSettings } from "@opengeni/testing";
 import {
+  ChannelAPartialMutationError,
   RoutingMutationOutcomeUnknownError,
   SandboxChannelAService,
   type ChannelASession,
@@ -175,8 +176,15 @@ describe("connector attachment sandbox materialization", () => {
         },
       })),
     };
+    let mutationRuns = 0;
+    const options = {
+      runMutation: async <T>(mutation: () => Promise<T>) => {
+        mutationRuns += 1;
+        return await mutation();
+      },
+    };
     try {
-      const first = await materializeConnectorAttachmentsInChannel(channel, request);
+      const first = await materializeConnectorAttachmentsInChannel(channel, request, options);
       expect(first.attachments).toHaveLength(fixtures.length);
       for (const [index, fixture] of fixtures.entries()) {
         const receipt = first.attachments[index]!;
@@ -207,12 +215,17 @@ describe("connector attachment sandbox materialization", () => {
       ).toBe(true);
       const firstRevision = channel.currentRevision();
       const firstEvents = structuredClone(events);
+      const commandsBeforeReplay = placement.commands.length;
 
-      const replay = await materializeConnectorAttachmentsInChannel(channel, request);
+      const replay = await materializeConnectorAttachmentsInChannel(channel, request, options);
       expect(replay).toEqual(first);
+      expect(mutationRuns).toBe(1);
       for (const fixture of fixtures) expect(requests.get(fixture.fileName)).toBe(1);
       expect(channel.currentRevision()).toBe(firstRevision);
       expect(events).toEqual(firstEvents);
+      const replayCommands = placement.commands.slice(commandsBeforeReplay).join("\n");
+      expect(replayCommands).not.toContain("mkdir -p");
+      expect(replayCommands).not.toContain("__OPENGENI_WORKSPACE_IMPORT_");
     } finally {
       server.stop(true);
     }
@@ -267,6 +280,9 @@ describe("connector attachment sandbox materialization", () => {
     await expect(
       materializeConnectorAttachmentsInChannel(
         {
+          async inspectWorkspaceFiles() {
+            return null;
+          },
           async importWorkspaceFiles() {
             throw uncertain;
           },
@@ -274,6 +290,99 @@ describe("connector attachment sandbox materialization", () => {
         request,
       ),
     ).rejects.toBe(uncertain);
+  });
+
+  test("preserves a known partial workspace mutation for the outer settlement owner", async () => {
+    const partial = new ChannelAPartialMutationError("first file committed", {
+      cause: new Error("second file failed integrity"),
+    });
+    const request = {
+      serverId: "example-connector",
+      toolName: "download_attachment",
+      operationId: "11111111-1111-4111-8111-111111111111",
+      connectionId: "22222222-2222-4222-8222-222222222222",
+      attachments: [],
+    };
+    await expect(
+      materializeConnectorAttachmentsInChannel(
+        {
+          async inspectWorkspaceFiles() {
+            return null;
+          },
+          async importWorkspaceFiles() {
+            throw partial;
+          },
+        },
+        request,
+      ),
+    ).rejects.toBe(partial);
+  });
+
+  test("reports a real two-file integrity failure as partial after preserving the first exact file", async () => {
+    const { session, root } = await makeBox();
+    const placement = withPlacementPrivateStaging(session);
+    const firstBytes = new TextEncoder().encode("first exact attachment");
+    const secondBytes = new TextEncoder().encode("second corrupt attachment");
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        return new Response(new URL(request.url).pathname === "/first" ? firstBytes : secondBytes);
+      },
+    });
+    const channel = new SandboxChannelAService({
+      session: placement.session,
+      workspaceRoot: root,
+    });
+    const request = {
+      serverId: "example-connector",
+      toolName: "download_attachment",
+      operationId: "11111111-1111-4111-8111-111111111111",
+      connectionId: "22222222-2222-4222-8222-222222222222",
+      attachments: [
+        {
+          providerAttachmentId: {
+            provider: "example",
+            kind: "attachment" as const,
+            value: "provider-file-first",
+          },
+          fileName: "first.bin",
+          mediaType: "application/octet-stream",
+          byteSize: firstBytes.byteLength,
+          contentSha256: sha256(firstBytes),
+          source: {
+            url: `${server.url}first?signature=private-first`,
+            expiresAt: "2030-01-02T03:04:05.000Z",
+          },
+        },
+        {
+          providerAttachmentId: {
+            provider: "example",
+            kind: "attachment" as const,
+            value: "provider-file-second",
+          },
+          fileName: "second.bin",
+          mediaType: "application/octet-stream",
+          byteSize: secondBytes.byteLength,
+          contentSha256: "0".repeat(64),
+          source: {
+            url: `${server.url}second?signature=private-second`,
+            expiresAt: "2030-01-02T03:04:05.000Z",
+          },
+        },
+      ],
+    };
+    const firstPath = connectorAttachmentSandboxPath(request, request.attachments[0]);
+    const secondPath = connectorAttachmentSandboxPath(request, request.attachments[1]);
+    try {
+      await expect(
+        materializeConnectorAttachmentsInChannel(channel, request),
+      ).rejects.toBeInstanceOf(ChannelAPartialMutationError);
+      expect(readFileSync(`${root}/${firstPath}`)).toEqual(Buffer.from(firstBytes));
+      expect(existsSync(`${root}/${secondPath}`)).toBe(false);
+      expect(channel.currentRevision()).toBe(1);
+    } finally {
+      server.stop(true);
+    }
   });
 
   test.each([

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { posix as posixPath } from "node:path";
 import {
   CONNECTOR_ATTACHMENT_RECEIPT_META_KEY,
   CONNECTOR_ATTACHMENT_RECEIPT_VERSION,
@@ -33,6 +35,7 @@ export type ConnectorAttachmentTransferProjectionOptions = Readonly<{
   serverId: string;
   toolName: string;
   operationId: string | undefined;
+  connectionId: string | undefined;
   expectedProvider?: string;
   authorizeAndMaterialize: (
     attachments: readonly ConnectorAttachmentTransfer[],
@@ -44,6 +47,40 @@ export class ConnectorAttachmentTransferError extends Error {
     super("Connector attachment transfer was rejected");
     this.name = "ConnectorAttachmentTransferError";
   }
+}
+
+function digestParts(...parts: readonly string[]): Buffer {
+  const hash = createHash("sha256");
+  for (const part of parts) {
+    const bytes = Buffer.from(part, "utf8");
+    hash.update(String(bytes.byteLength));
+    hash.update(":");
+    hash.update(bytes);
+    hash.update(";");
+  }
+  return hash.digest();
+}
+
+export function connectorAttachmentSandboxPath(
+  request: Pick<ConnectorAttachmentMaterializationRequest, "serverId" | "connectionId">,
+  attachment: ConnectorAttachmentTransfer,
+): string {
+  const digest = digestParts(
+    "opengeni-connector-attachment-path-v1",
+    request.serverId,
+    request.connectionId,
+    attachment.providerAttachmentId.provider,
+    attachment.providerAttachmentId.value,
+    attachment.contentSha256,
+  )
+    .toString("hex")
+    .slice(0, 32);
+  return posixPath.join(
+    ".opengeni/connector-attachments",
+    attachment.providerAttachmentId.provider,
+    digest,
+    attachment.fileName,
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -73,6 +110,7 @@ function sameProviderIdentity(
 function assertReceiptsMatchTransfers(
   transfers: readonly ConnectorAttachmentTransfer[],
   receipts: readonly ConnectorAttachmentReceipt[],
+  options: Readonly<{ serverId: string; connectionId: string }>,
 ): void {
   if (transfers.length !== receipts.length) throw new ConnectorAttachmentTransferError();
   for (const [index, transfer] of transfers.entries()) {
@@ -83,7 +121,8 @@ function assertReceiptsMatchTransfers(
       transfer.fileName !== receipt.fileName ||
       transfer.mediaType !== receipt.mediaType ||
       transfer.byteSize !== receipt.byteSize ||
-      transfer.contentSha256 !== receipt.contentSha256
+      transfer.contentSha256 !== receipt.contentSha256 ||
+      connectorAttachmentSandboxPath(options, transfer) !== receipt.sandboxPath
     ) {
       throw new ConnectorAttachmentTransferError();
     }
@@ -116,6 +155,7 @@ export async function projectConnectorAttachmentTransfers(
     if (!options.operationId || !UUID_PATTERN.test(options.operationId)) {
       throw new ConnectorAttachmentTransferError();
     }
+    if (!options.connectionId) throw new ConnectorAttachmentTransferError();
     if (
       options.expectedProvider &&
       envelope.attachments.some(
@@ -150,7 +190,10 @@ export async function projectConnectorAttachmentTransfers(
     const receiptEnvelope = ConnectorAttachmentReceiptEnvelope.parse(
       await options.authorizeAndMaterialize(envelope.attachments),
     );
-    assertReceiptsMatchTransfers(envelope.attachments, receiptEnvelope.attachments);
+    assertReceiptsMatchTransfers(envelope.attachments, receiptEnvelope.attachments, {
+      serverId: options.serverId,
+      connectionId: options.connectionId,
+    });
     const projected: AttemptToolResult = {
       content: [{ type: "text", text: receiptText(receiptEnvelope.attachments) }],
       _meta: {

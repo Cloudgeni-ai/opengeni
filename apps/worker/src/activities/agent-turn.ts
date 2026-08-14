@@ -453,7 +453,11 @@ import { executeCodexImageGeneration } from "./codex-image-generation";
 import { imageProviderBindingHash } from "./image-generation-operation";
 import { resolveImageGenerationReferences } from "./image-generation-references";
 import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
-import { SandboxChannelAService, type ChannelASession } from "@opengeni/runtime/sandbox";
+import {
+  ChannelAPartialMutationError,
+  SandboxChannelAService,
+  type ChannelASession,
+} from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import {
   desktopCapableBackend,
@@ -3299,7 +3303,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // Connected machines are the user's own persistence and never dirty the
       // cloud home archive. Every persistable raw-session write batch is fenced
       // against the exact current lease/provider before the provider sees it.
-      if (sandbox.established.backendId === "selfhosted") return await mutation();
+      if (sandbox.established.backendId === "selfhosted") {
+        try {
+          return await mutation();
+        } catch (error) {
+          if (error instanceof ChannelAPartialMutationError) {
+            throw new RoutingMutationOutcomeUnknownError(
+              operation,
+              `Connected Machine workspace mutation "${operation}" partially applied before a later batch item failed; the complete operation was not replayed`,
+              { cause: error },
+            );
+          }
+          throw error;
+        }
+      }
       if (!sandboxGroupId || !sandboxHolderId || !turnId || executionGeneration <= 0) {
         throw new Error("Workspace mutation attempted before exact turn sandbox admission");
       }
@@ -3323,17 +3340,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       try {
         result = await mutation();
       } catch (providerError) {
+        const partialMutation = providerError instanceof ChannelAPartialMutationError;
         try {
           await verifyWorkspaceMutationSettlement(db, {
             ...identity,
             admission,
-            outcome: "rejected",
+            outcome: partialMutation ? "resolved" : "rejected",
           });
         } catch (settlementError) {
           throw new RoutingMutationOutcomeUnknownError(
             operation,
-            `Platform workspace mutation "${operation}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
+            partialMutation
+              ? `Platform workspace mutation "${operation}" partially applied at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`
+              : `Platform workspace mutation "${operation}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
             { cause: settlementError },
+          );
+        }
+        if (partialMutation) {
+          throw new RoutingMutationOutcomeUnknownError(
+            operation,
+            `Platform workspace mutation "${operation}" partially applied before a later batch item failed; the complete operation was not replayed`,
+            { cause: providerError },
           );
         }
         throw providerError;
@@ -7388,15 +7415,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
           ...(runAs ? { runAs } : {}),
         });
-        const importExactBytes = async () =>
-          await materializeConnectorAttachmentsInChannel(channel, request);
-        return sandbox && !routingOn
-          ? await runWorkspaceMutationForSandbox(
-              sandbox,
-              "connectorAttachmentMaterialization",
-              importExactBytes,
-            )
-          : await importExactBytes();
+        return await materializeConnectorAttachmentsInChannel(channel, request, {
+          runMutation: async (mutation) => {
+            if (sandbox && !routingOn) {
+              return await runWorkspaceMutationForSandbox(
+                sandbox,
+                "connectorAttachmentMaterialization",
+                mutation,
+              );
+            }
+            return await mutation();
+          },
+        });
       };
       try {
         preparedTools = await waitForTurnOperation(

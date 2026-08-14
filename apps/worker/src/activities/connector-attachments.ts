@@ -1,13 +1,16 @@
 import { createHash } from "node:crypto";
-import { posix as posixPath } from "node:path";
 import {
   CONNECTOR_ATTACHMENT_RECEIPT_VERSION,
   ConnectorAttachmentReceiptEnvelope,
   type ConnectorAttachmentReceiptEnvelope as ConnectorAttachmentReceiptEnvelopeValue,
   type ConnectorAttachmentTransfer,
 } from "@opengeni/contracts";
-import type { ConnectorAttachmentMaterializationRequest } from "@opengeni/runtime";
 import {
+  connectorAttachmentSandboxPath,
+  type ConnectorAttachmentMaterializationRequest,
+} from "@opengeni/runtime";
+import {
+  ChannelAPartialMutationError,
   RoutingMutationOutcomeUnknownError,
   SandboxChannelAService,
 } from "@opengeni/runtime/sandbox";
@@ -19,7 +22,14 @@ export class ConnectorAttachmentMaterializationError extends Error {
   }
 }
 
-type ConnectorAttachmentChannel = Pick<SandboxChannelAService, "importWorkspaceFiles">;
+type ConnectorAttachmentChannel = Pick<
+  SandboxChannelAService,
+  "importWorkspaceFiles" | "inspectWorkspaceFiles"
+>;
+
+type ConnectorAttachmentMaterializationOptions = Readonly<{
+  runMutation?: <T>(mutation: () => Promise<T>) => Promise<T>;
+}>;
 
 function digestParts(...parts: readonly string[]): Buffer {
   const hash = createHash("sha256");
@@ -41,27 +51,7 @@ function uuidFromDigest(digest: Buffer): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-export function connectorAttachmentSandboxPath(
-  request: Pick<ConnectorAttachmentMaterializationRequest, "serverId" | "connectionId">,
-  attachment: ConnectorAttachmentTransfer,
-): string {
-  const digest = digestParts(
-    "opengeni-connector-attachment-path-v1",
-    request.serverId,
-    request.connectionId,
-    attachment.providerAttachmentId.provider,
-    attachment.providerAttachmentId.value,
-    attachment.contentSha256,
-  )
-    .toString("hex")
-    .slice(0, 32);
-  return posixPath.join(
-    ".opengeni/connector-attachments",
-    attachment.providerAttachmentId.provider,
-    digest,
-    attachment.fileName,
-  );
-}
+export { connectorAttachmentSandboxPath } from "@opengeni/runtime";
 
 export function connectorAttachmentImportOperationId(
   request: Pick<
@@ -89,6 +79,7 @@ export function connectorAttachmentImportOperationId(
 export async function materializeConnectorAttachmentsInChannel(
   channel: ConnectorAttachmentChannel,
   request: ConnectorAttachmentMaterializationRequest,
+  options: ConnectorAttachmentMaterializationOptions = {},
 ): Promise<ConnectorAttachmentReceiptEnvelopeValue> {
   try {
     const imports = request.attachments.map((attachment, index) => {
@@ -104,7 +95,13 @@ export async function materializeConnectorAttachmentsInChannel(
         source: attachment.source,
       };
     });
-    const importedFiles = await channel.importWorkspaceFiles(imports);
+    const replayedFiles = await channel.inspectWorkspaceFiles(imports);
+    const importExactBytes = async () => await channel.importWorkspaceFiles(imports);
+    const importedFiles =
+      replayedFiles ??
+      (options.runMutation
+        ? await options.runMutation(importExactBytes)
+        : await importExactBytes());
     const receipts = [];
     for (const [index, attachment] of request.attachments.entries()) {
       const sandboxPath = imports[index]?.destinationPath;
@@ -132,7 +129,12 @@ export async function materializeConnectorAttachmentsInChannel(
       attachments: receipts,
     });
   } catch (error) {
-    if (error instanceof RoutingMutationOutcomeUnknownError) throw error;
+    if (
+      error instanceof ChannelAPartialMutationError ||
+      error instanceof RoutingMutationOutcomeUnknownError
+    ) {
+      throw error;
+    }
     throw new ConnectorAttachmentMaterializationError();
   }
 }

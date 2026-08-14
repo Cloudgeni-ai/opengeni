@@ -31,6 +31,7 @@ import type { ExposedPortEndpoint } from "../stream-port";
 import { SelfhostedControlError } from "../selfhosted/control-rpc";
 import { renderSelfhostedFault } from "../selfhosted/fault-rendering";
 import {
+  ChannelAPartialMutationError,
   isDefinitePathNotFoundError,
   isExecSessionLostBanner,
   SandboxChannelAService,
@@ -997,22 +998,32 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           fn(backend.session, backend),
         );
       } catch (error) {
+        const partialMutation = error instanceof ChannelAPartialMutationError;
         if (mutatesWorkspace && this.deps.afterMutation) {
           try {
             await this.deps.afterMutation({
               op,
               backend,
               admission,
-              outcome: "rejected",
+              outcome: partialMutation ? "resolved" : "rejected",
             });
           } catch (settlementError) {
             this.invalidate(backend);
             throw new RoutingMutationOutcomeUnknownError(
               op,
-              `Mutating sandbox operation "${op}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
+              partialMutation
+                ? `Mutating sandbox operation "${op}" partially applied at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`
+                : `Mutating sandbox operation "${op}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
               { cause: settlementError },
             );
           }
+        }
+        if (partialMutation) {
+          throw new RoutingMutationOutcomeUnknownError(
+            op,
+            `Mutating sandbox operation "${op}" partially applied before a later batch item failed; the complete operation was not replayed`,
+            { cause: error },
+          );
         }
         if (!isFenceError(error)) {
           if (backend.sandboxId === null && this.deps.onDefaultBackendError) {
@@ -1453,11 +1464,23 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         revision: input.revision,
         ...(input.runAs ? { runAs: input.runAs } : {}),
       });
-      const receipts: WorkspaceFileImportReceipt[] = [];
-      for (const request of input.requests) {
-        receipts.push(await channel.importWorkspaceFile(request));
-      }
-      return receipts;
+      return await channel.importWorkspaceFiles(input.requests);
+    });
+  }
+
+  /** Inspect an exact-file envelope on one resolved backend without entering
+   * mutation admission or staging private source authority. */
+  async inspectWorkspaceFilesOnResolvedBackend(
+    input: ChannelARoutedWorkspaceImportBatchRequest,
+  ): Promise<readonly WorkspaceFileImportReceipt[] | null> {
+    return await this.dispatch("inspectWorkspaceFiles", false, async (session) => {
+      const channel = new SandboxChannelAService({
+        session: session as ChannelASession,
+        workspaceRoot: input.workspaceRoot,
+        revision: input.revision,
+        ...(input.runAs ? { runAs: input.runAs } : {}),
+      });
+      return await channel.inspectWorkspaceFiles(input.requests);
     });
   }
 

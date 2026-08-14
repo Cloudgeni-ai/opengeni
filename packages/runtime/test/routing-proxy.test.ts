@@ -683,6 +683,136 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     ]);
   });
 
+  test("inspects an exact replay on one backend without mutation admission or fs events", async () => {
+    const events: string[] = [];
+    const backend: RoutableBackendSession = {
+      async exec(args) {
+        const command = String((args as { cmd?: unknown }).cmd ?? "");
+        const marker = command.match(/__OPENGENI_WORKSPACE_INSPECT_[0-9a-f]+_REPLAY__/u)?.[0];
+        if (!marker) throw new Error("expected workspace inspection marker");
+        events.push("provider:inspected");
+        return { stdout: marker, stderr: "", exitCode: 0 };
+      },
+      async writePlacementPrivate() {
+        throw new Error("replay must not stage private authority");
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => {
+        events.push("unexpected:admitted");
+      },
+      afterMutation: async () => {
+        events.push("unexpected:settled");
+      },
+    });
+    const channel = new SandboxChannelAService({
+      session: proxy,
+      workspaceRoot: "/workspace",
+      emit: async () => events.push("unexpected:fs"),
+    });
+    const request = {
+      operationId: "11111111-1111-4111-8111-111111111111",
+      destinationPath:
+        ".opengeni/connector-attachments/example/0123456789abcdef0123456789abcdef/one.bin",
+      overwrite: false,
+      mayReplaceExisting: false,
+      createParents: true,
+      sizeBytes: 6,
+      sha256: "a".repeat(64),
+      source: {
+        url: "https://files.example.test/one?signature=private",
+        expiresAt: "2030-01-02T03:04:05.000Z",
+      },
+    };
+
+    expect(await channel.inspectWorkspaceFiles([request])).toEqual([
+      {
+        destinationPath: request.destinationPath,
+        sizeBytes: 6,
+        sha256: "a".repeat(64),
+        replayed: true,
+        revision: 0,
+      },
+    ]);
+    expect(channel.currentRevision()).toBe(0);
+    expect(events).toEqual(["provider:inspected"]);
+  });
+
+  test("settles a partially applied import batch as resolved and forbids complete replay", async () => {
+    const events: string[] = [];
+    let imports = 0;
+    const backend: RoutableBackendSession = {
+      async writePlacementPrivate() {
+        events.push("provider:staged");
+      },
+      async exec(args) {
+        const command = String((args as { cmd?: unknown }).cmd ?? "");
+        if (command.includes("__OPENGENI_FS_CONFINED_OK__")) {
+          return { stdout: "__OPENGENI_FS_CONFINED_OK__", stderr: "", exitCode: 0 };
+        }
+        const okMarker = command.match(/__OPENGENI_WORKSPACE_IMPORT_[0-9a-f]+_OK__/u)?.[0];
+        const integrityMarker = command.match(
+          /__OPENGENI_WORKSPACE_IMPORT_[0-9a-f]+_INTEGRITY__/u,
+        )?.[0];
+        if (!okMarker || !integrityMarker) throw new Error("expected workspace import markers");
+        imports += 1;
+        events.push(`provider:imported:${imports}`);
+        return imports === 1
+          ? { stdout: `${okMarker}\tcreated`, stderr: "", exitCode: 0 }
+          : { stdout: integrityMarker, stderr: "", exitCode: 74 };
+      },
+      async deletePlacementPrivate() {
+        events.push("provider:cleaned");
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async ({ op }) => {
+        events.push(`admitted:${op}`);
+        return "admission";
+      },
+      afterMutation: async ({ outcome }) => {
+        events.push(`settled:${outcome}`);
+      },
+    });
+    const channel = new SandboxChannelAService({
+      session: proxy,
+      workspaceRoot: "/workspace",
+      emit: async () => events.push("unexpected:fs"),
+    });
+    const requests = ["one.bin", "two.bin"].map((fileName, index) => ({
+      operationId: `11111111-1111-4111-8111-11111111111${index}`,
+      destinationPath: `.opengeni/connector-attachments/example/0123456789abcdef0123456789abcde${index}/${fileName}`,
+      overwrite: false,
+      mayReplaceExisting: false,
+      createParents: true,
+      sizeBytes: 6,
+      sha256: String(index + 1).repeat(64),
+      source: {
+        url: `https://files.example.test/${index}?signature=private`,
+        expiresAt: "2030-01-02T03:04:05.000Z",
+      },
+    }));
+
+    const error = await channel.importWorkspaceFiles(requests).catch((caught) => caught);
+    expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect((error as RoutingMutationOutcomeUnknownError).retryable).toBe(false);
+    expect(imports).toBe(2);
+    expect(events).toEqual([
+      "admitted:importWorkspaceFiles",
+      "provider:staged",
+      "provider:imported:1",
+      "provider:cleaned",
+      "provider:staged",
+      "provider:imported:2",
+      "provider:cleaned",
+      "settled:resolved",
+    ]);
+  });
+
   test("a rejected provider promise physically settles before its original error propagates", async () => {
     const events: string[] = [];
     const rejected = new Error("provider rejected");

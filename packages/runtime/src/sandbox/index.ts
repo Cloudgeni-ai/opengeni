@@ -356,6 +356,7 @@ export {
 // Agent-loop-free, so the API-direct control plane imports it from this leaf.
 export {
   SandboxChannelAService,
+  ChannelAPartialMutationError,
   ChannelAValidationError,
   ChannelAUnavailableError,
   ChannelAConflictError,

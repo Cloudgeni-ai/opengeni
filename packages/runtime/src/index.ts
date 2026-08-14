@@ -89,6 +89,7 @@ export {
   CONNECTOR_ATTACHMENT_PROVIDER_RESULT_MAX_BYTES,
   CONNECTOR_ATTACHMENT_SANITIZED_RESULT_MAX_BYTES,
   ConnectorAttachmentTransferError,
+  connectorAttachmentSandboxPath,
   projectConnectorAttachmentTransfers,
   type ConnectorAttachmentMaterializationRequest,
   type ConnectorAttachmentMaterializer,
@@ -3155,6 +3156,7 @@ export type PrepareToolsOptions = {
 };
 
 type PrefixedMcpConnectorAttachmentAuthority = Readonly<{
+  connectionId: string;
   expectedProvider?: string;
   authorizeAndMaterialize: (
     input: Omit<Parameters<ConnectorAttachmentMaterializer>[0], "connectionId">,
@@ -3950,13 +3952,13 @@ function buildConnectorAttachmentAuthority(
 ): PrefixedMcpConnectorAttachmentAuthority | undefined {
   const connectionRef = config.connectionRef;
   if (!connectionRef?.provider) return undefined;
+  const frozenConnectionId = resolvedMcpConnectionIds.get(config.id);
+  const materializeConnectorAttachments = options.materializeConnectorAttachments;
+  if (!frozenConnectionId || !materializeConnectorAttachments) return undefined;
   return {
+    connectionId: frozenConnectionId,
     expectedProvider: connectionRef.provider,
     authorizeAndMaterialize: async (input) => {
-      const frozenConnectionId = resolvedMcpConnectionIds.get(config.id);
-      if (!frozenConnectionId || !options.materializeConnectorAttachments) {
-        throw new ConnectorAttachmentTransferError();
-      }
       const revalidated = await resolveConnectionForRequest(
         options,
         config.id,
@@ -4009,7 +4011,7 @@ function buildConnectorAttachmentAuthority(
       ) {
         throw new ConnectorAttachmentTransferError();
       }
-      return await options.materializeConnectorAttachments({
+      return await materializeConnectorAttachments({
         ...input,
         connectionId: frozenConnectionId,
       });
@@ -5349,6 +5351,7 @@ export class PrefixedMcpServer implements MCPServer {
         serverId: this.registryId,
         toolName: unprefixed,
         operationId,
+        connectionId: this.connectorAttachmentAuthority?.connectionId,
         ...(this.connectorAttachmentAuthority?.expectedProvider
           ? { expectedProvider: this.connectorAttachmentAuthority.expectedProvider }
           : {}),

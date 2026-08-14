@@ -106,26 +106,29 @@ describe("connector attachment transfer contract", () => {
     ).toThrow();
   });
 
-  test("rejects short private source credentials embedded in public metadata", () => {
-    expect(() =>
-      ConnectorAttachmentTransferEnvelope.parse({
-        version: 1,
-        attachments: [
-          {
-            ...baseAttachment,
-            providerAttachmentId: {
-              ...baseAttachment.providerAttachmentId,
-              value: "provider-file-abc",
+  test.each(["sig", "auth"])(
+    "rejects short %s source credentials embedded in public metadata",
+    (credentialName) => {
+      expect(() =>
+        ConnectorAttachmentTransferEnvelope.parse({
+          version: 1,
+          attachments: [
+            {
+              ...baseAttachment,
+              providerAttachmentId: {
+                ...baseAttachment.providerAttachmentId,
+                value: "provider-file-abc",
+              },
+              source: {
+                ...baseAttachment.source,
+                url: `https://files.example.test/download?${credentialName}=abc`,
+              },
             },
-            source: {
-              ...baseAttachment.source,
-              url: "https://files.example.test/download?sig=abc",
-            },
-          },
-        ],
-      }),
-    ).toThrow();
-  });
+          ],
+        }),
+      ).toThrow();
+    },
+  );
 
   test.each([
     ["path separator", { fileName: "folder/report.txt" }],
@@ -232,7 +235,7 @@ describe("connector attachment transfer contract", () => {
           byteSize: baseAttachment.byteSize,
           contentSha256: baseAttachment.contentSha256,
           sandboxPath:
-            ".opengeni/connector-attachments/example.connector/0123456789abcdef/report.txt",
+            ".opengeni/connector-attachments/example.connector/0123456789abcdef0123456789abcdef/report.txt",
         },
       ],
     });
@@ -249,5 +252,42 @@ describe("connector attachment transfer contract", () => {
         attachments: [{ ...receipt.attachments[0], sandboxPath: "../report.txt" }],
       }),
     ).toThrow();
+    for (const sandboxPath of [
+      "https://files.example.test/private?signature=value",
+      ".opengeni/connector-attachments/example.connector/0123456789abcdef0123456789abcdef/CON.txt",
+      ".opengeni\\connector-attachments\\example.connector\\0123456789abcdef0123456789abcdef\\report.txt",
+      ".opengeni/connector-attachments/example.connector/0123456789abcdef0123456789abcdef/report.txt.",
+    ]) {
+      expect(() =>
+        ConnectorAttachmentReceiptEnvelope.parse({
+          ...receipt,
+          attachments: [{ ...receipt.attachments[0], sandboxPath }],
+        }),
+      ).toThrow();
+    }
+    expect(() =>
+      ConnectorAttachmentReceiptEnvelope.parse({
+        ...receipt,
+        attachments: [
+          {
+            ...receipt.attachments[0],
+            sandboxPath:
+              ".opengeni/connector-attachments/other/0123456789abcdef0123456789abcdef/report.txt",
+          },
+        ],
+      }),
+    ).toThrow("provider");
+    expect(() =>
+      ConnectorAttachmentReceiptEnvelope.parse({
+        ...receipt,
+        attachments: [
+          {
+            ...receipt.attachments[0],
+            sandboxPath:
+              ".opengeni/connector-attachments/example.connector/0123456789abcdef0123456789abcdef/other.txt",
+          },
+        ],
+      }),
+    ).toThrow("filename");
   });
 });

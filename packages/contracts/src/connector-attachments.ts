@@ -53,6 +53,7 @@ function isPrivateUrlCredentialQueryName(value: string): boolean {
   const normalized = value.toLowerCase().replace(/[^a-z0-9]/gu, "");
   return (
     normalized === "sig" ||
+    normalized === "auth" ||
     normalized.endsWith("signature") ||
     normalized.endsWith("token") ||
     normalized.endsWith("credential") ||
@@ -240,11 +241,37 @@ export const ConnectorAttachmentSandboxPath = boundedString(
 )
   .min(1)
   .refine(
-    (value) =>
-      value.startsWith(".opengeni/connector-attachments/") &&
-      !value.startsWith("/") &&
-      !value.split("/").includes("..") &&
-      !CONTROL_CHARACTER_PATTERN.test(value),
+    (value) => {
+      if (
+        value !== value.trim() ||
+        value.startsWith("/") ||
+        /^[A-Za-z]:[\\/]/u.test(value) ||
+        value.includes("\\") ||
+        CONTROL_CHARACTER_PATTERN.test(value)
+      ) {
+        return false;
+      }
+      const segments = value.split("/");
+      if (
+        segments.length !== 5 ||
+        segments[0] !== ".opengeni" ||
+        segments[1] !== "connector-attachments" ||
+        !PROVIDER_PATTERN.test(segments[2] ?? "") ||
+        !/^[0-9a-f]{32}$/u.test(segments[3] ?? "") ||
+        !ConnectorAttachmentFileName.safeParse(segments[4]).success
+      ) {
+        return false;
+      }
+      return segments.every(
+        (segment) =>
+          segment.length > 0 &&
+          segment !== "." &&
+          segment !== ".." &&
+          !PORTABLE_FILENAME_FORBIDDEN_PATTERN.test(segment) &&
+          !/[ .]$/u.test(segment) &&
+          !PORTABLE_FILENAME_RESERVED_PATTERN.test(segment),
+      );
+    },
     { message: "must be a confined connector attachment sandbox path" },
   );
 
@@ -257,7 +284,24 @@ export const ConnectorAttachmentReceipt = z
     contentSha256: ConnectorAttachmentSha256,
     sandboxPath: ConnectorAttachmentSandboxPath,
   })
-  .strict();
+  .strict()
+  .superRefine((receipt, context) => {
+    const segments = receipt.sandboxPath.split("/");
+    if (segments[2] !== receipt.providerAttachmentId.provider) {
+      context.addIssue({
+        code: "custom",
+        message: "sandbox path provider must match the provider attachment identity",
+        path: ["sandboxPath"],
+      });
+    }
+    if (segments[4] !== receipt.fileName) {
+      context.addIssue({
+        code: "custom",
+        message: "sandbox path filename must match the attachment filename",
+        path: ["sandboxPath"],
+      });
+    }
+  });
 export type ConnectorAttachmentReceipt = z.infer<typeof ConnectorAttachmentReceipt>;
 
 export const ConnectorAttachmentReceiptEnvelope = z
