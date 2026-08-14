@@ -119,6 +119,7 @@ pub async fn dispatch<P: Platform>(
 
 /// The actual oneof match. Separate from [`dispatch`] only to share the body with
 /// the sync [`dispatch_bytes`] entrypoint.
+#[allow(clippy::too_many_lines)]
 async fn dispatch_future<P: Platform>(
     request: ControlRequest,
     platform: &Arc<P>,

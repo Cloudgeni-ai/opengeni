@@ -1583,15 +1583,14 @@ fn fit_rgba(
     let Some(options) = options else {
         return Ok((rgba.to_vec(), width, height));
     };
-    if width <= options.max_width && height <= options.max_height {
+    let Some((output_width, output_height)) =
+        crate::model::fit_frame_dimensions(width, height, options.max_width, options.max_height)
+    else {
+        return Err(driver_failure("macOS capture dimensions are invalid"));
+    };
+    if (output_width, output_height) == (width, height) {
         return Ok((rgba.to_vec(), width, height));
     }
-    let scale = f64::min(
-        f64::from(options.max_width) / f64::from(width),
-        f64::from(options.max_height) / f64::from(height),
-    );
-    let output_width = (f64::from(width) * scale).floor().max(1.0) as u32;
-    let output_height = (f64::from(height) * scale).floor().max(1.0) as u32;
     let source = RgbaImage::from_raw(width, height, rgba.to_vec())
         .ok_or_else(|| driver_failure("macOS capture RGBA dimensions are inconsistent"))?;
     let resized =

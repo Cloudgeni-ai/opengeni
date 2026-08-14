@@ -917,6 +917,7 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// legacy adapter, and every other op runs on its own task behind an
     /// engine admission ticket (fair ordering + derived breakers; the runner
     /// holds no concurrency policy — LIMITS-DOCTRINE).
+    #[allow(clippy::too_many_lines)]
     async fn route_message(
         &self,
         link: &WorkspaceLink<P>,
@@ -1041,6 +1042,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn spawn_agent_update(
         &self,
         link: &WorkspaceLink<P>,
@@ -1280,15 +1282,12 @@ impl<P: Platform + 'static> Supervisor<P> {
                 Err(_) => UpdateReservation::Unavailable,
             };
         }
-        match self.update_operation_id.lock() {
-            Ok(mut operation) => {
-                *operation = Some(operation_id.to_string());
-                UpdateReservation::Started
-            }
-            Err(_) => {
-                self.update_active.store(false, Ordering::Release);
-                UpdateReservation::Unavailable
-            }
+        if let Ok(mut operation) = self.update_operation_id.lock() {
+            *operation = Some(operation_id.to_string());
+            UpdateReservation::Started
+        } else {
+            self.update_active.store(false, Ordering::Release);
+            UpdateReservation::Unavailable
         }
     }
 
@@ -1980,7 +1979,7 @@ fn running_binary_sha256() -> String {
         return String::new();
     };
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 128 * 1024];
+    let mut buffer = vec![0_u8; 128 * 1024].into_boxed_slice();
     loop {
         match file.read(&mut buffer) {
             Ok(0) => break,

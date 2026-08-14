@@ -267,6 +267,7 @@ fn disconnect(args: &DisconnectArgs, api_url: &str) -> anyhow_lite::Result {
 
 /// The FOREGROUND `run` command: enroll-if-needed, then dial + serve until a
 /// clean SIGINT/SIGTERM stops it.
+#[allow(clippy::too_many_lines)]
 async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // Single-instance guard, taken FIRST (before enroll-if-needed or any dial): an
     // enrolled agent's NATS subject IS its identity, so two `run` processes on one
@@ -276,7 +277,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // (dropped when `run` returns), and by the OS when the process exits, so a
     // crashed holder self-heals. Covers BOTH explicit `run` and run-by-default,
     // since both land here; `enroll`/`service`/`update`/`uninstall` do NOT lock.
-    let _instance_lock: Option<instance_lock::InstanceLock> = match instance_lock::acquire() {
+    let instance_lock_guard: Option<instance_lock::InstanceLock> = match instance_lock::acquire() {
         Ok(lock) => Some(lock),
         Err(instance_lock::LockError::Contended { holder_pid }) => {
             let pid = holder_pid.map_or_else(|| "unknown".to_owned(), |p| p.to_string());
@@ -420,7 +421,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     if shutdown_status.is_update() {
         // The running path has already been atomically replaced and health-gated.
         // Release the single-process lock before replacing/spawning the successor.
-        drop(_instance_lock);
+        drop(instance_lock_guard);
         restart_after_verified_update()?;
     }
     info!("agent stopped");

@@ -330,6 +330,22 @@ beforeAll(async () => {
     codexFetch: provider.fetch.bind(provider) as typeof fetch,
   });
 
+  const extensionBuild = Bun.spawn(["bun", "run", "build"], {
+    cwd: `${repoRoot}/apps/browser-extension`,
+    env: {
+      PATH: process.env.PATH ?? "",
+      HOME: process.env.HOME ?? "/tmp",
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const extensionBuildExit = await extensionBuild.exited;
+  if (extensionBuildExit !== 0) {
+    throw new Error(
+      `Browser extension build failed: ${await new Response(extensionBuild.stderr).text()}`,
+    );
+  }
+
   const build = Bun.spawn(["bun", "run", "vite", "build"], {
     cwd: `${repoRoot}/apps/web`,
     env: {

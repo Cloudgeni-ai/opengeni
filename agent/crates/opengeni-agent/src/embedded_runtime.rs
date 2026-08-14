@@ -21,6 +21,7 @@ const COMPUTER_NATIVE: &[u8] = include_bytes!(env!("OPENGENI_EMBEDDED_COMPUTER_N
 /// Materializes the release-contained runtime and returns its browserd path.
 /// Development builds carry no payload and return `None`, preserving explicit
 /// local/operator sidecar discovery.
+#[allow(clippy::unnecessary_wraps)]
 pub fn materialize(config_dir: &Path) -> PlatformResult<Option<PathBuf>> {
     #[cfg(not(opengeni_embedded_runtime))]
     {

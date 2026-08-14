@@ -233,7 +233,7 @@ function Install-VerifiedInteractionRuntime($agentAsset, $tmp, $installDir) {
     Invoke-Download "$assetUrl.minisig" $sigPath
     $want = ((Get-Content $shaPath -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
     $got = Get-Sha256 $assetPath
-    if ($want -ne $got) { Fail 4 "checksum mismatch for $assetName: expected $want got $got" }
+    if ($want -ne $got) { Fail 4 "checksum mismatch for ${assetName}: expected $want got $got" }
     Test-Signature $assetPath $sigPath
   }
 

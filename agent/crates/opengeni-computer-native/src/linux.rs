@@ -1934,15 +1934,21 @@ fn fit_live_rgba(
     frame: &LinuxRgbaFrame,
     options: crate::NativeCaptureOptions,
 ) -> NativeAdapterResult<(Vec<u8>, u32, u32)> {
-    if frame.width <= options.max_width && frame.height <= options.max_height {
+    let Some((output_width, output_height)) = crate::model::fit_frame_dimensions(
+        frame.width,
+        frame.height,
+        options.max_width,
+        options.max_height,
+    ) else {
+        return Err(NativeAdapterError::definite(
+            NativeAdapterErrorCode::DriverFailed,
+            "Linux capture dimensions are invalid",
+            true,
+        ));
+    };
+    if (output_width, output_height) == (frame.width, frame.height) {
         return Ok((frame.rgba.clone(), frame.width, frame.height));
     }
-    let scale = f64::min(
-        f64::from(options.max_width) / f64::from(frame.width),
-        f64::from(options.max_height) / f64::from(frame.height),
-    );
-    let output_width = (f64::from(frame.width) * scale).floor().max(1.0) as u32;
-    let output_height = (f64::from(frame.height) * scale).floor().max(1.0) as u32;
     let source =
         RgbaImage::from_raw(frame.width, frame.height, frame.rgba.clone()).ok_or_else(|| {
             NativeAdapterError::definite(

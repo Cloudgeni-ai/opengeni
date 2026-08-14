@@ -366,8 +366,7 @@ impl HeartbeatCollector {
                     // This collector owns liveness assertions only. Update
                     // progress travels on the same exact-instance event stream
                     // but is asserted by update-specific harness scenarios.
-                    Some(Event::AgentUpdateProgress(_)) => {}
-                    None => {}
+                    Some(Event::AgentUpdateProgress(_)) | None => {}
                 }
             }
         });

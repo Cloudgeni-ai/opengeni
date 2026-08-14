@@ -26,14 +26,13 @@ enum LaunchdInstallAction {
 }
 
 fn launchd_install_action(
-    loaded: bool,
+    loaded_program_matches: Option<bool>,
     restart: bool,
     definition_changed: bool,
-    loaded_program_matches: bool,
 ) -> LaunchdInstallAction {
-    if !loaded {
+    if loaded_program_matches.is_none() {
         LaunchdInstallAction::Bootstrap
-    } else if restart || definition_changed || !loaded_program_matches {
+    } else if restart || definition_changed || loaded_program_matches == Some(false) {
         LaunchdInstallAction::Reload
     } else {
         LaunchdInstallAction::KeepLoaded
@@ -214,9 +213,8 @@ fn reset_systemd_aggregate_limits(install_scope: ServiceScope) -> Result<(), Str
 fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     let plist_path = service::launchd_plist_path(&home()?);
     let body = service::render_launchd_plist(spec);
-    let definition_changed = std::fs::read(&plist_path)
-        .map(|existing| existing != body.as_bytes())
-        .unwrap_or(true);
+    let definition_changed =
+        std::fs::read(&plist_path).map_or(true, |existing| existing != body.as_bytes());
     if let Some(parent) = plist_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
@@ -228,11 +226,10 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     let domain = format!("gui/{uid}");
     let target = format!("{domain}/{}", service::ids::LAUNCHD_LABEL);
     let loaded_definition = capture("launchctl", &["print", &target]).ok();
-    let loaded = loaded_definition.is_some();
     let loaded_program_matches = loaded_definition
         .as_deref()
-        .is_some_and(|output| launchd_loaded_program_matches(output, &spec.binary_path));
-    match launchd_install_action(loaded, restart, definition_changed, loaded_program_matches) {
+        .map(|output| launchd_loaded_program_matches(output, &spec.binary_path));
+    match launchd_install_action(loaded_program_matches, restart, definition_changed) {
         LaunchdInstallAction::KeepLoaded => {}
         LaunchdInstallAction::Reload => {
             // launchd caches a loaded job's definition. Rewriting the plist and
@@ -634,26 +631,18 @@ mod tests {
 
     #[test]
     fn launchd_restart_reloads_the_definition_instead_of_kickstarting_the_cached_job() {
-        assert_eq!(
-            launchd_install_action(true, true, false, true),
-            LaunchdInstallAction::Reload
-        );
-        assert_eq!(
-            launchd_install_action(true, false, false, true),
-            LaunchdInstallAction::KeepLoaded
-        );
-        assert_eq!(
-            launchd_install_action(false, false, false, false),
-            LaunchdInstallAction::Bootstrap
-        );
-        assert_eq!(
-            launchd_install_action(true, false, true, true),
-            LaunchdInstallAction::Reload
-        );
-        assert_eq!(
-            launchd_install_action(true, false, false, false),
-            LaunchdInstallAction::Reload
-        );
+        for (loaded_program_matches, restart, definition_changed, expected) in [
+            (Some(true), true, false, LaunchdInstallAction::Reload),
+            (Some(true), false, false, LaunchdInstallAction::KeepLoaded),
+            (None, false, false, LaunchdInstallAction::Bootstrap),
+            (Some(true), false, true, LaunchdInstallAction::Reload),
+            (Some(false), false, false, LaunchdInstallAction::Reload),
+        ] {
+            assert_eq!(
+                launchd_install_action(loaded_program_matches, restart, definition_changed),
+                expected
+            );
+        }
     }
 
     #[test]

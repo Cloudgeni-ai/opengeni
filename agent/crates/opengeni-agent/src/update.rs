@@ -83,7 +83,7 @@ fn persist_completed_update_receipt_at(
     receipt: &CompletedUpdateReceipt,
 ) -> Result<(), String> {
     validate_completed_update_receipt(receipt)?;
-    std::fs::create_dir_all(&dir).map_err(|_| "update_receipt_persist_failed".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|_| "update_receipt_persist_failed".to_string())?;
     let path = dir.join(COMPLETED_UPDATE_RECEIPT_FILE);
     let temporary = dir.join(format!(
         ".{COMPLETED_UPDATE_RECEIPT_FILE}.{}.{}",
