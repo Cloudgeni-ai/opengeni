@@ -6202,6 +6202,7 @@ export type MachineRuntimeCapabilities = {
   opStream: boolean;
   browserBridge: boolean;
   operationResourcePolicy: boolean;
+  operationCpuQuota: boolean;
 };
 
 export type MachineUpdateStatus =
@@ -6247,6 +6248,7 @@ export type UpdateMachineAgentResponse = {
 export type MachineOperationPolicy = {
   memoryMaxBytes: number | null;
   memoryHighBytes: number | null;
+  cpuMaxMillicores: number | null;
   revision: number;
   updatedAt: string | null;
 };
@@ -6254,6 +6256,8 @@ export type MachineOperationPolicy = {
 export type UpdateMachineOperationPolicyRequest = {
   memoryMaxBytes: number | null;
   memoryHighBytes: number | null;
+  /** Omitted preserves the current CPU limit for older/partial clients; null clears. */
+  cpuMaxMillicores?: number | null;
   expectedRevision: number;
 };
 

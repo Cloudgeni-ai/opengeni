@@ -95,6 +95,7 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     expect(enrollment.operationPolicy).toEqual({
       memoryMaxBytes: null,
       memoryHighBytes: null,
+      cpuMaxMillicores: null,
       revision: 0,
       updatedAt: null,
     });
@@ -107,10 +108,12 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
       expectedRevision: 0,
       memoryMaxBytes: 1_073_741_824,
       memoryHighBytes: 805_306_368,
+      cpuMaxMillicores: 1_500,
     });
     expect(updated?.operationPolicy).toMatchObject({
       memoryMaxBytes: 1_073_741_824,
       memoryHighBytes: 805_306_368,
+      cpuMaxMillicores: 1_500,
       revision: 1,
     });
     expect(updated?.operationPolicy.updatedAt).not.toBeNull();
@@ -122,6 +125,7 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
       expectedRevision: 0,
       memoryMaxBytes: null,
       memoryHighBytes: null,
+      cpuMaxMillicores: null,
     });
     expect(stale).toBeNull();
     expect((await getEnrollment(db, workspaceId, enrollment.id))?.operationPolicy.revision).toBe(1);

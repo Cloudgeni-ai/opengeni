@@ -202,6 +202,7 @@ function helloPayload(
     desktop?: boolean;
     opStream?: boolean;
     operationResourcePolicy?: boolean;
+    operationCpuQuota?: boolean;
     desktopUnavailableReason?: string;
     display?: { id: string; width: number; height: number; virtual: boolean };
     capabilitiesAbsent?: boolean;
@@ -232,6 +233,7 @@ function helloPayload(
               desktop: opts.desktop ?? false,
               opStream: opts.opStream ?? false,
               operationResourcePolicy: opts.operationResourcePolicy ?? false,
+              operationCpuQuota: opts.operationCpuQuota ?? false,
               ...(opts.desktopUnavailableReason
                 ? { desktopUnavailableReason: opts.desktopUnavailableReason }
                 : {}),
@@ -507,6 +509,7 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
         desktop: true,
         opStream: true,
         operationResourcePolicy: true,
+        operationCpuQuota: true,
       }),
       helloSubject(workspaceId, enrollment.id, connectionInstanceId),
     );
@@ -519,6 +522,7 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
       desktop: true,
       opStream: true,
       operationResourcePolicy: true,
+      operationCpuQuota: true,
     });
   });
 

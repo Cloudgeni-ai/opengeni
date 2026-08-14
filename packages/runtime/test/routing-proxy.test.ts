@@ -40,7 +40,17 @@ import { isNativeDesktopSession } from "../src/sandbox-computer";
 const WS = "11111111-1111-1111-1111-111111111111";
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
 const connectionInstanceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-const resolveSelfhostedConnection = async () => ({ connectionInstanceId, opStream: false });
+const resolveSelfhostedConnection = async () => ({
+  connectionInstanceId,
+  operationResourcePolicy: {
+    memoryMaxBytes: null,
+    memoryHighBytes: null,
+    cpuMaxMillicores: null,
+    revision: 0,
+  },
+  operationResourcePolicySupported: true,
+  operationCpuQuotaSupported: true,
+});
 
 /** A trivial in-memory backend whose exec echoes its `tag` so a test can assert
  *  which backend an op landed on. Optionally fences a configured epoch. */

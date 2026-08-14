@@ -98,6 +98,7 @@ describe("useMachines", () => {
         return {
           memoryMaxBytes: request.memoryMaxBytes,
           memoryHighBytes: request.memoryHighBytes,
+          cpuMaxMillicores: request.cpuMaxMillicores ?? null,
           revision: request.expectedRevision + 1,
           updatedAt: "2026-08-14T10:00:00.000Z",
         };
@@ -112,6 +113,7 @@ describe("useMachines", () => {
     const request = {
       memoryMaxBytes: 1_073_741_824,
       memoryHighBytes: null,
+      cpuMaxMillicores: 1_500,
       expectedRevision: 2,
     };
     const result = await actRun(() =>

@@ -21,7 +21,7 @@
 import {
   buildSelfhostedBackendSession,
   type SelfhostedOpStreamDeps,
-  type SelfhostedOperationResourcePolicy,
+  type SelfhostedOperationAdmission,
   type SelfhostedRelayConfig,
 } from "../selfhosted/session";
 import type { SelfhostedOpObserver } from "../selfhosted/op-observer";
@@ -50,8 +50,9 @@ export interface RoutableSandbox {
 export interface SelfhostedConnectionBinding {
   connectionInstanceId: string;
   opStream?: SelfhostedOpStreamDeps;
-  operationResourcePolicy?: SelfhostedOperationResourcePolicy;
-  operationResourcePolicySupported?: boolean;
+  operationResourcePolicy: SelfhostedOperationAdmission["operationResourcePolicy"];
+  operationResourcePolicySupported: boolean;
+  operationCpuQuotaSupported: boolean;
 }
 
 export interface ActiveBackendResolverDeps {
@@ -336,12 +337,13 @@ export function makeActiveBackendResolver(
           : {}),
         ...(deps.selfhostedOnOp !== undefined ? { onOp: deps.selfhostedOnOp } : {}),
         ...(connection.opStream !== undefined ? { opStream: connection.opStream } : {}),
-        ...(connection.operationResourcePolicy !== undefined
-          ? { operationResourcePolicy: connection.operationResourcePolicy }
-          : {}),
-        ...(connection.operationResourcePolicySupported !== undefined
-          ? { operationResourcePolicySupported: connection.operationResourcePolicySupported }
-          : {}),
+        operationResourcePolicy: connection.operationResourcePolicy,
+        operationResourcePolicySupported: connection.operationResourcePolicySupported,
+        operationCpuQuotaSupported: connection.operationCpuQuotaSupported,
+        // The routing proxy caches this session by sandbox+epoch, but command
+        // policy and runner authority are mutable. Re-read one coherent DB
+        // snapshot only when a new exec/Git is admitted.
+        resolveOperationAdmission: () => deps.resolveSelfhostedConnection(sandbox),
         // The turn's declared environment → the session's manifest.environment, so
         // the SDK's per-turn manifest-env delta is empty (no "cannot change manifest
         // environment variables" throw on a pin-to-vm turn).

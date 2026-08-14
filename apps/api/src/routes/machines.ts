@@ -130,6 +130,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       expectedRevision: body.expectedRevision,
       memoryMaxBytes: body.memoryMaxBytes,
       memoryHighBytes: body.memoryHighBytes,
+      ...(body.cpuMaxMillicores !== undefined ? { cpuMaxMillicores: body.cpuMaxMillicores } : {}),
     });
     if (!updated) {
       throw new HTTPException(409, {

@@ -248,7 +248,8 @@ export function MachineDetail({
       {onUpdateOperationPolicy && machine.enrollmentId && machine.operationPolicy ? (
         <MachineOperationPolicyEditor
           policy={machine.operationPolicy}
-          supported={machine.runtime?.capabilities.operationResourcePolicy === true}
+          memorySupported={machine.runtime?.capabilities.operationResourcePolicy === true}
+          cpuSupported={machine.runtime?.capabilities.operationCpuQuota === true}
           saving={updatingOperationPolicy}
           onSave={(request) => onUpdateOperationPolicy(machine, request)}
         />

@@ -1,5 +1,5 @@
 -- deployment-mode: maintenance
--- Add an optional, revision-fenced command memory policy to each Connected
+-- Add an optional, revision-fenced command resource policy to each Connected
 -- Machine enrollment. NULL remains the unrestricted product default. New
 -- control planes may write the policy while old runners are still present;
 -- runtime capability gating fails commands closed until an enforcing runner is
@@ -14,6 +14,7 @@ SET LOCAL statement_timeout = '30min';
 ALTER TABLE enrollments
   ADD COLUMN operation_memory_max_bytes bigint,
   ADD COLUMN operation_memory_high_bytes bigint,
+  ADD COLUMN operation_cpu_max_millicores bigint,
   ADD COLUMN operation_policy_revision integer NOT NULL DEFAULT 0,
   ADD COLUMN operation_policy_updated_at timestamptz,
   ADD CONSTRAINT enrollments_operation_memory_max_shape_chk CHECK (
@@ -32,6 +33,12 @@ ALTER TABLE enrollments
     operation_memory_max_bytes IS NULL
     OR operation_memory_high_bytes IS NULL
     OR operation_memory_high_bytes <= operation_memory_max_bytes
+  ),
+  -- Positive uint32 millicores. The runner chooses a cgroup-v2 period within the
+  -- kernel ABI that represents every accepted value exactly (no silent rounding).
+  ADD CONSTRAINT enrollments_operation_cpu_shape_chk CHECK (
+    operation_cpu_max_millicores IS NULL
+    OR operation_cpu_max_millicores BETWEEN 1 AND 4294967295
   ),
   ADD CONSTRAINT enrollments_operation_policy_revision_chk CHECK (
     operation_policy_revision >= 0

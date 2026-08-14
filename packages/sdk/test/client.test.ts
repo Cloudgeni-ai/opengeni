@@ -121,6 +121,7 @@ describe("OpenGeniClient", () => {
     const response = {
       memoryMaxBytes: 1_073_741_824,
       memoryHighBytes: null,
+      cpuMaxMillicores: 1_500,
       revision: 3,
       updatedAt: "2026-08-14T10:00:00.000Z",
     };
@@ -130,6 +131,7 @@ describe("OpenGeniClient", () => {
       await client.updateMachineOperationPolicy(WORKSPACE_ID, enrollmentId, {
         memoryMaxBytes: 1_073_741_824,
         memoryHighBytes: null,
+        cpuMaxMillicores: 1_500,
         expectedRevision: 2,
       }),
     ).toEqual(response);
@@ -139,6 +141,7 @@ describe("OpenGeniClient", () => {
       body: JSON.stringify({
         memoryMaxBytes: 1_073_741_824,
         memoryHighBytes: null,
+        cpuMaxMillicores: 1_500,
         expectedRevision: 2,
       }),
     });

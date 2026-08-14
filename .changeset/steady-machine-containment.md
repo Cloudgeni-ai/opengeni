@@ -6,4 +6,4 @@
 "@opengeni/sdk": patch
 ---
 
-Add revision-fenced Connected Machine command-memory policies, exact live runner capability gating, and lifecycle-safe Linux operation accounting without introducing default resource limits.
+Add revision-fenced per-command memory and CPU policies for Connected Machines, exact live runner capability gating, and lifecycle-safe Linux operation accounting without introducing default resource limits.

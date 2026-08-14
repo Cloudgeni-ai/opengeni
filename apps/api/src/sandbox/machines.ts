@@ -120,6 +120,7 @@ function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineVi
       opStream: capability("opStream"),
       browserBridge: capability("browserBridge"),
       operationResourcePolicy: capability("operationResourcePolicy"),
+      operationCpuQuota: capability("operationCpuQuota"),
     },
     update,
   };

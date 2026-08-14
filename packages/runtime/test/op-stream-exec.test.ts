@@ -136,6 +136,76 @@ describe("op-stream exec (fake runner)", () => {
     expect(runner.runs.get("call_cancel:0")?.exit.cancelled).toBe(true);
   });
 
+  test("reconnect cancellation stays bound to the admitted connection", async () => {
+    const staleTransport = new InMemoryOpStreamTransport();
+    const liveTransport = new InMemoryOpStreamTransport();
+    const staleRunner = new FakeOpRunner({
+      transport: staleTransport,
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: "stale-instance",
+    });
+    const liveRunner = new FakeOpRunner({
+      transport: liveTransport,
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: "live-instance",
+    });
+    const requests: Array<{ subject: string; request: ControlRequest }> = [];
+    const session = new SelfhostedSession({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: "stale-instance",
+      controlRpc: {
+        request: async (subject, request, opts) => {
+          requests.push({ subject, request });
+          return subject.includes("connection.live-instance.rpc")
+            ? await liveRunner.request(subject, request, opts)
+            : await staleRunner.request(subject, request, opts);
+        },
+      },
+      relay: { host: "relay.test" },
+      timeoutMs: 2_000,
+      execTimeoutMs: 5_000,
+      opStream: { transport: staleTransport },
+      resolveOperationAdmission: async () => ({
+        connectionInstanceId: "live-instance",
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 2,
+        },
+        operationResourcePolicySupported: true,
+        operationCpuQuotaSupported: true,
+        opStream: { transport: liveTransport },
+      }),
+    });
+    liveRunner.script("call_reconnect_cancel:0", {
+      frames: [],
+      live: true,
+      holdUntilCancel: true,
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    const executing = runWithToolCallCorrelation("call_reconnect_cancel", () =>
+      session.exec({ cmd: "sleep 60" }),
+    );
+    while (!liveRunner.runs.has("call_reconnect_cancel:0")) await Bun.sleep(1);
+
+    expect(await session.cancelExecCommand("unknown-after-reconnect")).toBe(false);
+    expect(await session.cancelExecCommand("call_reconnect_cancel:0")).toBe(true);
+    const result = await executing;
+
+    expect(result.exitCode).toBe(-1);
+    expect(liveRunner.runs.get("call_reconnect_cancel:0")?.exit.cancelled).toBe(true);
+    expect(staleRunner.runs.size).toBe(0);
+    expect(
+      requests
+        .filter(({ request }) => request.op?.$case === "opCancel")
+        .map(({ subject }) => subject),
+    ).toEqual([expect.stringContaining("connection.live-instance.rpc")]);
+  });
+
   test("the SDK shell capability and turn fence cancel a connected-machine process end to end", async () => {
     const { runner, session } = buildRig();
     runner.script("call_shell_cancel:0", { frames: [], live: true, holdUntilCancel: true });
@@ -437,6 +507,53 @@ describe("op-stream exec (fake runner)", () => {
     });
     const result = await session.exec({ cmd: "echo legacy" });
     expect(result.exitCode).toBe(0);
+  });
+
+  test("op-stream fallback retains one authoritative command admission", async () => {
+    const transport = new InMemoryOpStreamTransport();
+    transport.available = false;
+    const { MockAgentResponder } = await import("../src/sandbox/selfhosted/testing");
+    const responder = new MockAgentResponder();
+    let admissionReads = 0;
+    const session = new SelfhostedSession({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: "stale-constructor-instance",
+      controlRpc: responder,
+      relay: { host: "relay.test" },
+      timeoutMs: 2_000,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      resolveOperationAdmission: async () => {
+        admissionReads += 1;
+        return {
+          connectionInstanceId: "admitted-instance",
+          operationResourcePolicy: {
+            memoryMaxBytes: 134_217_728,
+            memoryHighBytes: null,
+            cpuMaxMillicores: null,
+            revision: 4,
+          },
+          operationResourcePolicySupported: true,
+          operationCpuQuotaSupported: false,
+          opStream: {
+            transport,
+            ackIntervalMs: 20,
+            silenceTimeoutMs: 120,
+            reconnectHoldMs: 600,
+          },
+        };
+      },
+    });
+
+    const result = await session.exec({ cmd: "echo legacy" });
+
+    expect(result.exitCode).toBe(0);
+    expect(admissionReads).toBe(1);
+    expect(responder.requests).toHaveLength(1);
+    expect(responder.requests[0]?.subject).toContain("connection.admitted-instance.rpc");
+    expect(responder.requests[0]?.req.resourcePolicy).toEqual({
+      memoryMaxBytes: "134217728",
+    });
   });
 
   test("unbounded exec never degrades to legacy when the stream is unavailable", async () => {

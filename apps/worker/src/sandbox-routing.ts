@@ -1040,6 +1040,7 @@ export type SelfhostedTurnSessionArgs = {
    * enrollment snapshot as the process identity. */
   operationResourcePolicy: EnrollmentRecord["operationPolicy"];
   operationResourcePolicySupported: boolean;
+  operationCpuQuotaSupported: boolean;
   /** The active pointer's epoch — the control-op fence echoed to the agent. */
   epoch: number;
   /** The run's declared sandbox environment (the SAME object fed to buildAgent +
@@ -1103,6 +1104,7 @@ function connectionBindingFor(
     ...(opStream !== undefined ? { opStream } : {}),
     operationResourcePolicy: enrollment.operationPolicy,
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
+    operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
   };
 }
 
@@ -1110,7 +1112,7 @@ export async function establishSelfhostedTurnSession(
   services: RoutingWiringServices,
   args: SelfhostedTurnSessionArgs,
 ): Promise<EstablishedSandboxSession> {
-  const { settings, bus, onOp } = services;
+  const { db, settings, bus, onOp } = services;
   const { timeoutMs, execTimeoutMs } = selfhostedTimeoutsFromSettings(settings);
   const opStream = opStreamDepsFor(services, args.opStream);
   const { client, session } = await buildSelfhostedBackendSession({
@@ -1131,6 +1133,11 @@ export async function establishSelfhostedTurnSession(
     execTimeoutMs,
     operationResourcePolicy: args.operationResourcePolicy,
     operationResourcePolicySupported: args.operationResourcePolicySupported,
+    operationCpuQuotaSupported: args.operationCpuQuotaSupported,
+    resolveOperationAdmission: async () => {
+      const enrollment = await getLiveEnrollmentConnection(db, args.workspaceId, args.agentId);
+      return connectionBindingFor(services, enrollment);
+    },
     // Meter every control op (out-of-band telemetry) — no-op when unwired.
     ...(onOp !== undefined ? { onOp } : {}),
     // The streaming exec transport — present iff the machine advertised the

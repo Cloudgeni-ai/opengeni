@@ -106,6 +106,7 @@ export function canonicalHello(): Hello {
       opStream: false,
       browserBridge: false,
       operationResourcePolicy: false,
+      operationCpuQuota: false,
     },
     updateChannel: "stable",
     resumeToken: "resume-token-1",

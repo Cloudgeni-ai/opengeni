@@ -677,7 +677,7 @@ describe("M10 GET /machines/:enrollmentId/metrics/series", () => {
 });
 
 describe("Connected Machine command policy", () => {
-  test("updates exact byte limits under a revision fence and projects them in the fleet", async () => {
+  test("updates exact memory and CPU limits under a revision fence and projects them", async () => {
     if (!available) return;
     const { accountId, workspaceId, enrollment } = await seed();
     const app = appFor(new MemoryEventBus());
@@ -691,6 +691,7 @@ describe("Connected Machine command policy", () => {
         body: JSON.stringify({
           memoryMaxBytes: 1_073_741_824,
           memoryHighBytes: 805_306_368,
+          cpuMaxMillicores: 1_500,
           expectedRevision: 0,
         }),
       },
@@ -699,7 +700,27 @@ describe("Connected Machine command policy", () => {
     expect(await updated.json()).toMatchObject({
       memoryMaxBytes: 1_073_741_824,
       memoryHighBytes: 805_306_368,
+      cpuMaxMillicores: 1_500,
       revision: 1,
+    });
+
+    const legacyMemoryOnly = await app.request(
+      `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/operation-policy`,
+      {
+        method: "PATCH",
+        headers: { authorization: manageAuth, "content-type": "application/json" },
+        body: JSON.stringify({
+          memoryMaxBytes: 536_870_912,
+          memoryHighBytes: null,
+          expectedRevision: 1,
+        }),
+      },
+    );
+    expect(legacyMemoryOnly.status).toBe(200);
+    expect(await legacyMemoryOnly.json()).toMatchObject({
+      memoryMaxBytes: 536_870_912,
+      cpuMaxMillicores: 1_500,
+      revision: 2,
     });
 
     const stale = await app.request(
@@ -710,6 +731,7 @@ describe("Connected Machine command policy", () => {
         body: JSON.stringify({
           memoryMaxBytes: null,
           memoryHighBytes: null,
+          cpuMaxMillicores: null,
           expectedRevision: 0,
         }),
       },
@@ -724,15 +746,19 @@ describe("Connected Machine command policy", () => {
     const fleet = (await listed.json()) as {
       machines: Array<{
         enrollmentId: string | null;
-        operationPolicy: { memoryMaxBytes: number | null; revision: number } | null;
+        operationPolicy: {
+          memoryMaxBytes: number | null;
+          cpuMaxMillicores: number | null;
+          revision: number;
+        } | null;
       }>;
     };
     expect(
       fleet.machines.find((machine) => machine.enrollmentId === enrollment.id)?.operationPolicy,
-    ).toMatchObject({ memoryMaxBytes: 1_073_741_824, revision: 1 });
+    ).toMatchObject({ memoryMaxBytes: 536_870_912, cpuMaxMillicores: 1_500, revision: 2 });
   }, 90_000);
 
-  test("requires manage permission and rejects an impossible throttle order", async () => {
+  test("requires manage permission and rejects invalid resource values", async () => {
     if (!available) return;
     const { accountId, workspaceId, enrollment } = await seed();
     const app = appFor(new MemoryEventBus());
@@ -745,6 +771,7 @@ describe("Connected Machine command policy", () => {
         body: JSON.stringify({
           memoryMaxBytes: null,
           memoryHighBytes: null,
+          cpuMaxMillicores: null,
           expectedRevision: 0,
         }),
       },
@@ -760,11 +787,27 @@ describe("Connected Machine command policy", () => {
         body: JSON.stringify({
           memoryMaxBytes: 1024,
           memoryHighBytes: 2048,
+          cpuMaxMillicores: null,
           expectedRevision: 0,
         }),
       },
     );
     expect(invalid.status).toBe(400);
+
+    const invalidCpu = await app.request(
+      `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/operation-policy`,
+      {
+        method: "PATCH",
+        headers: { authorization: manageAuth, "content-type": "application/json" },
+        body: JSON.stringify({
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: 0,
+          expectedRevision: 0,
+        }),
+      },
+    );
+    expect(invalidCpu.status).toBe(400);
   }, 90_000);
 });
 

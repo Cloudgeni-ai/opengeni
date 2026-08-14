@@ -146,6 +146,7 @@ async function resolveSelfhostedConnection(
     ...(opStream ? { opStream } : {}),
     operationResourcePolicy: enrollment.operationPolicy,
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
+    operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
   };
 }
 

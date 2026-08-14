@@ -7347,11 +7347,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 operationResourcePolicy: machineEnrollment?.operationPolicy ?? {
                   memoryMaxBytes: null,
                   memoryHighBytes: null,
+                  cpuMaxMillicores: null,
                   revision: 0,
                   updatedAt: null,
                 },
                 operationResourcePolicySupported:
                   machineEnrollment?.agentCapabilities.operationResourcePolicy === true,
+                operationCpuQuotaSupported:
+                  machineEnrollment?.agentCapabilities.operationCpuQuota === true,
                 epoch: activeSandboxPointer!.activeEpoch,
                 environment: sandboxEnvironment,
                 ...(transientCodemodeEnvironment

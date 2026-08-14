@@ -800,6 +800,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         operationResourcePolicy: enrollment.operationPolicy,
         operationResourcePolicySupported:
           enrollment.agentCapabilities.operationResourcePolicy === true,
+        operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
         ...(deps.settings.agentOpStreamEnabled === true &&
         enrollment.opStream === true &&
         deps.bus.getOpStreamConnection

@@ -2618,6 +2618,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         operationResourcePolicy: enrollment.operationPolicy,
         operationResourcePolicySupported:
           enrollment.agentCapabilities.operationResourcePolicy === true,
+        operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
         ...(deps.settings.agentOpStreamEnabled === true &&
         enrollment.opStream === true &&
         deps.bus.getOpStreamConnection

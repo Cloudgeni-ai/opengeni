@@ -1025,6 +1025,11 @@ export interface Capabilities {
    * send a configured policy to a runner that does not advertise this bit.
    */
   operationResourcePolicy: boolean;
+  /**
+   * The runner enforces cpu_max_millicores in OperationResourcePolicy. Split from
+   * the memory capability so a rolling connection cannot silently ignore CPU.
+   */
+  operationCpuQuota: boolean;
 }
 
 /**
@@ -1175,12 +1180,16 @@ export interface EnrollmentCredentials {
 /**
  * Optional policy selected for one Connected Machine enrollment. Absence means
  * the control plane requests no limit; there is deliberately no runner-created
- * default quota. Local runner policy and ancestor OS/cgroup policy may tighten
+ * default quota. cpu_max_millicores is an exact, period-independent public ratio.
+ * The Linux runner selects a cgroup-v2 period within the kernel's 1ms..1s ABI so
+ * every positive uint32 millicore value is represented without rounding or
+ * silent loosening. Local runner policy and ancestor OS/cgroup policy may tighten
  * these values but never loosen them.
  */
 export interface OperationResourcePolicy {
   memoryMaxBytes?: string | undefined;
   memoryHighBytes?: string | undefined;
+  cpuMaxMillicores?: number | undefined;
 }
 
 export interface ExecRequest {
@@ -2809,6 +2818,7 @@ function createBaseCapabilities(): Capabilities {
     opStream: false,
     browserBridge: false,
     operationResourcePolicy: false,
+    operationCpuQuota: false,
   };
 }
 
@@ -2849,6 +2859,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     }
     if (message.operationResourcePolicy !== false) {
       writer.uint32(96).bool(message.operationResourcePolicy);
+    }
+    if (message.operationCpuQuota !== false) {
+      writer.uint32(104).bool(message.operationCpuQuota);
     }
     return writer;
   },
@@ -2956,6 +2969,14 @@ export const Capabilities: MessageFns<Capabilities> = {
           message.operationResourcePolicy = reader.bool();
           continue;
         }
+        case 13: {
+          if (tag !== 104) {
+            break;
+          }
+
+          message.operationCpuQuota = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3003,6 +3024,11 @@ export const Capabilities: MessageFns<Capabilities> = {
         : isSet(object.operation_resource_policy)
         ? globalThis.Boolean(object.operation_resource_policy)
         : false,
+      operationCpuQuota: isSet(object.operationCpuQuota)
+        ? globalThis.Boolean(object.operationCpuQuota)
+        : isSet(object.operation_cpu_quota)
+        ? globalThis.Boolean(object.operation_cpu_quota)
+        : false,
     };
   },
 
@@ -3044,6 +3070,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     if (message.operationResourcePolicy !== false) {
       obj.operationResourcePolicy = message.operationResourcePolicy;
     }
+    if (message.operationCpuQuota !== false) {
+      obj.operationCpuQuota = message.operationCpuQuota;
+    }
     return obj;
   },
 
@@ -3066,6 +3095,7 @@ export const Capabilities: MessageFns<Capabilities> = {
     message.opStream = object.opStream ?? false;
     message.browserBridge = object.browserBridge ?? false;
     message.operationResourcePolicy = object.operationResourcePolicy ?? false;
+    message.operationCpuQuota = object.operationCpuQuota ?? false;
     return message;
   },
 };
@@ -4479,7 +4509,7 @@ export const EnrollmentCredentials: MessageFns<EnrollmentCredentials> = {
 };
 
 function createBaseOperationResourcePolicy(): OperationResourcePolicy {
-  return { memoryMaxBytes: undefined, memoryHighBytes: undefined };
+  return { memoryMaxBytes: undefined, memoryHighBytes: undefined, cpuMaxMillicores: undefined };
 }
 
 export const OperationResourcePolicy: MessageFns<OperationResourcePolicy> = {
@@ -4489,6 +4519,9 @@ export const OperationResourcePolicy: MessageFns<OperationResourcePolicy> = {
     }
     if (message.memoryHighBytes !== undefined) {
       writer.uint32(16).uint64(message.memoryHighBytes);
+    }
+    if (message.cpuMaxMillicores !== undefined) {
+      writer.uint32(24).uint32(message.cpuMaxMillicores);
     }
     return writer;
   },
@@ -4516,6 +4549,14 @@ export const OperationResourcePolicy: MessageFns<OperationResourcePolicy> = {
           message.memoryHighBytes = reader.uint64().toString();
           continue;
         }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.cpuMaxMillicores = reader.uint32();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4537,6 +4578,11 @@ export const OperationResourcePolicy: MessageFns<OperationResourcePolicy> = {
         : isSet(object.memory_high_bytes)
         ? globalThis.String(object.memory_high_bytes)
         : undefined,
+      cpuMaxMillicores: isSet(object.cpuMaxMillicores)
+        ? globalThis.Number(object.cpuMaxMillicores)
+        : isSet(object.cpu_max_millicores)
+        ? globalThis.Number(object.cpu_max_millicores)
+        : undefined,
     };
   },
 
@@ -4548,6 +4594,9 @@ export const OperationResourcePolicy: MessageFns<OperationResourcePolicy> = {
     if (message.memoryHighBytes !== undefined) {
       obj.memoryHighBytes = message.memoryHighBytes;
     }
+    if (message.cpuMaxMillicores !== undefined) {
+      obj.cpuMaxMillicores = Math.round(message.cpuMaxMillicores);
+    }
     return obj;
   },
 
@@ -4558,6 +4607,7 @@ export const OperationResourcePolicy: MessageFns<OperationResourcePolicy> = {
     const message = createBaseOperationResourcePolicy();
     message.memoryMaxBytes = object.memoryMaxBytes ?? undefined;
     message.memoryHighBytes = object.memoryHighBytes ?? undefined;
+    message.cpuMaxMillicores = object.cpuMaxMillicores ?? undefined;
     return message;
   },
 };

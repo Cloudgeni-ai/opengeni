@@ -7473,6 +7473,7 @@ export const enrollments = pgTable(
     // ancestor host policy may only tighten them at execution.
     operationMemoryMaxBytes: bigint("operation_memory_max_bytes", { mode: "number" }),
     operationMemoryHighBytes: bigint("operation_memory_high_bytes", { mode: "number" }),
+    operationCpuMaxMillicores: bigint("operation_cpu_max_millicores", { mode: "number" }),
     operationPolicyRevision: integer("operation_policy_revision").notNull().default(0),
     operationPolicyUpdatedAt: timestamp("operation_policy_updated_at", { withTimezone: true }),
     status: text("status", { enum: enrollmentStatusValues }).notNull().default("active"),
@@ -7564,6 +7565,10 @@ export const enrollments = pgTable(
     operationMemoryOrder: check(
       "enrollments_operation_memory_order_chk",
       sql`${table.operationMemoryMaxBytes} is null or ${table.operationMemoryHighBytes} is null or ${table.operationMemoryHighBytes} <= ${table.operationMemoryMaxBytes}`,
+    ),
+    operationCpuShape: check(
+      "enrollments_operation_cpu_shape_chk",
+      sql`${table.operationCpuMaxMillicores} is null or ${table.operationCpuMaxMillicores} between 1 and 4294967295`,
     ),
     operationPolicyRevisionNonnegative: check(
       "enrollments_operation_policy_revision_chk",

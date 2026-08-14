@@ -206,6 +206,7 @@ describe("MachineCard — attach/swap affordance", () => {
           opStream: true,
           browserBridge: true,
           operationResourcePolicy: true,
+          operationCpuQuota: true,
         },
         update: null,
       },
@@ -247,6 +248,7 @@ describe("MachineCard — attach/swap affordance", () => {
           opStream: true,
           browserBridge: true,
           operationResourcePolicy: true,
+          operationCpuQuota: true,
         },
         update: {
           operationId: "00000000-0000-4000-8000-000000000001",
@@ -289,6 +291,7 @@ describe("MachineCard — attach/swap affordance", () => {
           opStream: true,
           browserBridge: true,
           operationResourcePolicy: true,
+          operationCpuQuota: true,
         },
         update: {
           operationId: "00000000-0000-4000-8000-000000000001",
@@ -421,6 +424,7 @@ describe("MachineDetail — runner authority diagnostics", () => {
       operationPolicy: {
         memoryMaxBytes: 1_073_741_824,
         memoryHighBytes: 805_306_368,
+        cpuMaxMillicores: 1_500,
         revision: 4,
         updatedAt: "2026-08-14T10:00:00.000Z",
       },
@@ -439,6 +443,7 @@ describe("MachineDetail — runner authority diagnostics", () => {
           opStream: true,
           browserBridge: true,
           operationResourcePolicy: false,
+          operationCpuQuota: false,
         },
         update: null,
       },
@@ -464,6 +469,7 @@ describe("MachineDetail — runner authority diagnostics", () => {
       {
         memoryMaxBytes: 1_073_741_824,
         memoryHighBytes: 805_306_368,
+        cpuMaxMillicores: 1_500,
         expectedRevision: 4,
       },
     ]);
@@ -477,6 +483,7 @@ describe("MachineDetail — runner authority diagnostics", () => {
       operationPolicy: {
         memoryMaxBytes: null,
         memoryHighBytes: null,
+        cpuMaxMillicores: null,
         revision: 2,
         updatedAt: null,
       },
@@ -502,6 +509,51 @@ describe("MachineDetail — runner authority diagnostics", () => {
     expect(
       r.container.querySelector('[data-machine-operation-policy] [role="alert"]')?.textContent,
     ).toBe("policy revision changed");
+    await r.unmount();
+  });
+
+  test("gates only the configured policy subset", async () => {
+    const m = machine({
+      sandboxId: "memory-only-policy",
+      state: "online",
+      operationPolicy: {
+        memoryMaxBytes: 1_073_741_824,
+        memoryHighBytes: null,
+        cpuMaxMillicores: null,
+        revision: 1,
+        updatedAt: null,
+      },
+      runtime: {
+        installedVersion: "0.1.16",
+        binarySha256: "ab".repeat(32),
+        updateChannel: "stable",
+        desiredVersion: "0.1.16",
+        versionState: "current",
+        capabilities: {
+          exec: true,
+          filesystem: true,
+          git: true,
+          pty: true,
+          desktop: true,
+          opStream: true,
+          browserBridge: true,
+          operationResourcePolicy: true,
+          operationCpuQuota: false,
+        },
+        update: null,
+      },
+    });
+    const r = await renderComponent(
+      <MachineDetail
+        machine={m}
+        series={[]}
+        window="1h"
+        onWindowChange={() => {}}
+        onUpdateOperationPolicy={async () => {}}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).not.toContain("Command execution fails closed");
     await r.unmount();
   });
 });

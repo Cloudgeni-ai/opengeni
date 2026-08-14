@@ -52,9 +52,11 @@ The agent reaches a user's machine via one trusted line and keeps itself current
   secret `OPENGENI_AGENT_MINISIGN_KEY` — never in the repo.
 - **Self-update** — `opengeni-agent update [--check]` discovers signed manifests
   from the enrolled deployments, verifies minisign + sha256 + version monotonicity,
-  selects the highest valid release, atomically self-replaces, executes the swapped
-  binary as a health gate, and automatically rolls back on failure. A tampered or
-  non-booting artifact is always rejected.
+  selects the highest valid release, atomically self-replaces, reconciles any
+  required generated background-service definition, executes the updated
+  installation as a health gate, and automatically rolls back on failure. A
+  tampered or non-booting artifact is always rejected. Capabilities that depend on
+  service topology remain unadvertised until that reconciliation succeeds.
 - **Background service** — `opengeni-agent start|stop|status` is the normal simple
   lifecycle; `service install|uninstall|...` is the advanced surface. It uses a
   systemd user/system unit, macOS LaunchAgent, or Windows Service. Repeated `start`
@@ -105,12 +107,14 @@ replacement control process starts in the same supervisor leaf while the delegat
 root remains empty and restart-safe. Startup verifies this topology and stamps that
 leaf with systemd-oomd's avoid marker. A custom/older unit that cannot provide the
 subgroup is reported as incapable and stays on unrestricted ambient execution;
-an explicit memory policy then fails closed. Optional per-enrollment memory
-limits arrive on exec/Git control requests and compose with stricter local
-`OPENGENI_AGENT_OP_MEMORY_{MAX,HIGH}` or ancestor policy. The runner advertises
-support only after its delegated memory-cgroup manager is active; an explicit
-policy otherwise fails closed. The default remains the machine's available
-resources, and typed PTY/desktop/browser/computer operations are unchanged.
+an explicit resource policy then fails closed. Optional per-enrollment memory
+and CPU limits arrive on each newly admitted exec/Git control request. CPU uses
+positive uint32 millicores (`1000` = one core); an in-flight command keeps its
+admitted snapshot. Requested values compose with stricter local
+`OPENGENI_AGENT_OP_MEMORY_{MAX,HIGH}` / `OPENGENI_AGENT_OP_CPU_MAX_MILLICORES`
+or ancestor policy. Memory and CPU enforcement are separately advertised and a
+configured unsupported limit fails closed. The default remains the machine's
+available resources, and typed PTY/desktop/browser/computer operations are unchanged.
 
 An installation upgraded from the old single-connection file keeps that link
 online immediately. Because the old file did not record its deployment URL,
@@ -118,10 +122,11 @@ online immediately. Because the old file did not record its deployment URL,
 deployment's connect command once confirms the origin and replaces only that
 legacy record. An unverified URL hint is never used as an update source; the
 signed public channel (or an explicit `update --base-url …`) remains the safe
-fallback until reconnect confirms it. Self-update is binary-wide: matching
-per-connection channels are used automatically, while mixed `stable`/`beta`
-links require an explicit `opengeni-agent update --channel …` choice instead of
-silently picking one.
+fallback until reconnect confirms it. Self-update is installation-wide (including
+the background-service definition when a release requires it): matching
+per-connection channels are used automatically, while mixed `stable`/`beta` links
+require an explicit `opengeni-agent update --channel …` choice instead of silently
+picking one.
 
 ## Wire protocol — single source of truth
 

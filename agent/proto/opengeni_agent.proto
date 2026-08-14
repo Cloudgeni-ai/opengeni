@@ -191,6 +191,9 @@ message Capabilities {
   // every contained exec/git child. A control plane must fail closed rather than
   // send a configured policy to a runner that does not advertise this bit.
   bool operation_resource_policy = 12;
+  // The runner enforces cpu_max_millicores in OperationResourcePolicy. Split from
+  // the memory capability so a rolling connection cannot silently ignore CPU.
+  bool operation_cpu_quota = 13;
 }
 
 // Capabilities of one live browser-profile bridge endpoint. This describes the
@@ -346,11 +349,15 @@ message EnrollmentCredentials {
 
 // Optional policy selected for one Connected Machine enrollment. Absence means
 // the control plane requests no limit; there is deliberately no runner-created
-// default quota. Local runner policy and ancestor OS/cgroup policy may tighten
+// default quota. cpu_max_millicores is an exact, period-independent public ratio.
+// The Linux runner selects a cgroup-v2 period within the kernel's 1ms..1s ABI so
+// every positive uint32 millicore value is represented without rounding or
+// silent loosening. Local runner policy and ancestor OS/cgroup policy may tighten
 // these values but never loosen them.
 message OperationResourcePolicy {
   optional uint64 memory_max_bytes = 1;
   optional uint64 memory_high_bytes = 2;
+  optional uint32 cpu_max_millicores = 3;
 }
 
 message ExecRequest {

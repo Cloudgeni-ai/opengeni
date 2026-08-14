@@ -12527,6 +12527,7 @@ export const MachineRuntimeCapabilities = z.object({
   opStream: z.boolean(),
   browserBridge: z.boolean(),
   operationResourcePolicy: z.boolean(),
+  operationCpuQuota: z.boolean(),
 });
 export type MachineRuntimeCapabilities = z.infer<typeof MachineRuntimeCapabilities>;
 
@@ -12582,9 +12583,14 @@ export const UpdateMachineAgentResponse = z.object({
 export type UpdateMachineAgentResponse = z.infer<typeof UpdateMachineAgentResponse>;
 
 const OperationMemoryBytes = z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable();
+const OperationCpuMillicores = z.number().int().positive().max(0xffff_ffff).nullable();
 
-function operationMemoryOrder(
-  value: { memoryMaxBytes: number | null; memoryHighBytes: number | null },
+function operationPolicyShape(
+  value: {
+    memoryMaxBytes: number | null;
+    memoryHighBytes: number | null;
+    cpuMaxMillicores?: number | null | undefined;
+  },
   ctx: z.RefinementCtx,
 ): void {
   if (
@@ -12600,25 +12606,28 @@ function operationMemoryOrder(
   }
 }
 
-/** Optional per-connection command memory policy. Null values are unrestricted;
- * revision is the optimistic concurrency fence for workspace operators. */
+/** Optional per-connection command resource policy. CPU is a period-independent
+ * millicore ratio; runners choose a documented representable cgroup period. Null
+ * values are unrestricted; revision is the optimistic concurrency fence. */
 export const MachineOperationPolicy = z
   .object({
     memoryMaxBytes: OperationMemoryBytes,
     memoryHighBytes: OperationMemoryBytes,
+    cpuMaxMillicores: OperationCpuMillicores,
     revision: z.number().int().nonnegative(),
     updatedAt: z.string().nullable(),
   })
-  .superRefine(operationMemoryOrder);
+  .superRefine(operationPolicyShape);
 export type MachineOperationPolicy = z.infer<typeof MachineOperationPolicy>;
 
 export const UpdateMachineOperationPolicyRequest = z
   .object({
     memoryMaxBytes: OperationMemoryBytes,
     memoryHighBytes: OperationMemoryBytes,
+    cpuMaxMillicores: OperationCpuMillicores.optional(),
     expectedRevision: z.number().int().nonnegative(),
   })
-  .superRefine(operationMemoryOrder);
+  .superRefine(operationPolicyShape);
 export type UpdateMachineOperationPolicyRequest = z.infer<
   typeof UpdateMachineOperationPolicyRequest
 >;

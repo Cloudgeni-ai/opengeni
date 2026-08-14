@@ -41554,6 +41554,7 @@ export type EnrollmentRecord = {
   operationPolicy: {
     memoryMaxBytes: number | null;
     memoryHighBytes: number | null;
+    cpuMaxMillicores: number | null;
     revision: number;
     updatedAt: string | null;
   };
@@ -41601,6 +41602,7 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
     operationPolicy: {
       memoryMaxBytes: row.operationMemoryMaxBytes ?? null,
       memoryHighBytes: row.operationMemoryHighBytes ?? null,
+      cpuMaxMillicores: row.operationCpuMaxMillicores ?? null,
       revision: Number(row.operationPolicyRevision),
       updatedAt: row.operationPolicyUpdatedAt?.toISOString() ?? null,
     },
@@ -41791,7 +41793,7 @@ export async function getLiveEnrollmentConnection(
 }
 
 /** Revision-fenced workspace-operator update of one Connected Machine's optional
- * command memory policy. NULL remains unrestricted. The active-enrollment check,
+ * command resource policy. NULL remains unrestricted. The active-enrollment check,
  * CAS, mutation, and audit receipt share one RLS transaction. */
 export async function updateEnrollmentOperationPolicy(
   db: Database,
@@ -41803,6 +41805,7 @@ export async function updateEnrollmentOperationPolicy(
     expectedRevision: number;
     memoryMaxBytes: number | null;
     memoryHighBytes: number | null;
+    cpuMaxMillicores?: number | null;
   },
 ): Promise<EnrollmentRecord | null> {
   return await withRlsContext(
@@ -41815,6 +41818,9 @@ export async function updateEnrollmentOperationPolicy(
         .set({
           operationMemoryMaxBytes: input.memoryMaxBytes,
           operationMemoryHighBytes: input.memoryHighBytes,
+          ...(input.cpuMaxMillicores !== undefined
+            ? { operationCpuMaxMillicores: input.cpuMaxMillicores }
+            : {}),
           operationPolicyRevision: sql`${schema.enrollments.operationPolicyRevision} + 1`,
           operationPolicyUpdatedAt: now,
           updatedAt: now,
@@ -41840,6 +41846,7 @@ export async function updateEnrollmentOperationPolicy(
           revision: Number(row.operationPolicyRevision),
           memoryMaxBytes: row.operationMemoryMaxBytes,
           memoryHighBytes: row.operationMemoryHighBytes,
+          cpuMaxMillicores: row.operationCpuMaxMillicores,
         },
       });
       return mapEnrollment(row);

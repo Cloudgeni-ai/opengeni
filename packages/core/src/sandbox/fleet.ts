@@ -594,6 +594,7 @@ export type RunOnSelfhostedMachine = {
   opStream?: SelfhostedOpStreamDeps;
   operationResourcePolicy?: SelfhostedOperationResourcePolicy;
   operationResourcePolicySupported?: boolean;
+  operationCpuQuotaSupported?: boolean;
   /**
    * Exact-attempt values for this one child process. Never persisted on the
    * enrollment or machine. The caller may supply these only after authenticating
@@ -632,6 +633,9 @@ export async function executeRunOnSelfhostedMachine(
       : {}),
     ...(machine.operationResourcePolicySupported !== undefined
       ? { operationResourcePolicySupported: machine.operationResourcePolicySupported }
+      : {}),
+    ...(machine.operationCpuQuotaSupported !== undefined
+      ? { operationCpuQuotaSupported: machine.operationCpuQuotaSupported }
       : {}),
     ...(machine.transientExecEnvironment !== undefined
       ? { transientExecEnvironment: () => machine.transientExecEnvironment! }
@@ -753,6 +757,7 @@ export async function runOnSandbox(
       operationResourcePolicy: enrollment.operationPolicy,
       operationResourcePolicySupported:
         enrollment.agentCapabilities.operationResourcePolicy === true,
+      operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
       ...(options.transientExecEnvironment !== undefined
         ? { transientExecEnvironment: options.transientExecEnvironment }
         : {}),

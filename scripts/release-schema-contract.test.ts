@@ -176,7 +176,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0250_connected_machine_operation_policy.sql",
       ),
     ).toMatchObject({
-      sha256: "d3fbbeac0fcb3eceafbfab06010734dac7e1c83ef7f355d0ceeb556795efd87f",
+      sha256: "a37e307de730bc47ccf4ed6bf517427ebb0d20199640f54e8e525ae1ce046663",
       deploymentMode: "maintenance",
     });
     expect(

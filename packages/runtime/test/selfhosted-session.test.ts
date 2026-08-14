@@ -4,6 +4,7 @@ import {
   type ControlRpc,
   MockAgentResponder,
   SelfhostedControlError,
+  type SelfhostedOperationAdmission,
   SelfhostedSandboxClient,
   SelfhostedSession,
   agentErrorToControlError,
@@ -52,7 +53,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(mock.requests[0]?.req.op?.$case).toBe("exec");
   });
 
-  test("configured command policy is carried as exact byte counts", async () => {
+  test("configured command policy carries exact memory and CPU limits", async () => {
     const mock = new MockAgentResponder();
     const session = new SelfhostedSession({
       workspaceId: WS,
@@ -62,8 +63,11 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
       operationResourcePolicy: {
         memoryMaxBytes: 134_217_728,
         memoryHighBytes: 100_663_296,
+        cpuMaxMillicores: 1_500,
+        revision: 3,
       },
       operationResourcePolicySupported: true,
+      operationCpuQuotaSupported: true,
     });
 
     await session.exec({ cmd: "true" });
@@ -71,7 +75,177 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(mock.requests[0]?.req.resourcePolicy).toEqual({
       memoryMaxBytes: "134217728",
       memoryHighBytes: "100663296",
+      cpuMaxMillicores: 1_500,
     });
+  });
+
+  test("cached sessions admit each command against current policy and connection truth", async () => {
+    const mock = new MockAgentResponder();
+    let reads = 0;
+    let admission: SelfhostedOperationAdmission = {
+      connectionInstanceId: "instance-a",
+      operationResourcePolicy: {
+        memoryMaxBytes: 134_217_728,
+        memoryHighBytes: null,
+        cpuMaxMillicores: null,
+        revision: 1,
+      },
+      operationResourcePolicySupported: true,
+      operationCpuQuotaSupported: false,
+    };
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      connectionInstanceId: "stale-constructor-instance",
+      controlRpc: mock,
+      relay: RELAY,
+      resolveOperationAdmission: async () => {
+        reads += 1;
+        return admission;
+      },
+    });
+
+    await session.exec({ cmd: "first" });
+    admission = {
+      connectionInstanceId: "instance-b",
+      operationResourcePolicy: {
+        memoryMaxBytes: 268_435_456,
+        memoryHighBytes: null,
+        cpuMaxMillicores: 2_000,
+        revision: 2,
+      },
+      operationResourcePolicySupported: true,
+      operationCpuQuotaSupported: true,
+    };
+    await session.exec({ cmd: "second" });
+    admission = {
+      connectionInstanceId: "instance-b",
+      operationResourcePolicy: {
+        memoryMaxBytes: null,
+        memoryHighBytes: null,
+        cpuMaxMillicores: null,
+        revision: 3,
+      },
+      operationResourcePolicySupported: true,
+      operationCpuQuotaSupported: true,
+    };
+    await session.exec({ cmd: "third" });
+
+    expect(reads).toBe(3);
+    expect(mock.requests.map((request) => request.subject)).toEqual([
+      subjectFor(WS, AGENT, "instance-a"),
+      subjectFor(WS, AGENT, "instance-b"),
+      subjectFor(WS, AGENT, "instance-b"),
+    ]);
+    expect(mock.requests.map((request) => request.req.resourcePolicy)).toEqual([
+      { memoryMaxBytes: "134217728" },
+      { memoryMaxBytes: "268435456", cpuMaxMillicores: 2_000 },
+      undefined,
+    ]);
+
+    await session.ping();
+    await session.writeFile({ path: "/tmp/no-policy-read", content: "ok" });
+    expect(reads).toBe(3);
+  });
+
+  test("a retried command retains its original authoritative admission", async () => {
+    const responder = new MockAgentResponder();
+    const requests: Array<{ subject: string; req: ControlRequest }> = [];
+    let admissionReads = 0;
+    let admission: SelfhostedOperationAdmission = {
+      connectionInstanceId: "instance-a",
+      operationResourcePolicy: {
+        memoryMaxBytes: 134_217_728,
+        memoryHighBytes: null,
+        cpuMaxMillicores: null,
+        revision: 1,
+      },
+      operationResourcePolicySupported: true,
+      operationCpuQuotaSupported: false,
+    };
+    const controlRpc: ControlRpc = {
+      request: async (subject, req, opts) => {
+        requests.push({ subject, req });
+        if (requests.length === 1) {
+          admission = {
+            connectionInstanceId: "instance-b",
+            operationResourcePolicy: {
+              memoryMaxBytes: 268_435_456,
+              memoryHighBytes: null,
+              cpuMaxMillicores: null,
+              revision: 2,
+            },
+            operationResourcePolicySupported: true,
+            operationCpuQuotaSupported: false,
+          };
+          return {
+            requestId: req.requestId,
+            error: {
+              code: ErrorCode.ERROR_CODE_DRAINING,
+              message: "the runner is draining",
+              retryable: true,
+              detail: {},
+            },
+          };
+        }
+        return await responder.request(subject, req, opts);
+      },
+    };
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      connectionInstanceId: "stale-constructor-instance",
+      controlRpc,
+      relay: RELAY,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      resolveOperationAdmission: async () => {
+        admissionReads += 1;
+        return admission;
+      },
+    });
+
+    await session.exec({ cmd: "true" });
+
+    expect(admissionReads).toBe(1);
+    expect(requests).toHaveLength(2);
+    expect(requests.map((request) => request.subject)).toEqual([
+      subjectFor(WS, AGENT, "instance-a"),
+      subjectFor(WS, AGENT, "instance-a"),
+    ]);
+    expect(requests.map((request) => request.req.resourcePolicy)).toEqual([
+      { memoryMaxBytes: "134217728" },
+      { memoryMaxBytes: "134217728" },
+    ]);
+  });
+
+  test("configured CPU fails closed on capability drift and never reaches the runner", async () => {
+    const mock = new MockAgentResponder();
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      connectionInstanceId: "instance-a",
+      controlRpc: mock,
+      relay: RELAY,
+      resolveOperationAdmission: async () => ({
+        connectionInstanceId: "instance-b",
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: 1_000,
+          revision: 8,
+        },
+        operationResourcePolicySupported: true,
+        operationCpuQuotaSupported: false,
+      }),
+    });
+
+    const failure = await session.exec({ cmd: "true" }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+      retryable: false,
+    });
+    expect(String((failure as Error).message)).toContain("CPU quotas");
+    expect(mock.requests).toHaveLength(0);
   });
 
   test("configured policy fails closed before dispatch to an incapable runner", async () => {
