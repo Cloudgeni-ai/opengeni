@@ -1,5 +1,20 @@
 # @opengeni/browserd
 
+## 0.1.12
+
+### Patch Changes
+
+- 79f57b5: Prime an exact frame fence when the first observation of a capturable computer target has not yet been viewed, allowing safe first pointer actions without continuous capture overhead. Browser fills now return `outcome_unknown` when a custom editor silently discards the dispatched value instead of claiming completion.
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [c3f0598]
+- Updated dependencies [d2f172c]
+- Updated dependencies [c056063]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/interaction@0.4.4
+
 ## 0.1.11
 
 ### Patch Changes
