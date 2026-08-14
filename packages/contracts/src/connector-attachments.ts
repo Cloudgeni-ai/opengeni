@@ -21,6 +21,9 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const MEDIA_TYPE_PATTERN =
   /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+(?:\s*;\s*[a-z0-9!#$&^_.+-]+=(?:[a-z0-9!#$&^_.+-]+|"[^"\r\n]*"))*$/iu;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u;
+const HTTP_URL_REFERENCE_PATTERN = /(?:https?:)?\/\/[^\s]/iu;
+const PORTABLE_FILENAME_FORBIDDEN_PATTERN = /[<>:"|?*]/u;
+const PORTABLE_FILENAME_RESERVED_PATTERN = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 const textEncoder = new TextEncoder();
 
 function utf8Bytes(value: string): number {
@@ -42,6 +45,10 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
+function containsHttpUrlReference(value: string): boolean {
+  return HTTP_URL_REFERENCE_PATTERN.test(value);
+}
+
 export const ConnectorAttachmentProviderIdentity = z
   .object({
     provider: boundedString(CONNECTOR_ATTACHMENT_PROVIDER_MAX_UTF8_BYTES).regex(PROVIDER_PATTERN),
@@ -51,7 +58,7 @@ export const ConnectorAttachmentProviderIdentity = z
       .refine((value) => !CONTROL_CHARACTER_PATTERN.test(value), {
         message: "must not contain control characters",
       })
-      .refine((value) => !isHttpUrl(value), {
+      .refine((value) => !isHttpUrl(value) && !containsHttpUrlReference(value), {
         message: "must be an opaque provider attachment identity, not a URL",
       }),
   })
@@ -68,15 +75,23 @@ export const ConnectorAttachmentFileName = boundedString(
     (value) =>
       value !== "." &&
       value !== ".." &&
+      value === value.trim() &&
       !value.includes("/") &&
       !value.includes("\\") &&
-      !CONTROL_CHARACTER_PATTERN.test(value),
+      !CONTROL_CHARACTER_PATTERN.test(value) &&
+      !PORTABLE_FILENAME_FORBIDDEN_PATTERN.test(value) &&
+      !/[ .]$/u.test(value) &&
+      !PORTABLE_FILENAME_RESERVED_PATTERN.test(value),
     { message: "must be a safe leaf filename" },
   );
 
 export const ConnectorAttachmentMediaType = boundedString(
   CONNECTOR_ATTACHMENT_MEDIA_TYPE_MAX_UTF8_BYTES,
-).regex(MEDIA_TYPE_PATTERN);
+)
+  .regex(MEDIA_TYPE_PATTERN)
+  .refine((value) => !containsHttpUrlReference(value), {
+    message: "must not contain an HTTP URL reference",
+  });
 
 export const ConnectorAttachmentSha256 = z.string().regex(SHA256_PATTERN);
 

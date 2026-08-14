@@ -80,7 +80,16 @@ describe("connector attachment transfer contract", () => {
     ["path separator", { fileName: "folder/report.txt" }],
     ["backslash", { fileName: "folder\\report.txt" }],
     ["dot segment", { fileName: ".." }],
+    ["Channel A forbidden filename character", { fileName: "report: Q1.pdf" }],
+    ["Channel A reserved filename", { fileName: "CON.txt" }],
     ["invalid media type", { mediaType: "plain text" }],
+    [
+      "URL-bearing media type parameter",
+      {
+        mediaType:
+          'application/octet-stream; source="https://files.example.test/private?signature=value"',
+      },
+    ],
     ["uppercase digest", { contentSha256: "A".repeat(64) }],
     [
       "URL-shaped provider identity",
@@ -97,6 +106,15 @@ describe("connector attachment transfer contract", () => {
         providerAttachmentId: {
           ...baseAttachment.providerAttachmentId,
           value: "  https://files.example.test/private?id=42",
+        },
+      },
+    ],
+    [
+      "protocol-relative URL-shaped provider identity",
+      {
+        providerAttachmentId: {
+          ...baseAttachment.providerAttachmentId,
+          value: "//files.example.test/private?signature=value",
         },
       },
     ],
