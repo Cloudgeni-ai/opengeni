@@ -123,7 +123,18 @@ export function AreaChart(props: {
   };
 
   const activeX =
-    active == null ? null : padL + (active / Math.max(props.labels.length - 1, 1)) * innerW;
+    active == null
+      ? null
+      : padL +
+        (props.labels.length === 1 ? innerW / 2 : (active / (props.labels.length - 1)) * innerW);
+  const activeCell = (() => {
+    if (active == null || activeX == null) return null;
+    if (props.labels.length === 1) return { x: padL, width: innerW };
+    const pointSpacing = innerW / (props.labels.length - 1);
+    const left = active === 0 ? padL : activeX - pointSpacing / 2;
+    const right = active === props.labels.length - 1 ? padL + innerW : activeX + pointSpacing / 2;
+    return { x: left, width: right - left };
+  })();
 
   const ticks = [0, 0.5, 1];
   const formattedValue = (value: number) =>
@@ -243,11 +254,11 @@ export function AreaChart(props: {
         })}
 
         <g clipPath={`url(#${plotClipId})`} data-chart-plot-highlight="clipped">
-          {activeX != null ? (
+          {activeCell != null ? (
             <rect
-              x={activeX - innerW / props.labels.length / 2}
+              x={activeCell.x}
               y={padTop}
-              width={Math.max(innerW / props.labels.length, 12)}
+              width={activeCell.width}
               height={innerH}
               className="fill-fg/[0.04]"
               data-chart-hover-band="aligned"

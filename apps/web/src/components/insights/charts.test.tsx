@@ -30,7 +30,7 @@ afterAll(() => {
 });
 
 describe("AreaChart", () => {
-  test("keeps smoothing control points inside each nonnegative segment", () => {
+  test("keeps smoothing control points inside long zero runs around a spike", () => {
     const path = smoothLine([
       { x: 0, y: 10 },
       { x: 1, y: 10 },
@@ -38,6 +38,7 @@ describe("AreaChart", () => {
       { x: 3, y: 0 },
       { x: 4, y: 10 },
       { x: 5, y: 10 },
+      { x: 6, y: 10 },
     ]);
     const renderedY = [...path.matchAll(/-?\d+(?:\.\d+)?,(-?\d+(?:\.\d+)?)/g)].map((match) =>
       Number(match[1]),
@@ -129,7 +130,7 @@ describe("AreaChart", () => {
     }
   });
 
-  test("positions the hover band once instead of translating it a second time", async () => {
+  test("uses nearest-point hover cells without translating them a second time", async () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -151,14 +152,60 @@ describe("AreaChart", () => {
       });
 
       const labels = container.querySelectorAll("button");
+      for (const [index, expected] of [
+        [0, { x: "36", width: "168" }],
+        [1, { x: "204", width: "336" }],
+        [2, { x: "540", width: "168" }],
+      ] as const) {
+        await act(async () => {
+          labels[index]?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+        });
+
+        const band = container.querySelector('[data-chart-hover-band="aligned"]');
+        expect(band?.getAttribute("x")).toBe(expected.x);
+        expect(band?.getAttribute("width")).toBe(expected.width);
+        expect(band?.getAttribute("transform")).toBeNull();
+        expect(band?.getAttribute("style")).toBeNull();
+      }
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("centers a single bucket while highlighting the full plot", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
       await act(async () => {
-        labels[1]?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+        root.render(
+          <AreaChart
+            labels={["00:00"]}
+            series={[
+              {
+                id: "tokens",
+                label: "Tokens",
+                values: [1],
+                className: "text-brand",
+              },
+            ]}
+          />,
+        );
+      });
+
+      await act(async () => {
+        container
+          .querySelector("button")
+          ?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
       });
 
       const band = container.querySelector('[data-chart-hover-band="aligned"]');
-      expect(band?.getAttribute("x")).toBe("260");
-      expect(band?.getAttribute("transform")).toBeNull();
-      expect(band?.getAttribute("style")).toBeNull();
+      const activeGuide = [...container.querySelectorAll("svg line")].at(-1);
+      expect(band?.getAttribute("x")).toBe("36");
+      expect(band?.getAttribute("width")).toBe("672");
+      expect(activeGuide?.getAttribute("x1")).toBe("372");
+      expect(container.querySelector("circle")?.getAttribute("cx")).toBe("372");
     } finally {
       await act(async () => root.unmount());
       container.remove();
