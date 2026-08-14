@@ -1260,7 +1260,11 @@ export class BrowserControlServer {
         socket.close(1009, "RFB input buffer exceeded");
         return;
       }
-      data.upstream.write(bytes);
+      // Bun may reuse the WebSocket receive buffer after this callback. TCP
+      // writes can outlive the callback under even brief backpressure, so own
+      // the bytes before enqueueing them; otherwise rapid noVNC key packets can
+      // be overwritten by the following packet while slower probes still pass.
+      data.upstream.write(bytes.slice());
       return;
     }
     if (data.pendingBytes + bytes.byteLength > MAX_RFB_INPUT_BUFFER_BYTES) {

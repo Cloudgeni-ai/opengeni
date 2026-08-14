@@ -105,7 +105,7 @@ describe("public React demo mobile product acceptance", () => {
         await navigation.getByRole("button", { name: "Workspace", exact: true }).click();
         await visibleWorkspaceDialog(page).waitFor();
         expect(
-          await page.getByRole("tab", { name: /^Changes/ }).getAttribute("aria-selected"),
+          await page.getByRole("tab", { name: "Files", exact: true }).getAttribute("aria-selected"),
         ).toBe("true");
         await page.getByRole("button", { name: "Close workspace" }).click();
         await visibleWorkspaceDialog(page).waitFor({ state: "hidden" });
@@ -181,7 +181,7 @@ describe("public React demo mobile product acceptance", () => {
     expect(await page.evaluate(() => document.activeElement?.getAttribute("role"))).toBe("tab");
     await page.keyboard.press("ArrowRight");
     expect(
-      await page.getByRole("tab", { name: "Files", exact: true }).getAttribute("aria-selected"),
+      await page.getByRole("tab", { name: "Terminal", exact: true }).getAttribute("aria-selected"),
     ).toBe("true");
     await expectAxeClean(page);
     await capture(page, "390-workspace-files.png");

@@ -191,6 +191,7 @@ import {
   type NormalizedRunCredentialMaterial,
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
+  type ConnectorAttachmentMaterializationRequest,
   createFirstPartyInteractionAttemptToolDefinitions,
   deleteRecordingArtifacts,
   stopRecording as stopRecordingOnBox,
@@ -203,6 +204,7 @@ import {
 } from "./google-drive-publication";
 import { connectionTokenResolverForTurn } from "./mcp-credentials";
 import { buildApiIntegrationServersForTurn } from "./api-integrations";
+import { materializeConnectorAttachmentsInChannel } from "./connector-attachments";
 import {
   allowedFirstPartyMcpToolsForSession,
   assertTurnExecutionPolicyMatchesConfigV1,
@@ -471,7 +473,11 @@ import { executeCodexImageGeneration } from "./codex-image-generation";
 import { imageProviderBindingHash } from "./image-generation-operation";
 import { resolveImageGenerationReferences } from "./image-generation-references";
 import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
-import { SandboxChannelAService, type ChannelASession } from "@opengeni/runtime/sandbox";
+import {
+  ChannelAPartialMutationError,
+  SandboxChannelAService,
+  type ChannelASession,
+} from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import {
   desktopCapableBackend,
@@ -3605,7 +3611,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // Connected machines are the user's own persistence and never dirty the
       // cloud home archive. Every persistable raw-session write batch is fenced
       // against the exact current lease/provider before the provider sees it.
-      if (sandbox.established.backendId === "selfhosted") return await mutation();
+      if (sandbox.established.backendId === "selfhosted") {
+        try {
+          return await mutation();
+        } catch (error) {
+          if (error instanceof ChannelAPartialMutationError) {
+            throw new RoutingMutationOutcomeUnknownError(
+              operation,
+              `Connected Machine workspace mutation "${operation}" partially applied before a later batch item failed; the complete operation was not replayed`,
+              { cause: error },
+            );
+          }
+          throw error;
+        }
+      }
       if (!sandboxGroupId || !sandboxHolderId || !turnId || executionGeneration <= 0) {
         throw new Error("Workspace mutation attempted before exact turn sandbox admission");
       }
@@ -3629,17 +3648,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       try {
         result = await mutation();
       } catch (providerError) {
+        const partialMutation = providerError instanceof ChannelAPartialMutationError;
         try {
           await verifyWorkspaceMutationSettlement(db, {
             ...identity,
             admission,
-            outcome: "rejected",
+            outcome: partialMutation ? "resolved" : "rejected",
           });
         } catch (settlementError) {
           throw new RoutingMutationOutcomeUnknownError(
             operation,
-            `Platform workspace mutation "${operation}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
+            partialMutation
+              ? `Platform workspace mutation "${operation}" partially applied at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`
+              : `Platform workspace mutation "${operation}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
             { cause: settlementError },
+          );
+        }
+        if (partialMutation) {
+          throw new RoutingMutationOutcomeUnknownError(
+            operation,
+            `Platform workspace mutation "${operation}" partially applied before a later batch item failed; the complete operation was not replayed`,
+            { cause: providerError },
           );
         }
         throw providerError;
@@ -6719,6 +6748,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         runSettings.sandboxBackend === "selfhosted" && !machinePrimary
           ? settings.sandboxBackend
           : runSettings.sandboxBackend;
+      const groupBoxImage = rigProviderImageSourceImage(runSettings, groupBoxBackend);
       const sandboxCreationBackend: Settings["sandboxBackend"] =
         settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
           ? groupBoxBackend
@@ -7437,16 +7467,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   backend: groupBoxBackend,
                   os: session.sandboxOs,
                   environment: sandboxEnvironment,
-                  // IMAGE IS SHARED STATE (B3, Modal warm-box path only): the container image
+                  // IMAGE IS SHARED STATE (B3): the container image
                   // this run resolves. The lease stamps it + conflicts on a live shared box
                   // running a DIFFERENT image (solo → durable rotation; N-holders →
-                  // SandboxImageConflictError surfaced as an actionable turn error). Prefer
-                  // the explicit Modal image ref, else the docker image. The selfhosted branch
+                  // SandboxImageConflictError surfaced as an actionable turn error). Select
+                  // the image for the actual group-box backend; a configured Modal image must
+                  // never override a Docker run. The selfhosted branch
                   // (establishSelfhostedTurnSession) NEVER passes
-                  // an image — B3 lives only on this Modal else-branch.
-                  ...((runSettings.modalImageRef ?? runSettings.dockerImage)
+                  // an image — B3 lives only on this managed-box branch.
+                  ...(groupBoxImage
                     ? {
-                        image: runSettings.modalImageRef ?? runSettings.dockerImage,
+                        image: groupBoxImage,
                       }
                     : {}),
                   // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
@@ -7781,6 +7812,44 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       });
       const toolPreparationStartedAt = performance.now();
       let toolPreparationOutcome: "completed" | "failed" = "completed";
+      const materializeConnectorAttachments = async (
+        request: ConnectorAttachmentMaterializationRequest,
+      ) => {
+        throwIfWorkerShuttingDown();
+        throwIfTurnCancelled();
+        let sandbox = resolvedSandbox;
+        if (!sandbox && turnSandboxProvisioner) {
+          sandbox = await turnSandboxProvisioner.get();
+        }
+        const sessionForImport = (lazyOwnedSandbox?.session ??
+          sandbox?.established.session ??
+          sdkOwnedSandboxSession) as ChannelASession | null;
+        if (!sessionForImport) {
+          throw new Error("Connector attachment sandbox is unavailable");
+        }
+        const runAs = sandboxRunAs(runSettings);
+        const channel = new SandboxChannelAService({
+          session: sessionForImport,
+          workspaceRoot: "/workspace",
+          leaseEpoch: sandbox?.leaseEpoch ?? 0,
+          emit: async (events) => {
+            await publish?.(events, true);
+          },
+          ...(runAs ? { runAs } : {}),
+        });
+        return await materializeConnectorAttachmentsInChannel(channel, request, {
+          runMutation: async (mutation) => {
+            if (sandbox && !routingOn) {
+              return await runWorkspaceMutationForSandbox(
+                sandbox,
+                "connectorAttachmentMaterialization",
+                mutation,
+              );
+            }
+            return await mutation();
+          },
+        });
+      };
       try {
         preparedTools = await waitForTurnOperation(
           runtime.prepareTools(runSettings, turnTools, {
@@ -7799,6 +7868,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...(codexAppsAuth ? { codexAppsAuth } : {}),
             resolveCredential,
             onAuthNeeded: publishToolAuthNeeded,
+            materializeConnectorAttachments,
             localMcpServers,
             onPreparationPhase: (measurement) => {
               recordTurnStartupPhase(observability, {
@@ -8511,9 +8581,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 backend: groupBoxBackend,
                 os: session.sandboxOs,
                 environment: sandboxEnvironment,
-                ...((runSettings.modalImageRef ?? runSettings.dockerImage)
+                ...(groupBoxImage
                   ? {
-                      image: runSettings.modalImageRef ?? runSettings.dockerImage,
+                      image: groupBoxImage,
                     }
                   : {}),
                 // The lazy acquire must enforce the same frozen rig authority

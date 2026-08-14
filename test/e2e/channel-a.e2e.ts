@@ -267,7 +267,11 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
     const response = await channelA(suffix, body);
     if (!response.ok) {
       throw new Error(
-        `Channel-A ${suffix} failed with HTTP ${response.status}: ${await response.text()}`,
+        [
+          `Channel-A ${suffix} failed with HTTP ${response.status}: ${await response.text()}`,
+          `[api tail]\n${api.logs().slice(-12_000)}`,
+          `[worker tail]\n${worker.logs().slice(-12_000)}`,
+        ].join("\n"),
       );
     }
     return response;

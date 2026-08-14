@@ -182,6 +182,15 @@ describe("release image workflow contract", () => {
     expect(keepsStableSandboxToolchainBeforeArtifactRuntime(previousOrdering)).toBe(false);
   });
 
+  test("retries the Azure CLI bootstrap in both sandbox images", async () => {
+    for (const path of ["docker/sandbox.Dockerfile", "docker/desktop.Dockerfile"]) {
+      const dockerfile = await readFile(resolve(root, path), "utf8");
+      expect(dockerfile).toContain(
+        "curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL https://aka.ms/InstallAzureCLIDeb",
+      );
+    }
+  });
+
   test("builds Checkov outside the serial sandbox toolchain", async () => {
     const dockerfile = await readFile(resolve(root, "docker/sandbox.Dockerfile"), "utf8");
 

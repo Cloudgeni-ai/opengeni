@@ -820,6 +820,7 @@ export function browserLaunchArguments(
     "--restore-last-session",
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",
+    platform === "linux" ? "--test-type" : null,
     profileCryptoArgument,
     ...validatedAdditional,
   ]
