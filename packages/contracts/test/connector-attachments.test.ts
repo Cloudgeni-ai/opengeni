@@ -106,6 +106,27 @@ describe("connector attachment transfer contract", () => {
     ).toThrow();
   });
 
+  test("rejects short private source credentials embedded in public metadata", () => {
+    expect(() =>
+      ConnectorAttachmentTransferEnvelope.parse({
+        version: 1,
+        attachments: [
+          {
+            ...baseAttachment,
+            providerAttachmentId: {
+              ...baseAttachment.providerAttachmentId,
+              value: "provider-file-abc",
+            },
+            source: {
+              ...baseAttachment.source,
+              url: "https://files.example.test/download?sig=abc",
+            },
+          },
+        ],
+      }),
+    ).toThrow();
+  });
+
   test.each([
     ["path separator", { fileName: "folder/report.txt" }],
     ["backslash", { fileName: "folder\\report.txt" }],

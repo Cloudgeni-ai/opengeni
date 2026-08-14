@@ -194,7 +194,7 @@ describe("connector attachment MCP projection", () => {
   });
 
   test("rejects signed source credentials copied into public metadata before materialization", async () => {
-    const credential = "SIGNED_TOKEN_9f1d";
+    const credential = "abc";
     let materializerCalled = false;
     await expect(
       projectConnectorAttachmentTransfers(
@@ -205,10 +205,10 @@ describe("connector attachment MCP projection", () => {
               attachments: [
                 {
                   ...attachment,
-                  fileName: `${credential}.bin`,
+                  fileName: `file-${credential}.bin`,
                   source: {
                     ...attachment.source,
-                    url: `https://files.example.test/download?signature=${credential}`,
+                    url: `https://files.example.test/download?sig=${credential}`,
                   },
                 },
               ],

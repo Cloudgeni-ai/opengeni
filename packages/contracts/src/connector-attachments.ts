@@ -98,7 +98,7 @@ function privateUrlCredentialValues(value: string): string[] {
 }
 
 function publicMetadataContainsCredential(publicValue: string, credential: string): boolean {
-  return credential.length >= 4 ? publicValue.includes(credential) : publicValue === credential;
+  return publicValue.includes(credential);
 }
 
 export const ConnectorAttachmentProviderIdentity = z
