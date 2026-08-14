@@ -53,7 +53,10 @@ handling is fail-closed and ordered:
 1. Parse the strict, versioned envelope and reject unsafe filenames, invalid
    media types, non-lowercase SHA-256 values, expired sources, non-HTTP(S)
    sources, URL userinfo/fragments, more than 16 attachments, or any attachment
-   larger than 5,000,000,000 bytes.
+   larger than 5,000,000,000 bytes. Public identity and content-type fields
+   cannot contain HTTP URL references, and credential-bearing query values from
+   the private source URL cannot be copied into the provider identity, filename,
+   or content type.
 2. Require a `connectionRef`-backed server with an explicit provider binding,
    require every attachment identity to use that exact provider namespace, and
    re-resolve its credential after the provider call with the exact workspace

@@ -193,6 +193,42 @@ describe("connector attachment MCP projection", () => {
     ).rejects.toThrow("rejected");
   });
 
+  test("rejects signed source credentials copied into public metadata before materialization", async () => {
+    const credential = "SIGNED_TOKEN_9f1d";
+    let materializerCalled = false;
+    await expect(
+      projectConnectorAttachmentTransfers(
+        transferResult({
+          _meta: {
+            [CONNECTOR_ATTACHMENT_TRANSFER_META_KEY]: {
+              version: 1,
+              attachments: [
+                {
+                  ...attachment,
+                  fileName: `${credential}.bin`,
+                  source: {
+                    ...attachment.source,
+                    url: `https://files.example.test/download?signature=${credential}`,
+                  },
+                },
+              ],
+            },
+          },
+        }),
+        {
+          serverId: "connector",
+          toolName: "download_attachment",
+          operationId,
+          authorizeAndMaterialize: async () => {
+            materializerCalled = true;
+            return matchingReceipt();
+          },
+        },
+      ),
+    ).rejects.toThrow("rejected");
+    expect(materializerCalled).toBe(false);
+  });
+
   test("rejects structured content beside an out-of-band transfer", async () => {
     await expect(
       projectConnectorAttachmentTransfers(

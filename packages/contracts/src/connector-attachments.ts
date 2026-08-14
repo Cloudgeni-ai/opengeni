@@ -49,6 +49,58 @@ function containsHttpUrlReference(value: string): boolean {
   return HTTP_URL_REFERENCE_PATTERN.test(value);
 }
 
+function isPrivateUrlCredentialQueryName(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/[^a-z0-9]/gu, "");
+  return (
+    normalized === "sig" ||
+    normalized.endsWith("signature") ||
+    normalized.endsWith("token") ||
+    normalized.endsWith("credential") ||
+    normalized.endsWith("secret") ||
+    normalized.endsWith("password") ||
+    normalized.endsWith("passcode") ||
+    normalized.endsWith("authorization") ||
+    normalized.endsWith("apikey") ||
+    normalized.endsWith("accesskey") ||
+    normalized.endsWith("securitytoken") ||
+    normalized.endsWith("sas") ||
+    normalized === "googleaccessid"
+  );
+}
+
+function privateUrlCredentialValues(value: string): string[] {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return [];
+  }
+  const credentials = new Set<string>();
+  for (const [name, credential] of parsed.searchParams) {
+    if (credential && isPrivateUrlCredentialQueryName(name)) credentials.add(credential);
+  }
+  for (const pair of parsed.search.slice(1).split("&")) {
+    if (!pair) continue;
+    const separator = pair.indexOf("=");
+    const rawName = separator === -1 ? pair : pair.slice(0, separator);
+    const rawCredential = separator === -1 ? "" : pair.slice(separator + 1);
+    let decodedName: string;
+    try {
+      decodedName = decodeURIComponent(rawName.replace(/\+/gu, " "));
+    } catch {
+      continue;
+    }
+    if (rawCredential && isPrivateUrlCredentialQueryName(decodedName)) {
+      credentials.add(rawCredential);
+    }
+  }
+  return [...credentials];
+}
+
+function publicMetadataContainsCredential(publicValue: string, credential: string): boolean {
+  return credential.length >= 4 ? publicValue.includes(credential) : publicValue === credential;
+}
+
 export const ConnectorAttachmentProviderIdentity = z
   .object({
     provider: boundedString(CONNECTOR_ATTACHMENT_PROVIDER_MAX_UTF8_BYTES).regex(PROVIDER_PATTERN),
@@ -140,7 +192,23 @@ export const ConnectorAttachmentTransfer = z
     contentSha256: ConnectorAttachmentSha256,
     source: ConnectorAttachmentPrivateSource,
   })
-  .strict();
+  .strict()
+  .superRefine((attachment, context) => {
+    const publicValues = [
+      attachment.providerAttachmentId.value,
+      attachment.fileName,
+      attachment.mediaType,
+    ];
+    for (const credential of privateUrlCredentialValues(attachment.source.url)) {
+      if (publicValues.some((value) => publicMetadataContainsCredential(value, credential))) {
+        context.addIssue({
+          code: "custom",
+          message: "private source credentials must not appear in public attachment metadata",
+        });
+        return;
+      }
+    }
+  });
 export type ConnectorAttachmentTransfer = z.infer<typeof ConnectorAttachmentTransfer>;
 
 export const ConnectorAttachmentTransferEnvelope = z

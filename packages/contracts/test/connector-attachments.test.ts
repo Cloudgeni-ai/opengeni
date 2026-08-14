@@ -77,6 +77,36 @@ describe("connector attachment transfer contract", () => {
   });
 
   test.each([
+    [
+      "provider identity",
+      {
+        providerAttachmentId: {
+          ...baseAttachment.providerAttachmentId,
+          value: "provider-file-SIGNED_TOKEN_9f1d",
+        },
+      },
+    ],
+    ["filename", { fileName: "SIGNED_TOKEN_9f1d.bin" }],
+    ["media type", { mediaType: 'application/octet-stream; token="SIGNED_TOKEN_9f1d"' }],
+  ])("rejects private source credentials copied into public %s", (_label, override) => {
+    expect(() =>
+      ConnectorAttachmentTransferEnvelope.parse({
+        version: 1,
+        attachments: [
+          {
+            ...baseAttachment,
+            ...override,
+            source: {
+              ...baseAttachment.source,
+              url: "https://files.example.test/download?signature=SIGNED_TOKEN_9f1d",
+            },
+          },
+        ],
+      }),
+    ).toThrow();
+  });
+
+  test.each([
     ["path separator", { fileName: "folder/report.txt" }],
     ["backslash", { fileName: "folder\\report.txt" }],
     ["dot segment", { fileName: ".." }],
