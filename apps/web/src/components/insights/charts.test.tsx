@@ -92,6 +92,27 @@ describe("AreaChart", () => {
       });
       expect(container.querySelectorAll("circle")).toHaveLength(180);
       expect(container.querySelectorAll("button").length).toBeLessThanOrEqual(8);
+
+      const slider = container.querySelector('[role="slider"]') as SVGSVGElement;
+      expect(slider.getAttribute("aria-valuemax")).toBe("179");
+      await act(async () => {
+        slider.focus();
+        slider.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+      });
+      expect(slider.getAttribute("aria-valuenow")).toBe("179");
+      expect(slider.getAttribute("aria-valuetext")).toBe("day-180. Tokens: 180");
+
+      await act(async () => {
+        slider.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+      });
+      expect(slider.getAttribute("aria-valuenow")).toBe("178");
+      expect(slider.getAttribute("aria-valuetext")).toBe("day-179. Tokens: 179");
+
+      await act(async () => {
+        slider.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+      });
+      expect(slider.getAttribute("aria-valuenow")).toBe("0");
+      expect(slider.getAttribute("aria-valuetext")).toBe("day-1. Tokens: 1.0");
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -206,6 +227,11 @@ describe("AreaChart", () => {
       expect(band?.getAttribute("width")).toBe("672");
       expect(activeGuide?.getAttribute("x1")).toBe("372");
       expect(container.querySelector("circle")?.getAttribute("cx")).toBe("372");
+      expect(
+        container
+          .querySelector('[data-chart-tooltip="aligned"]')
+          ?.getAttribute("data-chart-tooltip-position"),
+      ).toBe("50");
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -243,6 +269,51 @@ describe("AreaChart", () => {
 
       await act(async () => middleLabel.blur());
       expect(container.querySelector('[data-chart-hover-band="aligned"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("restores keyboard selection after pointer hover ends", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          <AreaChart
+            labels={["00:00", "01:00", "02:00"]}
+            series={[
+              {
+                id: "tokens",
+                label: "Tokens",
+                values: [0, 1, 0],
+                className: "text-brand",
+              },
+            ]}
+          />,
+        );
+      });
+
+      const labels = container.querySelectorAll("button");
+      const middleLabel = labels[1] as HTMLButtonElement;
+      const firstLabel = labels[0] as HTMLButtonElement;
+      await act(async () => middleLabel.focus());
+      expect([...container.querySelectorAll("svg line")].at(-1)?.getAttribute("x1")).toBe("372");
+
+      await act(async () => {
+        firstLabel.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      });
+      expect([...container.querySelectorAll("svg line")].at(-1)?.getAttribute("x1")).toBe("36");
+
+      await act(async () => {
+        firstLabel.dispatchEvent(
+          new MouseEvent("mouseout", { bubbles: true, relatedTarget: container.firstElementChild }),
+        );
+      });
+      expect([...container.querySelectorAll("svg line")].at(-1)?.getAttribute("x1")).toBe("372");
+      expect(document.activeElement).toBe(middleLabel);
     } finally {
       await act(async () => root.unmount());
       container.remove();
