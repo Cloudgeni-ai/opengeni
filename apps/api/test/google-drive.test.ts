@@ -514,7 +514,15 @@ describe("Google Drive local source preview", () => {
     ]);
     expect(google.fileListQueries).toEqual(["'root' in parents and trashed = false"]);
 
-    const save = await app(google.fetch).request(
+    const releaseReadinessLimits = {
+      googleDriveSyncMaxItems: 321,
+      googleDriveSyncMaxBytes: 654_000_000,
+      googleDriveSyncMaxFileBytes: 54_000_000,
+      googleDriveSyncMaxProviderRequests: 876,
+      googleDriveSyncMaxElapsedSeconds: 240,
+      googleDriveSyncMaxFailureDetails: 17,
+    };
+    const save = await app(google.fetch, releaseReadinessLimits).request(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/source`,
       {
         method: "POST",
@@ -598,13 +606,35 @@ describe("Google Drive local source preview", () => {
         expect.objectContaining({
           status: "active",
           schedule: { type: "interval", everySeconds: 3_600 },
-          action: expect.objectContaining({ kind: "knowledge_source_sync" }),
+          action: expect.objectContaining({
+            kind: "knowledge_source_sync",
+            limits: expect.objectContaining({
+              maxItems: 321,
+              maxBytes: 654_000_000,
+              maxFileBytes: 54_000_000,
+              maxProviderRequests: 876,
+              maxElapsedSeconds: 240,
+              maxFailureDetails: 17,
+              maxConcurrency: 4,
+            }),
+          }),
           metadata: expect.objectContaining({ externalSourceId: "folder-1" }),
         }),
         expect.objectContaining({
           status: "active",
           schedule: { type: "interval", everySeconds: 3_600 },
-          action: expect.objectContaining({ kind: "knowledge_source_sync" }),
+          action: expect.objectContaining({
+            kind: "knowledge_source_sync",
+            limits: expect.objectContaining({
+              maxItems: 321,
+              maxBytes: 654_000_000,
+              maxFileBytes: 54_000_000,
+              maxProviderRequests: 876,
+              maxElapsedSeconds: 240,
+              maxFailureDetails: 17,
+              maxConcurrency: 4,
+            }),
+          }),
           metadata: expect.objectContaining({ externalSourceId: "root" }),
         }),
       ]),

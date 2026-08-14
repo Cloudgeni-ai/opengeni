@@ -131,6 +131,94 @@ The dev stack can select another API or web port if the defaults are occupied.
 If that happens, update both base URLs and the Google authorized redirect URI
 to the exact ports printed by the dev stack.
 
+## Provider-free release-readiness receipt
+
+Run the source-controlled readiness command from the exact candidate checkout:
+
+```bash
+bun run deployment:google-drive-readiness
+```
+
+The command parses the ordinary OpenGeni runtime configuration and emits one
+secret-safe JSON receipt with schema
+`opengeni.google-drive-release-readiness.v1`. It verifies integration
+enablement, the presence of the OAuth client pair, signed-state and credential
+encryption secrets, the public callback origin, structured logs, and metrics.
+It prints only the derived callback URL and numeric budgets; it never prints
+secret values, OAuth tokens, provider response bodies, or request URLs. The
+receipt always states `providerCallsPerformed: false` and makes no Google API,
+deployment, database, or Kubernetes call.
+
+Exit status `0` means the local configuration checks passed, `2` means one or
+more readiness checks blocked, and `3` means the runtime configuration was
+invalid. A successful receipt is reusable source evidence only. It does not
+prove that every declared Drive source-security dependency is merged, authorize
+a non-production real-provider test, authorize a deployment, or establish
+Google verification, security-assessment, legal, or production acceptance.
+
+The configurable source budgets below are validated at process startup and
+persisted into every newly created or authorizedly updated Drive sync Schedule.
+Existing schedules retain their previously persisted limits until an authorized
+source save updates them.
+
+| Environment variable | Default | Validated purpose |
+| --- | ---: | --- |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ITEMS` | `500` | Maximum items examined by one source run. |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_BYTES` | `500000000` | Maximum total content bytes accepted by one run. |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FILE_BYTES` | `100000000` | Maximum bytes for one file; must not exceed the total-byte limit. |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_PROVIDER_REQUESTS` | `1000` | Maximum logical provider operations charged to one run. |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ELAPSED_SECONDS` | `300` | Maximum cumulative source-run elapsed time. |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FAILURE_DETAILS` | `25` | Maximum bounded per-item failure details retained in a result. |
+| `OPENGENI_GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MS` | `30000` | Per-attempt timeout for a Drive HTTP request. |
+| `OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_ATTEMPTS` | `3` | Maximum physical attempts for one retryable operation, including the first attempt. |
+| `OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS` | `250` | Initial exponential retry delay. |
+| `OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS` | `5000` | Maximum delay for one retry; must be at least the initial delay. |
+| `OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_BUDGET_MS` | `15000` | Maximum cumulative retry delay for one logical operation; must be at least the initial delay. |
+
+Bounded retries cover start-page-token, changes-page, metadata, folder-list,
+download, and export requests. Only transport failures, HTTP `429`, and HTTP
+`5xx` responses are retried; permanent provider responses retain the existing
+credential, permission, cursor, and reconnect classifications. Retry delay
+honors a bounded `Retry-After` value and otherwise uses capped exponential
+backoff. Exhausting the local policy returns control to the durable sync
+workflow. Physical retry attempts have separate telemetry and do not consume
+additional units from the durable source run's logical provider-request budget.
+
+Use `deploy/helm/opengeni/values.google-drive-readiness.example.yaml` as a
+non-secret values overlay during review. Its referenced runtime Secret must
+provide `OPENGENI_INTEGRATIONS_STATE_SECRET`,
+`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, `OPENGENI_GOOGLE_DRIVE_CLIENT_ID`, and
+`OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET`; never put their values in Helm values or
+readiness evidence.
+
+### Sync-health evidence and response
+
+The canonical `Google Drive sync` Grafana dashboard reports run outcomes,
+failure ratio, reconnect-required events, p95 terminal activity-batch duration, provider attempts and
+retries, explicit limit hits, and bounded terminal failure reasons. The Helm
+chart adds exact namespace/release/environment/provider-scoped alerts for a
+sustained failure ratio, reconnect-required events, and explicit limit hits.
+Structured terminal logs contain bounded reason and numeric counters only; they
+must not contain provider URLs, headers, bodies, tokens, or secrets.
+
+Operators should respond to reconnect-required alerts through the normal
+user-owned connection lifecycle, not by copying credentials. Investigate
+failure reasons and retry telemetry before increasing limits or retry budgets.
+A limit-hit alert is evidence that the configured safety boundary worked, not
+automatic authority to widen it.
+
+Release progression remains explicitly staged:
+
+1. Produce source-only tests, type checks, static chart/dashboard evidence, and
+   the provider-free readiness receipt from the exact candidate.
+2. Keep release acceptance blocked until every declared Drive source-security
+   dependency is merged and reconciled against the candidate.
+3. Run any real-provider acceptance only in a separately owned non-production
+   Google project after an authorized human records explicit approval.
+4. Require a separate explicit human approval for deployment or production
+   live-provider acceptance. No source merge or non-production result supplies
+   that authority.
+
 ## Connection lifecycle and recovery
 
 The Capabilities card projects one explicit, durable state for the current

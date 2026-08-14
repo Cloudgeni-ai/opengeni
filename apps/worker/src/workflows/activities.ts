@@ -1,5 +1,9 @@
 import { ActivityCancellationType, proxyActivities } from "@temporalio/workflow";
 import type * as activities from "../activities";
+import {
+  KNOWLEDGE_SOURCE_SYNC_ACTIVITY_HEARTBEAT_TIMEOUT_MS,
+  KNOWLEDGE_SOURCE_SYNC_ACTIVITY_MAXIMUM_ATTEMPTS,
+} from "../knowledge-source-sync-activity-policy";
 
 type WorkflowControlActivities = Pick<
   typeof activities,
@@ -118,12 +122,12 @@ export const knowledgeSourceSyncActivity = proxyActivities<
   Pick<typeof activities, "runKnowledgeSourceSyncBatch">
 >({
   startToCloseTimeout: "1 hour",
-  heartbeatTimeout: "2 minutes",
+  heartbeatTimeout: KNOWLEDGE_SOURCE_SYNC_ACTIVITY_HEARTBEAT_TIMEOUT_MS,
   retry: {
     initialInterval: "2 seconds",
     backoffCoefficient: 2,
     maximumInterval: "1 minute",
-    maximumAttempts: 5,
+    maximumAttempts: KNOWLEDGE_SOURCE_SYNC_ACTIVITY_MAXIMUM_ATTEMPTS,
   },
 });
 
