@@ -10,6 +10,7 @@ import {
 import type { Settings } from "@opengeni/config";
 import {
   API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
+  ApiIntegrationOAuthConnectionMetadata,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   signDelegatedAccessToken,
@@ -178,12 +179,15 @@ async function seedLegacyGoogleDriveConnection(
       }),
     ),
     grantedScopes: legacyScopes,
-    metadata: {
+    metadata: ApiIntegrationOAuthConnectionMetadata.parse({
       credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
       providerFamily: "google",
       providerPrincipalId: "google-principal-1",
+      providerEmail: "google.user@example.com",
+      providerDisplayName: "Google User",
       authorizedDefinitionIds: [GOOGLE_DRIVE_INTEGRATION_DEFINITION.id],
-    },
+      verifiedAt: new Date().toISOString(),
+    }),
     createdBySubjectId: workspace.subjectId,
     updatedBySubjectId: workspace.subjectId,
     credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
