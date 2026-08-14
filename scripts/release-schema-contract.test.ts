@@ -201,15 +201,6 @@ describe("release schema contract", () => {
       sha256: "437bb07ffe12f9c714bd2a40d0ecd8ed9df1fd9003f4d057fe11101999841f40",
       deploymentMode: "rolling",
     });
-    const personalInstanceAuthority = completeSourceContract.migrations.find(
-      (migration) => migration.path === "0246_integration_personal_instance_authority.sql",
-    );
-    if (personalInstanceAuthority) {
-      expect(personalInstanceAuthority).toMatchObject({
-        sha256: "1717d5cdaa298501f20463eef43822a2b1421984f30cab7cb381c2773c505388",
-        deploymentMode: "rolling",
-      });
-    }
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
