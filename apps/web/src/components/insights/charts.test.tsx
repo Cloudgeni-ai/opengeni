@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import { AreaChart } from "./charts";
+import { AreaChart, smoothLine } from "./charts";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -30,6 +30,23 @@ afterAll(() => {
 });
 
 describe("AreaChart", () => {
+  test("keeps smoothing control points inside each nonnegative segment", () => {
+    const path = smoothLine([
+      { x: 0, y: 10 },
+      { x: 1, y: 10 },
+      { x: 2, y: 10 },
+      { x: 3, y: 0 },
+      { x: 4, y: 10 },
+      { x: 5, y: 10 },
+    ]);
+    const renderedY = [...path.matchAll(/-?\d+(?:\.\d+)?,(-?\d+(?:\.\d+)?)/g)].map((match) =>
+      Number(match[1]),
+    );
+
+    expect(Math.min(...renderedY)).toBeGreaterThanOrEqual(0);
+    expect(Math.max(...renderedY)).toBeLessThanOrEqual(10);
+  });
+
   test("renders an explicit empty state instead of building invalid SVG paths", async () => {
     const container = document.createElement("div");
     document.body.append(container);
@@ -106,6 +123,42 @@ describe("AreaChart", () => {
       expect(clipPath).not.toBeNull();
       expect(highlight?.getAttribute("clip-path")).toBe(`url(#${clipPath?.id})`);
       expect(container.querySelector("svg")?.classList.contains("overflow-hidden")).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("positions the hover band once instead of translating it a second time", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          <AreaChart
+            labels={["00:00", "01:00", "02:00"]}
+            series={[
+              {
+                id: "tokens",
+                label: "Tokens",
+                values: [0, 1, 0],
+                className: "text-brand",
+              },
+            ]}
+          />,
+        );
+      });
+
+      const labels = container.querySelectorAll("button");
+      await act(async () => {
+        labels[1]?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      });
+
+      const band = container.querySelector('[data-chart-hover-band="aligned"]');
+      expect(band?.getAttribute("x")).toBe("260");
+      expect(band?.getAttribute("transform")).toBeNull();
+      expect(band?.getAttribute("style")).toBeNull();
     } finally {
       await act(async () => root.unmount());
       container.remove();

@@ -38,7 +38,7 @@ export function donutTone(index: number): string {
   return DONUT_TONES[index % DONUT_TONES.length]!;
 }
 
-function smoothLine(points: Array<{ x: number; y: number }>): string {
+export function smoothLine(points: Array<{ x: number; y: number }>): string {
   if (points.length === 0) return "";
   if (points.length === 1) return `M${points[0]!.x},${points[0]!.y}`;
   let d = `M${points[0]!.x},${points[0]!.y}`;
@@ -48,9 +48,11 @@ function smoothLine(points: Array<{ x: number; y: number }>): string {
     const p2 = points[i + 1]!;
     const p3 = points[i + 2] ?? p2;
     const cp1x = p1.x + (p2.x - p0.x) / 6;
-    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const minSegmentY = Math.min(p1.y, p2.y);
+    const maxSegmentY = Math.max(p1.y, p2.y);
+    const cp1y = Math.max(minSegmentY, Math.min(maxSegmentY, p1.y + (p2.y - p0.y) / 6));
     const cp2x = p2.x - (p3.x - p1.x) / 6;
-    const cp2y = p2.y - (p3.y - p1.y) / 6;
+    const cp2y = Math.max(minSegmentY, Math.min(maxSegmentY, p2.y - (p3.y - p1.y) / 6));
     d += ` C${cp1x},${cp1y} ${cp2x},${cp2y} ${p2.x},${p2.y}`;
   }
   return d;
@@ -242,15 +244,13 @@ export function AreaChart(props: {
 
         <g clipPath={`url(#${plotClipId})`} data-chart-plot-highlight="clipped">
           {activeX != null ? (
-            <motion.rect
+            <rect
               x={activeX - innerW / props.labels.length / 2}
               y={padTop}
               width={Math.max(innerW / props.labels.length, 12)}
               height={innerH}
               className="fill-fg/[0.04]"
-              initial={false}
-              animate={{ x: activeX - innerW / props.labels.length / 2 }}
-              transition={{ type: "spring", stiffness: 380, damping: 36 }}
+              data-chart-hover-band="aligned"
             />
           ) : null}
         </g>
