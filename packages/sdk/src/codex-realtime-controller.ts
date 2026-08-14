@@ -24,7 +24,6 @@ import type {
   CodexRealtimeWebrtcSession,
 } from "./codex-realtime";
 import { OpenGeniApiError } from "./errors";
-import { SessionRealtimeInboundEntry as SessionRealtimeInboundEntrySchema } from "@opengeni/contracts";
 import type {
   ActivateCodexRealtimeConnectionRequest,
   BeginSessionRealtimeRequest,
@@ -55,6 +54,24 @@ const OWNER_RECORD_VERSION = 1;
 const OWNER_DELEGATION_REPLAY_VERSION = 1;
 const OWNER_DELEGATION_REPLAY_MAX_CALLS = 4_096;
 const OWNER_DELEGATION_REPLAY_MAX_BYTES = 4 * 1024 * 1024;
+const SESSION_REALTIME_INBOUND_ENTRY_KEYS = new Set([
+  "operationId",
+  "kind",
+  "role",
+  "providerEventId",
+  "delegationItemId",
+  "text",
+  "payload",
+  "modelContext",
+]);
+const SESSION_REALTIME_INBOUND_KINDS = new Set([
+  "user_transcript",
+  "assistant_transcript",
+  "delegation_call",
+  "interruption",
+  "error",
+]);
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 export type CodexRealtimeControllerStatus =
   | "idle"
@@ -1519,20 +1536,18 @@ function readOwnerDelegationReplay(value: unknown): OwnerDelegationReplay | unde
   const pendingDelegations: SessionRealtimeInboundEntry[] = [];
   const pendingIds = new Set<string>();
   for (const candidate of record.pendingDelegations) {
-    const parsed = SessionRealtimeInboundEntrySchema.safeParse(candidate);
-    const raw = recordValue(candidate);
+    const parsed = readSessionRealtimeInboundEntry(candidate);
     if (
-      !parsed.success ||
-      parsed.data.kind !== "delegation_call" ||
-      !parsed.data.delegationItemId ||
-      parsed.data.modelContext !== raw?.modelContext ||
-      accepted.has(parsed.data.delegationItemId) ||
-      pendingIds.has(parsed.data.delegationItemId)
+      !parsed ||
+      parsed.kind !== "delegation_call" ||
+      !parsed.delegationItemId ||
+      accepted.has(parsed.delegationItemId) ||
+      pendingIds.has(parsed.delegationItemId)
     ) {
       return null;
     }
-    pendingIds.add(parsed.data.delegationItemId);
-    pendingDelegations.push(parsed.data);
+    pendingIds.add(parsed.delegationItemId);
+    pendingDelegations.push(parsed);
   }
   const replay: OwnerDelegationReplay = {
     version: OWNER_DELEGATION_REPLAY_VERSION,
@@ -1545,6 +1560,51 @@ function readOwnerDelegationReplay(value: unknown): OwnerDelegationReplay | unde
     return null;
   }
   return replay;
+}
+
+function readSessionRealtimeInboundEntry(value: unknown): SessionRealtimeInboundEntry | null {
+  const record = recordValue(value);
+  if (
+    !record ||
+    Object.keys(record).some((key) => !SESSION_REALTIME_INBOUND_ENTRY_KEYS.has(key)) ||
+    typeof record.operationId !== "string" ||
+    !UUID_PATTERN.test(record.operationId) ||
+    typeof record.kind !== "string" ||
+    !SESSION_REALTIME_INBOUND_KINDS.has(record.kind) ||
+    !optionalNullableEnum(record.role, ["user", "assistant"]) ||
+    !optionalNullableBoundedString(record.providerEventId, 1_024) ||
+    !optionalNullableBoundedString(record.delegationItemId, 1_024) ||
+    !optionalNullableBoundedString(record.text, 131_072) ||
+    (record.payload !== undefined && recordValue(record.payload) === null) ||
+    !optionalModelContext(record.modelContext)
+  ) {
+    return null;
+  }
+  return record as SessionRealtimeInboundEntry;
+}
+
+function optionalNullableEnum(value: unknown, allowed: readonly string[]): boolean {
+  return (
+    value === undefined || value === null || (typeof value === "string" && allowed.includes(value))
+  );
+}
+
+function optionalNullableBoundedString(value: unknown, maxLength: number): boolean {
+  return (
+    value === undefined ||
+    value === null ||
+    (typeof value === "string" && value.length <= maxLength)
+  );
+}
+
+function optionalModelContext(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (typeof value === "string" &&
+      value.length >= 1 &&
+      value.length <= 32_768 &&
+      value.trim() === value)
+  );
 }
 
 function defaultStorage(): CodexRealtimeOwnerStorage | undefined {

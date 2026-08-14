@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { SessionRealtimeInboundEntry as SessionRealtimeInboundEntrySchema } from "@opengeni/contracts";
 import {
   createCodexRealtimeController,
   projectSessionRealtimeLifecycle,
@@ -811,6 +812,75 @@ describe("Codex realtime browser controller", () => {
     });
     controller.close();
     expect(storage.values.has(key)).toBe(true);
+  });
+
+  test("rejects persisted delegation replay entries outside the exact mirrored wire contract", () => {
+    const key = `opengeni:codex-realtime-owner:${WORKSPACE_ID}:${SESSION_ID}`;
+    const operationId = "11111111-1111-4111-8111-111111111111";
+    const baseEntry = {
+      operationId,
+      kind: "delegation_call",
+      role: "user",
+      providerEventId: "persisted-provider-event",
+      delegationItemId: "persisted-delegation",
+      text: "delegate across reload",
+      payload: {},
+      modelContext: "exact persisted context",
+    };
+    const cases: Array<{
+      entry: Record<string, unknown>;
+      canonicalAccepted: boolean;
+    }> = [
+      { entry: { ...baseEntry, unexpected: true }, canonicalAccepted: false },
+      { entry: { ...baseEntry, operationId: "not-a-uuid" }, canonicalAccepted: false },
+      { entry: { ...baseEntry, role: "system" }, canonicalAccepted: false },
+      { entry: { ...baseEntry, providerEventId: "x".repeat(1_025) }, canonicalAccepted: false },
+      { entry: { ...baseEntry, payload: [] }, canonicalAccepted: false },
+      {
+        entry: { ...baseEntry, modelContext: "\texact persisted context\t" },
+        canonicalAccepted: true,
+      },
+    ];
+
+    for (const { entry, canonicalAccepted } of cases) {
+      expect(SessionRealtimeInboundEntrySchema.safeParse(entry).success).toBe(canonicalAccepted);
+      const storage = storageFixture({
+        [key]: JSON.stringify({
+          version: 1,
+          workspaceId: WORKSPACE_ID,
+          sessionId: SESSION_ID,
+          operationId,
+          browserInstanceId: "22222222-2222-4222-8222-222222222222",
+          ownerKey: "opengeni-realtime-owner:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          delegationReplay: {
+            version: 1,
+            acceptedDelegationItemIds: [],
+            pendingDelegations: [entry],
+          },
+        }),
+      });
+      const controller = createCodexRealtimeController({
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        storage,
+        randomUUID: uuidSource(),
+        ...noIntervals(),
+        client: {
+          beginSessionRealtime: async () => ({ mode: mode(), replay: false }),
+          negotiateCodexRealtimeWebrtc: async () => {
+            throw new Error("invalid owner proof must not negotiate");
+          },
+          activateCodexRealtimeConnection: async () => ({ mode: mode(), replay: false }),
+          heartbeatSessionRealtime: async () => ({ mode: mode(), replay: false }),
+          syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+          endSessionRealtime: async () => ({ mode: mode({ state: "ended" }), replay: false }),
+        },
+      });
+
+      expect(controller.snapshot().status).toBe("idle");
+      expect(storage.values.has(key)).toBe(false);
+      controller.close();
+    }
   });
 
   test("rotates at OpenGeni's proactive-rotation interval, reuses media, and retires the old generation only after activation", async () => {

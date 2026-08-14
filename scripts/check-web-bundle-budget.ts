@@ -22,10 +22,8 @@ const budgets = {
   // session graph includes the small shared interaction-invalidation chunk;
   // live media renderers and browser/computer controls remain lazy. Workspace
   // channels and the "For you" rail entry add always-loaded rail code and one
-  // more shared-chunk boundary in both graphs. Exact per-message realtime
-  // application context redistributes the direct-session graph across one
-  // additional static chunk without materially increasing its byte totals.
-  // Keep tight headroom above the measured production graph.
+  // more shared-chunk boundary in both graphs. Keep tight headroom above the
+  // measured production graph.
   initialRaw: 1448 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
@@ -35,7 +33,7 @@ const budgets = {
   initialFiles: 17,
   directSessionRaw: 1990 * kib,
   directSessionGzip: 552 * kib,
-  directSessionFiles: 20,
+  directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
   cssGzip: 31 * kib,
