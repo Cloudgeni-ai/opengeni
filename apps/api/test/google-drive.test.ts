@@ -452,7 +452,7 @@ describe("Google Drive local source preview", () => {
     const connected = await connect(workspace, google);
     expect(connected.callback.headers.get("location")).toContain("google_drive=connected");
     expect(connected.connection).toMatchObject({
-      grantedScopes: ["openid", GOOGLE_DRIVE_FULL_SCOPE],
+      grantedScopes: ["openid", GOOGLE_DRIVE_FULL_SCOPE].sort(),
       metadata: { accessMode: "readonly" },
     });
     expect(google.apiAuthorizationHeaders).toEqual(["Bearer google-access-token"]);

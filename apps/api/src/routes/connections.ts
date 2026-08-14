@@ -431,7 +431,6 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
       ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
       ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
-      ...(c.req.query("picked_file_ids") ? { pickedFileIds: c.req.query("picked_file_ids") } : {}),
       requestUrl: c.req.url,
     });
     return c.redirect(result.redirectTo, 302);
@@ -558,6 +557,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
       ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
       ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
+      ...(c.req.query("picked_file_ids") ? { pickedFileIds: c.req.query("picked_file_ids") } : {}),
       requestUrl: c.req.url,
     };
     const result = await completeGoogleDriveOAuthCallback(deps, input);
