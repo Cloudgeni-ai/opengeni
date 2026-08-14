@@ -237,7 +237,7 @@ function xaiGrokAvailabilityFor(input: {
 function availabilityFor(input: {
   model: ConfiguredModel;
   credentialReadiness: ModelCredentialReadinessV1;
-  policy: WorkspaceModelPolicyContract | null;
+  policyAllowed: boolean;
   observation?: ModelAvailabilityObservation | undefined;
   nowMs: number;
   maxAgeMs: number;
@@ -263,12 +263,7 @@ function availabilityFor(input: {
       checkedAt: input.credentialReadiness.checkedAt,
     };
   }
-  if (
-    !evaluateWorkspaceModelPolicy(input.policy, {
-      providerId: input.model.providerId,
-      modelId: input.model.id,
-    }).allowed
-  ) {
+  if (!input.policyAllowed) {
     return {
       status: "unavailable",
       selectable: false,
@@ -349,6 +344,10 @@ export function buildWorkspaceModelCatalog(input: {
       : MODEL_CREDENTIAL_READINESS_OBSERVATION_MAX_AGE_MS;
   const models = configuredModels(catalogSettings).map((model) => {
     const provider = providers.get(model.providerId);
+    const policyAllowed = evaluateWorkspaceModelPolicy(input.policy, {
+      providerId: model.providerId,
+      modelId: model.id,
+    }).allowed;
     const credentialReadiness = credentialReadinessFor({
       model,
       provider,
@@ -362,10 +361,11 @@ export function buildWorkspaceModelCatalog(input: {
     return {
       ...projectClientModel(model),
       credentialReadiness,
+      policyAllowed,
       availability: availabilityFor({
         model,
         credentialReadiness,
-        policy: input.policy,
+        policyAllowed,
         observation: input.observations?.[model.definitionVersion],
         nowMs,
         maxAgeMs,

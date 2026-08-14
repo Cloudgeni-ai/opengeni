@@ -182,6 +182,7 @@ describe("ModelPicker", () => {
             basis: "configuration" as const,
             checkedAt: null,
           },
+          policyAllowed: true,
           availability: {
             status: "available" as const,
             selectable: true,
@@ -211,6 +212,7 @@ describe("ModelPicker", () => {
             basis: "connection" as const,
             checkedAt: null,
           },
+          policyAllowed: false,
           availability: {
             status: "unavailable" as const,
             selectable: false,
