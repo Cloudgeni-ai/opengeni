@@ -1,5 +1,17 @@
 # @opengeni/interaction
 
+## 0.4.4
+
+### Patch Changes
+
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [c056063]
+  - @opengeni/contracts@1.1.0
+
 ## 0.4.3
 
 ### Patch Changes
