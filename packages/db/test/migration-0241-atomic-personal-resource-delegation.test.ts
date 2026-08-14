@@ -396,6 +396,10 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         values (${account!.id}, 'empty personal selection workspace')
         returning id
       `;
+      await sql`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${workspace!.id}, ${account!.id})
+      `;
       const sessionId = crypto.randomUUID();
       const turnId = crypto.randomUUID();
       const attemptId = crypto.randomUUID();
@@ -861,6 +865,12 @@ async function createFixture(
   const [targetWorkspace] = await sql<Array<{ id: string }>>`
     insert into workspaces (account_id, name)
     values (${account!.id}, 'target') returning id
+  `;
+  await sql`
+    insert into workspace_inference_controls (workspace_id, account_id)
+    values
+      (${personalWorkspace!.id}, ${account!.id}),
+      (${targetWorkspace!.id}, ${account!.id})
   `;
   const [membership] = await sql<Array<{ id: string }>>`
     insert into organization_memberships (
