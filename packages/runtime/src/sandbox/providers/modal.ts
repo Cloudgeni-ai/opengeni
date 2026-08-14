@@ -1135,10 +1135,20 @@ export async function sweepModalOrphanSandboxes(
   const ownedClient = options.client ? null : await createModalClient(settings);
   const modal = (options.client ?? ownedClient)! as ModalCpListClient;
   try {
-    const app = await modal.apps.fromName(settings.modalAppName, {
-      createIfMissing: false,
-      ...(settings.modalEnvironment ? { environment: settings.modalEnvironment } : {}),
-    });
+    let app: Awaited<ReturnType<typeof modal.apps.fromName>>;
+    try {
+      app = await modal.apps.fromName(settings.modalAppName, {
+        createIfMissing: false,
+        ...(settings.modalEnvironment ? { environment: settings.modalEnvironment } : {}),
+      });
+    } catch (error) {
+      // A new deployment has no Modal app until its first sandbox is created.
+      // That is an empty provider inventory, not a failed orphan sweep.
+      if (isModalNotFoundError(error)) {
+        return { examined: 0, terminated: [], skipped: 0 };
+      }
+      throw error;
+    }
     const appId = app.appId;
     if (!appId) {
       return { examined: 0, terminated: [], skipped: 0 };
