@@ -180,14 +180,36 @@ describe("interaction attempt tools", () => {
     const current = discoveredBrowserSession(browserSessionId, sessionId);
     const peer = discoveredBrowserSession(randomUUID(), randomUUID());
     const currentComputer = discoveredComputerSession(computerSessionId, sessionId);
+    const identity = {
+      id: randomUUID(),
+      accountId,
+      workspaceId,
+      name: "Reusable identity",
+      status: "active" as const,
+      version: 1,
+      defaultRevisionId: null,
+      headGeneration: 0,
+      revisionCount: 0,
+      createdBySubjectId: "model:test",
+      createdAt: now,
+      updatedAt: now,
+    };
+    const bridge = {
+      enrollmentId: randomUUID(),
+      state: "online" as const,
+      bridgeGeneration: "bridge-1",
+      inventoryRevision: 1,
+      connectedProfileCount: 0,
+      lastSeenAt: now,
+    };
     expect(BrowserSessionSchema.parse(current)).toEqual(current);
     expect(ComputerSessionSchema.parse(currentComputer)).toEqual(currentComputer);
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
         listBrowserSessions: async () => ({ revision: 2, sessions: [current, peer] }),
         listComputerSessions: async () => ({ revision: 1, sessions: [currentComputer] }),
-        listBrowserIdentities: async () => ({ revision: 0, identities: [] }),
-        listAttachedBrowsers: async () => ({ revision: 0, bridges: [], devices: [] }),
+        listBrowserIdentities: async () => ({ revision: 3, identities: [identity] }),
+        listAttachedBrowsers: async () => ({ revision: 4, bridges: [bridge], devices: [] }),
       }),
       workspaceId,
       sessionId,
@@ -202,6 +224,9 @@ describe("interaction attempt tools", () => {
     expect(local.structuredContent).toMatchObject({
       browsers: [{ id: current.id }],
       computers: [{ id: currentComputer.id }],
+      identities: [],
+      attachedBrowserBridges: [],
+      attachedBrowsers: [],
     });
 
     const workspace = await definitions[0]!.execute(
@@ -211,6 +236,10 @@ describe("interaction attempt tools", () => {
     expect((workspace.structuredContent as { browsers: BrowserSession[] }).browsers).toHaveLength(
       2,
     );
+    expect(workspace.structuredContent).toMatchObject({
+      identities: [{ id: identity.id }],
+      attachedBrowserBridges: [{ enrollmentId: bridge.enrollmentId }],
+    });
   });
 
   test("keeps model and Codemode Browser actions on the same durable operation and fences", async () => {
