@@ -22,7 +22,11 @@ use atspi::{
     ObjectRefOwned, Role, ScrollType, State,
 };
 use futures::stream::{self, StreamExt as _};
-use image::{codecs::jpeg::JpegEncoder, ExtendedColorType, ImageEncoder as _};
+use image::{
+    codecs::{jpeg::JpegEncoder, png::PngEncoder},
+    imageops::FilterType,
+    ExtendedColorType, ImageEncoder as _, RgbaImage,
+};
 use opengeni_agent_platform::{
     validate_linux_named_key_chord, DesktopBackend as _, LinuxDesktop, LinuxRgbaFrame, LinuxWindow,
     LinuxWindowRect, PlatformError,
@@ -1292,9 +1296,8 @@ impl AtspiComputerAdapter {
                     true,
                 )
             })?;
-        validate_live_frame_bounds(captured.width, captured.height, options)?;
-        let (width, height, bytes) = encode_live_jpeg(&captured, options.quality)?;
-        self.finish_window_capture(record, window, width, height, "image/jpeg", bytes)
+        let (width, height, mime_type, bytes) = encode_live_frame(&captured, options)?;
+        self.finish_window_capture(record, window, width, height, mime_type, bytes)
             .await
     }
 
@@ -1628,11 +1631,6 @@ impl ComputerAdapter for AtspiComputerAdapter {
         target_id: &str,
         options: crate::NativeCaptureOptions,
     ) -> NativeAdapterResult<NativeCapturedFrame> {
-        if options.format == crate::NativeFrameFormat::Png {
-            let frame = self.capture(target_id).await?;
-            validate_live_frame_bounds(frame.width, frame.height, options)?;
-            return Ok(frame);
-        }
         if let Some(target) = self.screen_target() {
             if target.id == target_id {
                 let desktop = self.desktop.as_ref().ok_or_else(|| {
@@ -1645,8 +1643,7 @@ impl ComputerAdapter for AtspiComputerAdapter {
                         true,
                     )
                 })?;
-                validate_live_frame_bounds(captured.width, captured.height, options)?;
-                let (width, height, bytes) = encode_live_jpeg(&captured, options.quality)?;
+                let (width, height, mime_type, bytes) = encode_live_frame(&captured, options)?;
                 let sequence = self.frame_sequence.fetch_add(1, Ordering::Relaxed) + 1;
                 let frame_id = format!("f_{}_{}", self.incarnation.simple(), sequence);
                 *self.latest_screen_frame.write().await = Some(frame_id.clone());
@@ -1656,7 +1653,7 @@ impl ComputerAdapter for AtspiComputerAdapter {
                     target_generation: target.target_generation,
                     width,
                     height,
-                    mime_type: "image/jpeg".to_string(),
+                    mime_type: mime_type.to_string(),
                     sha256: hex::encode(Sha256::digest(&bytes)),
                     bytes,
                 });
@@ -1898,32 +1895,31 @@ impl ComputerAdapter for AtspiComputerAdapter {
     }
 }
 
-fn validate_live_frame_bounds(
-    width: u32,
-    height: u32,
-    options: crate::NativeCaptureOptions,
-) -> NativeAdapterResult<()> {
-    if width > options.max_width || height > options.max_height {
-        return Err(NativeAdapterError::definite(
-            NativeAdapterErrorCode::InvalidAction,
-            "Linux live-frame bounds are smaller than the native target",
-            false,
-        ));
-    }
-    Ok(())
-}
-
-fn encode_live_jpeg(
+fn encode_live_frame(
     frame: &LinuxRgbaFrame,
-    quality: u8,
-) -> NativeAdapterResult<(u32, u32, Vec<u8>)> {
-    let mut rgb = Vec::with_capacity(frame.rgba.len() / 4 * 3);
-    for pixel in frame.rgba.chunks_exact(4) {
+    options: crate::NativeCaptureOptions,
+) -> NativeAdapterResult<(u32, u32, &'static str, Vec<u8>)> {
+    let (rgba, width, height) = fit_live_rgba(frame, options)?;
+    if options.format == crate::NativeFrameFormat::Png {
+        let mut png = Vec::new();
+        PngEncoder::new(&mut png)
+            .write_image(&rgba, width, height, ExtendedColorType::Rgba8)
+            .map_err(|error| {
+                NativeAdapterError::definite(
+                    NativeAdapterErrorCode::DriverFailed,
+                    format!("encode Linux live frame: {error}"),
+                    true,
+                )
+            })?;
+        return Ok((width, height, "image/png", png));
+    }
+    let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
+    for pixel in rgba.chunks_exact(4) {
         rgb.extend_from_slice(&pixel[..3]);
     }
     let mut jpeg = Vec::new();
-    JpegEncoder::new_with_quality(&mut jpeg, quality)
-        .write_image(&rgb, frame.width, frame.height, ExtendedColorType::Rgb8)
+    JpegEncoder::new_with_quality(&mut jpeg, options.quality)
+        .write_image(&rgb, width, height, ExtendedColorType::Rgb8)
         .map_err(|error| {
             NativeAdapterError::definite(
                 NativeAdapterErrorCode::DriverFailed,
@@ -1931,7 +1927,33 @@ fn encode_live_jpeg(
                 true,
             )
         })?;
-    Ok((frame.width, frame.height, jpeg))
+    Ok((width, height, "image/jpeg", jpeg))
+}
+
+fn fit_live_rgba(
+    frame: &LinuxRgbaFrame,
+    options: crate::NativeCaptureOptions,
+) -> NativeAdapterResult<(Vec<u8>, u32, u32)> {
+    if frame.width <= options.max_width && frame.height <= options.max_height {
+        return Ok((frame.rgba.clone(), frame.width, frame.height));
+    }
+    let scale = f64::min(
+        f64::from(options.max_width) / f64::from(frame.width),
+        f64::from(options.max_height) / f64::from(frame.height),
+    );
+    let output_width = (f64::from(frame.width) * scale).floor().max(1.0) as u32;
+    let output_height = (f64::from(frame.height) * scale).floor().max(1.0) as u32;
+    let source =
+        RgbaImage::from_raw(frame.width, frame.height, frame.rgba.clone()).ok_or_else(|| {
+            NativeAdapterError::definite(
+                NativeAdapterErrorCode::DriverFailed,
+                "Linux capture RGBA dimensions are inconsistent",
+                true,
+            )
+        })?;
+    let resized =
+        image::imageops::resize(&source, output_width, output_height, FilterType::Triangle);
+    Ok((resized.into_raw(), output_width, output_height))
 }
 
 fn descendant_keys(root: &str, items: &[CacheItem]) -> NativeAdapterResult<BTreeSet<String>> {
@@ -2483,6 +2505,52 @@ mod live_tests {
                 height: 180,
             },
         }
+    }
+
+    #[test]
+    fn live_frame_encoding_downscales_jpeg_without_changing_aspect_ratio() {
+        let frame = LinuxRgbaFrame {
+            rgba: vec![255_u8; 1_280 * 800 * 4],
+            width: 1_280,
+            height: 800,
+        };
+        let options = crate::NativeCaptureOptions {
+            format: crate::NativeFrameFormat::Jpeg,
+            quality: 72,
+            max_width: 720,
+            max_height: 720,
+        };
+
+        let (width, height, mime_type, bytes) =
+            encode_live_frame(&frame, options).expect("encode compact Linux live frame");
+
+        assert_eq!((width, height), (720, 450));
+        assert_eq!(mime_type, "image/jpeg");
+        let decoded = image::load_from_memory(&bytes).expect("decode JPEG");
+        assert_eq!((decoded.width(), decoded.height()), (720, 450));
+    }
+
+    #[test]
+    fn live_frame_encoding_preserves_bounded_png_geometry() {
+        let frame = LinuxRgbaFrame {
+            rgba: vec![128_u8; 640 * 360 * 4],
+            width: 640,
+            height: 360,
+        };
+        let options = crate::NativeCaptureOptions {
+            format: crate::NativeFrameFormat::Png,
+            quality: 80,
+            max_width: 720,
+            max_height: 720,
+        };
+
+        let (width, height, mime_type, bytes) =
+            encode_live_frame(&frame, options).expect("encode bounded Linux live frame");
+
+        assert_eq!((width, height), (640, 360));
+        assert_eq!(mime_type, "image/png");
+        let decoded = image::load_from_memory(&bytes).expect("decode PNG");
+        assert_eq!((decoded.width(), decoded.height()), (640, 360));
     }
 
     #[test]
