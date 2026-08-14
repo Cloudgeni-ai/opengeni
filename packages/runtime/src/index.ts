@@ -201,13 +201,14 @@ import {
   type ComputerToolMode,
   type RetainableSessionImageOutputHook,
 } from "./sandbox-computer";
-import type { RuntimeMetricsHooks } from "./metrics";
+import type { McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
 import {
   MultiProviderModelProvider,
   OpenGeniResponsesModel,
   buildOpenAIClientFromSettings,
   configureOpenAI,
   configureRuntimeMetricsHooks,
+  recordRuntimeMcpToolCallMetric,
   resolveTurnModel,
 } from "./model-provider";
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
@@ -287,7 +288,11 @@ export {
   type SkillLibrarySkill,
 } from "./skill-library";
 
-export type { RuntimeMetricsHooks } from "./metrics";
+export {
+  MCP_TOOL_CALL_OUTCOMES,
+  type McpToolCallOutcome,
+  type RuntimeMetricsHooks,
+} from "./metrics";
 export type {
   ModelPreparationMeasurement,
   ModelPreparationPhase,
@@ -1917,19 +1922,17 @@ const agentRigCredentialHooks = new WeakMap<object, SandboxLifecycleHook[]>();
  * which the timeline projection's `isErrorOutput` (packages/react/src/timeline/
  * projection.ts) settles to "failed" and downstream client normalizers read the same field.
  *
- * SCOPE: this only covers THROWN MCP failures (the ones that reach an
- * errorFunction). An MCP tool result carrying `isError: true` INLINE alongside
- * content is stripped to its `content` by @openai/agents-core's streamable-http
- * shim (dist/shims/mcp-server/node.js `callTool` returns `parsed.content`,
- * dropping `parsed.isError`) BEFORE the runtime ever sees it. Covering that mode
- * requires an SDK-level change (preserve `isError`) or reading the raw
- * CallToolResult — tracked separately.
+ * SCOPE: this covers only THROWN MCP failures (the ones that reach an
+ * errorFunction). Provider-returned CallToolResult values, including an inline
+ * `isError`, cross the SDK through `callToolResult` plus
+ * `McpResultCustomDataBridge`; their complete exact result is retained
+ * separately from this compatibility fallback.
  */
 export function mcpToolErrorOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
 } {
-  const details = error instanceof Error ? error.message : String(error);
+  const details = exactErrorMessage(error);
   return {
     isError: true,
     content: [
@@ -4068,11 +4071,9 @@ function parseWwwAuthenticate(header: string | null): {
 }
 
 // Application-defined JSON-RPC error code marking "this tool call needs a
-// connection". A RESULT carrying inline `isError: true` cannot be used here:
-// the agents SDK's streamable-http shim strips `isError` and returns only the
-// content, erasing the failure. A JSON-RPC error survives the shim as a thrown
-// McpError, which PrefixedMcpServer.callTool converts back into an MCP-shaped
-// `{ isError: true }` output for the model.
+// connection". The broker uses an error response because this condition occurs
+// before a provider tool result exists. PrefixedMcpServer converts the thrown
+// McpError into an MCP-shaped `{ isError: true }` output for the model.
 const MCP_AUTH_NEEDED_ERROR = {
   // OpenGeni application-defined JSON-RPC code. Keep this positive so it cannot
   // collide with MCP SDK transport errors such as RequestTimeout (-32001).
@@ -4126,42 +4127,65 @@ function mcpOutcomeUncertainResponse(
 }
 
 function isAuthNeededMcpError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
+  try {
+    if (!(error instanceof Error)) {
+      return false;
+    }
+    const code = (error as { code?: unknown }).code;
+    if (code !== MCP_AUTH_NEEDED_ERROR.code) {
+      return false;
+    }
+    const message = error.message;
+    return (
+      message === MCP_AUTH_NEEDED_ERROR.message ||
+      message === `MCP error ${MCP_AUTH_NEEDED_ERROR.code}: ${MCP_AUTH_NEEDED_ERROR.message}`
+    );
+  } catch {
+    // Typed error recognition is observational. A hostile getter/proxy must
+    // fall through to the ordinary exact-failure path, never replace it.
     return false;
   }
-  const code = (error as { code?: unknown }).code;
-  return (
-    code === MCP_AUTH_NEEDED_ERROR.code &&
-    (error.message === MCP_AUTH_NEEDED_ERROR.message ||
-      error.message === `MCP error ${MCP_AUTH_NEEDED_ERROR.code}: ${MCP_AUTH_NEEDED_ERROR.message}`)
-  );
 }
 
 function isToolOutcomeUncertainMcpError(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    (error as { code?: unknown }).code === MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.code
-  );
+  try {
+    return (
+      error instanceof Error &&
+      (error as { code?: unknown }).code === MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.code
+    );
+  } catch {
+    // Typed error recognition is observational. Preserve the source failure.
+    return false;
+  }
 }
 
 function mcpToolOutcomeUncertainContent(error: unknown): Array<{ type: "text"; text: string }> {
-  const data = error && typeof error === "object" ? (error as { data?: unknown }).data : undefined;
-  const providerFailure =
-    data && typeof data === "object"
-      ? (data as { providerFailure?: unknown }).providerFailure
-      : undefined;
-  const body =
-    providerFailure && typeof providerFailure === "object"
-      ? (providerFailure as { body?: unknown }).body
-      : undefined;
+  let body: unknown;
+  try {
+    const data =
+      error && typeof error === "object" ? (error as { data?: unknown }).data : undefined;
+    const providerFailure =
+      data && typeof data === "object"
+        ? (data as { providerFailure?: unknown }).providerFailure
+        : undefined;
+    body =
+      providerFailure && typeof providerFailure === "object"
+        ? (providerFailure as { body?: unknown }).body
+        : undefined;
+  } catch {
+    // The fixed uncertain-outcome guidance remains sufficient when optional
+    // provider detail cannot be projected safely.
+  }
   return [
     ...(typeof body === "string" ? [{ type: "text" as const, text: body }] : []),
     { type: "text", text: MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message },
   ];
 }
 
-// Preserve the exact source diagnostic as one independent content item. The
-// second item is OpenGeni guidance and never substitutes for or mutates it.
+// Preserve the exact source diagnostic as one independent content item when it
+// is safely readable. Hostile getters/proxies receive a fixed content-free
+// fallback so best-effort isolation cannot be turned into a new thrown error.
+// The second item is OpenGeni guidance and never mutates the source failure.
 function mcpToolUnavailableContent(error: unknown): Array<{ type: "text"; text: string }> {
   return [
     { type: "text", text: exactErrorMessage(error) },
@@ -4192,7 +4216,36 @@ function mcpContentAsResult(content: unknown): Record<string, unknown> {
 }
 
 function exactErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  try {
+    return error instanceof Error ? error.message : String(error);
+  } catch {
+    return "MCP tool call failed";
+  }
+}
+
+function mcpThrownToolCallOutcome(error: unknown, signal?: AbortSignal): McpToolCallOutcome {
+  try {
+    // The MCP SDK owns a precise timeout marker; check it before cancellation
+    // because a timeout implementation may also abort its underlying request.
+    if (isMcpRequestTimeoutError(error)) return "timeout";
+    if (signal?.aborted === true || (error instanceof Error && error.name === "AbortError")) {
+      return "cancelled";
+    }
+    const inspection = inspectMcpTransportError(error);
+    if (
+      isMcpTransportConnectivityError(error) ||
+      inspection.hasConnectionClosed ||
+      inspection.hasConnectivityMarker ||
+      inspection.hasConnectivityCode ||
+      inspection.httpStatuses.length > 0
+    ) {
+      return "thrown_transport_error";
+    }
+  } catch {
+    // Outcome metrics are strictly observational. Hostile getters/proxies must
+    // never replace the exact MCP failure or weaken best-effort isolation.
+  }
+  return "thrown_protocol_error";
 }
 
 type McpPublicErrorFields = {
@@ -4242,12 +4295,16 @@ function mcpErrorFields(
     // Public diagnostics are best-effort. Hostile getters/proxies must never
     // replace the exact internal failure with a logging projection failure.
   }
-  if (
-    isMcpRequestTimeoutError(error) ||
-    isMcpTransportConnectivityError(error) ||
-    isRawMcpTransportConnectivityError(error, options)
-  ) {
-    fields.retryable = true;
+  try {
+    if (
+      isMcpRequestTimeoutError(error) ||
+      isMcpTransportConnectivityError(error) ||
+      isRawMcpTransportConnectivityError(error, options)
+    ) {
+      fields.retryable = true;
+    }
+  } catch {
+    // Retry classification is also a public projection and must remain inert.
   }
   return fields;
 }
@@ -4300,6 +4357,12 @@ const MCP_REQUEST_TIMEOUT_MESSAGES = new Set([
   "Maximum total timeout exceeded",
   "MCP error -32001: Maximum total timeout exceeded",
 ]);
+// -32000 also sits at the edge of JSON-RPC's implementation-defined server
+// error range, so the numeric code alone cannot prove a transport closure.
+const MCP_CONNECTION_CLOSED_MESSAGES = new Set([
+  "Connection closed",
+  "MCP error -32000: Connection closed",
+]);
 
 const MCP_TRANSPORT_ERROR_MAX_DEPTH = 8;
 const MCP_TRANSPORT_ERROR_MAX_NODES = 32;
@@ -4310,14 +4373,18 @@ function inspectMcpTransportError(
   seen = new WeakSet<object>(),
 ): {
   complete: boolean;
+  hasConnectionClosed: boolean;
   hasConnectivityCode: boolean;
   hasConnectivityMarker: boolean;
   hasTypedError: boolean;
   hasRequestTimeout: boolean;
+  httpStatuses: number[];
   statuses: number[];
 } {
   const pending: Array<{ depth: number; value: unknown }> = [{ depth: 0, value: error }];
+  const httpStatuses: number[] = [];
   const statuses: number[] = [];
+  let hasConnectionClosed = false;
   let hasConnectivityCode = false;
   let hasConnectivityMarker = false;
   let hasTypedError = false;
@@ -4333,13 +4400,17 @@ function inspectMcpTransportError(
     seen.add(current.value);
     inspectedNodes += 1;
     const record = current.value as Record<string, unknown>;
+    let httpStatusValues: unknown[];
     let statusValues: unknown[];
     let code: unknown;
     let failureKind: unknown;
     let message: unknown;
     try {
-      statusValues = [record.status, record.statusCode, record.code];
+      const status = record.status;
+      const statusCode = record.statusCode;
       code = record.code;
+      httpStatusValues = [status, statusCode];
+      statusValues = [...httpStatusValues, code];
       failureKind = record.mcpTransportFailureKind;
       message = record.message;
       if (
@@ -4352,6 +4423,11 @@ function inspectMcpTransportError(
       complete = false;
       continue;
     }
+    for (const value of httpStatusValues) {
+      if (typeof value === "number" && Number.isFinite(value) && value >= 100 && value <= 599) {
+        httpStatuses.push(value);
+      }
+    }
     for (const value of statusValues) {
       if (typeof value === "number" && Number.isFinite(value) && value >= 100 && value <= 599) {
         statuses.push(value);
@@ -4362,6 +4438,13 @@ function inspectMcpTransportError(
     }
     if (failureKind === "connectivity_unavailable") {
       hasConnectivityMarker = true;
+    }
+    if (
+      code === -32_000 &&
+      typeof message === "string" &&
+      MCP_CONNECTION_CLOSED_MESSAGES.has(message)
+    ) {
+      hasConnectionClosed = true;
     }
     const timeoutCode = typeof code === "number" ? code : statusValues[0];
     if (
@@ -4397,10 +4480,12 @@ function inspectMcpTransportError(
   }
   return {
     complete,
+    hasConnectionClosed,
     hasConnectivityCode,
     hasConnectivityMarker,
     hasTypedError,
     hasRequestTimeout,
+    httpStatuses,
     statuses,
   };
 }
@@ -5226,36 +5311,51 @@ export class PrefixedMcpServer implements MCPServer {
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
     }
+    // Nested prefix wrappers are a projection seam around one physical
+    // tools/call. The innermost wrapper owns the single metric observation.
+    const recordsPhysicalCall = !(this.inner instanceof PrefixedMcpServer);
+    const startedAt = recordsPhysicalCall ? performance.now() : 0;
+    let metricRecorded = false;
+    const recordOutcome = (outcome: McpToolCallOutcome): void => {
+      if (!recordsPhysicalCall || metricRecorded) return;
+      metricRecorded = true;
+      recordRuntimeMcpToolCallMetric(outcome, startedAt);
+    };
     try {
       const projectedOutput = this.inner.callToolResult
         ? await this.inner.callToolResult(unprefixed, args, meta, options)
         : mcpContentAsResult(await this.inner.callTool(unprefixed, args, meta, options));
       const output = unwrapSdkMcpResultProjection(projectedOutput);
       assertMcpPayloadWithinBytes(output, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
-      return AttemptToolResult.parse(output);
+      const result = AttemptToolResult.parse(output);
+      recordOutcome(result.isError === true ? "provider_declared_error" : "success");
+      return result;
     } catch (error) {
       // A brokered tools/call that receives 401 may already have changed provider
       // state. The broker refreshed credentials for future requests but did not
       // replay this call. Preserve that ambiguity as an explicit model-visible
       // error for required and best-effort servers alike.
       if (isToolOutcomeUncertainMcpError(error)) {
+        recordOutcome("outcome_uncertain");
         return {
           isError: true,
           content: mcpToolOutcomeUncertainContent(error),
         };
       }
       // The connection broker's auth-needed short-circuit arrives as a thrown
-      // JSON-RPC error (an inline isError result would be stripped by the SDK
-      // shim). Surface it to the model as a failed-but-recoverable tool result
+      // JSON-RPC error because no provider result exists yet. Surface it to the
+      // model as a failed-but-recoverable tool result
       // instead of failing the turn; the timeline chip was already published.
       // This applies to ANY server — an auth-needed is recoverable once the user
       // re-links, so even a required tool degrades gracefully here.
       if (isAuthNeededMcpError(error)) {
+        recordOutcome("auth_needed");
         return {
           isError: true,
           content: [{ type: "text", text: MCP_AUTH_NEEDED_ERROR.message }],
         };
       }
+      recordOutcome(mcpThrownToolCallOutcome(error, options?.signal));
       // Best-effort INVOCATION isolation (sibling to the listTools guard). When
       // the model calls a best-effort server's tool and the call throws for ANY
       // other reason — a raw transport 401/403 that never became the broker's

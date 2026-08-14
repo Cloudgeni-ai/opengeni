@@ -24,7 +24,7 @@ import {
   invalidateServerToolsCache,
 } from "@openai/agents";
 import { RunToolApprovalItem, Usage } from "@openai/agents-core";
-import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   DEFAULT_AGENT_INSTRUCTIONS,
@@ -50,6 +50,7 @@ import {
   buildManifest,
   compactMcpResultCustomDataRunState,
   composeAgentInstructions,
+  configureRuntimeMetricsHooks,
   connectMcpServersInBatches,
   coreInstructions,
   appendGitCredentialBindingInstructions,
@@ -116,6 +117,7 @@ import {
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
   type ConnectorActionPolicyHooks,
+  type RuntimeMetricsHooks,
 } from "../src/index";
 import { McpResultCustomDataBridge } from "../src/mcp-result-custom-data";
 
@@ -1741,6 +1743,15 @@ describe("runtime event normalization", () => {
       expect(out.content[0]?.text).toContain("-32602");
       // Non-Error values stringify rather than throwing.
       expect(mcpToolErrorOutput("boom").content[0]?.text).toContain("boom");
+
+      const hostileMessage = new Error("unreadable");
+      Object.defineProperty(hostileMessage, "message", {
+        configurable: true,
+        get() {
+          throw new Error("hostile message getter");
+        },
+      });
+      expect(mcpToolErrorOutput(hostileMessage).content[0]?.text).toContain("MCP tool call failed");
     });
 
     test("mcpToolErrorOutput preserves credential-shaped error details exactly", () => {
@@ -4993,6 +5004,11 @@ describe("runtime event normalization", () => {
   });
 
   test("nested prefixed servers preserve one exact result marker and the innermost custom data", async () => {
+    const observations: Array<Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]> =
+      [];
+    configureRuntimeMetricsHooks({
+      onMcpToolCall: (input) => observations.push(input),
+    });
     const fullResult = {
       content: [{ type: "text" as const, text: "nested model-visible content" }],
       structuredContent: { receiptId: "nested-receipt-1" },
@@ -5044,20 +5060,25 @@ describe("runtime event normalization", () => {
       mcpServers: [outer],
     });
 
-    const result = await runAgentStream(agent, "Inspect it", settings);
-    const streamed: any[] = [];
-    for await (const event of result.toStream()) streamed.push(event);
-    await result.completed;
+    try {
+      const result = await runAgentStream(agent, "Inspect it", settings);
+      const streamed: any[] = [];
+      for await (const event of result.toStream()) streamed.push(event);
+      await result.completed;
 
-    const outputEvent = streamed.find(
-      (event) =>
-        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
-    );
-    expect(outputEvent?.item.output).toEqual(fullResult);
-    expect(outputEvent?.item.customData).toEqual({
-      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
-      [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { baseReceipt: "base-1" },
-    });
+      const outputEvent = streamed.find(
+        (event) =>
+          event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+      );
+      expect(outputEvent?.item.output).toEqual(fullResult);
+      expect(outputEvent?.item.customData).toEqual({
+        [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
+        [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { baseReceipt: "base-1" },
+      });
+      expect(observations.map(({ outcome }) => outcome)).toEqual(["success"]);
+    } finally {
+      configureRuntimeMetricsHooks(null);
+    }
   });
 
   test("an ordinary inner extractor may own OpenGeni-looking custom-data keys", async () => {
@@ -5663,6 +5684,296 @@ describe("runtime event normalization", () => {
     } finally {
       await prepared.close();
       mcp.close();
+    }
+  });
+
+  test("preserves HTTP-200 MCP errors through the SDK and meters bounded structural outcomes", async () => {
+    const observations: Array<Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]> =
+      [];
+    configureRuntimeMetricsHooks({
+      onMcpToolCall: (input) => observations.push(input),
+    });
+    const providerOnlyErrorMarker = "provider-only-http-200-error-marker";
+    const mcp = startTestMcpServer({
+      toolResultIsError: true,
+      toolResultText: providerOnlyErrorMarker,
+    });
+    const prepared = await prepareAgentTools(
+      testSettings({
+        sandboxBackend: "none",
+        webSearchEnabled: false,
+        mcpServers: [
+          {
+            id: "http_error",
+            name: "HTTP error result",
+            url: mcp.url,
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "http_error" }],
+    );
+    try {
+      const [httpErrorTool] = await prepared.mcpServers[0]!.listTools();
+      expect(httpErrorTool?.name).toBe("http_error__search_documents");
+      const settings = testSettings({
+        sandboxBackend: "none",
+        webSearchEnabled: false,
+      });
+      const model = new ScriptedModel([
+        {
+          output: [
+            scriptedFunctionCall(
+              httpErrorTool!.name,
+              { query: "failed delivery" },
+              "http-error-call",
+            ),
+          ],
+        },
+        { outputText: "done" },
+      ]);
+      const agent = buildOpenGeniAgent(settings, [], {
+        model,
+        hostedWebSearch: false,
+        mcpServers: prepared.mcpServers,
+      });
+
+      const result = await runAgentStream(agent, "Inspect it", settings);
+      const streamed: any[] = [];
+      for await (const event of result.toStream()) streamed.push(event);
+      await result.completed;
+
+      const outputEvent = streamed.find(
+        (event) =>
+          event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+      );
+      expect(outputEvent?.item.output).toMatchObject({
+        isError: true,
+        content: [{ type: "text", text: providerOnlyErrorMarker }],
+      });
+      const [durable] = normalizeSdkEvent(outputEvent);
+      expect((durable!.payload as { output?: unknown }).output).toEqual(outputEvent.item.output);
+      const nextModelInput = model.requests[1]?.input;
+      expect(Array.isArray(nextModelInput)).toBe(true);
+      const nextModelToolResult = (nextModelInput as any[]).find(
+        (item) => item.type === "function_call_result" && item.callId === "http-error-call",
+      );
+      expect(JSON.parse(nextModelToolResult.output.text)).toMatchObject({
+        isError: true,
+        content: [{ type: "text", text: providerOnlyErrorMarker }],
+      });
+
+      const scriptedResults: unknown[] = [
+        { content: [{ type: "text", text: "ok" }] },
+        Object.assign(
+          new Error("Authentication required - a connection link was posted to the session."),
+          { code: 40_101 },
+        ),
+        Object.assign(new Error("outcome uncertain"), {
+          code: 40_102,
+          data: { providerFailure: { body: "unknown provider outcome" } },
+        }),
+        Object.assign(new Error("MCP error -32001: Request timed out"), {
+          code: ErrorCode.RequestTimeout,
+        }),
+        Object.assign(new Error("cancelled"), { name: "AbortError" }),
+        Object.assign(new Error("upstream unavailable"), { status: 503 }),
+        Object.assign(new Error("application-defined protocol failure"), { code: 503 }),
+        Object.assign(new Error("MCP error -32602: Invalid params"), {
+          code: ErrorCode.InvalidParams,
+        }),
+        new McpError(ErrorCode.ConnectionClosed, "application-defined protocol failure"),
+      ];
+      const structural = new PrefixedMcpServer(
+        {
+          name: "structural-outcomes",
+          cacheToolsList: false,
+          async connect() {},
+          async close() {},
+          async listTools() {
+            return [];
+          },
+          async callTool() {
+            return [];
+          },
+          async callToolResult() {
+            const next = scriptedResults.shift();
+            if (next instanceof Error) throw next;
+            return next;
+          },
+          async invalidateToolsCache() {},
+        },
+        "structural-outcomes",
+        undefined,
+        true,
+      );
+      for (let index = 0; index < 9; index += 1) {
+        await structural.executeCatalogTool("inspect", {});
+      }
+
+      expect(observations.map(({ outcome }) => outcome)).toEqual([
+        "provider_declared_error",
+        "success",
+        "auth_needed",
+        "outcome_uncertain",
+        "timeout",
+        "cancelled",
+        "thrown_transport_error",
+        "thrown_protocol_error",
+        "thrown_protocol_error",
+        "thrown_protocol_error",
+      ]);
+      expect(observations.every(({ durationSeconds }) => durationSeconds >= 0)).toBe(true);
+    } finally {
+      configureRuntimeMetricsHooks(null);
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("MCP outcome metrics and projections cannot replace hostile source failures", async () => {
+    const observations: Array<Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]> =
+      [];
+    configureRuntimeMetricsHooks({
+      onMcpToolCall: (input) => observations.push(input),
+    });
+
+    const withHostileProperty = (property: "name" | "code" | "message", label: string) => {
+      const error = new Error(`${label} source failure`);
+      Object.defineProperty(error, property, {
+        configurable: true,
+        get() {
+          throw new Error(`hostile ${property} getter`);
+        },
+      });
+      return error;
+    };
+    const fixtures: Array<{ error: unknown; expectedBestEffortText: string }> = [
+      {
+        error: withHostileProperty("name", "name"),
+        expectedBestEffortText: "name source failure",
+      },
+      {
+        error: withHostileProperty("code", "code"),
+        expectedBestEffortText: "code source failure",
+      },
+      {
+        error: withHostileProperty("message", "message"),
+        expectedBestEffortText: "MCP tool call failed",
+      },
+      {
+        error: new Proxy(new Error("proxy source failure"), {
+          getPrototypeOf() {
+            throw new Error("hostile proxy getPrototypeOf");
+          },
+        }),
+        expectedBestEffortText: "MCP tool call failed",
+      },
+    ];
+    const serverFor = (error: unknown): MCPServer => ({
+      name: "hostile-error",
+      cacheToolsList: false,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [];
+      },
+      async callTool() {
+        throw error;
+      },
+      async callToolResult() {
+        throw error;
+      },
+      async invalidateToolsCache() {},
+    });
+    try {
+      for (const [index, fixture] of fixtures.entries()) {
+        const required = new PrefixedMcpServer(
+          serverFor(fixture.error),
+          `hostile-required-${index}`,
+        );
+        const bestEffort = new PrefixedMcpServer(
+          serverFor(fixture.error),
+          `hostile-best-effort-${index}`,
+          undefined,
+          true,
+        );
+        let requiredFailure: unknown;
+        try {
+          await required.executeCatalogTool("inspect", {});
+        } catch (error) {
+          requiredFailure = error;
+        }
+        expect(requiredFailure).toBe(fixture.error);
+
+        const bestEffortResult = await bestEffort.executeCatalogTool("inspect", {});
+        expect(bestEffortResult.isError).toBe(true);
+        expect(bestEffortResult.content[0]).toEqual({
+          type: "text",
+          text: fixture.expectedBestEffortText,
+        });
+      }
+      expect(observations.map(({ outcome }) => outcome)).toEqual(
+        Array.from({ length: fixtures.length * 2 }, () => "thrown_protocol_error"),
+      );
+    } finally {
+      configureRuntimeMetricsHooks(null);
+    }
+  });
+
+  test("classifies an SDK connection closure as transport without replacing the source failure", async () => {
+    const observations: Array<Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]> =
+      [];
+    configureRuntimeMetricsHooks({
+      onMcpToolCall: (input) => observations.push(input),
+    });
+
+    const sourceFailure = new McpError(ErrorCode.ConnectionClosed, "Connection closed");
+    const server: MCPServer = {
+      name: "connection-closed",
+      cacheToolsList: false,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [];
+      },
+      async callTool() {
+        throw sourceFailure;
+      },
+      async callToolResult() {
+        throw sourceFailure;
+      },
+      async invalidateToolsCache() {},
+    };
+    const required = new PrefixedMcpServer(server, "connection-closed-required");
+    const bestEffort = new PrefixedMcpServer(
+      server,
+      "connection-closed-best-effort",
+      undefined,
+      true,
+    );
+
+    try {
+      let requiredFailure: unknown;
+      try {
+        await required.executeCatalogTool("inspect", {});
+      } catch (error) {
+        requiredFailure = error;
+      }
+      expect(requiredFailure).toBe(sourceFailure);
+
+      const bestEffortResult = await bestEffort.executeCatalogTool("inspect", {});
+      expect(bestEffortResult.isError).toBe(true);
+      expect(bestEffortResult.content[0]).toEqual({
+        type: "text",
+        text: sourceFailure.message,
+      });
+      expect(observations.map(({ outcome }) => outcome)).toEqual([
+        "thrown_transport_error",
+        "thrown_transport_error",
+      ]);
+    } finally {
+      configureRuntimeMetricsHooks(null);
     }
   });
 

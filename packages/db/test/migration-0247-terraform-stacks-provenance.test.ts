@@ -9,6 +9,7 @@ import { bootstrapWorkspace, createDb, installPortableSkill } from "../src";
 import { migrate } from "../src/migrate";
 
 const migrationName = "0247_terraform_stacks_provenance_repair.sql";
+const resolutionFenceMigrationName = "0248_terraform_stacks_component_resolution_fence.sql";
 const oldUrl =
   "https://github.com/hashicorp/agent-skills/tree/de4323afdfbc30d1387f287b55062fa8d82b62e8/terraform/code-generation/skills/terraform-stacks";
 const newUrl =
@@ -31,6 +32,9 @@ const oldManifest = {
 };
 
 const migration = await Bun.file(new URL(`../drizzle/${migrationName}`, import.meta.url)).text();
+const resolutionFenceMigration = await Bun.file(
+  new URL(`../drizzle/${resolutionFenceMigrationName}`, import.meta.url),
+).text();
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -58,6 +62,20 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
     expect(migration).toContain("terraform_stacks_provenance_js_en_us");
     expect(migration).toContain(
       "DROP FUNCTION opengeni_private.terraform_stacks_provenance_rewrite_pack(jsonb)",
+    );
+    expect(resolutionFenceMigration.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: maintenance");
+    expect(resolutionFenceMigration).toContain("all opengeni_app sessions to be stopped");
+    expect(resolutionFenceMigration).toContain(
+      "LOCK TABLE capability_plugin_installations IN ACCESS EXCLUSIVE MODE",
+    );
+    expect(resolutionFenceMigration).toContain("installation.account_id = component.account_id");
+    expect(resolutionFenceMigration).toContain(
+      "installation.workspace_id = component.workspace_id",
+    );
+    expect(resolutionFenceMigration).toContain("installation.status = 'active'");
+    expect(resolutionFenceMigration).toContain("version.manifest_digest = component.digest");
+    expect(resolutionFenceMigration).toContain(
+      "component resolution fence found unexpected Pack state",
     );
   });
 
@@ -224,6 +242,55 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
           ${grant.subjectId}
         )
         returning id, version
+      `;
+      const decoyManifest = {
+        schemaVersion: 1,
+        kind: "plugin",
+        version: "9.9.9",
+        source: "review-fixture",
+      };
+      const decoyDigest = sha256(stableJson(decoyManifest));
+      const [decoyPlugin] = await shared.admin<Array<{ id: string }>>`
+        insert into capability_plugins (
+          plugin_key, account_id, workspace_id, name, description, category, tags, provenance
+        ) values (
+          ${`review/resolved-id-decoy/${suffix}`},
+          ${grant.accountId},
+          ${grant.workspaceId},
+          'Resolved id decoy',
+          'Valid unrelated Plugin installation for the migration resolution fence regression.',
+          'review',
+          '[]'::jsonb,
+          'workspace'
+        )
+        returning id
+      `;
+      const [decoyVersion] = await shared.admin<Array<{ id: string }>>`
+        insert into capability_plugin_versions (
+          plugin_id, version, manifest_digest, manifest, status
+        ) values (
+          ${decoyPlugin!.id},
+          '9.9.9',
+          ${decoyDigest},
+          ${shared.admin.json(decoyManifest)},
+          'published'
+        )
+        returning id
+      `;
+      const [decoyPluginInstallation] = await shared.admin<Array<{ id: string }>>`
+        insert into capability_plugin_installations (
+          account_id, workspace_id, plugin_id, plugin_version_id, status, version,
+          installed_by_subject_id
+        ) values (
+          ${grant.accountId},
+          ${grant.workspaceId},
+          ${decoyPlugin!.id},
+          ${decoyVersion!.id},
+          'active',
+          1,
+          ${grant.subjectId}
+        )
+        returning id
       `;
       const [facetInstallation] = await shared.admin<Array<{ id: string; version: number }>>`
         insert into capability_facet_installations (
@@ -531,6 +598,47 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
         where id = ${packComponent!.id}
       `;
       await migrate(shared.adminUrl);
+
+      await shared.admin`
+        update pack_installation_components
+        set resolved_id = ${decoyPluginInstallation!.id}
+        where id = ${packComponent!.id}
+      `;
+      await shared.admin`
+        delete from schema_migrations where name = ${resolutionFenceMigrationName}
+      `;
+      await expect(migrate(shared.adminUrl)).rejects.toThrow(
+        "component resolution fence found unexpected Pack state",
+      );
+      const [rejectedResolution] = await shared.admin<
+        Array<{ resolvedId: string; migrationRecorded: boolean }>
+      >`
+        select
+          component.resolved_id as "resolvedId",
+          exists (
+            select 1 from schema_migrations
+            where name = ${resolutionFenceMigrationName}
+          ) as "migrationRecorded"
+        from pack_installation_components component
+        where component.id = ${packComponent!.id}
+      `;
+      expect(rejectedResolution).toEqual({
+        resolvedId: decoyPluginInstallation!.id,
+        migrationRecorded: false,
+      });
+      await shared.admin`
+        update pack_installation_components
+        set resolved_id = ${pluginInstallation!.id}
+        where id = ${packComponent!.id}
+      `;
+      await migrate(shared.adminUrl);
+      const [acceptedResolution] = await shared.admin<Array<{ migrationRecorded: boolean }>>`
+        select exists (
+          select 1 from schema_migrations
+          where name = ${resolutionFenceMigrationName}
+        ) as "migrationRecorded"
+      `;
+      expect(acceptedResolution).toEqual({ migrationRecorded: true });
     } finally {
       await app?.close();
       await shared.release();

@@ -7486,6 +7486,144 @@ export async function listEnabledMcpCapabilityServers(
   });
 }
 
+const ecmaScriptTrimCharacters =
+  "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
+
+const registryApiKeyContractValidSql = sql<boolean>`coalesce((
+  jsonb_typeof(${schema.capabilityCatalogItems.metadata} -> 'authContract') = 'object'
+  and jsonb_typeof(${schema.capabilityCatalogItems.metadata} -> 'authContract' -> 'headerName') = 'string'
+  and (${schema.capabilityCatalogItems.metadata} -> 'authContract' ->> 'headerName')
+    ~ ${"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$"}
+  and jsonb_typeof(${schema.capabilityCatalogItems.metadata} -> 'authContract' -> 'scheme') = 'string'
+  and length(btrim(
+    ${schema.capabilityCatalogItems.metadata} -> 'authContract' ->> 'scheme',
+    ${ecmaScriptTrimCharacters}
+  )) > 0
+), false)`;
+
+/**
+ * Metadata-only projection of runnable capability MCP server ids. The query
+ * deliberately computes credential-presence booleans in PostgreSQL and never
+ * selects stored header ciphertext or connection-reference contents.
+ */
+export async function listEnabledMcpCapabilityServerIds(
+  db: Database,
+  workspaceId: string,
+): Promise<string[]> {
+  const rows = await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) =>
+      await scopedDb
+        .select({
+          installationId: schema.capabilityInstallations.id,
+          itemId: schema.capabilityCatalogItems.id,
+          itemWorkspaceId: schema.capabilityCatalogItems.workspaceId,
+          itemSource: schema.capabilityCatalogItems.source,
+          itemAuthKind: schema.capabilityCatalogItems.authKind,
+          itemAuthModel: schema.capabilityCatalogItems.authModel,
+          itemMcpProbePresent: sql<boolean>`${schema.capabilityCatalogItems.metadata} ? 'mcpProbe'`,
+          itemMcpProbeStatus: sql<
+            string | null
+          >`${schema.capabilityCatalogItems.metadata} -> 'mcpProbe' ->> 'status'`,
+          itemRegistryApiKeyContractValid: registryApiKeyContractValidSql,
+          itemMcpServerId: sql<
+            string | null
+          >`${schema.capabilityCatalogItems.metadata} ->> 'mcpServerId'`,
+          endpointPresent: sql<boolean>`coalesce(length(${schema.capabilityCatalogItems.endpointUrl}), 0) > 0`,
+          mcpConnectivityStatus: sql<
+            string | null
+          >`${schema.capabilityInstallations.metadata} -> 'mcpConnectivity' ->> 'status'`,
+          hasEncryptedHeaders: sql<boolean>`exists (
+            select 1
+            from jsonb_each_text(
+              case
+                when jsonb_typeof(${schema.capabilityInstallations.config} -> 'headersEncrypted') = 'object'
+                  then ${schema.capabilityInstallations.config} -> 'headersEncrypted'
+                else '{}'::jsonb
+              end
+            ) header
+            where length(header.value) > 0
+          )`,
+          hasConnectionRef: sql<boolean>`(
+            jsonb_typeof(${schema.capabilityInstallations.config} -> 'connectionRef') = 'object'
+            and jsonb_typeof(${schema.capabilityInstallations.config} -> 'connectionRef' -> 'providerDomain') = 'string'
+            and length(${schema.capabilityInstallations.config} -> 'connectionRef' ->> 'providerDomain') > 0
+          )`,
+        })
+        .from(schema.capabilityInstallations)
+        .innerJoin(
+          schema.capabilityCatalogItems,
+          and(
+            or(
+              eq(
+                schema.capabilityInstallations.workspaceId,
+                schema.capabilityCatalogItems.workspaceId,
+              ),
+              isNull(schema.capabilityCatalogItems.workspaceId),
+            ),
+            eq(schema.capabilityInstallations.capabilityId, schema.capabilityCatalogItems.id),
+          ),
+        )
+        .where(
+          and(
+            eq(schema.capabilityInstallations.workspaceId, workspaceId),
+            eq(schema.capabilityInstallations.kind, "mcp"),
+            eq(schema.capabilityInstallations.status, "active"),
+            eq(schema.capabilityCatalogItems.stale, false),
+            sql`(
+              ${schema.capabilityInstallations.metadata} ->> 'facetInstallationId' is null
+              or exists (
+                select 1
+                from ${schema.capabilityComponentOwners} owner
+                where owner.facet_installation_id::text = ${schema.capabilityInstallations.metadata} ->> 'facetInstallationId'
+                  and ${effectiveCapabilityOwnerSql(sql`owner.owner_kind`, sql`owner.owner_id`)}
+              )
+            )`,
+          ),
+        )
+        .orderBy(asc(schema.capabilityCatalogItems.name)),
+  );
+
+  const preferredByInstallation = new Map<string, (typeof rows)[number]>();
+  for (const row of rows) {
+    const existing = preferredByInstallation.get(row.installationId);
+    if (!existing || (existing.itemWorkspaceId === null && row.itemWorkspaceId !== null)) {
+      preferredByInstallation.set(row.installationId, row);
+    }
+  }
+
+  return [...preferredByInstallation.values()].flatMap((row) => {
+    const metadata = row.itemMcpServerId !== null ? { mcpServerId: row.itemMcpServerId } : {};
+    const trusted =
+      row.itemSource !== registryCapabilitySource ||
+      (row.itemMcpProbePresent &&
+        row.itemMcpProbeStatus === "real" &&
+        row.itemAuthKind !== null &&
+        row.itemAuthKind !== "unknown" &&
+        (row.itemAuthKind !== "api_key" || row.itemRegistryApiKeyContractValid));
+    const connectivityOk =
+      row.mcpConnectivityStatus === "ok" || row.mcpConnectivityStatus === "auth_deferred";
+    const legacyActive =
+      !trusted &&
+      row.itemSource === registryCapabilitySource &&
+      !row.itemMcpProbePresent &&
+      row.itemAuthKind !== null &&
+      row.itemAuthKind !== "unknown" &&
+      connectivityOk &&
+      (!row.itemAuthModel || row.hasEncryptedHeaders || row.hasConnectionRef);
+    if (
+      (!trusted && !legacyActive) ||
+      !row.endpointPresent ||
+      !connectivityOk ||
+      (row.itemAuthModel && !row.hasEncryptedHeaders && !row.hasConnectionRef)
+    ) {
+      return [];
+    }
+    return [mcpServerIdForCapability(row.itemId, metadata)];
+  });
+}
+
 /**
  * Decrypts an enabled capability MCP's stored credential headers. Returns
  * null when the server has none, and "unavailable" when headers exist but
@@ -13411,6 +13549,40 @@ export async function getScheduledTaskPersonalConnectionDelegations(
   });
 }
 
+/**
+ * Lock and project the exact mutable incident-task authority inside a caller's
+ * dispatch/claim transaction. Returning the frozen personal delegation tuple
+ * from the same row prevents a later task edit from mixing with the task
+ * snapshot used for preflight.
+ */
+export async function requireScheduledTaskIncidentAuthorityInTransaction(
+  tx: Database,
+  input: { workspaceId: string; taskId: string },
+): Promise<{
+  task: ScheduledTask;
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
+}> {
+  const [row] = await tx
+    .select()
+    .from(schema.scheduledTasks)
+    .where(
+      and(
+        eq(schema.scheduledTasks.workspaceId, input.workspaceId),
+        eq(schema.scheduledTasks.id, input.taskId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (!row) throw new Error(`Scheduled task not found: ${input.taskId}`);
+  return {
+    task: mapScheduledTask(row),
+    personalConnectionDelegations: parsedPersonalConnectionDelegations(
+      row.personalConnectionDelegations,
+      `scheduled_tasks:${input.workspaceId}:${input.taskId}`,
+    ),
+  };
+}
+
 export async function getScheduledTaskXaiProviderAccountAuthoritySnapshot(
   db: Database,
   workspaceId: string,
@@ -13680,6 +13852,27 @@ export async function markScheduledTaskRunFailedIfQueued(
         ),
       );
   });
+}
+
+/** Claim-time stale-authority settlement; no model/tool/sandbox work has started. */
+export async function markScheduledTaskRunAuthorityRejectedInTransaction(
+  tx: Database,
+  input: { workspaceId: string; runId: string },
+): Promise<void> {
+  await tx
+    .update(schema.scheduledTaskRuns)
+    .set({
+      status: "failed",
+      error: "incident_responder_under_capable",
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+        eq(schema.scheduledTaskRuns.id, input.runId),
+        inArray(schema.scheduledTaskRuns.status, ["queued", "dispatched"]),
+      ),
+    );
 }
 
 export async function updateScheduledTaskRun(
@@ -15337,6 +15530,33 @@ export async function getRigVersion(
       )
       .limit(1);
     return row ? mapRigVersion(row) : null;
+  });
+}
+
+/** Metadata-only health for one exact frozen rig version. Never reads setup,
+ * variable values, credential material, or the currently active version. */
+export async function getRigVersionHealth(
+  db: Database,
+  workspaceId: string,
+  rigId: string,
+  versionId: string,
+): Promise<RigVerificationHealth | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.rigVersions)
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, workspaceId),
+          eq(schema.rigVersions.rigId, rigId),
+          eq(schema.rigVersions.id, versionId),
+        ),
+      )
+      .limit(1);
+    if (!row) return null;
+    const version = mapRigVersion(row);
+    const healthByVersion = await loadRigHealthByActiveVersion(scopedDb, workspaceId, [version]);
+    return healthByVersion.get(version.id) ?? unknownRigHealth(version);
   });
 }
 
@@ -47911,6 +48131,11 @@ export type ClaimSessionWorkForAttemptInput = {
   attemptId: string;
   dispatchId: string;
   trigger: SessionWorkTrigger;
+  /** Optional worker-owned mutable-authority fence for pending machine inputs. */
+  validatePendingSystemUpdateAuthority?: (
+    tx: Database,
+    update: SessionSystemUpdate,
+  ) => Promise<{ action: "accept" } | { action: "reject"; reason: string }>;
 };
 
 export type ClaimSessionWorkForAttemptResult =
@@ -48143,7 +48368,22 @@ export async function claimSessionWorkForAttempt(
           }
           const validUpdates: typeof updates = [];
           const cancelledUpdateIds: string[] = [];
+          const authorityRejectedUpdateIds: string[] = [];
           for (const update of updates) {
+            if (input.validatePendingSystemUpdateAuthority) {
+              const validation = await input.validatePendingSystemUpdateAuthority(
+                tx as unknown as Database,
+                mapSessionSystemUpdate(update),
+              );
+              if (validation.action === "reject") {
+                await tx
+                  .update(schema.sessionSystemUpdates)
+                  .set({ state: "failed", classification: "failure" })
+                  .where(eq(schema.sessionSystemUpdates.id, update.id));
+                authorityRejectedUpdateIds.push(update.id);
+                continue;
+              }
+            }
             const payload = update.payload;
             if (payload.type === "goal_continuation") {
               const goalId = typeof payload.goalId === "string" ? payload.goalId : null;
@@ -48192,36 +48432,56 @@ export async function claimSessionWorkForAttempt(
               systemUpdateExecutionAuthorityKey(candidate),
           );
           if (deliverable.length === 0) {
-            const cancellationEvent =
-              cancelledUpdateIds.length > 0
-                ? {
-                    accountId,
-                    workspaceId,
-                    sessionId,
-                    // No receiving turn exists when every candidate was
-                    // cancelled before a model batch could be persisted.
-                    turnId: null,
-                    turnGeneration: null,
-                    turnAttemptId: null,
-                    turnAssociation: null,
-                    sequence: nextSequence,
-                    type: "system.update.cancelled" as const,
-                    payload: {
-                      updateIds: cancelledUpdateIds,
-                      count: cancelledUpdateIds.length,
-                      reason: "stale_goal_continuation",
-                    },
-                    occurredAt,
-                  }
-                : null;
+            let sequence = nextSequence - 1;
+            const cancellationEvents: SessionEventInsertWithPayload[] = [];
+            if (cancelledUpdateIds.length > 0) {
+              cancellationEvents.push({
+                accountId,
+                workspaceId,
+                sessionId,
+                // No receiving turn exists when every candidate was
+                // cancelled before a model batch could be persisted.
+                turnId: null,
+                turnGeneration: null,
+                turnAttemptId: null,
+                turnAssociation: null,
+                sequence: ++sequence,
+                type: "system.update.cancelled" as const,
+                payload: {
+                  updateIds: cancelledUpdateIds,
+                  count: cancelledUpdateIds.length,
+                  reason: "stale_goal_continuation",
+                },
+                occurredAt,
+              });
+            }
+            if (authorityRejectedUpdateIds.length > 0) {
+              cancellationEvents.push({
+                accountId,
+                workspaceId,
+                sessionId,
+                turnId: null,
+                turnGeneration: null,
+                turnAttemptId: null,
+                turnAssociation: null,
+                sequence: ++sequence,
+                type: "system.update.cancelled" as const,
+                payload: {
+                  updateIds: authorityRejectedUpdateIds,
+                  count: authorityRejectedUpdateIds.length,
+                  reason: "stale_execution_authority",
+                },
+                occurredAt,
+              });
+            }
             return {
               count: 0,
-              lastSequence: cancellationEvent ? nextSequence : nextSequence - 1,
+              lastSequence: sequence,
               triggerEventId: null,
               historyItemId: null,
               historyItem: null,
               updates: [],
-              events: cancellationEvent ? [cancellationEvent] : [],
+              events: cancellationEvents,
               event: null,
             };
           }
@@ -48290,6 +48550,25 @@ export async function claimSessionWorkForAttempt(
                 updateIds: cancelledUpdateIds,
                 count: cancelledUpdateIds.length,
                 reason: "stale_goal_continuation",
+              },
+              occurredAt,
+            });
+          }
+          if (authorityRejectedUpdateIds.length > 0) {
+            events.push({
+              accountId,
+              workspaceId,
+              sessionId,
+              turnId,
+              turnGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
+              sequence: ++sequence,
+              type: "system.update.cancelled",
+              payload: {
+                updateIds: authorityRejectedUpdateIds,
+                count: authorityRejectedUpdateIds.length,
+                reason: "stale_execution_authority",
               },
               occurredAt,
             });
@@ -55129,6 +55408,11 @@ export type AddSessionSystemUpdateResult =
       events: SessionEvent[];
     };
 
+export type PrepareSessionSystemUpdateSourceResult = {
+  /** Private, bounded, content-free source authority appended before insert. */
+  lineage?: Record<string, unknown>;
+};
+
 export async function addSessionSystemUpdate(
   db: Database,
   input: AddSessionSystemUpdateInput,
@@ -55151,6 +55435,13 @@ export async function addSessionSystemUpdateWithSourceMutation(
     wakeEventId: string | null,
     updateId: string | null,
   ) => Promise<void>,
+  options: {
+    /** Runs under the locked session/source transaction before any update/event insert. */
+    prepareSource?: (
+      tx: Database,
+      sessionId: string,
+    ) => Promise<PrepareSessionSystemUpdateSourceResult | void>;
+  } = {},
 ): Promise<AddSessionSystemUpdateResult> {
   if (Buffer.byteLength(JSON.stringify(input.payload)) > MAX_INTERNAL_UPDATE_BYTES) {
     throw new Error(`Internal update payload exceeds ${MAX_INTERNAL_UPDATE_BYTES} bytes`);
@@ -55180,6 +55471,11 @@ export async function addSessionSystemUpdateWithSourceMutation(
           await mutateSource(tx as unknown as Database, null, null);
           return { added: false, reason: "session_cancelled" } as const;
         }
+        const prepared = await options.prepareSource?.(tx as unknown as Database, input.sessionId);
+        const lineage = {
+          ...(input.lineage ?? {}),
+          ...(prepared?.lineage ?? {}),
+        };
 
         const [inserted] = await tx
           .insert(schema.sessionSystemUpdates)
@@ -55196,7 +55492,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
                   dedupeKey: input.dedupeKey,
                   summary: input.summary,
                   payload: input.payload,
-                  lineage: input.lineage ?? {},
+                  lineage,
                   personalConnectionDelegations: input.personalConnectionDelegations ?? [],
                   xaiProviderAccountAuthoritySnapshot:
                     input.xaiProviderAccountAuthoritySnapshot ??

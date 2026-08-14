@@ -33,6 +33,8 @@ import {
   CompactionNeededError,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
+  SandboxConfigError,
+  SandboxExecReadinessError,
   WorkspaceArchiveIntegrityError,
   contextRobustnessFilterForSettings,
   modelResponseUsageFromResponse,
@@ -48,6 +50,7 @@ import {
   assertPhysicalToolQuiescenceForCancellation,
   assertSessionAttemptQuiescenceRecoveryDurable,
   classifyContextWindowOverflowError,
+  classifySandboxLogicalProvisionFailure,
   classifyXaiCredentialFailure,
   credentialSubjectIdForTurnInitiator,
   classifyMcpTransportTimeoutError,
@@ -117,6 +120,8 @@ import {
 } from "../src/activities/agent-turn";
 import {
   SandboxExecReadinessTimeoutError,
+  SandboxProvisionStageError,
+  SandboxSiblingWarmingTimeoutError,
   sandboxLeaseHolderIdForAttempt,
 } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
@@ -2603,7 +2608,7 @@ describe("lazy sandbox provisioner single-flight", () => {
       lazyEnabled: true,
       machinePrimary: false,
       sandboxBackend: "docker" as const,
-      hasInitialRunCredentialMaterial: false,
+      hasRunCredentialResolver: false,
       generatedVideoFileCount: 0,
       hasSignedFileResources: false,
     };
@@ -2624,9 +2629,10 @@ describe("lazy sandbox provisioner single-flight", () => {
       policy: "eager",
       reason: "backend_none",
     });
-    expect(
-      sandboxEstablishPolicyDecision({ ...base, hasInitialRunCredentialMaterial: true }),
-    ).toEqual({ policy: "eager", reason: "initial_run_credentials" });
+    expect(sandboxEstablishPolicyDecision({ ...base, hasRunCredentialResolver: true })).toEqual({
+      policy: "on-demand",
+      reason: "initial_run_credentials_deferred",
+    });
     expect(sandboxEstablishPolicyDecision({ ...base, generatedVideoFileCount: 1 })).toEqual({
       policy: "eager",
       reason: "generated_video_files",
@@ -2635,6 +2641,88 @@ describe("lazy sandbox provisioner single-flight", () => {
       policy: "eager",
       reason: "signed_file_resources",
     });
+    expect(
+      sandboxEstablishPolicyDecision({
+        ...base,
+        hasRunCredentialResolver: true,
+        generatedVideoFileCount: 1,
+      }),
+    ).toEqual({ policy: "eager", reason: "generated_video_files" });
+    expect(
+      sandboxEstablishPolicyDecision({
+        ...base,
+        hasRunCredentialResolver: true,
+        hasSignedFileResources: true,
+      }),
+    ).toEqual({ policy: "eager", reason: "signed_file_resources" });
+  });
+
+  test("credential-bearing lazy turns resolve context once and materialize at the first shared operation", async () => {
+    const steps: string[] = [];
+    let resolves = 0;
+    let materializations = 0;
+    const initialMaterial = await (async () => {
+      resolves += 1;
+      steps.push("credential-resolved");
+      return { available: true };
+    })();
+    const provisioner = createTurnSandboxProvisioner(async () => {
+      await Bun.sleep(5);
+      if (initialMaterial.available) {
+        materializations += 1;
+        steps.push("credential-materialized");
+      }
+      return {
+        exec: async () => {
+          steps.push("provider-operation");
+        },
+      };
+    });
+
+    // Model preparation resolves the exact attempt once so auth-needed state
+    // can be model-visible, but a model-only turn still owns no sandbox write,
+    // renewal loop, lease, box, or exact-generation cleanup.
+    expect(resolves).toBe(1);
+    expect(materializations).toBe(0);
+    expect(steps).toEqual(["credential-resolved"]);
+
+    const boxes = await Promise.all(Array.from({ length: 8 }, () => provisioner.get()));
+    await boxes[0]!.exec();
+
+    expect(resolves).toBe(1);
+    expect(materializations).toBe(1);
+    expect(steps).toEqual(["credential-resolved", "credential-materialized", "provider-operation"]);
+  });
+
+  test("activity prepares credential model context before turn input and reuses it lazily", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    const resolutionAt = source.indexOf(
+      "const initialRunCredentialMaterial = runCredentialResolver",
+    );
+    const modelNoteAt = source.indexOf(
+      "const runCredentialsNote = initialRunCredentialMaterial",
+      resolutionAt,
+    );
+    const turnInputAt = source.indexOf("const prepared = await turnInput(", modelNoteAt);
+    const provisionerAt = source.indexOf(
+      "turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
+      modelNoteAt,
+    );
+    const lazyCredentialAttachAt = source.indexOf(
+      "await attachRunCredentialRenewal(",
+      provisionerAt,
+    );
+    const lazyProvisionerPrefix = source.slice(provisionerAt, lazyCredentialAttachAt + 500);
+
+    expect(resolutionAt).toBeGreaterThan(-1);
+    expect(modelNoteAt).toBeGreaterThan(resolutionAt);
+    expect(turnInputAt).toBeGreaterThan(modelNoteAt);
+    expect(provisionerAt).toBeGreaterThan(modelNoteAt);
+    expect(lazyCredentialAttachAt).toBeGreaterThan(provisionerAt);
+    expect(lazyProvisionerPrefix).not.toContain("runCredentialResolver.resolve(");
+    expect(lazyProvisionerPrefix).toContain("initialRunCredentialMaterial");
   });
 
   test("deadline rotation uses only short anti-churn pacing", () => {
@@ -2785,7 +2873,7 @@ describe("lazy sandbox provisioner single-flight", () => {
         new WorkspaceArchiveIntegrityError(
           "workspace_fingerprint_unavailable",
           "fingerprint unavailable",
-          { retryable: true },
+          { retryable: true, cause: Object.assign(new Error("transport"), { code: "EAI_AGAIN" }) },
         ),
       ),
     ).toBe(true);
@@ -2800,6 +2888,248 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(isLazySandboxProvisionRetryable(new Error("ECONNRESET during sandbox create"))).toBe(
       false,
     );
+  });
+
+  test("classifies the closed logical provision failure taxonomy from typed structure", () => {
+    expect(
+      classifySandboxLogicalProvisionFailure(
+        "modal",
+        new SandboxExecReadinessTimeoutError("modal", 60_000, {
+          sandboxGroupId: "group-1",
+          instanceId: "sb-1",
+        }),
+      ),
+    ).toMatchObject({
+      category: "exec_readiness",
+      stage: "exec_readiness",
+      code: "sandbox_exec_readiness_timeout",
+    });
+    expect(
+      classifySandboxLogicalProvisionFailure(
+        "modal",
+        new SandboxExecReadinessError("modal", "exec_probe_failed", 60_000, 1, "sb-1"),
+      ),
+    ).toMatchObject({ category: "exec_readiness", code: "exec_probe_failed" });
+    expect(
+      classifySandboxLogicalProvisionFailure(
+        "modal",
+        new SandboxSiblingWarmingTimeoutError("modal", 600_000, {
+          sandboxGroupId: "group-1",
+        }),
+      ),
+    ).toMatchObject({ category: "sibling_warming", stage: "sibling_warming" });
+    expect(
+      classifySandboxLogicalProvisionFailure(
+        "modal",
+        new SandboxLeaseSupersededError("group-1", 4),
+      ),
+    ).toMatchObject({
+      category: "lease_superseded",
+      stage: "lease_admission",
+      expected: true,
+      retryable: true,
+    });
+    expect(
+      classifySandboxLogicalProvisionFailure(
+        "modal",
+        new SandboxLeaseTransitionError(
+          "group-1",
+          4,
+          "capture_in_progress",
+          "modal",
+          "sb-1",
+          "draining",
+        ),
+      ),
+    ).toMatchObject({
+      category: "drain_capture_wait",
+      stage: "lifecycle_wait",
+      code: "capture_in_progress",
+      expected: true,
+    });
+    expect(
+      classifySandboxLogicalProvisionFailure(
+        "modal",
+        new WorkspaceArchiveIntegrityError("archive_hydration_failed", "archive restore rejected"),
+      ),
+    ).toMatchObject({
+      category: "archive_recovery",
+      stage: "archive_recovery",
+      code: "archive_hydration_failed",
+    });
+    expect(
+      classifySandboxLogicalProvisionFailure(
+        "modal",
+        new SandboxProvisionStageError("create", new SandboxConfigError("modal", "missing token")),
+      ),
+    ).toMatchObject({ category: "configuration", stage: "create", code: "sandbox_config" });
+
+    const transport = Object.assign(new Error("provider request failed"), {
+      code: "ENOTFOUND",
+    });
+    expect(
+      classifySandboxLogicalProvisionFailure(
+        "modal",
+        new SandboxProvisionStageError("resume", transport),
+      ),
+    ).toMatchObject({
+      category: "provider_transport",
+      stage: "resume",
+      code: "code=ENOTFOUND",
+      retryable: false,
+    });
+    expect(
+      classifySandboxLogicalProvisionFailure(
+        "modal",
+        new SandboxProvisionStageError("create", new Error("typed boundary without subtype")),
+      ),
+    ).toMatchObject({ category: "create", stage: "create", code: "create_failed" });
+    expect(
+      classifySandboxLogicalProvisionFailure("modal", new Error("unstructured failure")),
+    ).toMatchObject({ category: "unknown", stage: "unknown", code: "unknown" });
+  });
+
+  test("one logical correlation records internal retries separately from its terminal result", async () => {
+    let establishes = 0;
+    const attempts: Array<{ provisionId: string; attempt: number; outcome: string }> = [];
+    const completed: Array<{ provisionId: string; internalAttempts: number }> = [];
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        establishes += 1;
+        if (establishes === 1) {
+          throw new SandboxLeaseSupersededError("group-1", 2);
+        }
+        return "ready";
+      },
+      {
+        backoffMs: 1,
+        provisionIdFactory: () => "11111111-1111-4111-8111-111111111111",
+        onAttemptSettled: ({ provisionId, attempt, outcome }) => {
+          attempts.push({ provisionId, attempt, outcome });
+        },
+        onCompleted: (_result, settlement) => {
+          completed.push(settlement);
+        },
+      },
+    );
+
+    await expect(provisioner.get()).resolves.toBe("ready");
+    expect(attempts).toEqual([
+      {
+        provisionId: "11111111-1111-4111-8111-111111111111",
+        attempt: 1,
+        outcome: "retrying",
+      },
+      {
+        provisionId: "11111111-1111-4111-8111-111111111111",
+        attempt: 2,
+        outcome: "completed",
+      },
+    ]);
+    expect(completed).toEqual([
+      {
+        provisionId: "11111111-1111-4111-8111-111111111111",
+        internalAttempts: 2,
+        durationMs: expect.any(Number),
+      },
+    ]);
+  });
+
+  test("fallible pre-terminal completion work records only the failed logical outcome", async () => {
+    let establishes = 0;
+    let disposed = 0;
+    const terminal: string[] = [];
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        establishes += 1;
+        return "ready";
+      },
+      {
+        provisionIdFactory: () => "11111111-1111-4111-8111-111111111111",
+        beforeCompleted: () => {
+          throw new Error("generated image materialization failed");
+        },
+        onCompleted: () => {
+          terminal.push("completed");
+        },
+        onFailed: (_error, settlement) => {
+          terminal.push(`failed:${settlement.provisionId}`);
+        },
+        disposeResult: () => {
+          disposed += 1;
+        },
+      },
+    );
+
+    await expect(provisioner.get()).rejects.toThrow("generated image materialization failed");
+    await expect(provisioner.get()).rejects.toThrow("generated image materialization failed");
+    expect(establishes).toBe(1);
+    expect(disposed).toBe(1);
+    expect(terminal).toEqual(["failed:11111111-1111-4111-8111-111111111111"]);
+  });
+
+  test("cancellation during pre-terminal completion emits no terminal outcome", async () => {
+    const controller = new AbortController();
+    let establishes = 0;
+    let completed = 0;
+    let failed = 0;
+    let disposed = 0;
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        establishes += 1;
+        return "ready";
+      },
+      {
+        signal: controller.signal,
+        beforeCompleted: () => {
+          controller.abort(new Error("STEER"));
+        },
+        onCompleted: () => {
+          completed += 1;
+        },
+        onFailed: () => {
+          failed += 1;
+        },
+        disposeResult: () => {
+          disposed += 1;
+        },
+      },
+    );
+
+    await expect(provisioner.get()).rejects.toBeInstanceOf(TurnOperationCancelledError);
+    expect(establishes).toBe(1);
+    expect(disposed).toBe(1);
+    expect(completed).toBe(0);
+    expect(failed).toBe(0);
+  });
+
+  test("an exhausted expected transition settles one logical id before a later re-read", async () => {
+    let sequence = 0;
+    const failures: Array<{ provisionId: string; internalAttempts: number }> = [];
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        throw new SandboxLeaseTransitionError(
+          "group-1",
+          3,
+          "provider_recovery_in_progress",
+          "modal",
+          "sb-1",
+          "draining",
+        );
+      },
+      {
+        maxRetries: 0,
+        provisionIdFactory: () => `provision-${++sequence}`,
+        onFailed: (_error, settlement) => failures.push(settlement),
+      },
+    );
+
+    await expect(provisioner.get()).rejects.toThrow(SandboxLeaseTransitionError);
+    await expect(provisioner.get()).rejects.toThrow(SandboxLeaseTransitionError);
+    expect(failures).toEqual([
+      { provisionId: "provision-1", internalAttempts: 1, durationMs: expect.any(Number) },
+      { provisionId: "provision-2", internalAttempts: 1, durationMs: expect.any(Number) },
+    ]);
   });
 
   test("Steer/Pause cancels a pending provision immediately and disposes its late lease", async () => {

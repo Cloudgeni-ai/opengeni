@@ -21,6 +21,8 @@ export type ScheduledAlertOccurrenceDeclaration = {
 export type ScheduledAlertOccurrenceIdentity = {
   status: "firing" | "resolved";
   sessionCreateIdempotencyKey: string;
+  /** Exact bounded labels from the validated structured occurrence. */
+  labels: Readonly<Record<string, string>>;
 };
 
 /**
@@ -68,6 +70,7 @@ export function scheduledAlertOccurrenceIdentity(input: {
   return {
     status,
     sessionCreateIdempotencyKey: `scheduled-alert-occurrence:v1:${digest}`,
+    labels: Object.fromEntries(labels),
   };
 }
 

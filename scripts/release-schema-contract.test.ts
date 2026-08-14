@@ -347,6 +347,24 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
+      if (migrations.has("0248_terraform_stacks_component_resolution_fence.sql")) {
+        if (
+          migrations.has("0246_integration_personal_instance_authority.sql") &&
+          migrations.has("0241_atomic_personal_resource_delegation.sql")
+        ) {
+          return includesActivation
+            ? "80d175fb7eb7c37c6965f6df657bcefeacf1a454f894f412831c6564060fb23f"
+            : "21f47bdcee153ce1552bb6c55c25e62b475cb050c6bc4c7ff627ecc24c7c7c8c";
+        }
+        if (migrations.has("0246_integration_personal_instance_authority.sql")) {
+          return includesActivation
+            ? "fd62e02cda3bfcafc0a9e7530713636a52d99cb0185c9c01e56de929af5c7d3a"
+            : "6a4c6aa993c9dc1cd3db1b24e2d1e9e527dc3c20113368d9eef88a38da2a9d2a";
+        }
+        return includesActivation
+          ? "c9ee6c1d08989d738c0db3d4372eb0b19b15294a92f21216e08eec3de4260c30"
+          : "ece89076dd885e577e756f47ca9c299e25b1df3194a0221286739519ba58b580";
+      }
       if (migrations.has("0247_terraform_stacks_provenance_repair.sql")) {
         if (
           migrations.has("0246_integration_personal_instance_authority.sql") &&
@@ -515,6 +533,7 @@ describe("release schema contract", () => {
     expect(contract.fileCount).toBe(
       108 +
         (migrations.has("0247_terraform_stacks_provenance_repair.sql") ? 1 : 0) +
+        (migrations.has("0248_terraform_stacks_component_resolution_fence.sql") ? 1 : 0) +
         (migrations.has("0065_enrollment_credential_generation.sql") ? 1 : 0) +
         (migrations.has(currentMainToolPolicyMigration) ? 1 : 0) +
         (migrations.has("0117_sandbox_recovery_generations.sql") ? 1 : 0) +
@@ -688,9 +707,11 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0247_terraform_stacks_provenance_repair.sql")
-        ? "0247_terraform_stacks_provenance_repair.sql"
-        : latestCompatibleMigration,
+      migrations.has("0248_terraform_stacks_component_resolution_fence.sql")
+        ? "0248_terraform_stacks_component_resolution_fence.sql"
+        : migrations.has("0247_terraform_stacks_provenance_repair.sql")
+          ? "0247_terraform_stacks_provenance_repair.sql"
+          : latestCompatibleMigration,
     );
     expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
       sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",
@@ -851,6 +872,12 @@ describe("release schema contract", () => {
     if (migrations.has("0247_terraform_stacks_provenance_repair.sql")) {
       expect(migrations.get("0247_terraform_stacks_provenance_repair.sql")).toMatchObject({
         sha256: "0bb6196b0a89e4b9d2271ec098793e2c8cbeecf4c9ef7ff036f3ed26e1792cff",
+        deploymentMode: "maintenance",
+      });
+    }
+    if (migrations.has("0248_terraform_stacks_component_resolution_fence.sql")) {
+      expect(migrations.get("0248_terraform_stacks_component_resolution_fence.sql")).toMatchObject({
+        sha256: "4fe9beb4cdf182a4391f7268bc83d11fdbc3125c105d48c8ca0bf41349be095f",
         deploymentMode: "maintenance",
       });
     }
