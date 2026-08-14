@@ -176,6 +176,9 @@ export function IntegrationControlCenter({
   );
   const callbackHandled = useRef(false);
   const loadRequestGeneration = useRef(0);
+  const mountedRef = useRef(true);
+  const currentOperationScopeRef = useRef({ client, workspaceId });
+  currentOperationScopeRef.current = { client, workspaceId };
   const setupInstanceKeyRef = useRef<string | null>(null);
   const setupTriggerRef = useRef<HTMLElement | null>(null);
   const removeTriggerRef = useRef<HTMLElement | null>(null);
@@ -194,8 +197,16 @@ export function IntegrationControlCenter({
         };
   const { definitions, instances, loading, error: loadError, refreshRevision } = currentLoadState;
 
+  const isCurrentOperationScope = useCallback(() => {
+    const current = currentOperationScopeRef.current;
+    return mountedRef.current && current.client === client && current.workspaceId === workspaceId;
+  }, [client, workspaceId]);
+
   const load = useCallback(async () => {
+    if (!isCurrentOperationScope()) return;
     const generation = ++loadRequestGeneration.current;
+    const isCurrentLoad = () =>
+      generation === loadRequestGeneration.current && isCurrentOperationScope();
     setLoadState((current) =>
       current.client === client && current.workspaceId === workspaceId
         ? { ...current, loading: true, error: null }
@@ -214,7 +225,7 @@ export function IntegrationControlCenter({
         client.listIntegrationDefinitions(workspaceId),
         client.listApiIntegrations(workspaceId),
       ]);
-      if (generation !== loadRequestGeneration.current) return;
+      if (!isCurrentLoad()) return;
       setLoadState((current) => ({
         client,
         workspaceId,
@@ -228,7 +239,7 @@ export function IntegrationControlCenter({
             : 1,
       }));
     } catch (error) {
-      if (generation !== loadRequestGeneration.current) return;
+      if (!isCurrentLoad()) return;
       setLoadState((current) => ({
         ...(current.client === client && current.workspaceId === workspaceId
           ? current
@@ -245,7 +256,15 @@ export function IntegrationControlCenter({
         error: error instanceof Error ? error.message : String(error),
       }));
     }
-  }, [client, workspaceId]);
+  }, [client, isCurrentOperationScope, workspaceId]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    const mounted = mountedRef;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     void load();
@@ -257,6 +276,15 @@ export function IntegrationControlCenter({
 
   useEffect(() => {
     callbackHandled.current = false;
+    setBusyKey(null);
+    setCallbackBusy(false);
+    setRemoveTarget(null);
+    setSetupDefinition(null);
+    setSetupInitialAccountLabel("");
+    setupInstanceKeyRef.current = null;
+    setupTriggerRef.current = null;
+    removeTriggerRef.current = null;
+    dispatchCustomApi({ type: "reset" });
   }, [client, workspaceId]);
 
   useEffect(() => {
@@ -294,12 +322,15 @@ export function IntegrationControlCenter({
           ? { expectedInstanceVersion: pending.expectedInstanceVersion }
           : {}),
       });
+      if (!isCurrentOperationScope()) return;
       await Promise.all([load(), onChanged()]);
+      if (!isCurrentOperationScope()) return;
       toast.success(`${pending.displayName} is ready`, {
         description: `${preview.tools.length} tools are available through this exact account.`,
       });
     })()
       .catch((error) => {
+        if (!isCurrentOperationScope()) return;
         toast.error("Connected, but couldn't finish setup", {
           description:
             error instanceof Error
@@ -308,10 +339,11 @@ export function IntegrationControlCenter({
         });
       })
       .finally(() => {
+        if (!isCurrentOperationScope()) return;
         setCallbackBusy(false);
         setBusyKey(null);
       });
-  }, [client, load, onChanged, workspaceId]);
+  }, [client, isCurrentOperationScope, load, onChanged, workspaceId]);
 
   const instancesByDefinition = useMemo(() => {
     const grouped = new Map<string, ApiIntegrationInstallationSummary[]>();
@@ -357,6 +389,7 @@ export function IntegrationControlCenter({
       expectedInstanceVersion?: number;
     },
   ) {
+    if (!isCurrentOperationScope()) return;
     setBusyKey(input.instanceKey);
     try {
       const returnPath = apiIntegrationOAuthReturnPath(
@@ -378,10 +411,11 @@ export function IntegrationControlCenter({
         returnPath,
         ...(input.connectionId ? { connectionId: input.connectionId } : {}),
       });
+      if (!isCurrentOperationScope()) return;
       if (!response.authorizationUrl) throw new Error("The provider did not return a consent URL.");
       window.location.assign(response.authorizationUrl);
     } catch (error) {
-      setBusyKey(null);
+      if (isCurrentOperationScope()) setBusyKey(null);
       throw error;
     }
   }
@@ -405,6 +439,7 @@ export function IntegrationControlCenter({
         expectedInstanceVersion: instance.instanceVersion,
       });
     } catch (error) {
+      if (!isCurrentOperationScope()) return;
       toast.error("Couldn't start account connection", {
         description: error instanceof Error ? error.message : String(error),
       });
@@ -421,13 +456,15 @@ export function IntegrationControlCenter({
         instance.capabilityId,
         instance.instanceKey,
       );
+      if (!isCurrentOperationScope()) return;
       setRemoveTarget({ instance, removesDefinition: preview.removesDefinition });
     } catch (error) {
+      if (!isCurrentOperationScope()) return;
       toast.error("Couldn't inspect removal impact", {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      setBusyKey(null);
+      if (isCurrentOperationScope()) setBusyKey(null);
     }
   }
 
@@ -445,19 +482,22 @@ export function IntegrationControlCenter({
           expectedInstanceVersion: instance.instanceVersion,
         },
       );
+      if (!isCurrentOperationScope()) return false;
       setRemoveTarget(null);
       await Promise.all([load(), onChanged()]);
+      if (!isCurrentOperationScope()) return false;
       toast.success(`${instance.displayName} removed`, {
         description: "Its Connection was retained and can be reused or disconnected separately.",
       });
       return true;
     } catch (error) {
+      if (!isCurrentOperationScope()) return false;
       toast.error("Couldn't remove this instance", {
         description: error instanceof Error ? error.message : String(error),
       });
       return false;
     } finally {
-      setBusyKey(null);
+      if (isCurrentOperationScope()) setBusyKey(null);
     }
   }
 
@@ -485,6 +525,7 @@ export function IntegrationControlCenter({
   }
 
   async function previewCustomApi(connection = customApi.connection) {
+    if (!isCurrentOperationScope()) return;
     let source;
     try {
       source = customApiSourceFromDraft(customApi.draft);
@@ -504,8 +545,10 @@ export function IntegrationControlCenter({
           ? { connectionId: connection.id, ownership: customApi.draft.ownership }
           : {}),
       });
+      if (!isCurrentOperationScope()) return;
       dispatchCustomApi({ type: "preview", preview, connection });
     } catch (error) {
+      if (!isCurrentOperationScope()) return;
       dispatchCustomApi({
         type: "preview_error",
         message: error instanceof Error ? error.message : String(error),
@@ -515,6 +558,7 @@ export function IntegrationControlCenter({
   }
 
   async function authenticateCustomApi() {
+    if (!isCurrentOperationScope()) return;
     let connection: ConnectionMetadata;
     dispatchCustomApi({ type: "phase", phase: "creating_connection", error: null });
     try {
@@ -535,11 +579,14 @@ export function IntegrationControlCenter({
             providerDomain,
           }),
         );
+        if (!isCurrentOperationScope()) return;
         await onChanged();
+        if (!isCurrentOperationScope()) return;
       }
       dispatchCustomApi({ type: "connection", connection });
       await previewCustomApi(connection);
     } catch (error) {
+      if (!isCurrentOperationScope()) return;
       dispatchCustomApi({
         type: "phase",
         phase: "auth",
@@ -549,6 +596,7 @@ export function IntegrationControlCenter({
   }
 
   async function installCustomApi() {
+    if (!isCurrentOperationScope()) return;
     const validationError = customApiInstallValidationError(customApi);
     if (validationError) {
       dispatchCustomApi({ type: "phase", phase: "review", error: validationError });
@@ -573,12 +621,15 @@ export function IntegrationControlCenter({
         ...(editing ? { expectedInstanceVersion: editing.instanceVersion } : {}),
         allowedTools: customApi.selectedTools,
       });
+      if (!isCurrentOperationScope()) return;
       await Promise.all([load(), onChanged()]);
+      if (!isCurrentOperationScope()) return;
       toast.success(`${customApi.draft.displayName.trim()} ${editing ? "updated" : "installed"}`, {
         description: `${customApi.selectedTools.length} tools are available through this exact instance.`,
       });
       dispatchCustomApi({ type: "reset" });
     } catch (error) {
+      if (!isCurrentOperationScope()) return;
       dispatchCustomApi({
         type: "phase",
         phase: "review",
