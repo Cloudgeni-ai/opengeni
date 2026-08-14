@@ -38,7 +38,7 @@ const REALTIME_DELEGATION_INPUT_MAX_BYTES = 65_536;
 const REALTIME_MODEL_CONTEXT_MAX_CHARACTERS = 32_768;
 
 export type CodexRealtimeV3BridgeFatal = {
-  code: "pending_overflow";
+  code: "pending_overflow" | "replay_journal_failed";
   message: string;
 };
 
@@ -79,6 +79,13 @@ export type CodexRealtimeV3BridgeOptions = {
   acceptedDelegationItemIds?: Set<string> | undefined;
   /** Unsynced delegation snapshots retained exactly across provider connection rotations. */
   pendingDelegations?: Map<string, SessionRealtimeInboundEntry> | undefined;
+  /** Persist exact delegation replay state before it becomes browser-reload-sensitive. */
+  onDelegationReplayStateChange?:
+    | ((state: {
+        acceptedDelegationItemIds: ReadonlySet<string>;
+        pendingDelegations: ReadonlyMap<string, SessionRealtimeInboundEntry>;
+      }) => void)
+    | undefined;
   /** The controller installs its activation FIFO first, then enables this listener synchronously. */
   listen?: boolean | undefined;
   onSnapshot?: ((snapshot: CodexRealtimeV3BridgeSnapshot) => void) | undefined;
@@ -178,9 +185,9 @@ export function createCodexRealtimeV3Bridge(
   });
   const publish = (): void => options.onSnapshot?.(snapshot());
 
-  const triggerFatal = (message: string): void => {
+  const triggerFatalCode = (code: CodexRealtimeV3BridgeFatal["code"], message: string): void => {
     if (closed || fatal) return;
-    fatal = { code: "pending_overflow", message };
+    fatal = { code, message };
     lastError = message;
     publish();
     try {
@@ -189,6 +196,10 @@ export function createCodexRealtimeV3Bridge(
       // A consumer callback cannot turn a controlled bridge failure into an
       // unhandled provider-message exception.
     }
+  };
+
+  const triggerFatal = (message: string): void => {
+    triggerFatalCode("pending_overflow", message);
   };
 
   const enqueue = (entry: SessionRealtimeInboundEntry): boolean => {
@@ -206,6 +217,14 @@ export function createCodexRealtimeV3Bridge(
     pendingInboundBytes += bytes;
     return true;
   };
+
+  // Same-browser reload reconstructs this exact map from the persisted owner
+  // journal. Queue those first-frozen calls before listening to the replacement
+  // provider connection; startup proof or a duplicate call drives the normal
+  // flush path without resampling application context.
+  for (const [delegationItemId, entry] of pendingDelegations) {
+    if (enqueue(entry)) locallyQueuedDelegationItemIds.add(delegationItemId);
+  }
 
   const hasWork = (): boolean =>
     pendingInbound.length > 0 ||
@@ -241,6 +260,38 @@ export function createCodexRealtimeV3Bridge(
         // of every arrival accepted while the request was pending.
         pendingInbound = [...batch, ...pendingInbound];
         throw error;
+      }
+
+      const acceptedAfterSync = new Set(acceptedDelegationItemIds);
+      const pendingAfterSync = new Map(pendingDelegations);
+      let delegationReplayChanged = false;
+      for (const item of batch) {
+        if (item.entry.kind === "delegation_call" && item.entry.delegationItemId) {
+          delegationReplayChanged = true;
+          acceptedAfterSync.add(item.entry.delegationItemId);
+          if (pendingAfterSync.get(item.entry.delegationItemId) === item.entry) {
+            pendingAfterSync.delete(item.entry.delegationItemId);
+          }
+        }
+      }
+      if (delegationReplayChanged) {
+        try {
+          options.onDelegationReplayStateChange?.({
+            acceptedDelegationItemIds: acceptedAfterSync,
+            pendingDelegations: pendingAfterSync,
+          });
+        } catch (error) {
+          // The server may already have admitted this exact batch. Keep it
+          // queued with the original operation identity and stop this bridge.
+          // Recovery can safely replay it because the prior pending journal
+          // state remains authoritative until the accepted transition writes.
+          pendingInbound = [...batch, ...pendingInbound];
+          triggerFatalCode(
+            "replay_journal_failed",
+            `Codex realtime delegation replay journal failed: ${safeError(error)}`,
+          );
+          return;
+        }
       }
 
       for (const item of batch) {
@@ -382,12 +433,13 @@ export function createCodexRealtimeV3Bridge(
       // These events are provider UI deltas. `turn.done` is the single
       // authoritative finalized transcript persisted below.
     } else if (event.type === "delegation.created") {
-      if (
-        acceptedDelegationItemIds.has(event.delegationItemId) ||
-        locallyQueuedDelegationItemIds.has(event.delegationItemId)
-      ) {
+      if (acceptedDelegationItemIds.has(event.delegationItemId)) {
         ignoredEventCount += 1;
         lastIgnoredEventType = event.type;
+      } else if (locallyQueuedDelegationItemIds.has(event.delegationItemId)) {
+        ignoredEventCount += 1;
+        lastIgnoredEventType = event.type;
+        durable = true;
       } else {
         let entry = pendingDelegations.get(event.delegationItemId);
         if (!entry) {
@@ -408,6 +460,18 @@ export function createCodexRealtimeV3Bridge(
             ...(modelContext ? { modelContext } : {}),
           };
           pendingDelegations.set(event.delegationItemId, entry);
+        }
+        try {
+          options.onDelegationReplayStateChange?.({
+            acceptedDelegationItemIds,
+            pendingDelegations,
+          });
+        } catch (error) {
+          triggerFatalCode(
+            "replay_journal_failed",
+            `Codex realtime delegation replay journal failed: ${safeError(error)}`,
+          );
+          return Promise.resolve();
         }
         durable = enqueue(entry);
         if (durable) {

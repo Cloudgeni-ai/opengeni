@@ -2764,8 +2764,8 @@ export const sessions = pgTable(
     ),
     initialModelContextValid: check(
       "sessions_initial_model_context_check",
-      sql`${table.initialModelContext} is null or (${table.initialModelContext} = btrim(${table.initialModelContext})
-        and char_length(${table.initialModelContext}) between 1 and 32768)`,
+      sql`${table.initialModelContext} is null
+        or opengeni_private.model_context_value_valid(${table.initialModelContext})`,
     ),
   }),
 );
@@ -3204,8 +3204,7 @@ export const sessionRealtimeEntries = pgTable(
         or (
           ${table.direction} = 'provider_in'
           and ${table.kind} in ('delegation_call', 'user_transcript', 'assistant_transcript')
-          and ${table.modelContext} = btrim(${table.modelContext})
-          and char_length(${table.modelContext}) between 1 and 32768
+          and opengeni_private.model_context_value_valid(${table.modelContext})
         )`,
     ),
   }),
@@ -4600,8 +4599,8 @@ export const sessionTurns = pgTable(
     ),
     modelContextValid: check(
       "session_turns_model_context_check",
-      sql`${table.modelContext} is null or (${table.modelContext} = btrim(${table.modelContext})
-        and char_length(${table.modelContext}) between 1 and 32768)`,
+      sql`${table.modelContext} is null
+        or opengeni_private.model_context_value_valid(${table.modelContext})`,
     ),
   }),
 );

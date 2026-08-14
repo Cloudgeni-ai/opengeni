@@ -109,6 +109,7 @@ describe("migration 0240 model context user messages", () => {
     expect(source).toContain('ADD COLUMN "model_context" text');
     expect(source).toContain('ADD CONSTRAINT "sessions_initial_model_context_check"');
     expect(source).toContain('ADD CONSTRAINT "session_turns_model_context_check"');
+    expect(source).toContain("opengeni_private.model_context_value_valid");
     expect(source).toContain('VALIDATE CONSTRAINT "sessions_initial_model_context_check"');
     expect(source).toContain('VALIDATE CONSTRAINT "session_turns_model_context_check"');
     expect(source).toContain("Completed historical turns retain their original conversation truth");
@@ -264,6 +265,30 @@ describe("migration 0240 model context user messages", () => {
       expect(notApplied).toEqual({ applied: false });
 
       await sql`update session_turns set status = 'completed' where id = ${live.turnId}`;
+
+      await sql`update sessions set initial_turn_instructions = ${"\t"} where id = ${queued.id}`;
+      let legacyWhitespaceError: unknown;
+      try {
+        await migrate(blank.databaseUrl);
+      } catch (error) {
+        legacyWhitespaceError = error;
+      }
+      expect((legacyWhitespaceError as { code?: string } | undefined)?.code).toBe("23514");
+      await expectPreCutoverColumns(sql);
+      await sql`update sessions set initial_turn_instructions = ${queued.context} where id = ${queued.id}`;
+
+      const astralOverflow = "😀".repeat(16_385);
+      await sql`update session_turns set turn_instructions = ${astralOverflow} where id = ${queued.turnId}`;
+      let legacyUtf16Error: unknown;
+      try {
+        await migrate(blank.databaseUrl);
+      } catch (error) {
+        legacyUtf16Error = error;
+      }
+      expect((legacyUtf16Error as { code?: string } | undefined)?.code).toBe("23514");
+      await expectPreCutoverColumns(sql);
+      await sql`update session_turns set turn_instructions = ${queued.context} where id = ${queued.turnId}`;
+
       await migrate(blank.databaseUrl);
 
       const columns = await sql<Array<{ tableName: string; columnName: string }>>`
@@ -309,7 +334,7 @@ describe("migration 0240 model context user messages", () => {
       });
       let invalidSessionContextError: unknown;
       try {
-        await sql`update sessions set initial_model_context = '   ' where id = ${queued.id}`;
+        await sql`update sessions set initial_model_context = ${"\tvalue\t"} where id = ${queued.id}`;
       } catch (error) {
         invalidSessionContextError = error;
       }
@@ -317,11 +342,52 @@ describe("migration 0240 model context user messages", () => {
 
       let invalidTurnContextError: unknown;
       try {
-        await sql`update session_turns set model_context = ${"x".repeat(32_769)} where id = ${queued.turnId}`;
+        await sql`update session_turns set model_context = ${astralOverflow} where id = ${queued.turnId}`;
       } catch (error) {
         invalidTurnContextError = error;
       }
       expect((invalidTurnContextError as { code?: string } | undefined)?.code).toBe("23514");
+      const realtimeId = crypto.randomUUID();
+      await sql`
+        insert into session_realtime_modes (
+          id, account_id, workspace_id, session_id, operation_id, owner_subject_id,
+          browser_instance_id, owner_key_hash, model, version, connection_epoch,
+          lease_expires_at, last_heartbeat_at
+        ) values (
+          ${realtimeId}, ${grant.accountId}, ${grant.workspaceId}, ${queued.id},
+          ${crypto.randomUUID()}, ${grant.subjectId}, ${crypto.randomUUID()}, ${"a".repeat(64)},
+          'gpt-live-1-boulder-alpha', 1, 1, now() + interval '30 seconds', now()
+        )`;
+      let invalidRealtimeContextError: unknown;
+      try {
+        await sql`
+          insert into session_realtime_entries (
+            account_id, workspace_id, session_id, realtime_id, operation_id,
+            connection_epoch, sequence, direction, kind, role, text, text_codec_version,
+            payload, payload_codec_version, model_context
+          ) values (
+            ${grant.accountId}, ${grant.workspaceId}, ${queued.id}, ${realtimeId},
+            ${crypto.randomUUID()}, 1, 1, 'provider_in', 'user_transcript', 'user',
+            'final transcript', 1, '{}'::jsonb, 1, ${astralOverflow}
+          )`;
+      } catch (error) {
+        invalidRealtimeContextError = error;
+      }
+      expect((invalidRealtimeContextError as { code?: string } | undefined)?.code).toBe("23514");
+      const [validator] = await sql<
+        Array<{ valid: boolean; tabOnly: boolean; tabPadded: boolean; astralOverflow: boolean }>
+      >`
+        select
+          opengeni_private.model_context_value_valid('valid context') as valid,
+          opengeni_private.model_context_value_valid(${"\t"}) as "tabOnly",
+          opengeni_private.model_context_value_valid(${"\tvalue\t"}) as "tabPadded",
+          opengeni_private.model_context_value_valid(${astralOverflow}) as "astralOverflow"`;
+      expect(validator).toEqual({
+        valid: true,
+        tabOnly: false,
+        tabPadded: false,
+        astralOverflow: false,
+      });
       const constraints = await sql<Array<{ name: string; validated: boolean }>>`
         select conname as name, convalidated as validated
         from pg_constraint

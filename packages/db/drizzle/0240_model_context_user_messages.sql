@@ -124,24 +124,46 @@ ALTER TABLE "sessions"
 ALTER TABLE "session_turns"
   RENAME COLUMN "turn_instructions" TO "model_context";
 
+-- Match JavaScript String.prototype.trim() plus UTF-16 .length for every
+-- PostgreSQL-representable string. PostgreSQL text excludes lone surrogates,
+-- while astral code points count as two JavaScript code units.
+CREATE OR REPLACE FUNCTION opengeni_private.model_context_value_valid(value text)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE code_units integer;
+BEGIN
+  IF value = '' OR value <> btrim(
+    value,
+    U&'\0009\000A\000B\000C\000D\0020\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000\FEFF'
+  )
+  THEN
+    RETURN false;
+  END IF;
+  SELECT sum(CASE WHEN ascii(character) > 65535 THEN 2 ELSE 1 END)::integer
+  INTO code_units
+  FROM unnest(string_to_array(value, NULL)) AS characters(character);
+  RETURN code_units BETWEEN 1 AND 32768;
+EXCEPTION WHEN others THEN
+  RETURN false;
+END;
+$body$;
+
 ALTER TABLE "sessions"
   ADD CONSTRAINT "sessions_initial_model_context_check"
   CHECK (
     "initial_model_context" IS NULL
-    OR (
-      "initial_model_context" = btrim("initial_model_context")
-      AND char_length("initial_model_context") BETWEEN 1 AND 32768
-    )
+    OR opengeni_private.model_context_value_valid("initial_model_context")
   ) NOT VALID;
 
 ALTER TABLE "session_turns"
   ADD CONSTRAINT "session_turns_model_context_check"
   CHECK (
     "model_context" IS NULL
-    OR (
-      "model_context" = btrim("model_context")
-      AND char_length("model_context") BETWEEN 1 AND 32768
-    )
+    OR opengeni_private.model_context_value_valid("model_context")
   ) NOT VALID;
 
 ALTER TABLE "session_realtime_entries"
@@ -157,8 +179,7 @@ ALTER TABLE "session_realtime_entries"
     OR (
       "direction" = 'provider_in'
       AND "kind" IN ('delegation_call', 'user_transcript', 'assistant_transcript')
-      AND "model_context" = btrim("model_context")
-      AND char_length("model_context") BETWEEN 1 AND 32768
+      AND opengeni_private.model_context_value_valid("model_context")
     )
   ) NOT VALID;
 

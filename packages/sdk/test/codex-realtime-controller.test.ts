@@ -1099,8 +1099,165 @@ describe("Codex realtime browser controller", () => {
     expect(syncRequests[1]?.entries).toEqual([original]);
     expect(syncRequests[1]?.connectionEpoch).toBe(2);
     expect(contextReads).toBe(1);
-    expect(controller.snapshot().bridge).toMatchObject({ pendingInbound: 0, ignoredEventCount: 0 });
+    expect(controller.snapshot().bridge).toMatchObject({ pendingInbound: 0, ignoredEventCount: 1 });
     await controller.stop();
+  });
+
+  test("replays one unsynced delegation after close and same-browser owner recovery", async () => {
+    const browser = rotatingBrowserFixture();
+    const storage = storageFixture();
+    const syncRequests: SyncSessionRealtimeLedgerRequest[] = [];
+    let current = mode();
+    let context = "first route context";
+    let contextReads = 0;
+    let uuid = 300;
+    let rejectFirstDelegation = true;
+    const delegation = (providerEventId: string) =>
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: providerEventId,
+        item: {
+          id: "reload-unsynced-delegation",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "delegate across reload" }],
+        },
+      });
+    const providerStarted = (providerEventId: string) =>
+      JSON.stringify({
+        type: "session.started",
+        event_id: providerEventId,
+        session: { id: `provider-${providerEventId}` },
+      });
+    const client = {
+      beginSessionRealtime: async (
+        _workspaceId: string,
+        _sessionId: string,
+        request: { operationId: string; browserInstanceId: string },
+      ) => {
+        const replay = current.operationId === request.operationId;
+        if (!replay) {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+        }
+        return { mode: current, replay };
+      },
+      negotiateCodexRealtimeWebrtc: async (
+        _workspaceId: string,
+        _sessionId: string,
+        request: CodexRealtimeWebrtcRequest,
+      ) => {
+        const connectionEpoch = request.rotate
+          ? current.connectionEpoch + 1
+          : current.connectionEpoch;
+        return {
+          sdp: ANSWER,
+          version: "v3" as const,
+          model: "gpt-live-1-boulder-alpha" as const,
+          connectionId: `32000000-0000-4000-8000-${String(connectionEpoch).padStart(12, "0")}`,
+          connectionEpoch,
+          startupFenceSequence: 0,
+          modeVersion: current.version,
+          replay: false,
+        };
+      },
+      activateCodexRealtimeConnection: async (
+        _workspaceId: string,
+        _sessionId: string,
+        _realtimeId: string,
+        _connectionId: string,
+        request: { connectionEpoch: number },
+      ) => {
+        const rotated = request.connectionEpoch !== current.connectionEpoch;
+        current = mode({
+          ...current,
+          version: current.version + (rotated ? 1 : 0),
+          connectionEpoch: request.connectionEpoch,
+        });
+        return { mode: current, replay: false };
+      },
+      heartbeatSessionRealtime: async () => {
+        current = mode({ ...current, version: current.version + 1 });
+        return { mode: current, replay: false };
+      },
+      syncSessionRealtimeLedger: async (
+        _workspaceId: string,
+        _sessionId: string,
+        _realtimeId: string,
+        request: SyncSessionRealtimeLedgerRequest,
+      ) => {
+        if (request.entries?.some((entry) => entry.kind === "delegation_call")) {
+          syncRequests.push(request);
+          if (rejectFirstDelegation) {
+            rejectFirstDelegation = false;
+            throw new Error("first browser closed before durable sync");
+          }
+        }
+        return { accepted: [], outbound: [] };
+      },
+      endSessionRealtime: async () => ({
+        mode: mode({
+          ...current,
+          state: "ended",
+          version: current.version + 1,
+          endedAt: "2026-07-29T07:01:00.000Z",
+          endReason: "user_stop",
+        }),
+        replay: false,
+      }),
+    };
+    const createController = () =>
+      createCodexRealtimeController({
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        storage,
+        remoteAudio: browser.remoteAudio,
+        randomUUID: () => `31000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+        createPeerConnection: browser.createPeerConnection,
+        getUserMedia: browser.getUserMedia,
+        getModelContext: () => {
+          contextReads += 1;
+          return context;
+        },
+        ...noIntervals(),
+        client,
+      });
+
+    const first = createController();
+    await first.start();
+    await first.ingestProviderEvent(providerStarted("startup-first"));
+    await expect(first.ingestProviderEvent(delegation("delegation-original"))).rejects.toThrow(
+      "first browser closed before durable sync",
+    );
+    const original = syncRequests[0]?.entries?.[0];
+    if (!original) throw new Error("Expected the first browser to freeze one delegation");
+    first.close();
+
+    context = "changed route context";
+    const recovered = createController();
+    await recovered.observeLifecycle(null);
+    await recovered.ingestProviderEvent(providerStarted("startup-recovered"));
+    await recovered.ingestProviderEvent(delegation("delegation-duplicate"));
+
+    expect(syncRequests[1]?.entries).toEqual([original]);
+    expect(syncRequests[1]?.connectionEpoch).toBe(2);
+    expect(contextReads).toBe(1);
+    expect(recovered.snapshot().bridge).toMatchObject({ pendingInbound: 0 });
+    const owner = JSON.parse([...storage.values.values()][0] ?? "null") as {
+      delegationReplay?: {
+        version?: number;
+        acceptedDelegationItemIds?: string[];
+        pendingDelegations?: unknown[];
+      };
+    };
+    expect(owner.delegationReplay).toEqual({
+      version: 1,
+      acceptedDelegationItemIds: ["reload-unsynced-delegation"],
+      pendingDelegations: [],
+    });
+    await recovered.stop();
   });
 
   test("coalesces duplicate peer failures and retries with capped backoff until one replacement succeeds", async () => {
@@ -1878,6 +2035,84 @@ describe("Codex realtime browser controller", () => {
       diagnostic: { kind: "reconnect", recoverable: true },
     });
     expect(timers.timeoutDelays()).toEqual([10]);
+    await controller.stop();
+  });
+
+  test("invalidates stale owner proof when a delegation replay journal write fails", async () => {
+    const browser = browserFixture();
+    const timers = timerFixture();
+    const storage = storageFixture();
+    const originalSetItem = storage.setItem;
+    storage.setItem = (key, value) => {
+      if (value.includes('"delegationReplay"')) {
+        throw new Error("session storage quota exceeded");
+      }
+      return originalSetItem(key, value);
+    };
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    let uuid = 0;
+    let current = mode();
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage,
+      randomUUID: () => `62000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+      createPeerConnection: () => browser.peer,
+      getUserMedia: async () => browser.media,
+      reconnectBackoffMs: [10],
+      ...timers,
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        negotiateCodexRealtimeWebrtc: async () => ({
+          sdp: ANSWER,
+          version: "v3",
+          model: "gpt-live-1-boulder-alpha",
+          connectionId: CONNECTION_ID,
+          connectionEpoch: 1,
+          startupFenceSequence: 0,
+          modeVersion: current.version,
+          replay: false,
+        }),
+        activateCodexRealtimeConnection: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async (_workspaceId, _sessionId, _realtimeId, request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+        endSessionRealtime: async () => ({
+          mode: mode({ ...current, state: "ended", endReason: "user_stop" }),
+          replay: false,
+        }),
+      },
+    });
+
+    await controller.start();
+    await controller.ingestProviderEvent(
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: "journal-write-failure-event",
+        item: {
+          id: "journal-write-failure",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "delegate once" }],
+        },
+      }),
+    );
+
+    expect(requests).toEqual([]);
+    expect(storage.values.size).toBe(0);
+    expect(controller.snapshot()).toMatchObject({
+      status: "recovering",
+      bridge: { fatal: { code: "replay_journal_failed" }, pendingInbound: 0 },
+    });
+    expect(timers.timeoutDelays()).toEqual([0]);
     await controller.stop();
   });
 

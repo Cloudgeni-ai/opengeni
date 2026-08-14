@@ -7,6 +7,8 @@ import {
   CODEX_REALTIME_V3_PENDING_MAX_BYTES,
   CODEX_REALTIME_V3_PENDING_MAX_ENTRIES,
   createCodexRealtimeV3Bridge,
+  type CodexRealtimeV3BridgeFatal,
+  type CodexRealtimeV3BridgeOptions,
 } from "../src/codex-realtime-v3";
 import * as sdkWire from "../src/codex-realtime-v3-wire";
 import type {
@@ -77,7 +79,8 @@ function bridgeOptions(input: {
   getModelContext?: () => string | undefined;
   acceptedDelegationItemIds?: Set<string>;
   pendingDelegations?: Map<string, SessionRealtimeInboundEntry>;
-  onFatal?: (fatal: { code: "pending_overflow"; message: string }) => void;
+  onDelegationReplayStateChange?: CodexRealtimeV3BridgeOptions["onDelegationReplayStateChange"];
+  onFatal?: (fatal: CodexRealtimeV3BridgeFatal) => void;
 }) {
   return {
     events: input.events ?? dataChannel(),
@@ -91,6 +94,7 @@ function bridgeOptions(input: {
     getModelContext: input.getModelContext,
     acceptedDelegationItemIds: input.acceptedDelegationItemIds,
     pendingDelegations: input.pendingDelegations,
+    onDelegationReplayStateChange: input.onDelegationReplayStateChange,
     onFatal: input.onFatal,
   };
 }
@@ -384,6 +388,115 @@ describe("Codex realtime V3 bridge", () => {
     expect(pendingDelegations.size).toBe(0);
     expect(second.snapshot().pendingInbound).toBe(0);
     second.close();
+  });
+
+  test("fails closed before sync when the first delegation replay journal write fails", async () => {
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    const fatals: CodexRealtimeV3BridgeFatal[] = [];
+    const pendingDelegations = new Map<string, SessionRealtimeInboundEntry>();
+    let contextReads = 0;
+    const bridge = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        getModelContext: () => {
+          contextReads += 1;
+          return "frozen route context";
+        },
+        pendingDelegations,
+        onDelegationReplayStateChange: () => {
+          throw new Error("session storage quota exceeded");
+        },
+        onFatal: (fatal) => fatals.push(fatal),
+        sync: async (request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+
+    await bridge.ingest(
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: "delegation-original",
+        item: {
+          id: "journal-write-failure",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "delegate once" }],
+        },
+      }),
+    );
+
+    expect(requests).toEqual([]);
+    expect(contextReads).toBe(1);
+    expect(pendingDelegations.get("journal-write-failure")).toMatchObject({
+      kind: "delegation_call",
+      providerEventId: "delegation-original",
+      delegationItemId: "journal-write-failure",
+      modelContext: "frozen route context",
+    });
+    expect(bridge.snapshot()).toMatchObject({
+      pendingInbound: 0,
+      fatal: {
+        code: "replay_journal_failed",
+        message: "Codex realtime delegation replay journal failed: session storage quota exceeded",
+      },
+    });
+    expect(fatals).toHaveLength(1);
+    expect(bridge.snapshot().fatal).toEqual(fatals[0]!);
+    bridge.close();
+  });
+
+  test("retains the exact pending delegation when its accepted journal transition fails", async () => {
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    const fatals: CodexRealtimeV3BridgeFatal[] = [];
+    const acceptedDelegationItemIds = new Set<string>();
+    const pendingDelegations = new Map<string, SessionRealtimeInboundEntry>();
+    let journalWrites = 0;
+    const bridge = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        acceptedDelegationItemIds,
+        pendingDelegations,
+        onDelegationReplayStateChange: () => {
+          journalWrites += 1;
+          if (journalWrites === 2) throw new Error("accepted transition could not persist");
+        },
+        onFatal: (fatal) => fatals.push(fatal),
+        sync: async (request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+
+    await bridge.ingest(
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: "delegation-original",
+        item: {
+          id: "accepted-write-failure",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "delegate once" }],
+        },
+      }),
+    );
+
+    const original = requests[0]?.entries?.[0];
+    if (!original) throw new Error("Expected one exact delegation sync entry");
+    expect(journalWrites).toBe(2);
+    expect(acceptedDelegationItemIds).toEqual(new Set());
+    expect(pendingDelegations.get("accepted-write-failure")).toBe(original);
+    expect(bridge.snapshot()).toMatchObject({
+      pendingInbound: 1,
+      fatal: {
+        code: "replay_journal_failed",
+        message:
+          "Codex realtime delegation replay journal failed: accepted transition could not persist",
+      },
+    });
+    expect(fatals).toHaveLength(1);
+    expect(bridge.snapshot().fatal).toEqual(fatals[0]!);
+    bridge.close();
   });
 
   test("persists one finalized transcript per turn and ignores live transcript deltas", async () => {
@@ -842,7 +955,7 @@ describe("Codex realtime V3 bridge", () => {
   });
 
   test("crossing either hard pending bound emits one fatal and stops the generation", async () => {
-    const fatals: Array<{ code: "pending_overflow"; message: string }> = [];
+    const fatals: CodexRealtimeV3BridgeFatal[] = [];
     const requests: SyncSessionRealtimeLedgerRequest[] = [];
     const bridge = createCodexRealtimeV3Bridge(
       bridgeOptions({
@@ -873,7 +986,7 @@ describe("Codex realtime V3 bridge", () => {
     });
     bridge.close();
 
-    const byteFatals: Array<{ code: "pending_overflow"; message: string }> = [];
+    const byteFatals: CodexRealtimeV3BridgeFatal[] = [];
     const byteRequests: SyncSessionRealtimeLedgerRequest[] = [];
     const byteBridge = createCodexRealtimeV3Bridge(
       bridgeOptions({

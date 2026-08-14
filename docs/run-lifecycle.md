@@ -95,6 +95,15 @@ peer events inert. Failed preparation leaves the old healthy peer active;
 recovery uses bounded backoff and terminal conflicts permanently stop its retry
 loop. Stop, reload without owner proof, and concurrent timer/network failure
 all abort pending negotiation and release peers, timers, media, and playback.
+The same-browser owner record also carries a versioned, bounded delegation
+replay journal. A delegation snapshot is written before it enters the bridge
+queue; successful sync advances the journal from the exact pending entry to its
+accepted item identity before in-memory acknowledgement. Reload recovery
+requeues pending snapshots without rereading host context and suppresses
+accepted provider duplicates. Malformed, normalization-changing, oversized,
+over-count, or unwritable journal state fails closed and stops that connection
+generation instead of mutating or dropping durable work; terminal mode
+settlement removes the owner record and journal together.
 The browser installs a raw listener synchronously when `oai-events` is created,
 before any asynchronous negotiation. Its activation FIFO excludes audio deltas,
 rejects malformed or over-1-MiB events, and is hard-bounded to 256 entries and
