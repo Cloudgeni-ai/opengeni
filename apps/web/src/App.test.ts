@@ -56,6 +56,7 @@ import {
   enabledWorkspaceCapabilityMcpServers,
   gitHubRepositoryResource,
   initialReasoningEffort,
+  installedApiIntegrationMcpServers,
   labelEffort,
   mergeMcpServerOptions,
   newSessionDraftToolPolicy,
@@ -1258,6 +1259,26 @@ describe("buildTools", () => {
     ).toEqual([
       { id: "cap-ready", name: "Ready MCP" },
       { id: "codex_apps", name: "Codex Apps" },
+    ]);
+  });
+
+  test("derives selectable MCP servers from installed API integration instances", () => {
+    expect(
+      installedApiIntegrationMcpServers([
+        {
+          serverId: "api_openapi_google_gmail_account_one",
+          name: "Gmail",
+          displayName: "Work Gmail",
+        },
+        {
+          serverId: "api_openapi_inventory_account_one",
+          name: "Inventory API",
+          displayName: "",
+        },
+      ]),
+    ).toEqual([
+      { id: "api_openapi_google_gmail_account_one", name: "Work Gmail" },
+      { id: "api_openapi_inventory_account_one", name: "Inventory API" },
     ]);
   });
 
