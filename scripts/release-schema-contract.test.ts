@@ -185,11 +185,24 @@ describe("release schema contract", () => {
       sha256: "a13ddf193d04fbc5beac33f33641358f2486eef88744e06f3bfeb02366761da7",
       deploymentMode: "rolling",
     });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0244_slack_app_home_refresh_queue.sql",
+      ),
+    ).toMatchObject({
+      sha256: "f098df63a6ed21e88362faf0d6c5e36321604bb300ac155529adb9b17da30858",
+      deploymentMode: "rolling",
+    });
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
+      if (migrations.has("0244_slack_app_home_refresh_queue.sql")) {
+        return includesActivation
+          ? "6dfd8724938ea9e087593afcc8ea0cbb963b8600e898b76f7c6eb9b0fadbc05f"
+          : "864ab2e236a6847bc80d00870de1312e7dd9853c1eb655f3bfd66d0f4812cae3";
+      }
       if (
         migrations.has("0243_google_drive_object_acl_authority.sql") &&
         migrations.has("0241_enrollment_agent_runtime.sql")
@@ -511,10 +524,12 @@ describe("release schema contract", () => {
         (migrations.has("0238_recover_unclaimed_session_turns.sql") ? 1 : 0) +
         (migrations.has("0240_enrollment_connection_authority.sql") ? 1 : 0) +
         (migrations.has("0241_enrollment_agent_runtime.sql") ? 1 : 0) +
-        (migrations.has("0243_google_drive_object_acl_authority.sql") ? 1 : 0),
+        (migrations.has("0243_google_drive_object_acl_authority.sql") ? 1 : 0) +
+        (migrations.has("0244_slack_app_home_refresh_queue.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(sessionVisibilityContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
+      "0244_slack_app_home_refresh_queue.sql",
       "0243_google_drive_object_acl_authority.sql",
       "0241_enrollment_agent_runtime.sql",
       "0240_enrollment_connection_authority.sql",

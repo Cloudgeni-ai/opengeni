@@ -8575,10 +8575,7 @@ export async function claimSlackAppHomeRefresh(
 export async function settleSlackAppHomeRefresh(
   db: Database,
   input: {
-    refresh: Pick<
-      SlackAppHomeRefresh,
-      "id" | "accountId" | "workspaceId" | "desiredRevision"
-    >;
+    refresh: Pick<SlackAppHomeRefresh, "id" | "accountId" | "workspaceId" | "desiredRevision">;
     claimHolderId: string;
     errorCode?: string | null;
   },
@@ -8609,10 +8606,7 @@ export async function settleSlackAppHomeRefresh(
 export async function releaseSlackAppHomeRefresh(
   db: Database,
   input: {
-    refresh: Pick<
-      SlackAppHomeRefresh,
-      "id" | "accountId" | "workspaceId" | "desiredRevision"
-    >;
+    refresh: Pick<SlackAppHomeRefresh, "id" | "accountId" | "workspaceId" | "desiredRevision">;
     claimHolderId: string;
     errorCode: string;
     retryAt: Date;
@@ -8627,7 +8621,7 @@ export async function releaseSlackAppHomeRefresh(
         retryAt: sql`case
           when ${schema.slackAppHomeRefreshes.desiredRevision} > ${input.refresh.desiredRevision}
             then null
-          else ${input.retryAt}
+          else ${input.retryAt.toISOString()}::timestamptz
         end`,
         attemptCount: sql`case
           when ${schema.slackAppHomeRefreshes.desiredRevision} > ${input.refresh.desiredRevision}
