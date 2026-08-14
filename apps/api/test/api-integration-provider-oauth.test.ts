@@ -178,6 +178,23 @@ async function waitForCondition(check: () => Promise<boolean>, timeoutMs = 10_00
   }
 }
 
+async function waitForDatabaseLock(pid: number): Promise<void> {
+  await waitForCondition(async () => {
+    const [row] = await shared!.admin<Array<{ waiting: boolean }>>`
+      select exists (
+        select 1
+        from pg_stat_activity
+        where pid = ${pid}::integer
+          and datname = current_database()
+          and state = 'active'
+          and wait_event_type = 'Lock'
+          and cardinality(pg_blocking_pids(pid)) > 0
+      ) as waiting
+    `;
+    return row?.waiting === true;
+  });
+}
+
 function providerFixture(
   options: {
     googleTokenGate?: Promise<void>;
@@ -545,7 +562,7 @@ describe("API Integration provider OAuth", () => {
         BEFORE INSERT ON connections
         FOR EACH ROW EXECUTE FUNCTION ${functionName}();
       `);
-      await blocker`select pg_advisory_lock(${lockKey})`;
+      await blocker`select pg_advisory_lock(${lockKey}::bigint)`;
       blockerLocked = true;
 
       const persistence = persistProviderOAuthConnection(client.db, {
@@ -586,25 +603,19 @@ describe("API Integration provider OAuth", () => {
         return row?.waiting === 1;
       });
 
+      const [revokerBackend] = await revoker<Array<{ pid: number }>>`
+        select pg_backend_pid()::integer as pid
+      `;
       const revocation = (async () =>
         await revoker`
-          /* ope124-concurrent-account-revocation-${suffix} */
           update organization_memberships
           set status = 'suspended', authorization_revision = authorization_revision + 1,
               updated_at = now()
           where account_id = ${managed.accountId} and subject_id = ${managed.subjectId}
         `)();
-      await waitForCondition(async () => {
-        const [row] = await shared!.admin<Array<{ wait_event_type: string | null }>>`
-          select wait_event_type
-          from pg_stat_activity
-          where query like ${`%ope124-concurrent-account-revocation-${suffix}%`}
-            and state = 'active'
-        `;
-        return row?.wait_event_type === "Lock";
-      });
+      await waitForDatabaseLock(revokerBackend!.pid);
 
-      await blocker`select pg_advisory_unlock(${lockKey})`;
+      await blocker`select pg_advisory_unlock(${lockKey}::bigint)`;
       blockerLocked = false;
       expect(await persistence).toMatchObject({
         workspaceId: managed.workspaceId,
@@ -627,7 +638,7 @@ describe("API Integration provider OAuth", () => {
       expect(connection?.credential_encrypted).toBe(credentialSentinel);
     } finally {
       if (blockerLocked)
-        await blocker`select pg_advisory_unlock(${lockKey})`.catch(() => undefined);
+        await blocker`select pg_advisory_unlock(${lockKey}::bigint)`.catch(() => undefined);
       await blocker.end().catch(() => undefined);
       await revoker.end().catch(() => undefined);
       await shared!.admin
@@ -681,7 +692,7 @@ describe("API Integration provider OAuth", () => {
         BEFORE INSERT ON connections
         FOR EACH ROW EXECUTE FUNCTION ${functionName}();
       `);
-      await blocker`select pg_advisory_lock(${lockKey})`;
+      await blocker`select pg_advisory_lock(${lockKey}::bigint)`;
       blockerLocked = true;
 
       const pending = callback(
@@ -700,9 +711,11 @@ describe("API Integration provider OAuth", () => {
         return row?.waiting === 1;
       });
 
+      const [revokerBackend] = await revoker<Array<{ pid: number }>>`
+        select pg_backend_pid()::integer as pid
+      `;
       const downgrade = (async () =>
         await revoker`
-          /* ope124-concurrent-workspace-downgrade-${suffix} */
           update workspace_memberships
           set permissions = ${revoker.json(["connections:read", "workspace:read"])},
               updated_at = now()
@@ -710,17 +723,9 @@ describe("API Integration provider OAuth", () => {
             and workspace_id = ${managed.workspaceId}
             and subject_id = ${managed.subjectId}
         `)();
-      await waitForCondition(async () => {
-        const [row] = await shared!.admin<Array<{ wait_event_type: string | null }>>`
-          select wait_event_type
-          from pg_stat_activity
-          where query like ${`%ope124-concurrent-workspace-downgrade-${suffix}%`}
-            and state = 'active'
-        `;
-        return row?.wait_event_type === "Lock";
-      });
+      await waitForDatabaseLock(revokerBackend!.pid);
 
-      await blocker`select pg_advisory_unlock(${lockKey})`;
+      await blocker`select pg_advisory_unlock(${lockKey}::bigint)`;
       blockerLocked = false;
       const connected = await pending;
       expect(
@@ -745,7 +750,7 @@ describe("API Integration provider OAuth", () => {
       expect(connection?.id).toBeString();
     } finally {
       if (blockerLocked)
-        await blocker`select pg_advisory_unlock(${lockKey})`.catch(() => undefined);
+        await blocker`select pg_advisory_unlock(${lockKey}::bigint)`.catch(() => undefined);
       await blocker.end().catch(() => undefined);
       await revoker.end().catch(() => undefined);
       await shared!.admin
