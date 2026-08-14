@@ -26,6 +26,7 @@ import {
   synchronizeCanonicalHumanLoginBindings,
   updateSlackTaskPolicy,
   updateWorkspaceSettings,
+  withWorkspaceSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -41,6 +42,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
+import { sql } from "drizzle-orm";
 import { Hono } from "hono";
 import {
   createSlackUserLinkToken,
@@ -151,6 +153,7 @@ function fakeSlack(
 ) {
   const posts: SlackPost[] = [];
   const homePublications: SlackHomePublication[] = [];
+  const homeViewHashes = new Map<string, string>();
   const calls: SlackCall[] = [];
   const reactionContexts = new Map<string, SlackReactionContext>();
   const privateFiles = new Map<string, SlackPrivateFileFixture>();
@@ -371,8 +374,18 @@ function fakeSlack(
         await paused.released;
         homePauses.delete(userId);
       }
-      homePublications.push({ userId, hash: form.get("hash"), view });
-      return Response.json({ ok: true, view: { id: `V_${homePublications.length}` } });
+      const requestedHash = form.get("hash");
+      const currentHash = homeViewHashes.get(userId);
+      if (requestedHash && currentHash && requestedHash !== currentHash) {
+        return Response.json({ ok: false, error: "hash_conflict" });
+      }
+      homePublications.push({ userId, hash: requestedHash, view });
+      const nextHash = `home-view-${homePublications.length}`;
+      homeViewHashes.set(userId, nextHash);
+      return Response.json({
+        ok: true,
+        view: { id: `V_${homePublications.length}`, hash: nextHash },
+      });
     }
     if (method === "files.info") {
       const fileId = form.get("file") ?? "";
@@ -488,6 +501,8 @@ function fakeSlack(
     channelAccessFailures,
     pauseBeforePost,
     pauseBeforeHomePublish,
+    currentHomeViewHash: (userId: string) => homeViewHashes.get(userId) ?? null,
+    setHomeViewHash: (userId: string, hash: string) => homeViewHashes.set(userId, hash),
   };
 }
 
@@ -881,8 +896,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         type: "app_home_opened",
         user: value.ownerSlackUserId,
         tab: "home",
+        view: { hash: "home-hash-initial" },
       },
     };
+    value.slack.setHomeViewHash(value.ownerSlackUserId, "home-hash-initial");
     expect((await postEvent(value.app, event)).status).toBe(200);
     expect((await postEvent(value.app, event)).status).toBe(200);
     expect(value.slack.homePublications).toHaveLength(0);
@@ -910,8 +927,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         type: "app_home_opened",
         user: value.ownerSlackUserId,
         tab: "home",
+        view: { hash: "home-hash-authorized" },
       },
     };
+    value.slack.setHomeViewHash(value.ownerSlackUserId, "home-hash-authorized");
     expect((await postEvent(value.app, event)).status).toBe(200);
     expect(value.slack.homePublications).toHaveLength(0);
     expect(await drainAll(value.deps)).toBe(1);
@@ -920,13 +939,49 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       where workspace_id = ${value.owner.workspaceId}
         and connection_id = ${value.connectionId}
         and slack_user_id = ${value.ownerSlackUserId}`;
-    expect((await postEvent(value.app, { ...event, eventId: `${event.eventId}_2` })).status).toBe(
-      200,
-    );
+    expect(
+      (
+        await postEvent(value.app, {
+          ...event,
+          eventId: `${event.eventId}_2`,
+          event: {
+            ...event.event,
+            view: { hash: value.slack.currentHomeViewHash(value.ownerSlackUserId) },
+          },
+        })
+      ).status,
+    ).toBe(200);
     expect(await drainAll(value.deps)).toBe(1);
     const revoked = JSON.stringify(value.slack.homePublications.at(-1)!.view.blocks);
     expect(revoked).toContain("Connect your OpenGeni account");
     expect(revoked).not.toContain("Must disappear after unlink");
+  });
+
+  test("App Home never publishes task data without Slack's current view hash", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await createSessionForRequest(value.deps, value.owner, value.owner.workspaceId, {
+      initialMessage: "Must remain hidden without a Slack view hash",
+      model: "gpt-5.6-terra",
+      sandboxBackend: "none",
+    });
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_HOME_NO_HASH_${crypto.randomUUID()}`,
+          event: {
+            type: "app_home_opened",
+            user: value.ownerSlackUserId,
+            tab: "home",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    expect(await drainAll(value.deps)).toBe(1);
+    const view = JSON.stringify(value.slack.homePublications.at(-1)!.view.blocks);
+    expect(view).toContain("Refresh OpenGeni Home");
+    expect(view).not.toContain("Must remain hidden without a Slack view hash");
   });
 
   test("App Home serializes overlapping refreshes so revoked content cannot win last", async () => {
@@ -947,6 +1002,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         view: { hash: "home-hash-a" },
       },
     };
+    value.slack.setHomeViewHash(value.ownerSlackUserId, "home-hash-a");
     expect((await postEvent(value.app, firstEvent)).status).toBe(200);
     const pause = value.slack.pauseBeforeHomePublish(value.ownerSlackUserId);
     const firstDrain = drainSlackInteractionsOnce(value.deps);
@@ -962,7 +1018,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         await postEvent(value.app, {
           ...firstEvent,
           eventId: `E_HOME_RACE_B_${crypto.randomUUID()}`,
-          event: { ...firstEvent.event, view: { hash: "home-hash-b" } },
+          event: { ...firstEvent.event, view: { hash: "home-hash-a" } },
         })
       ).status,
     ).toBe(200);
@@ -974,7 +1030,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
     expect(value.slack.homePublications.map((publication) => publication.hash)).toEqual([
       "home-hash-a",
-      "home-hash-b",
+      null,
     ]);
     const finalView = JSON.stringify(value.slack.homePublications.at(-1)!.view.blocks);
     expect(finalView).toContain("Connect your OpenGeni account");
@@ -984,36 +1040,30 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
   test("App Home scans beyond the newest page for older tasks needing attention", async () => {
     if (!available) return;
     const value = await fixture();
-    const urgent = await createSessionForRequest(
-      value.deps,
-      value.owner,
-      value.owner.workspaceId,
-      {
-        initialMessage: "Older urgent task remains visible",
-        model: "gpt-5.6-terra",
-        sandboxBackend: "none",
-      },
-    );
-    await shared!.admin`
-      update sessions
-      set status = 'failed', updated_at = now() - interval '2 hours'
-      where workspace_id = ${value.owner.workspaceId} and id = ${urgent.id}`;
-    for (let index = 0; index < 35; index += 1) {
-      const recent = await createSessionForRequest(
-        value.deps,
-        value.owner,
-        value.owner.workspaceId,
-        {
-          initialMessage: `Newer completed task ${index}`,
-          model: "gpt-5.6-terra",
-          sandboxBackend: "none",
-        },
-      );
-      await shared!.admin`
+    const urgent = await createSessionForRequest(value.deps, value.owner, value.owner.workspaceId, {
+      initialMessage: "Older urgent task remains visible",
+      model: "gpt-5.6-terra",
+      sandboxBackend: "none",
+    });
+    await withWorkspaceSessionActivityRls(client.db, value.owner.workspaceId, async (db) => {
+      await db.execute(sql`
         update sessions
-        set status = 'idle', updated_at = now() - (${35 - index} * interval '1 minute')
-        where workspace_id = ${value.owner.workspaceId} and id = ${recent.id}`;
-    }
+        set status = 'failed', updated_at = now() - interval '2 hours'
+        where workspace_id = ${value.owner.workspaceId} and id = ${urgent.id}`);
+      await db.execute(sql`
+        insert into sessions (
+          account_id, workspace_id, status, initial_message, resources, tools, metadata,
+          model, sandbox_backend, sandbox_group_id, tool_policy, created_at, updated_at
+        )
+        select ${value.owner.accountId}, ${value.owner.workspaceId}, 'idle',
+          'Newer completed task ' || n::text, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+          'gpt-5.6-terra', 'none', gen_random_uuid(),
+          jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null),
+          statement_timestamp() - make_interval(secs => n),
+          statement_timestamp() - make_interval(secs => n)
+        from generate_series(1, 500) as generated(n)
+      `);
+    });
     expect(
       (
         await postEvent(value.app, {
@@ -1023,6 +1073,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
             type: "app_home_opened",
             user: value.ownerSlackUserId,
             tab: "home",
+            view: { hash: "home-hash-pagination" },
           },
         })
       ).status,

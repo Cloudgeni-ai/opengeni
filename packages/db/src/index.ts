@@ -8572,6 +8572,35 @@ export async function claimSlackAppHomeRefresh(
   return rows[0] ? mapSlackAppHomeRefresh(rows[0]) : null;
 }
 
+export async function renewSlackAppHomeRefreshClaim(
+  db: Database,
+  input: {
+    refresh: Pick<SlackAppHomeRefresh, "id" | "accountId" | "workspaceId">;
+    claimHolderId: string;
+    claimLeaseMs: number;
+  },
+): Promise<boolean> {
+  if (input.claimLeaseMs < 1_000 || input.claimLeaseMs > 300_000) {
+    throw new Error("invalid Slack App Home claim lease");
+  }
+  return await withRlsContext(db, input.refresh, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackAppHomeRefreshes)
+      .set({
+        claimExpiresAt: sql`now() + make_interval(secs => ${input.claimLeaseMs}::double precision / 1000)`,
+      })
+      .where(
+        and(
+          eq(schema.slackAppHomeRefreshes.id, input.refresh.id),
+          eq(schema.slackAppHomeRefreshes.claimHolderId, input.claimHolderId),
+          gt(schema.slackAppHomeRefreshes.claimExpiresAt, sql`now()`),
+        ),
+      )
+      .returning({ id: schema.slackAppHomeRefreshes.id });
+    return rows.length === 1;
+  });
+}
+
 export async function settleSlackAppHomeRefresh(
   db: Database,
   input: {

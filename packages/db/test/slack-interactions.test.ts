@@ -21,6 +21,7 @@ import {
   getSessionForSubject,
   grantWorkspaceAccess,
   listSessionsForSubject,
+  renewSlackAppHomeRefreshClaim,
   releaseSlackAppHomeRefresh,
   releaseSlackInteractionInbox,
   reserveSlackInteractionActionHandles,
@@ -448,6 +449,25 @@ describe("Slack interaction migration and durable database boundary", () => {
     const holderA = crypto.randomUUID();
     const claimedA = await claimSlackAppHomeRefresh(db, holderA, 300_000);
     expect(claimedA).toMatchObject({ id: first.id, desiredRevision: 1, attemptCount: 1 });
+    expect(
+      await renewSlackAppHomeRefreshClaim(db, {
+        refresh: claimedA!,
+        claimHolderId: holderA,
+        claimLeaseMs: 300_000,
+      }),
+    ).toBe(true);
+    const [renewedLease] = await admin<{ renewed: boolean }[]>`
+      select claim_expires_at > now() + interval '4 minutes' as renewed
+      from slack_app_home_refreshes
+      where id = ${first.id}`;
+    expect(renewedLease?.renewed).toBe(true);
+    expect(
+      await renewSlackAppHomeRefreshClaim(db, {
+        refresh: claimedA!,
+        claimHolderId: crypto.randomUUID(),
+        claimLeaseMs: 300_000,
+      }),
+    ).toBe(false);
     const newer = await enqueueSlackAppHomeRefresh(db, {
       ...input,
       providerEventId: "E_APP_HOME_2",

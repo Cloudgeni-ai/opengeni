@@ -67,6 +67,7 @@ import {
   rekeySlackInteractionRoute,
   reopenSlackInteractionDelivery,
   reserveSlackInteractionActionHandles,
+  renewSlackAppHomeRefreshClaim,
   releaseSlackInteractionDelivery,
   releaseSlackAppHomeRefresh,
   releaseSlackInteractionInbox,
@@ -818,6 +819,7 @@ async function publishSlackAppHome(
   deps: ApiRouteDeps,
   installation: SlackInstallationRoute,
   refresh: SlackAppHomeRefresh,
+  renewLease: () => Promise<void>,
 ): Promise<void> {
   const link = await getSlackBotUserLink(
     deps.db,
@@ -841,10 +843,11 @@ async function publishSlackAppHome(
       connectionId: installation.connectionId,
       subjectId: "service:slack-app-home",
     });
-    await client.publishHomeView({
-      userId: refresh.slackUserId,
-      hash: refresh.providerViewHash,
-      blocks: buildSlackAppHomeAccessBlocks({
+    await publishSlackAppHomeAccessView(
+      client,
+      refresh,
+      renewLease,
+      buildSlackAppHomeAccessBlocks({
         title: link ? "OpenGeni access needed" : "Connect your OpenGeni account",
         message: link
           ? "Your Slack identity is linked, but it does not currently have access to this OpenGeni workspace."
@@ -857,7 +860,7 @@ async function publishSlackAppHome(
           refresh.slackUserId,
         ),
       }),
-    });
+    );
     return;
   }
 
@@ -874,6 +877,7 @@ async function publishSlackAppHome(
   try {
     let cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
     do {
+      await renewLease();
       const page = await listSessionsForSubject(deps.db, installation.workspaceId, {
         subjectId: grant.subjectId,
         limit: 500,
@@ -888,10 +892,11 @@ async function publishSlackAppHome(
     } while (cursor);
   } catch (error) {
     if (!(error instanceof SessionListAccessError)) throw error;
-    await client.publishHomeView({
-      userId: refresh.slackUserId,
-      hash: refresh.providerViewHash,
-      blocks: buildSlackAppHomeAccessBlocks({
+    await publishSlackAppHomeAccessView(
+      client,
+      refresh,
+      renewLease,
+      buildSlackAppHomeAccessBlocks({
         title: "OpenGeni access changed",
         message:
           "Your current OpenGeni access could not be verified. Reconnect before tasks are shown here.",
@@ -903,7 +908,7 @@ async function publishSlackAppHome(
           refresh.slackUserId,
         ),
       }),
-    });
+    );
     return;
   }
   const currentLink = await getSlackBotUserLink(
@@ -924,10 +929,11 @@ async function publishSlackAppHome(
     currentGrant.accountId !== installation.accountId ||
     !hasPermission(currentGrant.permissions, "sessions:read")
   ) {
-    await client.publishHomeView({
-      userId: refresh.slackUserId,
-      hash: refresh.providerViewHash,
-      blocks: buildSlackAppHomeAccessBlocks({
+    await publishSlackAppHomeAccessView(
+      client,
+      refresh,
+      renewLease,
+      buildSlackAppHomeAccessBlocks({
         title: "OpenGeni access changed",
         message:
           "Your current OpenGeni access could not be verified. Reconnect before tasks are shown here.",
@@ -939,7 +945,7 @@ async function publishSlackAppHome(
           refresh.slackUserId,
         ),
       }),
-    });
+    );
     return;
   }
   const currentAuthorizationScope = await requireSessionAuthorizationListScope(
@@ -951,19 +957,36 @@ async function publishSlackAppHome(
     slackSessionAuthorizationScopeKey(currentAuthorizationScope) !==
     slackSessionAuthorizationScopeKey(authorizationScope)
   ) {
-    await client.publishHomeView({
-      userId: refresh.slackUserId,
-      hash: refresh.providerViewHash,
-      blocks: buildSlackAppHomeAccessBlocks({
+    await publishSlackAppHomeAccessView(
+      client,
+      refresh,
+      renewLease,
+      buildSlackAppHomeAccessBlocks({
         title: "OpenGeni access changed",
         message:
           "Your current task access changed while this view was loading. Reopen Home to refresh it safely.",
         actionLabel: "Open OpenGeni",
         actionUrl: slackWorkspaceUrl(deps, installation.workspaceId),
       }),
-    });
+    );
     return;
   }
+  if (!refresh.providerViewHash) {
+    await publishSlackAppHomeAccessView(
+      client,
+      refresh,
+      renewLease,
+      buildSlackAppHomeAccessBlocks({
+        title: "Refresh OpenGeni Home",
+        message:
+          "Reopen Home to refresh your tasks safely. OpenGeni does not publish task data without Slack's current view version.",
+        actionLabel: "Open OpenGeni",
+        actionUrl: slackWorkspaceUrl(deps, installation.workspaceId),
+      }),
+    );
+    return;
+  }
+  await renewLease();
   await client.publishHomeView({
     userId: refresh.slackUserId,
     hash: refresh.providerViewHash,
@@ -973,6 +996,32 @@ async function publishSlackAppHome(
       sessionUrl: (sessionId) => slackSessionUrl(deps, installation.workspaceId, sessionId),
     }),
   });
+}
+
+async function publishSlackAppHomeAccessView(
+  client: OpenGeniSlackBotClient,
+  refresh: SlackAppHomeRefresh,
+  renewLease: () => Promise<void>,
+  blocks: ReturnType<typeof buildSlackAppHomeAccessBlocks>,
+): Promise<void> {
+  try {
+    await renewLease();
+    await client.publishHomeView({
+      userId: refresh.slackUserId,
+      hash: refresh.providerViewHash,
+      blocks,
+    });
+  } catch (error) {
+    if (!(error instanceof SlackBotProviderError) || error.code !== "hash_conflict") throw error;
+    // Access views contain no task data. If an older authorized publication
+    // advanced Slack's optimistic-concurrency hash, replace it fail-closed
+    // rather than dropping the newer clearing obligation.
+    await renewLease();
+    await client.publishHomeView({
+      userId: refresh.slackUserId,
+      blocks,
+    });
+  }
 }
 
 export async function drainSlackInteractionsOnce(deps: ApiRouteDeps): Promise<boolean> {
@@ -989,7 +1038,19 @@ export async function drainSlackInteractionsOnce(deps: ApiRouteDeps): Promise<bo
       ) {
         throw new SlackInteractionPermanentError("slack_app_home_installation_changed");
       }
-      await publishSlackAppHome(deps, installation, refresh);
+      const renewLease = async () => {
+        if (
+          !(await renewSlackAppHomeRefreshClaim(deps.db, {
+            refresh,
+            claimHolderId: appHomeHolder,
+            claimLeaseMs: APP_HOME_LEASE_MS,
+          }))
+        ) {
+          throw new SlackInteractionPermanentError("slack_app_home_claim_lost");
+        }
+      };
+      await renewLease();
+      await publishSlackAppHome(deps, installation, refresh, renewLease);
       await settleSlackAppHomeRefresh(deps.db, {
         refresh,
         claimHolderId: appHomeHolder,
