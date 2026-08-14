@@ -13,6 +13,17 @@ const migrationUrl = new URL(
 );
 const runtimePostureUrl = new URL("../src/runtime-posture.ts", import.meta.url);
 const provisionRolesUrl = new URL("../src/provision-roles.ts", import.meta.url);
+const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
+
+async function acquireMigrationTestDatabase(label: string) {
+  const blank = await acquireBlankTestDatabase(label);
+  if (!blank && requireRealDatabase) {
+    throw new Error(
+      `[migration-0241-atomic-personal-resource-delegation] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable for ${label}`,
+    );
+  }
+  return blank;
+}
 
 describe("migration 0241 atomic personal-resource delegation", () => {
   test("freezes the complete admission, snapshot, consumption, and runtime posture", async () => {
@@ -136,14 +147,29 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       "resource_row.origin_workspace_id IS DISTINCT FROM member_row.personal_workspace_id",
     );
 
-    // Admission is attached to accepted attempt insertion and checks exact
-    // session visibility/epoch/owner before any resource grant is considered.
+    // Admission is attached to accepted attempt insertion and checks the exact
+    // current uninterrupted attempt plus session visibility/epoch/owner before
+    // any resource grant is considered.
     expect(source).toContain("RETURNS trigger");
     expect(source).toContain("AFTER INSERT ON %I.session_turn_attempts");
     expect(source).toContain("NEW.authority_visibility IS DISTINCT FROM session_row.visibility");
     expect(source).toContain("NEW.authority_epoch IS DISTINCT FROM session_row.authority_epoch");
     expect(source).toContain(
       "NEW.authority_owner_organization_membership_id\n          IS DISTINCT FROM session_row.owner_organization_membership_id",
+    );
+    expect(source).toContain("session_row.active_turn_id IS DISTINCT FROM NEW.turn_id");
+    expect(source).toContain("turn_row.active_attempt_id IS DISTINCT FROM NEW.id");
+    expect(source).toContain(
+      "turn_row.execution_generation IS DISTINCT FROM NEW.execution_generation",
+    );
+    expect(source).toContain(
+      "turn_row.status NOT IN ('running', 'requires_action', 'recovering', 'waiting_capacity')",
+    );
+    expect(source).toContain("NEW.state NOT IN ('claimed', 'running')");
+    expect(source).toContain("NEW.closed_at IS NOT NULL");
+    expect(source).toContain("NEW.quiesced_at IS NOT NULL");
+    expect(source).toContain(
+      "personal-resource admission requires the exact current uninterrupted attempt",
     );
     const selectionCountIndex = source.indexOf("SELECT count(*)::integer INTO resource_total");
     const emptySelectionIndex = source.indexOf("IF resource_total = 0 THEN");
@@ -200,7 +226,22 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       "GRANT EXECUTE ON FUNCTION resolve_session_attempt_personal_resources(uuid, uuid, uuid)\n      TO opengeni_app",
     );
     expect(source).toContain("attempt.state IN ('claimed', 'running')");
+    expect(source).toContain("attempt.closed_at IS NULL");
     expect(source).toContain("attempt.quiesced_at IS NULL");
+    expect(source).toContain("session_value.active_turn_id = admission_row.turn_id");
+    expect(source).toContain("turn_value.active_attempt_id = admission_row.attempt_id");
+    expect(source).toContain(
+      "turn_value.execution_generation = admission_row.execution_generation",
+    );
+    expect(source).toContain(
+      "turn_value.status IN ('running', 'requires_action', 'recovering', 'waiting_capacity')",
+    );
+    expect(source).toContain("interruption.state IN ('pending', 'delivered', 'acknowledged')");
+    expect(source).toContain("FOR SHARE OF session_value, turn_value");
+    expect(source).toContain("FOR UPDATE OF attempt");
+    expect(source).toContain(
+      "personal-resource resolve requires the exact current uninterrupted attempt",
+    );
     expect(source).toContain(
       "membership.authorization_revision\n                = snapshot.membership_authorization_revision",
     );
@@ -240,7 +281,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
   for (const order of ["migrate-then-provision", "provision-then-migrate"] as const) {
     test(`converges helper ACLs after ${order} without breaking ordinary app-role RLS`, async () => {
       const appPassword = "apppw";
-      const blank = await acquireBlankTestDatabase(`migration-0241-capability-${order}`);
+      const blank = await acquireMigrationTestDatabase(`migration-0241-capability-${order}`);
       if (!blank) return;
 
       if (order === "migrate-then-provision") {
@@ -383,7 +424,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
   }
 
   test("admits an ordinary attempt with no selected personal resources or personal authority", async () => {
-    const blank = await acquireBlankTestDatabase("migration-0241-empty-personal-selection");
+    const blank = await acquireMigrationTestDatabase("migration-0241-empty-personal-selection");
     if (!blank) return;
 
     await migrate(blank.databaseUrl);
@@ -484,11 +525,12 @@ describe("migration 0241 atomic personal-resource delegation", () => {
     } finally {
       await client.close();
       await sql.end({ timeout: 5 });
+      await blank.release();
     }
   }, 180_000);
 
   test("rejects cross-workspace rig versions at admission and resolution", async () => {
-    const blank = await acquireBlankTestDatabase("migration-0241-rig-version-workspace-fence");
+    const blank = await acquireMigrationTestDatabase("migration-0241-rig-version-workspace-fence");
     if (!blank) return;
 
     const appPassword = "apppw";
@@ -584,11 +626,12 @@ describe("migration 0241 atomic personal-resource delegation", () => {
     } finally {
       await app.end({ timeout: 5 });
       await admin.end({ timeout: 5 });
+      await blank.release();
     }
   }, 180_000);
 
   test("atomically snapshots direct/transitive selections and replays one once receipt", async () => {
-    const blank = await acquireBlankTestDatabase("migration-0241-personal-resource-replay");
+    const blank = await acquireMigrationTestDatabase("migration-0241-personal-resource-replay");
     if (!blank) return;
 
     const sql = postgres(blank.databaseUrl, { max: 4, onnotice: () => undefined });
@@ -680,11 +723,14 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       expect(resolved).toHaveLength(3);
     } finally {
       await sql.end({ timeout: 5 });
+      await blank.release();
     }
   });
 
   test("serializes concurrent once use and fails closed after live authority drift", async () => {
-    const blank = await acquireBlankTestDatabase("migration-0241-personal-resource-concurrency");
+    const blank = await acquireMigrationTestDatabase(
+      "migration-0241-personal-resource-concurrency",
+    );
     if (!blank) return;
 
     const admin = postgres(blank.databaseUrl, { max: 6, onnotice: () => undefined });
@@ -823,16 +869,168 @@ describe("migration 0241 atomic personal-resource delegation", () => {
             )
           `),
       );
-      await expect(resolve()).rejects.toThrow("snapshot is no longer live");
+      await expect(resolve()).rejects.toThrow(
+        "personal-resource resolve requires the exact current uninterrupted attempt",
+      );
     } finally {
       await client.close();
       await scoped.end({ timeout: 5 });
       await admin.end({ timeout: 5 });
+      await blank.release();
     }
   });
 
+  test("requires the exact current uninterrupted attempt at admission and resolution", async () => {
+    const blank = await acquireMigrationTestDatabase("migration-0241-current-attempt-fences");
+    if (!blank) return;
+
+    const sql = postgres(blank.databaseUrl, { max: 4, onnotice: () => undefined });
+    try {
+      await migrate(blank.databaseUrl);
+      const ids = await createFixture(sql, blank.databaseUrl, "once", {
+        directOnly: true,
+      });
+      const exactAttemptError =
+        "personal-resource admission requires the exact current uninterrupted attempt";
+
+      await expect(
+        insertAttemptWithLifecycle(
+          sql,
+          ids,
+          ids.attemptA,
+          "workflow-inactive-pointer",
+          "run-inactive-pointer",
+          "activity-inactive-pointer",
+          { sessionActiveTurnId: null },
+        ),
+      ).rejects.toThrow(exactAttemptError);
+      await expect(
+        insertAttemptWithLifecycle(
+          sql,
+          ids,
+          ids.attemptA,
+          "workflow-stale-generation",
+          "run-stale-generation",
+          "activity-stale-generation",
+          { turnExecutionGeneration: 2 },
+        ),
+      ).rejects.toThrow(exactAttemptError);
+      await expect(
+        insertAttemptWithLifecycle(
+          sql,
+          ids,
+          ids.attemptA,
+          "workflow-stale-status",
+          "run-stale-status",
+          "activity-stale-status",
+          { turnStatus: "completed" },
+        ),
+      ).rejects.toThrow(exactAttemptError);
+
+      const [unconsumedGrant] = await sql<Array<{ status: string }>>`
+        select status from organization_user_resource_grants
+        where id = ${ids.directGrant}
+      `;
+      expect(unconsumedGrant?.status).toBe("active");
+
+      await insertAttempt(
+        sql,
+        ids,
+        ids.attemptA,
+        "workflow-current",
+        "run-current",
+        "activity-current",
+      );
+      await setRuntimeScope(sql, ids);
+      const resolve = async () =>
+        await sql`
+          select * from resolve_session_attempt_personal_resources(
+            ${ids.account}, ${ids.targetWorkspace}, ${ids.attemptA}
+          )
+        `;
+      expect(await resolve()).toHaveLength(1);
+
+      const resolveAttemptError =
+        "personal-resource resolve requires the exact current uninterrupted attempt";
+      await sql`update sessions set active_turn_id = null where id = ${ids.session}`;
+      await expect(resolve()).rejects.toThrow(resolveAttemptError);
+      await sql`update sessions set active_turn_id = ${ids.turn} where id = ${ids.session}`;
+
+      await sql`update session_turns set execution_generation = 2 where id = ${ids.turn}`;
+      await expect(resolve()).rejects.toThrow(resolveAttemptError);
+      await sql`update session_turns set execution_generation = 1 where id = ${ids.turn}`;
+
+      await sql.begin(async (tx) => {
+        await tx.unsafe("set local opengeni.session_inference_claim = '1'");
+        await tx`update session_turns set status = 'completed' where id = ${ids.turn}`;
+      });
+      await expect(resolve()).rejects.toThrow(resolveAttemptError);
+      await sql.begin(async (tx) => {
+        await tx.unsafe("set local opengeni.session_inference_claim = '1'");
+        await tx`update session_turns set status = 'running' where id = ${ids.turn}`;
+      });
+
+      const [interruptionReceipt] = await sql<Array<{ id: string }>>`
+        insert into session_command_receipts (
+          account_id, workspace_id, actor_type, actor_subject_id, action,
+          target_session_id, target_turn_id, operation_key, canonical_request_hash
+        ) values (
+          ${ids.account}, ${ids.targetWorkspace}, 'human', ${ids.subject},
+          'session.queue.steer', ${ids.session}, ${ids.turn}, ${crypto.randomUUID()},
+          'migration-0241-acknowledged-interruption'
+        ) returning id
+      `;
+      let releaseHeldResolve!: () => void;
+      let markResolveLocked!: () => void;
+      const heldResolveRelease = new Promise<void>((resolveHeld) => {
+        releaseHeldResolve = resolveHeld;
+      });
+      const resolveLocked = new Promise<void>((resolveLockedAttempt) => {
+        markResolveLocked = resolveLockedAttempt;
+      });
+      const heldResolve = sql.begin(async (tx) => {
+        await setRuntimeScope(tx, ids);
+        const resolved = await tx`
+          select * from resolve_session_attempt_personal_resources(
+            ${ids.account}, ${ids.targetWorkspace}, ${ids.attemptA}
+          )
+        `;
+        markResolveLocked();
+        await heldResolveRelease;
+        return resolved;
+      });
+      await resolveLocked;
+      const interruptionInsert = sql`
+        insert into session_attempt_interruptions (
+          account_id, workspace_id, session_id, operation_id, attempt_id,
+          kind, control_revision, state, delivered_at, acknowledged_at
+        ) values (
+          ${ids.account}, ${ids.targetWorkspace}, ${ids.session},
+          ${interruptionReceipt!.id}, ${ids.attemptA}, 'steer', 1,
+          'acknowledged', clock_timestamp(), clock_timestamp()
+        )
+      `;
+      try {
+        expect(
+          await Promise.race([
+            interruptionInsert.then(() => "inserted" as const),
+            Bun.sleep(100).then(() => "blocked" as const),
+          ]),
+        ).toBe("blocked");
+      } finally {
+        releaseHeldResolve();
+      }
+      expect(await heldResolve).toHaveLength(1);
+      await interruptionInsert;
+      await expect(resolve()).rejects.toThrow(resolveAttemptError);
+    } finally {
+      await sql.end({ timeout: 5 });
+      await blank.release();
+    }
+  }, 180_000);
+
   test("admits exact session and always grant fences", async () => {
-    const blank = await acquireBlankTestDatabase("migration-0241-personal-resource-fences");
+    const blank = await acquireMigrationTestDatabase("migration-0241-personal-resource-fences");
     if (!blank) return;
 
     const sql = postgres(blank.databaseUrl, { max: 4, onnotice: () => undefined });
@@ -876,6 +1074,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       }
     } finally {
       await sql.end({ timeout: 5 });
+      await blank.release();
     }
   });
 });
@@ -1079,6 +1278,75 @@ async function insertAttempt(
   activityId: string,
   onConflict = false,
 ) {
+  return await insertAttemptWithLifecycle(sql, ids, attemptId, workflowId, runId, activityId, {
+    onConflict,
+  });
+}
+
+async function insertAttemptWithLifecycle(
+  sql: postgres.Sql,
+  ids: FixtureIds,
+  attemptId: string,
+  workflowId: string,
+  runId: string,
+  activityId: string,
+  options: {
+    onConflict?: boolean;
+    sessionActiveTurnId?: string | null;
+    turnActiveAttemptId?: string | null;
+    turnExecutionGeneration?: number;
+    turnStatus?: string;
+    attemptExecutionGeneration?: number;
+  } = {},
+) {
+  const sessionActiveTurnId =
+    options.sessionActiveTurnId === undefined ? ids.turn : options.sessionActiveTurnId;
+  const turnActiveAttemptId =
+    options.turnActiveAttemptId === undefined ? attemptId : options.turnActiveAttemptId;
+  const turnExecutionGeneration = options.turnExecutionGeneration ?? 1;
+  const attemptExecutionGeneration = options.attemptExecutionGeneration ?? 1;
+  const turnStatus = options.turnStatus ?? "running";
+  return await sql.begin(async (tx) => {
+    await tx.unsafe("set local opengeni.session_inference_claim = '1'");
+    await tx`
+      update sessions
+      set active_turn_id = ${sessionActiveTurnId}, status = 'running'
+      where id = ${ids.session}
+        and account_id = ${ids.account}
+        and workspace_id = ${ids.targetWorkspace}
+    `;
+    await tx`
+      update session_turns
+      set active_attempt_id = ${turnActiveAttemptId},
+        execution_generation = ${turnExecutionGeneration}, status = ${turnStatus}
+      where id = ${ids.turn}
+        and account_id = ${ids.account}
+        and workspace_id = ${ids.targetWorkspace}
+        and session_id = ${ids.session}
+    `;
+    return await insertAttemptRow(
+      tx,
+      ids,
+      attemptId,
+      workflowId,
+      runId,
+      activityId,
+      attemptExecutionGeneration,
+      options.onConflict ?? false,
+    );
+  });
+}
+
+async function insertAttemptRow(
+  sql: postgres.Sql | postgres.TransactionSql,
+  ids: FixtureIds,
+  attemptId: string,
+  workflowId: string,
+  runId: string,
+  activityId: string,
+  executionGeneration: number,
+  onConflict: boolean,
+) {
   const conflict = onConflict ? sql`on conflict (id) do nothing` : sql``;
   return await sql`
     insert into session_turn_attempts (
@@ -1089,14 +1357,14 @@ async function insertAttempt(
       connector_action_policies
     ) values (
       ${attemptId}, ${ids.account}, ${ids.targetWorkspace}, ${ids.session}, ${ids.turn},
-      1, ${workflowId}, ${runId}, ${activityId}, 1, 1, 'workspace_shared',
+      ${executionGeneration}, ${workflowId}, ${runId}, ${activityId}, 1, 1, 'workspace_shared',
       ${ids.membership}, '{}'::jsonb, '[]'::jsonb
     )
     ${conflict}
   `;
 }
 
-async function setRuntimeScope(sql: postgres.Sql, ids: FixtureIds) {
+async function setRuntimeScope(sql: postgres.Sql | postgres.TransactionSql, ids: FixtureIds) {
   await sql`select set_config('opengeni.account_id', ${ids.account}, false)`;
   await sql`select set_config('opengeni.workspace_id', ${ids.targetWorkspace}, false)`;
   await sql`select set_config('opengeni.subject_id', ${ids.subject}, false)`;

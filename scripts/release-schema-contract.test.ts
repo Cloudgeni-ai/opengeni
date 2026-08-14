@@ -196,8 +196,8 @@ describe("release schema contract", () => {
         migrations.has("0241_atomic_personal_resource_delegation.sql")
       ) {
         return includesActivation
-          ? "6fdf8d0ba5ea3021e0b14e54287f976b54e236a5b505cfa822330ec78ada66d7"
-          : "40aca86aa92b8061115be7a6abd81a14591f27103bfa706a7659fc4e84dc1f04";
+          ? "64f53a4ec4517fa2525aba293869d9048c9932bed58f0ef17445a2723aa579fe"
+          : "01840387a701cb5585308d2cf47070298c6580e6d037abfa3f4358563220868d";
       }
       if (
         migrations.has("0236_session_visibility_slack_policy.sql") &&
@@ -205,8 +205,8 @@ describe("release schema contract", () => {
         migrations.has("0241_atomic_personal_resource_delegation.sql")
       ) {
         return includesActivation
-          ? "f65c52256bbcca9efb74d5b263d4e1689bd497670df3d59c4fec360d8dfcf840"
-          : "b82e3fea7922a70439c405d97800675ab46f8d433912bfc3d7b6f4906e41b861";
+          ? "ed2d5cdf78858b08efdbf0bd46474c1bd45ec1798595a104da1e4c9b123a34c2"
+          : "720613ad79a8956f6cc5372c5441dcfbbec1b4c9dd7a9c7e3d08dae4f736ffab";
       }
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
       if (
@@ -215,8 +215,8 @@ describe("release schema contract", () => {
         migrations.has("0241_atomic_personal_resource_delegation.sql")
       ) {
         return includesActivation
-          ? "a50e66a6da558f0f6bc9923ec63897473d42aedf821191790a52ae1b555b8c47"
-          : "3fac4f59443be6c03d2d36dda5249eea57975860d75566c2890081d7e1322e4d";
+          ? "9052b2c6bdec863e26504274ccd527bd8d53b8375ac9465edbe8378183bbdd0d"
+          : "7b553426ed71c3a6a1677b9be182f0a7674ff23dddaee017272dd47a6897d0fd";
       }
       if (
         migrations.has("0243_google_drive_object_acl_authority.sql") &&
@@ -231,8 +231,8 @@ describe("release schema contract", () => {
         migrations.has("0241_atomic_personal_resource_delegation.sql")
       ) {
         return includesActivation
-          ? "cf3bc13b6c4fb5765a424d521bd5c34e4451743ca71af55a21389a40444609c4"
-          : "ef0691e9c07366e3aa289c2007372113868e75ae163853bb80950ccaf9a2956a";
+          ? "015b520626fe065f8497d7bd065da60e1168f902c31af22a1b51e81ac3878a19"
+          : "82e13cbc75672a8fffe3014b606b833c65bd1e476e67d755043a024c49984521";
       }
       if (migrations.has("0243_google_drive_object_acl_authority.sql")) {
         return includesActivation
@@ -244,8 +244,8 @@ describe("release schema contract", () => {
         migrations.has("0241_atomic_personal_resource_delegation.sql")
       ) {
         return includesActivation
-          ? "71084e4237d368d9cdb954fa8eaa743c4da2d94da63cb68536a7fc09f14306ad"
-          : "2f9ebd4fc00daa1a78b20f4749ad92eaaf9ab89ca5c369dff7b7f33a56aea688";
+          ? "9c004e0805db7f59f8086c9823f5f9d25bb6849b36b1bae1c1603a91a687f98e"
+          : "0f32095219b9894a903f442fc4cd8feb5dd8ef6d6404104aa6f50131d0c6be90";
       }
       if (migrations.has("0241_enrollment_agent_runtime.sql")) {
         return includesActivation
@@ -254,8 +254,8 @@ describe("release schema contract", () => {
       }
       if (migrations.has("0241_atomic_personal_resource_delegation.sql")) {
         return includesActivation
-          ? "2d47230bb5ad6f8936c241f9132b490a86d39042531099b1b05e3f1885e6a506"
-          : "a4db6e4284ef8fe3e328810315a587075fe856bbf166704698891e4b25be055c";
+          ? "22ca0d47d0c0adc8aa6b6f6c32b062110397e312843930c8d2f718d979845f57"
+          : "1ae31a2d57ec668e2a6313b94902304df837ab66d66f3a3968e57e09332c18bd";
       }
       if (migrations.has("0238_recover_unclaimed_session_turns.sql")) {
         return includesActivation
@@ -777,7 +777,7 @@ describe("release schema contract", () => {
     }
     if (migrations.has("0241_atomic_personal_resource_delegation.sql")) {
       expect(migrations.get("0241_atomic_personal_resource_delegation.sql")).toMatchObject({
-        sha256: "86f8bf301c85ca93ce1356d31fc64fad2e8d934274c0da06281014c5a668be8e",
+        sha256: "4a8e3752decc0a497f8eb00de223923747bf2994a0f76ccb977ce7f3ced9e5be",
         deploymentMode: "rolling",
       });
     }

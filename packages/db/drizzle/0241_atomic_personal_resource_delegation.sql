@@ -398,7 +398,28 @@ BEGIN
       END IF;
 
       IF NEW.execution_generation <= 0
-        OR NEW.authority_visibility IS DISTINCT FROM session_row.visibility
+        OR NEW.state NOT IN ('claimed', 'running')
+        OR NEW.closed_at IS NOT NULL
+        OR NEW.quiesced_at IS NOT NULL
+        OR session_row.active_turn_id IS DISTINCT FROM NEW.turn_id
+        OR turn_row.active_attempt_id IS DISTINCT FROM NEW.id
+        OR turn_row.execution_generation IS DISTINCT FROM NEW.execution_generation
+        OR turn_row.status NOT IN ('running', 'requires_action', 'recovering', 'waiting_capacity')
+        OR EXISTS (
+          SELECT 1
+          FROM session_attempt_interruptions interruption
+          WHERE interruption.account_id = NEW.account_id
+            AND interruption.workspace_id = NEW.workspace_id
+            AND interruption.session_id = NEW.session_id
+            AND interruption.attempt_id = NEW.id
+            AND interruption.state IN ('pending', 'delivered', 'acknowledged')
+        )
+      THEN
+        RAISE EXCEPTION 'personal-resource admission requires the exact current uninterrupted attempt'
+          USING ERRCODE = '42501';
+      END IF;
+
+      IF NEW.authority_visibility IS DISTINCT FROM session_row.visibility
         OR NEW.authority_epoch IS DISTINCT FROM session_row.authority_epoch
         OR NEW.authority_owner_organization_membership_id
           IS DISTINCT FROM session_row.owner_organization_membership_id
@@ -717,6 +738,51 @@ BEGIN
 
       IF caller_subject IS DISTINCT FROM admission_row.initiating_human_subject_id THEN
         RAISE EXCEPTION 'personal-resource resolve initiating human mismatch'
+          USING ERRCODE = '42501';
+      END IF;
+
+      PERFORM 1
+      FROM sessions session_value
+      JOIN session_turns turn_value
+        ON turn_value.account_id = session_value.account_id
+       AND turn_value.workspace_id = session_value.workspace_id
+       AND turn_value.session_id = session_value.id
+      JOIN session_turn_attempts attempt
+        ON attempt.account_id = turn_value.account_id
+       AND attempt.workspace_id = turn_value.workspace_id
+       AND attempt.session_id = turn_value.session_id
+       AND attempt.turn_id = turn_value.id
+      WHERE session_value.id = admission_row.session_id
+        AND session_value.account_id = admission_row.account_id
+        AND session_value.workspace_id = admission_row.workspace_id
+        AND session_value.active_turn_id = admission_row.turn_id
+        AND turn_value.id = admission_row.turn_id
+        AND turn_value.active_attempt_id = admission_row.attempt_id
+        AND turn_value.execution_generation = admission_row.execution_generation
+        AND turn_value.status IN ('running', 'requires_action', 'recovering', 'waiting_capacity')
+        AND attempt.id = admission_row.attempt_id
+        AND attempt.execution_generation = admission_row.execution_generation
+        AND attempt.state IN ('claimed', 'running')
+        AND attempt.closed_at IS NULL
+        AND attempt.quiesced_at IS NULL
+      FOR SHARE OF session_value, turn_value
+      FOR UPDATE OF attempt;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'personal-resource resolve requires the exact current uninterrupted attempt'
+          USING ERRCODE = '42501';
+      END IF;
+
+      IF EXISTS (
+        SELECT 1
+        FROM session_attempt_interruptions interruption
+        WHERE interruption.account_id = admission_row.account_id
+          AND interruption.workspace_id = admission_row.workspace_id
+          AND interruption.session_id = admission_row.session_id
+          AND interruption.attempt_id = admission_row.attempt_id
+          AND interruption.state IN ('pending', 'delivered', 'acknowledged')
+      )
+      THEN
+        RAISE EXCEPTION 'personal-resource resolve requires the exact current uninterrupted attempt'
           USING ERRCODE = '42501';
       END IF;
 
