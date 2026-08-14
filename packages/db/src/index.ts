@@ -8326,6 +8326,26 @@ export type SlackInteractionInboxEntry = {
   updatedAt: Date;
 };
 
+export type SlackAppHomeRefresh = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  slackTeamId: string;
+  slackUserId: string;
+  providerEventId: string;
+  providerViewHash: string | null;
+  desiredRevision: number;
+  processedRevision: number;
+  claimHolderId: string | null;
+  claimExpiresAt: Date | null;
+  attemptCount: number;
+  retryAt: Date | null;
+  lastErrorCode: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
 export type SlackInteraction = {
   id: string;
   accountId: string;
@@ -8486,6 +8506,172 @@ export async function deleteSlackBotUserLink(
       )
       .returning({ id: schema.slackBotUserLinks.id });
     return rows.length > 0;
+  });
+}
+
+export async function enqueueSlackAppHomeRefresh(
+  db: Database,
+  input: Pick<
+    SlackAppHomeRefresh,
+    | "accountId"
+    | "workspaceId"
+    | "connectionId"
+    | "slackTeamId"
+    | "slackUserId"
+    | "providerEventId"
+    | "providerViewHash"
+  >,
+): Promise<SlackAppHomeRefresh> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .insert(schema.slackAppHomeRefreshes)
+      .values(input)
+      .onConflictDoUpdate({
+        target: [
+          schema.slackAppHomeRefreshes.connectionId,
+          schema.slackAppHomeRefreshes.slackUserId,
+        ],
+        set: {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          slackTeamId: input.slackTeamId,
+          providerEventId: input.providerEventId,
+          providerViewHash: input.providerViewHash,
+          desiredRevision: sql`case
+            when ${schema.slackAppHomeRefreshes.providerEventId} = excluded.provider_event_id
+              then ${schema.slackAppHomeRefreshes.desiredRevision}
+            else ${schema.slackAppHomeRefreshes.desiredRevision} + 1
+          end`,
+          retryAt: sql`case
+            when ${schema.slackAppHomeRefreshes.providerEventId} = excluded.provider_event_id
+              then ${schema.slackAppHomeRefreshes.retryAt}
+            else null
+          end`,
+          lastErrorCode: sql`case
+            when ${schema.slackAppHomeRefreshes.providerEventId} = excluded.provider_event_id
+              then ${schema.slackAppHomeRefreshes.lastErrorCode}
+            else null
+          end`,
+          updatedAt: sql`now()`,
+        },
+      })
+      .returning();
+    if (!row) throw new Error("Slack App Home refresh write returned no row");
+    return mapSlackAppHomeRefresh(row);
+  });
+}
+
+export async function claimSlackAppHomeRefresh(
+  db: Database,
+  claimHolderId: string,
+  claimLeaseMs: number,
+): Promise<SlackAppHomeRefresh | null> {
+  const rows = await db.execute<typeof schema.slackAppHomeRefreshes.$inferSelect>(
+    sql`select * from opengeni_private.claim_slack_app_home_refresh(${claimHolderId}::uuid, ${claimLeaseMs})`,
+  );
+  return rows[0] ? mapSlackAppHomeRefresh(rows[0]) : null;
+}
+
+export async function renewSlackAppHomeRefreshClaim(
+  db: Database,
+  input: {
+    refresh: Pick<SlackAppHomeRefresh, "id" | "accountId" | "workspaceId">;
+    claimHolderId: string;
+    claimLeaseMs: number;
+  },
+): Promise<boolean> {
+  if (input.claimLeaseMs < 1_000 || input.claimLeaseMs > 300_000) {
+    throw new Error("invalid Slack App Home claim lease");
+  }
+  return await withRlsContext(db, input.refresh, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackAppHomeRefreshes)
+      .set({
+        claimExpiresAt: sql`now() + make_interval(secs => ${input.claimLeaseMs}::double precision / 1000)`,
+      })
+      .where(
+        and(
+          eq(schema.slackAppHomeRefreshes.id, input.refresh.id),
+          eq(schema.slackAppHomeRefreshes.claimHolderId, input.claimHolderId),
+          gt(schema.slackAppHomeRefreshes.claimExpiresAt, sql`now()`),
+        ),
+      )
+      .returning({ id: schema.slackAppHomeRefreshes.id });
+    return rows.length === 1;
+  });
+}
+
+export async function settleSlackAppHomeRefresh(
+  db: Database,
+  input: {
+    refresh: Pick<SlackAppHomeRefresh, "id" | "accountId" | "workspaceId" | "desiredRevision">;
+    claimHolderId: string;
+    errorCode?: string | null;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input.refresh, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackAppHomeRefreshes)
+      .set({
+        processedRevision: input.refresh.desiredRevision,
+        claimHolderId: null,
+        claimExpiresAt: null,
+        retryAt: null,
+        attemptCount: 0,
+        lastErrorCode: input.errorCode?.slice(0, 128) ?? null,
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(schema.slackAppHomeRefreshes.id, input.refresh.id),
+          eq(schema.slackAppHomeRefreshes.claimHolderId, input.claimHolderId),
+        ),
+      )
+      .returning({ id: schema.slackAppHomeRefreshes.id });
+    return rows.length === 1;
+  });
+}
+
+export async function releaseSlackAppHomeRefresh(
+  db: Database,
+  input: {
+    refresh: Pick<SlackAppHomeRefresh, "id" | "accountId" | "workspaceId" | "desiredRevision">;
+    claimHolderId: string;
+    errorCode: string;
+    retryAt: Date;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input.refresh, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackAppHomeRefreshes)
+      .set({
+        claimHolderId: null,
+        claimExpiresAt: null,
+        retryAt: sql`case
+          when ${schema.slackAppHomeRefreshes.desiredRevision} > ${input.refresh.desiredRevision}
+            then null
+          else ${input.retryAt.toISOString()}::timestamptz
+        end`,
+        attemptCount: sql`case
+          when ${schema.slackAppHomeRefreshes.desiredRevision} > ${input.refresh.desiredRevision}
+            then 0
+          else ${schema.slackAppHomeRefreshes.attemptCount}
+        end`,
+        lastErrorCode: sql`case
+          when ${schema.slackAppHomeRefreshes.desiredRevision} > ${input.refresh.desiredRevision}
+            then null
+          else ${input.errorCode.slice(0, 128)}
+        end`,
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(schema.slackAppHomeRefreshes.id, input.refresh.id),
+          eq(schema.slackAppHomeRefreshes.claimHolderId, input.claimHolderId),
+        ),
+      )
+      .returning({ id: schema.slackAppHomeRefreshes.id });
+    return rows.length === 1;
   });
 }
 
@@ -9521,6 +9707,30 @@ function mapSlackInteractionInbox(
     reactionContextCheckpoint:
       slackRowValue(row, "reactionContextCheckpoint", "reaction_context_checkpoint") ?? null,
     processedAt: slackRowNullableDate(row, "processedAt", "processed_at"),
+    createdAt: slackRowDate(row, "createdAt", "created_at"),
+    updatedAt: slackRowDate(row, "updatedAt", "updated_at"),
+  };
+}
+
+function mapSlackAppHomeRefresh(
+  row: typeof schema.slackAppHomeRefreshes.$inferSelect | Record<string, unknown>,
+): SlackAppHomeRefresh {
+  return {
+    id: slackRowString(row, "id", "id"),
+    accountId: slackRowString(row, "accountId", "account_id"),
+    workspaceId: slackRowString(row, "workspaceId", "workspace_id"),
+    connectionId: slackRowString(row, "connectionId", "connection_id"),
+    slackTeamId: slackRowString(row, "slackTeamId", "slack_team_id"),
+    slackUserId: slackRowString(row, "slackUserId", "slack_user_id"),
+    providerEventId: slackRowString(row, "providerEventId", "provider_event_id"),
+    providerViewHash: slackRowNullableString(row, "providerViewHash", "provider_view_hash"),
+    desiredRevision: slackRowNumber(row, "desiredRevision", "desired_revision"),
+    processedRevision: slackRowNumber(row, "processedRevision", "processed_revision"),
+    claimHolderId: slackRowNullableString(row, "claimHolderId", "claim_holder_id"),
+    claimExpiresAt: slackRowNullableDate(row, "claimExpiresAt", "claim_expires_at"),
+    attemptCount: slackRowNumber(row, "attemptCount", "attempt_count"),
+    retryAt: slackRowNullableDate(row, "retryAt", "retry_at"),
+    lastErrorCode: slackRowNullableString(row, "lastErrorCode", "last_error_code"),
     createdAt: slackRowDate(row, "createdAt", "created_at"),
     updatedAt: slackRowDate(row, "updatedAt", "updated_at"),
   };

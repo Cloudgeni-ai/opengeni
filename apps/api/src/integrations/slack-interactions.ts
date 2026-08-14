@@ -15,6 +15,7 @@ import {
   type FileResourceRef,
   type FirstPartyMcpToolName,
   type HumanInputQuestion,
+  type SessionAuthorizationListScope,
   type SessionEvent,
   type WorkspaceSlackReactionSummonSettings,
   workspaceSlackReactionChannelAllowed,
@@ -31,13 +32,16 @@ import {
   advanceSlackInteractionDelivery,
   bindSlackInteractionSession,
   cancelSlackUserLinkAccessRequest,
+  claimSlackAppHomeRefresh,
   claimSlackInteractionDelivery,
   claimSlackInteractionProgressDelivery,
   claimSlackInteractionInbox,
   closeSlackInteractionDelivery,
   completeSlackUserLinkAccessIfGranted,
+  decodeSessionListCursor,
   deferSlackInteractionDelivery,
   deleteSlackBotUserLink,
+  enqueueSlackAppHomeRefresh,
   enqueueSlackInteractionInbox,
   getConnectionMetadata,
   getOrCreateSlackInteraction,
@@ -63,18 +67,24 @@ import {
   rekeySlackInteractionRoute,
   reopenSlackInteractionDelivery,
   reserveSlackInteractionActionHandles,
+  renewSlackAppHomeRefreshClaim,
   releaseSlackInteractionDelivery,
+  releaseSlackAppHomeRefresh,
   releaseSlackInteractionInbox,
   requestSlackUserLinkWorkspaceAccess,
   resolveSlackInstallationRoute,
   saveSlackInteractionInboxReactionCheckpoint,
   saveSlackSharedTaskOrigin,
   settleSlackInteractionInbox,
+  settleSlackAppHomeRefresh,
   settleSlackInteractionActionHandles,
+  listSessionsForSubject,
+  SessionListAccessError,
   denySlackUserLinkAccessRequest,
   prepareSlackUserLinkAccessRequest,
   SlackUserLinkAccessPersistenceError,
   type SlackInstallationRoute,
+  type SlackAppHomeRefresh,
   type SlackInteraction,
   type SlackInteractionActionHandle,
   type SlackInteractionActionKind,
@@ -88,6 +98,7 @@ import {
   hasPermission,
   requireAccessContext,
   requireAccessGrant,
+  requireSessionAuthorizationListScope,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -100,6 +111,12 @@ import {
   type SlackMessageBlock,
   SlackBotProviderError,
 } from "./slack-bot";
+import {
+  buildSlackAppHomeAccessBlocks,
+  buildSlackAppHomeBlocks,
+  isSlackAppHomeLinkAction,
+  slackAppHomeOpenedEvent,
+} from "./slack-app-home";
 import { importSlackReactionImage, type ImportedSlackReactionImage } from "../slack-reaction-files";
 
 export const SLACK_INTERACTION_MAX_BODY_BYTES = 256 * 1024;
@@ -125,6 +142,7 @@ const MAX_SLACK_REACTION_IMAGE_AGGREGATE_BYTES = 16 * 1024 * 1024;
 const MAX_PROGRESS_MESSAGES = 3;
 const SLACK_USER_LINK_TTL_MS = 15 * 60_000;
 const INBOX_LEASE_MS = 30_000;
+const APP_HOME_LEASE_MS = 300_000;
 const DELIVERY_LEASE_MS = 30_000;
 const MAX_DELIVERY_ATTEMPTS = 8;
 const MAX_DELIVERY_RETRY_MS = 5 * 60_000;
@@ -357,6 +375,19 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
         message: "Slack installation unavailable",
       });
     const event = record(payload.event);
+    const appHomeEvent = slackAppHomeOpenedEvent(payload);
+    if (appHomeEvent) {
+      await enqueueSlackAppHomeRefresh(deps.db, {
+        accountId: installation.accountId,
+        workspaceId: installation.workspaceId,
+        connectionId: installation.connectionId,
+        slackTeamId: appHomeEvent.slackTeamId,
+        slackUserId: appHomeEvent.slackUserId,
+        providerEventId: appHomeEvent.eventId,
+        providerViewHash: appHomeEvent.viewHash,
+      });
+      return c.json({ ok: true });
+    }
     if (event?.type === "reaction_added") {
       const [workspace, connection] = await Promise.all([
         getWorkspace(deps.db, installation.workspaceId),
@@ -424,6 +455,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     const form = new URLSearchParams(signed.rawBody);
     const payload = parseJsonObject(form.get("payload") ?? "");
     if (payload.type === "block_actions") {
+      if (isSlackAppHomeLinkAction(payload)) return c.json({ ok: true });
       const entry = normalizedBlockActionInteraction(payload);
       const installation = await resolveSlackInstallationRoute(deps.db, entry.slackTeamId);
       if (!installation) {
@@ -783,7 +815,285 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
   });
 }
 
+async function publishSlackAppHome(
+  deps: ApiRouteDeps,
+  installation: SlackInstallationRoute,
+  refresh: SlackAppHomeRefresh,
+  renewLease: () => Promise<void>,
+): Promise<void> {
+  const link = await getSlackBotUserLink(
+    deps.db,
+    installation.workspaceId,
+    installation.connectionId,
+    refresh.slackUserId,
+  );
+  const grant = link
+    ? await getWorkspaceGrant(deps.db, link.subjectId, installation.workspaceId, {
+        principalKind: "human_session",
+      })
+    : null;
+  if (
+    !grant ||
+    grant.accountId !== installation.accountId ||
+    !hasPermission(grant.permissions, "sessions:read")
+  ) {
+    const client = await createOpenGeniSlackBotInteractionClient(deps, {
+      accountId: installation.accountId,
+      workspaceId: installation.workspaceId,
+      connectionId: installation.connectionId,
+      subjectId: "service:slack-app-home",
+    });
+    await publishSlackAppHomeAccessView(
+      client,
+      refresh,
+      renewLease,
+      buildSlackAppHomeAccessBlocks({
+        title: link ? "OpenGeni access needed" : "Connect your OpenGeni account",
+        message: link
+          ? "Your Slack identity is linked, but it does not currently have access to this OpenGeni workspace."
+          : "Link this Slack identity to see your active tasks, requests, and recent results here.",
+        actionLabel: link ? "Request access" : "Connect OpenGeni",
+        actionUrl: slackAppHomeLinkUrl(
+          deps,
+          installation,
+          refresh.slackTeamId,
+          refresh.slackUserId,
+        ),
+      }),
+    );
+    return;
+  }
+
+  const client = await createOpenGeniSlackBotInteractionClient(deps, {
+    accountId: installation.accountId,
+    workspaceId: installation.workspaceId,
+    connectionId: installation.connectionId,
+    subjectId: grant.subjectId,
+  });
+  // Host session authorization is resolved at publication time, before the
+  // database query, so App Home cannot leak rows through a stale broad list.
+  const authorizationScope = await requireSessionAuthorizationListScope(deps, grant, "core");
+  const sessions: Awaited<ReturnType<typeof listSessionsForSubject>>["sessions"] = [];
+  try {
+    let cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
+    do {
+      await renewLease();
+      const page = await listSessionsForSubject(deps.db, installation.workspaceId, {
+        subjectId: grant.subjectId,
+        limit: 500,
+        ...(cursor ? { cursor } : {}),
+        ...(authorizationScope ? { authorizationScope } : {}),
+      });
+      if (!cursor) sessions.push(...page.pinned);
+      sessions.push(...page.sessions);
+      if (!page.nextCursor) break;
+      cursor = decodeSessionListCursor(page.nextCursor) ?? undefined;
+      if (!cursor) throw new Error("Slack App Home session cursor was invalid");
+    } while (cursor);
+  } catch (error) {
+    if (!(error instanceof SessionListAccessError)) throw error;
+    await publishSlackAppHomeAccessView(
+      client,
+      refresh,
+      renewLease,
+      buildSlackAppHomeAccessBlocks({
+        title: "OpenGeni access changed",
+        message:
+          "Your current OpenGeni access could not be verified. Reconnect before tasks are shown here.",
+        actionLabel: "Reconnect OpenGeni",
+        actionUrl: slackAppHomeLinkUrl(
+          deps,
+          installation,
+          refresh.slackTeamId,
+          refresh.slackUserId,
+        ),
+      }),
+    );
+    return;
+  }
+  const currentLink = await getSlackBotUserLink(
+    deps.db,
+    installation.workspaceId,
+    installation.connectionId,
+    refresh.slackUserId,
+  );
+  const currentGrant = currentLink
+    ? await getWorkspaceGrant(deps.db, currentLink.subjectId, installation.workspaceId, {
+        principalKind: "human_session",
+      })
+    : null;
+  if (
+    !currentLink ||
+    currentLink.subjectId !== grant.subjectId ||
+    !currentGrant ||
+    currentGrant.accountId !== installation.accountId ||
+    !hasPermission(currentGrant.permissions, "sessions:read")
+  ) {
+    await publishSlackAppHomeAccessView(
+      client,
+      refresh,
+      renewLease,
+      buildSlackAppHomeAccessBlocks({
+        title: "OpenGeni access changed",
+        message:
+          "Your current OpenGeni access could not be verified. Reconnect before tasks are shown here.",
+        actionLabel: "Reconnect OpenGeni",
+        actionUrl: slackAppHomeLinkUrl(
+          deps,
+          installation,
+          refresh.slackTeamId,
+          refresh.slackUserId,
+        ),
+      }),
+    );
+    return;
+  }
+  const currentAuthorizationScope = await requireSessionAuthorizationListScope(
+    deps,
+    currentGrant,
+    "core",
+  );
+  if (
+    slackSessionAuthorizationScopeKey(currentAuthorizationScope) !==
+    slackSessionAuthorizationScopeKey(authorizationScope)
+  ) {
+    await publishSlackAppHomeAccessView(
+      client,
+      refresh,
+      renewLease,
+      buildSlackAppHomeAccessBlocks({
+        title: "OpenGeni access changed",
+        message:
+          "Your current task access changed while this view was loading. Reopen Home to refresh it safely.",
+        actionLabel: "Open OpenGeni",
+        actionUrl: slackWorkspaceUrl(deps, installation.workspaceId),
+      }),
+    );
+    return;
+  }
+  if (!refresh.providerViewHash) {
+    await publishSlackAppHomeAccessView(
+      client,
+      refresh,
+      renewLease,
+      buildSlackAppHomeAccessBlocks({
+        title: "Refresh OpenGeni Home",
+        message:
+          "Reopen Home to refresh your tasks safely. OpenGeni does not publish task data without Slack's current view version.",
+        actionLabel: "Open OpenGeni",
+        actionUrl: slackWorkspaceUrl(deps, installation.workspaceId),
+      }),
+    );
+    return;
+  }
+  await renewLease();
+  await client.publishHomeView({
+    userId: refresh.slackUserId,
+    hash: refresh.providerViewHash,
+    blocks: buildSlackAppHomeBlocks({
+      sessions,
+      workspaceUrl: slackWorkspaceUrl(deps, installation.workspaceId),
+      sessionUrl: (sessionId) => slackSessionUrl(deps, installation.workspaceId, sessionId),
+    }),
+  });
+}
+
+async function publishSlackAppHomeAccessView(
+  client: OpenGeniSlackBotClient,
+  refresh: SlackAppHomeRefresh,
+  renewLease: () => Promise<void>,
+  blocks: ReturnType<typeof buildSlackAppHomeAccessBlocks>,
+): Promise<void> {
+  try {
+    await renewLease();
+    await client.publishHomeView({
+      userId: refresh.slackUserId,
+      hash: refresh.providerViewHash,
+      blocks,
+    });
+  } catch (error) {
+    if (!(error instanceof SlackBotProviderError) || error.code !== "hash_conflict") throw error;
+    // Access views contain no task data. If an older authorized publication
+    // advanced Slack's optimistic-concurrency hash, replace it fail-closed
+    // rather than dropping the newer clearing obligation.
+    await renewLease();
+    await client.publishHomeView({
+      userId: refresh.slackUserId,
+      blocks,
+    });
+  }
+}
+
 export async function drainSlackInteractionsOnce(deps: ApiRouteDeps): Promise<boolean> {
+  const appHomeHolder = crypto.randomUUID();
+  const refresh = await claimSlackAppHomeRefresh(deps.db, appHomeHolder, APP_HOME_LEASE_MS);
+  if (refresh) {
+    try {
+      const installation = await resolveSlackInstallationRoute(deps.db, refresh.slackTeamId);
+      if (
+        !installation ||
+        installation.accountId !== refresh.accountId ||
+        installation.workspaceId !== refresh.workspaceId ||
+        installation.connectionId !== refresh.connectionId
+      ) {
+        throw new SlackInteractionPermanentError("slack_app_home_installation_changed");
+      }
+      const renewLease = async () => {
+        if (
+          !(await renewSlackAppHomeRefreshClaim(deps.db, {
+            refresh,
+            claimHolderId: appHomeHolder,
+            claimLeaseMs: APP_HOME_LEASE_MS,
+          }))
+        ) {
+          throw new SlackInteractionPermanentError("slack_app_home_claim_lost");
+        }
+      };
+      await renewLease();
+      await publishSlackAppHome(deps, installation, refresh, renewLease);
+      await settleSlackAppHomeRefresh(deps.db, {
+        refresh,
+        claimHolderId: appHomeHolder,
+      });
+    } catch (error) {
+      const code = safeErrorCode(error);
+      console.error("[slack-interactions] App Home refresh failed", {
+        workspaceId: refresh.workspaceId,
+        connectionId: refresh.connectionId,
+        slackUserId: refresh.slackUserId,
+        providerEventId: refresh.providerEventId,
+        desiredRevision: refresh.desiredRevision,
+        attemptCount: refresh.attemptCount,
+        errorCode: code,
+      });
+      if (error instanceof SlackBotProviderError && error.code === "hash_conflict") {
+        await settleSlackAppHomeRefresh(deps.db, {
+          refresh,
+          claimHolderId: appHomeHolder,
+          errorCode: code,
+        });
+      } else if (
+        refresh.attemptCount >= 5 ||
+        error instanceof SlackInteractionPermanentError ||
+        permanentSlackDeliveryError(error)
+      ) {
+        await settleSlackAppHomeRefresh(deps.db, {
+          refresh,
+          claimHolderId: appHomeHolder,
+          errorCode: code,
+        });
+      } else {
+        await releaseSlackAppHomeRefresh(deps.db, {
+          refresh,
+          claimHolderId: appHomeHolder,
+          errorCode: code,
+          retryAt: new Date(Date.now() + slackDeliveryRetryMs(error, refresh.attemptCount)),
+        });
+      }
+    }
+    return true;
+  }
+
   const holder = crypto.randomUUID();
   const entry = await claimSlackInteractionInbox(deps.db, holder, INBOX_LEASE_MS);
   if (entry) {
@@ -3336,6 +3646,69 @@ function openSessionText(deps: ApiRouteDeps, workspaceId: string, sessionId: str
   if (!base) throw new Error("Slack session acknowledgement requires an absolute web base URL");
   const url = new URL(`/workspaces/${workspaceId}/sessions/${sessionId}`, base).toString();
   return `<${url}|Open in OpenGeni>`;
+}
+
+function slackWorkspaceUrl(deps: ApiRouteDeps, workspaceId: string): string | null {
+  return safeSlackActionUrl(deps, `/workspaces/${encodeURIComponent(workspaceId)}`);
+}
+
+function slackSessionAuthorizationScopeKey(scope: SessionAuthorizationListScope | null): string {
+  if (scope === null) return "standalone";
+  if (scope.kind === "all") return "all";
+  return JSON.stringify({
+    kind: scope.kind,
+    rootSessionIds: [...scope.rootSessionIds].sort(),
+    sessionIds: [...scope.sessionIds].sort(),
+  });
+}
+
+function slackSessionUrl(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  sessionId: string,
+): string | null {
+  return safeSlackActionUrl(
+    deps,
+    `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`,
+  );
+}
+
+function safeSlackActionUrl(deps: ApiRouteDeps, pathname: string): string | null {
+  const base = deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl;
+  if (!base) return null;
+  try {
+    const url = new URL(pathname, base);
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function slackAppHomeLinkUrl(
+  deps: ApiRouteDeps,
+  installation: SlackInstallationRoute,
+  slackTeamId: string,
+  slackUserId: string,
+): string | null {
+  const signingSecret = deps.settings.slackSigningSecret;
+  const base = slackWorkspaceUrl(deps, installation.workspaceId);
+  if (!signingSecret || !base) return base;
+  const url = new URL(
+    `/workspaces/${encodeURIComponent(installation.workspaceId)}/capabilities`,
+    base,
+  );
+  url.hash = new URLSearchParams({
+    slack_link: createSlackUserLinkToken(signingSecret, {
+      workspaceId: installation.workspaceId,
+      connectionId: installation.connectionId,
+      slackTeamId,
+      slackUserId,
+    }),
+  }).toString();
+  return url.toString();
 }
 
 function makeRecurringText(deps: ApiRouteDeps, workspaceId: string, sessionId: string) {
