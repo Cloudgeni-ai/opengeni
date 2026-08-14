@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 const BACKGROUND_BROWSER_EXECUTABLE_ENV: &str = "OPENGENI_BACKGROUND_BROWSER_EXECUTABLE";
+#[cfg(target_os = "macos")]
 const BACKGROUND_BROWSER_PID_FILE_ENV: &str = "OPENGENI_BACKGROUND_BROWSER_PID_FILE";
 
 #[tokio::main]
