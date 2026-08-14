@@ -1181,6 +1181,26 @@ describe("buildTimeline", () => {
     expect((items[0] as SandboxItem).status).toBe("complete");
   });
 
+  test("shows an expected sandbox lifecycle transition as superseded rather than failed", () => {
+    reset();
+    const items = buildTimeline([
+      event("sandbox.operation.started", {
+        name: "sandbox.provision",
+        provisionId: "11111111-1111-4111-8111-111111111111",
+      }),
+      event("sandbox.operation.failed", {
+        name: "sandbox.provision",
+        provisionId: "11111111-1111-4111-8111-111111111111",
+        expectedTransition: true,
+        failureCategory: "lease_superseded",
+        failureStage: "lease_admission",
+        failureCode: "lease_superseded",
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect((items[0] as SandboxItem).status).toBe("cancelled");
+  });
+
   test("keeps every context compaction visible with its before and after size", () => {
     reset();
     const items = buildTimeline([

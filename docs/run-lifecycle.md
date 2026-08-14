@@ -781,6 +781,17 @@ rolls only the exact warming epoch back to cold, and fails the turn rather than
 rapidly creating sibling boxes. Any later display/setup failure follows the same
 owned cleanup path.
 
+Lazy establishment observes one correlation-qualified logical provision at a
+time. Its terminal durable `sandbox.provision` event records a closed structural
+stage/category/code plus internal-attempt count; expected lease supersession or
+capture/rotation wait is explicitly distinct from an actual logical failure.
+Provider create/resume ownership annotates the unchanged source diagnostic with
+its typed boundary stage, and classification otherwise uses typed error properties
+and provider status/code evidence—never arbitrary message matching. Metrics keep
+logical terminal outcomes separate from internal safe retries. A typed transport
+category is diagnostic only and never licenses replay of an outcome-unknown
+provider create or operation.
+
 Lease liveness is not provider or workspace truth. The durable recovery
 projection independently records provider existence, archive availability,
 restore progress, and verified workspace readiness alongside lease liveness and

@@ -8,6 +8,8 @@ import {
   recordCompanyBrainContributions,
   recordModelInputTokens,
   recordModelRequestPhase,
+  recordSandboxLogicalProvision,
+  recordSandboxProvisionAttempt,
   recordSessionEventAppendLatency,
   recordSessionEventPublishLatency,
   recordTurnSandboxEstablishPolicy,
@@ -24,6 +26,58 @@ import {
 function worker() {
   return createObservability(testSettings(), { component: "worker" });
 }
+
+describe("logical sandbox provision metrics", () => {
+  test("separates internal lifecycle retries from one terminal logical outcome", async () => {
+    const observability = worker();
+    recordSandboxProvisionAttempt(observability, {
+      backend: "modal",
+      stage: "lease_admission",
+      category: "lease_superseded",
+      outcome: "retrying",
+      durationSeconds: 0.25,
+    });
+    recordSandboxProvisionAttempt(observability, {
+      backend: "modal",
+      stage: "resume",
+      category: "resume",
+      outcome: "completed",
+      durationSeconds: 0.5,
+    });
+    recordSandboxLogicalProvision(observability, {
+      backend: "modal",
+      stage: "resume",
+      category: "none",
+      outcome: "completed",
+      expected: false,
+      internalAttempts: 2,
+      durationSeconds: 1,
+    });
+    recordSandboxLogicalProvision(observability, {
+      backend: "modal",
+      stage: "lifecycle_wait",
+      category: "drain_capture_wait",
+      outcome: "expected_transition",
+      expected: true,
+      internalAttempts: 3,
+      durationSeconds: 2,
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_sandbox_provision_attempts_total\{[^}]*category="lease_superseded"[^}]*outcome="retrying"[^}]*stage="lease_admission"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_provisions_total\{[^}]*category="none"[^}]*expected="false"[^}]*outcome="completed"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_provisions_total\{[^}]*category="drain_capture_wait"[^}]*expected="true"[^}]*outcome="expected_transition"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_provision_internal_attempts_sum\{[^}]*category="none"[^}]*\} 2\b/,
+    );
+  });
+});
 
 describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
   test("first content delta records TTFT from the response (re)start anchor", async () => {

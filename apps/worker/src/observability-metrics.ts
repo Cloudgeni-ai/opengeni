@@ -1055,6 +1055,30 @@ export type TurnSandboxEstablishReason =
   | "initial_run_credentials"
   | "generated_video_files"
   | "signed_file_resources";
+export type SandboxLogicalProvisionCategory =
+  | "create"
+  | "resume"
+  | "exec_readiness"
+  | "sibling_warming"
+  | "lease_superseded"
+  | "drain_capture_wait"
+  | "archive_recovery"
+  | "provider_transport"
+  | "configuration"
+  | "unknown";
+export type SandboxLogicalProvisionStage =
+  | "create"
+  | "resume"
+  | "exec_readiness"
+  | "sibling_warming"
+  | "lease_admission"
+  | "lifecycle_wait"
+  | "archive_recovery"
+  | "configuration"
+  | "provider_transport"
+  | "unknown";
+export type SandboxLogicalProvisionOutcome = "completed" | "expected_transition" | "failed";
+export type SandboxProvisionAttemptOutcome = "completed" | "retrying" | "failed";
 
 const TURN_STARTUP_PHASE_BUCKETS = [
   0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120,
@@ -1124,6 +1148,103 @@ export function recordTurnSandboxEstablishPolicy(
       backend: input.backend,
     },
   });
+}
+
+/** Physical establish/resume attempts inside one logical provision. Safe
+ * lifecycle retries are counted here, never as another user-visible failure. */
+export function recordSandboxProvisionAttempt(
+  observability: Observability,
+  input: {
+    backend: string;
+    stage: SandboxLogicalProvisionStage;
+    category: SandboxLogicalProvisionCategory;
+    outcome: SandboxProvisionAttemptOutcome;
+    durationSeconds: number;
+  },
+): void {
+  const labels = {
+    backend: input.backend,
+    stage: input.stage,
+    category: input.category,
+    outcome: input.outcome,
+  };
+  try {
+    observability.incrementCounter({
+      name: "opengeni_sandbox_provision_attempts_total",
+      help: "Internal physical attempts within logical sandbox provisions.",
+      labels,
+    });
+    observability.observeHistogram({
+      name: "opengeni_sandbox_provision_attempt_duration_seconds",
+      help: "Internal sandbox provision attempt duration by bounded structural outcome.",
+      buckets: TURN_STARTUP_PHASE_BUCKETS,
+      labels,
+      value: Math.max(0, input.durationSeconds),
+    });
+  } catch {
+    try {
+      observability.incrementCounter({
+        name: "opengeni_observability_observer_errors_total",
+        help: "Observability observer failures isolated from product execution.",
+        labels: { observer: "sandbox_provision" },
+      });
+    } catch {
+      // The registry itself is unhealthy; provisioning remains authoritative.
+    }
+  }
+}
+
+/** One terminal observation for one correlation-qualified logical provision. */
+export function recordSandboxLogicalProvision(
+  observability: Observability,
+  input: {
+    backend: string;
+    stage: SandboxLogicalProvisionStage;
+    category: SandboxLogicalProvisionCategory | "none";
+    outcome: SandboxLogicalProvisionOutcome;
+    expected: boolean;
+    internalAttempts: number;
+    durationSeconds: number;
+  },
+): void {
+  const labels = {
+    backend: input.backend,
+    stage: input.stage,
+    category: input.category,
+    outcome: input.outcome,
+    expected: input.expected ? "true" : "false",
+  };
+  try {
+    observability.incrementCounter({
+      name: "opengeni_sandbox_provisions_total",
+      help: "Logical sandbox provisions by terminal outcome and bounded failure taxonomy.",
+      labels,
+    });
+    observability.observeHistogram({
+      name: "opengeni_sandbox_provision_duration_seconds",
+      help: "Logical sandbox provision duration including internal safe retries.",
+      buckets: TURN_STARTUP_PHASE_BUCKETS,
+      labels,
+      value: Math.max(0, input.durationSeconds),
+    });
+    observability.observeHistogram({
+      name: "opengeni_sandbox_provision_internal_attempts",
+      help: "Internal physical attempts per terminal logical sandbox provision.",
+      buckets: [1, 2, 3, 4, 5, 8],
+      labels,
+      value: Math.max(1, input.internalAttempts),
+    });
+  } catch {
+    try {
+      observability.incrementCounter({
+        name: "opengeni_observability_observer_errors_total",
+        help: "Observability observer failures isolated from product execution.",
+        labels: { observer: "sandbox_provision" },
+      });
+    } catch {
+      // The registry itself is unhealthy; provisioning remains authoritative.
+    }
+  }
 }
 
 export function recordTurnWorkerPreparationTotal(
