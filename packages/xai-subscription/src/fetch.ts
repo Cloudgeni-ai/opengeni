@@ -305,48 +305,71 @@ async function normalizeResponse(
     async pull(controller) {
       if (audit.terminal) return;
       try {
-        const chunk = await reader.read();
-        if (audit.terminal) return;
-        pending += decoder.decode(chunk.value, { stream: !chunk.done });
-        const parts = pending.split(/\r?\n\r?\n/);
-        pending = parts.pop() ?? "";
-        if (chunk.done && pending) {
-          parts.push(pending);
-          pending = "";
-        }
-        for (const part of parts) {
-          const progress = sseProgress(part);
-          controller.enqueue(encoder.encode(`${normalizeSseEvent(part, onFinalContextUsage)}\n\n`));
-          if (!progress.valid) continue;
-          clearIdleTimer();
-          const now = performance.now();
-          const interEventGapMs = Math.max(0, now - (audit.lastProgressAt ?? audit.startedAt));
-          audit.eventCount = Math.min(Number.MAX_SAFE_INTEGER, audit.eventCount + 1);
-          audit.lastEventType = progress.eventType;
-          audit.lastProgressAt = now;
-          silenceStartedAt = now;
-          if (audit.eventCount === 1) {
-            await emitRequestEvent(audit, {
-              phase: "first_event",
-              responseObserved: true,
-              status: response.status,
-              ...providerRequestIdFields(response.headers),
-            });
-          } else {
-            emitDiagnosticEvent(audit, {
-              phase: "progress",
-              responseObserved: true,
-              status: response.status,
-              interEventGapMs,
-              ...providerRequestIdFields(response.headers),
-            });
+        // A provider may split one SSE event across several network chunks. A
+        // pull that returns without enqueueing anything can leave the pending
+        // downstream read parked indefinitely in Bun, so keep reading until we
+        // can satisfy it with at least one complete block (or settle the stream).
+        while (!audit.terminal) {
+          const chunk = await reader.read();
+          if (audit.terminal) return;
+          pending += decoder.decode(chunk.value, { stream: !chunk.done });
+          const parts = pending.split(/\r?\n\r?\n/);
+          pending = parts.pop() ?? "";
+          if (chunk.done && pending) {
+            parts.push(pending);
+            pending = "";
           }
-          if (progress.terminal) {
+          let enqueued = false;
+          for (const part of parts) {
+            const progress = sseProgress(part);
+            controller.enqueue(
+              encoder.encode(`${normalizeSseEvent(part, onFinalContextUsage)}\n\n`),
+            );
+            enqueued = true;
+            if (!progress.valid) continue;
+            clearIdleTimer();
+            const now = performance.now();
+            const interEventGapMs = Math.max(0, now - (audit.lastProgressAt ?? audit.startedAt));
+            audit.eventCount = Math.min(Number.MAX_SAFE_INTEGER, audit.eventCount + 1);
+            audit.lastEventType = progress.eventType;
+            audit.lastProgressAt = now;
+            silenceStartedAt = now;
+            if (audit.eventCount === 1) {
+              await emitRequestEvent(audit, {
+                phase: "first_event",
+                responseObserved: true,
+                status: response.status,
+                ...providerRequestIdFields(response.headers),
+              });
+            } else {
+              emitDiagnosticEvent(audit, {
+                phase: "progress",
+                responseObserved: true,
+                status: response.status,
+                interEventGapMs,
+                ...providerRequestIdFields(response.headers),
+              });
+            }
+            if (progress.terminal) {
+              audit.terminal = true;
+              clearIdleTimer();
+              await reader.cancel().catch(() => undefined);
+              await emitRequestEvent(audit, {
+                phase: progress.terminal,
+                responseObserved: true,
+                status: response.status,
+                ...providerRequestIdFields(response.headers),
+              });
+              closeStream();
+              return;
+            }
+            armIdleTimer();
+          }
+          if (chunk.done) {
             audit.terminal = true;
             clearIdleTimer();
-            await reader.cancel().catch(() => undefined);
             await emitRequestEvent(audit, {
-              phase: progress.terminal,
+              phase: "failed",
               responseObserved: true,
               status: response.status,
               ...providerRequestIdFields(response.headers),
@@ -354,18 +377,7 @@ async function normalizeResponse(
             closeStream();
             return;
           }
-          armIdleTimer();
-        }
-        if (chunk.done) {
-          audit.terminal = true;
-          clearIdleTimer();
-          await emitRequestEvent(audit, {
-            phase: "failed",
-            responseObserved: true,
-            status: response.status,
-            ...providerRequestIdFields(response.headers),
-          });
-          closeStream();
+          if (enqueued) return;
         }
       } catch (error) {
         if (audit.terminal) {
