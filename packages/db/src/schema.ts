@@ -6922,6 +6922,33 @@ export const sandboxProviderLossTeardownClaims = pgTable(
     consumedAt: timestamp("consumed_at", { withTimezone: true }),
   },
   (table) => ({
+    workspaceAccount: foreignKey({
+      name: "sandbox_provider_loss_teardown_claims_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "sandbox_provider_loss_teardown_claims_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("restrict"),
+    admissionReference: foreignKey({
+      name: "sandbox_provider_loss_teardown_claims_admission_scope_fk",
+      columns: [
+        table.accountId,
+        table.workspaceId,
+        table.sessionId,
+        table.leaseId,
+        table.admissionId,
+      ],
+      foreignColumns: [
+        sandboxWorkspaceMutationAdmissions.accountId,
+        sandboxWorkspaceMutationAdmissions.workspaceId,
+        sandboxWorkspaceMutationAdmissions.sessionId,
+        sandboxWorkspaceMutationAdmissions.leaseId,
+        sandboxWorkspaceMutationAdmissions.id,
+      ],
+    }).onDelete("restrict"),
     scopedId: uniqueIndex("sandbox_provider_loss_teardown_claims_scoped_id_uq").on(
       table.accountId,
       table.workspaceId,
@@ -6955,6 +6982,10 @@ export const sandboxProviderLossTeardownClaims = pgTable(
         and octet_length(${table.holderId}) between 1 and 256
         and octet_length(${table.providerBackend}) between 1 and 64
         and octet_length(${table.providerInstanceId}) between 1 and 512`,
+    ),
+    consumedAfterClaim: check(
+      "sandbox_provider_loss_teardown_claims_consume_check",
+      sql`${table.consumedAt} is null or ${table.consumedAt} >= ${table.claimedAt}`,
     ),
   }),
 );
@@ -7000,6 +7031,43 @@ export const sandboxProviderLossReceipts = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    workspaceAccount: foreignKey({
+      name: "sandbox_provider_loss_receipts_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "sandbox_provider_loss_receipts_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("restrict"),
+    admissionReference: foreignKey({
+      name: "sandbox_provider_loss_receipts_admission_scope_fk",
+      columns: [
+        table.accountId,
+        table.workspaceId,
+        table.sessionId,
+        table.leaseId,
+        table.admissionId,
+      ],
+      foreignColumns: [
+        sandboxWorkspaceMutationAdmissions.accountId,
+        sandboxWorkspaceMutationAdmissions.workspaceId,
+        sandboxWorkspaceMutationAdmissions.sessionId,
+        sandboxWorkspaceMutationAdmissions.leaseId,
+        sandboxWorkspaceMutationAdmissions.id,
+      ],
+    }).onDelete("restrict"),
+    claimReference: foreignKey({
+      name: "sandbox_provider_loss_receipts_claim_scope_fk",
+      columns: [table.accountId, table.workspaceId, table.admissionId, table.claimId],
+      foreignColumns: [
+        sandboxProviderLossTeardownClaims.accountId,
+        sandboxProviderLossTeardownClaims.workspaceId,
+        sandboxProviderLossTeardownClaims.admissionId,
+        sandboxProviderLossTeardownClaims.id,
+      ],
+    }).onDelete("restrict"),
     scopedId: uniqueIndex("sandbox_provider_loss_receipts_scoped_id_uq").on(
       table.accountId,
       table.workspaceId,
@@ -7015,15 +7083,24 @@ export const sandboxProviderLossReceipts = pgTable(
     ),
     identityValid: check(
       "sandbox_provider_loss_receipts_identity_check",
-      sql`${table.leaseEpoch} >= 0
+      sql`${table.actorKind} = 'turn'
+        and ${table.actorId} = ${table.attemptId}
+        and ${table.holderKind} = 'turn'
+        and ${table.operation} = 'codemodeTokenRenewal'
+        and ${table.leaseEpoch} >= 0
         and ${table.workspaceGeneration} > 0
         and ${table.routeEpoch} >= 0
-        and octet_length(${table.operation}) between 1 and 128
+        and (${table.routeKind} = 'active' or ${table.routeTargetId} is null)
+        and ${table.terminateOutcome} in ('terminated', 'not_found')
         and octet_length(${table.holderId}) between 1 and 256
         and octet_length(${table.providerBackend}) between 1 and 64
         and octet_length(${table.providerInstanceId}) between 1 and 512
         and octet_length(${table.destructionCorrelationId}) between 1 and 256
-        and (${table.routeKind} = 'active' or ${table.routeTargetId} is null)`,
+        and ${table.notFoundObservedAt} >= ${table.destructionObservedAt}`,
+    ),
+    consumedAfterCreation: check(
+      "sandbox_provider_loss_receipts_consume_check",
+      sql`${table.consumedAt} is null or ${table.consumedAt} >= ${table.createdAt}`,
     ),
   }),
 );

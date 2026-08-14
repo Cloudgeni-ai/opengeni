@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase } from "@opengeni/testing";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
+import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
 
 import {
   acquireLease,
@@ -13,6 +14,7 @@ import {
   withRlsContext,
 } from "../src";
 import { migrate } from "../src/migrate";
+import { sandboxProviderLossReceipts, sandboxProviderLossTeardownClaims } from "../src/schema";
 
 const migrationName = "0240_sandbox_provider_loss_receipts.sql";
 
@@ -87,6 +89,56 @@ async function expectSqlState(operation: PromiseLike<unknown>, code: string): Pr
 }
 
 describe("0240 provider-loss receipt protocol", () => {
+  test("keeps the Drizzle provider-loss constraints identical to migration 0240", () => {
+    const dialect = new PgDialect();
+    const claims = getTableConfig(sandboxProviderLossTeardownClaims);
+    const receipts = getTableConfig(sandboxProviderLossReceipts);
+
+    expect(claims.foreignKeys.map((foreignKey) => foreignKey.getName()).sort()).toEqual([
+      "sandbox_provider_loss_teardown_claims_admission_scope_fk",
+      "sandbox_provider_loss_teardown_claims_workspace_account_fk",
+      "sandbox_provider_loss_teardown_claims_workspace_session_fk",
+    ]);
+    expect(receipts.foreignKeys.map((foreignKey) => foreignKey.getName()).sort()).toEqual([
+      "sandbox_provider_loss_receipts_admission_scope_fk",
+      "sandbox_provider_loss_receipts_claim_scope_fk",
+      "sandbox_provider_loss_receipts_workspace_account_fk",
+      "sandbox_provider_loss_receipts_workspace_session_fk",
+    ]);
+
+    const claimChecks = new Map(
+      claims.checks.map((check) => [check.name, dialect.sqlToQuery(check.value).sql]),
+    );
+    const receiptChecks = new Map(
+      receipts.checks.map((check) => [check.name, dialect.sqlToQuery(check.value).sql]),
+    );
+    expect(Array.from(claimChecks.keys()).sort()).toEqual([
+      "sandbox_provider_loss_teardown_claims_consume_check",
+      "sandbox_provider_loss_teardown_claims_identity_check",
+    ]);
+    expect(Array.from(receiptChecks.keys()).sort()).toEqual([
+      "sandbox_provider_loss_receipts_consume_check",
+      "sandbox_provider_loss_receipts_identity_check",
+    ]);
+    expect(claimChecks.get("sandbox_provider_loss_teardown_claims_consume_check")).toContain(
+      '"consumed_at" is null or "sandbox_provider_loss_teardown_claims"."consumed_at" >= "sandbox_provider_loss_teardown_claims"."claimed_at"',
+    );
+    const receiptIdentity = receiptChecks.get("sandbox_provider_loss_receipts_identity_check");
+    for (const predicate of [
+      `"actor_kind" = 'turn'`,
+      '"actor_id" = "sandbox_provider_loss_receipts"."attempt_id"',
+      `"holder_kind" = 'turn'`,
+      `"operation" = 'codemodeTokenRenewal'`,
+      `"terminate_outcome" in ('terminated', 'not_found')`,
+      '"not_found_observed_at" >= "sandbox_provider_loss_receipts"."destruction_observed_at"',
+    ]) {
+      expect(receiptIdentity).toContain(predicate);
+    }
+    expect(receiptChecks.get("sandbox_provider_loss_receipts_consume_check")).toContain(
+      '"consumed_at" is null or "sandbox_provider_loss_receipts"."consumed_at" >= "sandbox_provider_loss_receipts"."created_at"',
+    );
+  });
+
   test("installs the distinct claim/receipt state machine and hard fences", async () => {
     const shared = await acquireSharedTestDatabase("migration-0240-provider-loss-receipts");
     if (!shared) {
@@ -205,16 +257,32 @@ describe("0240 provider-loss receipt protocol", () => {
         where conname in (
           'sandbox_workspace_mutation_admissions_outcome_check',
           'sandbox_workspace_mutation_admissions_settlement_check',
+          'sandbox_provider_loss_teardown_claims_workspace_account_fk',
+          'sandbox_provider_loss_teardown_claims_workspace_session_fk',
+          'sandbox_provider_loss_teardown_claims_admission_scope_fk',
           'sandbox_provider_loss_teardown_claims_identity_check',
+          'sandbox_provider_loss_teardown_claims_consume_check',
+          'sandbox_provider_loss_receipts_workspace_account_fk',
+          'sandbox_provider_loss_receipts_workspace_session_fk',
+          'sandbox_provider_loss_receipts_admission_scope_fk',
           'sandbox_provider_loss_receipts_identity_check',
-          'sandbox_provider_loss_receipts_claim_scope_fk'
+          'sandbox_provider_loss_receipts_claim_scope_fk',
+          'sandbox_provider_loss_receipts_consume_check'
         )
         order by conname
       `;
       expect(constraints.map((row) => row.name)).toEqual([
+        "sandbox_provider_loss_receipts_admission_scope_fk",
         "sandbox_provider_loss_receipts_claim_scope_fk",
+        "sandbox_provider_loss_receipts_consume_check",
         "sandbox_provider_loss_receipts_identity_check",
+        "sandbox_provider_loss_receipts_workspace_account_fk",
+        "sandbox_provider_loss_receipts_workspace_session_fk",
+        "sandbox_provider_loss_teardown_claims_admission_scope_fk",
+        "sandbox_provider_loss_teardown_claims_consume_check",
         "sandbox_provider_loss_teardown_claims_identity_check",
+        "sandbox_provider_loss_teardown_claims_workspace_account_fk",
+        "sandbox_provider_loss_teardown_claims_workspace_session_fk",
         "sandbox_workspace_mutation_admissions_outcome_check",
         "sandbox_workspace_mutation_admissions_settlement_check",
       ]);
@@ -224,6 +292,25 @@ describe("0240 provider-loss receipt protocol", () => {
       expect(
         constraints.find((row) => row.name.endsWith("settlement_check"))?.definition,
       ).toContain("unknown");
+      expect(
+        constraints.find((row) => row.name.endsWith("teardown_claims_consume_check"))?.definition,
+      ).toContain("consumed_at >= claimed_at");
+      expect(
+        constraints.find((row) => row.name.endsWith("receipts_consume_check"))?.definition,
+      ).toContain("consumed_at >= created_at");
+      const receiptIdentity = constraints.find((row) =>
+        row.name.endsWith("provider_loss_receipts_identity_check"),
+      )?.definition;
+      for (const predicate of [
+        "actor_kind = 'turn'::text",
+        "actor_id = attempt_id",
+        "holder_kind = 'turn'::text",
+        "operation = 'codemodeTokenRenewal'::text",
+        "terminate_outcome = ANY",
+        "not_found_observed_at >= destruction_observed_at",
+      ]) {
+        expect(receiptIdentity).toContain(predicate);
+      }
 
       const triggers = await shared.admin<{ name: string; tableName: string }[]>`
         select trigger.tgname as name, target.relname as "tableName"
