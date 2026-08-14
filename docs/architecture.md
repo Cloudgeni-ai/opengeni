@@ -774,17 +774,28 @@ query route, and configured non-workspace selector labels whose exact values
 come only from the validated structured alert occurrence. Workspace-only or
 mismatched series metadata is rejected. New responders use the rig's current
 active version; existing and reusable responders use their frozen exact rig
-version even after another version becomes active. The full preflight is repeated
-inside the locked scheduled-source settlement, which persists only a content-free
-responder-authority digest and exact tool-policy version. Claim revalidates that
-fence before any model, tool, sandbox, provider, or retrieval work; a narrowed
-responder fails the pending source instead of running with stale authority. A
-valid structured alert on a legacy task without the declaration fails closed
-before authority, admission, run, session, or retrieval work. The evaluator is
-pure and metadata-only: it cannot discover broad endpoints, fetch `/metrics`,
-decrypt a value, inspect ambient worker credentials, or expose private
-configuration in its fixed blocker result. Ordinary tasks and malformed/non-alert
-legacy metadata retain their existing path.
+version even after another version becomes active. Capability and API-integration
+availability is projected as runnable server ids plus only the exact
+task-delegation matching tuple; incident admission never materializes capability
+header ciphertext, integration definitions, endpoint schemas, Codex Apps
+designation, or ambient credential authorization. The worker locks the current
+task before its first incident mutation and commits the run, usage, new session
+or reusable goal, task pointer, system update, and source settlement in one
+session-activity transaction; a final preflight blocker therefore rolls back the
+complete dispatch in all four run modes. Event fanout and Temporal wake happen
+only after commit. Source settlement persists only a content-free v2 fence over
+the exact task snapshot, responder authority, tool-policy version, and hashed
+alert-selector values. Claim locks and refetches the task, reconstructs the
+validated structured occurrence, repeats the full preflight, and compares the
+complete fence before any model, tool, sandbox, provider, or retrieval work; a
+changed policy, exact selector value, or responder fails the pending source
+instead of running with stale authority. A valid structured alert on a legacy
+task without the declaration fails closed before authority, admission, run,
+session, or retrieval work. The evaluator is pure and metadata-only: it cannot
+discover broad endpoints, fetch `/metrics`, decrypt a value, inspect ambient
+worker credentials, or expose private configuration in its fixed blocker result.
+Ordinary tasks and malformed/non-alert legacy metadata retain their existing
+path.
 
 The official Gmail MCP stays on the generic capability/connection path, but it
 is personal-only: each workspace member authorizes their own mailbox, and both

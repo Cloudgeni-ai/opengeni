@@ -7487,6 +7487,144 @@ export async function listEnabledMcpCapabilityServers(
 }
 
 /**
+ * Metadata-only projection of runnable capability MCP server ids. The query
+ * deliberately computes credential-presence booleans in PostgreSQL and never
+ * selects stored header ciphertext or connection-reference contents.
+ */
+export async function listEnabledMcpCapabilityServerIds(
+  db: Database,
+  workspaceId: string,
+): Promise<string[]> {
+  const rows = await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) =>
+      await scopedDb
+        .select({
+          installationId: schema.capabilityInstallations.id,
+          itemId: schema.capabilityCatalogItems.id,
+          itemWorkspaceId: schema.capabilityCatalogItems.workspaceId,
+          itemSource: schema.capabilityCatalogItems.source,
+          itemAuthKind: schema.capabilityCatalogItems.authKind,
+          itemAuthModel: schema.capabilityCatalogItems.authModel,
+          itemMcpProbePresent: sql<boolean>`${schema.capabilityCatalogItems.metadata} ? 'mcpProbe'`,
+          itemMcpProbeStatus: sql<
+            string | null
+          >`${schema.capabilityCatalogItems.metadata} -> 'mcpProbe' ->> 'status'`,
+          itemAuthContractHeaderName: sql<
+            string | null
+          >`${schema.capabilityCatalogItems.metadata} -> 'authContract' ->> 'headerName'`,
+          itemAuthContractScheme: sql<
+            string | null
+          >`${schema.capabilityCatalogItems.metadata} -> 'authContract' ->> 'scheme'`,
+          itemMcpServerId: sql<
+            string | null
+          >`${schema.capabilityCatalogItems.metadata} ->> 'mcpServerId'`,
+          endpointPresent: sql<boolean>`coalesce(length(${schema.capabilityCatalogItems.endpointUrl}), 0) > 0`,
+          mcpConnectivityStatus: sql<
+            string | null
+          >`${schema.capabilityInstallations.metadata} -> 'mcpConnectivity' ->> 'status'`,
+          hasEncryptedHeaders: sql<boolean>`exists (
+            select 1
+            from jsonb_each_text(
+              case
+                when jsonb_typeof(${schema.capabilityInstallations.config} -> 'headersEncrypted') = 'object'
+                  then ${schema.capabilityInstallations.config} -> 'headersEncrypted'
+                else '{}'::jsonb
+              end
+            ) header
+            where length(header.value) > 0
+          )`,
+          hasConnectionRef: sql<boolean>`(
+            jsonb_typeof(${schema.capabilityInstallations.config} -> 'connectionRef') = 'object'
+            and jsonb_typeof(${schema.capabilityInstallations.config} -> 'connectionRef' -> 'providerDomain') = 'string'
+            and length(${schema.capabilityInstallations.config} -> 'connectionRef' ->> 'providerDomain') > 0
+          )`,
+        })
+        .from(schema.capabilityInstallations)
+        .innerJoin(
+          schema.capabilityCatalogItems,
+          and(
+            or(
+              eq(
+                schema.capabilityInstallations.workspaceId,
+                schema.capabilityCatalogItems.workspaceId,
+              ),
+              isNull(schema.capabilityCatalogItems.workspaceId),
+            ),
+            eq(schema.capabilityInstallations.capabilityId, schema.capabilityCatalogItems.id),
+          ),
+        )
+        .where(
+          and(
+            eq(schema.capabilityInstallations.workspaceId, workspaceId),
+            eq(schema.capabilityInstallations.kind, "mcp"),
+            eq(schema.capabilityInstallations.status, "active"),
+            eq(schema.capabilityCatalogItems.stale, false),
+            sql`(
+              ${schema.capabilityInstallations.metadata} ->> 'facetInstallationId' is null
+              or exists (
+                select 1
+                from ${schema.capabilityComponentOwners} owner
+                where owner.facet_installation_id::text = ${schema.capabilityInstallations.metadata} ->> 'facetInstallationId'
+                  and ${effectiveCapabilityOwnerSql(sql`owner.owner_kind`, sql`owner.owner_id`)}
+              )
+            )`,
+          ),
+        )
+        .orderBy(asc(schema.capabilityCatalogItems.name)),
+  );
+
+  const preferredByInstallation = new Map<string, (typeof rows)[number]>();
+  for (const row of rows) {
+    const existing = preferredByInstallation.get(row.installationId);
+    if (!existing || (existing.itemWorkspaceId === null && row.itemWorkspaceId !== null)) {
+      preferredByInstallation.set(row.installationId, row);
+    }
+  }
+
+  return [...preferredByInstallation.values()].flatMap((row) => {
+    const metadata = {
+      ...(row.itemMcpProbePresent ? { mcpProbe: { status: row.itemMcpProbeStatus } } : {}),
+      ...(row.itemAuthContractHeaderName !== null || row.itemAuthContractScheme !== null
+        ? {
+            authContract: {
+              headerName: row.itemAuthContractHeaderName,
+              scheme: row.itemAuthContractScheme,
+            },
+          }
+        : {}),
+      ...(row.itemMcpServerId !== null ? { mcpServerId: row.itemMcpServerId } : {}),
+    };
+    const trusted = capabilityCatalogItemIsTrustedForExposure({
+      source: row.itemSource as CapabilitySource,
+      stale: false,
+      authKind: row.itemAuthKind as CapabilityCatalogItem["authKind"],
+      metadata,
+    });
+    const connectivityOk =
+      row.mcpConnectivityStatus === "ok" || row.mcpConnectivityStatus === "auth_deferred";
+    const legacyActive =
+      !trusted &&
+      row.itemSource === registryCapabilitySource &&
+      !row.itemMcpProbePresent &&
+      row.itemAuthKind !== null &&
+      row.itemAuthKind !== "unknown" &&
+      connectivityOk &&
+      (!row.itemAuthModel || row.hasEncryptedHeaders || row.hasConnectionRef);
+    if (
+      (!trusted && !legacyActive) ||
+      !row.endpointPresent ||
+      !connectivityOk ||
+      (row.itemAuthModel && !row.hasEncryptedHeaders && !row.hasConnectionRef)
+    ) {
+      return [];
+    }
+    return [mcpServerIdForCapability(row.itemId, metadata)];
+  });
+}
+
+/**
  * Decrypts an enabled capability MCP's stored credential headers. Returns
  * null when the server has none, and "unavailable" when headers exist but
  * cannot be recovered (missing key or failed decryption) — in which case the
@@ -13409,6 +13547,40 @@ export async function getScheduledTaskPersonalConnectionDelegations(
         )
       : [];
   });
+}
+
+/**
+ * Lock and project the exact mutable incident-task authority inside a caller's
+ * dispatch/claim transaction. Returning the frozen personal delegation tuple
+ * from the same row prevents a later task edit from mixing with the task
+ * snapshot used for preflight.
+ */
+export async function requireScheduledTaskIncidentAuthorityInTransaction(
+  tx: Database,
+  input: { workspaceId: string; taskId: string },
+): Promise<{
+  task: ScheduledTask;
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
+}> {
+  const [row] = await tx
+    .select()
+    .from(schema.scheduledTasks)
+    .where(
+      and(
+        eq(schema.scheduledTasks.workspaceId, input.workspaceId),
+        eq(schema.scheduledTasks.id, input.taskId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (!row) throw new Error(`Scheduled task not found: ${input.taskId}`);
+  return {
+    task: mapScheduledTask(row),
+    personalConnectionDelegations: parsedPersonalConnectionDelegations(
+      row.personalConnectionDelegations,
+      `scheduled_tasks:${input.workspaceId}:${input.taskId}`,
+    ),
+  };
 }
 
 export async function getScheduledTaskXaiProviderAccountAuthoritySnapshot(

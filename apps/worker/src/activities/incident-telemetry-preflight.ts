@@ -4,6 +4,7 @@ import {
   type FirstPartyMcpToolName,
   type Permission,
   type ResourceRef,
+  type ScheduledTask,
   type ScheduledTaskAgentConfig,
 } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
@@ -55,9 +56,11 @@ export type IncidentTelemetryPreflightInput = {
 export const INCIDENT_TELEMETRY_AUTHORITY_FENCE_LINEAGE_KEY = "incidentTelemetryAuthorityFence";
 
 export type IncidentTelemetryAuthorityFence = {
-  version: 1;
+  version: 2;
   toolPolicyVersion: number;
   responderDigest: string;
+  taskDigest: string;
+  alertSelectorDigest: string;
 };
 
 export type IncidentTelemetryPreflightDeclaration =
@@ -190,10 +193,24 @@ export function evaluateIncidentTelemetryPreflight(
   return { action: "ready" };
 }
 
-export function incidentTelemetryAuthorityFence(
-  responder: IncidentTelemetryResponderMetadata,
-): IncidentTelemetryAuthorityFence | null {
+export function incidentTelemetryAuthorityFence(input: {
+  task: ScheduledTask;
+  responder: IncidentTelemetryResponderMetadata;
+  alertOccurrenceLabels: Readonly<Record<string, string>> | null;
+}): IncidentTelemetryAuthorityFence | null {
+  const { task, responder } = input;
   if (responder.toolPolicyVersion === null) return null;
+  const declaration = incidentTelemetryPreflightDeclaration(
+    task.agentConfig,
+    input.alertOccurrenceLabels !== null,
+  );
+  if (declaration.action !== "required" || !input.alertOccurrenceLabels) return null;
+  const selectorEntries = declaration.preflight.dataSource.alertSelectorLabels
+    .map((label) => [label, input.alertOccurrenceLabels?.[label]] as const)
+    .sort(([left], [right]) => left.localeCompare(right));
+  if (selectorEntries.some(([, value]) => typeof value !== "string" || value.length === 0)) {
+    return null;
+  }
   const normalized = {
     metadataComplete: responder.metadataComplete,
     resources: [...responder.resources].map((resource) => stableJson(resource)).sort(),
@@ -215,9 +232,11 @@ export function incidentTelemetryAuthorityFence(
       .sort((left, right) => left.name.localeCompare(right.name)),
   };
   return {
-    version: 1,
+    version: 2,
     toolPolicyVersion: responder.toolPolicyVersion,
     responderDigest: createHash("sha256").update(stableJson(normalized)).digest("hex"),
+    taskDigest: createHash("sha256").update(stableJson(task)).digest("hex"),
+    alertSelectorDigest: createHash("sha256").update(stableJson(selectorEntries)).digest("hex"),
   };
 }
 
@@ -227,16 +246,22 @@ export function parseIncidentTelemetryAuthorityFence(
   const raw = lineage[INCIDENT_TELEMETRY_AUTHORITY_FENCE_LINEAGE_KEY];
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const value = raw as Record<string, unknown>;
-  return value.version === 1 &&
+  return value.version === 2 &&
     typeof value.toolPolicyVersion === "number" &&
     Number.isInteger(value.toolPolicyVersion) &&
     value.toolPolicyVersion > 0 &&
     typeof value.responderDigest === "string" &&
-    /^[0-9a-f]{64}$/.test(value.responderDigest)
+    /^[0-9a-f]{64}$/.test(value.responderDigest) &&
+    typeof value.taskDigest === "string" &&
+    /^[0-9a-f]{64}$/.test(value.taskDigest) &&
+    typeof value.alertSelectorDigest === "string" &&
+    /^[0-9a-f]{64}$/.test(value.alertSelectorDigest)
     ? {
-        version: 1,
+        version: 2,
         toolPolicyVersion: value.toolPolicyVersion,
         responderDigest: value.responderDigest,
+        taskDigest: value.taskDigest,
+        alertSelectorDigest: value.alertSelectorDigest,
       }
     : null;
 }

@@ -1,22 +1,21 @@
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  type McpPersonalConnectionDelegation,
   type ScheduledTask,
   type Session,
   type SessionSystemUpdate,
 } from "@opengeni/contracts";
-import {
-  defaultSessionMcpServerIds,
-  resolveSessionToolPolicy,
-  settingsWithEnabledCapabilityMcpServers,
-} from "@opengeni/core";
+import { defaultSessionMcpServerIds, resolveSessionToolPolicy } from "@opengeni/core";
 import {
   getRig,
   getRigName,
   getRigVersion,
   getRigVersionHealth,
-  getScheduledTask,
   getVariableSet,
+  listEnabledMcpCapabilityServerIds,
+  listInstalledApiIntegrationServerIdsForDelegations,
   markScheduledTaskRunAuthorityRejectedInTransaction,
+  requireScheduledTaskIncidentAuthorityInTransaction,
   requireSession,
   type Database,
 } from "@opengeni/db";
@@ -30,8 +29,10 @@ import {
   INCIDENT_TELEMETRY_AUTHORITY_FENCE_LINEAGE_KEY,
   incidentTelemetryAuthorityFence,
   parseIncidentTelemetryAuthorityFence,
+  evaluateIncidentTelemetryPreflight,
   type IncidentTelemetryResponderMetadata,
 } from "./incident-telemetry-preflight";
+import { scheduledAlertOccurrenceIdentity } from "../scheduled-alert-occurrence";
 
 /** Resolve only exact selected responder metadata; never read/decrypt values or call providers. */
 export async function resolveIncidentTelemetryResponderMetadata(input: {
@@ -39,20 +40,26 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
   settings: Settings;
   task: ScheduledTask;
   session: Session | null;
+  personalConnectionDelegations: readonly McpPersonalConnectionDelegation[];
 }): Promise<IncidentTelemetryResponderMetadata> {
-  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
-    input.db,
-    input.task.workspaceId,
-    input.settings,
-  );
-  const availableMcpServerIds = new Set(runtimeSettings.mcpServers.map((server) => server.id));
+  const [capabilityServerIds, apiIntegrationServerIds] = await Promise.all([
+    listEnabledMcpCapabilityServerIds(input.db, input.task.workspaceId),
+    listInstalledApiIntegrationServerIdsForDelegations(
+      input.db,
+      input.task.workspaceId,
+      input.personalConnectionDelegations,
+    ),
+  ]);
+  const availableMcpServerIds = new Set(input.settings.mcpServers.map((server) => server.id));
+  for (const id of capabilityServerIds) availableMcpServerIds.add(id);
+  for (const id of apiIntegrationServerIds) availableMcpServerIds.add(id);
   for (const server of input.session?.mcpServers ?? []) {
     availableMcpServerIds.add(server.id);
   }
 
   const sessionTools = input.session
     ? input.session.tools
-    : withFirstPartyTools(runtimeSettings, input.task.agentConfig.tools);
+    : withFirstPartyTools(input.settings, input.task.agentConfig.tools);
   const resolvedToolPolicy = resolveSessionToolPolicy({
     toolPolicy: input.session?.toolPolicy ?? {
       mode: "explicit",
@@ -60,7 +67,7 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
     },
     sessionTools,
     availableMcpServerIds,
-    defaultMcpServerIds: defaultSessionMcpServerIds(runtimeSettings.mcpServers),
+    defaultMcpServerIds: defaultSessionMcpServerIds(input.settings.mcpServers),
   });
 
   let metadataComplete = true;
@@ -128,8 +135,8 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
     resources: input.session?.resources ?? input.task.agentConfig.resources,
     mcpServerIds: resolvedToolPolicy.toolRefs.map((tool) => tool.id),
     firstPartyMcpTools: input.session
-      ? allowedFirstPartyMcpToolsForSession(runtimeSettings, input.session.firstPartyMcpTools)
-      : resolveFirstPartyMcpToolPolicy(runtimeSettings).default,
+      ? allowedFirstPartyMcpToolsForSession(input.settings, input.session.firstPartyMcpTools)
+      : resolveFirstPartyMcpToolPolicy(input.settings).default,
     firstPartyMcpPermissions:
       input.session?.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
     rig,
@@ -138,7 +145,9 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
         ? [
             {
               name: variableSet.name,
-              variables: variableSet.variables.map((variable) => ({ name: variable.name })),
+              variables: variableSet.variables.map((variable) => ({
+                name: variable.name,
+              })),
             },
           ]
         : [],
@@ -169,25 +178,48 @@ export async function validateIncidentTelemetrySystemUpdateAuthority(input: {
         runId,
       });
     }
-    return { action: "reject", reason: "incident_responder_under_capable" } as const;
+    return {
+      action: "reject",
+      reason: "incident_responder_under_capable",
+    } as const;
   };
   if (!fence || typeof taskId !== "string" || !runId) return await reject();
 
-  const [task, session] = await Promise.all([
-    getScheduledTask(input.db, input.workspaceId, taskId),
-    requireSession(input.db, input.workspaceId, input.sessionId),
-  ]);
-  if (!task) return await reject();
+  const session = await requireSession(input.db, input.workspaceId, input.sessionId);
+  const { task, personalConnectionDelegations } =
+    await requireScheduledTaskIncidentAuthorityInTransaction(input.db, {
+      workspaceId: input.workspaceId,
+      taskId,
+    });
+  const occurrence = scheduledAlertOccurrenceIdentity({
+    workspaceId: input.workspaceId,
+    scheduledTaskId: task.id,
+    metadata: task.metadata,
+  });
   const responder = await resolveIncidentTelemetryResponderMetadata({
     db: input.db,
     settings: input.settings,
     task,
     session,
+    personalConnectionDelegations,
   });
-  const current = incidentTelemetryAuthorityFence(responder);
+  const preflight = evaluateIncidentTelemetryPreflight({
+    agentConfig: task.agentConfig,
+    incidentTriggered: occurrence !== null,
+    alertOccurrenceLabels: occurrence?.labels ?? null,
+    responder,
+  });
+  if (preflight.action !== "ready") return await reject();
+  const current = incidentTelemetryAuthorityFence({
+    task,
+    responder,
+    alertOccurrenceLabels: occurrence?.labels ?? null,
+  });
   return current &&
     current.toolPolicyVersion === fence.toolPolicyVersion &&
-    current.responderDigest === fence.responderDigest
+    current.responderDigest === fence.responderDigest &&
+    current.taskDigest === fence.taskDigest &&
+    current.alertSelectorDigest === fence.alertSelectorDigest
     ? { action: "accept" }
     : await reject();
 }
