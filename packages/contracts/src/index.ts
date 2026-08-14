@@ -6830,6 +6830,7 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   }),
   createdByContext: TurnInitiatorContext.default({}),
   personalConnections: z.array(McpPersonalConnectionSummary).default([]),
+  authorityRevision: z.number().int().positive().default(1),
   reusableSessionId: z.string().uuid().nullable(),
   targetSessionId: z.string().uuid().nullable().default(null),
   variableSetId: z.string().uuid().nullable().default(null),

@@ -19,6 +19,7 @@ import {
   getScheduledTask,
   ensureKnowledgeSourceSyncState,
   getScheduledTaskPersonalConnectionDelegations,
+  getScheduledTaskRunPersonalResourceAuthority,
   getScheduledTaskXaiProviderAccountAuthoritySnapshot,
   getRig,
   getVariableSet,
@@ -173,6 +174,11 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           `scheduled:${crypto.randomUUID()}`,
         scheduledAt: null,
       });
+      const runPersonalResourceAuthority = await getScheduledTaskRunPersonalResourceAuthority(db, {
+        accountId: task.accountId,
+        workspaceId: task.workspaceId,
+        runId: run.id,
+      });
       await recordUsageEvent(db, {
         accountId: task.accountId,
         workspaceId: task.workspaceId,
@@ -268,7 +274,10 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               throw new Error(`rig has no active version to bind: ${task.rigId}`);
             }
             frozenRigId = rig.id;
-            frozenRigVersionId = rig.activeVersion.id;
+            frozenRigVersionId =
+              runPersonalResourceAuthority?.resources.find(
+                (resource) => resource.resourceKind === "rig" && resource.resourceId === rig.id,
+              )?.resourceVersionId ?? rig.activeVersion.id;
           }
           let session: Awaited<ReturnType<typeof createSession>>;
           let sessionCreated = true;
@@ -501,6 +510,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               },
               personalConnectionDelegations: taskPersonalConnectionDelegations,
               xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
+              scheduledTaskRunId: run.id,
             },
             async (tx, wakeEventId) => {
               if (!wakeEventId) throw new Error("Scheduled delivery has no wake event");
@@ -627,6 +637,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               },
               personalConnectionDelegations: taskPersonalConnectionDelegations,
               xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
+              scheduledTaskRunId: run.id,
             },
             async (tx, wakeEventId) => {
               if (task.runMode === "existing_session") {
