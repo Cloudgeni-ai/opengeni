@@ -382,6 +382,27 @@ type ModelAvailabilityV1 = {
 };
 ```
 
+Workspace admins manage the hard allowlist from **Workspace Settings → Model
+access**. The UI supports an unrestricted policy or an exact canonical model-id
+allowlist, including future/custom IDs that are not yet present in the catalog.
+It uses the existing model-policy routes through the typed SDK methods
+`getWorkspaceModelAccessPolicy` and `updateWorkspaceModelAccessPolicy`:
+
+```text
+GET /v1/workspaces/:workspaceId/model-policy
+PUT /v1/workspaces/:workspaceId/model-policy
+```
+
+Provider allowlists remain part of the API contract for advanced/operator use.
+The authenticated catalog exposes only a per-model `policyAllowed` verdict, not
+the provider identity that produced it. During a rolling upgrade, older API
+instances may omit this additive verdict; the Settings editor then preserves
+the existing provider rule and disables semantic replacement until a complete
+projection is available. When an existing provider allowlist is opened with a
+complete projection, it remains opaque and unchanged until an admin explicitly
+confirms replacement; the admin then reviews the exact model IDs before saving
+the new policy.
+
 Credential readiness and provider availability are deliberately separate.
 Static API-key presence proves only local configuration readiness; it is not a
 provider-health probe. Codex readiness comes from the existing metadata-only

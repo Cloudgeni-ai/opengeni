@@ -35,6 +35,7 @@ export type TemporalTurnTaskQueueStats = {
 } | null;
 
 const turnTrackers = new WeakMap<Observability, TurnLifecycleMetrics>();
+const modelRequestTrackers = new WeakMap<Observability, ModelRequestLifecycleMetrics>();
 const creditBalanceGaugeAccounts = new WeakMap<Observability, Set<string>>();
 const modelCacheCounterTotals = new WeakMap<Observability, Map<string, number>>();
 
@@ -114,6 +115,19 @@ export function runtimeMetricsHooksForObservability(
         name: "opengeni_sandbox_warming_timeouts_total",
         help: "Total sandbox warming timeouts.",
         labels: { backend, stage },
+      });
+    },
+    onMcpToolCall: ({ outcome, durationSeconds }) => {
+      observability.incrementCounter({
+        name: "opengeni_mcp_tool_calls_total",
+        help: "Total physical MCP tool calls by bounded structural outcome.",
+        labels: { outcome },
+      });
+      observability.observeHistogram({
+        name: "opengeni_mcp_tool_call_duration_seconds",
+        help: "MCP tool-call duration in seconds by bounded structural outcome.",
+        labels: { outcome },
+        value: durationSeconds,
       });
     },
     onSandboxOp: ({ backend, op, outcome, code, healed, durationSeconds, replyBytes }) => {
@@ -361,6 +375,111 @@ export class TurnLifecycleMetrics {
     if (!this.timer) {
       return;
     }
+    clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  private now(): number {
+    return this.options.now?.() ?? Date.now();
+  }
+}
+
+export function modelRequestLifecycleMetricsFor(
+  observability: Observability,
+): ModelRequestLifecycleMetrics {
+  const existing = modelRequestTrackers.get(observability);
+  if (existing) return existing;
+  const tracker = new ModelRequestLifecycleMetrics(observability);
+  modelRequestTrackers.set(observability, tracker);
+  return tracker;
+}
+
+export class ModelRequestLifecycleMetrics {
+  private readonly requests = new Map<
+    string,
+    { provider: string; startedAt: number; lastEventAt: number }
+  >();
+  private readonly providers = new Set<string>();
+  private timer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(
+    private readonly observability: Observability,
+    private readonly options: {
+      now?: () => number;
+      refreshIntervalMs?: number;
+    } = {},
+  ) {}
+
+  start(key: string, provider: string): void {
+    const now = this.now();
+    this.providers.add(provider);
+    this.requests.set(key, { provider, startedAt: now, lastEventAt: now });
+    this.ensureTimer();
+    this.refreshGauges();
+  }
+
+  event(key: string, interEventGapMs?: number): void {
+    const request = this.requests.get(key);
+    if (!request) return;
+    request.lastEventAt = this.now();
+    this.observability.incrementCounter({
+      name: "opengeni_model_request_stream_events_total",
+      help: "Complete, valid provider SSE data events by provider.",
+      labels: { provider: request.provider },
+    });
+    if (interEventGapMs !== undefined) {
+      this.observability.observeHistogram({
+        name: "opengeni_model_request_stream_event_gap_seconds",
+        help: "Seconds between complete, valid provider SSE data events.",
+        buckets: MODEL_REQUEST_PHASE_BUCKETS,
+        labels: { provider: request.provider },
+        value: Math.max(0, interEventGapMs / 1000),
+      });
+    }
+  }
+
+  finish(key: string): void {
+    this.requests.delete(key);
+    this.refreshGauges();
+    if (this.requests.size === 0) this.stopTimer();
+  }
+
+  refreshGauges(): void {
+    const now = this.now();
+    for (const provider of this.providers) {
+      const active = [...this.requests.values()].filter((request) => request.provider === provider);
+      this.observability.setGauge({
+        name: "opengeni_model_requests_inflight",
+        help: "Current in-flight provider model requests in this worker process.",
+        labels: { provider },
+        value: active.length,
+      });
+      this.observability.setGauge({
+        name: "opengeni_model_request_oldest_no_event_age_seconds",
+        help: "Seconds since the least recently progressing in-flight provider request received a valid SSE event.",
+        labels: { provider },
+        value:
+          active.length === 0
+            ? 0
+            : Math.max(0, (now - Math.min(...active.map((request) => request.lastEventAt))) / 1000),
+      });
+    }
+  }
+
+  stop(): void {
+    this.requests.clear();
+    this.refreshGauges();
+    this.stopTimer();
+  }
+
+  private ensureTimer(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => this.refreshGauges(), this.options.refreshIntervalMs ?? 15_000);
+    this.timer.unref?.();
+  }
+
+  private stopTimer(): void {
+    if (!this.timer) return;
     clearInterval(this.timer);
     this.timer = null;
   }
@@ -947,8 +1066,33 @@ export type TurnSandboxEstablishReason =
   | "machine_primary"
   | "backend_none"
   | "initial_run_credentials"
+  | "initial_run_credentials_deferred"
   | "generated_video_files"
   | "signed_file_resources";
+export type SandboxLogicalProvisionCategory =
+  | "create"
+  | "resume"
+  | "exec_readiness"
+  | "sibling_warming"
+  | "lease_superseded"
+  | "drain_capture_wait"
+  | "archive_recovery"
+  | "provider_transport"
+  | "configuration"
+  | "unknown";
+export type SandboxLogicalProvisionStage =
+  | "create"
+  | "resume"
+  | "exec_readiness"
+  | "sibling_warming"
+  | "lease_admission"
+  | "lifecycle_wait"
+  | "archive_recovery"
+  | "configuration"
+  | "provider_transport"
+  | "unknown";
+export type SandboxLogicalProvisionOutcome = "completed" | "expected_transition" | "failed";
+export type SandboxProvisionAttemptOutcome = "completed" | "retrying" | "failed";
 
 const TURN_STARTUP_PHASE_BUCKETS = [
   0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120,
@@ -1018,6 +1162,103 @@ export function recordTurnSandboxEstablishPolicy(
       backend: input.backend,
     },
   });
+}
+
+/** Physical establish/resume attempts inside one logical provision. Safe
+ * lifecycle retries are counted here, never as another user-visible failure. */
+export function recordSandboxProvisionAttempt(
+  observability: Observability,
+  input: {
+    backend: string;
+    stage: SandboxLogicalProvisionStage;
+    category: SandboxLogicalProvisionCategory;
+    outcome: SandboxProvisionAttemptOutcome;
+    durationSeconds: number;
+  },
+): void {
+  const labels = {
+    backend: input.backend,
+    stage: input.stage,
+    category: input.category,
+    outcome: input.outcome,
+  };
+  try {
+    observability.incrementCounter({
+      name: "opengeni_sandbox_provision_attempts_total",
+      help: "Internal physical attempts within logical sandbox provisions.",
+      labels,
+    });
+    observability.observeHistogram({
+      name: "opengeni_sandbox_provision_attempt_duration_seconds",
+      help: "Internal sandbox provision attempt duration by bounded structural outcome.",
+      buckets: TURN_STARTUP_PHASE_BUCKETS,
+      labels,
+      value: Math.max(0, input.durationSeconds),
+    });
+  } catch {
+    try {
+      observability.incrementCounter({
+        name: "opengeni_observability_observer_errors_total",
+        help: "Observability observer failures isolated from product execution.",
+        labels: { observer: "sandbox_provision" },
+      });
+    } catch {
+      // The registry itself is unhealthy; provisioning remains authoritative.
+    }
+  }
+}
+
+/** One terminal observation for one correlation-qualified logical provision. */
+export function recordSandboxLogicalProvision(
+  observability: Observability,
+  input: {
+    backend: string;
+    stage: SandboxLogicalProvisionStage;
+    category: SandboxLogicalProvisionCategory | "none";
+    outcome: SandboxLogicalProvisionOutcome;
+    expected: boolean;
+    internalAttempts: number;
+    durationSeconds: number;
+  },
+): void {
+  const labels = {
+    backend: input.backend,
+    stage: input.stage,
+    category: input.category,
+    outcome: input.outcome,
+    expected: input.expected ? "true" : "false",
+  };
+  try {
+    observability.incrementCounter({
+      name: "opengeni_sandbox_provisions_total",
+      help: "Logical sandbox provisions by terminal outcome and bounded failure taxonomy.",
+      labels,
+    });
+    observability.observeHistogram({
+      name: "opengeni_sandbox_provision_duration_seconds",
+      help: "Logical sandbox provision duration including internal safe retries.",
+      buckets: TURN_STARTUP_PHASE_BUCKETS,
+      labels,
+      value: Math.max(0, input.durationSeconds),
+    });
+    observability.observeHistogram({
+      name: "opengeni_sandbox_provision_internal_attempts",
+      help: "Internal physical attempts per terminal logical sandbox provision.",
+      buckets: [1, 2, 3, 4, 5, 8],
+      labels,
+      value: Math.max(1, input.internalAttempts),
+    });
+  } catch {
+    try {
+      observability.incrementCounter({
+        name: "opengeni_observability_observer_errors_total",
+        help: "Observability observer failures isolated from product execution.",
+        labels: { observer: "sandbox_provision" },
+      });
+    } catch {
+      // The registry itself is unhealthy; provisioning remains authoritative.
+    }
+  }
 }
 
 export function recordTurnWorkerPreparationTotal(

@@ -10,11 +10,13 @@ import {
   CONNECTOR_ATTACHMENT_SANITIZED_RESULT_MAX_BYTES,
   PrefixedMcpServer,
   connectorAttachmentSandboxPath,
+  configureRuntimeMetricsHooks,
   prepareAgentTools,
   projectConnectorAttachmentTransfers,
   type ConnectorAttachmentMaterializationRequest,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
+  type RuntimeMetricsHooks,
 } from "../src";
 import { RoutingMutationOutcomeUnknownError } from "../src/sandbox";
 
@@ -293,6 +295,11 @@ describe("connector attachment MCP projection", () => {
   });
 
   test("best-effort MCP isolation does not flatten routed mutation outcome-unknown", async () => {
+    const observations: Array<Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]> =
+      [];
+    configureRuntimeMetricsHooks({
+      onMcpToolCall: (input) => observations.push(input),
+    });
     const uncertain = new RoutingMutationOutcomeUnknownError(
       "importWorkspaceFiles",
       "synthetic uncertain connector attachment batch",
@@ -315,9 +322,14 @@ describe("connector attachment MCP projection", () => {
       undefined,
       true,
     );
-    await expect(
-      wrapped.callTool(`${wrapped.prefix}download_attachment`, {}, undefined),
-    ).rejects.toBe(uncertain);
+    try {
+      await expect(
+        wrapped.callTool(`${wrapped.prefix}download_attachment`, {}, undefined),
+      ).rejects.toBe(uncertain);
+      expect(observations.map(({ outcome }) => outcome)).toEqual(["outcome_uncertain"]);
+    } finally {
+      configureRuntimeMetricsHooks(null);
+    }
   });
 
   test("rejects structured content beside an out-of-band transfer", async () => {

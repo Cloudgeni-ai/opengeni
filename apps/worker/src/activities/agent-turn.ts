@@ -87,6 +87,7 @@ import {
   SandboxLeaseSupersededError,
   SandboxLeaseTransitionError,
   SandboxImageConflictError,
+  SandboxRigConflictError,
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
   isRetryableDatabaseTransportFailure,
@@ -158,7 +159,17 @@ import {
   isMcpTransportConnectivityError,
   runOwnedSandboxSetup,
   RoutingMutationOutcomeUnknownError,
+  SandboxConfigError,
+  SandboxExactResumeInstanceUnavailableError,
+  SandboxExactResumeReplacedError,
+  SandboxExecReadinessError,
+  SandboxProviderContinuityUnavailableError,
+  SandboxProviderUnavailableError,
+  SandboxResumeIdentityMismatchError,
+  SandboxResumeIdentityUnavailableError,
+  SandboxResumeStateUnavailableError,
   WorkspaceArchiveIntegrityError,
+  classifyProviderSandboxFailure,
   sdkBackendIdForSandboxBackend,
   swapTargetEstablishability,
   type SandboxFileDownload,
@@ -274,6 +285,7 @@ import {
 import { mergeResourceRefs } from "./common";
 import {
   fetchXaiSubscriptionQuota,
+  classifyXaiSubscriptionStreamIdleTimeoutError,
   isXaiSubscriptionHostedToolContinuationError,
   isXaiSubscriptionTransportError,
   XaiSubscriptionReloginRequired,
@@ -373,6 +385,8 @@ import {
   sandboxLeaseHolderIdForAttempt,
   maybePersistWarmWorkspaceSnapshot,
   waitForWarmSnapshot,
+  sandboxProvisionFailureStage,
+  SandboxProvisionStageError,
   SandboxWarmingTimeoutError,
   type ResumedTurnSandbox,
   type TurnSandboxLeaseHolderId,
@@ -387,6 +401,7 @@ import {
 import { makeTurnOpJournal, type TurnHeartbeatDetails } from "../op-journal";
 import {
   makeMachineOpObserver,
+  modelRequestLifecycleMetricsFor,
   modelCallAccountContext,
   recordBatchFlush,
   recordContextCompaction,
@@ -394,6 +409,8 @@ import {
   recordModelCacheTokens,
   recordModelInputTokens,
   recordModelRequestPhase,
+  recordSandboxLogicalProvision,
+  recordSandboxProvisionAttempt,
   recordCompanyBrainContributions,
   recordSessionEventAppendLatency,
   recordSessionEventPublishLatency,
@@ -403,6 +420,8 @@ import {
   runtimeMetricsHooksForObservability,
   StreamTimingMetrics,
   turnLifecycleMetricsFor,
+  type SandboxLogicalProvisionCategory,
+  type SandboxLogicalProvisionStage,
   type TurnOutcome,
   type TurnSandboxEstablishReason,
 } from "../observability-metrics";
@@ -2091,16 +2110,13 @@ export function sandboxEstablishPolicyDecision(input: {
   lazyEnabled: boolean;
   machinePrimary: boolean;
   sandboxBackend: Settings["sandboxBackend"];
-  hasInitialRunCredentialMaterial: boolean;
+  hasRunCredentialResolver: boolean;
   generatedVideoFileCount: number;
   hasSignedFileResources: boolean;
 }): { policy: "eager" | "on-demand"; reason: TurnSandboxEstablishReason } {
   if (!input.lazyEnabled) return { policy: "eager", reason: "lazy_disabled" };
   if (input.machinePrimary) return { policy: "eager", reason: "machine_primary" };
   if (input.sandboxBackend === "none") return { policy: "eager", reason: "backend_none" };
-  if (input.hasInitialRunCredentialMaterial) {
-    return { policy: "eager", reason: "initial_run_credentials" };
-  }
   if (input.generatedVideoFileCount > 0) {
     return { policy: "eager", reason: "generated_video_files" };
   }
@@ -2110,6 +2126,14 @@ export function sandboxEstablishPolicyDecision(input: {
   // path whose materialization outcome is not known yet.
   if (input.hasSignedFileResources) {
     return { policy: "eager", reason: "signed_file_resources" };
+  }
+  // Merely having a host run-credential resolver is not proof that this turn
+  // will use the sandbox. Resolve its attempt-bound material before model input
+  // so auth-needed context remains deterministic, but defer every sandbox
+  // write, lease, renewal, and cleanup action to the first-operation
+  // provisioner. The eager file paths above remain unchanged.
+  if (input.hasRunCredentialResolver) {
+    return { policy: "on-demand", reason: "initial_run_credentials_deferred" };
   }
   return { policy: "on-demand", reason: "eligible" };
 }
@@ -2558,6 +2582,29 @@ export type TurnSandboxProvisioner<T> = {
   waitForSettled(timeoutMs: number): Promise<T | null>;
 };
 
+export type SandboxLogicalProvisionFailure = {
+  category: SandboxLogicalProvisionCategory;
+  stage: SandboxLogicalProvisionStage;
+  code: string;
+  expected: boolean;
+  retryable: boolean;
+};
+
+export type TurnSandboxProvisionAttempt<T = unknown> = {
+  provisionId: string;
+  attempt: number;
+  outcome: "completed" | "retrying" | "failed";
+  durationMs: number;
+  result?: T;
+  error?: unknown;
+};
+
+export type TurnSandboxProvisionSettlement = {
+  provisionId: string;
+  internalAttempts: number;
+  durationMs: number;
+};
+
 export class TurnOperationCancelledError extends Error {
   readonly name = "TurnOperationCancelledError";
 
@@ -2655,23 +2702,234 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sandboxProvisionErrorChain(error: unknown): unknown[] {
+  const chain: unknown[] = [];
+  const seen = new Set<object>();
+  let current = error;
+  for (let depth = 0; depth < 6; depth += 1) {
+    chain.push(current);
+    if (!current || typeof current !== "object" || seen.has(current)) break;
+    seen.add(current);
+    if (current instanceof SandboxProvisionStageError) {
+      current = current.source;
+      continue;
+    }
+    const cause = Reflect.get(current, "cause");
+    if (cause === undefined || cause === current) break;
+    current = cause;
+  }
+  return chain;
+}
+
+function firstProvisionError<T>(
+  chain: readonly unknown[],
+  constructor: abstract new (...args: never[]) => T,
+): T | null {
+  return chain.find((value): value is T => value instanceof constructor) ?? null;
+}
+
+/**
+ * Closed, structural taxonomy for one logical provision failure. The classifier
+ * follows only typed wrapper/cause links and provider status/code fields; it
+ * never infers lifecycle truth from an arbitrary error message.
+ */
+export function classifySandboxLogicalProvisionFailure(
+  backend: string,
+  error: unknown,
+): SandboxLogicalProvisionFailure {
+  const chain = sandboxProvisionErrorChain(error);
+  const wrappedStage =
+    chain.map((value) => sandboxProvisionFailureStage(value)).find((stage) => stage !== null) ??
+    null;
+  const warming =
+    chain.find(
+      (value): value is SandboxWarmingTimeoutError => value instanceof SandboxWarmingTimeoutError,
+    ) ?? null;
+  if (warming) {
+    const execReadiness = warming.stage === "exec_readiness";
+    return {
+      category: execReadiness ? "exec_readiness" : "sibling_warming",
+      stage: execReadiness ? "exec_readiness" : "sibling_warming",
+      code: warming.code,
+      expected: false,
+      retryable: false,
+    };
+  }
+  const readiness = firstProvisionError(chain, SandboxExecReadinessError);
+  if (readiness) {
+    return {
+      category: "exec_readiness",
+      stage: "exec_readiness",
+      code: readiness.code,
+      expected: false,
+      retryable: false,
+    };
+  }
+  const superseded = firstProvisionError(chain, SandboxLeaseSupersededError);
+  if (superseded) {
+    return {
+      category: "lease_superseded",
+      stage: "lease_admission",
+      code: "lease_superseded",
+      expected: true,
+      retryable: true,
+    };
+  }
+  const transition = firstProvisionError(chain, SandboxLeaseTransitionError);
+  if (transition) {
+    return {
+      category: "drain_capture_wait",
+      stage: "lifecycle_wait",
+      code: transition.reason,
+      expected: true,
+      retryable: true,
+    };
+  }
+  const deadlineRotation = firstProvisionError(chain, SandboxDeadlineRotationError);
+  if (deadlineRotation) {
+    return {
+      category: "drain_capture_wait",
+      stage: "lifecycle_wait",
+      code: "provider_deadline_rotation",
+      expected: true,
+      retryable: false,
+    };
+  }
+  const recoveryBlocked = firstProvisionError(chain, SandboxLeaseRecoveryBlockedError);
+  if (recoveryBlocked) {
+    return {
+      category: "archive_recovery",
+      stage: "archive_recovery",
+      code: recoveryBlocked.code,
+      expected: false,
+      retryable: false,
+    };
+  }
+  const archive = firstProvisionError(chain, WorkspaceArchiveIntegrityError);
+  if (archive) {
+    return {
+      category: "archive_recovery",
+      stage: "archive_recovery",
+      code: archive.code,
+      expected: false,
+      retryable: archive.retryable,
+    };
+  }
+  const continuity = firstProvisionError(chain, SandboxProviderContinuityUnavailableError);
+  if (continuity) {
+    return {
+      category: "archive_recovery",
+      stage: "archive_recovery",
+      code: "provider_continuity_unavailable",
+      expected: false,
+      retryable: continuity.retryable,
+    };
+  }
+  const configuration = chain.find(
+    (value) =>
+      value instanceof SandboxConfigError ||
+      value instanceof SandboxProviderUnavailableError ||
+      value instanceof SandboxImageConflictError ||
+      value instanceof SandboxRigConflictError,
+  );
+  if (configuration) {
+    return {
+      category: "configuration",
+      stage: wrappedStage ?? "configuration",
+      code:
+        configuration instanceof SandboxImageConflictError
+          ? "image_conflict"
+          : configuration instanceof SandboxRigConflictError
+            ? "rig_conflict"
+            : configuration instanceof SandboxProviderUnavailableError
+              ? "provider_unavailable"
+              : "sandbox_config",
+      expected: false,
+      retryable: false,
+    };
+  }
+  const resumeFailure = chain.find(
+    (value) =>
+      value instanceof SandboxResumeStateUnavailableError ||
+      value instanceof SandboxResumeIdentityMismatchError ||
+      value instanceof SandboxResumeIdentityUnavailableError ||
+      value instanceof SandboxExactResumeReplacedError ||
+      value instanceof SandboxExactResumeInstanceUnavailableError,
+  );
+  if (resumeFailure) {
+    return {
+      category: "resume",
+      stage: "resume",
+      code:
+        resumeFailure instanceof SandboxResumeStateUnavailableError
+          ? "resume_state_unavailable"
+          : resumeFailure instanceof SandboxResumeIdentityMismatchError
+            ? "resume_identity_mismatch"
+            : resumeFailure instanceof SandboxResumeIdentityUnavailableError
+              ? "resume_identity_unavailable"
+              : resumeFailure instanceof SandboxExactResumeReplacedError
+                ? "exact_resume_replaced"
+                : "exact_resume_instance_unavailable",
+      expected: false,
+      retryable: false,
+    };
+  }
+  const providerFailure = classifyProviderSandboxFailure(backend, error);
+  if (providerFailure.kind === "transient_transport") {
+    return {
+      category: "provider_transport",
+      stage: wrappedStage ?? "provider_transport",
+      code: providerFailure.diagnostic,
+      expected: false,
+      // A typed transport fault is attributable, but a create outcome may be
+      // ambiguous. Classification never licenses replay on its own.
+      retryable: false,
+    };
+  }
+  if (wrappedStage) {
+    return {
+      category: wrappedStage,
+      stage: wrappedStage,
+      code: `${wrappedStage}_failed`,
+      expected: false,
+      retryable: false,
+    };
+  }
+  return {
+    category: "unknown",
+    stage: "unknown",
+    code: "unknown",
+    expected: false,
+    retryable: false,
+  };
+}
+
 export function isLazySandboxProvisionRetryable(error: unknown): boolean {
+  const chain = sandboxProvisionErrorChain(error);
   if (
-    error instanceof SandboxImageConflictError ||
-    error instanceof SandboxLeaseRecoveryBlockedError
+    chain.some(
+      (value) =>
+        value instanceof SandboxImageConflictError ||
+        value instanceof SandboxRigConflictError ||
+        value instanceof SandboxLeaseRecoveryBlockedError,
+    )
   ) {
     return false;
   }
-  if (error instanceof WorkspaceArchiveIntegrityError) {
-    return error.retryable;
+  const archive = firstProvisionError(chain, WorkspaceArchiveIntegrityError);
+  if (archive) {
+    return archive.retryable;
   }
   if (
-    error instanceof SandboxLeaseSupersededError ||
-    error instanceof SandboxLeaseTransitionError
+    chain.some(
+      (value) =>
+        value instanceof SandboxLeaseSupersededError ||
+        value instanceof SandboxLeaseTransitionError,
+    )
   ) {
     return true;
   }
-  if (error instanceof SandboxWarmingTimeoutError) {
+  if (chain.some((value) => value instanceof SandboxWarmingTimeoutError)) {
     return false;
   }
   // Provider/transport text is not durable evidence that creation never
@@ -2697,9 +2955,17 @@ export function createTurnSandboxProvisioner<T>(
     maxRetries?: number;
     backoffMs?: number;
     signal?: AbortSignal;
-    onStarted?: () => Promise<void> | void;
-    onCompleted?: (result: T) => Promise<void> | void;
-    onFailed?: (error: unknown) => Promise<void> | void;
+    provisionIdFactory?: () => string;
+    onStarted?: (
+      settlement: Pick<TurnSandboxProvisionSettlement, "provisionId">,
+    ) => Promise<void> | void;
+    onAttemptSettled?: (attempt: TurnSandboxProvisionAttempt<T>) => Promise<void> | void;
+    beforeCompleted?: (
+      result: T,
+      settlement: Pick<TurnSandboxProvisionSettlement, "provisionId" | "internalAttempts">,
+    ) => Promise<void> | void;
+    onCompleted?: (result: T, settlement: TurnSandboxProvisionSettlement) => Promise<void> | void;
+    onFailed?: (error: unknown, settlement: TurnSandboxProvisionSettlement) => Promise<void> | void;
     disposeResult?: (result: T) => Promise<void> | void;
   } = {},
 ): TurnSandboxProvisioner<T> {
@@ -2707,23 +2973,44 @@ export function createTurnSandboxProvisioner<T>(
   const backoffMs = options.backoffMs ?? 250;
   let memo: Promise<T> | null = null;
 
-  const run = async (): Promise<T> => {
-    let attempt = 0;
+  const run = async (
+    provisionId: string,
+    onAttempt: (attempt: number) => void,
+  ): Promise<{ result: T; internalAttempts: number }> => {
+    let internalAttempts = 0;
     while (true) {
+      internalAttempts += 1;
+      onAttempt(internalAttempts);
+      const startedAt = performance.now();
       try {
         throwIfTurnOperationCancelled(options.signal);
         const operation = establish();
-        return await waitForTurnOperation(operation, options.signal, options.disposeResult);
+        const result = await waitForTurnOperation(operation, options.signal, options.disposeResult);
+        await options.onAttemptSettled?.({
+          provisionId,
+          attempt: internalAttempts,
+          outcome: "completed",
+          durationMs: performance.now() - startedAt,
+          result,
+        });
+        return { result, internalAttempts };
       } catch (error) {
-        if (
+        const retrying = !(
           error instanceof TurnOperationCancelledError ||
-          attempt >= maxRetries ||
+          internalAttempts > maxRetries ||
           !isLazySandboxProvisionRetryable(error)
-        ) {
+        );
+        await options.onAttemptSettled?.({
+          provisionId,
+          attempt: internalAttempts,
+          outcome: retrying ? "retrying" : "failed",
+          durationMs: performance.now() - startedAt,
+          error,
+        });
+        if (!retrying) {
           throw error;
         }
-        attempt += 1;
-        await sleep(backoffMs * attempt);
+        await sleep(backoffMs * internalAttempts);
       }
     }
   };
@@ -2731,24 +3018,44 @@ export function createTurnSandboxProvisioner<T>(
   return {
     get(): Promise<T> {
       if (!memo) {
+        const provisionId = options.provisionIdFactory?.() ?? randomUUID();
         memo = (async () => {
+          const startedAt = performance.now();
           throwIfTurnOperationCancelled(options.signal);
-          await options.onStarted?.();
+          await options.onStarted?.({ provisionId });
           throwIfTurnOperationCancelled(options.signal);
           let result: T | undefined;
+          let internalAttempts = 0;
           let hasResult = false;
           try {
-            result = await run();
+            const runResult = await run(provisionId, (attempt) => {
+              internalAttempts = attempt;
+            });
+            result = runResult.result;
+            internalAttempts = runResult.internalAttempts;
             hasResult = true;
             throwIfTurnOperationCancelled(options.signal);
-            await options.onCompleted?.(result);
+            await options.beforeCompleted?.(result, {
+              provisionId,
+              internalAttempts,
+            });
+            throwIfTurnOperationCancelled(options.signal);
+            await options.onCompleted?.(result, {
+              provisionId,
+              internalAttempts,
+              durationMs: performance.now() - startedAt,
+            });
             return result;
           } catch (error) {
             if (hasResult) {
               await options.disposeResult?.(result as T);
             }
             if (!(error instanceof TurnOperationCancelledError)) {
-              await options.onFailed?.(error);
+              await options.onFailed?.(error, {
+                provisionId,
+                internalAttempts: Math.max(1, internalAttempts),
+                durationMs: performance.now() - startedAt,
+              });
             }
             throw error;
           }
@@ -5866,7 +6173,108 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             webSearch: runSettings.webSearchEnabled,
             xSearch: runSettings.webSearchEnabled,
           },
+          streamIdleTimeoutMs: runSettings.supergrokResponseStreamIdleTimeoutMs,
           nextRequestId: () => `${dispatchId}:xai:${++xaiModelRequestSequence}`,
+          onModelRequestDiagnostic: (event) => {
+            const requestKey = `${event.requestId}:${event.transportAttempt}`;
+            if (event.phase === "started") {
+              modelRequestLifecycleMetricsFor(observability).start(
+                requestKey,
+                "supergrok-subscription",
+              );
+              if (
+                firstModelRequestPreparationStartedAt !== null &&
+                !firstModelRequestPreparationRecorded
+              ) {
+                firstModelRequestPreparationRecorded = true;
+                recordTurnStartupPhase(observability, {
+                  phase: "model_request_preparation",
+                  provider: turnExecutionPolicy.providerId,
+                  backend: activeSandboxBackend ?? groupBoxBackend,
+                  outcome: "completed",
+                  durationSeconds:
+                    (performance.now() - firstModelRequestPreparationStartedAt) / 1_000,
+                  count: turnTools.length,
+                });
+              }
+            }
+            if (event.phase === "first_event" || event.phase === "progress") {
+              modelRequestLifecycleMetricsFor(observability).event(
+                requestKey,
+                event.phase === "progress" ? event.interEventGapMs : undefined,
+              );
+            }
+            const terminal =
+              event.phase === "completed" ||
+              event.phase === "failed" ||
+              event.phase === "timed_out";
+            if (terminal) {
+              modelRequestLifecycleMetricsFor(observability).finish(requestKey);
+            }
+            const phase =
+              event.phase === "headers"
+                ? "headers"
+                : event.phase === "first_event"
+                  ? "first_byte"
+                  : terminal
+                    ? "terminal"
+                    : null;
+            if (!phase) return;
+            recordModelRequestPhase(observability, {
+              provider: "supergrok-subscription",
+              phase,
+              ...(terminal
+                ? {
+                    outcome:
+                      event.phase === "completed"
+                        ? ("completed" as const)
+                        : event.phase === "timed_out"
+                          ? ("timed_out" as const)
+                          : ("failed" as const),
+                  }
+                : {}),
+              durationSeconds: event.durationMs / 1_000,
+            });
+          },
+          onModelRequestEvent: async (event) => {
+            if (!publish || !turnId) {
+              throw new Error("SuperGrok model request started before the turn event producer");
+            }
+            const shouldRecordStartedAudit =
+              event.phase === "started" && !firstModelRequestAuditRecorded;
+            if (shouldRecordStartedAudit) firstModelRequestAuditRecorded = true;
+            const auditStartedAt = shouldRecordStartedAudit ? performance.now() : null;
+            let auditOutcome: "completed" | "failed" = "completed";
+            try {
+              await publish([
+                {
+                  type: "agent.model.request",
+                  payload: {
+                    ...event,
+                    provider: "supergrok-subscription",
+                    turnId,
+                    attemptId: input.attemptId,
+                    dispatchId,
+                    executionGeneration,
+                  },
+                },
+              ]);
+            } catch (error) {
+              auditOutcome = "failed";
+              throw error;
+            } finally {
+              if (auditStartedAt !== null) {
+                recordTurnStartupPhase(observability, {
+                  phase: "model_request_audit",
+                  provider: turnExecutionPolicy.providerId,
+                  backend: activeSandboxBackend ?? groupBoxBackend,
+                  outcome: auditOutcome,
+                  durationSeconds: (performance.now() - auditStartedAt) / 1_000,
+                  count: turnTools.length,
+                });
+              }
+            }
+          },
         });
         xaiRequestContext = authorization.context;
       }
@@ -6359,6 +6767,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               cancellationSignal,
               undefined,
             );
+      const establishDecision = sandboxEstablishPolicyDecision({
+        lazyEnabled: lazyProvisionEnabled(settings),
+        machinePrimary,
+        sandboxBackend: runSettings.sandboxBackend,
+        hasRunCredentialResolver: runCredentialResolver !== null,
+        generatedVideoFileCount: requiredGeneratedVideoFiles.length,
+        hasSignedFileResources:
+          requiresSignedFileResourceDownloads(
+            runSettings,
+            activeSandboxBackend ?? groupBoxBackend,
+          ) && turnResources.some((resource) => resource.kind === "file"),
+      });
+      const establishPolicy = establishDecision.policy;
+      recordTurnSandboxEstablishPolicy(observability, {
+        policy: establishDecision.policy,
+        reason: establishDecision.reason,
+        backend: machinePrimary ? "selfhosted" : groupBoxBackend,
+      });
+      // Resolve once before model preparation so partial/auth-needed host state
+      // is available as bounded model context and reconnect UI even when an
+      // on-demand turn never provisions a box. Resolution alone performs no
+      // sandbox write or renewal; both paths reuse this exact material and the
+      // lazy path materializes it only inside its first-operation single-flight.
       const initialRunCredentialMaterial = runCredentialResolver
         ? await waitForTurnOperation(
             runCredentialResolver.resolve({
@@ -6384,27 +6815,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         cancellationSignal,
         undefined,
       );
-      const establishDecision = sandboxEstablishPolicyDecision({
-        lazyEnabled: lazyProvisionEnabled(settings),
-        machinePrimary,
-        sandboxBackend: runSettings.sandboxBackend,
-        // Resolved run credentials must be written to one exact leased sandbox
-        // before agent execution. A warm active pointer can bypass the lazy
-        // provisioner entirely, which previously skipped materialization.
-        hasInitialRunCredentialMaterial: initialRunCredentialMaterial !== null,
-        generatedVideoFileCount: requiredGeneratedVideoFiles.length,
-        hasSignedFileResources:
-          requiresSignedFileResourceDownloads(
-            runSettings,
-            activeSandboxBackend ?? groupBoxBackend,
-          ) && turnResources.some((resource) => resource.kind === "file"),
-      });
-      const establishPolicy = establishDecision.policy;
-      recordTurnSandboxEstablishPolicy(observability, {
-        policy: establishDecision.policy,
-        reason: establishDecision.reason,
-        backend: machinePrimary ? "selfhosted" : groupBoxBackend,
-      });
       // Computed exactly ONCE per turn and reused for BOTH the box manifest
       // (resumeBoxForTurn -> establishSandboxSessionFromEnvelope, below) AND the
       // agent (runtime.buildAgent, below). sandboxEnvironmentForRun mints a FRESH
@@ -6741,6 +7151,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
 
       const attachRunCredentialRenewal = async (
         credentialSession: RunCredentialCommandSession,
+        initialMaterial: NormalizedRunCredentialMaterial | null,
         initialSandbox?: ResumedTurnSandbox,
       ): Promise<void> => {
         if (!runCredentialResolver) return;
@@ -6758,7 +7169,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           return targetSandbox;
         };
 
-        if (!initialRunCredentialMaterial) {
+        if (!initialMaterial) {
           await runWorkspaceMutationForSandbox(
             requireTargetSandbox(),
             "runCredentialClear",
@@ -6826,14 +7237,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
         };
 
-        const initialExpiryMs = initialRunCredentialMaterial.expiresAt?.getTime() ?? null;
+        const initialExpiryMs = initialMaterial.expiresAt?.getTime() ?? null;
         const seed =
           initialExpiryMs !== null && initialExpiryMs <= Date.now() + RUN_CREDENTIAL_EXPIRY_LEAD_MS
             ? await runCredentialResolver.resolve({
                 purpose: "provision",
                 forceRefresh: true,
               })
-            : initialRunCredentialMaterial;
+            : initialMaterial;
         await write(seed, true);
         if (runCredentialRenewalClosed) return;
         const controller = startRunCredentialRenewalLoop({
@@ -8175,6 +8586,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             await publishSandboxLifecycleEvents(provisioned);
             await attachRunCredentialRenewal(
               provisioned.established.session as RunCredentialCommandSession,
+              initialRunCredentialMaterial,
               provisioned,
             );
             const provisionedSetupSession = initialRunCredentialMaterial
@@ -8240,32 +8652,38 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
           {
             signal: sandboxResumeSignal,
-            onStarted: async () => {
+            onStarted: async ({ provisionId }) => {
               await publish?.(
                 [
                   {
                     type: "sandbox.operation.started",
-                    payload: { name: "sandbox.provision" },
+                    payload: { name: "sandbox.provision", provisionId },
                   },
                 ],
                 true,
               );
             },
-            onCompleted: async (provisioned) => {
-              await publish?.(
-                [
-                  {
-                    type: "sandbox.operation.completed",
-                    payload: {
-                      name: "sandbox.provision",
-                      ...(provisioned.established.origin
-                        ? { origin: provisioned.established.origin }
-                        : {}),
-                    },
-                  },
-                ],
-                true,
-              );
+            onAttemptSettled: ({ result, error, outcome, durationMs }) => {
+              const successStage =
+                result?.established.origin === "created"
+                  ? "create"
+                  : result?.established.origin === "resumed"
+                    ? "resume"
+                    : result?.established.origin === "restored"
+                      ? "archive_recovery"
+                      : "unknown";
+              const failure = error
+                ? classifySandboxLogicalProvisionFailure(groupBoxBackend, error)
+                : null;
+              recordSandboxProvisionAttempt(observability, {
+                backend: groupBoxBackend,
+                stage: failure?.stage ?? successStage,
+                category: failure?.category ?? successStage,
+                outcome,
+                durationSeconds: durationMs / 1_000,
+              });
+            },
+            beforeCompleted: async (provisioned) => {
               throwIfTurnOperationCancelled(sandboxResumeSignal);
               startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
               setupBoxSession = provisioned.established.session;
@@ -8281,8 +8699,45 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   provisioned.established.session,
                 );
               }
+              throwIfTurnOperationCancelled(sandboxResumeSignal);
             },
-            onFailed: async (error) => {
+            onCompleted: async (provisioned, settlement) => {
+              await publish?.(
+                [
+                  {
+                    type: "sandbox.operation.completed",
+                    payload: {
+                      name: "sandbox.provision",
+                      ...(provisioned.established.origin
+                        ? { origin: provisioned.established.origin }
+                        : {}),
+                      provisionId: settlement.provisionId,
+                      internalAttempts: settlement.internalAttempts,
+                    },
+                  },
+                ],
+                true,
+              );
+              const successStage =
+                provisioned.established.origin === "created"
+                  ? "create"
+                  : provisioned.established.origin === "resumed"
+                    ? "resume"
+                    : provisioned.established.origin === "restored"
+                      ? "archive_recovery"
+                      : "unknown";
+              recordSandboxLogicalProvision(observability, {
+                backend: groupBoxBackend,
+                stage: successStage,
+                category: "none",
+                outcome: "completed",
+                expected: false,
+                internalAttempts: settlement.internalAttempts,
+                durationSeconds: settlement.durationMs / 1_000,
+              });
+            },
+            onFailed: async (error, settlement) => {
+              const failure = classifySandboxLogicalProvisionFailure(groupBoxBackend, error);
               await publish?.(
                 [
                   {
@@ -8290,11 +8745,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     payload: {
                       name: "sandbox.provision",
                       error: error instanceof Error ? error.message : String(error),
+                      provisionId: settlement.provisionId,
+                      internalAttempts: settlement.internalAttempts,
+                      failureCategory: failure.category,
+                      failureStage: failure.stage,
+                      failureCode: failure.code,
+                      expectedTransition: failure.expected,
+                      retryable: failure.retryable,
                     },
                   },
                 ],
                 true,
               );
+              recordSandboxLogicalProvision(observability, {
+                backend: groupBoxBackend,
+                stage: failure.stage,
+                category: failure.category,
+                outcome: failure.expected ? "expected_transition" : "failed",
+                expected: failure.expected,
+                internalAttempts: settlement.internalAttempts,
+                durationSeconds: settlement.durationMs / 1_000,
+              });
             },
             disposeResult: async (provisioned) => {
               await releaseLateSandbox(provisioned);
@@ -8960,6 +9431,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               // decorate setup commands so they source the active generation.
               await attachRunCredentialRenewal(
                 eagerSetupSession as RunCredentialCommandSession,
+                initialRunCredentialMaterial,
                 resolvedSandbox,
               );
               const eagerCredentialSetupSession = initialRunCredentialMaterial
@@ -9099,7 +9571,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                             const pinnedCredentialSession = setupBoxSession
                               ? (setupBoxSession as RunCredentialCommandSession)
                               : credentialSession;
-                            await attachRunCredentialRenewal(pinnedCredentialSession);
+                            await attachRunCredentialRenewal(
+                              pinnedCredentialSession,
+                              initialRunCredentialMaterial,
+                            );
                           },
                         }
                       : {}),
@@ -11962,6 +12437,9 @@ export function agentRunFailurePayload(
   timeoutClass?: string;
   responseObserved?: boolean;
   requestId?: string;
+  eventCount?: number;
+  lastEventType?: string;
+  silenceDurationMs?: number;
   correlationId?: string;
   stage?: string;
   sqlState?: string | null;
@@ -12028,6 +12506,20 @@ export function agentRunFailurePayload(
         "SuperGrok stopped responding after its hosted search completed. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
       code: "xai_hosted_tool_continuation_stalled",
       retryable: false,
+    };
+  }
+  const xaiStreamTimeout = classifyXaiSubscriptionStreamIdleTimeoutError(error);
+  if (xaiStreamTimeout) {
+    return {
+      error:
+        "SuperGrok stopped sending valid response events. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+      code: "xai_response_stream_idle_timeout",
+      retryable: false,
+      responseObserved: xaiStreamTimeout.responseObserved,
+      eventCount: xaiStreamTimeout.eventCount,
+      silenceDurationMs: xaiStreamTimeout.silenceDurationMs,
+      ...(xaiStreamTimeout.requestId ? { requestId: xaiStreamTimeout.requestId } : {}),
+      ...(xaiStreamTimeout.lastEventType ? { lastEventType: xaiStreamTimeout.lastEventType } : {}),
     };
   }
   if (isSessionEventPersistenceError(error)) {

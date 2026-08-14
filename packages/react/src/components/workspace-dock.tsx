@@ -21,6 +21,8 @@ import {
   Separator,
   useDefaultLayout,
   usePanelRef,
+  type Layout,
+  type LayoutChangedMeta,
   type LayoutStorage,
 } from "react-resizable-panels";
 import { cn } from "../lib/cn";
@@ -164,6 +166,25 @@ export function WorkspaceDock({
     storage: getLayoutStorage(),
     id: autoSaveId,
   });
+  const expandedDefaultLayout =
+    defaultLayout && (defaultLayout.dock ?? 0) > 1 ? defaultLayout : undefined;
+  const lastExpandedSizeRef = useRef(expandedDefaultLayout?.dock ?? defaultSize);
+  const layoutIdentityRef = useRef(autoSaveId);
+  if (layoutIdentityRef.current !== autoSaveId) {
+    layoutIdentityRef.current = autoSaveId;
+    lastExpandedSizeRef.current = expandedDefaultLayout?.dock ?? defaultSize;
+  }
+  const persistExpandedLayout = useCallback(
+    (layout: Layout, meta: LayoutChangedMeta) => {
+      // Both supported panel-library versions report 100/0 when the host
+      // collapses the dock. Do not replace the last user-selected width with it.
+      const dockSize = layout.dock ?? 0;
+      if (dockSize <= 1) return;
+      lastExpandedSizeRef.current = dockSize;
+      onLayoutChanged(layout, meta);
+    },
+    [onLayoutChanged],
+  );
 
   const requestedTab = activeTab ?? internalTab;
   const tabIds = tabs.map((tab) => tab.id);
@@ -193,7 +214,7 @@ export function WorkspaceDock({
       dockPanelRef.current?.collapse();
       setMaximized(false);
     } else {
-      dockPanelRef.current?.expand();
+      dockPanelRef.current?.resize(`${lastExpandedSizeRef.current}%`);
     }
   }, [collapsedProp, dockPanelRef]);
 
@@ -419,8 +440,8 @@ export function WorkspaceDock({
       <Group
         orientation="horizontal"
         className="min-h-0 flex-1"
-        {...(defaultLayout ? { defaultLayout } : {})}
-        onLayoutChanged={onLayoutChanged}
+        {...(expandedDefaultLayout ? { defaultLayout: expandedDefaultLayout } : {})}
+        onLayoutChanged={persistExpandedLayout}
       >
         <Panel id="primary" minSize="30%" className="min-h-0 min-w-0">
           <div

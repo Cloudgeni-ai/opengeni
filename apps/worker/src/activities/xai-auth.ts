@@ -35,6 +35,9 @@ export async function buildXaiTurnRequestAuthorization(input: {
   hostedSearch?: XaiSubscriptionRequestContext["hostedSearch"];
   onFinalContextUsage?: XaiSubscriptionRequestContext["onFinalContextUsage"];
   nextRequestId?: XaiSubscriptionRequestContext["nextRequestId"];
+  streamIdleTimeoutMs?: XaiSubscriptionRequestContext["streamIdleTimeoutMs"];
+  onModelRequestDiagnostic?: XaiSubscriptionRequestContext["onModelRequestDiagnostic"];
+  onModelRequestEvent?: XaiSubscriptionRequestContext["onModelRequestEvent"];
 }): Promise<XaiTurnRequestAuthorization> {
   const encryptionKey = environmentsEncryptionKeyBytes(input.settings);
   if (!encryptionKey) {
@@ -117,6 +120,11 @@ export async function buildXaiTurnRequestAuthorization(input: {
       ...(input.hostedSearch ? { hostedSearch: input.hostedSearch } : {}),
       ...(input.onFinalContextUsage ? { onFinalContextUsage: input.onFinalContextUsage } : {}),
       ...(input.nextRequestId ? { nextRequestId: input.nextRequestId } : {}),
+      ...(input.streamIdleTimeoutMs ? { streamIdleTimeoutMs: input.streamIdleTimeoutMs } : {}),
+      ...(input.onModelRequestDiagnostic
+        ? { onModelRequestDiagnostic: input.onModelRequestDiagnostic }
+        : {}),
+      ...(input.onModelRequestEvent ? { onModelRequestEvent: input.onModelRequestEvent } : {}),
     },
   };
 }

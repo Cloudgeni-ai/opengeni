@@ -21,6 +21,7 @@ describe("workspace model catalog availability", () => {
       source: "supergrok",
       credentialReadiness: { status: "not_ready", reason: "needs_reauth" },
       availability: { status: "unavailable", selectable: false, reason: "needs_reauth" },
+      policyAllowed: true,
     });
 
     const available = buildWorkspaceModelCatalog({
@@ -120,6 +121,7 @@ describe("workspace model catalog availability", () => {
       selectable: false,
       reason: "policy_blocked",
     });
+    expect(blocked.policyAllowed).toBe(false);
 
     const missingCredential = buildWorkspaceModelCatalog({
       settings: { ...settings, openaiApiKey: undefined },

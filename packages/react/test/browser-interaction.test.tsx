@@ -731,6 +731,48 @@ describe("BrowserSession React resources", () => {
     await hook.unmount();
   });
 
+  test("lets the controller settle human input without a shorter UI deadline", async () => {
+    const currentTarget = target();
+    const currentObservation = observation(BROWSER_SESSION_ID, currentTarget);
+    let settle!: (value: BrowserActionReceipt) => void;
+    let requestOptions: unknown = "not-called";
+    const client = fakeClient({
+      getBrowserSession: async () => browserSession(),
+      listBrowserTargets: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => currentObservation,
+      actInBrowser: async (_workspaceId, _browserSessionId, request, options) => {
+        requestOptions = options;
+        return await new Promise<BrowserActionReceipt>((resolve) => {
+          settle = resolve;
+        });
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useBrowserSession({
+          client,
+          workspaceId: WORKSPACE_ID,
+          browserSessionId: BROWSER_SESSION_ID,
+          pollIntervalMs: 60_000,
+        }),
+      undefined,
+    );
+    await flush(20);
+
+    const pending = hook.result.current.act({ type: "clipboard", operation: "paste", text: "x" });
+    await flush(5);
+    expect(requestOptions).toBeUndefined();
+
+    settle(receipt(currentObservation));
+    await actRun(async () => await pending);
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
   test("reconciles a tab that disappears between inventory and selection", async () => {
     const stale = target(BROWSER_SESSION_ID, "stale-target");
     const live = target(BROWSER_SESSION_ID, "live-target");

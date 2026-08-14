@@ -117,9 +117,11 @@ OPENGENI_APP_NAME="OpenGeni Agent"
 # (a Developer-ID-signed + notarized .app zipped with its .app dir as the archive
 # root). Absent today → the installer assembles an ad-hoc bundle locally instead.
 OPENGENI_APP_BUNDLE_ASSET="OpenGeni-Agent.app.zip"
-# Set to 1 only when this invocation replaces an existing, different agent
-# version. Adding another workspace with the same binary remains live and does
-# not interrupt in-flight commands.
+# Set to 1 only when this invocation replaces an existing agent executable with
+# different verified bytes. Per-SHA control-plane builds can intentionally share
+# one release semver, so version text alone cannot decide whether the running
+# service must restart. Adding another workspace with identical bytes remains
+# live and does not interrupt in-flight commands.
 OPENGENI_AGENT_WAS_UPGRADED=0
 
 log()  { printf '%s\n' "opengeni-install: $*" >&2; }
@@ -163,6 +165,21 @@ mark_upgrade_if_changed() {
   _policy_installed="$2"
   _policy_new="$(agent_release_version "$_policy_installed" 2>/dev/null || true)"
   if [ -n "$_policy_old" ] && [ -n "$_policy_new" ] && [ "$_policy_old" != "$_policy_new" ]; then
+    OPENGENI_AGENT_WAS_UPGRADED=1
+  fi
+}
+
+# Record replacement of an installed executable with different verified bytes.
+# This is the Linux per-SHA path's restart authority: two control-plane builds
+# may both report (for example) 0.1.15 while carrying different protocol code.
+# A first install and a byte-identical reinstall remain non-disruptive.
+mark_upgrade_if_binary_changed() {
+  _policy_old_bin="$1"
+  _policy_new_bin="$2"
+  [ -f "$_policy_old_bin" ] || return 0
+  _policy_old_sha="$(sha256_of "$_policy_old_bin")"
+  _policy_new_sha="$(sha256_of "$_policy_new_bin")"
+  if [ "$_policy_old_sha" != "$_policy_new_sha" ]; then
     OPENGENI_AGENT_WAS_UPGRADED=1
   fi
 }
@@ -847,11 +864,7 @@ main() {
     if should_keep_newer_agent "$dest" "$bin_tmp"; then
       rm -f "$bin_tmp"
     else
-      _old_version="$(agent_release_version "$dest" 2>/dev/null || true)"
-      _new_version="$(agent_release_version "$bin_tmp" 2>/dev/null || true)"
-      if [ -n "$_old_version" ] && [ -n "$_new_version" ] && [ "$_old_version" != "$_new_version" ]; then
-        OPENGENI_AGENT_WAS_UPGRADED=1
-      fi
+      mark_upgrade_if_binary_changed "$dest" "$bin_tmp"
       mv -f "$bin_tmp" "$dest" || die 2 "cannot install to $dest (try OPENGENI_SYSTEM=1 with sudo, or set OPENGENI_INSTALL_DIR)"
       log "installed verified binary to $dest"
       install_interaction_companions "$interaction_runtime" "$install_dir"
@@ -871,8 +884,8 @@ path_hint() {
   esac
 }
 
-# Ensure the ordinary per-user daemon is installed and running. A same-version
-# additive connection never restarts it; a real binary upgrade activates once.
+# Ensure the ordinary per-user daemon is installed and running. A byte-identical
+# additive connection never restarts it; a changed verified binary activates once.
 # Minimal/container environments can opt out explicitly or fall back to `run`.
 start_background_agent() {
   _service_bin="$1"

@@ -84,6 +84,22 @@ function computerSession(
   };
 }
 
+function startingComputerSession(
+  id = COMPUTER_SESSION_ID,
+  associationSessionId = SESSION_ID,
+): ComputerSession {
+  return {
+    ...computerSession(id, associationSessionId),
+    lifecycle: "starting",
+    controller: null,
+    platform: null,
+    adapter: null,
+    seatId: null,
+    displayId: null,
+    capabilities: null,
+  };
+}
+
 function target(id = "window-1", kind: ComputerTarget["kind"] = "window"): ComputerTarget {
   return {
     id,
@@ -132,7 +148,7 @@ function observation(current = target()): ComputerObservation {
 function mutation(
   session = computerSession(),
   kind: "create" | "end" = "create",
-  operationId = crypto.randomUUID(),
+  operationId: string = crypto.randomUUID(),
 ): ComputerSessionMutationResponse {
   return {
     session,
@@ -577,6 +593,58 @@ describe("ComputerSession frame stream", () => {
 });
 
 describe("ComputerViewer", () => {
+  test("lazily creates this agent's computer on first visit even when peers exist", async () => {
+    const peer = computerSession(PEER_COMPUTER_SESSION_ID, PEER_SESSION_ID, "Peer Mac");
+    const starting = startingComputerSession();
+    const createRequests: unknown[] = [];
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [peer] }),
+      createComputerSession: async (_workspaceId, request) => {
+        createRequests.push(request);
+        return mutation(starting, "create", request.operationId);
+      },
+    });
+
+    const rendered = await renderComponent(
+      <ComputerViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(60);
+
+    expect(createRequests).toHaveLength(1);
+    expect(createRequests[0]).toMatchObject({ sessionId: SESSION_ID, name: "Computer" });
+    expect(rendered.container.textContent).toContain("Opening computer");
+    expect(rendered.container.textContent).not.toContain("No computer for this agent");
+    await rendered.unmount();
+  });
+
+  test("does not loop automatic creation and offers retry after a real failure", async () => {
+    let createCalls = 0;
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [] }),
+      createComputerSession: async () => {
+        createCalls += 1;
+        throw new Error("No computer placement is available.");
+      },
+    });
+
+    const rendered = await renderComponent(
+      <ComputerViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(80);
+
+    expect(createCalls).toBe(1);
+    expect(rendered.container.textContent).toContain("Computer didn’t open");
+    expect(rendered.container.textContent).toContain("No computer placement is available.");
+    const retry = [...rendered.container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Try again",
+    );
+    expect(retry).toBeDefined();
+    await actRun(() => retry!.click());
+    await flush(30);
+    expect(createCalls).toBe(2);
+    await rendered.unmount();
+  });
+
   test("ignores standalone modifier keydowns before a computer shortcut", () => {
     const event = (
       key: string,

@@ -393,6 +393,7 @@ describe("OpenGeniClient access + workspaces", () => {
             basis: "configuration",
             checkedAt: null,
           },
+          policyAllowed: true,
           availability: {
             status: "unknown",
             selectable: true,
@@ -409,6 +410,42 @@ describe("OpenGeniClient access + workspaces", () => {
     expect(new URL(requests[0]!.url).pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/model-catalog`);
     expect(result.models[0]?.availability.selectable).toBe(true);
     expect(result.models[0]?.credentialReadiness.status).toBe("ready");
+  });
+
+  test("workspace model access policy reads and fully replaces the allowlist", async () => {
+    const responses = [
+      { allowedProviders: ["codex-subscription"], allowedModels: null },
+      {
+        allowedProviders: null,
+        allowedModels: ["codex/gpt-5.6-sol", "supergrok/grok-4.6"],
+      },
+    ];
+    const { client, requests } = makeClient(() => jsonResponse(responses.shift()));
+
+    expect(await client.getWorkspaceModelAccessPolicy(WORKSPACE_ID)).toEqual({
+      allowedProviders: ["codex-subscription"],
+      allowedModels: null,
+    });
+    expect(
+      await client.updateWorkspaceModelAccessPolicy(WORKSPACE_ID, {
+        allowedProviders: null,
+        allowedModels: ["codex/gpt-5.6-sol", "supergrok/grok-4.6"],
+      }),
+    ).toEqual({
+      allowedProviders: null,
+      allowedModels: ["codex/gpt-5.6-sol", "supergrok/grok-4.6"],
+    });
+
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `GET /v1/workspaces/${WORKSPACE_ID}/model-policy`,
+        `PUT /v1/workspaces/${WORKSPACE_ID}/model-policy`,
+      ],
+    );
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      allowedProviders: null,
+      allowedModels: ["codex/gpt-5.6-sol", "supergrok/grok-4.6"],
+    });
   });
 
   test("Slack user-link access methods use token-free continuation routes", async () => {

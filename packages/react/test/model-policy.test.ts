@@ -22,6 +22,7 @@ function catalogModel(
       basis: "configuration",
       checkedAt: null,
     },
+    policyAllowed: true,
     availability: {
       status: "available",
       selectable: true,

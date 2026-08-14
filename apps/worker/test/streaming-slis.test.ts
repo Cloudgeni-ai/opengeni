@@ -2,11 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
 import {
+  ModelRequestLifecycleMetrics,
   recordBatchFlush,
   recordContextCompaction,
   recordCompanyBrainContributions,
   recordModelInputTokens,
   recordModelRequestPhase,
+  recordSandboxLogicalProvision,
+  recordSandboxProvisionAttempt,
   recordSessionEventAppendLatency,
   recordSessionEventPublishLatency,
   recordTurnSandboxEstablishPolicy,
@@ -23,6 +26,58 @@ import {
 function worker() {
   return createObservability(testSettings(), { component: "worker" });
 }
+
+describe("logical sandbox provision metrics", () => {
+  test("separates internal lifecycle retries from one terminal logical outcome", async () => {
+    const observability = worker();
+    recordSandboxProvisionAttempt(observability, {
+      backend: "modal",
+      stage: "lease_admission",
+      category: "lease_superseded",
+      outcome: "retrying",
+      durationSeconds: 0.25,
+    });
+    recordSandboxProvisionAttempt(observability, {
+      backend: "modal",
+      stage: "resume",
+      category: "resume",
+      outcome: "completed",
+      durationSeconds: 0.5,
+    });
+    recordSandboxLogicalProvision(observability, {
+      backend: "modal",
+      stage: "resume",
+      category: "none",
+      outcome: "completed",
+      expected: false,
+      internalAttempts: 2,
+      durationSeconds: 1,
+    });
+    recordSandboxLogicalProvision(observability, {
+      backend: "modal",
+      stage: "lifecycle_wait",
+      category: "drain_capture_wait",
+      outcome: "expected_transition",
+      expected: true,
+      internalAttempts: 3,
+      durationSeconds: 2,
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_sandbox_provision_attempts_total\{[^}]*category="lease_superseded"[^}]*outcome="retrying"[^}]*stage="lease_admission"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_provisions_total\{[^}]*category="none"[^}]*expected="false"[^}]*outcome="completed"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_provisions_total\{[^}]*category="drain_capture_wait"[^}]*expected="true"[^}]*outcome="expected_transition"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_provision_internal_attempts_sum\{[^}]*category="none"[^}]*\} 2\b/,
+    );
+  });
+});
 
 describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
   test("first content delta records TTFT from the response (re)start anchor", async () => {
@@ -144,6 +199,43 @@ describe("provider request lifecycle diagnostics", () => {
       /opengeni_model_request_phase_duration_seconds_count\{[^}]*phase="first_byte"[^}]*provider="codex-subscription"[^}]*\} 1\b/,
     );
     expect(metrics).not.toContain("requestId");
+  });
+
+  test("tracks active SuperGrok requests and valid-event liveness without identity labels", async () => {
+    const observability = worker();
+    let now = 1_000;
+    const lifecycle = new ModelRequestLifecycleMetrics(observability, {
+      now: () => now,
+      refreshIntervalMs: 60_000,
+    });
+
+    lifecycle.start("private-request-id:1", "supergrok-subscription");
+    now = 2_500;
+    lifecycle.event("private-request-id:1", 1_500);
+    now = 7_500;
+    lifecycle.refreshGauges();
+
+    let metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_requests_inflight\{[^}]*provider="supergrok-subscription"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_request_oldest_no_event_age_seconds\{[^}]*provider="supergrok-subscription"[^}]*\} 5\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_request_stream_events_total\{[^}]*provider="supergrok-subscription"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_request_stream_event_gap_seconds_sum\{[^}]*provider="supergrok-subscription"[^}]*\} 1\.5\b/,
+    );
+    expect(metrics).not.toContain("private-request-id");
+
+    lifecycle.finish("private-request-id:1");
+    metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_requests_inflight\{[^}]*provider="supergrok-subscription"[^}]*\} 0\b/,
+    );
+    lifecycle.stop();
   });
 });
 
