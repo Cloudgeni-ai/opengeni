@@ -258,6 +258,14 @@ describe("release schema contract", () => {
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0247_terraform_stacks_provenance_repair.sql")) {
+        if (
+          migrations.has("0246_integration_personal_instance_authority.sql") &&
+          migrations.has("0241_atomic_personal_resource_delegation.sql")
+        ) {
+          return includesActivation
+            ? "284783d8796f7aee26d2cd020c6f0a75e36e7ad94c396830bb57767069b0e415"
+            : "9fc0116ea258cee2003cfc37243a392b2d00051879f428af77afe74fe569b1f6";
+        }
         if (migrations.has("0246_integration_personal_instance_authority.sql")) {
           return includesActivation
             ? "4010330f29f41088c8691ae6a210a76407023af21e6e301628ab489c150e51bb"
