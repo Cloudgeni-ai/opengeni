@@ -1,5 +1,19 @@
 # @opengeni/react
 
+## 1.0.2
+
+### Patch Changes
+
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+- 4d1ed07: Preserve complete bounded lazy-search tool schemas across durable model history, expose Linux desktop application launch when the image supports it, suppress the managed Chrome sandbox warning, label Computer sessions as Desktops in the UI, and keep AnyDoc available in headed desktop sandboxes.
+- 79f57b5: Present an active goal yielding to a foreground human turn as waiting instead of blocked, and keep active-goal elapsed time advancing.
+- Updated dependencies [90c0c3e]
+- Updated dependencies [e0e0102]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [d2f172c]
+- Updated dependencies [c056063]
+  - @opengeni/sdk@1.0.2
+
 ## 1.0.1
 
 ### Patch Changes
