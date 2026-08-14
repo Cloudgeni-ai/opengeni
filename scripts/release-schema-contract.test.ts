@@ -114,7 +114,7 @@ describe("release schema contract", () => {
     const completeMigrations = new Map(
       completeSourceContract.migrations.map((migration) => [migration.path, migration]),
     );
-    expect(completeMigrations.get("0240_sandbox_provider_loss_receipts.sql")).toMatchObject({
+    expect(completeMigrations.get("0240_atomic_provider_loss_receipts.sql")).toMatchObject({
       sha256: "dc7b0f988d87af3e1ab6d82e38ef3fe25743b84dad817265b25efc3e2f440dd7",
       deploymentMode: "rolling",
     });
@@ -137,7 +137,7 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0237_interaction_transition_reaper.sql",
-      "0240_sandbox_provider_loss_receipts.sql",
+      "0240_atomic_provider_loss_receipts.sql",
       "0238_supergrok_realtime_model.sql",
       "0239_supergrok_video_funding.sql",
     ].filter((path) =>

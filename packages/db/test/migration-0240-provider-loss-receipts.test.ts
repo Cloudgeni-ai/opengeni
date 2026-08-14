@@ -17,7 +17,7 @@ import {
 import { migrate } from "../src/migrate";
 import { sandboxProviderLossReceipts, sandboxProviderLossTeardownClaims } from "../src/schema";
 
-const migrationName = "0240_sandbox_provider_loss_receipts.sql";
+const migrationName = "0240_atomic_provider_loss_receipts.sql";
 
 const claimTimestampOnlyColumns = ["updated_at"] as const;
 const claimExactAtomicTransitionColumns = [
