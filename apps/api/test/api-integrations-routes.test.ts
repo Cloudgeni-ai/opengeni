@@ -605,7 +605,10 @@ describe("API Integration routes", () => {
         ],
       },
     });
-    const legacyConfigured = structuredClone(configured);
+    const legacyConfigured = {
+      ...configured,
+      binding: { ...configured.binding },
+    };
     delete legacyConfigured.binding.directlyOwned;
     delete legacyConfigured.binding.owners;
     await shared!.admin`
