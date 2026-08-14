@@ -236,6 +236,7 @@ import {
   settingsWithWorkspaceGatewayCredential,
   withXaiSubscriptionProvider,
 } from "./capabilities";
+import { validateIncidentTelemetrySystemUpdateAuthority } from "./incident-telemetry-authority";
 import {
   CODEX_USAGE_EXHAUSTED_PCT,
   authoritativeCodexCapacityResetAt,
@@ -4497,6 +4498,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attemptId: input.attemptId,
         dispatchId,
         trigger: input.trigger,
+        validatePendingSystemUpdateAuthority: async (tx, update) =>
+          await validateIncidentTelemetrySystemUpdateAuthority({
+            db: tx,
+            settings,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            update,
+          }),
       });
       if (claim.action === "unclaimed") {
         activityStatus = "unclaimed";
