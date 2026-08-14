@@ -1,5 +1,12 @@
 # @opengeni/codemode
 
+## 0.4.5
+
+### Patch Changes
+
+- Updated dependencies [e0e0102]
+  - @opengeni/contracts@1.0.2
+
 ## 0.4.4
 
 ### Patch Changes
