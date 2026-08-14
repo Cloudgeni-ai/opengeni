@@ -7536,6 +7536,13 @@ export async function createConnection(
   );
 }
 
+function canWriteWorkspaceConnections(permissions: unknown): boolean {
+  return (
+    Array.isArray(permissions) &&
+    (permissions.includes("connections:write") || permissions.includes("workspace:admin"))
+  );
+}
+
 /**
  * Serialize one provider-principal/owner connection generation. Distinct OAuth
  * starts for the same principal converge on one row, while an explicit
@@ -7560,14 +7567,36 @@ export async function persistProviderOAuthConnection(
         );
         if (
           input.workspaceCredentialAuthority?.kind === "google_drive_account_admin" &&
-          (input.subjectId !== null ||
+          input.subjectId !== null
+        ) {
+          return null;
+        }
+        if (input.workspaceCredentialAuthority?.kind === "google_drive_account_admin") {
+          const authoritySubjectId = input.workspaceCredentialAuthority.subjectId;
+          if (
             !(await hasCurrentAccountAdminForWorkspaceCredential(tx, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
-              subjectId: input.workspaceCredentialAuthority.subjectId,
-            })))
-        ) {
-          return null;
+              subjectId: authoritySubjectId,
+            }))
+          ) {
+            return null;
+          }
+          const [workspaceGrant] = await tx
+            .select({ permissions: schema.workspaceMemberships.permissions })
+            .from(schema.workspaceMemberships)
+            .where(
+              and(
+                eq(schema.workspaceMemberships.accountId, input.accountId),
+                eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+                eq(schema.workspaceMemberships.subjectId, authoritySubjectId),
+              ),
+            )
+            .for("share")
+            .limit(1);
+          if (!canWriteWorkspaceConnections(workspaceGrant?.permissions)) {
+            return null;
+          }
         }
         const exactOwner = connectionExactSubject(input.subjectId ?? null);
         const requested = input.requestedConnectionId

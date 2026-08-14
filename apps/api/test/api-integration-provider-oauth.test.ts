@@ -459,6 +459,66 @@ describe("API Integration provider OAuth", () => {
     expect(persisted).toEqual([]);
   }, 60_000);
 
+  test("atomically rejects workspace Google Drive persistence after its workspace grant is downgraded or deleted", async () => {
+    if (!available) return;
+    for (const mutation of ["downgraded", "deleted"] as const) {
+      const managed = await freshManagedWorkspace();
+      if (mutation === "downgraded") {
+        await shared!.admin`
+          update workspace_memberships
+          set permissions = ${shared!.admin.json(["connections:read", "workspace:read"])},
+              updated_at = now()
+          where account_id = ${managed.accountId}
+            and workspace_id = ${managed.workspaceId}
+            and subject_id = ${managed.subjectId}
+        `;
+      } else {
+        await shared!.admin`
+          delete from workspace_memberships
+          where account_id = ${managed.accountId}
+            and workspace_id = ${managed.workspaceId}
+            and subject_id = ${managed.subjectId}
+        `;
+      }
+      const suffix = `${mutation}-${crypto.randomUUID()}`;
+      const persisted = await persistProviderOAuthConnection(client.db, {
+        accountId: managed.accountId,
+        workspaceId: managed.workspaceId,
+        subjectId: null,
+        visibleToSubjectId: managed.subjectId,
+        providerDomain: "www.googleapis.com",
+        kind: "oauth2",
+        status: "active",
+        credentialEncrypted: `must-not-persist-${suffix}`,
+        grantedScopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+        metadata: {
+          credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
+          providerFamily: "google",
+          providerPrincipalId: `google-${suffix}`,
+          authorizedDefinitionIds: [GOOGLE_DRIVE_INTEGRATION_DEFINITION.id],
+        },
+        createdBySubjectId: managed.subjectId,
+        updatedBySubjectId: managed.subjectId,
+        credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
+        providerFamily: "google",
+        providerPrincipalId: `google-${suffix}`,
+        workspaceCredentialAuthority: {
+          kind: "google_drive_account_admin",
+          subjectId: managed.subjectId,
+        },
+      });
+      expect(persisted).toBeNull();
+      const rows = await shared!.admin<Array<{ id: string }>>`
+        select id
+        from connections
+        where workspace_id = ${managed.workspaceId}
+          and subject_id is null
+          and provider_domain = 'www.googleapis.com'
+      `;
+      expect(rows).toEqual([]);
+    }
+  }, 60_000);
+
   test("serializes concurrent account revocation after the persistence authority lock", async () => {
     if (!available) return;
     const managed = await freshManagedWorkspace();
@@ -565,6 +625,124 @@ describe("API Integration provider OAuth", () => {
           and subject_id is null
       `;
       expect(connection?.credential_encrypted).toBe(credentialSentinel);
+    } finally {
+      if (blockerLocked)
+        await blocker`select pg_advisory_unlock(${lockKey})`.catch(() => undefined);
+      await blocker.end().catch(() => undefined);
+      await revoker.end().catch(() => undefined);
+      await shared!.admin
+        .unsafe(`DROP TRIGGER IF EXISTS ${triggerName} ON connections`)
+        .catch(() => undefined);
+      await shared!.admin
+        .unsafe(`DROP FUNCTION IF EXISTS ${functionName}()`)
+        .catch(() => undefined);
+    }
+  }, 60_000);
+
+  test("serializes a concurrent workspace grant downgrade after the callback grant check", async () => {
+    if (!available) return;
+    const managed = await freshManagedWorkspace();
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const functionName = `test_drive_workspace_lock_${suffix}`;
+    const triggerName = `test_drive_workspace_lock_${suffix}`;
+    const principalId = `google-workspace-lock-${suffix}`;
+    const lockKey = Number.parseInt(suffix.slice(0, 7), 16);
+    const blocker = postgres(shared!.adminUrl, { max: 1 });
+    const revoker = postgres(shared!.adminUrl, { max: 1 });
+    const fixture = providerFixture();
+    fixture.setGooglePrincipalId(principalId);
+    fixture.googlePlans.push({
+      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: `workspace-lock-refresh-${suffix}`,
+    });
+    const started = await start(
+      fixture,
+      managed,
+      {
+        definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+        ownership: "workspace",
+      },
+      ["account:admin", "connections:read", "connections:write", "workspace:read"],
+    );
+    expect(started.response.status).toBe(200);
+    let blockerLocked = false;
+    try {
+      await shared!.admin.unsafe(`
+        CREATE FUNCTION ${functionName}() RETURNS trigger
+        LANGUAGE plpgsql AS $body$
+        BEGIN
+          IF NEW.metadata ->> 'providerPrincipalId' = '${principalId}' THEN
+            PERFORM pg_advisory_xact_lock(${lockKey});
+          END IF;
+          RETURN NEW;
+        END
+        $body$;
+        CREATE TRIGGER ${triggerName}
+        BEFORE INSERT ON connections
+        FOR EACH ROW EXECUTE FUNCTION ${functionName}();
+      `);
+      await blocker`select pg_advisory_lock(${lockKey})`;
+      blockerLocked = true;
+
+      const pending = callback(
+        fixture,
+        new URL(started.authorizationUrl).searchParams.get("state")!,
+      );
+      await waitForCondition(async () => {
+        const [row] = await shared!.admin<Array<{ waiting: number }>>`
+          select count(*)::integer as waiting
+          from pg_locks
+          where locktype = 'advisory'
+            and classid = 0
+            and objid = ${lockKey}
+            and granted = false
+        `;
+        return row?.waiting === 1;
+      });
+
+      const downgrade = (async () =>
+        await revoker`
+          /* ope124-concurrent-workspace-downgrade-${suffix} */
+          update workspace_memberships
+          set permissions = ${revoker.json(["connections:read", "workspace:read"])},
+              updated_at = now()
+          where account_id = ${managed.accountId}
+            and workspace_id = ${managed.workspaceId}
+            and subject_id = ${managed.subjectId}
+        `)();
+      await waitForCondition(async () => {
+        const [row] = await shared!.admin<Array<{ wait_event_type: string | null }>>`
+          select wait_event_type
+          from pg_stat_activity
+          where query like ${`%ope124-concurrent-workspace-downgrade-${suffix}%`}
+            and state = 'active'
+        `;
+        return row?.wait_event_type === "Lock";
+      });
+
+      await blocker`select pg_advisory_unlock(${lockKey})`;
+      blockerLocked = false;
+      const connected = await pending;
+      expect(
+        new URL(connected.headers.get("location")!).searchParams.get("integration_oauth"),
+      ).toBe("success");
+      await downgrade;
+      const [membership] = await shared!.admin<Array<{ permissions: string[] }>>`
+        select permissions
+        from workspace_memberships
+        where account_id = ${managed.accountId}
+          and workspace_id = ${managed.workspaceId}
+          and subject_id = ${managed.subjectId}
+      `;
+      expect(membership?.permissions).toEqual(["connections:read", "workspace:read"]);
+      const [connection] = await shared!.admin<Array<{ id: string }>>`
+        select id
+        from connections
+        where workspace_id = ${managed.workspaceId}
+          and provider_domain = 'www.googleapis.com'
+          and subject_id is null
+      `;
+      expect(connection?.id).toBeString();
     } finally {
       if (blockerLocked)
         await blocker`select pg_advisory_unlock(${lockKey})`.catch(() => undefined);
