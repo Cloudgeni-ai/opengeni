@@ -1,5 +1,37 @@
 # @opengeni/db
 
+## 1.0.2
+
+### Patch Changes
+
+- a551666: Fix local Gmail provider OAuth callbacks, Google scope equivalence, stable
+  Discovery compilation, and installed API integration visibility in session
+  tool selection.
+- 90c0c3e: Persist bounded, content-free Company Brain prompt contribution estimates on authoritative model-call facts and expose their source breakdown and coverage in Workspace Insights.
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+- 4d1ed07: Preserve complete bounded lazy-search tool schemas across durable model history, expose Linux desktop application launch when the image supports it, suppress the managed Chrome sandbox warning, label Computer sessions as Desktops in the UI, and keep AnyDoc available in headed desktop sandboxes.
+- ce3b370: Restore the MPL-2.0 license and notice for the curated HashiCorp Terraform Skills in the published runtime package, and forward-repair the persisted Terraform Stacks provenance URL.
+- b2af2df: Bind Integration facet idempotency receipts to the subject that created them so another workspace administrator cannot replay a personal facet result.
+- 3843825: Prevent workspace administrators from rebinding another subject's personal API Integration instance.
+- 1ab8023: Deduplicate scheduled alert deliveries onto one atomic responder session per scheduled task and canonical alert occurrence while preserving separate roots for distinct tasks and reopened occurrences.
+- 886682d: Fail closed when a persisted Terraform Stacks Pack component resolves to an unrelated, inactive, cross-tenant, or digest-mismatched Plugin installation.
+- 234a5e7: Replay exact completed Integration facet configure receipts before mutable instance, Connection, or provider validation while preserving request conflicts and exact-subject isolation.
+- d2f172c: Add fail-closed, metadata-only capability, exact rig-version health, exact alert-selector data-source checks, and source/claim authority fencing for scheduled incident telemetry responders before expensive retrieval.
+- c056063: Project exact Integration Facet ownership so shared or externally managed bindings are read-only and direct removal reports retained owners truthfully.
+- Updated dependencies [79f57b5]
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ec00479]
+- Updated dependencies [79f57b5]
+- Updated dependencies [c3f0598]
+- Updated dependencies [d2f172c]
+- Updated dependencies [c056063]
+  - @opengeni/codemode@0.4.5
+  - @opengeni/contracts@1.1.0
+  - @opengeni/config@0.16.5
+
 ## 1.0.1
 
 ### Patch Changes
