@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { stableJson } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 
@@ -169,6 +170,45 @@ describe("portable Skill persistence", () => {
       remainingOwners: [],
     });
     expect(await listInstalledPortableSkills(client.db, first.workspaceId)).toEqual([]);
+  }, 60_000);
+
+  test("replays a Skill version stored before the redundant manifest version field", async () => {
+    if (!available || !client || !shared) return;
+    const input = skillInput("legacy-manifest-replay");
+    const installed = await installPortableSkill(client.db, input);
+    const [stored] = await shared.admin<
+      Array<{ manifest: Record<string, postgres.JSONValue | undefined> }>
+    >`
+      select manifest
+      from capability_plugin_versions
+      where id = ${installed.pluginVersionId}
+    `;
+    expect(stored).toBeDefined();
+    const legacyManifest = { ...stored!.manifest };
+    delete legacyManifest.version;
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`
+        update capability_plugin_versions
+        set manifest = ${tx.json(legacyManifest)}::jsonb,
+            manifest_digest = ${sha256(stableJson(legacyManifest))}
+        where id = ${installed.pluginVersionId}
+      `;
+    });
+
+    expect(await installPortableSkill(client.db, input)).toEqual({
+      ...installed,
+      created: false,
+    });
+    await expect(
+      installPortableSkill(client.db, { ...input, totalBytes: input.totalBytes + 1 }),
+    ).rejects.toThrow("conflicts with immutable stored content");
+    await uninstallPortableSkill(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      capabilityId: input.capabilityId,
+      expectedInstallationVersion: installed.installationVersion,
+    });
   }, 60_000);
 
   test("removing a direct owner preserves a Skill still owned by a Pack", async () => {
