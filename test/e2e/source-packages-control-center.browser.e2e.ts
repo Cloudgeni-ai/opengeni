@@ -5,6 +5,7 @@ import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const evidenceDir = new URL("../../.agent/evidence/capabilities-source-packages/", import.meta.url)
@@ -18,7 +19,7 @@ const skillCapabilityId = "skill:release-operator-browser";
 const pluginKey = "example/research";
 const skillUrl = "https://github.com/acme/skills/tree/main/release-operator";
 const pluginUrl = "https://plugins.example.test/research.json";
-const apiContractRevision = "2026-08-model-context-v1";
+const apiContractRevision = OPENGENI_API_CONTRACT_REVISION;
 let webBaseUrl = "";
 
 type UiState = {
