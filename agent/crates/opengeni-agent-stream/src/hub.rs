@@ -25,18 +25,21 @@
 //! tokens and only splice a producer↔consumer pair when the keys match and both
 //! tokens pass (see the crate-level relay-dial protocol doc).
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use opengeni_agent_platform::{
-    DesktopBackend, PlatformError, PlatformResult, PtyProcess, StreamRegistry,
+    spawn_pty, DesktopBackend, PlatformError, PlatformResult, PtyProcess, StreamRegistry,
 };
-use opengeni_agent_proto::v1::{self, DesktopEnsureRequest, PtyOpenResponse, StreamChannel};
-use tokio::sync::{mpsc, oneshot};
+use opengeni_agent_proto::v1::{
+    self, DesktopEnsureRequest, PtyOpenRequest, PtyOpenResponse, StreamChannel,
+};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
 use crate::backoff::ChannelBackoff;
+use crate::browser_pump;
 use crate::channel::{ChannelConfig, RelayChannel};
 use crate::framebuffer_pump::{self, InputPolicy};
 use crate::pty_pump::{self, PtyCommand, PtyControlTx};
@@ -58,6 +61,8 @@ const PUMP_READY_TIMEOUT: Duration = Duration::from_secs(5);
 pub const PTY_STREAM_PORT: u32 = 7681;
 /// The logical port a desktop (framebuffer) stream maps to (the noVNC port).
 pub const DESKTOP_STREAM_PORT: u32 = 6080;
+const BROWSER_STREAM_PORT_START: u32 = 20_000;
+const BROWSER_STREAM_PORT_END: u32 = 65_535;
 
 /// Static configuration for the relay hub: the agent identity, the relay URL, and
 /// the agent's relay token + consent policy.
@@ -88,6 +93,16 @@ pub struct RelayHub {
     /// `pty_write`/`pty_resize`/`pty_close` ops reach. Entries are removed when the
     /// pump ends.
     ptys: Arc<Mutex<HashMap<String, PtyControlTx>>>,
+    /// Idempotent terminal scopes → their live PTY/channel. The value is removed
+    /// when the PTY pump exits. A scope is supplied by the control plane's durable
+    /// OpenGeni session identity; explicit unscoped `pty_open` remains create-new.
+    pty_scopes: Arc<Mutex<HashMap<String, PtyOpenResponse>>>,
+    /// Per-scope singleflight locks. Weak values make the lock table self-pruning:
+    /// it does not retain one allocation for every historical session forever.
+    pty_scope_locks: Arc<Mutex<HashMap<String, Weak<AsyncMutex<()>>>>>,
+    /// Allocated logical relay ports for browser frame subscriptions. They are
+    /// routing handles, not listening TCP ports.
+    browser_ports: Arc<Mutex<HashSet<u32>>>,
 }
 
 impl std::fmt::Debug for RelayHub {
@@ -107,6 +122,9 @@ impl RelayHub {
         Self {
             config: Arc::new(config),
             ptys: Arc::new(Mutex::new(HashMap::new())),
+            pty_scopes: Arc::new(Mutex::new(HashMap::new())),
+            pty_scope_locks: Arc::new(Mutex::new(HashMap::new())),
+            browser_ports: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -130,53 +148,131 @@ impl RelayHub {
             relay_url: self.config.relay_url.clone(),
         }
     }
-}
 
-#[async_trait]
-impl StreamRegistry for RelayHub {
-    async fn register_pty(&self, process: PtyProcess) -> PlatformResult<PtyOpenResponse> {
+    fn scope_lock(&self, scope_id: &str) -> Arc<AsyncMutex<()>> {
+        let mut locks = self
+            .pty_scope_locks
+            .lock()
+            .expect("pty scope lock table poisoned");
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(scope_id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(AsyncMutex::new(()));
+        locks.insert(scope_id.to_string(), Arc::downgrade(&lock));
+        lock
+    }
+
+    /// Returns the scoped PTY only while its pump/control sender is still live.
+    /// A stale scope entry is removed eagerly so the next ensure can recreate it.
+    fn live_scoped_pty(&self, scope_id: &str) -> Option<PtyOpenResponse> {
+        let response = self
+            .pty_scopes
+            .lock()
+            .ok()
+            .and_then(|scopes| scopes.get(scope_id).cloned())?;
+        let live = self
+            .ptys
+            .lock()
+            .ok()
+            .and_then(|ptys| ptys.get(&response.pty_id).cloned())
+            .is_some_and(|sender| !sender.is_closed());
+        if live {
+            return Some(response);
+        }
+        if let Ok(mut scopes) = self.pty_scopes.lock() {
+            if scopes
+                .get(scope_id)
+                .is_some_and(|candidate| candidate.pty_id == response.pty_id)
+            {
+                scopes.remove(scope_id);
+            }
+        }
+        None
+    }
+
+    async fn register_pty_scoped(
+        &self,
+        process: PtyProcess,
+        scope_id: Option<String>,
+    ) -> PlatformResult<PtyOpenResponse> {
         let descriptor = self.descriptor(v1::StreamKind::Pty, PTY_STREAM_PORT);
         let config = self.channel_config(descriptor.clone());
-        let channel = RelayChannel::register(config.clone())
+        let channel = RelayChannel::register(config)
             .await
             .map_err(stream_to_platform)?;
         let pty_id = descriptor.channel_id.clone();
+        let response = PtyOpenResponse {
+            pty_id: pty_id.clone(),
+            channel: Some(descriptor),
+        };
 
-        // The control channel reaches the pump for pty_write/resize/close ops.
         let (cmd_tx, cmd_rx) = mpsc::channel::<PtyCommand>(PTY_COMMAND_BUFFER);
         if let Ok(mut ptys) = self.ptys.lock() {
             ptys.insert(pty_id.clone(), cmd_tx);
         }
+        if let Some(scope_id) = scope_id.as_ref() {
+            if let Ok(mut scopes) = self.pty_scopes.lock() {
+                scopes.insert(scope_id.clone(), response.clone());
+            }
+        }
 
-        // Spawn the supervised pump: it auto-reconnects + resumes on a relay blip,
-        // and de-registers the pty control entry when it ends. The readiness signal
-        // is fired once the pump is live + has shipped the shell's first prompt
-        // byte(s) into the relay ring, so a consumer dialing the minted URL sees
-        // output WITHOUT having to type.
         let (ready_tx, ready_rx) = oneshot::channel();
         spawn_pty_pump(
             process,
             channel,
             cmd_rx,
             pty_id.clone(),
+            scope_id.clone(),
             self.ptys.clone(),
+            self.pty_scopes.clone(),
             ready_tx,
         );
 
-        // Gate the mint on the pump being serveable: do not return the descriptor
-        // until the first byte(s) are buffered. On a timeout (or a pump that died
-        // before becoming ready) drop the half-registered control entry and surface
-        // a typed error rather than minting a dead URL.
         await_pump_ready(ready_rx, "pty").await.inspect_err(|_| {
             if let Ok(mut ptys) = self.ptys.lock() {
                 ptys.remove(&pty_id);
             }
+            if let (Some(scope_id), Ok(mut scopes)) = (scope_id.as_ref(), self.pty_scopes.lock()) {
+                if scopes
+                    .get(scope_id)
+                    .is_some_and(|candidate| candidate.pty_id == pty_id)
+                {
+                    scopes.remove(scope_id);
+                }
+            }
         })?;
 
-        Ok(PtyOpenResponse {
-            pty_id,
-            channel: Some(descriptor),
-        })
+        Ok(response)
+    }
+}
+
+#[async_trait]
+impl StreamRegistry for RelayHub {
+    async fn open_pty(
+        &self,
+        req: &PtyOpenRequest,
+        default_shell: &[String],
+    ) -> PlatformResult<PtyOpenResponse> {
+        if req.scope_id.is_empty() {
+            let process = spawn_pty(req, default_shell)?;
+            return self.register_pty_scoped(process, None).await;
+        }
+
+        // Singleflight only the SAME durable session. Different sessions on one
+        // machine open concurrently and receive different PTYs/channels.
+        let lock = self.scope_lock(&req.scope_id);
+        let _guard = lock.lock().await;
+        if let Some(response) = self.live_scoped_pty(&req.scope_id) {
+            return Ok(response);
+        }
+        let process = spawn_pty(req, default_shell)?;
+        self.register_pty_scoped(process, Some(req.scope_id.clone()))
+            .await
+    }
+
+    async fn register_pty(&self, process: PtyProcess) -> PlatformResult<PtyOpenResponse> {
+        self.register_pty_scoped(process, None).await
     }
 
     async fn register_desktop(
@@ -187,7 +283,7 @@ impl StreamRegistry for RelayHub {
     ) -> PlatformResult<StreamChannel> {
         let descriptor = self.descriptor(v1::StreamKind::Desktop, DESKTOP_STREAM_PORT);
         let config = self.channel_config(descriptor.clone());
-        let channel = RelayChannel::register(config.clone())
+        let channel = RelayChannel::register(config)
             .await
             .map_err(stream_to_platform)?;
 
@@ -198,9 +294,124 @@ impl StreamRegistry for RelayHub {
         // real frame (retrying a transient first-capture against Xvfb readiness), so
         // a consumer dialing the minted URL immediately replays a frame.
         let (ready_tx, ready_rx) = oneshot::channel();
-        spawn_desktop_pump(desktop, channel, config, policy, ready_tx);
+        spawn_desktop_pump(desktop, channel, policy, ready_tx);
         await_pump_ready(ready_rx, "desktop").await?;
 
+        Ok(descriptor)
+    }
+
+    async fn register_browser_frames(
+        &self,
+        browserd_port: u16,
+        req: &v1::BrowserFramesOpenRequest,
+    ) -> PlatformResult<StreamChannel> {
+        let port = allocate_browser_port(&self.browser_ports)?;
+        let descriptor = self.descriptor(v1::StreamKind::Browser, port);
+        let config = self.channel_config(descriptor.clone());
+        let mut channel = match RelayChannel::register(config).await {
+            Ok(channel) => channel,
+            Err(error) => {
+                release_browser_port(&self.browser_ports, port);
+                return Err(stream_to_platform(error));
+            }
+        };
+        let socket = match browser_pump::connect(browserd_port, req).await {
+            Ok(socket) => socket,
+            Err(error) => {
+                channel
+                    .close(
+                        v1::StreamCloseReason::Normal,
+                        "browser frame source unavailable",
+                    )
+                    .await;
+                release_browser_port(&self.browser_ports, port);
+                return Err(stream_to_platform(error));
+            }
+        };
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let browser_ports = self.browser_ports.clone();
+        tokio::spawn(async move {
+            match browser_pump::run(socket, &mut channel, Some(ready_tx)).await {
+                Ok(()) => {
+                    channel
+                        .close(v1::StreamCloseReason::Normal, "browser frame stream closed")
+                        .await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "browser frame pump ended");
+                    channel
+                        .close(
+                            v1::StreamCloseReason::ProcessExit,
+                            "browser frame stream failed",
+                        )
+                        .await;
+                }
+            }
+            release_browser_port(&browser_ports, port);
+        });
+        if let Err(error) = await_pump_ready(ready_rx, "browser").await {
+            release_browser_port(&self.browser_ports, port);
+            return Err(error);
+        }
+        Ok(descriptor)
+    }
+
+    async fn register_computer_frames(
+        &self,
+        browserd_port: u16,
+        req: &v1::ComputerFramesOpenRequest,
+    ) -> PlatformResult<StreamChannel> {
+        let port = allocate_browser_port(&self.browser_ports)?;
+        let descriptor = self.descriptor(v1::StreamKind::Computer, port);
+        let config = self.channel_config(descriptor.clone());
+        let mut channel = match RelayChannel::register(config).await {
+            Ok(channel) => channel,
+            Err(error) => {
+                release_browser_port(&self.browser_ports, port);
+                return Err(stream_to_platform(error));
+            }
+        };
+        let socket = match browser_pump::connect_computer(browserd_port, req).await {
+            Ok(socket) => socket,
+            Err(error) => {
+                channel
+                    .close(
+                        v1::StreamCloseReason::Normal,
+                        "computer frame source unavailable",
+                    )
+                    .await;
+                release_browser_port(&self.browser_ports, port);
+                return Err(stream_to_platform(error));
+            }
+        };
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let browser_ports = self.browser_ports.clone();
+        tokio::spawn(async move {
+            match browser_pump::run(socket, &mut channel, Some(ready_tx)).await {
+                Ok(()) => {
+                    channel
+                        .close(
+                            v1::StreamCloseReason::Normal,
+                            "computer frame stream closed",
+                        )
+                        .await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "computer frame pump ended");
+                    channel
+                        .close(
+                            v1::StreamCloseReason::ProcessExit,
+                            "computer frame stream failed",
+                        )
+                        .await;
+                }
+            }
+            release_browser_port(&browser_ports, port);
+        });
+        if let Err(error) = await_pump_ready(ready_rx, "computer").await {
+            release_browser_port(&self.browser_ports, port);
+            return Err(error);
+        }
         Ok(descriptor)
     }
 
@@ -244,45 +455,39 @@ impl RelayHub {
 /// Spawns the supervised PTY pump: run the pump; on a retryable transport drop,
 /// reconnect (full-jitter) + resume; stop on a clean PTY exit or a terminal error.
 /// De-registers the pty control entry on exit.
+#[allow(clippy::too_many_arguments)]
 fn spawn_pty_pump(
     mut process: PtyProcess,
     mut channel: RelayChannel,
     mut commands: mpsc::Receiver<PtyCommand>,
     pty_id: String,
+    scope_id: Option<String>,
     ptys: Arc<Mutex<HashMap<String, PtyControlTx>>>,
+    pty_scopes: Arc<Mutex<HashMap<String, PtyOpenResponse>>>,
     ready: oneshot::Sender<()>,
 ) {
     tokio::spawn(async move {
-        // The readiness signal is fired by the pump on its FIRST run only; a
-        // reconnect re-enters the pump with `None`.
-        let mut ready = Some(ready);
-        let mut backoff = ChannelBackoff::standard();
-        loop {
-            match pty_pump::run(&mut process, &mut channel, &mut commands, ready.take()).await {
-                Ok(()) => {
-                    // Clean PTY exit: tear the channel down with PROCESS_EXIT.
-                    channel
-                        .close(v1::StreamCloseReason::ProcessExit, "pty exited")
-                        .await;
-                    break;
-                }
-                Err(e) if e.retryable() => {
-                    tracing::warn!(error = %e, "pty relay channel dropped; reconnecting");
-                    if channel.reconnect(backoff.next_delay()).await.is_err() {
-                        // The owner gave up (rejected open); stop the pump.
-                        break;
-                    }
-                    backoff.reset();
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "pty pump terminal error");
-                    break;
-                }
+        // The PTY pump owns reconnects because its reader/writer handles are
+        // once-only and must remain alive across every relay transport generation.
+        match pty_pump::run(&mut process, &mut channel, &mut commands, Some(ready)).await {
+            Ok(()) => {
+                channel
+                    .close(v1::StreamCloseReason::ProcessExit, "pty exited")
+                    .await;
             }
+            Err(e) => tracing::error!(error = %e, "pty pump terminal error"),
         }
         let _ = process.kill();
         if let Ok(mut map) = ptys.lock() {
             map.remove(&pty_id);
+        }
+        if let (Some(scope_id), Ok(mut scopes)) = (scope_id.as_ref(), pty_scopes.lock()) {
+            if scopes
+                .get(scope_id)
+                .is_some_and(|candidate| candidate.pty_id == pty_id)
+            {
+                scopes.remove(scope_id);
+            }
         }
     });
 }
@@ -291,7 +496,6 @@ fn spawn_pty_pump(
 fn spawn_desktop_pump(
     desktop: Arc<dyn DesktopBackend>,
     mut channel: RelayChannel,
-    _config: ChannelConfig,
     policy: InputPolicy,
     ready: oneshot::Sender<()>,
 ) {
@@ -358,6 +562,31 @@ fn new_channel_id() -> String {
 }
 
 static CHANNEL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BROWSER_PORT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn allocate_browser_port(ports: &Arc<Mutex<HashSet<u32>>>) -> PlatformResult<u32> {
+    let mut ports = ports
+        .lock()
+        .map_err(|_| PlatformError::os("browser relay allocation state is unavailable"))?;
+    let range = u64::from(BROWSER_STREAM_PORT_END - BROWSER_STREAM_PORT_START + 1);
+    for _ in 0..range {
+        let offset =
+            BROWSER_PORT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % range;
+        let port = BROWSER_STREAM_PORT_START + u32::try_from(offset).unwrap_or(0);
+        if ports.insert(port) {
+            return Ok(port);
+        }
+    }
+    Err(PlatformError::os(
+        "browser relay channel allocation bound was reached",
+    ))
+}
+
+fn release_browser_port(ports: &Arc<Mutex<HashSet<u32>>>, port: u32) {
+    if let Ok(mut ports) = ports.lock() {
+        ports.remove(&port);
+    }
+}
 
 /// Maps a stream error to a platform error so the dispatch path surfaces a typed
 /// `AgentError`. A relay open failure is a `STREAM`-class condition.
@@ -434,5 +663,49 @@ mod tests {
             .await
             .expect_err("a dropped sender must error");
         assert!(matches!(err, PlatformError::Os { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn scoped_open_reuses_the_live_pty_without_spawning_a_replacement() {
+        let hub = RelayHub::new(RelayHubConfig {
+            workspace_id: "ws".to_string(),
+            agent_id: "ag".to_string(),
+            relay_url: "wss://unreachable.invalid".to_string(),
+            agent_token: "tok".to_string(),
+            allow_screen_control: true,
+        });
+        let descriptor = hub.descriptor(v1::StreamKind::Pty, PTY_STREAM_PORT);
+        let response = PtyOpenResponse {
+            pty_id: descriptor.channel_id.clone(),
+            channel: Some(descriptor),
+        };
+        let (control, _commands) = mpsc::channel(1);
+        hub.ptys
+            .lock()
+            .expect("ptys")
+            .insert(response.pty_id.clone(), control);
+        hub.pty_scopes
+            .lock()
+            .expect("scopes")
+            .insert("session-1".to_string(), response.clone());
+
+        // An impossible command proves reuse occurs before spawn/dial. Concurrent
+        // capability refreshes must both receive the exact existing descriptor.
+        let request = PtyOpenRequest {
+            command: vec!["/definitely/not/a/real/shell".to_string()],
+            scope_id: "session-1".to_string(),
+            ..Default::default()
+        };
+        let first_hub = hub.clone();
+        let second_hub = hub.clone();
+        let first_request = request.clone();
+        let second_request = request.clone();
+        let (first, second) = tokio::join!(
+            first_hub.open_pty(&first_request, &[]),
+            second_hub.open_pty(&second_request, &[]),
+        );
+        assert_eq!(first.expect("first reuse"), response);
+        assert_eq!(second.expect("second reuse"), response);
+        assert_eq!(hub.ptys.lock().expect("ptys").len(), 1);
     }
 }

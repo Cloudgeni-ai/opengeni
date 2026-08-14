@@ -4,7 +4,8 @@
 //   Changes  — review-first git: turn-end capture (cold) or live diff (warm)
 //   Files    — tree + inline editor (capture-backed cold, live warm)
 //   Terminal — interactive xterm wired to the box PTY (Channel-A projection)
-//   Desktop  — noVNC (Channel-B), watch by default + a server-gated take-control
+//   Browser  — workspace-wide BrowserSessions, tabs, live frames, and input
+//   Computer — workspace ComputerSessions: native targets, frames, and input
 // plus a machine-state chip in the dock header (the one truthful live/waking/
 // offline indicator) and any host-injected extra tabs (Run/Debug in apps/web).
 //
@@ -13,13 +14,24 @@
 // (no `sonner` import), and every surface renders with package primitives + og
 // tokens only. `apps/web` consumes this through the exact public surface an
 // external embedder uses — that is criterion F1.
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  type ReactNode,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { SessionEvent } from "@opengeni/sdk";
+import type { InteractionPlacement } from "@opengeni/sdk/interaction";
 import {
   CircleCheckIcon,
   CpuIcon,
   FileCode2Icon,
   GitCompareArrowsIcon,
+  Globe2Icon,
   LoaderCircleIcon,
   MonitorIcon,
   RefreshCwIcon,
@@ -31,6 +43,8 @@ import { type ClientOverride, useOpenGeni } from "../provider";
 import { cn } from "../lib/cn";
 import { xtermThemeFromTokens } from "../lib/xterm-theme";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
+import type { BrowserFrameWebSocketFactory } from "../hooks/use-browser-frame-stream";
+import type { ComputerFrameWebSocketFactory } from "../hooks/use-computer-frame-stream";
 import { useSessionCapabilities } from "../hooks/use-session-capabilities";
 import { useSandboxFiles } from "../hooks/use-sandbox-files";
 import {
@@ -46,8 +60,17 @@ import type { MachineView } from "../types/machines";
 import { SandboxFiles } from "./sandbox-files";
 import { WorkbenchChanges } from "./workbench-changes";
 import { SandboxTerminal, type XtermTheme } from "./sandbox-terminal";
-import { DesktopViewer } from "./desktop-viewer";
 import { WorkspaceDock, type WorkspaceDockProps, type WorkspaceTab } from "./workspace-dock";
+
+const LazyBrowserViewer = lazy(async () => {
+  const viewers = await import("./interactive-workbench-viewers");
+  return { default: viewers.BrowserViewer };
+});
+
+const LazyComputerViewer = lazy(async () => {
+  const viewers = await import("./interactive-workbench-viewers");
+  return { default: viewers.ComputerViewer };
+});
 
 /** A host-routed notification (replaces the app-only `sonner` toast coupling). */
 export type WorkspaceNotification = { kind: "error" | "info"; message: string };
@@ -56,6 +79,7 @@ export type WorkspaceNotification = { kind: "error" | "info"; message: string };
 export const WORKBENCH_TAB_CHANGES = "changes";
 export const WORKBENCH_TAB_FILES = "files";
 export const WORKBENCH_TAB_TERMINAL = "terminal";
+export const WORKBENCH_TAB_BROWSER = "browser";
 export const WORKBENCH_TAB_DESKTOP = "desktop";
 
 /**
@@ -67,6 +91,7 @@ export const WORKBENCH_SURFACES = [
   WORKBENCH_TAB_CHANGES,
   WORKBENCH_TAB_FILES,
   WORKBENCH_TAB_TERMINAL,
+  WORKBENCH_TAB_BROWSER,
   WORKBENCH_TAB_DESKTOP,
 ] as const;
 
@@ -108,6 +133,18 @@ function WorkbenchTabLabel({ icon, children }: { icon: ReactNode; children: Reac
       </span>
       <span>{children}</span>
     </span>
+  );
+}
+
+function WorkbenchSurfaceLoading({ name }: { name: "Browser" | "Computer" }) {
+  return (
+    <CenteredState
+      icon={
+        <LoaderCircleIcon className="size-5 animate-spin motion-reduce:animate-none" aria-hidden />
+      }
+    >
+      <p className="text-og-sm font-medium text-og-fg">Opening {name}</p>
+    </CenteredState>
   );
 }
 
@@ -199,7 +236,7 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride & {
   /** Live event log (usually `useSessionEvents().events`). */
   events: SessionEvent[];
   /**
-   * Built-in surfaces this host wants to expose. Omit for all four. A disabled
+   * Built-in surfaces this host wants to expose. Omit for all five. A disabled
    * surface is behaviorally dormant: its data hooks, warm intents, stream
    * attachment, and navigation callbacks are not activated.
    */
@@ -209,9 +246,16 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride & {
   initialTab?: string | null | undefined;
   /** Actually selected dock tab. Inactive data surfaces retain cache but issue no live reads. */
   activeTab?: string | null | undefined;
+  /** Whether the dock is visible. Hidden docks retain UI state but must not keep
+   * expensive browser/computer media streams alive. */
+  workspaceVisible?: boolean | undefined;
   /** Host-routed notifications (mutation errors, desktop-consent failures). The
    *  package never imports a toast library — the host decides how to surface. */
   onNotify?: ((notification: WorkspaceNotification) => void) | undefined;
+  /** Alternate frame transport for non-browser runtimes and deterministic tests. */
+  browserWebSocketFactory?: BrowserFrameWebSocketFactory | undefined;
+  /** Alternate Computer frame transport for non-browser runtimes and deterministic tests. */
+  computerWebSocketFactory?: ComputerFrameWebSocketFactory | undefined;
   /** File requested by a Changes guard. The Files surface defers the read until
    *  the sandbox is live, then reveals this path. */
   requestedFilePath?: string | null | undefined;
@@ -220,10 +264,14 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride & {
   requestedFileRequestId?: string | number | null | undefined;
   /** Route a guarded diff into the host's Files tab. */
   onOpenFile?: ((path: string) => void) | undefined;
+  /** Navigate the host dock to one exact linked ComputerSession. */
+  onOpenComputerSession?: ((computerSessionId: string) => void) | undefined;
+  requestedComputerSessionId?: string | null | undefined;
+  requestedComputerRequestId?: string | number | null | undefined;
 };
 
 export type UseSandboxWorkspaceTabsResult = {
-  /** Changes | Files | Terminal | Desktop (capability-gated where noted). */
+  /** Changes | Files | Terminal | Browser | Desktop (capability-gated where noted). */
   tabs: WorkspaceTab[];
   /** The source-driven default tab: Changes when the first authoritative capture
    *  or live Git result has changes, else Files (a host `initialTab` overrides).
@@ -236,7 +284,6 @@ export type UseSandboxWorkspaceTabsResult = {
 
 type SessionWarmIntents = {
   sessionId: string;
-  watchDesktop: boolean;
   warmTerminal: boolean;
   warmFiles: boolean;
 };
@@ -244,7 +291,6 @@ type SessionWarmIntents = {
 function emptyWarmIntents(sessionId: string): SessionWarmIntents {
   return {
     sessionId,
-    watchDesktop: false,
     warmTerminal: false,
     warmFiles: false,
   };
@@ -259,19 +305,50 @@ function emptyWarmIntents(sessionId: string): SessionWarmIntents {
 export function useSandboxWorkspaceTabs(
   options: UseSandboxWorkspaceTabsOptions,
 ): UseSandboxWorkspaceTabsResult {
-  const { client, workspaceId } = useOpenGeni(options);
-  const { sessionId, events, onNotify, requestedFilePath, requestedFileRequestId, onOpenFile } =
-    options;
+  const { client, workspaceId, workspaceInteractionEvent } = useOpenGeni(options);
+  const {
+    sessionId,
+    events,
+    onNotify,
+    browserWebSocketFactory,
+    computerWebSocketFactory,
+    requestedFilePath,
+    requestedFileRequestId,
+    onOpenFile,
+    onOpenComputerSession,
+    requestedComputerSessionId,
+    requestedComputerRequestId,
+  } = options;
   const initialTab = options.initialTab ?? null;
   const activeTab = options.activeTab ?? initialTab;
+  const workspaceVisible = options.workspaceVisible ?? true;
   const requestedSurfaces = options.surfaces ?? WORKBENCH_SURFACES;
   const surfaceSet = new Set<SandboxWorkspaceSurface>(requestedSurfaces);
   const changesEnabled = surfaceSet.has(WORKBENCH_TAB_CHANGES);
   const filesEnabled = surfaceSet.has(WORKBENCH_TAB_FILES);
   const terminalEnabled = surfaceSet.has(WORKBENCH_TAB_TERMINAL);
+  const browserEnabled = surfaceSet.has(WORKBENCH_TAB_BROWSER);
   const desktopEnabled = surfaceSet.has(WORKBENCH_TAB_DESKTOP);
+  const createLinkedComputer = useCallback(
+    async (name: string, placement?: InteractionPlacement) => {
+      const response = await client.createComputerSession(workspaceId, {
+        operationId: crypto.randomUUID(),
+        sessionId,
+        name,
+        ...(placement ? { placement } : {}),
+      });
+      if (response.operation.state !== "completed" || response.session.lifecycle !== "active") {
+        throw new Error(response.operation.error?.message ?? "The computer could not be opened.");
+      }
+      return {
+        id: response.session.id,
+        placement: response.session.placement,
+      };
+    },
+    [client, sessionId, workspaceId],
+  );
   const workspaceDataEnabled = changesEnabled || filesEnabled;
-  const anySurfaceEnabled = workspaceDataEnabled || terminalEnabled || desktopEnabled;
+  const machineSurfaceEnabled = workspaceDataEnabled || terminalEnabled || desktopEnabled;
   // Do not speculatively activate both remote workspace surfaces while the dock
   // is still resolving its selected tab. Modal calls cannot be cancelled after
   // dispatch, so that transient state otherwise creates an aborted duplicate
@@ -281,17 +358,17 @@ export function useSandboxWorkspaceTabs(
   const filesActive = resolvedActiveTab === WORKBENCH_TAB_FILES;
   const surfaceIdentity = WORKBENCH_SURFACES.filter((surface) => surfaceSet.has(surface)).join(",");
 
-  // The three box-warming INTENTS, each off by default and each
+  // The two box-warming INTENTS, each off by default and each
   // flipped true by a genuine user action (never on mount, never on a passive
-  // capture glance): desktop watch consent, terminal engagement (`onActivate`), and
-  // a deliberate live-file open/edit in Files. Browsing capture-served
+  // capture glance): terminal engagement (`onActivate`) and a deliberate
+  // live-file open/edit in Files. Browsing capture-served
   // Changes/Files warms nothing — that is the whole point of Refinement 1.
   const [storedWarmIntents, setStoredWarmIntents] = useState<SessionWarmIntents>(() =>
     emptyWarmIntents(sessionId),
   );
   const warmIntents =
     storedWarmIntents.sessionId === sessionId ? storedWarmIntents : emptyWarmIntents(sessionId);
-  const { watchDesktop, warmTerminal, warmFiles } = warmIntents;
+  const { warmTerminal, warmFiles } = warmIntents;
   const requestWarmIntent = useCallback(
     (intent: Exclude<keyof SessionWarmIntents, "sessionId">) => {
       setStoredWarmIntents((previous) => {
@@ -308,7 +385,7 @@ export function useSandboxWorkspaceTabs(
     workspaceId,
     sessionId,
     pollIntervalMs: 8000,
-    enabled: anySurfaceEnabled,
+    enabled: machineSurfaceEnabled,
   });
   const activeMachine: MachineView | null =
     machines.machines.find((m) => m.sandboxId === machines.activeSandboxId) ??
@@ -317,8 +394,8 @@ export function useSandboxWorkspaceTabs(
 
   const caps = useSessionCapabilities(sessionId, {
     events,
-    enabled: anySurfaceEnabled,
-    attachDesktop: desktopEnabled && watchDesktop,
+    enabled: machineSurfaceEnabled,
+    attachDesktop: false,
     attachTerminal: terminalEnabled && warmTerminal,
     // Explicit live-file intent only — NOT "the Files tab is open". A cold edit
     // or guarded-file open wakes the box; a glance at the tree/diff does not.
@@ -359,11 +436,6 @@ export function useSandboxWorkspaceTabs(
     interactive: terminalEnabled && ptyCapable,
     liveness,
   });
-  const desktopAdvertised =
-    desktopEnabled &&
-    ((capabilities?.DesktopStream.transport ?? null) !== null ||
-      capabilities?.DesktopStream.reason === "lease_cold");
-
   // Lazy provisioning (#315) creates the box mid-turn on the first sandbox tool
   // call, emitting sandbox.provision started→completed/failed on the live stream.
   // The on-demand resting hook rests without polling, so when the box warms the
@@ -380,6 +452,17 @@ export function useSandboxWorkspaceTabs(
     }
     provisioningRef.current = { sessionId, provisioning };
   }, [sessionId, provisioning, renegotiate]);
+
+  // BrowserSession and ComputerSession lifecycles use the same placement lease
+  // as files/terminal/desktop, but are workspace resources rather than session
+  // events. Re-read the capability document on their canonical workspace
+  // invalidation so the one machine chip cannot remain "Offline" beside a live
+  // browser/computer (or remain "Live" after the final interaction holder ends).
+  // This is a read-only negotiation: it never acquires a holder or wakes a box.
+  useEffect(() => {
+    if (workspaceInteractionEvent?.workspaceId !== workspaceId) return;
+    renegotiate();
+  }, [workspaceId, workspaceInteractionEvent, renegotiate]);
 
   // The cold-paint data source: the latest turn-end capture, fetched with a single
   // api round-trip on mount (no machine). Feeds the Files tree + the Changes/Git
@@ -505,40 +588,6 @@ export function useSandboxWorkspaceTabs(
     return () => observer.disconnect();
   }, [terminalEnabled]);
 
-  async function acknowledgeAndWatch() {
-    try {
-      const shared = capabilities?.DesktopStream.shared ?? false;
-      await client.acknowledgeStream(workspaceId, sessionId, {
-        acknowledgeUnredacted: true,
-        acknowledgeShared: shared,
-      });
-      requestWarmIntent("watchDesktop");
-      caps.renegotiate();
-    } catch (error) {
-      onNotify?.({
-        kind: "error",
-        message: `Could not start the desktop stream: ${error instanceof Error ? error.message : String(error)}`,
-      });
-      throw error instanceof Error ? error : new Error(String(error));
-    }
-  }
-
-  // Re-warm WITHOUT re-acknowledging: the consent was already recorded, only the
-  // box drained back to cold. Idempotent — the viewer auto-warm de-dupes.
-  function rewarmDesktop() {
-    if (!watchDesktop) requestWarmIntent("watchDesktop");
-    caps.renegotiate();
-  }
-
-  // A previously acknowledged desktop attaches immediately on mount. A first
-  // view waits for the automatic acknowledgment callback above, which then
-  // engages the holder without an avoidable attach-before-ack 409.
-  function activateDesktop() {
-    const desktop = capabilities?.DesktopStream;
-    if (desktop?.requiresAcknowledgment && !desktop.acknowledged) return;
-    rewarmDesktop();
-  }
-
   const dirtyCount = git.diff.length;
 
   // The one truthful machine indicator, derived from the live capability/liveness
@@ -548,10 +597,7 @@ export function useSandboxWorkspaceTabs(
     capabilitiesState: caps.state,
     activeMachineState: activeMachine?.state ?? null,
     activeIsSelfhosted: activeMachine?.kind === "selfhosted",
-    wantsWarm:
-      (terminalEnabled && warmTerminal) ||
-      (desktopEnabled && watchDesktop) ||
-      (workspaceDataEnabled && warmFiles),
+    wantsWarm: (terminalEnabled && warmTerminal) || (workspaceDataEnabled && warmFiles),
     capturedAt: captureState.capturedAt,
   });
   const workspaceWaking = chip.state === "waking";
@@ -722,6 +768,7 @@ export function useSandboxWorkspaceTabs(
               result={terminal}
               terminalCapability={capabilities?.Terminal ?? null}
               onActivate={() => requestWarmIntent("warmTerminal")}
+              onReconnectNeeded={caps.renegotiate}
               showHeader
               shell={capabilities?.Terminal.shell ?? undefined}
               liveness={liveness}
@@ -732,28 +779,65 @@ export function useSandboxWorkspaceTabs(
       });
     }
 
-    // Desktop — capability-gated; mounting the selected tab automatically
-    // engages the viewer and records any required acknowledgment.
-    if (desktopAdvertised) {
+    // Browser — independent from sandbox capability negotiation. BrowserSessions
+    // are workspace resources and may live in this agent's sandbox, a peer's
+    // sandbox, a connected machine, or an external browser placement.
+    if (browserEnabled) {
+      list.push({
+        id: WORKBENCH_TAB_BROWSER,
+        label: <WorkbenchTabLabel icon={<Globe2Icon />}>Browser</WorkbenchTabLabel>,
+        content: (
+          <Suspense fallback={<WorkbenchSurfaceLoading name="Browser" />}>
+            <LazyBrowserViewer
+              key={sessionId}
+              client={client}
+              workspaceId={workspaceId}
+              sessionId={sessionId}
+              // WorkspaceDock mounts a heavy surface only after its first visit,
+              // then keeps it mounted behind `hidden` when another tab is
+              // selected. Keep that already-visited surface enabled while the
+              // dock itself remains open: tearing down its controller + media
+              // socket on every Browser↔Computer tab switch turned an ordinary
+              // click into a multi-second cold reconnect. This does not eagerly
+              // start BrowserViewer—the lazy panel is still unmounted until the
+              // user/agent first visits it.
+              enabled={workspaceVisible}
+              onNotify={onNotify}
+              {...(desktopEnabled ? { createLinkedComputer } : {})}
+              {...(onOpenComputerSession ? { onOpenComputer: onOpenComputerSession } : {})}
+              {...(browserWebSocketFactory ? { webSocketFactory: browserWebSocketFactory } : {})}
+              className="h-full"
+            />
+          </Suspense>
+        ),
+      });
+    }
+
+    // Computer — stable legacy tab id, new workspace resource body. Like Browser,
+    // it is independent from the selected agent's sandbox capability document.
+    if (desktopEnabled) {
       list.push({
         id: WORKBENCH_TAB_DESKTOP,
-        label: <WorkbenchTabLabel icon={<MonitorIcon />}>Desktop</WorkbenchTabLabel>,
-        badge: watchDesktop ? (
-          <span className="rounded-og-xs bg-og-status-running/20 px-1 text-og-xs text-og-status-running">
-            Live
-          </span>
-        ) : undefined,
+        label: <WorkbenchTabLabel icon={<MonitorIcon />}>Computer</WorkbenchTabLabel>,
         content: (
-          <DesktopViewer
-            key={sessionId}
-            capability={capabilities?.DesktopStream ?? null}
-            viewerCapReached={caps.viewerCapReached}
-            watching={watchDesktop}
-            onActivate={activateDesktop}
-            onAcknowledge={acknowledgeAndWatch}
-            onWarm={rewarmDesktop}
-            className="h-full"
-          />
+          <Suspense fallback={<WorkbenchSurfaceLoading name="Computer" />}>
+            <LazyComputerViewer
+              key={sessionId}
+              client={client}
+              workspaceId={workspaceId}
+              sessionId={sessionId}
+              // Same visited-surface lifetime as Browser above. A live noVNC
+              // connection survives tab switches and ResizeObserver re-fits its
+              // canvas when this hidden panel becomes visible again, making the
+              // second and later Computer opens local-machine fast.
+              enabled={workspaceVisible}
+              onNotify={onNotify}
+              requestedComputerSessionId={requestedComputerSessionId}
+              requestedComputerRequestId={requestedComputerRequestId}
+              {...(computerWebSocketFactory ? { webSocketFactory: computerWebSocketFactory } : {})}
+              className="h-full"
+            />
+          </Suspense>
         ),
       });
     }
@@ -765,14 +849,24 @@ export function useSandboxWorkspaceTabs(
     changesEnabled,
     filesEnabled,
     terminalOn,
-    desktopAdvertised,
+    browserEnabled,
+    desktopEnabled,
     captureAvailable,
     dirtyCount,
-    watchDesktop,
     warmTerminal,
     requestedFilePath,
     requestedFileRequestId,
     onOpenFile,
+    onOpenComputerSession,
+    requestedComputerSessionId,
+    requestedComputerRequestId,
+    onNotify,
+    browserWebSocketFactory,
+    computerWebSocketFactory,
+    workspaceVisible,
+    resolvedActiveTab,
+    client,
+    workspaceId,
     liveness,
     sessionId,
     files,
@@ -786,13 +880,14 @@ export function useSandboxWorkspaceTabs(
     caps.error,
     caps.viewerCapReached,
     requestWarmIntent,
+    createLinkedComputer,
   ]);
 
   return {
     tabs,
     defaultTab,
     machine: {
-      enabled: anySurfaceEnabled,
+      enabled: machineSurfaceEnabled,
       chip,
       activeMachine,
       loading: machines.loading,
@@ -810,7 +905,7 @@ export type SandboxWorkspaceProps = ClientOverride & {
   primary: ReactNode;
   /**
    * Built-in surfaces this host wants to expose. Omit for Changes, Files,
-   * Terminal, and Desktop. Disabled surfaces remain behaviorally dormant.
+   * Terminal, Browser, and Desktop. Disabled surfaces remain behaviorally dormant.
    */
   surfaces?: readonly SandboxWorkspaceSurface[] | undefined;
   /** Host tabs injected BEFORE the workbench tabs (e.g. a "Run" landing tab). */
@@ -822,6 +917,10 @@ export type SandboxWorkspaceProps = ClientOverride & {
   initialTab?: string | undefined;
   /** Host-routed notifications (no toast dependency in the package). */
   onNotify?: ((notification: WorkspaceNotification) => void) | undefined;
+  /** Alternate Browser frame transport for non-browser runtimes and deterministic tests. */
+  browserWebSocketFactory?: BrowserFrameWebSocketFactory | undefined;
+  /** Alternate Computer frame transport for non-browser runtimes and deterministic tests. */
+  computerWebSocketFactory?: ComputerFrameWebSocketFactory | undefined;
   /** Controlled collapsed state for hosts with their own dock toggle. */
   collapsed?: boolean | undefined;
   onCollapsedChange?: ((collapsed: boolean) => void) | undefined;
@@ -853,6 +952,8 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     trailingTabs,
     initialTab,
     onNotify,
+    browserWebSocketFactory,
+    computerWebSocketFactory,
     collapsed,
     onCollapsedChange,
     showCollapseControl,
@@ -873,7 +974,13 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     path: string;
     requestId: number;
   } | null>(null);
+  const [requestedComputer, setRequestedComputer] = useState<{
+    sessionId: string;
+    computerSessionId: string;
+    requestId: number;
+  } | null>(null);
   const nextFileRequestId = useRef(0);
+  const nextComputerRequestId = useRef(0);
   const selectedTab = storedSelection?.sessionId === sessionId ? storedSelection.tab : null;
   const activeTabHint = selectedTab ?? initialTab ?? leadingTabs?.[0]?.id ?? null;
   const openFile = useCallback(
@@ -881,6 +988,18 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
       nextFileRequestId.current += 1;
       setRequestedFile({ sessionId, path, requestId: nextFileRequestId.current });
       setStoredSelection({ sessionId, tab: WORKBENCH_TAB_FILES });
+    },
+    [sessionId],
+  );
+  const openComputer = useCallback(
+    (computerSessionId: string) => {
+      nextComputerRequestId.current += 1;
+      setRequestedComputer({
+        sessionId,
+        computerSessionId,
+        requestId: nextComputerRequestId.current,
+      });
+      setStoredSelection({ sessionId, tab: WORKBENCH_TAB_DESKTOP });
     },
     [sessionId],
   );
@@ -897,10 +1016,18 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     ...(surfaces ? { surfaces } : {}),
     ...(initialTab ? { initialTab } : {}),
     activeTab: activeTabHint,
+    workspaceVisible: collapsed !== true,
     ...(onNotify ? { onNotify } : {}),
+    ...(browserWebSocketFactory ? { browserWebSocketFactory } : {}),
+    ...(computerWebSocketFactory ? { computerWebSocketFactory } : {}),
     requestedFilePath: requestedFile?.sessionId === sessionId ? requestedFile.path : null,
     requestedFileRequestId: requestedFile?.sessionId === sessionId ? requestedFile.requestId : null,
     onOpenFile: openFile,
+    onOpenComputerSession: openComputer,
+    requestedComputerSessionId:
+      requestedComputer?.sessionId === sessionId ? requestedComputer.computerSessionId : null,
+    requestedComputerRequestId:
+      requestedComputer?.sessionId === sessionId ? requestedComputer.requestId : null,
   });
 
   // A user's tab click wins forever; before that we follow the source-driven
@@ -968,13 +1095,13 @@ function MachineStateChip({ chip }: { chip: MachineChip }) {
     <div
       role="status"
       aria-label={`Machine: ${chip.label}`}
-      className="inline-flex min-h-7 items-center gap-1.5 px-2 py-1 text-og-xs font-medium text-og-fg-muted max-[1023px]:min-h-11 pointer-coarse:min-h-11"
+      className="inline-flex min-h-7 min-w-0 items-center gap-1.5 px-2 py-1 text-og-xs font-medium text-og-fg-muted max-[1023px]:min-h-11 pointer-coarse:min-h-11"
     >
       <span
         className={cn("size-1.5 shrink-0 rounded-full", chipDotClass(chip.state))}
         aria-hidden
       />
-      <span className="max-w-[11rem] truncate">{chip.label}</span>
+      <span className="min-w-0 max-w-[11rem] truncate">{chip.label}</span>
     </div>
   );
 }

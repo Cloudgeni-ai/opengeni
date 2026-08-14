@@ -5,6 +5,7 @@
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
+//   /workspaces/:id/priority                 → "For you" priority feed (agent-time-lost ledger)
 //   /workspaces/:id/agents                   → workspace agent topology
 //   /sessions/:sessionId                     → authorized compatibility redirect
 //   /workspaces/:id/variable-sets            → variable sets + variables
@@ -56,6 +57,7 @@ const LazyVariableSetsRoute = lazyRouteComponent(
 );
 const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
 const LazyInsightsRoute = lazyRouteComponent(() => import("@/routes/insights"), "InsightsRoute");
+const LazyPriorityRoute = lazyRouteComponent(() => import("@/routes/priority"), "PriorityRoute");
 const LazyOrgSettingsRoute = lazyRouteComponent(
   () => import("@/routes/org-settings"),
   "OrgSettingsRoute",
@@ -228,6 +230,11 @@ const workspaceInsightsRoute = createRoute({
   path: "insights",
   component: Insights,
 });
+const workspacePriorityRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "priority",
+  component: Priority,
+});
 // Legacy standalone Packs route: packs are now a subsection of Capabilities,
 // so this redirects there (focusing the Packs subsection) instead of mounting
 // a separate page.
@@ -241,19 +248,22 @@ const workspaceCapabilitiesRoute = createRoute({
   path: "capabilities",
   // `?section=packs` focuses the Packs subsection (used by the legacy
   // /packs redirect and the nav). Unknown values fall back to the catalog.
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { section?: "packs"; slack_link?: string } => ({
+  validateSearch: (search: Record<string, unknown>): { section?: "packs" } => ({
     ...(search.section === "packs" ? { section: "packs" as const } : {}),
-    ...(typeof search.slack_link === "string" && search.slack_link
-      ? { slack_link: search.slack_link }
-      : {}),
   }),
   component: Capabilities,
 });
 const workspaceSchedulesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "schedules",
+  validateSearch: (search: Record<string, unknown>): { sourceSessionId?: string } => ({
+    ...(typeof search.sourceSessionId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      search.sourceSessionId,
+    )
+      ? { sourceSessionId: search.sourceSessionId }
+      : {}),
+  }),
   component: Schedules,
 });
 const workspaceDocumentsRoute = createRoute({
@@ -352,6 +362,7 @@ const routeTree = rootRoute.addChildren([
     workspaceRigDetailRoute,
     workspaceMachinesRoute,
     workspaceInsightsRoute,
+    workspacePriorityRoute,
     workspacePacksRoute,
     workspaceCapabilitiesRoute,
     workspaceSchedulesRoute,
@@ -464,6 +475,11 @@ function Insights() {
   return <LazyInsightsRoute workspaceId={workspaceId} />;
 }
 
+function Priority() {
+  const { workspaceId } = workspacePriorityRoute.useParams();
+  return <LazyPriorityRoute workspaceId={workspaceId} />;
+}
+
 function PacksRedirect() {
   const { workspaceId } = workspacePacksRoute.useParams();
   return (
@@ -478,19 +494,14 @@ function PacksRedirect() {
 
 function Capabilities() {
   const { workspaceId } = workspaceCapabilitiesRoute.useParams();
-  const { section, slack_link: slackLinkToken } = workspaceCapabilitiesRoute.useSearch();
-  return (
-    <LazyCapabilitiesRoute
-      workspaceId={workspaceId}
-      initialSection={section}
-      slackLinkToken={slackLinkToken}
-    />
-  );
+  const { section } = workspaceCapabilitiesRoute.useSearch();
+  return <LazyCapabilitiesRoute workspaceId={workspaceId} initialSection={section} />;
 }
 
 function Schedules() {
   const { workspaceId } = workspaceSchedulesRoute.useParams();
-  return <LazySchedulesRoute workspaceId={workspaceId} />;
+  const { sourceSessionId } = workspaceSchedulesRoute.useSearch();
+  return <LazySchedulesRoute workspaceId={workspaceId} sourceSessionId={sourceSessionId} />;
 }
 
 function Documents() {

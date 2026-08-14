@@ -15,6 +15,18 @@ const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
   "social_thread_fetch",
   "social_posts_sync",
   "social_post_reply",
+  "x_accounts_list",
+  "x_search_live",
+  "x_mentions_live",
+  "x_thread_fetch",
+  "x_posts_sync",
+  "x_post_reply",
+  "reddit_accounts_list",
+  "reddit_search_live",
+  "reddit_mentions_live",
+  "reddit_thread_fetch",
+  "reddit_posts_sync",
+  "reddit_post_reply",
   "slack_bot_list_channels",
   "slack_bot_channel_history",
   "slack_bot_thread_replies",
@@ -24,6 +36,19 @@ const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
   "slack_bot_file_content",
   "slack_bot_post_message",
   "slack_bot_delete_message",
+  "fiken_companies_list",
+  "fiken_contacts_list",
+  "fiken_contact_create",
+  "fiken_products_list",
+  "fiken_invoices_list",
+  "fiken_invoice_get",
+  "fiken_invoice_draft_create",
+  "fiken_bank_accounts_list",
+  "fiken_purchases_list",
+  "fiken_sales_list",
+  "atlassian_sources_list",
+  "atlassian_search",
+  "atlassian_get",
 ] as const;
 
 describe("first-party MCP tool-name contract", () => {
@@ -40,6 +65,12 @@ describe("first-party MCP tool-name contract", () => {
         firstPartyMcpTools: [...FIRST_PARTY_MCP_TOOL_NAMES],
       }).success,
     ).toBe(true);
+    expect(
+      CreateSessionRequest.parse({
+        initialMessage: "preserve stored Slack selection",
+        firstPartyMcpTools: ["slack_bot_post_message"],
+      }).firstPartyMcpTools,
+    ).toEqual(["slack_bot_post_message"]);
   });
 
   test("keeps every connector-wide tool outside the ordinary default selection", () => {
@@ -98,5 +129,63 @@ describe("first-party MCP tool-name contract", () => {
         exp: Math.floor(Date.now() / 1000) + 60,
       }).success,
     ).toBe(false);
+  });
+
+  test("accepts paired agent-attempt depth claims and rejects partial or non-agent claims", () => {
+    const base = {
+      accountId: crypto.randomUUID(),
+      workspaceId: crypto.randomUUID(),
+      subjectId: "worker:first-party-mcp",
+      permissions: ["sessions:create" as const],
+      principalKind: "agent_attempt" as const,
+      sessionId: crypto.randomUUID(),
+      turnId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      executionGeneration: 1,
+      exp: Math.floor(Date.now() / 1000) + 60,
+    };
+    expect(
+      DelegatedAccessTokenPayload.safeParse({
+        ...base,
+        nestedAgentDepth: 2,
+        effectiveMaxNestedAgentDepth: 3,
+      }).success,
+    ).toBe(true);
+    expect(
+      DelegatedAccessTokenPayload.safeParse({
+        ...base,
+        nestedAgentDepth: 2,
+      }).success,
+    ).toBe(false);
+    expect(
+      DelegatedAccessTokenPayload.safeParse({
+        ...base,
+        principalKind: "service",
+        sessionId: undefined,
+        turnId: undefined,
+        attemptId: undefined,
+        executionGeneration: undefined,
+        nestedAgentDepth: 0,
+        effectiveMaxNestedAgentDepth: 3,
+      }).success,
+    ).toBe(false);
+  });
+
+  test("preserves advanced public session-create compatibility outside the model surface", () => {
+    const targetSandboxId = crypto.randomUUID();
+    expect(
+      CreateSessionRequest.parse({
+        initialMessage: "advanced public caller",
+        maxNestedAgentDepth: 0,
+        sandbox: "shared",
+        targetSandboxId,
+        workingDir: "/srv/worktree",
+      }),
+    ).toMatchObject({
+      maxNestedAgentDepth: 0,
+      sandbox: "shared",
+      targetSandboxId,
+      workingDir: "/srv/worktree",
+    });
   });
 });

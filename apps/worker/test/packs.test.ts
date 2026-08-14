@@ -3,6 +3,7 @@ import type { Settings } from "@opengeni/config";
 import { CapabilityPack } from "@opengeni/contracts";
 import {
   mergeRigDefaultVariableSetEnvironment,
+  packInstallationUsesLegacyRuntime,
   settingsWithPackSandboxImage,
   settingsWithRigImage,
   workspacePackRuntimeFromPacks,
@@ -33,16 +34,28 @@ const infraSkill = {
 };
 
 describe("workspace pack runtime resolution", () => {
+  test("loads inline runtime only for pre-V2 Pack installations", () => {
+    expect(
+      packInstallationUsesLegacyRuntime({ manifestSnapshot: null, manifestDigest: null }),
+    ).toBe(true);
+    expect(
+      packInstallationUsesLegacyRuntime({
+        manifestSnapshot: pack({ id: "v2-pack", skills: [infraSkill] }),
+        manifestDigest: "a".repeat(64),
+      }),
+    ).toBe(false);
+  });
+
   test("resolves to the global-image fallback when no pack declares a runtime", () => {
     expect(workspacePackRuntimeFromPacks([])).toEqual({
       sandboxImage: null,
       sandboxProviderImages: null,
-      skills: [],
+      skillActivations: [],
     });
     expect(workspacePackRuntimeFromPacks([pack({ id: "plain" })])).toEqual({
       sandboxImage: null,
       sandboxProviderImages: null,
-      skills: [],
+      skillActivations: [],
     });
   });
 
@@ -60,16 +73,21 @@ describe("workspace pack runtime resolution", () => {
       "ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     );
     expect(runtime.sandboxProviderImages).toBeNull();
-    expect(runtime.skills).toEqual([
+    expect(runtime.skillActivations).toEqual([
       {
-        name: "infra-ops",
-        description: null,
-        files: infraSkill.files,
+        source: "pack",
+        id: "pack:infra-runtime:infra-ops",
+        artifact: {
+          name: "infra-ops",
+          description: null,
+          files: infraSkill.files,
+        },
+        reason: "active legacy Pack infra-runtime",
       },
     ]);
   });
 
-  test("fails plainly when more than one enabled pack declares a sandbox image", () => {
+  test("fails plainly when more than one legacy Pack declares a sandbox image", () => {
     const packs = [
       pack({ id: "pack-b", sandboxImage: "example.com/b:1" }),
       pack({ id: "pack-a", sandboxImage: "example.com/a:1" }),
@@ -104,7 +122,9 @@ describe("workspace pack runtime resolution", () => {
         skills: [{ ...infraSkill, description: "Operate workspace infrastructure." }],
       }),
     ]);
-    expect(runtime.skills[0]?.description).toBe("Operate workspace infrastructure.");
+    expect(runtime.skillActivations[0]?.artifact.description).toBe(
+      "Operate workspace infrastructure.",
+    );
   });
 });
 
@@ -165,7 +185,7 @@ describe("pack sandbox image settings", () => {
   });
 });
 
-describe("rig sandbox image precedence (M3): rig > pack > deployment", () => {
+describe("rig image precedence over the pre-V2 Pack compatibility fallback", () => {
   const DEPLOYMENT = "opengeni-sandbox:local";
   const PACK = "ghcr.io/example/pack@sha256:pack";
   const RIG = "ghcr.io/example/rig@sha256:rig";

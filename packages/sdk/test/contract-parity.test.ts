@@ -38,7 +38,41 @@ import {
   MetricSample as ContractMetricSample,
   MachineMetricsSeriesResponse as ContractMachineMetricsSeriesResponse,
   NewSessionDraft as ContractNewSessionDraft,
+  InstallApiIntegrationRequest as ContractInstallApiIntegrationRequest,
+  IntegrationFacetMutationResult as ContractIntegrationFacetMutationResult,
+  IntegrationFacetRemovalResult as ContractIntegrationFacetRemovalResult,
+  IntegrationInstanceFacetsResponse as ContractIntegrationInstanceFacetsResponse,
+  MutateIntegrationFacetRequest as ContractMutateIntegrationFacetRequest,
+  InstalledApiIntegration as ContractInstalledApiIntegration,
+  ApiIntegrationUninstallPreview as ContractApiIntegrationUninstallPreview,
+  UninstallApiIntegrationRequest as ContractUninstallApiIntegrationRequest,
+  UninstallApiIntegrationResult as ContractUninstallApiIntegrationResult,
+  UpsertIntegrationFacetRequest as ContractUpsertIntegrationFacetRequest,
+  CapabilityPack as ContractCapabilityPack,
+  InstallPackRequest as ContractInstallPackRequest,
+  PackInstallation as ContractPackInstallation,
+  PackInstallationPreview as ContractPackInstallationPreview,
+  PackUninstallPreview as ContractPackUninstallPreview,
+  PreviewPackInstallationRequest as ContractPreviewPackInstallationRequest,
+  RegisterCapabilityPackRequest as ContractRegisterCapabilityPackRequest,
+  UninstallPackRequest as ContractUninstallPackRequest,
+  UninstallPackResult as ContractUninstallPackResult,
+  WorkspaceRegisteredPack as ContractWorkspaceRegisteredPack,
+  InstallPluginRequest as ContractInstallPluginRequest,
+  InstalledPlugin as ContractInstalledPlugin,
+  ListInstalledPluginsResponse as ContractListInstalledPluginsResponse,
+  PluginManifest as ContractPluginManifest,
+  PluginPreview as ContractPluginPreview,
+  PluginUninstallPreview as ContractPluginUninstallPreview,
+  PreviewPluginRequest as ContractPreviewPluginRequest,
+  UninstallPluginRequest as ContractUninstallPluginRequest,
+  UninstallPluginResult as ContractUninstallPluginResult,
   SaveNewSessionDraftRequest as ContractSaveNewSessionDraftRequest,
+  SlackUserLinkAccessRequest as ContractSlackUserLinkAccessRequest,
+  PrepareSlackUserLinkAccessRequest as ContractPrepareSlackUserLinkAccessRequest,
+  SlackUserLinkAccessMutationRequest as ContractSlackUserLinkAccessMutationRequest,
+  ApproveSlackUserLinkAccessRequest as ContractApproveSlackUserLinkAccessRequest,
+  ListSlackUserLinkAccessRequestsResponse as ContractListSlackUserLinkAccessRequestsResponse,
   OPENGENI_CORRELATION_HEADER as CONTRACT_CORRELATION_HEADER,
   SandboxBackend as ContractSandboxBackend,
   SandboxOs as ContractSandboxOs,
@@ -123,8 +157,40 @@ import type {
   MachineMetricsSeriesResponse,
   NewSessionDraft,
   NewSessionDraftOptions,
+  InstallApiIntegrationRequest,
+  IntegrationFacetMutationResult,
+  IntegrationFacetRemovalResult,
+  IntegrationInstanceFacetsResponse,
+  MutateIntegrationFacetRequest,
+  InstalledApiIntegration,
+  ApiIntegrationUninstallPreview,
+  UninstallApiIntegrationRequest,
+  UninstallApiIntegrationResult,
+  UpsertIntegrationFacetRequest,
+  CapabilityPack,
+  InstallPackRequest,
+  PackInstallation,
+  PackInstallationPreview,
+  PackUninstallPreview,
+  PreviewPackInstallationRequest,
+  RegisterCapabilityPackRequest,
+  UninstallPackRequest,
+  UninstallPackResult,
+  WorkspaceRegisteredPack,
+  InstallPluginRequest,
+  InstalledPlugin,
+  ListInstalledPluginsResponse,
+  PluginManifest,
+  PluginPreview,
+  PluginUninstallPreview,
+  PreviewPluginRequest,
   ReasoningEffort,
   SaveNewSessionDraftRequest,
+  SlackUserLinkAccessRequest,
+  PrepareSlackUserLinkAccessRequest,
+  SlackUserLinkAccessMutationRequest,
+  ApproveSlackUserLinkAccessRequest,
+  ListSlackUserLinkAccessRequestsResponse,
   SandboxBackend,
   SandboxOs,
   ScheduledTask,
@@ -157,6 +223,8 @@ import type {
   SubmitHumanInputResponseRequest,
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionMcpApprovalPolicyResponse,
+  UninstallPluginRequest,
+  UninstallPluginResult,
   StreamUrlRotatedPayload,
   UpdateWorkspaceMemberRequest,
   ViewerHeartbeatRequest,
@@ -178,6 +246,29 @@ describe("SDK / contracts parity", () => {
   });
   test("pins the default uploaded-file mount root", () => {
     expect(DEFAULT_FILE_RESOURCE_MOUNT_ROOT).toBe(CONTRACT_DEFAULT_FILE_RESOURCE_MOUNT_ROOT);
+  });
+
+  test("Slack user-link access continuation shapes match the public contracts", () => {
+    const acceptRequest = (
+      value: z.infer<typeof ContractSlackUserLinkAccessRequest>,
+    ): SlackUserLinkAccessRequest => value;
+    const acceptPrepare = (
+      value: PrepareSlackUserLinkAccessRequest,
+    ): z.input<typeof ContractPrepareSlackUserLinkAccessRequest> => value;
+    const acceptMutation = (
+      value: SlackUserLinkAccessMutationRequest,
+    ): z.input<typeof ContractSlackUserLinkAccessMutationRequest> => value;
+    const acceptApproval = (
+      value: Omit<ApproveSlackUserLinkAccessRequest, "permissions">,
+    ): Omit<z.input<typeof ContractApproveSlackUserLinkAccessRequest>, "permissions"> => value;
+    const acceptList = (
+      value: z.infer<typeof ContractListSlackUserLinkAccessRequestsResponse>,
+    ): ListSlackUserLinkAccessRequestsResponse => value;
+    expect(
+      [acceptRequest, acceptPrepare, acceptMutation, acceptApproval, acceptList].every(
+        (fn) => typeof fn === "function",
+      ),
+    ).toBe(true);
   });
   test("known session event types match the contracts enum exactly", () => {
     expect([...SESSION_EVENT_TYPES].sort()).toEqual([...ContractSessionEventType.options].sort());
@@ -549,7 +640,10 @@ describe("SDK / contracts parity", () => {
       pinned: false,
       status: "archived",
     };
-    const settings: UpdateWorkspaceSettingsRequest = { memoryEnabled: true };
+    const settings: UpdateWorkspaceSettingsRequest = {
+      memoryEnabled: true,
+      memoryPromptMode: "retrieval_only",
+    };
     expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateKnowledgeMemoryRequest.safeParse(update).success).toBe(true);
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(settings).success).toBe(true);
@@ -698,6 +792,188 @@ describe("SDK / contracts parity", () => {
     const parsed = ContractMachinesResponse.parse(response);
     const asSdk: MachinesResponse = parsed;
     expect(asSdk.machines[0]!.kind).toBe("selfhosted");
+  });
+
+  test("Plugin package request and response shapes match the contracts", () => {
+    const acceptManifest = (value: z.infer<typeof ContractPluginManifest>): PluginManifest => value;
+    const acceptPreview = (value: z.infer<typeof ContractPluginPreview>): PluginPreview => value;
+    const acceptInstalled = (value: z.infer<typeof ContractInstalledPlugin>): InstalledPlugin =>
+      value;
+    const acceptList = (
+      value: z.infer<typeof ContractListInstalledPluginsResponse>,
+    ): ListInstalledPluginsResponse => value;
+    const acceptUninstallPreview = (
+      value: z.infer<typeof ContractPluginUninstallPreview>,
+    ): PluginUninstallPreview => value;
+    const acceptUninstallResult = (
+      value: z.infer<typeof ContractUninstallPluginResult>,
+    ): UninstallPluginResult => value;
+    expect(
+      [
+        acceptManifest,
+        acceptPreview,
+        acceptInstalled,
+        acceptList,
+        acceptUninstallPreview,
+        acceptUninstallResult,
+      ].every((fn) => typeof fn === "function"),
+    ).toBe(true);
+
+    const previewRequest: PreviewPluginRequest = {
+      url: "https://plugins.example.test/research.json",
+    };
+    const installRequest: InstallPluginRequest = {
+      url: previewRequest.url,
+      expectedManifestDigest: "a".repeat(64),
+      expectedComponents: [{ key: "research", digest: "b".repeat(64) }],
+      idempotencyKey: "00000000-0000-4000-8000-000000000100",
+    };
+    const uninstallRequest: UninstallPluginRequest = {
+      expectedInstallationVersion: 2,
+      idempotencyKey: "00000000-0000-4000-8000-000000000101",
+    };
+    expect(ContractPreviewPluginRequest.safeParse(previewRequest).success).toBe(true);
+    expect(ContractInstallPluginRequest.safeParse(installRequest).success).toBe(true);
+    expect(ContractUninstallPluginRequest.safeParse(uninstallRequest).success).toBe(true);
+  });
+
+  test("Pack composition request and response shapes match the contracts", () => {
+    const acceptManifest = (value: z.infer<typeof ContractCapabilityPack>): CapabilityPack => value;
+    const acceptRegistered = (
+      value: z.infer<typeof ContractWorkspaceRegisteredPack>,
+    ): WorkspaceRegisteredPack => value;
+    const acceptInstallation = (
+      value: z.infer<typeof ContractPackInstallation>,
+    ): PackInstallation => value;
+    const acceptPreview = (
+      value: z.infer<typeof ContractPackInstallationPreview>,
+    ): PackInstallationPreview => value;
+    const acceptUninstallPreview = (
+      value: z.infer<typeof ContractPackUninstallPreview>,
+    ): PackUninstallPreview => value;
+    const acceptUninstallResult = (
+      value: z.infer<typeof ContractUninstallPackResult>,
+    ): UninstallPackResult => value;
+    expect(
+      [
+        acceptManifest,
+        acceptRegistered,
+        acceptInstallation,
+        acceptPreview,
+        acceptUninstallPreview,
+        acceptUninstallResult,
+      ].every((fn) => typeof fn === "function"),
+    ).toBe(true);
+
+    const manifest: RegisterCapabilityPackRequest = {
+      id: "infrastructure/safe-operations",
+      name: "Safe infrastructure operations",
+      description: "Pinned infrastructure capabilities and runtime requirements.",
+      role: "infrastructure",
+      category: "operations",
+      version: "2.0.0",
+      components: [
+        {
+          key: "skill/safe-operations",
+          kind: "skill",
+          capabilityId: "skill:portable/safe-operations",
+          contentSha256: "a".repeat(64),
+        },
+        {
+          key: "integration/linear/main",
+          kind: "integration",
+          capabilityId: "integration:linear",
+          instanceKey: "main",
+          revisionId: "openapi:linear-v1",
+          contentSha256: "b".repeat(64),
+        },
+      ],
+      rig: {
+        required: true,
+        requireVerified: true,
+      },
+    };
+    const previewRequest: PreviewPackInstallationRequest = {
+      rigId: "00000000-0000-4000-8000-000000000300",
+      variableSetId: "00000000-0000-4000-8000-000000000301",
+    };
+    const installRequest: InstallPackRequest = {
+      expectedManifestDigest: "c".repeat(64),
+      expectedInstallationVersion: 3,
+      rigId: previewRequest.rigId,
+      variableSetId: previewRequest.variableSetId,
+      idempotencyKey: "00000000-0000-4000-8000-000000000302",
+      metadata: { source: "capabilities-ui" },
+    };
+    const uninstallRequest: UninstallPackRequest = {
+      expectedInstallationVersion: 4,
+      idempotencyKey: "00000000-0000-4000-8000-000000000303",
+    };
+    expect(ContractRegisterCapabilityPackRequest.safeParse(manifest).success).toBe(true);
+    expect(ContractPreviewPackInstallationRequest.safeParse(previewRequest).success).toBe(true);
+    expect(ContractInstallPackRequest.safeParse(installRequest).success).toBe(true);
+    expect(ContractUninstallPackRequest.safeParse(uninstallRequest).success).toBe(true);
+  });
+
+  test("multi-instance API Integration shapes match the contracts", () => {
+    const acceptInstalled = (
+      value: z.infer<typeof ContractInstalledApiIntegration>,
+    ): InstalledApiIntegration => value;
+    const acceptUninstallPreview = (
+      value: z.infer<typeof ContractApiIntegrationUninstallPreview>,
+    ): ApiIntegrationUninstallPreview => value;
+    const acceptUninstallResult = (
+      value: z.infer<typeof ContractUninstallApiIntegrationResult>,
+    ): UninstallApiIntegrationResult => value;
+    expect(
+      [acceptInstalled, acceptUninstallPreview, acceptUninstallResult].every(
+        (fn) => typeof fn === "function",
+      ),
+    ).toBe(true);
+
+    const installRequest: InstallApiIntegrationRequest = {
+      source: { kind: "definition", definitionId: "google-gmail" },
+      expectedRevisionId: "openapi:aaaaaaaaaaaaaaaaaaaaaaaa",
+      expectedContentSha256: "b".repeat(64),
+      connectionId: "00000000-0000-4000-8000-000000000200",
+      instanceKey: "finance",
+      displayName: "Gmail — Finance",
+      expectedInstanceVersion: 2,
+    };
+    const uninstallRequest: UninstallApiIntegrationRequest = {
+      expectedInstallationVersion: 4,
+      expectedInstanceVersion: 2,
+    };
+    expect(ContractInstallApiIntegrationRequest.safeParse(installRequest).success).toBe(true);
+    expect(ContractUninstallApiIntegrationRequest.safeParse(uninstallRequest).success).toBe(true);
+  });
+
+  test("generic Integration facet lifecycle shapes match the contracts", () => {
+    const acceptList = (
+      value: z.infer<typeof ContractIntegrationInstanceFacetsResponse>,
+    ): IntegrationInstanceFacetsResponse => value;
+    const acceptMutation = (
+      value: z.infer<typeof ContractIntegrationFacetMutationResult>,
+    ): IntegrationFacetMutationResult => value;
+    const acceptRemoval = (
+      value: z.infer<typeof ContractIntegrationFacetRemovalResult>,
+    ): IntegrationFacetRemovalResult => value;
+    expect(
+      [acceptList, acceptMutation, acceptRemoval].every((fn) => typeof fn === "function"),
+    ).toBe(true);
+
+    const upsert: UpsertIntegrationFacetRequest = {
+      displayName: "Finance inbox",
+      config: { unreadOnly: true },
+      expectedVersion: 2,
+      idempotencyKey: "00000000-0000-4000-8000-000000000301",
+    };
+    const mutation: MutateIntegrationFacetRequest = {
+      expectedVersion: 3,
+      idempotencyKey: "00000000-0000-4000-8000-000000000302",
+    };
+    expect(ContractUpsertIntegrationFacetRequest.safeParse(upsert).success).toBe(true);
+    expect(ContractMutateIntegrationFacetRequest.safeParse(mutation).success).toBe(true);
   });
 
   test("SDK-built create-session requests parse under the contracts schema", () => {

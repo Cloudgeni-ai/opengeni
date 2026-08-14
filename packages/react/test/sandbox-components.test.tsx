@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import type { DesktopRfbFactory, DesktopRfbLike } from "@opengeni/sdk";
 import { actRun, registerDom, renderComponent, flush } from "./render-hook";
 import { fakeCapabilities, fakeFileDiff, fakeHeadlessCapabilities } from "./sandbox-fixtures";
-import { DesktopViewer } from "../src/components/desktop-viewer";
+import { desktopPrimaryShortcut, DesktopViewer } from "../src/components/desktop-viewer";
 import { DiffView } from "../src/components/diff-view";
 import { PierreDiff } from "../src/components/pierre-diff";
 import { FileBrowser } from "../src/components/file-browser";
@@ -386,6 +386,30 @@ describe("PierreDiff (the one renderer)", () => {
 });
 
 describe("DesktopViewer", () => {
+  test("maps the host primary modifier onto the remote RFB platform", () => {
+    const event = {
+      altKey: false,
+      code: "KeyA",
+      ctrlKey: false,
+      key: "a",
+      metaKey: true,
+      shiftKey: false,
+    };
+    expect(desktopPrimaryShortcut(event, "mac", "linux")).toEqual([
+      { keysym: 0xffe3, code: "ControlLeft", down: true },
+      { keysym: 97, code: "KeyA", down: true },
+      { keysym: 97, code: "KeyA", down: false },
+      { keysym: 0xffe3, code: "ControlLeft", down: false },
+    ]);
+    expect(desktopPrimaryShortcut(event, "mac", "macos")).toEqual([
+      { keysym: 0xffeb, code: "MetaLeft", down: true },
+      { keysym: 97, code: "KeyA", down: true },
+      { keysym: 97, code: "KeyA", down: false },
+      { keysym: 0xffeb, code: "MetaLeft", down: false },
+    ]);
+    expect(desktopPrimaryShortcut({ ...event, key: "v" }, "mac", "linux")).toBe("clipboard");
+  });
+
   // A fake RFB that records construction + reports its viewOnly + scaling setting.
   function fakeRfb(): {
     factory: DesktopRfbFactory;
@@ -550,6 +574,120 @@ describe("DesktopViewer", () => {
     await r.unmount();
   });
 
+  test("desktop paste is accepted only by an explicit host clipboard authority", async () => {
+    const pasted: string[] = [];
+    let connect: (() => void) | undefined;
+    const factory: DesktopRfbFactory = () => ({
+      viewOnly: false,
+      scaleViewport: false,
+      clipViewport: false,
+      addEventListener: (type, cb) => {
+        if (type === "connect") connect = cb;
+      },
+      removeEventListener: () => {},
+      disconnect: () => {},
+    });
+    const cap = { ...fakeCapabilities().DesktopStream, mode: "interactive" as const };
+    const r = await renderComponent(
+      <DesktopViewer
+        capability={cap}
+        interactive
+        rfbFactory={factory}
+        onPasteText={(text) => {
+          pasted.push(text);
+          return true;
+        }}
+      />,
+    );
+    await flush(5);
+    await actRun(() => connect?.());
+    await flush();
+
+    const root = r.container.querySelector<HTMLElement>("[data-opengeni-desktop]");
+    expect(root).not.toBeNull();
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", {
+      value: {
+        getData: (type: string) => (type === "text/plain" ? "exact paste" : ""),
+        types: ["text/plain"],
+      },
+    });
+    await actRun(() => root?.dispatchEvent(event));
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(pasted).toEqual(["exact paste"]);
+    await r.unmount();
+  });
+
+  test("a Mac primary shortcut is sent once as target Control over the live RFB", async () => {
+    const keys: Array<{ keysym: number; code: string; down?: boolean }> = [];
+    let connect: (() => void) | undefined;
+    const priorPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
+    Object.defineProperty(navigator, "platform", { configurable: true, value: "MacIntel" });
+    const factory: DesktopRfbFactory = () => ({
+      viewOnly: false,
+      scaleViewport: false,
+      clipViewport: false,
+      addEventListener: (type, cb) => {
+        if (type === "connect") connect = cb;
+      },
+      removeEventListener: () => {},
+      sendKey: (keysym, code, down) =>
+        keys.push({ keysym, code, ...(down !== undefined ? { down } : {}) }),
+      disconnect: () => {},
+    });
+    const cap = { ...fakeCapabilities().DesktopStream, mode: "interactive" as const };
+    const r = await renderComponent(
+      <DesktopViewer capability={cap} interactive targetPlatform="linux" rfbFactory={factory} />,
+    );
+    try {
+      await flush(5);
+      await actRun(() => connect?.());
+      await flush();
+      const root = r.container.querySelector<HTMLElement>("[data-opengeni-desktop]")!;
+      await actRun(() =>
+        root.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            bubbles: true,
+            cancelable: true,
+            code: "MetaLeft",
+            key: "Meta",
+            metaKey: true,
+          }),
+        ),
+      );
+      const event = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "KeyA",
+        key: "a",
+        metaKey: true,
+      });
+      await actRun(() => root.dispatchEvent(event));
+      await actRun(() =>
+        root.dispatchEvent(
+          new KeyboardEvent("keyup", {
+            bubbles: true,
+            cancelable: true,
+            code: "MetaLeft",
+            key: "Meta",
+          }),
+        ),
+      );
+      expect(event.defaultPrevented).toBe(true);
+      expect(keys).toEqual([
+        { keysym: 0xffe3, code: "ControlLeft", down: true },
+        { keysym: 97, code: "KeyA", down: true },
+        { keysym: 97, code: "KeyA", down: false },
+        { keysym: 0xffe3, code: "ControlLeft", down: false },
+      ]);
+    } finally {
+      if (priorPlatform) Object.defineProperty(navigator, "platform", priorPlatform);
+      else Reflect.deleteProperty(navigator, "platform");
+      await r.unmount();
+    }
+  });
+
   test("a benign capability refresh (same url/token) does not reconnect the socket", async () => {
     const { factory, instances } = trackingRfb();
     const base = fakeCapabilities().DesktopStream;
@@ -563,6 +701,47 @@ describe("DesktopViewer", () => {
     await r.rerender(<DesktopViewer capability={refreshed} rfbFactory={factory} />);
     await flush(5);
     expect(instances.length).toBe(1); // survived the renegotiation — no reconnect.
+    await r.unmount();
+  });
+
+  test("rotating the direct-RFB bearer protocol reconnects exactly once", async () => {
+    const { factory, instances } = trackingRfb();
+    const cap = { ...fakeCapabilities().DesktopStream, mode: "interactive" as const };
+    const first = ["opengeni.rfb.v1", "opengeni.auth.first"];
+    const r = await renderComponent(
+      <DesktopViewer
+        capability={cap}
+        interactive
+        webSocketProtocols={first}
+        rfbFactory={factory}
+      />,
+    );
+    await flush(5);
+    expect(instances.length).toBe(1);
+
+    await r.rerender(
+      <DesktopViewer
+        capability={cap}
+        interactive
+        webSocketProtocols={["opengeni.rfb.v1", "opengeni.auth.second"]}
+        rfbFactory={factory}
+      />,
+    );
+    await flush(5);
+    expect(instances.length).toBe(2);
+
+    // A normal render can allocate a fresh array. Identical protocol values
+    // must not churn the live RFB connection.
+    await r.rerender(
+      <DesktopViewer
+        capability={cap}
+        interactive
+        webSocketProtocols={["opengeni.rfb.v1", "opengeni.auth.second"]}
+        rfbFactory={factory}
+      />,
+    );
+    await flush(5);
+    expect(instances.length).toBe(2);
     await r.unmount();
   });
 });

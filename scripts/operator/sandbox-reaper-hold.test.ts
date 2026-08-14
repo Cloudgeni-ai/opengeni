@@ -31,6 +31,7 @@ function lease(overrides: Partial<LeaseSnapshot> = {}): LeaseSnapshot {
     rigVersionId: null,
     dataPlaneUrl: null,
     terminalDataPlaneUrl: null,
+    controllerDataPlaneUrl: null,
     leaseEpoch: 7,
     workspaceGeneration: 4,
     archiveGeneration: 3,

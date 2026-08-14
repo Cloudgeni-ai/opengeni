@@ -39,6 +39,7 @@ import type {
   SignalCodexCapacityWorkflow,
   SignalSessionAttemptQuiesced,
   StartSandboxReaperWorkflow,
+  StartVideoGenerationWorkflow,
   WakeSessionWorkflowSignal,
 } from "./activities/types";
 import { turnTaskQueue } from "./workflows/activities";
@@ -107,6 +108,8 @@ export {
 const SANDBOX_REAPER_SCHEDULE_ID = "opengeni-sandbox-lease-reaper";
 export const FILE_UPLOAD_REAPER_SCHEDULE_ID = "opengeni-file-upload-reaper";
 export const FILE_UPLOAD_REAPER_PERIOD_MS = 15 * 60 * 1_000;
+export const SITE_AUTH_MAINTENANCE_SCHEDULE_ID = "opengeni-site-auth-maintenance";
+export const SITE_AUTH_MAINTENANCE_PERIOD_MS = 60 * 1_000;
 export type OpenGeniWorkerRole = "control" | "turn";
 
 export type WorkerOptions = {
@@ -343,6 +346,7 @@ export async function createWorkerWorkflowSignaler(
   signalCodexCapacityWorkflow: SignalCodexCapacityWorkflow;
   getTurnTaskQueueStats: () => Promise<TurnTaskQueueStats>;
   startSandboxReaperWorkflow: StartSandboxReaperWorkflow;
+  startVideoGenerationWorkflow: StartVideoGenerationWorkflow;
   check: () => Promise<void>;
   close: () => Promise<void>;
 }> {
@@ -456,6 +460,33 @@ export async function createWorkerWorkflowSignaler(
           workflowId: SANDBOX_REAPER_V2_WORKFLOW_ID,
           workflowIdReusePolicy: "ALLOW_DUPLICATE",
           args: [],
+        });
+        return "started";
+      } catch (error) {
+        if (error instanceof WorkflowExecutionAlreadyStartedError) {
+          return "already_running";
+        }
+        throw error;
+      }
+    },
+    startVideoGenerationWorkflow: async ({ accountId, workspaceId, operationId }) => {
+      try {
+        await temporal.workflow.start("videoGenerationWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: `video-generation:${operationId}`,
+          // Reject a concurrent or already-completed run, but allow the repair
+          // sweep to restart this exact operation if the workflow itself failed.
+          // Every provider/storage transition remains CAS/idempotency fenced in
+          // Postgres, so recovery never creates a second logical operation.
+          workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
+          args: [
+            {
+              accountId,
+              workspaceId,
+              operationId,
+              baseTaskQueue: settings.temporalTaskQueue,
+            },
+          ],
         });
         return "started";
       } catch (error) {
@@ -611,6 +642,48 @@ export async function registerFileUploadReaperSchedule(
   }
 }
 
+/** Register the deployment-wide maintained-auth dispatcher. Its one-minute
+ * cadence matches the minimum public policy interval; DB claims own overlap,
+ * crash recovery, and exact session idempotency. */
+export async function registerSiteAuthMaintenanceSchedule(
+  settings: Settings,
+  observability: Observability,
+): Promise<{ registered: boolean; close: () => Promise<void> }> {
+  const connection = await Connection.connect(temporalConnectionOptions(settings));
+  const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
+  try {
+    await temporal.schedule.create({
+      scheduleId: SITE_AUTH_MAINTENANCE_SCHEDULE_ID,
+      spec: { intervals: [{ every: SITE_AUTH_MAINTENANCE_PERIOD_MS }] },
+      action: {
+        type: "startWorkflow",
+        workflowType: "siteAuthMaintenanceWorkflow",
+        taskQueue: settings.temporalTaskQueue,
+        args: [],
+      },
+      policies: {
+        overlap: ScheduleOverlapPolicy.SKIP,
+        catchupWindow: "1m",
+        pauseOnFailure: false,
+      },
+    });
+    observability.info("Registered the global site-auth maintenance Schedule", {
+      scheduleId: SITE_AUTH_MAINTENANCE_SCHEDULE_ID,
+      maintenancePeriodMs: SITE_AUTH_MAINTENANCE_PERIOD_MS,
+    });
+    return { registered: true, close: async () => connection.close() };
+  } catch (error) {
+    if (error instanceof ScheduleAlreadyRunning) {
+      observability.info("Global site-auth maintenance Schedule already registered", {
+        scheduleId: SITE_AUTH_MAINTENANCE_SCHEDULE_ID,
+      });
+      return { registered: false, close: async () => connection.close() };
+    }
+    await connection.close().catch(() => undefined);
+    throw error;
+  }
+}
+
 /**
  * Register the one repair cadence for committed workflow-wake revisions. The
  * activity only reads the transactional outbox and sends revision-scoped
@@ -721,7 +794,8 @@ export async function createOpenGeniWorkerService(
       !options.activityDependencies.signalSessionAttemptQuiesced ||
       !options.activityDependencies.inspectSessionAttemptActivity ||
       !options.activityDependencies.signalCodexCapacityWorkflow ||
-      !options.activityDependencies.startSandboxReaperWorkflow;
+      !options.activityDependencies.startSandboxReaperWorkflow ||
+      !options.activityDependencies.startVideoGenerationWorkflow;
     if (needsSignaler) {
       signaler = await retryStartupDependency(
         "Temporal client",
@@ -743,12 +817,16 @@ export async function createOpenGeniWorkerService(
     const startSandboxReaperWorkflow =
       options.activityDependencies.startSandboxReaperWorkflow ??
       signaler?.startSandboxReaperWorkflow;
+    const startVideoGenerationWorkflow =
+      options.activityDependencies.startVideoGenerationWorkflow ??
+      signaler?.startVideoGenerationWorkflow;
     if (
       !wakeSessionWorkflow ||
       !signalSessionAttemptQuiesced ||
       !inspectSessionAttemptActivity ||
       !signalCodexCapacityWorkflow ||
-      !startSandboxReaperWorkflow
+      !startSandboxReaperWorkflow ||
+      !startVideoGenerationWorkflow
     ) {
       throw new Error("OpenGeni worker lifecycle could not resolve its workflow signalers");
     }
@@ -766,6 +844,7 @@ export async function createOpenGeniWorkerService(
         inspectSessionAttemptActivity,
         signalCodexCapacityWorkflow,
         startSandboxReaperWorkflow,
+        startVideoGenerationWorkflow,
       },
     });
 
@@ -791,6 +870,13 @@ export async function createOpenGeniWorkerService(
         await retryStartupDependency(
           "Temporal schedule (file upload reaper)",
           () => registerFileUploadReaperSchedule(settings, observability),
+          { ...retryOptions, onRetry },
+        ),
+      );
+      schedules.push(
+        await retryStartupDependency(
+          "Temporal schedule (site auth maintenance)",
+          () => registerSiteAuthMaintenanceSchedule(settings, observability),
           { ...retryOptions, onRetry },
         ),
       );

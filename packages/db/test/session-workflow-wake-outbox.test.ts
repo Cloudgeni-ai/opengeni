@@ -22,8 +22,8 @@ import {
   settleSessionAttemptInterruptions,
   setSessionGoalStatus,
   submitHumanPromptInTransaction,
-  withWorkspaceRls,
-  withWorkspaceSubjectRls,
+  withWorkspaceSessionActivityRls as withWorkspaceRls,
+  withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
 import * as schema from "../src/schema";
 
@@ -80,7 +80,7 @@ async function send(
     wakeFixture.grant.subjectId,
     (db) =>
       db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as typeof db, {
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
           accountId: wakeFixture.grant.accountId,
           workspaceId: wakeFixture.grant.workspaceId!,
           sessionId: wakeFixture.session.id,
@@ -100,7 +100,7 @@ async function send(
 async function pauseWorkspace(ctx: WakeFixture) {
   return await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
     db.transaction((tx) =>
-      mutateWorkspaceControlInTransaction(tx as typeof db, {
+      mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
         accountId: ctx.grant.accountId,
         workspaceId: ctx.grant.workspaceId!,
         actor: { type: "human", subjectId: ctx.grant.subjectId },
@@ -212,7 +212,7 @@ describe("transactional session workflow wake outbox", () => {
     const grant = access.workspaceGrants[0]!;
     await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        mutateWorkspaceControlInTransaction(tx as typeof db, {
+        mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           actor: { type: "human", subjectId: grant.subjectId },
@@ -390,6 +390,56 @@ describe("transactional session workflow wake outbox", () => {
     });
   });
 
+  test("starts a delivered row at the new deadline while preserving an earlier pending wake", async () => {
+    const ctx = await fixture();
+    const alreadyDue = new Date(Date.now() - 60_000);
+    const deliveredRevision = await enqueueSessionWorkflowWake(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+      reason: "already-delivered",
+      notBefore: alreadyDue,
+    });
+    await markSessionWorkflowWakeDelivered(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+      wakeRevision: deliveredRevision,
+    });
+
+    const firstDeadline = new Date(Date.now() + 60_000);
+    const pendingRevision = await enqueueSessionWorkflowWake(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+      reason: "delayed-recovery",
+      notBefore: firstDeadline,
+    });
+    expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
+      wakeRevision: pendingRevision,
+      deliveredRevision,
+      nextAttemptAt: firstDeadline,
+    });
+
+    const laterDeadline = new Date(firstDeadline.getTime() + 60_000);
+    const coalescedRevision = await enqueueSessionWorkflowWake(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+      reason: "later-recovery",
+      notBefore: laterDeadline,
+    });
+    expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
+      wakeRevision: coalescedRevision,
+      deliveredRevision,
+      nextAttemptAt: firstDeadline,
+    });
+  });
+
   test("a stale acknowledgement cannot clear retry state owned by a newer revision", async () => {
     const ctx = await fixture();
     const first = await send(ctx, "first");
@@ -495,7 +545,7 @@ describe("transactional session workflow wake outbox", () => {
     });
     const paused = await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as typeof db, {
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
           accountId: ctx.grant.accountId,
           workspaceId: ctx.grant.workspaceId!,
           sessionId: ctx.session.id,
@@ -537,7 +587,7 @@ describe("transactional session workflow wake outbox", () => {
     });
     const paused = await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as typeof db, {
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
           accountId: ctx.grant.accountId,
           workspaceId: ctx.grant.workspaceId!,
           sessionId: ctx.session.id,
@@ -589,7 +639,7 @@ describe("transactional session workflow wake outbox", () => {
     ]);
     await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as typeof db, {
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
           accountId: ctx.grant.accountId,
           workspaceId: ctx.grant.workspaceId!,
           sessionId: ctx.session.id,

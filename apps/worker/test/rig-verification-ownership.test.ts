@@ -44,6 +44,7 @@ function snapshot(overrides: Partial<LeaseSnapshot> = {}): LeaseSnapshot {
     rigVersionId: VERSION_ID,
     dataPlaneUrl: null,
     terminalDataPlaneUrl: null,
+    controllerDataPlaneUrl: null,
     leaseEpoch: 7,
     resumeBackendId: null,
     resumeState: null,
@@ -55,7 +56,7 @@ function snapshot(overrides: Partial<LeaseSnapshot> = {}): LeaseSnapshot {
 function established(instanceId = "sb-verifier"): EstablishedSandboxSession {
   return {
     client: {},
-    session: {},
+    session: { exec: async () => ({ exitCode: 0 }) },
     sessionState: { sandboxId: instanceId },
     instanceId,
     backendId: "modal",
@@ -72,6 +73,7 @@ type HarnessOptions = {
   commitError?: Error;
   commitResult?: boolean;
   terminateResult?: boolean;
+  readinessResult?: unknown;
   markError?: Error;
   failError?: Error;
   controllerFactory?: RigVerificationOwnershipDependencies["createCancellationController"];
@@ -123,6 +125,12 @@ function harness(options: HarnessOptions = {}) {
       events.push("establish:start");
       if (options.establishErrorBeforeCreate) throw options.establishErrorBeforeCreate;
       const created = established();
+      created.session = {
+        exec: async () => {
+          events.push("readiness");
+          return options.readinessResult ?? { exitCode: 0 };
+        },
+      };
       await establishOptions.onSandboxCreated?.(created);
       events.push("establish:return");
       return created;
@@ -232,12 +240,13 @@ describe("rig verification canonical lease ownership", () => {
         return "passed";
       }),
     ).resolves.toBe("passed");
-    expect(state.events.slice(0, 7)).toEqual([
+    expect(state.events.slice(0, 8)).toEqual([
       "acquire",
       "establish:start",
       "record",
       "tag",
       "establish:return",
+      "readiness",
       "commit",
       "run",
     ]);
@@ -253,6 +262,17 @@ describe("rig verification canonical lease ownership", () => {
     expect(state.events).not.toContain("commit");
     expect(state.events).toContain("terminate");
     expect(state.events).toContain("fail-warming");
+    expect(state.events.at(-1)).toBe("release");
+  });
+
+  test("command readiness is proven before warm publication", async () => {
+    const state = harness({ readinessResult: { exitCode: 1 } });
+    await expect(state.run(async () => true)).rejects.toThrow(
+      "exec readiness probe failed with exit code 1",
+    );
+    expect(state.events).toContain("readiness");
+    expect(state.events).not.toContain("commit");
+    expect(state.events).toContain("terminate");
     expect(state.events.at(-1)).toBe("release");
   });
 

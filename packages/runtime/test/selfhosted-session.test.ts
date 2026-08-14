@@ -18,13 +18,14 @@ const RELAY = { host: "relay.test", port: 443, tls: true } as const;
 const WS = "11111111-1111-1111-1111-111111111111";
 const AGENT = "agent-abc";
 
-function sessionWith(rpc: ControlRpc, epoch = 0): SelfhostedSession {
+function sessionWith(rpc: ControlRpc, epoch = 0, terminalScopeId?: string): SelfhostedSession {
   return new SelfhostedSession({
     workspaceId: WS,
     agentId: AGENT,
     controlRpc: rpc,
     relay: RELAY,
     epoch,
+    ...(terminalScopeId !== undefined ? { terminalScopeId } : {}),
   });
 }
 
@@ -42,6 +43,40 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     // The request was addressed to the agent subject.
     expect(mock.requests[0]?.subject).toBe(subjectFor(WS, AGENT));
     expect(mock.requests[0]?.req.op?.$case).toBe("exec");
+  });
+
+  test("exec snapshots renewed transient values without persisting them", async () => {
+    const mock = new MockAgentResponder();
+    let bearer = "first-attempt-bearer";
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      controlRpc: mock,
+      relay: RELAY,
+      transientExecEnvironment: () => ({
+        OPENGENI_CODEMODE_URL: "https://api.example.test/codemode",
+        OPENGENI_CODEMODE_TOKEN: bearer,
+      }),
+    });
+
+    await session.exec({ cmd: "first" });
+    bearer = "renewed-attempt-bearer";
+    await session.exec({ cmd: "second" });
+
+    const first = mock.requests[0]?.req.op;
+    const second = mock.requests[1]?.req.op;
+    if (first?.$case !== "exec" || second?.$case !== "exec") {
+      throw new Error("expected exec requests");
+    }
+    expect(first.exec.env).toEqual({
+      OPENGENI_CODEMODE_URL: "https://api.example.test/codemode",
+      OPENGENI_CODEMODE_TOKEN: "first-attempt-bearer",
+    });
+    expect(second.exec.env.OPENGENI_CODEMODE_TOKEN).toBe("renewed-attempt-bearer");
+    expect(session.state.environment).toEqual({});
+    expect(session.state.manifest.environment).toEqual({});
+    expect(await session.serializeSessionState()).toEqual({ agentId: AGENT });
+    expect(JSON.stringify(await session.serializeSessionState())).not.toContain("bearer");
   });
 
   test("exec bounds the host process inside a slightly larger reply deadline", async () => {
@@ -219,7 +254,8 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
 
   test("resolveExposedPort(7681) routes to ptyOpen (NOT desktopEnsure) — the PTY plane is display-independent", async () => {
     const mock = new MockAgentResponder();
-    const endpoint = await sessionWith(mock).resolveExposedPort(7681);
+    const terminalScopeId = "77777777-7777-4777-8777-777777777777";
+    const endpoint = await sessionWith(mock, 0, terminalScopeId).resolveExposedPort(7681);
     // The terminal port resolves a relay endpoint on 7681 …
     expect(endpoint.host).toBe("relay.test");
     expect(endpoint.path).toBe("/stream");
@@ -229,13 +265,86 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     // terminal must not inherit the desktop's live-display requirement (the gap).
     const op = mock.requests.at(-1)?.req.op?.$case;
     expect(op).toBe("ptyOpen");
+    const request = mock.requests.at(-1)?.req.op;
+    if (request?.$case !== "ptyOpen") throw new Error("expected ptyOpen");
+    expect(request.ptyOpen.scopeId).toBe(terminalScopeId);
     expect(mock.requests.some((r) => r.req.op?.$case === "desktopEnsure")).toBe(false);
+  });
+
+  test("SelfhostedSandboxClient threads the durable terminal scope into every resumed session", async () => {
+    const mock = new MockAgentResponder();
+    const terminalScopeId = "88888888-8888-4888-8888-888888888888";
+    const client = new SelfhostedSandboxClient({
+      workspaceId: WS,
+      relay: RELAY,
+      controlRpcFactory: () => mock,
+      agentId: AGENT,
+      terminalScopeId,
+    });
+    const session = await client.resume({ agentId: AGENT });
+    await session.resolveExposedPort(7681);
+    const request = mock.requests.at(-1)?.req.op;
+    if (request?.$case !== "ptyOpen") throw new Error("expected ptyOpen");
+    expect(request.ptyOpen.scopeId).toBe(terminalScopeId);
   });
 
   test("resolveExposedPort(6080) still routes to desktopEnsure (the desktop plane)", async () => {
     const mock = new MockAgentResponder();
     await sessionWith(mock).resolveExposedPort(6080);
     expect(mock.requests.at(-1)?.req.op?.$case).toBe("desktopEnsure");
+  });
+
+  test("interaction sidecar and Browser/Computer frame relays use typed control ops", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock);
+    const ensured = await session.ensureBrowserControl({
+      scopeId: `${WS}:attached:device-1`,
+      scopeGeneration: "connection-1",
+      adminToken: "a".repeat(32),
+      allowedOrigins: ["https://app.example"],
+    });
+    expect(ensured).toEqual({ port: 17_321, sidecarGeneration: "mock-sidecar-1" });
+    const opened = await session.openBrowserFrames({
+      scopeId: `${WS}:attached:device-1`,
+      scopeGeneration: "connection-1",
+      browserSessionId: "22222222-2222-2222-2222-222222222222",
+      controllerGeneration: "controller-1",
+      targetId: "target-1",
+      viewToken: "b".repeat(32),
+      expiresAtMs: String(Date.now() + 60_000),
+      format: "jpeg",
+      quality: 70,
+      maxWidth: 1_440,
+      maxHeight: 900,
+      everyNthFrame: 1,
+    });
+    expect(mock.requests.map((request) => request.req.op?.$case).slice(-2)).toEqual([
+      "browserControlEnsure",
+      "browserFramesOpen",
+    ]);
+    expect(opened.channel).toMatchObject({ kind: 3, port: 20_000 });
+    expect(opened.endpoint).toMatchObject({ host: "relay.test", path: "/stream" });
+    expect(opened.endpoint.query).toContain("port=20000");
+    expect(opened.endpoint.query).toContain("channel=mock-browser-target-1");
+
+    const openedComputer = await session.openComputerFrames({
+      scopeId: `${WS}:connected_machine:machine-1`,
+      scopeGeneration: "connection-1",
+      computerSessionId: "33333333-3333-4333-8333-333333333333",
+      controllerGeneration: "controller-2",
+      targetId: "window-1",
+      viewToken: "c".repeat(32),
+      expiresAtMs: String(Date.now() + 60_000),
+      format: "png",
+      quality: 80,
+      maxWidth: 1_200,
+      maxHeight: 800,
+      everyNthFrame: 2,
+    });
+    expect(mock.requests.at(-1)?.req.op?.$case).toBe("computerFramesOpen");
+    expect(openedComputer.channel).toMatchObject({ kind: 4, port: 20_001 });
+    expect(openedComputer.endpoint.query).toContain("port=20001");
+    expect(openedComputer.endpoint.query).toContain("channel=mock-computer-window-1");
   });
 
   test("ping returns true against a live responder, false when offline", async () => {

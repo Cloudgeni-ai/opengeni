@@ -5,11 +5,13 @@ members = [
     "crates/opengeni-agent-engine",
     "crates/opengeni-agent-proto",
     "crates/opengeni-agent-platform",
+    "crates/opengeni-agent-linux-ffi",
     "crates/opengeni-agent-macos-ffi",
     "crates/opengeni-agent-stream",
     "crates/opengeni-agent-update",
     "crates/opengeni-relay",
     "crates/opengeni-agent-harness",
+    "crates/opengeni-computer-native",
 ]
 
 # Shared metadata + lint posture for every crate in the agent workspace.
@@ -45,8 +47,9 @@ async-trait = "0.1"
 command-group = { version = "5.0.1", features = ["with-tokio"] }
 
 # Control-plane transport. async-nats is the official Rust NATS client; the agent
-# subscribes to `agent.<ws>.<id>.rpc` and answers ControlRequests.
-async-nats = "0.49"
+# subscribes to `agent.<ws>.<id>.rpc` and answers ControlRequests. 0.47+ requires
+# Rust 1.88, so keep the newest lineage compatible with our declared 1.82 floor.
+async-nats = "=0.46.0"
 
 # Structured logging; never log secret values.
 tracing = "0.1"
@@ -59,6 +62,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
+# 1.19+ can select edition-2024 `getrandom`; 1.18.1 is the newest lineage
+# compatible with the workspace's declared Cargo/Rust 1.82 floor.
+uuid = { version = "=1.18.1", features = ["v4"] }
 
 # CLI parsing.
 clap = { version = "4", features = ["derive", "env"] }
@@ -80,10 +86,14 @@ xattr = "1.6.1"
 # A real PTY (openpty/ConPTY) via a SAFE binding — no unsafe.
 portable-pty = "0.9"
 # Desktop frame encoding (capture → PNG chunk over a StreamFrame).
-image = { version = "0.25", default-features = false, features = ["png"] }
+# 0.25.7+ raised the MSRV; 0.25.6 retains the PNG API and Rust 1.82 support.
+image = { version = "=0.25.6", default-features = false, features = ["jpeg", "png"] }
 # Linux X11 capture + XTEST input + RANDR geometry via the SAFE pure-Rust binding
 # (keeps unsafe_code = forbid; no FFI of our own).
-x11rb = { version = "0.13", features = ["xtest", "randr", "image"] }
+x11rb = { version = "0.13", features = ["xtest", "randr", "composite", "damage", "image"] }
+# Text-only native clipboard access. The helper retains one handle for its full
+# lifetime so X11 selection ownership remains valid; macOS uses NSPasteboard.
+arboard = { version = "=3.6.1", default-features = false }
 # The relay-dial wss fallback transport (the QUIC/WebTransport preferred path is
 # structured behind a trait; wss is the concrete day-1 impl).
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
@@ -113,14 +123,30 @@ minisign-verify = "0.2"
 # discovery/verify/rollback; we delegate ONLY the atomic replace.
 self-replace = "1"
 # Deterministic staged-rollout cohorting: blake3(agentId + cohort_salt) % 100.
-blake3 = "1"
+# 1.8.3+ moved to edition 2024 without declaring an MSRV, bypassing Cargo's
+# compatibility-aware resolver; 1.8.2 is the newest Rust 1.82-compatible release.
+blake3 = "=1.8.2"
 # Semantic-version comparison for version-monotonicity + min_supported gating.
 semver = "1"
 # Hex encode/decode for the sha256 compare.
 hex = "0.4"
+# AT-SPI 0.30 supports our Rust 1.82 floor, but its intentionally broad zbus /
+# zvariant ranges also admit newer releases whose edition-2024 helper crates do
+# not. Keep the compatible pair explicit so a routine lock refresh cannot
+# silently raise the agent's MSRV.
+atspi = { version = "0.30", default-features = false, features = ["connection", "proxies", "zbus"] }
+zbus = { version = "=5.5.0", default-features = false }
+zvariant = { version = "=5.2.0", default-features = false }
+zvariant_utils = { version = "=3.2.0", default-features = false }
+proc-macro-crate = "=3.2.0"
+indexmap = "=2.7.1"
+async-lock = "=3.4.0"
+async-signal = "=0.2.10"
 
 # Test-only helpers.
-tempfile = "3"
+# 3.27+ selects edition-2024 `getrandom`; keep proto builds compatible with the
+# workspace's declared Cargo/Rust 1.82 floor.
+tempfile = "=3.20.0"
 
 [workspace.lints.rust]
 missing_docs = "warn"

@@ -1,4 +1,5 @@
-import type { Settings } from "@opengeni/config";
+import { resolveFirstPartyDelegationSecret, type Settings } from "@opengeni/config";
+import { verifyDelegatedAccessToken } from "@opengeni/contracts";
 import type { Context, MiddlewareHandler } from "hono";
 import { installExactPaths, isInstallRedirectPath } from "../routes/install";
 
@@ -17,7 +18,7 @@ export function requireAccessKey(settings: Settings): MiddlewareHandler {
       await next();
       return;
     }
-    if (isAuthorized(c, settings.accessKey)) {
+    if (await isAuthorized(c, settings)) {
       await next();
       return;
     }
@@ -49,11 +50,16 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   }
   if (
     path === "/v1/integrations/oauth/callback" ||
+    path === "/v1/integrations/provider-oauth/callback" ||
+    path === "/v1/integrations/google-drive/callback" ||
     path === "/v1/integrations/oauth/client-metadata.json" ||
     path === "/v1/integrations/slack/callback" ||
     path === "/v1/integrations/slack/events" ||
     path === "/v1/integrations/slack/commands" ||
-    path === "/v1/integrations/slack/interactions"
+    path === "/v1/integrations/slack/interactions" ||
+    // Fiken OAuth browser redirect: exact path only, protected by signed
+    // single-use state plus a callback-time grant recheck.
+    path === "/v1/integrations/fiken/callback"
   ) {
     return true;
   }
@@ -98,19 +104,33 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   return false;
 }
 
-function isAuthorized(c: Context, expected: string | undefined): boolean {
-  if (!expected) {
-    return false;
-  }
+async function isAuthorized(c: Context, settings: Settings): Promise<boolean> {
+  const expected = settings.accessKey;
   const explicit = c.req.header("x-opengeni-access-key");
-  if (constantTimeEqual(explicit, expected)) {
+  if (expected && constantTimeEqual(explicit, expected)) {
     return true;
   }
   const authorization = c.req.header("authorization");
   const bearer = authorization?.startsWith("Bearer ")
     ? authorization.slice("Bearer ".length)
     : undefined;
-  return constantTimeEqual(bearer, expected);
+  if (expected && constantTimeEqual(bearer, expected)) {
+    return true;
+  }
+
+  // This middleware is only the deployment perimeter. A valid first-party
+  // delegated bearer is already authenticated with the deployment's separate
+  // delegation authority, so admit it only to the product API's route-level
+  // access resolver. Deployment-only surfaces such as /metrics still require
+  // the static deployment key. The resolver enforces exact account, workspace,
+  // principal, and permissions; attempt-bound surfaces add live-attempt fences.
+  const delegationSecret = resolveFirstPartyDelegationSecret(settings);
+  return Boolean(
+    c.req.path.startsWith("/v1/") &&
+    bearer &&
+    delegationSecret &&
+    (await verifyDelegatedAccessToken(delegationSecret, bearer)),
+  );
 }
 
 function constantTimeEqual(actual: string | undefined, expected: string): boolean {

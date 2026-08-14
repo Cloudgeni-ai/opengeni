@@ -1,5 +1,112 @@
 # @opengeni/react
 
+## 0.57.0
+
+### Patch Changes
+
+- d86610d: Prevent deterministic model-generated worker-spawn failures, hide exhausted nested-agent creation, and show bounded structured session orchestration diagnostics in worker timeline rows while preserving the advanced public REST/SDK create contract.
+- d86610d: Run published HTML artifacts as exact source in an opaque-origin sandbox, raise their UTF-8 ceiling to 4 MiB, and expose reusable React rendering. Add deployment-configurable default and allowed built-in session tools plus configured shared-key delegation fallback.
+- Updated dependencies [478d7fe]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+  - @opengeni/sdk@0.57.0
+
+## 0.56.0
+
+### Minor Changes
+
+- b0b2bed: Add unified browser and computer interaction APIs, reusable browser identities, native input, live streaming, and React viewer controls across managed sandboxes and connected machines.
+
+### Patch Changes
+
+- Updated dependencies [b0b2bed]
+  - @opengeni/sdk@0.56.0
+
+## 0.55.0
+
+### Minor Changes
+
+- 8beed26: Add managed-human organization membership discovery. Expose the exact active
+  self-membership and personal-workspace identity returned by the existing
+  narrow provisioning capability through a managed-session-only API route and
+  typed SDK method, while denying delegated/API-key principals and terminal
+  memberships.
+
+### Patch Changes
+
+- Updated dependencies [8beed26]
+  - @opengeni/sdk@0.55.0
+
+## 0.54.0
+
+### Patch Changes
+
+- Updated dependencies [1e78f58]
+- Updated dependencies [1e78f58]
+- Updated dependencies [1e78f58]
+  - @opengeni/sdk@0.54.0
+
+## 0.53.1
+
+### Patch Changes
+
+- @opengeni/sdk@0.53.1
+
+## 0.53.0
+
+### Minor Changes
+
+- d2def0c: Add the complete browser-native and semantic computer interaction system across managed sandboxes, Connected Machines, attached Chrome, and external browser placements. Ship durable browser identities, authentication repair, network routing, downloads/uploads, shared causal control, public SDK and React workbench surfaces, and one exact MCP/Codemode execution catalog with native Connected Machine access.
+
+### Patch Changes
+
+- Updated dependencies [d2def0c]
+- Updated dependencies [5215c0e]
+  - @opengeni/sdk@0.53.0
+
+## 0.52.1
+
+### Patch Changes
+
+- 5c5ea4a: Add the universal capabilities platform with named API integration instances,
+  provider-specific feature bindings, and local runtime adapters.
+- Updated dependencies [5c5ea4a]
+  - @opengeni/sdk@0.52.1
+
+## 0.52.0
+
+### Patch Changes
+
+- Updated dependencies [8b6803a]
+- Updated dependencies [aeb07f4]
+- Updated dependencies [ff7203c]
+  - @opengeni/sdk@0.52.0
+
+## 0.51.0
+
+### Minor Changes
+
+- dcfe6eb: Add canonical attempt-scoped CodeMode, browser and computer interaction, and durable collaborative editable artifacts. Agents and humans now share one artifact head through the same application authority; direct MCP and CodeMode support bounded inspection, fenced edits, trusted Office import, and asynchronous export to workspace files. The session UI gains a first-class Artifacts workspace, and React interaction viewers move to an explicit lazy-loadable subpath.
+
+### Patch Changes
+
+- 2f4ce5e: Add durable Seedance video generation with workspace model and funding policy,
+  secure media references, retained video artifacts, sandbox materialization,
+  OpenGeni-credit and workspace-gateway funding, and SDK/React playback surfaces.
+- 76e54a9: Keep mobile voice-input Cancel and Stop controls visible while recording in crowded composer footers.
+- bd5514e: Add explicitly enabled provider-neutral knowledge-source schedules with durable wake provenance, generation-fenced execution checkpoints and index obligations, fail-closed ACL activation seams, no-agent execution, layered pause state, shared schedule administration, and Google Drive source lifecycle integration.
+- 90eea29: Make connected-machine removal show every dependent session and support an explicit canonical move-to-default-sandbox confirmation before revocation. Default moves prove managed sandbox readiness through the existing fleet route, active turns remain fail-closed, and typed swap rejections surface as visible errors instead of false success.
+- Updated dependencies [b46f4de]
+- Updated dependencies [2f4ce5e]
+- Updated dependencies [d55a093]
+- Updated dependencies [dcfe6eb]
+- Updated dependencies [ad9123b]
+- Updated dependencies [bd5514e]
+- Updated dependencies [90eea29]
+- Updated dependencies [a858835]
+  - @opengeni/sdk@0.51.0
+
 ## 0.50.1
 
 ### Patch Changes

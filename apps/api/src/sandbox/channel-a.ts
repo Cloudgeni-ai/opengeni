@@ -64,8 +64,10 @@ import {
   ChannelAUnsupportedError,
   ChannelAUnavailableError,
   ChannelAValidationError,
-  toolspaceTokenFileFromEnvironment,
-  withToolspaceTokenSession,
+  BrowserControlRequestError,
+  BrowserControlTransportError,
+  codemodeTokenFileFromEnvironment,
+  withCodemodeTokenSession,
   withRunCredentialsSession,
   type ChannelASession,
   type EstablishedSandboxSession,
@@ -98,7 +100,22 @@ export type ChannelAOperation =
   | "terminal.pty.open"
   | "terminal.pty.write"
   | "terminal.pty.resize"
-  | "terminal.pty.close";
+  | "terminal.pty.close"
+  | "browser.create"
+  | "browser.resume"
+  | "browser.suspend"
+  | "browser.end"
+  | "browser.read"
+  | "browser.action"
+  | "browser.control"
+  | "browser.download.save"
+  | "browser.attach"
+  | "computer.create"
+  | "computer.end"
+  | "computer.read"
+  | "computer.action"
+  | "computer.control"
+  | "computer.attach";
 
 export type ChannelAContext = {
   accountId: string;
@@ -110,6 +127,11 @@ export type ChannelAContext = {
   waitSignal?: AbortSignal | undefined;
   /** Bounded route identity for metrics and safe operator diagnostics. */
   operation?: ChannelAOperation | undefined;
+  /** The callback is an interaction-controller read or an exactly-once action.
+   * A controller transport failure may therefore rebuild the exact fenced
+   * provider handle and replay the request. Tab/lifecycle mutations that lack
+   * a controller operation id must never opt into this recovery. */
+  retryControllerTransport?: boolean | undefined;
 };
 
 export type ChannelAOperationFailureReason =
@@ -138,6 +160,10 @@ export type ChannelAHandle = {
   /** Connected Machine homes deliberately have no cloud lease. Durable PTYs
    * require a real home-provider lease and reject this null case. */
   lease: LeaseSnapshot | null;
+  /** Exact placement-home session established under this request's lease or
+   * Connected Machine fence. Unlike routingSession, this never follows a later
+   * active-sandbox pointer and is safe for placement-bound controllers. */
+  homeSession: ChannelASession;
   routingSession: RoutingSandboxSession;
   requestId: string;
 };
@@ -355,6 +381,8 @@ type ChannelAReadRecoveryOptions = {
   maxFreshHandleRetries?: 1 | 2;
   /** Never start another provider attempt after the originating request ends. */
   waitSignal?: AbortSignal | undefined;
+  /** Additional callback-specific failure that is safe to replay. */
+  retryableError?: ((error: unknown) => boolean) | undefined;
 };
 
 /** Retry a side-effect-free Channel-A read only after the caller has discarded
@@ -375,7 +403,9 @@ export async function runChannelAReadWithFreshHandleRetry<T>(
     try {
       return await run();
     } catch (error) {
-      if (!(error instanceof ChannelAUnavailableError) || retries >= maxFreshHandleRetries) {
+      const retryable =
+        error instanceof ChannelAUnavailableError || options.retryableError?.(error) === true;
+      if (!retryable || retries >= maxFreshHandleRetries) {
         throw error;
       }
       options.waitSignal?.throwIfAborted();
@@ -389,7 +419,17 @@ export function shouldEvictChannelAHandleAfterError(
   error: unknown,
   cacheKind: EstablishedHandleCacheKind,
 ): boolean {
-  return error instanceof ChannelAUnavailableError && cacheKind === "read";
+  return (
+    cacheKind === "read" &&
+    (error instanceof ChannelAUnavailableError || isRetryableControllerTransport(error))
+  );
+}
+
+function isRetryableControllerTransport(error: unknown): boolean {
+  return (
+    error instanceof BrowserControlTransportError ||
+    (error instanceof BrowserControlRequestError && error.retryable)
+  );
 }
 
 function evictEstablishedHandle(key: string, cacheKind: EstablishedHandleCacheKind): void {
@@ -481,7 +521,7 @@ async function withChannelAOperation<T>(
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
 
   // The STABLE run-environment used by both a cloud home and a machine home.
-  // It also carries the per-session Toolspace pointer selected below.
+  // It also carries the per-session Codemode pointer selected below.
   const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
     db,
     settings,
@@ -507,6 +547,7 @@ async function withChannelAOperation<T>(
   const runEstablished = async (
     routed: EstablishedSandboxSession,
     lease: LeaseSnapshot | null,
+    homeSession: ChannelASession,
   ): Promise<T> => {
     const emit = async (events: { type: string; payload: unknown }[]): Promise<void> => {
       await appendAndPublishEvents(
@@ -519,10 +560,10 @@ async function withChannelAOperation<T>(
     };
     const routingSession = routed.session as RoutingSandboxSession;
     const credentialSession = withRunCredentialsSession(routingSession as object, session.id);
-    const scopedSession = environment.OPENGENI_TOOLSPACE_TOKEN_FILE
-      ? withToolspaceTokenSession(
+    const scopedSession = environment.OPENGENI_CODEMODE_TOKEN_FILE
+      ? withCodemodeTokenSession(
           credentialSession,
-          toolspaceTokenFileFromEnvironment(environment, session.id),
+          codemodeTokenFileFromEnvironment(environment, session.id),
         )
       : credentialSession;
     const service = new SandboxChannelAService({
@@ -530,7 +571,7 @@ async function withChannelAOperation<T>(
       leaseEpoch: lease?.leaseEpoch ?? session.activeEpoch,
       emit,
     });
-    const result = await fn({ service, lease, routingSession, requestId });
+    const result = await fn({ service, lease, homeSession, routingSession, requestId });
     // The direct request has accepted the result in memory. Finalize every
     // Connected Machine backend the routing proxy reached so a mid-request
     // route transition cannot leave completed output retained until TTL.
@@ -607,7 +648,7 @@ async function withChannelAOperation<T>(
         },
         established,
       );
-      return await runEstablished(routed, null);
+      return await runEstablished(routed, null, established.session as ChannelASession);
     } catch (error) {
       observeChannelAOperationFailure(services, {
         workspaceId,
@@ -832,7 +873,8 @@ async function withChannelAOperation<T>(
         },
         established!,
       );
-      const run = async () => await runEstablished(routed, leaseSnapshot);
+      const run = async () =>
+        await runEstablished(routed, leaseSnapshot, established!.session as ChannelASession);
       return readOnly && session.sandboxBackend === "modal"
         ? await withSandboxProviderReadLock(
             db,
@@ -923,6 +965,9 @@ async function withChannelAOperation<T>(
           {
             maxFreshHandleRetries: session.sandboxBackend === "modal" ? 2 : 1,
             ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
+            ...(ctx.retryControllerTransport
+              ? { retryableError: isRetryableControllerTransport }
+              : {}),
           },
         )
       : await runProviderOperation();

@@ -55,6 +55,7 @@ export * from "./billing/limits";
 // postUserMessageTurn, createAndStartSession, capability/pack/environment/
 // scheduled-task/workspace-member logic, …).
 export * from "./domain/capabilities";
+export * from "./domain/skill-imports";
 export * from "./domain/environments";
 export * from "./rigs";
 export * from "./domain/packs";
@@ -65,9 +66,16 @@ export * from "./domain/scheduled-tasks";
 export * from "./domain/sessions";
 export * from "./domain/insights";
 export * from "./domain/memory-slack-publication";
+export * from "./domain/memory-slack-delivery";
+export * from "./domain/durable-learning-slack-publication";
+export * from "./domain/slack-publication-secret-safety";
 export * from "./domain/company-profile-durable-learning-adapter";
 export * from "./domain/slack-bot";
+export * from "./domain/conversation-integrations";
+export * from "./domain/fiken";
 export * from "./domain/workspace-members";
+export * from "./domain/video-generation";
+export * from "./domain/video-generation-capabilities";
 export * from "./application/new-session-drafts";
 export * from "./application/session-commands";
 

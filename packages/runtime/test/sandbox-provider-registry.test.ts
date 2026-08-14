@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { access } from "node:fs/promises";
 import {
+  BROWSER_CONTROL_PORT,
   CAPABILITY_DESCRIPTORS,
   DESKTOP_STREAM_PORT,
   SandboxBackend,
@@ -22,6 +23,7 @@ import {
   sdkBackendIdForSandboxBackend,
   selectBackend,
 } from "../src/sandbox";
+import { dockerInspectProvesMissing } from "../src/sandbox/providers/docker";
 
 // Per-provider credential stubs so build() can run without real creds. Only the
 // fields validateCredentials requires per backend are present.
@@ -219,6 +221,35 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     expect(typeof client.resumeExact).toBe("function");
   });
 
+  test("docker exact resume recognizes only exact missing-container diagnostics", () => {
+    const containerId = "fba61104cc50168d";
+
+    expect(
+      dockerInspectProvesMissing(
+        { stderr: `Error response from daemon: No such container: ${containerId}\n` },
+        containerId,
+      ),
+    ).toBe(true);
+    expect(
+      dockerInspectProvesMissing(
+        { stderr: `Error: No such container: ${containerId}` },
+        containerId,
+      ),
+    ).toBe(true);
+    expect(
+      dockerInspectProvesMissing(
+        { stderr: `Error response from daemon: No such container: another-container` },
+        containerId,
+      ),
+    ).toBe(false);
+    expect(
+      dockerInspectProvesMissing(
+        { stderr: `permission denied while inspecting ${containerId}` },
+        containerId,
+      ),
+    ).toBe(false);
+  });
+
   test("local exact resume never restores or creates a replacement workspace", async () => {
     const client = createSandboxClient(testSettings({ sandboxBackend: "local" })) as {
       create: () => Promise<{
@@ -401,6 +432,24 @@ describe("createSandboxClient — 6080 desktop-port merge", () => {
       ) as { options?: { exposedPorts?: number[] } };
       expect(client.options?.exposedPorts ?? []).not.toContain(DESKTOP_STREAM_PORT);
     }
+  });
+});
+
+describe("createSandboxClient — browser controller port merge", () => {
+  for (const backend of ["modal", "runloop", "e2b"] as const) {
+    test(`pre-declares 7682 for ${backend}`, () => {
+      const client = createSandboxClient(
+        testSettings({ sandboxBackend: backend, ...CREDS[backend] }),
+      ) as { options?: { exposedPorts?: number[] } };
+      expect(client.options?.exposedPorts).toContain(BROWSER_CONTROL_PORT);
+    });
+  }
+
+  test("leaves the on-demand Blaxel port list absent", () => {
+    const client = createSandboxClient(
+      testSettings({ sandboxBackend: "blaxel", blaxelApiKey: "k" }),
+    ) as { options?: { exposedPorts?: number[] } };
+    expect(client.options?.exposedPorts).toBeUndefined();
   });
 });
 

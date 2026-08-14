@@ -1,20 +1,19 @@
-import type { AccessGrant, FileAsset } from "@opengeni/contracts";
+import type { AccessGrant } from "@opengeni/contracts";
 import { EDITABLE_ARTIFACT_KERNEL_VERSION_MAX_BYTES } from "@opengeni/contracts/editable-artifacts";
 import {
   EditableArtifactCompatibilityError,
   EditableArtifactDurableExportError,
   EditableArtifactDomainError,
-  EDITABLE_ARTIFACT_ORIGINAL_IMPORT_MAX_BYTES,
-  MAX_EDITABLE_ARTIFACT_SNAPSHOT_BYTES,
+  EditableArtifactOfficeImportError,
   editableArtifactClientTransactionId,
-  editableArtifactCausalFrontier,
-  editableArtifactContentHash,
   editableArtifactId,
   editableArtifactReplicaId,
   editableArtifactScope,
-  editableArtifactStateHash,
   hasPermission,
   requireAccessGrant,
+  requireSessionAuthorization,
+  SessionAuthorizationDeniedError,
+  SessionAuthorizationUnavailableError,
   type AccessDeps,
   type EditableArtifact,
   type EditableArtifactActor,
@@ -22,11 +21,11 @@ import {
   type EditableArtifactDurableExportService,
   type EditableArtifactMaterializationDownload,
   type EditableArtifactMaterializationJob,
+  type EditableArtifactOfficeImportPort,
   type EditableArtifactPinnedVersion,
   type EditableArtifactModality,
-  type ImportEditableArtifactApplicationInput,
 } from "@opengeni/core";
-import { getFile } from "@opengeni/db";
+import { listEditableArtifactIdsForSession } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 
@@ -34,7 +33,6 @@ import { ApiHttpError } from "../http/api-error";
 
 export const EDITABLE_ARTIFACT_HTTP_REQUEST_MAX_BYTES = 4 * 1024;
 export const EDITABLE_ARTIFACT_EXPORT_REQUEST_MAX_BYTES = 260 * 1024;
-export const EDITABLE_ARTIFACT_IMPORT_REQUEST_MAX_BYTES = 2 * 1024 * 1024;
 export const EDITABLE_ARTIFACT_LIVE_TICKET_REQUEST_MAX_BYTES =
   EDITABLE_ARTIFACT_HTTP_REQUEST_MAX_BYTES;
 
@@ -68,7 +66,14 @@ const VersionName = z
       isWellFormedPersistedText(value),
   );
 const AttemptId = z.string().uuid();
+const SessionId = z.string().uuid();
 const AttemptGeneration = z.number().int().positive().max(2_147_483_647);
+const ListEditableArtifactsQuery = z
+  .object({
+    sourceSessionId: SessionId,
+    replicaId: ReplicaId,
+  })
+  .strict();
 
 const MintEditableArtifactLiveTicketRequest = z
   .object({
@@ -92,52 +97,6 @@ const CreateEditableArtifactRequest = z
   })
   .strict();
 
-const ImportSnapshotCommon = {
-  blobReference: z.string().min(1).max(1_024),
-  byteSize: z.number().int().positive().max(MAX_EDITABLE_ARTIFACT_SNAPSHOT_BYTES),
-  contentHash: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
-  mimeType: z.literal("application/vnd.opengeni.editable-artifact-snapshot"),
-  coveredHeadSequence: z.literal(0),
-  stateHash: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
-  modelSchemaVersion: PositiveModelSchemaVersion,
-  kernelVersion: VersionName,
-} as const;
-
-const ImportEditableArtifactSnapshot = z.discriminatedUnion("modality", [
-  z
-    .object({
-      ...ImportSnapshotCommon,
-      modality: z.literal("spreadsheet"),
-      coveredCausalFrontier: z
-        .array(
-          z
-            .object({
-              replicaId: ReplicaId,
-              counter: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-            })
-            .strict(),
-        )
-        .max(65_536),
-      operationProtocolVersion: PositiveProtocolVersion,
-      crdtStateVersion: PositiveProtocolVersion,
-    })
-    .strict(),
-  z
-    .object({
-      ...ImportSnapshotCommon,
-      modality: z.literal("document"),
-      nativeRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-    })
-    .strict(),
-  z
-    .object({
-      ...ImportSnapshotCommon,
-      modality: z.literal("presentation"),
-      nativeRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-    })
-    .strict(),
-]);
-
 const ImportEditableArtifactRequest = z
   .object({
     replicaId: ReplicaId,
@@ -152,10 +111,8 @@ const ImportEditableArtifactRequest = z
       .string()
       .uuid()
       .refine((value) => value === value.toLowerCase()),
-    snapshot: ImportEditableArtifactSnapshot,
   })
-  .strict()
-  .refine((value) => value.modality === value.snapshot.modality);
+  .strict();
 
 const PinEditableArtifactVersionRequest = z
   .object({
@@ -214,6 +171,10 @@ const EditableArtifactResult = z
     createdAt: z.string().datetime({ offset: true }),
     updatedAt: z.string().datetime({ offset: true }),
   })
+  .strict();
+
+const EditableArtifactListResult = z
+  .object({ artifacts: z.array(EditableArtifactResult).max(64) })
   .strict();
 
 const PinnedVersionResult = z
@@ -335,11 +296,13 @@ export type EditableArtifactRouteDependencies = AccessDeps &
   Readonly<{
     editableArtifacts?: EditableArtifactApplicationPort;
     editableArtifactExports?: EditableArtifactDurableExportService;
-    /** Test/embedding seam; standalone defaults to the RLS-scoped DB lookup. */
-    editableArtifactImportSource?: (
-      workspaceId: string,
-      fileId: string,
-    ) => Promise<FileAsset | null>;
+    editableArtifactOfficeImports?: EditableArtifactOfficeImportPort;
+    /** Test/embedding seam; returned ids are still authorized one by one. */
+    editableArtifactSessionArtifactIds?: (
+      scope: EditableArtifactRouteScope,
+      sourceSessionId: string,
+      limit: number,
+    ) => Promise<readonly string[]>;
   }>;
 
 export type EditableArtifactApplicationErrorCode =
@@ -364,6 +327,46 @@ export function registerEditableArtifactRoutes(
 ): void {
   const collection = "/v1/workspaces/:workspaceId/editable-artifacts";
   const item = `${collection}/:artifactId`;
+
+  app.get(collection, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
+    const query = ListEditableArtifactsQuery.safeParse({
+      sourceSessionId: context.req.query("sourceSessionId"),
+      replicaId: context.req.query("replicaId"),
+    });
+    if (!query.success) {
+      throw new ApiHttpError(422, {
+        code: "validation_failed",
+        message: "Invalid editable artifact list query.",
+      });
+    }
+    await authorizeSourceSession(deps, grant, query.data.sourceSessionId);
+    const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
+    const actor = editableArtifactActorForGrant(grant, query.data.replicaId);
+    const candidateIds = await (deps.editableArtifactSessionArtifactIds
+      ? deps.editableArtifactSessionArtifactIds(scope, query.data.sourceSessionId, 64)
+      : listEditableArtifactIdsForSession(deps.db, scope, query.data.sourceSessionId, 64));
+    const artifactIds = normalizeArtifactIdList(candidateIds);
+    const application = requireEditableArtifactApplication(deps);
+    const artifacts: z.infer<typeof EditableArtifactResult>[] = [];
+    for (const artifactId of artifactIds) {
+      try {
+        const artifact = await application.readArtifact({
+          scope,
+          actor,
+          artifactId: editableArtifactId(artifactId),
+        });
+        artifacts.push(projectArtifact(artifact, scope));
+      } catch (error) {
+        if (isInvisibleListCandidate(error)) continue;
+        throw editableArtifactHttpError(error);
+      }
+    }
+    const result = EditableArtifactListResult.parse({ artifacts });
+    context.header("cache-control", "private, no-store");
+    return context.json(result, 200);
+  });
 
   app.post(collection, async (context) => {
     const workspaceId = context.req.param("workspaceId");
@@ -400,54 +403,38 @@ export function registerEditableArtifactRoutes(
       throw applicationHttpError("forbidden");
     }
     const body = await parseBoundedImportRequest(context);
-    const source = await (deps.editableArtifactImportSource
-      ? deps.editableArtifactImportSource(workspaceId, body.sourceFileId)
-      : getFile(deps.db, workspaceId, body.sourceFileId));
-    const expectedSourceMime = officeMimeType(body.modality);
-    if (
-      !source ||
-      source.workspaceId !== workspaceId ||
-      source.status !== "ready" ||
-      source.contentType !== expectedSourceMime ||
-      source.sizeBytes < 1 ||
-      source.sizeBytes > EDITABLE_ARTIFACT_ORIGINAL_IMPORT_MAX_BYTES ||
-      typeof source.sha256 !== "string" ||
-      !/^[0-9a-f]{64}$/u.test(source.sha256)
-    ) {
-      throw new ApiHttpError(422, {
-        code: "validation_failed",
-        message: "Editable artifact import source is not a ready Office file.",
-      });
-    }
-    const expectedSnapshotReference = `editable-artifacts/snapshots/sha256/${body.snapshot.contentHash.slice("sha256:".length)}`;
-    if (body.snapshot.blobReference !== expectedSnapshotReference) {
-      throw new ApiHttpError(422, {
-        code: "validation_failed",
-        message: "Editable artifact snapshot reference is invalid.",
-      });
-    }
     const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
     const actor = editableArtifactActorForGrant(grant, body.replicaId);
     try {
+      const prepared = await requireEditableArtifactOfficeImports(deps).prepare({
+        scope,
+        actor,
+        fileId: body.sourceFileId,
+        modality: body.modality,
+        signal: context.req.raw.signal,
+      });
       const artifact = await requireEditableArtifactApplication(deps).importArtifact({
         scope,
         actor,
         idempotencyKey: editableArtifactClientTransactionId(body.idempotencyKey),
         modality: body.modality,
         title: body.title,
-        originalImport: {
-          fileId: source.id,
-          blobReference: source.objectKey,
-          byteSize: source.sizeBytes,
-          contentHash: editableArtifactContentHash(`sha256:${source.sha256}`),
-          mimeType: expectedSourceMime,
-        },
-        snapshot: normalizeImportSnapshot(body.snapshot),
+        originalImport: prepared.originalImport,
+        snapshot: prepared.snapshot,
         signal: context.req.raw.signal,
       });
       context.header("cache-control", "private, no-store");
       return context.json(projectArtifact(artifact, scope), 201);
     } catch (error) {
+      if (error instanceof EditableArtifactOfficeImportError) {
+        throw new ApiHttpError(error.code === "source_changed" ? 409 : 422, {
+          code: error.code === "source_changed" ? "conflict" : "validation_failed",
+          message:
+            error.code === "source_changed"
+              ? "The workspace file changed during import."
+              : "The workspace file cannot be imported as this artifact modality.",
+        });
+      }
       throw editableArtifactHttpError(error);
     }
   });
@@ -627,6 +614,35 @@ export function registerEditableArtifactRoutes(
   });
 }
 
+async function authorizeSourceSession(
+  deps: EditableArtifactRouteDependencies,
+  grant: AccessGrant,
+  sessionId: string,
+): Promise<void> {
+  try {
+    await requireSessionAuthorization(deps, grant, {
+      sessionId,
+      operation: "session.read",
+      surface: "http",
+    });
+  } catch (error) {
+    if (error instanceof SessionAuthorizationDeniedError) {
+      throw new ApiHttpError(404, {
+        code: "not_found",
+        message: "Session not found.",
+      });
+    }
+    if (error instanceof SessionAuthorizationUnavailableError) {
+      throw new ApiHttpError(503, {
+        code: "upstream_unavailable",
+        message: "Session authorization is temporarily unavailable.",
+        retryable: true,
+      });
+    }
+    throw error;
+  }
+}
+
 function requireEditableArtifactApplication(
   deps: EditableArtifactRouteDependencies,
 ): EditableArtifactApplicationPort {
@@ -643,6 +659,15 @@ function requireEditableArtifactExports(
     throw editableArtifactHttpError(new EditableArtifactApplicationError("unavailable"));
   }
   return deps.editableArtifactExports;
+}
+
+function requireEditableArtifactOfficeImports(
+  deps: EditableArtifactRouteDependencies,
+): EditableArtifactOfficeImportPort {
+  if (!deps.editableArtifactOfficeImports) {
+    throw editableArtifactHttpError(new EditableArtifactApplicationError("unavailable"));
+  }
+  return deps.editableArtifactOfficeImports;
 }
 
 function projectArtifact(
@@ -859,6 +884,32 @@ function parseArtifactId(value: string): string {
   return parsed.data;
 }
 
+function normalizeArtifactIdList(value: readonly string[]): readonly string[] {
+  if (!Array.isArray(value) || value.length > 64) {
+    throw new Error("Editable artifact list adapter returned too many candidates");
+  }
+  const ids = value.map((candidate) => {
+    const parsed = ArtifactId.safeParse(candidate);
+    if (!parsed.success) {
+      throw new Error("Editable artifact list adapter returned an invalid candidate");
+    }
+    return parsed.data;
+  });
+  if (new Set(ids).size !== ids.length) {
+    throw new Error("Editable artifact list adapter returned duplicate candidates");
+  }
+  return ids;
+}
+
+function isInvisibleListCandidate(error: unknown): boolean {
+  return (
+    (error instanceof EditableArtifactDomainError &&
+      (error.code === "forbidden" || error.code === "not_found")) ||
+    (error instanceof EditableArtifactApplicationError &&
+      (error.code === "forbidden" || error.code === "not_found"))
+  );
+}
+
 function parseReplicaId(value: string): string {
   const parsed = ReplicaId.safeParse(value);
   if (!parsed.success) {
@@ -904,7 +955,7 @@ async function parseBoundedCreateRequest(
 async function parseBoundedImportRequest(
   context: Context,
 ): Promise<z.infer<typeof ImportEditableArtifactRequest>> {
-  const value = await readBoundedJson(context.req.raw, EDITABLE_ARTIFACT_IMPORT_REQUEST_MAX_BYTES);
+  const value = await readBoundedJson(context.req.raw, EDITABLE_ARTIFACT_HTTP_REQUEST_MAX_BYTES);
   const parsed = ImportEditableArtifactRequest.safeParse(value);
   if (!parsed.success) {
     throw new ApiHttpError(422, {
@@ -913,52 +964,6 @@ async function parseBoundedImportRequest(
     });
   }
   return parsed.data;
-}
-
-function officeMimeType(
-  modality: EditableArtifactModality,
-):
-  | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-  | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-  | "application/vnd.openxmlformats-officedocument.presentationml.presentation" {
-  return modality === "spreadsheet"
-    ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    : modality === "document"
-      ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-      : "application/vnd.openxmlformats-officedocument.presentationml.presentation";
-}
-
-function normalizeImportSnapshot(
-  snapshot: z.infer<typeof ImportEditableArtifactSnapshot>,
-): ImportEditableArtifactApplicationInput["snapshot"] {
-  const common = {
-    blobReference: snapshot.blobReference,
-    byteSize: snapshot.byteSize,
-    contentHash: editableArtifactContentHash(snapshot.contentHash),
-    mimeType: snapshot.mimeType,
-    coveredHeadSequence: snapshot.coveredHeadSequence,
-    stateHash: editableArtifactStateHash(snapshot.stateHash),
-    modelSchemaVersion: snapshot.modelSchemaVersion,
-    kernelVersion: snapshot.kernelVersion,
-  } as const;
-  return snapshot.modality === "spreadsheet"
-    ? Object.freeze({
-        ...common,
-        modality: "spreadsheet" as const,
-        coveredCausalFrontier: editableArtifactCausalFrontier(
-          snapshot.coveredCausalFrontier.map((entry) => ({
-            replicaId: editableArtifactReplicaId(entry.replicaId),
-            counter: entry.counter,
-          })),
-        ),
-        operationProtocolVersion: snapshot.operationProtocolVersion,
-        crdtStateVersion: snapshot.crdtStateVersion,
-      })
-    : Object.freeze({
-        ...common,
-        modality: snapshot.modality,
-        nativeRevision: snapshot.nativeRevision,
-      });
 }
 
 async function parseBoundedVersionRequest(

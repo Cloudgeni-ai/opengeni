@@ -6,15 +6,18 @@ import {
   capabilityConnectPlan,
   capabilityFilterLabel,
   capabilityFormError,
+  capabilityItemKindLabel,
   capabilityKindLabel,
   capabilityMonogram,
   capabilityReconnectPlan,
+  capabilityRequiresPersonalConnection,
   capabilitySourceLabel,
   connectionHealth,
   connectionToReuseForApiKey,
   curatedSkillProvenance,
   domainFromUrl,
   emptyCapabilityForm,
+  fikenWorkspaceConnection,
   filterCapabilityCatalogItems,
   isMissingCredentialsError,
   normalizeProviderDomain,
@@ -24,6 +27,7 @@ import {
   preferredSocialConnection,
   registryResultsForQuery,
   resolveSheetItem,
+  socialConnectionsForOwnership,
   subjectOAuthConnectionRef,
   workspaceConnectionForDomain,
 } from "./capabilities";
@@ -85,6 +89,13 @@ function item(overrides: Partial<CapabilityCatalogItem> = {}): CapabilityCatalog
     staleAt: null,
     tools: [],
     runtime: { available: true, notes: null },
+    lifecycle: {
+      status: "available",
+      readiness: "setup_required",
+      detail: null,
+      managedBy: null,
+    },
+    actions: [],
     enabled: false,
     enabledReason: null,
     connectionRef: null,
@@ -117,7 +128,13 @@ function socialConnection(overrides: Partial<SocialConnection> = {}): SocialConn
 describe("filterCapabilityCatalogItems", () => {
   const items = [
     item({ id: "a", kind: "mcp", name: "Linear", tags: ["issues"] }),
-    item({ id: "b", kind: "api", name: "Stripe", description: "Payments", tags: [] }),
+    item({
+      id: "b",
+      kind: "api",
+      name: "Stripe",
+      description: "Payments",
+      tags: [],
+    }),
     item({ id: "c", kind: "skill", name: "Summarize", tags: ["text"] }),
   ];
 
@@ -144,6 +161,25 @@ describe("filterCapabilityCatalogItems", () => {
     );
     expect(filterCapabilityCatalogItems(items, "api", "summar")).toHaveLength(0);
   });
+
+  test("keeps interactive filtering bounded across five thousand catalog rows", () => {
+    const largeCatalog = Array.from({ length: 5_000 }, (_, index) =>
+      item({
+        id: `cap-${index}`,
+        kind: index % 2 === 0 ? "mcp" : "api",
+        name: index === 4_321 ? "Needle Analytics" : `Capability ${index}`,
+        description: `Bounded catalog fixture ${index}`,
+        tags: index === 4_321 ? ["needle", "analytics"] : ["catalog"],
+      }),
+    );
+
+    const startedAt = performance.now();
+    const results = filterCapabilityCatalogItems(largeCatalog, "all", "needle analytics");
+    const durationMs = performance.now() - startedAt;
+
+    expect(results.map((entry) => entry.id)).toEqual(["cap-4321"]);
+    expect(durationMs).toBeLessThan(1_000);
+  });
 });
 
 describe("human labels", () => {
@@ -151,6 +187,9 @@ describe("human labels", () => {
     expect(capabilityKindLabel("mcp")).toBe("MCP server");
     expect(capabilityKindLabel("api")).toBe("API");
     expect(capabilityKindLabel("pack")).toBe("Pack");
+    expect(
+      capabilityItemKindLabel(item({ kind: "api", surfaceType: "provider_integration" })),
+    ).toBe("Integration");
   });
 
   test("source labels are human", () => {
@@ -209,22 +248,39 @@ describe("curated skill provenance", () => {
 });
 
 describe("capabilityConnectPlan", () => {
-  test("first-party social APIs use their dedicated OAuth connector", () => {
+  test("social provider integrations use their dedicated OAuth connector", () => {
     const x = item({
       id: "api:x",
       kind: "api",
-      surfaceType: "first_party_social",
-      metadata: { provider: "x" },
+      surfaceType: "provider_integration",
+      metadata: { providerAdapter: "social", provider: "x" },
     });
-    expect(capabilityConnectPlan(x)).toEqual({ mode: "social_oauth", provider: "x" });
+    expect(capabilityConnectPlan(x)).toEqual({
+      mode: "social_oauth",
+      provider: "x",
+    });
     expect(capabilityAuthHint(x)).toBe("OAuth");
   });
 
-  test("non-MCP kinds just enable", () => {
-    expect(capabilityConnectPlan(item({ kind: "skill" }))).toEqual({ mode: "enable" });
-    expect(capabilityConnectPlan(item({ kind: "api", authKind: "api_key" }))).toEqual({
-      mode: "enable",
+  test("non-MCP kinds require their dedicated lifecycle", () => {
+    expect(capabilityConnectPlan(item({ kind: "skill" }))).toEqual({
+      mode: "dedicated",
     });
+    expect(capabilityConnectPlan(item({ kind: "api", authKind: "api_key" }))).toEqual({
+      mode: "dedicated",
+    });
+  });
+
+  test("first-party Fiken uses the verified paste-a-token connector", () => {
+    const fiken = item({
+      id: "api:fiken",
+      kind: "api",
+      surfaceType: "first_party_fiken",
+      authKind: "api_key",
+      providerDomain: "fiken.no",
+    });
+    expect(capabilityConnectPlan(fiken)).toEqual({ mode: "fiken_api_token" });
+    expect(capabilityAuthHint(fiken)).toBe("API key");
   });
 
   test("OAuth-capable MCP connects via oauth with its mcp url", () => {
@@ -240,7 +296,47 @@ describe("capabilityConnectPlan", () => {
       mode: "oauth",
       providerDomain: "linear.app",
       mcpUrl: "https://mcp.linear.app/sse",
+      requestedScopes: [],
     });
+  });
+
+  test("OAuth-capable MCP carries its reviewed least-privilege scopes", () => {
+    const requestedScopes = [
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.compose",
+      "https://www.googleapis.com/auth/gmail.modify",
+    ];
+    expect(
+      capabilityConnectPlan(
+        item({
+          authKind: "oauth2",
+          providerDomain: "gmailmcp.googleapis.com",
+          mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+          metadata: { scopesHint: requestedScopes },
+        }),
+      ),
+    ).toEqual({
+      mode: "oauth",
+      providerDomain: "gmailmcp.googleapis.com",
+      mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      requestedScopes,
+    });
+  });
+
+  test("official Gmail is personal-only even before refreshed catalog metadata arrives", () => {
+    expect(
+      capabilityRequiresPersonalConnection(
+        item({
+          mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+          metadata: {},
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      capabilityRequiresPersonalConnection(
+        item({ metadata: { connectionOwnership: "personal_only" } }),
+      ),
+    ).toBe(true);
   });
 
   test("MCP with required headers collects an api_key with humanized labels", () => {
@@ -288,7 +384,11 @@ describe("capabilityConnectPlan", () => {
     // Imported rows carry authKind api_key but no requiredHeaders in metadata; they
     // must NOT dead-end on Enable → 422, they get the generic single-field form.
     const byKind = capabilityConnectPlan(
-      item({ kind: "mcp", authKind: "api_key", providerDomain: "supabase.com" }),
+      item({
+        kind: "mcp",
+        authKind: "api_key",
+        providerDomain: "supabase.com",
+      }),
     );
     expect(byKind).toEqual({
       mode: "api_key",
@@ -309,10 +409,83 @@ describe("capabilityConnectPlan", () => {
 
   test("provider domain falls back to the mcp url host", () => {
     const plan = capabilityConnectPlan(
-      item({ kind: "mcp", authKind: "oauth2", mcpUrl: "https://mcp.notion.com/mcp" }),
+      item({
+        kind: "mcp",
+        authKind: "oauth2",
+        mcpUrl: "https://mcp.notion.com/mcp",
+      }),
     );
     if (plan.mode !== "oauth") throw new Error("expected oauth");
     expect(plan.providerDomain).toBe("mcp.notion.com");
+  });
+});
+
+describe("first-party fiken capability state", () => {
+  const fikenItem = item({
+    id: "api:fiken",
+    kind: "api",
+    surfaceType: "first_party_fiken",
+    providerDomain: "fiken.no",
+  });
+  const fikenRow = (overrides: Partial<ConnectionMetadata> = {}) =>
+    connection({
+      providerDomain: "fiken.no",
+      kind: "api_key",
+      subjectId: null,
+      metadata: { credentialRole: "fiken_api_token" },
+      ...overrides,
+    });
+
+  test("health derives from the workspace fiken row without a connectionRef", () => {
+    expect(connectionHealth(fikenItem, [], false)).toEqual({
+      state: "unverified",
+    });
+    expect(connectionHealth(fikenItem, [], true)).toEqual({ state: "none" });
+    const active = fikenRow();
+    expect(connectionHealth(fikenItem, [active], true)).toEqual({
+      state: "connected",
+      connection: active,
+    });
+    const lapsed = fikenRow({ status: "needs_reauth" });
+    expect(connectionHealth(fikenItem, [lapsed], true)).toEqual({
+      state: "attention",
+      connection: lapsed,
+    });
+  });
+
+  test("accepts the OAuth lane's oauth2 rows like the server predicate", () => {
+    const oauth = fikenRow({ kind: "oauth2" });
+    expect(connectionHealth(fikenItem, [oauth], true)).toEqual({
+      state: "connected",
+      connection: oauth,
+    });
+  });
+
+  test("ignores personal, foreign-domain, and unroled rows", () => {
+    expect(
+      connectionHealth(
+        fikenItem,
+        [
+          fikenRow({ subjectId: "subject-a" }),
+          fikenRow({ providerDomain: "linear.app" }),
+          fikenRow({ metadata: {} }),
+        ],
+        true,
+      ),
+    ).toEqual({ state: "none" });
+  });
+
+  test("prefers the usable row, newest first", () => {
+    const lapsed = fikenRow({
+      id: "old",
+      status: "needs_reauth",
+      updatedAt: "2026-08-05T00:00:00.000Z",
+    });
+    const active = fikenRow({
+      id: "new",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+    });
+    expect(fikenWorkspaceConnection([lapsed, active])?.id).toBe("new");
   });
 });
 
@@ -323,8 +496,34 @@ describe("first-party social capability state", () => {
       status: "disabled",
       updatedAt: "2026-08-03T00:00:00.000Z",
     });
-    const connected = socialConnection({ updatedAt: "2026-08-02T00:00:00.000Z" });
+    const connected = socialConnection({
+      updatedAt: "2026-08-02T00:00:00.000Z",
+    });
     expect(preferredSocialConnection([disabled, connected], "x")?.status).toBe("connected");
+  });
+
+  test("keeps every exact account and filters ownership without singleton collapse", () => {
+    const personal = socialConnection({
+      id: "11111111-1111-4111-8111-111111111113",
+      ownership: "personal",
+      accountHandle: "personal",
+      updatedAt: "2026-08-04T00:00:00.000Z",
+    });
+    const needsReauth = socialConnection({
+      id: "11111111-1111-4111-8111-111111111114",
+      status: "needs_reauth",
+      accountHandle: "support",
+      updatedAt: "2026-08-05T00:00:00.000Z",
+    });
+    const connected = socialConnection({
+      id: "11111111-1111-4111-8111-111111111115",
+      accountHandle: "main",
+      updatedAt: "2026-08-03T00:00:00.000Z",
+    });
+    expect(socialConnectionsForOwnership([personal, needsReauth, connected], "workspace")).toEqual([
+      connected,
+      needsReauth,
+    ]);
   });
 });
 
@@ -333,7 +532,11 @@ describe("capabilityAuthHint", () => {
     expect(capabilityAuthHint(item({ kind: "mcp", authKind: "oauth2" }))).toBe("OAuth");
     expect(
       capabilityAuthHint(
-        item({ kind: "mcp", authKind: "api_key", metadata: { requiredHeaders: ["X-API-Key"] } }),
+        item({
+          kind: "mcp",
+          authKind: "api_key",
+          metadata: { requiredHeaders: ["X-API-Key"] },
+        }),
       ),
     ).toBe("API key");
     expect(capabilityAuthHint(item({ kind: "skill" }))).toBeNull();
@@ -354,13 +557,18 @@ describe("isMissingCredentialsError", () => {
 });
 
 describe("capabilityFormError", () => {
-  test("requires a name for every kind", () => {
+  test("requires an MCP server name", () => {
     expect(capabilityFormError({ ...emptyCapabilityForm(), name: "" })).toBe("Give it a name.");
   });
 
-  test("only MCP servers require an endpoint URL", () => {
+  test("requires a valid MCP server URL", () => {
     expect(
-      capabilityFormError({ ...emptyCapabilityForm(), kind: "mcp", name: "X", endpointUrl: "" }),
+      capabilityFormError({
+        ...emptyCapabilityForm(),
+        kind: "mcp",
+        name: "X",
+        endpointUrl: "",
+      }),
     ).toBe("Enter the MCP server URL.");
     expect(
       capabilityFormError({
@@ -379,25 +587,6 @@ describe("capabilityFormError", () => {
       }),
     ).toBeNull();
   });
-
-  test("non-MCP kinds never ask for a URL", () => {
-    expect(
-      capabilityFormError({
-        ...emptyCapabilityForm(),
-        kind: "skill",
-        name: "Summarize",
-        endpointUrl: "",
-      }),
-    ).toBeNull();
-    expect(
-      capabilityFormError({
-        ...emptyCapabilityForm(),
-        kind: "api",
-        name: "Weather",
-        endpointUrl: "",
-      }),
-    ).toBeNull();
-  });
 });
 
 describe("oauthResumeAction", () => {
@@ -413,7 +602,11 @@ describe("oauthResumeAction", () => {
   test("an enabled item whose returned connection matches its ref is a reconnect", () => {
     const enabled = item({
       enabled: true,
-      connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" },
+      connectionRef: {
+        connectionId: "conn-1",
+        providerDomain: "linear.app",
+        kind: "oauth2",
+      },
     });
     expect(oauthResumeAction(enabled, "conn-1")).toBe("reconnect");
   });
@@ -422,7 +615,11 @@ describe("oauthResumeAction", () => {
     // The stored ref points at a deleted connection; OAuth minted "conn-2".
     const enabled = item({
       enabled: true,
-      connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" },
+      connectionRef: {
+        connectionId: "conn-1",
+        providerDomain: "linear.app",
+        kind: "oauth2",
+      },
     });
     expect(oauthResumeAction(enabled, "conn-2")).toBe("enable");
   });
@@ -455,7 +652,11 @@ describe("normalizeProviderDomain", () => {
 });
 
 describe("connectionHealth", () => {
-  const ref = { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" };
+  const ref = {
+    connectionId: "conn-1",
+    providerDomain: "linear.app",
+    kind: "oauth2",
+  };
 
   test("no connection ref (headers-enabled or credential-free) is healthy 'none'", () => {
     // Headers-enabled and credential-free installations carry connectionRef null;
@@ -535,7 +736,13 @@ describe("connectionHealth", () => {
   });
 
   test("workspace bindings continue to match only their exact UUID", () => {
-    const conns = [connection({ id: "other", providerDomain: "linear.app", status: "active" })];
+    const conns = [
+      connection({
+        id: "other",
+        providerDomain: "linear.app",
+        status: "active",
+      }),
+    ];
     expect(connectionHealth(item({ enabled: true, connectionRef: ref }), conns, true)).toEqual({
       state: "attention",
       connection: null,
@@ -574,7 +781,11 @@ describe("capabilityReconnectPlan", () => {
   test("oauth2 ref → oauth reconnect; a deleted row carries a null connectionId", () => {
     const oauthItem = item({
       enabled: true,
-      connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" },
+      connectionRef: {
+        connectionId: "conn-1",
+        providerDomain: "linear.app",
+        kind: "oauth2",
+      },
     });
     expect(capabilityReconnectPlan(oauthItem, deleted)).toEqual({
       kind: "oauth",
@@ -603,7 +814,11 @@ describe("capabilityReconnectPlan", () => {
   test("nothing to repair when healthy, unverified, or without a ref", () => {
     const withRef = item({
       enabled: true,
-      connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "api_key" },
+      connectionRef: {
+        connectionId: "conn-1",
+        providerDomain: "linear.app",
+        kind: "api_key",
+      },
     });
     expect(
       capabilityReconnectPlan(withRef, {
@@ -628,7 +843,11 @@ describe("resolveSheetItem (sheet binds to the live catalog row, never a snapsho
       kind: "mcp",
       authKind: "oauth2",
       enabled: true,
-      connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" },
+      connectionRef: {
+        connectionId: "conn-1",
+        providerDomain: "linear.app",
+        kind: "oauth2",
+      },
     });
     const selected = {
       id: "cap-1",
@@ -668,7 +887,12 @@ describe("resolveSheetItem (sheet binds to the live catalog row, never a snapsho
     const snap = item({ id: "new-1" });
     expect(
       resolveSheetItem(
-        { id: "new-1", registry: false, snapshotFallback: true, snapshot: snap },
+        {
+          id: "new-1",
+          registry: false,
+          snapshotFallback: true,
+          snapshot: snap,
+        },
         [],
       ),
     ).toBe(snap);
@@ -678,7 +902,12 @@ describe("resolveSheetItem (sheet binds to the live catalog row, never a snapsho
     const snap = item({ id: "gone", enabled: true });
     expect(
       resolveSheetItem(
-        { id: "gone", registry: false, snapshotFallback: false, snapshot: snap },
+        {
+          id: "gone",
+          registry: false,
+          snapshotFallback: false,
+          snapshot: snap,
+        },
         [],
       ),
     ).toBeNull();
@@ -751,7 +980,13 @@ describe("workspaceConnectionForDomain", () => {
   });
 
   test("ignores subject-scoped connections (only workspace-shared)", () => {
-    const conns = [connection({ id: "c1", providerDomain: "linear.app", subjectId: "user-1" })];
+    const conns = [
+      connection({
+        id: "c1",
+        providerDomain: "linear.app",
+        subjectId: "user-1",
+      }),
+    ];
     expect(workspaceConnectionForDomain(conns, "linear.app")).toBeNull();
   });
 
@@ -772,7 +1007,11 @@ describe("connectionToReuseForApiKey", () => {
       },
     });
     const conns = [
-      connection({ id: "other", providerDomain: "api.supabase.com", subjectId: null }),
+      connection({
+        id: "other",
+        providerDomain: "api.supabase.com",
+        subjectId: null,
+      }),
     ];
     expect(connectionToReuseForApiKey(cap, conns, "api.supabase.com")).toBe("ref-conn");
   });

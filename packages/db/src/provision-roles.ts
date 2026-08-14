@@ -5,6 +5,7 @@ import {
   RUNTIME_READ_INSERT_TABLES,
   RUNTIME_READ_INSERT_UPDATE_TABLES,
   RUNTIME_READ_ONLY_TABLES,
+  RUNTIME_READ_UPDATE_TABLES,
 } from "./runtime-posture";
 import {
   classifyRoleRelationships,
@@ -478,6 +479,7 @@ async function grantAppRoleIfSchemaExists(
 ): Promise<void> {
   const runtimeFullDmlTables = `ARRAY[${RUNTIME_FULL_DML_TABLES.map(literal).join(", ")}]`;
   const runtimeReadOnlyTables = `ARRAY[${RUNTIME_READ_ONLY_TABLES.map(literal).join(", ")}]`;
+  const runtimeReadUpdateTables = `ARRAY[${RUNTIME_READ_UPDATE_TABLES.map(literal).join(", ")}]`;
   const runtimeReadInsertTables = `ARRAY[${RUNTIME_READ_INSERT_TABLES.map(literal).join(", ")}]`;
   const runtimeReadInsertUpdateTables = `ARRAY[${RUNTIME_READ_INSERT_UPDATE_TABLES.map(literal).join(", ")}]`;
   await sql.unsafe(`
@@ -505,6 +507,16 @@ BEGIN
       IF to_regclass(format('%I.%I', ${literal(schema)}, runtime_table)) IS NOT NULL THEN
         EXECUTE format(
           'GRANT SELECT ON TABLE %I.%I TO %I',
+          ${literal(schema)},
+          runtime_table,
+          ${literal(role)}
+        );
+      END IF;
+    END LOOP;
+    FOREACH runtime_table IN ARRAY ${runtimeReadUpdateTables} LOOP
+      IF to_regclass(format('%I.%I', ${literal(schema)}, runtime_table)) IS NOT NULL THEN
+        EXECUTE format(
+          'GRANT SELECT, UPDATE ON TABLE %I.%I TO %I',
           ${literal(schema)},
           runtime_table,
           ${literal(role)}
@@ -603,6 +615,28 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.create_task_note_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,integer)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.create_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.archive_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.list_task_notes_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, boolean, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.workspace_instruction_policy_get_or_create_snapshot(uuid,uuid,uuid,uuid,uuid,integer)',
         ${literal(schema)}
       )
@@ -681,12 +715,242 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.slack_task_policy_update(uuid,text,uuid,uuid,jsonb,uuid,bigint,text,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.slack_task_policy_update(uuid, text, uuid, uuid, jsonb, uuid, bigint, text, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.scoped_knowledge_apply_lifecycle(uuid,text,uuid,text,bigint,text,text,text,text,text,text)',
         ${literal(schema)}
       )
     ) IS NOT NULL THEN
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION %I.scoped_knowledge_apply_lifecycle(uuid, text, uuid, text, bigint, text, text, text, text, text, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    -- Migration 0197 creates this target-schema-local SECURITY DEFINER lock
+    -- before opengeni_app may exist. Re-converge only its exact EXECUTE grant
+    -- for the supported migrate-then-provision install order; keep PUBLIC
+    -- revoked and do not widen table privileges.
+    IF to_regprocedure(
+      format(
+        '%I.knowledge_source_sync_lock_authority(uuid,uuid,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.knowledge_source_sync_lock_authority(uuid, uuid, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.knowledge_source_sync_lock_authority(uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.ensure_managed_human_personal_workspace(uuid,text,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.ensure_managed_human_personal_workspace(uuid, text, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.ensure_managed_human_personal_workspace(uuid, text, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(format('%I.ensure_canonical_human_identity(text,text)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.ensure_canonical_human_identity(text, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.ensure_canonical_human_identity(text, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(format('%I.validate_canonical_human_session(text,text,boolean)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.validate_canonical_human_session(text, text, boolean) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.validate_canonical_human_session(text, text, boolean) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(format('%I.get_canonical_human_identity_projection(text)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.get_canonical_human_identity_projection(text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.get_canonical_human_identity_projection(text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(format('%I.apply_canonical_human_identity_operation(uuid,text,bigint,text,uuid,text,text,text)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.apply_canonical_human_identity_operation(uuid, text, bigint, text, uuid, text, text, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.apply_canonical_human_identity_operation(uuid, text, bigint, text, uuid, text, text, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    -- Migration 0225 creates these target-schema-local session visibility
+    -- capabilities before opengeni_app may exist. Re-converge their exact
+    -- EXECUTE grants for migrate-then-provision installs without granting
+    -- blanket execution on target-schema routines.
+    IF to_regprocedure(
+      format(
+        '%I.session_private_actor_visible(uuid,uuid,uuid,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.session_private_actor_visible(uuid, uuid, uuid, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.session_private_actor_visible(uuid, uuid, uuid, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.session_reference_visible(uuid,uuid,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.session_reference_visible(uuid, uuid, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.session_reference_visible(uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.transition_session_visibility(uuid,uuid,uuid,text,text,integer,text,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.fork_session_content(uuid,uuid,uuid,text,uuid,text,text,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.create_xai_subscription_credential(uuid,uuid,text,text,text,text,text,text,text,timestamptz)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamptz) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamptz) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.disconnect_xai_subscription_credential(uuid, uuid, text, uuid, jsonb) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.disconnect_xai_subscription_credential(uuid, uuid, text, uuid, jsonb) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.resolve_xai_authority_pool(uuid, uuid, text, jsonb) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.resolve_xai_authority_pool(uuid, uuid, text, jsonb) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.revalidate_xai_subscription_authority(uuid, text, uuid, jsonb) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.revalidate_xai_subscription_authority(uuid, text, uuid, jsonb) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.xai_provider_account_authority_snapshot_v1_valid(jsonb) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.xai_provider_account_authority_snapshot_v1_valid(jsonb) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.xai_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.xai_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.xai_subscription_pool_visible(uuid, uuid, text, text, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.xai_subscription_pool_visible(uuid, uuid, text, text, uuid) TO %I',
         ${literal(schema)},
         ${literal(role)}
       );

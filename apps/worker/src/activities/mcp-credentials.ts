@@ -34,5 +34,6 @@ export function connectionTokenResolverForTurn(input: {
     initiator: input.turn.initiator,
     initiatorContext: input.turn.initiatorContext,
     surface: "model",
+    allowOfficialGmailRestDestination: input.settings.gmailRestAdapterEnabled,
   });
 }

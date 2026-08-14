@@ -29,6 +29,7 @@ import {
   useRail,
 } from "@/components/rail/rail-context";
 import { CollapsedSessionsButton, SessionList } from "@/components/rail/session-list";
+import { ForYouLink } from "@/components/rail/for-you-link";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import {
   SessionSandboxSwitcher,
@@ -178,6 +179,7 @@ function RailBody() {
         <>
           {/* Sessions are the primary object. Workspace administration remains
               secondary on desktop and becomes its own screen on phones. */}
+          <ForYouLink />
           <div className="mt-2 flex min-h-0 flex-1 flex-col">
             {rail.collapsed ? <CollapsedSessionsButton /> : <SessionList />}
           </div>
@@ -512,7 +514,11 @@ function SessionRouteHeader({
       policyLoading={policyLoading}
       sandboxSlot={
         sessionSupportsFleetSwitching(session.sandboxBackend) ? (
-          <SessionSandboxSwitcher workspaceId={session.workspaceId} sessionId={session.id} />
+          <SessionSandboxSwitcher
+            workspaceId={session.workspaceId}
+            sessionId={session.id}
+            sandboxBackend={session.sandboxBackend}
+          />
         ) : null
       }
       codexSlot={

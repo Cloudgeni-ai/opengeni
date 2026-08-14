@@ -1,5 +1,5 @@
 import type { TerminalCapability } from "@opengeni/sdk";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { type TerminalStreamStatus, useTerminalStream } from "../hooks/use-terminal-stream";
 import type { UseSandboxTerminalResult } from "../hooks/use-sandbox-terminal";
@@ -87,6 +87,8 @@ export type SandboxTerminalProps = {
    * the firehose-only default).
    */
   onActivate?: (() => void) | undefined;
+  /** Re-negotiate the terminal capability after an unexpected socket failure. */
+  onReconnectNeeded?: (() => void) | undefined;
   className?: string | undefined;
 };
 
@@ -94,6 +96,7 @@ export type SandboxTerminalProps = {
 // drive it without a hard type dep on the lazily-imported lib.
 type XtermLike = {
   open: (el: HTMLElement) => void;
+  focus: () => void;
   write: (data: string) => void;
   clear: () => void;
   onData: (cb: (data: string) => void) => { dispose: () => void };
@@ -223,6 +226,7 @@ export function SandboxTerminal({
   showHeader,
   shell,
   onActivate,
+  onReconnectNeeded,
   className,
 }: SandboxTerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -237,7 +241,8 @@ export function SandboxTerminal({
   const [activated, setActivated] = useState(false);
 
   // ── Interactive transport switch ─────────────────────────────────────────────
-  const ptyDescriptor = terminalCapability?.transport === "pty-ws";
+  const ptyDescriptor =
+    terminalCapability?.transport === "pty-ws" || terminalCapability?.transport === "relay-pty";
   const ptyAttachable = terminalCanAcquirePty(terminalCapability);
   const {
     status: ptyStatus,
@@ -251,7 +256,7 @@ export function SandboxTerminal({
     capability:
       ptyAttachable && ready
         ? {
-            transport: "pty-ws",
+            transport: terminalCapability!.transport,
             url: ptyDescriptor ? terminalCapability!.url : null,
             token: ptyDescriptor ? terminalCapability!.token : null,
             expiresAt: ptyDescriptor ? terminalCapability!.expiresAt : null,
@@ -260,6 +265,7 @@ export function SandboxTerminal({
     onOutput: (data) => {
       termRef.current?.write(data);
     },
+    onReconnectNeeded,
   });
 
   // A pty-ws capability exclusively owns the screen even while connecting or
@@ -304,6 +310,16 @@ export function SandboxTerminal({
   });
 
   function handleActivate() {
+    // Capture-phase activation may synchronously negotiate a fresh terminal
+    // capability and rerender the shell. Focus xterm before that state change so
+    // the user's first keystroke or paste reaches its already-bounded input
+    // queue instead of landing on the surrounding dock.
+    const term = termRef.current;
+    if (term && !readOnly && (ptyAttachable || result.write !== null)) {
+      term.options.disableStdin = false;
+      term.options.cursorBlink = true;
+    }
+    term?.focus();
     if (!activated) setActivated(true);
     onActivate?.();
   }
@@ -451,7 +467,7 @@ export function SandboxTerminal({
 
   // Sync stdin/cursor at runtime (NOT a remount) when interactivity flips, so the
   // projection→PTY handoff keeps the single Terminal instance + its scrollback.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const term = termRef.current;
     if (!ready || !term) return;
     term.options.disableStdin = !interactive;
@@ -509,9 +525,10 @@ export function SandboxTerminal({
     }
   }, [ready, result.chunks, ptyMode]);
 
-  // Wire interactive input when allowed. PTY mode pipes keystrokes to the ttyd
-  // socket; firehose mode uses the legacy ptyWrite-over-HTTP fn.
-  useEffect(() => {
+  // Wire interactive input when allowed. `ptyWrite` is stable across socket
+  // status changes, so this subscription does not tear down while a grant opens
+  // or rotates and cannot create a first-keystroke gap.
+  useLayoutEffect(() => {
     const term = termRef.current;
     if (!ready || !term || !interactive) {
       setInputReady(false);

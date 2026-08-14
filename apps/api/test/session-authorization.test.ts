@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionAuthorizationOperation } from "@opengeni/contracts";
-import { sessionAuthorizationOperationForHttp } from "../src/routes/sessions";
+import {
+  goalProposalMatchesExpectedRevision,
+  sessionAuthorizationOperationForHttp,
+} from "../src/routes/sessions";
 
 const sessionId = "11111111-1111-4111-8111-111111111111";
 const root = `/v1/workspaces/22222222-2222-4222-8222-222222222222/sessions/${sessionId}`;
@@ -9,6 +12,7 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["GET", "", "session.read"],
   ["PATCH", "", "session.title.write"],
   ["PUT", "/pin", "session.pin.write"],
+  ["PUT", "/channel", "session.channel.write"],
   ["PUT", "/tool-policy", "session.tool_policy.write"],
   ["GET", "/lineage", "session.lineage.read"],
   ["POST", "/codex-account", "session.codex_account.write"],
@@ -25,6 +29,8 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["GET", "/goal", "session.goal.read"],
   ["PATCH", "/goal", "session.goal.write"],
   ["DELETE", "/goal", "session.goal.write"],
+  ["GET", "/goal/revisions", "session.goal.read"],
+  ["POST", "/goal/revisions/33333333-3333-4333-8333-333333333333/apply", "session.goal.write"],
   ["POST", "/context/clear", "session.context.write"],
   ["POST", "/context/compact", "session.context.write"],
   ["GET", "/events", "session.events.read"],
@@ -70,6 +76,11 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
 ];
 
 describe("session HTTP authorization classification", () => {
+  test("an old proposal cannot be applied using the newer current revision as its fence", () => {
+    expect(goalProposalMatchesExpectedRevision({ baseObjectiveRevision: 2 }, 3)).toBe(false);
+    expect(goalProposalMatchesExpectedRevision({ baseObjectiveRevision: 2 }, 2)).toBe(true);
+  });
+
   test.each(cases)("%s %s maps to %s", (method, suffix, expected) => {
     expect(sessionAuthorizationOperationForHttp(method, `${root}${suffix}`, sessionId)).toBe(
       expected,

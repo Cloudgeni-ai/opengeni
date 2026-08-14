@@ -22,12 +22,14 @@ import {
   SessionPinAccessError,
   SessionPinVersionConflictError,
   setSessionPin,
+  withWorkspaceSessionActivityRls,
+  withWorkspaceSubjectSessionActivityRls,
   withWorkspaceRls,
   withWorkspaceSubjectRls,
   type Database,
   type DbClient,
 } from "../src/index";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -74,6 +76,12 @@ async function grantMember(
     ...workspace,
     subjectId,
     permissions: ["sessions:read"],
+  });
+}
+
+async function executeSessionActivity(workspaceId: string, statement: SQL): Promise<void> {
+  await withWorkspaceSessionActivityRls(db, workspaceId, async (scoped) => {
+    await scoped.execute(statement);
   });
 }
 
@@ -178,14 +186,18 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       parentSessionId: child.id,
     });
     await session({ ...workspace, message: "unrelated root" });
-    await admin`
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
       update sessions
       set status = case
         when id = ${child.id} then 'running'
         when id = ${grandchild.id} then 'requires_action'
         else status
-      end
-      where id in (${child.id}, ${grandchild.id})`;
+      end,
+      updated_at = now()
+      where id in (${child.id}, ${grandchild.id})`,
+    );
 
     const roots = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId,
@@ -234,7 +246,9 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       parentId: index === 0 ? deepRoot.id : deepIds[index - 1]!,
       message: `deep-${index + 1}`,
     }));
-    await admin`
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
       insert into sessions (
         id, account_id, workspace_id, status, initial_message, model,
         sandbox_backend, sandbox_group_id, parent_session_id, temporal_workflow_id,
@@ -244,10 +258,13 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         node.id, ${workspace.accountId}, ${workspace.workspaceId}, 'running', node.message,
         'test-model', 'none', node.id, node."parentId", 'tree-deep-' || node.id::text,
         jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', node."parentId")
-      from jsonb_to_recordset(${admin.json(deepRows)}::jsonb)
-        as node(id uuid, "parentId" uuid, message text)`;
+      from jsonb_to_recordset(${JSON.stringify(deepRows)}::jsonb)
+        as node(id uuid, "parentId" uuid, message text)`,
+    );
 
-    await admin`
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
       with nodes as (
         select gen_random_uuid() as id, ordinal
         from generate_series(1, 1005) as ordinal
@@ -265,7 +282,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
           'mode', 'explicit',
           'inheritedFromSessionId', ${wideRoot.id}::uuid
         )
-      from nodes`;
+      from nodes`,
+    );
 
     for (const sessionId of [deepRoot.id, deepIds[0]!, wideRoot.id]) {
       await setSessionPin(db, {
@@ -318,30 +336,40 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const subjectId = "user:bounded-pinned-roots";
+    const marker = `bounded-pinned-root-${crypto.randomUUID()}`;
     await grantMember(workspace, subjectId);
-    await admin`
-      with nodes as (
-        select gen_random_uuid() as id, ordinal
-        from generate_series(1, 105) as ordinal
-      ), inserted as (
-        insert into sessions (
-          id, account_id, workspace_id, status, initial_message, model,
-          sandbox_backend, sandbox_group_id, temporal_workflow_id, tool_policy
-        )
-        select
-          id, ${workspace.accountId}, ${workspace.workspaceId}, 'idle',
-          'pinned-root-' || ordinal::text, 'test-model', 'none', id,
-          'bounded-pinned-root-' || id::text,
-          jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-        from nodes
-        returning id
-      )
-      insert into session_pins (
-        account_id, workspace_id, subject_id, session_id, pinned, pinned_at
-      )
-      select
-        ${workspace.accountId}, ${workspace.workspaceId}, ${subjectId}, id, true, now()
-      from inserted`;
+    await withWorkspaceSubjectSessionActivityRls(
+      db,
+      workspace.workspaceId,
+      subjectId,
+      async (scoped) => {
+        await scoped.execute(sql`
+          with nodes as (
+            select gen_random_uuid() as id, ordinal
+            from generate_series(1, 105) as ordinal
+          )
+          insert into sessions (
+            id, account_id, workspace_id, status, initial_message, model,
+            sandbox_backend, sandbox_group_id, temporal_workflow_id, tool_policy
+          )
+          select
+            id, ${workspace.accountId}, ${workspace.workspaceId}, 'idle',
+            'pinned-root-' || ordinal::text, 'test-model', 'none', id,
+            ${marker} || '-' || ordinal::text,
+            jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+          from nodes`);
+        await scoped.execute(sql`
+          insert into session_pins (
+            account_id, workspace_id, subject_id, session_id, pinned, pinned_at
+          )
+          select
+            ${workspace.accountId}, ${workspace.workspaceId}, ${subjectId}, id, true, now()
+          from sessions
+          where account_id = ${workspace.accountId}
+            and workspace_id = ${workspace.workspaceId}
+            and temporal_workflow_id like ${`${marker}-%`}`);
+      },
+    );
 
     const page = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId,
@@ -581,14 +609,20 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const pinnedFirst = await session({ ...workspace, message: "find pinned first" });
     const pinnedSecond = await session({ ...workspace, message: "find pinned second" });
     const newer = await session({ ...workspace, message: "ordinary newer" });
-    await admin`
-      update sessions set updated_at = now() - interval '4 minutes' where id = ${older.id}`;
-    await admin`
-      update sessions set updated_at = now() - interval '3 minutes' where id = ${pinnedFirst.id}`;
-    await admin`
-      update sessions set updated_at = now() - interval '2 minutes' where id = ${pinnedSecond.id}`;
-    await admin`
-      update sessions set updated_at = now() - interval '1 minute' where id = ${newer.id}`;
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+        update sessions
+        set updated_at = case id
+          when ${older.id} then now() - interval '4 minutes'
+          when ${pinnedFirst.id} then now() - interval '3 minutes'
+          when ${pinnedSecond.id} then now() - interval '2 minutes'
+          when ${newer.id} then now() - interval '1 minute'
+          else updated_at
+        end
+        where id in (${older.id}, ${pinnedFirst.id}, ${pinnedSecond.id}, ${newer.id})
+      `,
+    );
 
     await setSessionPin(db, {
       workspaceId: workspace.workspaceId,
@@ -705,8 +739,10 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const apiKeySubject = "api_key:00000000-0000-4000-8000-000000000001";
     const first = await session({ ...workspace, message: "api key first" });
     const second = await session({ ...workspace, message: "api key second" });
-    await admin`
-      update sessions set updated_at = now() - interval '1 minute' where id = ${first.id}`;
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`update sessions set updated_at = now() - interval '1 minute' where id = ${first.id}`,
+    );
 
     const page = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId: apiKeySubject,
@@ -742,18 +778,19 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const oldest = await session({ ...workspace, message: "snapshot oldest" });
     const middle = await session({ ...workspace, message: "snapshot middle" });
     const newest = await session({ ...workspace, message: "snapshot newest" });
-    await admin`
-      update sessions
-      set updated_at = now() - interval '3 minutes'
-      where id = ${oldest.id}`;
-    await admin`
-      update sessions
-      set updated_at = now() - interval '2 minutes'
-      where id = ${middle.id}`;
-    await admin`
-      update sessions
-      set updated_at = now() - interval '1 minute'
-      where id = ${newest.id}`;
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+        update sessions
+        set updated_at = case id
+          when ${oldest.id} then now() - interval '3 minutes'
+          when ${middle.id} then now() - interval '2 minutes'
+          when ${newest.id} then now() - interval '1 minute'
+          else updated_at
+        end
+        where id in (${oldest.id}, ${middle.id}, ${newest.id})
+      `,
+    );
 
     const firstPage = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId: "user:snapshot",
@@ -765,8 +802,10 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
 
     // This is the race the old updated_at cursor could lose: the row was below
     // page one, then became newer than page one's tail before page two.
-    await admin`
-      update sessions set updated_at = now() + interval '1 minute' where id = ${middle.id}`;
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`update sessions set updated_at = now() + interval '1 minute' where id = ${middle.id}`,
+    );
 
     const secondPage = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId: "user:snapshot",
@@ -865,7 +904,9 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       },
     });
 
-    await admin`
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
       update sessions
       set updated_at = case id
         when ${root.id} then now()
@@ -874,7 +915,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         when ${exact.id} then now() - interval '3 minutes'
         else now() - interval '4 minutes'
       end
-      where workspace_id = ${workspace.workspaceId}`;
+      where workspace_id = ${workspace.workspaceId}`,
+    );
     const first = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId,
       limit: 1,
@@ -1443,7 +1485,9 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const workspace = await freshWorkspace();
     const subjectId = "user:concurrent-list-readers";
     await grantMember(workspace, subjectId);
-    await admin`
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
       insert into sessions (
         id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id,
         tool_policy
@@ -1455,7 +1499,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       from (
         select gen_random_uuid() as id, ordinality
         from generate_series(1, 128) with ordinality
-      ) generated`;
+      ) generated`,
+    );
 
     const pages = await Promise.all(
       Array.from({ length: 16 }, () =>
@@ -1483,7 +1528,9 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const oversized = await freshWorkspace();
     const oversizedSubject = "user:oversized-list";
     await grantMember(oversized, oversizedSubject);
-    await admin`
+    await executeSessionActivity(
+      oversized.workspaceId,
+      sql`
       insert into sessions (
         id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id,
         tool_policy
@@ -1495,7 +1542,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       from (
         select gen_random_uuid() as id, ordinality
         from generate_series(1, ${SESSION_LIST_SNAPSHOT_MAX_IDS + 1}) with ordinality
-      ) generated`;
+      ) generated`,
+    );
     await expect(
       listSessionsForSubject(db, oversized.workspaceId, {
         subjectId: oversizedSubject,
@@ -1515,7 +1563,9 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const retainedSubject = "user:snapshot-quota-retained";
     await grantMember(quota, quotaSubject);
     await grantMember(quota, retainedSubject);
-    await admin`
+    await executeSessionActivity(
+      quota.workspaceId,
+      sql`
       insert into sessions (
         id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id,
         tool_policy
@@ -1527,7 +1577,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       from (
         select gen_random_uuid() as id, ordinality
         from generate_series(1, 68) with ordinality
-      ) generated`;
+      ) generated`,
+    );
 
     const retainedPage = await listSessionsForSubject(db, quota.workspaceId, {
       subjectId: retainedSubject,

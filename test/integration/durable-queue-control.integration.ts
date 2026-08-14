@@ -19,7 +19,7 @@ import {
   listSessionTurns,
   markSessionWorkflowWakeDelivered,
   steerAgentSessionInTransaction,
-  withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
@@ -645,19 +645,18 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         dbClient.db,
         grant,
         "idle target must admit only the newest Agent Steer",
+        actor.sessionId,
       );
       const steer = (instruction: string) =>
-        withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
-          db.transaction((tx) =>
-            steerAgentSessionInTransaction(tx as typeof db, {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId,
-              targetSessionId: target.id,
-              actor,
-              operationKey: crypto.randomUUID(),
-              instruction,
-            }),
-          ),
+        withWorkspaceSessionActivityRls(dbClient.db, grant.workspaceId, (db) =>
+          steerAgentSessionInTransaction(db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            targetSessionId: target.id,
+            actor,
+            operationKey: crypto.randomUUID(),
+            instruction,
+          }),
         );
       const firstText = `superseded idle steer ${crypto.randomUUID()}`;
       const newestText = `accepted newest idle steer ${crypto.randomUUID()}`;
@@ -1179,10 +1178,12 @@ async function createDurableSession(
   db: ReturnType<typeof createDb>["db"],
   grant: AccessGrant,
   initialMessage: string,
+  parentSessionId?: string,
 ) {
   return await createSession(db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
+    parentSessionId,
     initialMessage,
     resources: [],
     tools: [],

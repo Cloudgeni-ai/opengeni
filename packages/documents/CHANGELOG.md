@@ -1,5 +1,141 @@
 # @opengeni/documents
 
+## 0.5.39
+
+### Patch Changes
+
+- Updated dependencies [499c70c]
+  - @opengeni/db@0.36.1
+  - @opengeni/config@0.16.2
+  - @opengeni/storage@0.2.94
+
+## 0.5.38
+
+### Patch Changes
+
+- 478d7fe: Add permission-first agent Knowledge search, exact fetch, and cursor-bounded browsing over authorized Documents.
+- Updated dependencies [d86610d]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+  - @opengeni/contracts@0.50.0
+  - @opengeni/db@0.36.0
+  - @opengeni/config@0.16.1
+  - @opengeni/storage@0.2.93
+
+## 0.5.37
+
+### Patch Changes
+
+- Updated dependencies [b0b2bed]
+  - @opengeni/config@0.16.0
+  - @opengeni/contracts@0.49.0
+  - @opengeni/db@0.35.1
+  - @opengeni/storage@0.2.92
+
+## 0.5.36
+
+### Patch Changes
+
+- Updated dependencies [8beed26]
+- Updated dependencies [8beed26]
+- Updated dependencies [8beed26]
+- Updated dependencies [8beed26]
+  - @opengeni/contracts@0.48.0
+  - @opengeni/db@0.35.0
+  - @opengeni/config@0.15.1
+  - @opengeni/storage@0.2.91
+
+## 0.5.35
+
+### Patch Changes
+
+- Updated dependencies [1e78f58]
+- Updated dependencies [1c4ac69]
+- Updated dependencies [1e78f58]
+- Updated dependencies [746bbbe]
+- Updated dependencies [9849e25]
+- Updated dependencies [1e78f58]
+  - @opengeni/config@0.15.0
+  - @opengeni/contracts@0.47.0
+  - @opengeni/db@0.34.0
+  - @opengeni/storage@0.2.90
+
+## 0.5.34
+
+### Patch Changes
+
+- Updated dependencies [3d74340]
+  - @opengeni/contracts@0.46.0
+  - @opengeni/db@0.33.0
+  - @opengeni/config@0.14.1
+  - @opengeni/storage@0.2.89
+
+## 0.5.33
+
+### Patch Changes
+
+- Updated dependencies [d2def0c]
+- Updated dependencies [5215c0e]
+- Updated dependencies [d15d3e8]
+- Updated dependencies [d241d13]
+- Updated dependencies [3f81608]
+- Updated dependencies [733c22f]
+- Updated dependencies [42a1242]
+  - @opengeni/config@0.14.0
+  - @opengeni/contracts@0.45.0
+  - @opengeni/db@0.32.0
+  - @opengeni/storage@0.2.88
+
+## 0.5.32
+
+### Patch Changes
+
+- Updated dependencies [b57d61f]
+- Updated dependencies [5c5ea4a]
+  - @opengeni/contracts@0.44.1
+  - @opengeni/db@0.31.1
+  - @opengeni/config@0.13.2
+  - @opengeni/storage@0.2.87
+
+## 0.5.31
+
+### Patch Changes
+
+- ff7203c: Add a read-only Atlassian Jira and Confluence connector with shared OAuth setup, selected-source live agent search and reads, and optional governed knowledge synchronization.
+- Updated dependencies [87e9ae6]
+- Updated dependencies [8b6803a]
+- Updated dependencies [aeb07f4]
+- Updated dependencies [ff7203c]
+  - @opengeni/config@0.13.1
+  - @opengeni/db@0.31.0
+  - @opengeni/contracts@0.44.0
+  - @opengeni/storage@0.2.86
+
+## 0.5.30
+
+### Patch Changes
+
+- 5fcad0a: Expose an agent-safe checkpointed listing of newly indexed documents with source and provenance metadata.
+- Updated dependencies [b46f4de]
+- Updated dependencies [2f4ce5e]
+- Updated dependencies [d55a093]
+- Updated dependencies [7954468]
+- Updated dependencies [dcfe6eb]
+- Updated dependencies [ad9123b]
+- Updated dependencies [31666e2]
+- Updated dependencies [bd5514e]
+- Updated dependencies [90eea29]
+- Updated dependencies [a858835]
+- Updated dependencies [5fcad0a]
+  - @opengeni/contracts@0.43.0
+  - @opengeni/db@0.30.0
+  - @opengeni/config@0.13.0
+  - @opengeni/storage@0.2.85
+
 ## 0.5.29
 
 ### Patch Changes

@@ -49,11 +49,11 @@ function dockerInspectMessage(error: unknown): string {
   return typeof stderr === "string" ? stderr.trim() : "";
 }
 
-function dockerInspectProvesMissing(error: unknown, containerId: string): boolean {
+export function dockerInspectProvesMissing(error: unknown, containerId: string): boolean {
   const escaped = containerId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`^Error: No such (?:object|container): ${escaped}$`).test(
-    dockerInspectMessage(error),
-  );
+  return new RegExp(
+    `^(?:Error|Error response from daemon): No such (?:object|container): ${escaped}$`,
+  ).test(dockerInspectMessage(error));
 }
 
 class OpenGeniDockerSandboxClient extends DockerSandboxClient {

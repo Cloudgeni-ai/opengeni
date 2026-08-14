@@ -6,6 +6,35 @@ import { testSettings } from "@opengeni/testing";
 import { buildWorkspaceModelCatalog } from "../src/model-catalog";
 
 describe("workspace model catalog availability", () => {
+  test("SuperGrok definitions use a distinct public rail and workspace readiness", () => {
+    const settings = testSettings({ supergrokSubscriptionEnabled: true });
+    const unavailable = buildWorkspaceModelCatalog({
+      settings,
+      policy: null,
+      codexSubscriptionActive: false,
+      xaiSubscriptionActive: false,
+    });
+    const blocked = unavailable.models.find((model) => model.id === "supergrok/grok-4.6")!;
+    expect(blocked).toMatchObject({
+      provider: "supergrok",
+      providerLabel: "SuperGrok",
+      source: "supergrok",
+      credentialReadiness: { status: "not_ready", reason: "needs_reauth" },
+      availability: { status: "unavailable", selectable: false, reason: "needs_reauth" },
+    });
+
+    const available = buildWorkspaceModelCatalog({
+      settings,
+      policy: null,
+      codexSubscriptionActive: false,
+      xaiSubscriptionActive: true,
+    });
+    expect(available.models.find((model) => model.id === "supergrok/grok-4.6")).toMatchObject({
+      credentialReadiness: { status: "ready", basis: "connection" },
+      availability: { status: "unknown", selectable: true },
+    });
+  });
+
   test("projects OpenGeni topology safely and gates the workspace Gateway rail", () => {
     const settings = testSettings({
       codexSubscriptionEnabled: false,
@@ -623,6 +652,8 @@ describe("workspace model catalog route discipline", () => {
     expect(handler).toContain('"workspace:read"');
     expect(handler.indexOf("getWorkspaceModelPolicy")).toBeGreaterThan(grant);
     expect(handler.indexOf("workspaceCodexSubscriptionActive")).toBeGreaterThan(grant);
+    expect(handler.indexOf("workspaceXaiSubscriptionActive")).toBeGreaterThan(grant);
+    expect(handler).toContain("xaiSubscriptionActive,");
     expect(handler).toContain('"private, no-store"');
   });
 });

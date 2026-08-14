@@ -71,13 +71,23 @@ export interface DesktopRfbLike {
     type: "connect" | "disconnect" | "securityfailure",
     cb: (e?: unknown) => void,
   ) => void;
+  /** Send clipboard text over the already-open RFB connection. */
+  clipboardPasteFrom?(text: string): void;
+  /** Send one RFB key event. A missing `down` emits a complete key press. */
+  sendKey?(keysym: number, code: string, down?: boolean): void;
+  /** Focus or release the RFB keyboard sink without reconnecting. */
+  focus?(options?: FocusOptions): void;
+  blur?(): void;
   disconnect(): void;
 }
 
 export type DesktopRfbFactory = (
   target: HTMLElement,
   url: string,
-  opts: { credentials?: { password?: string | undefined } | undefined },
+  opts: {
+    credentials?: { password?: string | undefined } | undefined;
+    wsProtocols?: string[] | undefined;
+  },
 ) => DesktopRfbLike;
 
 export type DesktopConnectionState =

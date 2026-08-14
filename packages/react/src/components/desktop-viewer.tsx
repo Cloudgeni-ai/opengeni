@@ -4,8 +4,16 @@ import type {
   DesktopStreamCapability,
 } from "@opengeni/sdk";
 import { LoaderCircleIcon, MonitorIcon, MousePointerClickIcon, WifiOffIcon } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import {
+  type ClipboardEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { cn } from "../lib/cn";
+import { interactionHostPlatform, type InteractionHostPlatform } from "../lib/host-platform";
 import { useDesktopStream } from "../hooks/use-desktop-stream";
 import type { DesktopWebSocketFactory } from "../hooks/use-relay-frame-stream";
 
@@ -24,9 +32,22 @@ export type DesktopViewerProps = {
   scaleViewport?: boolean | undefined;
   /** Custom RFB factory (tests / a WebRTC swap). Defaults to lazy @novnc/novnc. */
   rfbFactory?: DesktopRfbFactory | undefined;
+  /** Authenticated controller protocols for proxied RFB transports. */
+  webSocketProtocols?: string[] | undefined;
   /** Custom socket factory for the self-hosted `relay-frames` transport (tests).
    *  Defaults to `new WebSocket(url)`. Mirrors `rfbFactory`. */
   webSocketFactory?: DesktopWebSocketFactory | undefined;
+  /**
+   * Optional host-owned paste path. ComputerSession hosts use their native,
+   * target-scoped clipboard action instead of relying on an RFB server to sync
+   * ClientCutText into the graphical seat. Return true once the host accepted
+   * the text. Without a host authority the viewer leaves paste untouched rather
+   * than claiming success for an unreliable display-server clipboard heuristic.
+   */
+  onPasteText?: ((text: string) => boolean) | undefined;
+  /** OS behind the RFB seat. Used only to translate the host's primary shortcut
+   * (Cmd on macOS, Ctrl elsewhere) to the target's primary modifier. */
+  targetPlatform?: "linux" | "macos" | "windows" | null | undefined;
   /**
    * @deprecated Desktop acknowledgment is automatic. Retained as an ignored
    * compatibility prop so existing embedders keep compiling.
@@ -138,7 +159,10 @@ export function DesktopViewer({
   showControlToggle = true,
   scaleViewport,
   rfbFactory,
+  webSocketProtocols,
   webSocketFactory,
+  onPasteText,
+  targetPlatform,
   onActivate,
   onAcknowledge,
   watching,
@@ -273,6 +297,7 @@ export function DesktopViewer({
     interactive: inControl,
     ...(scaleViewport !== undefined ? { scaleViewport } : {}),
     ...(rfbFactory ? { rfbFactory } : {}),
+    ...(webSocketProtocols ? { webSocketProtocols } : {}),
     ...(webSocketFactory ? { webSocketFactory } : {}),
   });
 
@@ -373,6 +398,45 @@ export function DesktopViewer({
     stream.reconnect();
   };
 
+  const paste = (event: ClipboardEvent<HTMLDivElement>) => {
+    if (!inControl) return;
+    const text = event.clipboardData.getData("text/plain");
+    if (!text && !event.clipboardData.types.includes("text/plain")) return;
+    if (!onPasteText?.(text)) return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const primaryShortcut = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!inControl || !targetPlatform) return;
+    const hostPlatform = interactionHostPlatform();
+    // noVNC maps a Mac Command key to remote Alt before the actual chord key
+    // arrives. Suppress that standalone physical modifier; the complete target
+    // chord below owns both its down and up events.
+    if (isHostPrimaryModifier(event, hostPlatform)) {
+      event.stopPropagation();
+      return;
+    }
+    const chord = desktopPrimaryShortcut(event, hostPlatform, targetPlatform);
+    if (!chord) return;
+    // Copy/paste must keep the browser's default clipboard dispatch alive, but
+    // noVNC must not also send the host modifier into the remote seat.
+    if (chord === "clipboard") {
+      event.stopPropagation();
+      return;
+    }
+    const sent = chord.every(({ keysym, code, down }) => stream.sendKey?.(keysym, code, down));
+    if (!sent) return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const primaryModifierUp = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (inControl && isHostPrimaryModifier(event, interactionHostPlatform())) {
+      event.stopPropagation();
+    }
+  };
+
   // ── Resolve the single UI state (priority order) ────────────────────────────
   let uiState: DesktopUiState;
   if (viewerCapReached) uiState = "viewer_cap";
@@ -448,6 +512,10 @@ export function DesktopViewer({
       data-state={stream.state}
       data-ui-state={uiState}
       data-in-control={inControl ? "true" : undefined}
+      data-target-platform={targetPlatform ?? undefined}
+      onKeyDownCapture={primaryShortcut}
+      onKeyUpCapture={primaryModifierUp}
+      onPasteCapture={paste}
     >
       {/* noVNC mount target. It appends a `width:100%;height:100%` `_screen` div
           and AUTOSCALES the 1280x800 framebuffer to fit THIS box. We pin it to
@@ -522,6 +590,51 @@ export function DesktopViewer({
       )}
     </div>
   );
+}
+
+type RfbKeyEvent = { keysym: number; code: string; down: boolean };
+
+function isHostPrimaryModifier(
+  event: Pick<ReactKeyboardEvent<HTMLDivElement>, "key">,
+  hostPlatform: InteractionHostPlatform,
+): boolean {
+  return event.key === (hostPlatform === "mac" ? "Meta" : "Control");
+}
+
+/** Translate one host-primary chord into deterministic RFB events for the
+ * target OS. noVNC otherwise treats a Mac Command key as remote Alt, which
+ * makes ordinary Cmd+A/Z shortcuts silently wrong on Linux sandboxes. */
+export function desktopPrimaryShortcut(
+  event: Pick<
+    ReactKeyboardEvent<HTMLDivElement>,
+    "altKey" | "ctrlKey" | "key" | "metaKey" | "shiftKey" | "code"
+  >,
+  hostPlatform: InteractionHostPlatform,
+  targetPlatform: "linux" | "macos" | "windows",
+): RfbKeyEvent[] | "clipboard" | null {
+  const primaryHeld = hostPlatform === "mac" ? event.metaKey : event.ctrlKey;
+  if (!primaryHeld || [...event.key].length !== 1) return null;
+  const key = event.key.toLowerCase();
+  if (!event.altKey && (key === "c" || key === "v")) return "clipboard";
+  const primary =
+    targetPlatform === "macos"
+      ? { keysym: 0xffeb, code: "MetaLeft" }
+      : { keysym: 0xffe3, code: "ControlLeft" };
+  const modifiers = [
+    primary,
+    ...(event.altKey ? [{ keysym: 0xffe9, code: "AltLeft" }] : []),
+    ...(event.shiftKey ? [{ keysym: 0xffe1, code: "ShiftLeft" }] : []),
+  ];
+  const keyEvent = {
+    keysym: key.codePointAt(0)!,
+    code: event.code || (/^[a-z]$/u.test(key) ? `Key${key.toUpperCase()}` : key),
+  };
+  return [
+    ...modifiers.map((modifier) => ({ ...modifier, down: true })),
+    { ...keyEvent, down: true },
+    { ...keyEvent, down: false },
+    ...modifiers.reverse().map((modifier) => ({ ...modifier, down: false })),
+  ];
 }
 
 /**

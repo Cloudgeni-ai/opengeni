@@ -1,0 +1,11 @@
+Lightpanda 0.3.5
+Copyright Lightpanda contributors
+License: GNU Affero General Public License v3.0
+Project: https://github.com/lightpanda-io/browser
+
+OpenGeni images distribute the unmodified upstream release binary. The exact
+corresponding source archive is installed at:
+  /usr/local/share/source/lightpanda-0.3.5.tar.gz
+
+The license text is installed at:
+  /usr/local/share/licenses/lightpanda/LICENSE

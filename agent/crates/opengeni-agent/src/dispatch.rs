@@ -131,15 +131,8 @@ async fn dispatch_future<P: Platform>(
         "dispatching control request"
     );
 
-    // Epoch fence: reject ops the control plane resolved against an OLDER epoch
-    // than the agent currently holds (a stale, pre-swap/pre-reconnect op). An
-    // epoch of 0 means "unset" (e.g. the connect hello) and is never fenced.
-    if request.epoch != 0 && request.epoch < ctx.epoch {
-        return err_response(
-            request_id,
-            &PlatformError::Unsupported(String::new()),
-            fenced_error(request.epoch, ctx.epoch),
-        );
+    if let Some(response) = stale_epoch_response(&request, ctx.epoch) {
+        return response;
     }
 
     let Some(op) = request.op else {
@@ -155,15 +148,7 @@ async fn dispatch_future<P: Platform>(
                 agent_monotonic_ms: ctx.monotonic_ms(),
             }),
         ),
-        Op::Metrics(_) => {
-            // The sample briefly blocks (a /proc/stat CPU delta) → the blocking
-            // pool, so the dispatch loop is never stalled. A join failure degrades
-            // to a default sample (a metrics gap is never fatal, §10.7).
-            let metrics = tokio::task::spawn_blocking(crate::metrics::sample)
-                .await
-                .unwrap_or_default();
-            ok(request_id, RespResult::Metrics(metrics))
-        }
+        Op::Metrics(_) => metrics_response(request_id).await,
         Op::Hello(_) | Op::Resume(_) | Op::UpdateMayProceed(_) => {
             // These are control-plane→agent acknowledgements the agent ORIGINATES
             // (it sends a Hello and receives a HelloAck); receiving one as an
@@ -191,7 +176,10 @@ async fn dispatch_future<P: Platform>(
         // oversized reply into a structured `PayloadTooLarge` error rather than a
         // silent publish failure + caller timeout. If a future need arises to stream
         // or chunk these bodies, bound them at the op like the screenshot does.
-        Op::Exec(req) => result(request_id, platform.exec(&req).await, RespResult::Exec),
+        Op::Exec(mut req) => {
+            crate::codemode::expose_native_client(&mut req);
+            result(request_id, platform.exec(&req).await, RespResult::Exec)
+        }
         Op::FsRead(req) => result(request_id, platform.fs_read(&req).await, RespResult::FsRead),
         Op::FsWrite(req) => result(
             request_id,
@@ -224,6 +212,21 @@ async fn dispatch_future<P: Platform>(
             platform.desktop_ensure(&req).await,
             RespResult::DesktopEnsure,
         ),
+        Op::BrowserControlEnsure(req) => result(
+            request_id,
+            platform.browser_control_ensure(&req).await,
+            RespResult::BrowserControlEnsure,
+        ),
+        Op::BrowserFramesOpen(req) => result(
+            request_id,
+            platform.browser_frames_open(&req).await,
+            RespResult::BrowserFramesOpen,
+        ),
+        Op::ComputerFramesOpen(req) => result(
+            request_id,
+            platform.computer_frames_open(&req).await,
+            RespResult::ComputerFramesOpen,
+        ),
 
         // --- computer-use control ops: the AGENT drives its own desktop --------
         // Extracted to helpers so this dispatch match stays compact + readable.
@@ -245,6 +248,28 @@ async fn dispatch_future<P: Platform>(
             RespResult::PtyClose,
         ),
     }
+}
+
+/// Rejects operations resolved against a superseded agent epoch. Epoch zero is
+/// unset (for example, the connect hello) and is never fenced.
+fn stale_epoch_response(request: &ControlRequest, current_epoch: u32) -> Option<ControlResponse> {
+    (request.epoch != 0 && request.epoch < current_epoch).then(|| {
+        err_response(
+            request.request_id.clone(),
+            &PlatformError::Unsupported(String::new()),
+            fenced_error(request.epoch, current_epoch),
+        )
+    })
+}
+
+async fn metrics_response(request_id: String) -> ControlResponse {
+    // The sample briefly blocks (a /proc/stat CPU delta) → the blocking pool, so
+    // the dispatch loop is never stalled. A join failure degrades to a default
+    // sample (a metrics gap is never fatal, §10.7).
+    let metrics = tokio::task::spawn_blocking(crate::metrics::sample)
+        .await
+        .unwrap_or_default();
+    ok(request_id, RespResult::Metrics(metrics))
 }
 
 /// Handles [`Op::DesktopInput`] — the computer-use INJECT op the agent runs

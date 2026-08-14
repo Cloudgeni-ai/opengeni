@@ -175,12 +175,18 @@ mod linux {
             descendant_score, "500",
             "fast descendant {descendant_pid} must carry oom_score_adj=500"
         );
+        let op_leaf = service_dir.join(shell_unified.rsplit('/').next().expect("op leaf name"));
+        assert_eq!(
+            std::fs::read_to_string(op_leaf.join("memory.oom.group"))
+                .expect("read operation OOM grouping")
+                .trim(),
+            "1",
+            "a memcg OOM must terminate the complete operation"
+        );
 
         // The op leaf is a real child of the resolved service cgroup.
         assert!(
-            service_dir
-                .join(shell_unified.rsplit('/').next().expect("op leaf name"))
-                .exists(),
+            op_leaf.exists(),
             "the op leaf {shell_unified} should exist under {}",
             service_dir.display()
         );

@@ -2,12 +2,16 @@ import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
+import { CapabilityCatalogItem as CapabilityCatalogItemSchema } from "@opengeni/contracts";
 
 import type { ConnectionHealth } from "@/lib/capabilities";
 import type { CapabilityCatalogItem, ConnectionMetadata, SocialConnection } from "@/types";
+import { EnabledCapabilitiesSection } from "./capability-catalog-sections";
+import { Sheet } from "@/components/ui/sheet";
 import {
   ConnectionStatus,
   DEFAULT_CONNECTION_OWNERSHIP,
+  DetailBody,
   OwnershipSelector,
   SocialConnectorControls,
 } from "./capability-detail-sheet";
@@ -86,6 +90,32 @@ function socialConnection(overrides: Partial<SocialConnection> = {}): SocialConn
   };
 }
 
+function installedCuratedSkill(): CapabilityCatalogItem {
+  return CapabilityCatalogItemSchema.parse({
+    id: "skill:terraform-style-guide",
+    kind: "skill",
+    source: "library",
+    name: "Terraform Style Guide",
+    description: "Reviewed Terraform conventions.",
+    category: "infrastructure",
+    enabled: true,
+    runtime: { available: true, notes: null },
+    lifecycle: {
+      status: "installed",
+      readiness: "ready",
+      detail: "installed",
+      managedBy: "workspace",
+    },
+    actions: ["configure", "update", "uninstall", "inspect"],
+    metadata: {
+      libraryId: "terraform-style-guide",
+      version: "1.0.0",
+      contentSha256: "a".repeat(64),
+      updateAvailable: true,
+    },
+  });
+}
+
 describe("connection ownership UI", () => {
   test("defaults to workspace ownership and exposes two labeled radio choices", async () => {
     expect(DEFAULT_CONNECTION_OWNERSHIP).toBe("workspace");
@@ -159,19 +189,240 @@ describe("connection ownership UI", () => {
       await rendered.unmount();
     }
   });
+
+  test("official Gmail exposes only a personal connect action and explains isolation", async () => {
+    const gmail = CapabilityCatalogItemSchema.parse({
+      id: "registry:gmail",
+      kind: "mcp",
+      source: "registry",
+      name: "Gmail",
+      category: "integrations",
+      providerDomain: "gmailmcp.googleapis.com",
+      mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      endpointUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      authKind: "oauth2",
+      runtime: { available: true, mcpServerId: "gmail-runtime", notes: null },
+      metadata: { connectionOwnership: "personal_only" },
+    });
+    const onAction = mock((_action: unknown) => {});
+    const rendered = await render(
+      <Sheet open>
+        <DetailBody
+          item={gmail}
+          health={{ state: "none" }}
+          logoSrc={null}
+          busy={false}
+          errorMessage={null}
+          canManageSocial={false}
+          onAction={onAction}
+        />
+      </Sheet>,
+    );
+    try {
+      expect(rendered.container.textContent).toContain(
+        "Other workspace members cannot discover or use",
+      );
+      expect(rendered.container.textContent).toContain("Each member connects their own");
+      expect(rendered.container.textContent).toContain(
+        "content added to a session follows that session's visibility",
+      );
+      expect(rendered.container.textContent).not.toContain("Connect for workspace");
+      const connect = [...rendered.container.querySelectorAll("button")].find((button) =>
+        button.textContent?.includes("Connect only for me"),
+      );
+      expect(connect).toBeDefined();
+      await act(async () => connect!.click());
+      expect(onAction).toHaveBeenCalledWith({
+        type: "oauth",
+        item: gmail,
+        ownership: "personal",
+      });
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("an installed MCP exposes only the authoritative disconnect action", async () => {
+    const mcp = CapabilityCatalogItemSchema.parse({
+      id: "mcp:internal-tools",
+      kind: "mcp",
+      source: "manual",
+      name: "Internal Tools",
+      category: "custom",
+      endpointUrl: "https://mcp.example.com/sse",
+      enabled: true,
+      runtime: { available: true, mcpServerId: "internal-tools", notes: null },
+      lifecycle: {
+        status: "ready",
+        readiness: "ready",
+        detail: "enabled",
+        managedBy: "workspace",
+      },
+      actions: ["configure", "disconnect", "inspect"],
+    });
+    const onAction = mock((_action: unknown) => {});
+    const rendered = await render(
+      <Sheet open>
+        <DetailBody
+          item={mcp}
+          health={{ state: "none" }}
+          logoSrc={null}
+          busy={false}
+          errorMessage={null}
+          canManageSocial={false}
+          onAction={onAction}
+        />
+      </Sheet>,
+    );
+    try {
+      const disconnect = [...rendered.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Disconnect",
+      );
+      expect(disconnect).toBeDefined();
+      expect(rendered.container.textContent).not.toContain("Disable");
+      await act(async () => disconnect!.click());
+      expect(onAction).toHaveBeenCalledWith({ type: "disconnect", item: mcp });
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("non-MCP capabilities never expose the generic disconnect mutation", async () => {
+    const plugin = CapabilityCatalogItemSchema.parse({
+      id: "plugin:source-package",
+      kind: "plugin",
+      source: "manual",
+      name: "Source Package",
+      category: "developer-tools",
+      enabled: true,
+      runtime: { available: true, notes: null },
+      lifecycle: {
+        status: "installed",
+        readiness: "ready",
+        detail: "installed",
+        managedBy: "workspace",
+      },
+      actions: ["configure", "update", "uninstall", "inspect"],
+    });
+    const onAction = mock((_action: unknown) => {});
+    const rendered = await render(
+      <Sheet open>
+        <DetailBody
+          item={plugin}
+          health={{ state: "none" }}
+          logoSrc={null}
+          busy={false}
+          errorMessage={null}
+          canManageSocial={false}
+          onAction={onAction}
+        />
+      </Sheet>,
+    );
+    try {
+      expect(rendered.container.textContent).toContain(
+        "Manage this capability from its dedicated controls.",
+      );
+      expect(rendered.container.textContent).not.toContain("Disconnect");
+      expect(rendered.container.textContent).not.toContain("Disable");
+      expect(onAction).not.toHaveBeenCalled();
+    } finally {
+      await rendered.unmount();
+    }
+  });
 });
 
-describe("first-party social connector UI", () => {
+describe("Skill installation authority UI", () => {
+  test("keeps Skill mutations disabled with administrator guidance for non-admin members", async () => {
+    const skill = installedCuratedSkill();
+    const onAction = mock((_action: unknown) => {});
+    const rendered = await render(
+      <Sheet open>
+        <DetailBody
+          item={skill}
+          health={{ state: "none" }}
+          logoSrc={null}
+          busy={false}
+          errorMessage={null}
+          canManageSocial={false}
+          canManageSkills={false}
+          onAction={onAction}
+        />
+      </Sheet>,
+    );
+    try {
+      const update = [...rendered.container.querySelectorAll("button")].find((button) =>
+        button.textContent?.includes("Update Skill"),
+      );
+      const remove = [...rendered.container.querySelectorAll("button")].find((button) =>
+        button.textContent?.includes("Remove Skill"),
+      );
+      expect(update?.disabled).toBe(true);
+      expect(remove?.disabled).toBe(true);
+      expect(rendered.container.textContent).toContain(
+        "Workspace administrator permission is required to install, update, or remove Skills.",
+      );
+      await act(async () => update!.click());
+      await act(async () => remove!.click());
+      expect(onAction).not.toHaveBeenCalled();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("keeps read access while disabling the enabled-strip removal shortcut", async () => {
+    const skill = installedCuratedSkill();
+    const onOpen = mock((_item: CapabilityCatalogItem) => {});
+    const onDisable = mock((_item: CapabilityCatalogItem) => {});
+    const rendered = await render(
+      <EnabledCapabilitiesSection
+        items={[skill]}
+        busyId={null}
+        connectionHealth={() => ({ state: "none" })}
+        logoUrl={() => null}
+        canManageSkills={false}
+        onOpen={onOpen}
+        onDisable={onDisable}
+      />,
+    );
+    try {
+      const inspect = rendered.container.querySelector<HTMLButtonElement>(
+        '[data-capability-id="skill:terraform-style-guide"]',
+      );
+      const remove = [...rendered.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Remove",
+      );
+      expect(inspect?.disabled).toBe(false);
+      expect(remove?.disabled).toBe(true);
+      expect(remove?.title).toContain("Workspace administrator permission is required");
+      await act(async () => inspect!.click());
+      await act(async () => remove!.click());
+      expect(onOpen).toHaveBeenCalledWith(skill);
+      expect(onDisable).not.toHaveBeenCalled();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+});
+
+describe("social provider integration UI", () => {
   const x = { id: "api:x", name: "X" } as CapabilityCatalogItem;
 
-  test("shows workspace automation semantics and emits reconnect/disconnect actions", async () => {
+  test("shows every workspace account and emits exact disconnect plus add/reconnect actions", async () => {
     const onAction = mock((_action: unknown) => {});
     const connected = socialConnection();
+    const needsReauth = socialConnection({
+      id: "55555555-5555-4555-8555-555555555555",
+      accountHandle: "opengeni_support",
+      accountName: "OpenGeni Support",
+      externalAccountId: "x-account-2",
+      status: "needs_reauth",
+      updatedAt: "2026-08-02T00:00:00.000Z",
+    });
     const rendered = await render(
       <SocialConnectorControls
         item={x}
         provider="x"
-        connections={[connected]}
+        connections={[needsReauth, connected]}
         ownership="workspace"
         onOwnershipChange={() => undefined}
         busy={false}
@@ -180,14 +431,18 @@ describe("first-party social connector UI", () => {
       />,
     );
     try {
-      expect(rendered.container.textContent).toContain("Connected as @opengeni");
+      expect(rendered.container.textContent).toContain("OpenGeni");
+      expect(rendered.container.textContent).toContain("OpenGeni Support");
+      expect(rendered.container.textContent).toContain("Needs reconnection");
       expect(rendered.container.textContent).toContain("Workspace shared");
       expect(rendered.container.textContent).toContain("scheduled automations");
       const buttons = [...rendered.container.querySelectorAll("button")];
       expect(buttons.map((button) => button.textContent?.trim())).toEqual([
-        "Reconnect X",
         "Disconnect",
+        "Disconnect",
+        "Reconnect or add X account",
       ]);
+      await act(async () => buttons[2]!.click());
       await act(async () => buttons[0]!.click());
       await act(async () => buttons[1]!.click());
       expect(onAction).toHaveBeenNthCalledWith(1, {
@@ -200,6 +455,11 @@ describe("first-party social connector UI", () => {
         type: "disconnect_social",
         item: x,
         connectionId: connected.id,
+      });
+      expect(onAction).toHaveBeenNthCalledWith(3, {
+        type: "disconnect_social",
+        item: x,
+        connectionId: needsReauth.id,
       });
     } finally {
       await rendered.unmount();

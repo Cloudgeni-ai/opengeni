@@ -1,6 +1,8 @@
 import { isOpenAIResponsesRawModelStreamEvent, type RunStreamEvent } from "@openai/agents";
 import {
+  INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
   approvalIdentifier,
+  RequestHumanInteractionToolInput,
   RequestHumanInputToolInput,
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
@@ -9,6 +11,7 @@ import {
 } from "@opengeni/contracts";
 
 import { normalizeProtocolJsonValue } from "./protocol-json";
+import { mcpResultFromCustomData } from "./mcp-result-custom-data";
 
 export type NormalizedRuntimeEvent = {
   type: SessionEventType;
@@ -63,6 +66,13 @@ export type SerializedHumanInputInterruption = {
   input: ReturnType<typeof RequestHumanInputToolInput.parse>;
 };
 
+export type SerializedInteractionInterventionInterruption = {
+  toolCallId: string;
+  input: ReturnType<typeof RequestHumanInteractionToolInput.parse>;
+  /** Exact SDK approval object retained in the frozen RunState. */
+  approval: unknown;
+};
+
 function base64DecodedByteLength(value: string): number {
   const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
   return Math.max(0, Math.floor((value.length * 3) / 4) - padding);
@@ -109,6 +119,31 @@ function toolOutputMediaPreview(value: unknown): SessionEventMediaPreview | null
     if (typeof url !== "string" || url.length === 0) return null;
     return sessionEventMediaPreviewFromDataUrl(url) ?? sessionEventMediaPreview("image/*", null);
   }
+  if ((record.type === "image" || record.type === "audio") && typeof record.data === "string") {
+    const mediaType =
+      typeof record.mimeType === "string" && record.mimeType.length > 0
+        ? record.mimeType
+        : record.type === "audio"
+          ? "audio/*"
+          : "image/png";
+    return (
+      sessionEventMediaPreviewFromDataUrl(record.data) ??
+      sessionEventMediaPreview(mediaType, base64DecodedByteLength(record.data))
+    );
+  }
+  if (record.type === "resource" && record.resource && typeof record.resource === "object") {
+    const resource = record.resource as Record<string, unknown>;
+    if (typeof resource.blob === "string") {
+      const mediaType =
+        typeof resource.mimeType === "string" && resource.mimeType.length > 0
+          ? resource.mimeType
+          : "application/octet-stream";
+      return (
+        sessionEventMediaPreviewFromDataUrl(resource.blob) ??
+        sessionEventMediaPreview(mediaType, base64DecodedByteLength(resource.blob))
+      );
+    }
+  }
   if (record.type !== "image" || !record.image || typeof record.image !== "object") return null;
   const image = record.image as Record<string, unknown>;
   const mediaType =
@@ -147,6 +182,15 @@ export function normalizeToolOutputForEvent(output: unknown): unknown {
       return normalized[0];
     }
     return normalized;
+  }
+  if (output && typeof output === "object") {
+    const record = output as Record<string, unknown>;
+    if (Array.isArray(record.content)) {
+      return {
+        ...record,
+        content: record.content.map((el) => toolOutputMediaPreview(el) ?? el),
+      };
+    }
   }
   return output;
 }
@@ -272,6 +316,7 @@ export function normalizeSdkEvent(
       },
     });
   } else if (item.type === "tool_call_output_item") {
+    const retainedMcpResult = mcpResultFromCustomData(item.customData);
     pushProtocolEvent({
       type: "agent.toolCall.output",
       payload: {
@@ -281,7 +326,7 @@ export function normalizeSdkEvent(
         output:
           "toolOutputOverride" in options
             ? options.toolOutputOverride
-            : normalizeToolOutputForEvent(item.output),
+            : normalizeToolOutputForEvent(retainedMcpResult ?? item.output),
       },
       ...(options.retainedOutputEvidence !== undefined
         ? { retainedOutputEvidence: options.retainedOutputEvidence }
@@ -580,19 +625,35 @@ function requestUsageEntriesProp(
 
 export function serializeApprovals(interruptions: unknown[]): unknown[] {
   const approvals = interruptions
-    .filter((item) => interruptionToolName(item) !== HUMAN_INPUT_TOOL_NAME)
+    .filter(
+      (item) =>
+        ![HUMAN_INPUT_TOOL_NAME, INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME].includes(
+          interruptionToolName(item),
+        ),
+    )
+    .map(serializeApprovalInterruption);
+  return normalizeProtocolJsonValue(approvals, '$["approvals"]');
+}
+
+export function serializeInteractionInterventionRequests(
+  interruptions: unknown[],
+): SerializedInteractionInterventionInterruption[] {
+  return interruptions
+    .filter((item) => interruptionToolName(item) === INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME)
     .map((item: any) => {
-      if (typeof item?.toJSON === "function") {
-        return item.toJSON();
+      const toolCallId = approvalIdentifier(item);
+      if (!toolCallId) {
+        throw new Error("Interaction intervention is missing a stable tool-call identity");
       }
       return {
-        id: approvalIdentifier(item) ?? "approval",
-        name: item?.name ?? item?.rawItem?.name ?? "tool",
-        arguments: item?.arguments ?? item?.rawItem?.arguments ?? null,
-        raw: item,
+        toolCallId,
+        input: RequestHumanInteractionToolInput.parse(interruptionArguments(item)),
+        approval: normalizeProtocolJsonValue(
+          serializeApprovalInterruption(item),
+          '$["interactionInterventionApproval"]',
+        ),
       };
     });
-  return normalizeProtocolJsonValue(approvals, '$["approvals"]');
 }
 
 export function serializeHumanInputRequests(
@@ -601,24 +662,35 @@ export function serializeHumanInputRequests(
   return interruptions
     .filter((item) => interruptionToolName(item) === HUMAN_INPUT_TOOL_NAME)
     .map((item: any) => {
-      const rawArguments = item?.arguments ?? item?.rawItem?.arguments;
-      let parsedArguments: unknown = rawArguments;
-      if (typeof rawArguments === "string") {
-        try {
-          parsedArguments = JSON.parse(rawArguments);
-        } catch {
-          throw new Error("Human-input interruption contains invalid JSON arguments");
-        }
-      }
       const toolCallId = approvalIdentifier(item);
       if (!toolCallId) {
         throw new Error("Human-input interruption is missing a stable tool-call identity");
       }
       return {
         toolCallId,
-        input: RequestHumanInputToolInput.parse(parsedArguments),
+        input: RequestHumanInputToolInput.parse(interruptionArguments(item)),
       };
     });
+}
+
+function serializeApprovalInterruption(item: any): unknown {
+  if (typeof item?.toJSON === "function") return item.toJSON();
+  return {
+    id: approvalIdentifier(item) ?? "approval",
+    name: item?.name ?? item?.rawItem?.name ?? "tool",
+    arguments: item?.arguments ?? item?.rawItem?.arguments ?? null,
+    raw: item,
+  };
+}
+
+function interruptionArguments(item: any): unknown {
+  const rawArguments = item?.arguments ?? item?.rawItem?.arguments;
+  if (typeof rawArguments !== "string") return rawArguments;
+  try {
+    return JSON.parse(rawArguments) as unknown;
+  } catch {
+    throw new Error("Tool interruption contains invalid JSON arguments");
+  }
 }
 
 function interruptionToolName(item: unknown): string {

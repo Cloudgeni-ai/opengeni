@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { eq, sql, type SQL } from "drizzle-orm";
 import type { PgDatabase, PgTransactionConfig } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
@@ -29,6 +30,17 @@ import * as schema from "./schema";
 
 export type Database = PgDatabase<any, typeof schema>;
 
+declare const sessionActivityDatabaseBrand: unique symbol;
+
+/**
+ * A workspace-scoped transaction whose session activity commit gate is open.
+ * Session-row writers accept this narrower handle so new call sites cannot
+ * accidentally bypass the once-per-transaction revision finalizer.
+ */
+export type SessionActivityDatabase = Database & {
+  readonly [sessionActivityDatabaseBrand]: true;
+};
+
 export type DbClient = {
   db: Database;
   close: () => Promise<void>;
@@ -37,6 +49,37 @@ export type DbClient = {
 export type RlsContext = {
   accountId: string;
   workspaceId?: string | null;
+};
+
+export type SessionRlsActorContext = {
+  subjectId: string;
+  initiatingHumanSubjectId?: string | null;
+};
+
+const sessionRlsActorContext = new AsyncLocalStorage<SessionRlsActorContext>();
+
+export async function withSessionRlsActorContext<T>(
+  actor: SessionRlsActorContext,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (!actor.subjectId.trim()) {
+    throw new Error("withSessionRlsActorContext: a non-empty subjectId is required");
+  }
+  if (
+    actor.initiatingHumanSubjectId !== undefined &&
+    actor.initiatingHumanSubjectId !== null &&
+    !actor.initiatingHumanSubjectId.trim()
+  ) {
+    throw new Error(
+      "withSessionRlsActorContext: initiatingHumanSubjectId must be null or non-empty",
+    );
+  }
+  return await sessionRlsActorContext.run(actor, fn);
+}
+
+type RlsContextSettings = {
+  accountId: string;
+  workspaceId: string;
 };
 
 /**
@@ -313,7 +356,72 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   // Old OpenGeni binaries do not set this GUC, so migration-installed update
   // fences can distinguish their partial writes without inspecting content.
   await db.execute(sql`select set_config('opengeni.lossless_content_writer', '1', true)`);
-  await db.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`);
+  await db.execute(sql`select
+    set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
+    set_config('opengeni.pending_tool_event_output_v1', '1', true)`);
+  const sessionActor = sessionRlsActorContext.getStore();
+  if (sessionActor) {
+    await setSubjectRlsContext(db, sessionActor.subjectId);
+    await db.execute(
+      sql`select set_config(
+        'opengeni.initiating_human_subject_id',
+        ${sessionActor.initiatingHumanSubjectId ?? ""},
+        true
+      )`,
+    );
+  }
+}
+
+async function readRlsContextSettings(db: Database): Promise<RlsContextSettings> {
+  const [settings] = await rawRows<{
+    account_id: string | null;
+    workspace_id: string | null;
+  }>(
+    db,
+    sql`select
+      current_setting('opengeni.account_id', true) as account_id,
+      current_setting('opengeni.workspace_id', true) as workspace_id`,
+  );
+  return {
+    accountId: settings?.account_id ?? "",
+    workspaceId: settings?.workspace_id ?? "",
+  };
+}
+
+async function assertRlsContextApplied(db: Database, context: RlsContext): Promise<void> {
+  const applied = await readRlsContextSettings(db);
+  const expectedWorkspaceId = context.workspaceId ?? "";
+  if (applied.accountId !== context.accountId) {
+    throw new Error(
+      `RLS context not applied on the active backend: expected account ${context.accountId}, got "${applied.accountId}"`,
+    );
+  }
+  if (applied.workspaceId !== expectedWorkspaceId) {
+    throw new Error(
+      `RLS context not applied on the active backend: expected workspace "${expectedWorkspaceId}", got "${applied.workspaceId}"`,
+    );
+  }
+}
+
+async function restoreRlsContextSettings(
+  db: Database,
+  settings: RlsContextSettings,
+): Promise<void> {
+  const [restored] = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+  }>(
+    db,
+    sql`select
+      set_config('opengeni.account_id', ${settings.accountId}, true) as account_id,
+      set_config('opengeni.workspace_id', ${settings.workspaceId}, true) as workspace_id`,
+  );
+  if (
+    restored?.account_id !== settings.accountId ||
+    restored.workspace_id !== settings.workspaceId
+  ) {
+    throw new Error("RLS context could not be restored after a nested scope");
+  }
 }
 
 export async function withRlsContext<T>(
@@ -322,8 +430,10 @@ export async function withRlsContext<T>(
   fn: (db: Database) => Promise<T>,
   transactionConfig?: PgTransactionConfig,
 ): Promise<T> {
+  const restoreParentScope = isTransactionHandle(db);
   return await db.transaction(async (tx) => {
     const scoped = tx as unknown as Database;
+    const parentScope = restoreParentScope ? await readRlsContextSettings(scoped) : null;
     await setRlsContext(scoped, context);
     // Defense-in-depth: read the LOCAL GUC back on THIS backend BEFORE running
     // the scoped query. The set_config and this read share one db.transaction,
@@ -334,29 +444,13 @@ export async function withRlsContext<T>(
     // manufacturing a phantom "no active subscription" from a credential that is
     // in fact active. Convert that silent false into a loud, root-cause-bearing
     // error so the caller can retry rather than permanently mis-decide.
-    const applied = await rawRows<{
-      account_id: string | null;
-      workspace_id: string | null;
-    }>(
-      scoped,
-      sql`select
-        current_setting('opengeni.account_id', true) as account_id,
-        current_setting('opengeni.workspace_id', true) as workspace_id`,
-    );
-    const appliedAccountId = applied[0]?.account_id ?? "";
-    const expectedWorkspaceId = context.workspaceId ?? "";
-    const appliedWorkspaceId = applied[0]?.workspace_id ?? "";
-    if (appliedAccountId !== context.accountId) {
-      throw new Error(
-        `RLS context not applied on the active backend: expected account ${context.accountId}, got "${appliedAccountId}"`,
-      );
-    }
-    if (appliedWorkspaceId !== expectedWorkspaceId) {
-      throw new Error(
-        `RLS context not applied on the active backend: expected workspace "${expectedWorkspaceId}", got "${appliedWorkspaceId}"`,
-      );
-    }
-    return await fn(scoped);
+    await assertRlsContextApplied(scoped, context);
+    const value = await fn(scoped);
+    // A nested transaction is a savepoint, and SET LOCAL survives successful
+    // savepoint release. Restore only the tenant scope the nested helper owns;
+    // writer/protocol capabilities intentionally remain transaction-wide.
+    if (parentScope) await restoreRlsContextSettings(scoped, parentScope);
+    return value;
   }, transactionConfig);
 }
 
@@ -414,6 +508,230 @@ export async function withWorkspaceRls<T>(
   );
 }
 
+type SessionActivityGate = {
+  db: SessionActivityDatabase;
+  owner: boolean;
+};
+
+function isTransactionHandle(db: Database): boolean {
+  return typeof (db as Database & { rollback?: unknown }).rollback === "function";
+}
+
+async function assertSessionActivityGateEntry(db: Database): Promise<void> {
+  if (!isTransactionHandle(db)) return;
+  const [gate] = await rawRows<{ state: string | null }>(
+    db,
+    sql`
+      select nullif(
+        current_setting('opengeni.session_activity_gate_state', true),
+        ''
+      ) as state
+    `,
+  );
+  if (gate?.state === null || gate === undefined) {
+    throw new Error("Session activity commit gate must start at the outer transaction boundary");
+  }
+}
+
+async function beginSessionActivityGate(
+  db: Database,
+  workspaceId: string,
+): Promise<SessionActivityGate> {
+  const [gate] = await rawRows<{
+    prior_state: string | null;
+    prior_workspace_id: string | null;
+  }>(
+    db,
+    sql`
+      with current_gate as materialized (
+        select
+          nullif(current_setting('opengeni.session_activity_gate_state', true), '') as prior_state,
+          nullif(current_setting('opengeni.session_activity_gate_workspace_id', true), '') as prior_workspace_id
+      )
+      select
+        prior_state,
+        prior_workspace_id,
+        case
+          when prior_state is null
+            then set_config('opengeni.session_activity_gate_state', 'open', true)
+          else prior_state
+        end as effective_state,
+        case
+          when prior_state is null
+            then set_config('opengeni.session_activity_gate_workspace_id', ${workspaceId}, true)
+          else prior_workspace_id
+        end as effective_workspace_id
+      from current_gate
+    `,
+  );
+  if (!gate) {
+    throw new Error("Session activity commit gate could not be opened");
+  }
+  if (gate.prior_state === null) {
+    return { db: db as SessionActivityDatabase, owner: true };
+  }
+  if (gate.prior_state === "open" && gate.prior_workspace_id === workspaceId) {
+    return { db: db as SessionActivityDatabase, owner: false };
+  }
+  throw new Error("Session activity commit gate is already owned by another transaction scope");
+}
+
+async function finalizeSessionActivityGate(
+  db: SessionActivityDatabase,
+  workspaceId: string,
+): Promise<void> {
+  // Resolve every deferred FK/constraint before taking the shared workspace
+  // counter. The only row writes after that point stamp session rows already
+  // modified and therefore already owned by this transaction.
+  await db.execute(
+    sql`select set_config('opengeni.session_activity_gate_state', 'preparing', true)`,
+  );
+  await db.execute(sql`set constraints all immediate`);
+  // The first flush proves every pre-existing deferred obligation. Re-defer
+  // only our commit guard so the marker-clearing writes below queue a fresh
+  // proof against the final row state, then force that proof before returning.
+  await db.execute(
+    sql`set constraints sessions_activity_insert_commit_guard, sessions_activity_update_commit_guard deferred`,
+  );
+  const [result] = await rawRows<{
+    had_pending: boolean;
+    pending_count: number;
+    revision: string | null;
+    stamped_count: number;
+  }>(
+    db,
+    sql`
+      with gate as materialized (
+        select set_config('opengeni.session_activity_gate_state', 'finalizing', true) as state
+      ),
+      pending as materialized (
+        select ${schema.sessions.id}
+        from ${schema.sessions}
+        cross join gate
+        where ${schema.sessions.workspaceId} = ${workspaceId}
+          and ${schema.sessions.activityRevisionPendingXid}
+            = pg_current_xact_id()::text::bigint
+      ),
+      advanced as (
+        update ${schema.workspaceSessionActivityRevisions} as counter
+        set revision = counter.revision + 1
+        where counter.workspace_id = ${workspaceId}
+          and exists (select 1 from pending)
+        returning counter.revision
+      ),
+      stamped as (
+        update ${schema.sessions} as session
+        set
+          activity_revision = advanced.revision,
+          activity_revision_pending_xid = null
+        from advanced
+        where session.workspace_id = ${workspaceId}
+          and session.activity_revision_pending_xid
+            = pg_current_xact_id()::text::bigint
+        returning session.id
+      ),
+      stats as materialized (
+        select
+          exists (select 1 from pending) as had_pending,
+          (select count(*)::integer from pending) as pending_count,
+          (select revision::text from advanced) as revision,
+          (select count(*)::integer from stamped) as stamped_count
+      ),
+      finalized as materialized (
+        select
+          had_pending,
+          pending_count,
+          revision,
+          stamped_count,
+          set_config('opengeni.session_activity_gate_state', 'finalized', true) as state
+        from stats
+      )
+      select had_pending, pending_count, revision, stamped_count
+      from finalized
+    `,
+  );
+  if (!result) {
+    throw new Error("Session activity commit gate did not return a finalization result");
+  }
+  if (result.had_pending && result.revision === null) {
+    throw new Error("Workspace session activity counter is unavailable");
+  }
+  if (result.stamped_count !== result.pending_count) {
+    throw new Error("Session activity commit gate did not stamp every pending row");
+  }
+  await db.execute(
+    sql`set constraints sessions_activity_insert_commit_guard, sessions_activity_update_commit_guard immediate`,
+  );
+}
+
+/**
+ * Run one workspace transaction with explicit once-per-transaction session
+ * activity finalization. Nested callers reuse the outer gate; only its owner
+ * finalizes immediately before the enclosing RLS transaction commits.
+ */
+export async function withSessionActivityRlsContext<T>(
+  db: Database,
+  context: RlsContext & { workspaceId: string },
+  fn: (db: SessionActivityDatabase) => Promise<T>,
+  transactionConfig?: PgTransactionConfig,
+): Promise<T> {
+  await assertSessionActivityGateEntry(db);
+  return await withRlsContext(
+    db,
+    context,
+    async (scopedDb) => {
+      const gate = await beginSessionActivityGate(scopedDb, context.workspaceId);
+      const value = await fn(gate.db);
+      // The finalizer must never trust tenant GUCs that arbitrary callback code
+      // could have changed. Nested RLS helpers restore their parent scope; this
+      // assertion is the fail-closed commit-boundary proof for every other path.
+      await assertRlsContextApplied(gate.db, context);
+      if (gate.owner) {
+        await finalizeSessionActivityGate(gate.db, context.workspaceId);
+      }
+      return value;
+    },
+    transactionConfig,
+  );
+}
+
+export async function withWorkspaceSessionActivityRls<T>(
+  db: Database,
+  workspaceId: string,
+  fn: (db: SessionActivityDatabase) => Promise<T>,
+  transactionConfig?: PgTransactionConfig,
+): Promise<T> {
+  return await withSessionActivityRlsContext(
+    db,
+    { ...(await rlsContextForWorkspace(db, workspaceId)), workspaceId },
+    fn,
+    transactionConfig,
+  );
+}
+
+/**
+ * Open one nested savepoint without losing the gate brand. Drizzle correctly
+ * preserves the backend-local gate GUCs, but its structural transaction type
+ * cannot express that provenance; keep the single trusted rebrand here.
+ */
+export async function withSessionActivitySavepoint<T>(
+  db: SessionActivityDatabase,
+  fn: (db: SessionActivityDatabase) => Promise<T>,
+): Promise<T> {
+  return await db.transaction(async (tx) => await fn(tx as unknown as SessionActivityDatabase));
+}
+
+export async function retrySessionActivityRls<T>(
+  db: Database,
+  workspaceId: string,
+  options: IdempotentPersistenceTransactionOptions,
+  fn: (db: SessionActivityDatabase) => Promise<T>,
+): Promise<T> {
+  return await runIdempotentPersistenceTransaction(options, async () => {
+    return await withWorkspaceSessionActivityRls(db, workspaceId, fn);
+  });
+}
+
 export async function retryWorkspacePersistence<T>(
   db: Database,
   workspaceId: string,
@@ -455,6 +773,28 @@ export async function withWorkspaceSubjectRls<T>(
   return await withRlsContext(
     db,
     context,
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, subjectId);
+      return await fn(scopedDb);
+    },
+    transactionConfig,
+  );
+}
+
+export async function withWorkspaceSubjectSessionActivityRls<T>(
+  db: Database,
+  workspaceId: string,
+  subjectId: string,
+  fn: (db: SessionActivityDatabase) => Promise<T>,
+  transactionConfig?: PgTransactionConfig,
+): Promise<T> {
+  if (!subjectId.trim()) {
+    throw new Error("withWorkspaceSubjectSessionActivityRls: a non-empty subjectId is required");
+  }
+  const context = await rlsContextForWorkspace(db, workspaceId);
+  return await withSessionActivityRlsContext(
+    db,
+    { ...context, workspaceId },
     async (scopedDb) => {
       await setSubjectRlsContext(scopedDb, subjectId);
       return await fn(scopedDb);

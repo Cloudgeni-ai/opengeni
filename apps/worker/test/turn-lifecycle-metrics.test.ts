@@ -22,11 +22,20 @@ describe("turn lifecycle metrics", () => {
     let metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(/opengeni_turns_inflight\{[^}]*\} 1/);
     expect(metrics).toMatch(/opengeni_turn_oldest_inflight_age_seconds\{[^}]*\} 3/);
+    expect(metrics).toMatch(/opengeni_turn_oldest_no_progress_age_seconds\{[^}]*\} 3/);
+
+    tracker.progress("turn-1");
+    now = 6_000;
+    tracker.refreshGauges();
+    metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_turn_oldest_inflight_age_seconds\{[^}]*\} 5/);
+    expect(metrics).toMatch(/opengeni_turn_oldest_no_progress_age_seconds\{[^}]*\} 2/);
 
     tracker.finish("turn-1", "completed");
 
     metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(/opengeni_turns_inflight\{[^}]*\} 0/);
+    expect(metrics).toMatch(/opengeni_turn_oldest_no_progress_age_seconds\{[^}]*\} 0/);
     expect(metrics).toContain("opengeni_turns_total");
     expect(metrics).toContain('outcome="completed"');
     expect(metrics).toContain("opengeni_turn_duration_seconds_bucket");

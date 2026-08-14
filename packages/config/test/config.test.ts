@@ -99,6 +99,32 @@ describe("browser analytics configuration", () => {
   });
 });
 
+describe("remote browser placement configuration", () => {
+  test("keeps provider credentials optional and parses bounded launch policy", () => {
+    const defaults = withEnv({}, () => getSettings());
+    expect(defaults.browserbaseApiKey).toBeUndefined();
+    expect(defaults.kernelApiKey).toBeUndefined();
+    expect(defaults.kernelBrowserTimeoutSeconds).toBe(3_600);
+    expect(defaults.kernelBrowserStealth).toBe(false);
+
+    const configured = withEnv(
+      {
+        OPENGENI_BROWSERBASE_API_KEY: "bb-secret",
+        OPENGENI_KERNEL_API_KEY: "kernel-secret",
+        OPENGENI_KERNEL_ENDPOINT: "https://kernel.example.test",
+        OPENGENI_KERNEL_BROWSER_TIMEOUT_SECONDS: "7200",
+        OPENGENI_KERNEL_BROWSER_STEALTH: "true",
+      },
+      () => getSettings(),
+    );
+    expect(configured.browserbaseApiKey).toBe("bb-secret");
+    expect(configured.kernelApiKey).toBe("kernel-secret");
+    expect(configured.kernelEndpoint).toBe("https://kernel.example.test");
+    expect(configured.kernelBrowserTimeoutSeconds).toBe(7_200);
+    expect(configured.kernelBrowserStealth).toBe(true);
+  });
+});
+
 describe("Codex progressive tool disclosure", () => {
   test("is enabled by default and supports an explicit emergency opt-out", () => {
     expect(withEnv({}, () => getSettings()).codexToolSearchEnabled).toBe(true);
@@ -125,6 +151,18 @@ describe("provider-neutral progressive tool disclosure", () => {
 });
 
 describe("Google Drive integration settings", () => {
+  test("keeps Workspace Events wake hints default-off", () => {
+    expect(withEnv({}, () => getSettings()).googleDriveWorkspaceEventsEnabled).toBeUndefined();
+    expect(
+      withEnv({ OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED: "false" }, () => getSettings())
+        .googleDriveWorkspaceEventsEnabled,
+    ).toBe(false);
+    expect(
+      withEnv({ OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED: "true" }, () => getSettings())
+        .googleDriveWorkspaceEventsEnabled,
+    ).toBe(true);
+  });
+
   test("loads the split localhost browser and API origins", () => {
     const settings = withEnv(
       {
@@ -845,6 +883,8 @@ describe("sandbox preparation profiles", () => {
         "list_document_bases",
         "list_indexed_documents",
         "knowledge_search",
+        "knowledge_get",
+        "knowledge_browse",
         "knowledge_fetch",
         "memory_search",
         "memory_propose",
@@ -871,35 +911,38 @@ describe("sandbox preparation profiles", () => {
     );
   });
 
-  test("defaults toolspace off and only adds sandbox pointers when enabled", () => {
-    const off = withEnv({}, () => getSettings());
-    expect(off.toolspaceEnabled).toBe(false);
-    expect(off.toolspaceMaxCallsPerTurn).toBe(200);
-    expect(off.ogtoolPackageSpec).toBeUndefined();
-    expect(
-      stableSandboxEnvironmentForRun(off, {}, { workspaceId: "ws-1" })
-        .OPENGENI_TOOLSPACE_TOKEN_FILE,
-    ).toBeUndefined();
-    expect(
-      stableSandboxEnvironmentForRun(off, {}, { workspaceId: "ws-1" }).OPENGENI_TOOLSPACE_URL,
-    ).toBeUndefined();
+  test("adds Codemode pointers whenever exact-attempt signing authority is available", () => {
+    const local = withEnv({}, () => getSettings());
+    expect(local.codemodeMaxCallsPerTurn).toBe(200);
+    expect(local.ogtoolPackageSpec).toBeUndefined();
+    expect(stableSandboxEnvironmentForRun(local, {}, { workspaceId: "ws-1" })).toMatchObject({
+      OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
+      OPENGENI_CODEMODE_URL: "http://host.docker.internal:8000/v1/workspaces/ws-1/codemode",
+    });
 
-    const on = withEnv(
+    const configured = withEnv(
       {
-        OPENGENI_TOOLSPACE_ENABLED: "true",
-        OPENGENI_TOOLSPACE_MAX_CALLS_PER_TURN: "17",
+        OPENGENI_PRODUCT_ACCESS_MODE: "configured",
+        OPENGENI_CODEMODE_MAX_CALLS_PER_TURN: "17",
         OPENGENI_OGTOOL_PACKAGE_SPEC: "@opengeni/ogtool@0.1.0",
         OPENGENI_DELEGATION_SECRET: "delegation-secret",
       },
       () => getSettings(),
     );
-    expect(on.toolspaceEnabled).toBe(true);
-    expect(on.toolspaceMaxCallsPerTurn).toBe(17);
-    expect(stableSandboxEnvironmentForRun(on, {}, { workspaceId: "ws-1" })).toMatchObject({
-      OPENGENI_TOOLSPACE_TOKEN_FILE: "/workspace/.opengeni/toolspace-token",
-      OPENGENI_TOOLSPACE_URL: "http://127.0.0.1:8000/v1/workspaces/ws-1/mcp",
+    expect(configured.codemodeMaxCallsPerTurn).toBe(17);
+    expect(stableSandboxEnvironmentForRun(configured, {}, { workspaceId: "ws-1" })).toMatchObject({
+      OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
+      OPENGENI_CODEMODE_URL: "http://host.docker.internal:8000/v1/workspaces/ws-1/codemode",
       OPENGENI_OGTOOL_PACKAGE_SPEC: "@opengeni/ogtool@0.1.0",
     });
+
+    const unavailable = withEnv({ OPENGENI_PRODUCT_ACCESS_MODE: "configured" }, () =>
+      getSettings(),
+    );
+    expect(
+      stableSandboxEnvironmentForRun(unavailable, {}, { workspaceId: "ws-1" })
+        .OPENGENI_CODEMODE_TOKEN_FILE,
+    ).toBeUndefined();
   });
 
   test("rejects floating or malformed ogtool package specs", () => {
@@ -942,11 +985,10 @@ describe("sandbox preparation profiles", () => {
     expect(env.PATH).toBeUndefined();
   });
 
-  test("adds no Toolspace pointers for selfhosted", () => {
+  test("adds no Codemode pointers for selfhosted", () => {
     const settings = withEnv(
       {
         OPENGENI_SANDBOX_BACKEND: "selfhosted",
-        OPENGENI_TOOLSPACE_ENABLED: "true",
         OPENGENI_DELEGATION_SECRET: "delegation-secret",
       },
       () => getSettings(),
@@ -956,28 +998,51 @@ describe("sandbox preparation profiles", () => {
     expect(env).toEqual({});
   });
 
-  test("requires a delegation secret when toolspace is enabled", () => {
-    expect(() =>
-      withEnv(
-        {
-          OPENGENI_TOOLSPACE_ENABLED: "true",
-        },
-        () => getSettings(),
-      ),
-    ).toThrow("OPENGENI_DELEGATION_SECRET is required when OPENGENI_TOOLSPACE_ENABLED=true");
-  });
-
-  test("resolves a local-only first-party delegation secret without weakening configured mode", async () => {
+  test("resolves first-party delegation from explicit, configured shared-key, or local mode", async () => {
     const { resolveFirstPartyDelegationSecret } = await import("../src/index");
     const local = withEnv({}, () => getSettings());
-    const configured = withEnv({ OPENGENI_PRODUCT_ACCESS_MODE: "configured" }, () => getSettings());
+    const configured = withEnv(
+      {
+        OPENGENI_PRODUCT_ACCESS_MODE: "configured",
+        OPENGENI_AUTH_REQUIRED: "true",
+        OPENGENI_ACCESS_KEY: "configured-shared-key",
+      },
+      () => getSettings(),
+    );
     const explicit = withEnv({ OPENGENI_DELEGATION_SECRET: "operator-secret" }, () =>
       getSettings(),
     );
 
     expect(resolveFirstPartyDelegationSecret(local)).toBeTruthy();
-    expect(resolveFirstPartyDelegationSecret(configured)).toBeUndefined();
+    expect(resolveFirstPartyDelegationSecret(configured)).toBe("configured-shared-key");
     expect(resolveFirstPartyDelegationSecret(explicit)).toBe("operator-secret");
+  });
+
+  test("parses deployment first-party tool defaults and allowed ceiling", async () => {
+    const { resolveFirstPartyMcpToolPolicy } = await import("../src/index");
+    const settings = withEnv(
+      {
+        OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS: "session_get,goal_update",
+        OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS: '["session_get","goal_update","goal_pause"]',
+      },
+      () => getSettings(),
+    );
+    expect(resolveFirstPartyMcpToolPolicy(settings)).toEqual({
+      default: ["session_get", "goal_update"],
+      allowed: ["session_get", "goal_update", "goal_pause"],
+    });
+  });
+
+  test("rejects defaults outside the deployment first-party tool ceiling", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS: "session_get,session_create",
+          OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS: "session_get",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("must be a subset");
   });
 
   test("does not duplicate a custom files MCP profile", () => {
@@ -1380,9 +1445,24 @@ describe("backend-gated sandbox required-credential validation", () => {
         () => getSettings(),
       ).modalImageId,
     ).toBe(imageId);
+    const snapshotImageId = "im-01KZWASVD6W1WEHC1PKN62PAF3";
+    expect(
+      withEnv({ OPENGENI_MODAL_IMAGE_ID: snapshotImageId }, () => getSettings()).modalImageId,
+    ).toBe(snapshotImageId);
     expect(() =>
       withEnv({ OPENGENI_MODAL_IMAGE_ID: "im-not-a-valid-id" }, () => getSettings()),
     ).toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_MODAL_IMAGE_ID: "im-valid/escape" }, () => getSettings()),
+    ).toThrow();
+  });
+
+  test("layers new Modal workspaces with directory snapshots by default", () => {
+    expect(withEnv({}, () => getSettings()).modalWorkspacePersistence).toBe("snapshot_directory");
+    expect(
+      withEnv({ OPENGENI_MODAL_WORKSPACE_PERSISTENCE: "snapshot_filesystem" }, () => getSettings())
+        .modalWorkspacePersistence,
+    ).toBe("snapshot_filesystem");
   });
 
   test("keeps sandbox artifact-runtime admission explicit and disabled by default", () => {

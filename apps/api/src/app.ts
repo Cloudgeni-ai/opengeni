@@ -3,15 +3,19 @@ import {
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
   configuredModels,
+  resolveFirstPartyMcpToolPolicy,
   withCodexCatalogProvider,
+  withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
 import {
   ClientConfig,
+  CodemodeCallRequest,
   ErrorEnvelope,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
   resolveWorkspaceMemoryEnabled,
+  resolveWorkspaceMemoryPromptMode,
   VOICE_INPUT_ACCEPTED_MIME_TYPES,
   TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
   type AccessGrant,
@@ -23,7 +27,18 @@ import {
   indexDocumentNow,
   type DocumentServices,
 } from "@opengeni/documents";
-import { dbSql, getWorkspace, rlsContextForWorkspace } from "@opengeni/db";
+import {
+  CodemodeCallBudgetExceededError,
+  CodemodeOperationConflictError,
+  CodemodeOperationNotExecutableError,
+  CodemodePayloadTooLargeError,
+  CodemodeToolApprovalRequiredError,
+  CodemodeToolNotInCatalogError,
+  dbSql,
+  getWorkspace,
+  rlsContextForWorkspace,
+  withSessionRlsActorContext,
+} from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -39,6 +54,7 @@ import {
   CodexCompactionV2ProviderLockedError,
   hasPermission,
   requireAccessGrant,
+  requireLiveAgentAttemptAuthorization,
   requirePermission,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
@@ -48,23 +64,45 @@ import { createManagedAuth } from "./auth/managed-auth";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
-import { isToolspaceGrant, prepareToolspaceMcpSurface } from "./mcp/toolspace";
+import {
+  CodemodeAuthorityError,
+  isCodemodeGrant,
+  readCodemodeOperation,
+  requireActiveCodemodeCatalog,
+  submitAndDispatchCodemodeCall,
+} from "./codemode";
 import { boundedMcpRequest, McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
+import {
+  BrowserControlProtocolError,
+  BrowserControlTransportError,
+} from "@opengeni/runtime/sandbox";
 import { requireAccessKey } from "./http/auth";
+import { allowedCorsOrigin } from "./http/cors";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
+import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
 import { registerDocumentRoutes } from "./routes/documents";
 import { registerEnrollmentRoutes } from "./routes/enrollments";
 import { registerMachineRoutes } from "./routes/machines";
+import { registerMemorySlackPublicationRoutes } from "./routes/memory-slack-publications";
 import { registerEnvironmentRoutes } from "./routes/environments";
 import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
 import { registerBillingRoutes } from "./routes/billing";
+import { registerBrowserIdentityRoutes } from "./routes/browser-identities";
+import { registerBrowserSessionRoutes } from "./routes/browser-sessions";
+import { registerComputerSessionRoutes } from "./routes/computer-sessions";
 import { registerGitHubRoutes } from "./routes/github";
 import { registerInstallRoutes } from "./routes/install";
+import { registerApiIntegrationRoutes } from "./routes/api-integrations";
+import { registerIntegrationFacetRoutes } from "./routes/integration-facets";
+import { registerInteractionResourceRoutes } from "./routes/interaction-resources";
 import { registerPackRoutes } from "./routes/packs";
+import { registerPluginRoutes } from "./routes/plugins";
+import { registerSkillRoutes } from "./routes/skills";
+import { registerChannelRoutes } from "./routes/channels";
 import { registerRigRoutes } from "./routes/rigs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerSessionRoutes } from "./routes/sessions";
@@ -72,16 +110,22 @@ import { registerSocialRoutes } from "./routes/social";
 import { registerWorkspaceRoutes } from "./routes/workspaces";
 import { registerWorkspaceInstructionPolicyRoutes } from "./routes/workspace-instruction-policies";
 import { registerCompanyProfileRoutes } from "./routes/company-profile";
+import { registerSlackTaskPolicyRoutes } from "./routes/slack-task-policy";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
 import { registerTranscriptionRoutes } from "./routes/transcriptions";
 import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
+import { registerVideoGenerationRoutes } from "./routes/video-generation";
+import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
+import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
 import { projectClientModel } from "./model-catalog";
 import { createTranscriptionService } from "./transcription/service";
 import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
 import { registerSlackInteractionRoutes } from "./integrations/slack-interactions";
+
+export { allowedCorsOrigin } from "./http/cors";
 
 export type {
   ApiRouteDeps,
@@ -104,7 +148,7 @@ export {
 export { workflowIdForSession } from "@opengeni/core";
 export { replaySessionEvents, sseSessionStream, sseWorkspaceControlStream } from "./http/sse";
 
-export const API_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
+export const API_MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024;
 
 /** Effective Hono bodyLimit — API JSON ceiling or voice multipart + multipart overhead. */
 export function apiRequestBodyLimitBytes(settings: {
@@ -433,9 +477,12 @@ export function createAppComposition(deps: AppDependencies): {
 
   app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
-    const catalogSettings = deps.settings.codexSubscriptionEnabled
+    const codexCatalogSettings = deps.settings.codexSubscriptionEnabled
       ? withCodexCatalogProvider(deps.settings)
       : deps.settings;
+    const catalogSettings = deps.settings.supergrokSubscriptionEnabled
+      ? withXaiSubscriptionCatalogProvider(codexCatalogSettings)
+      : codexCatalogSettings;
     return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
@@ -454,6 +501,7 @@ export function createAppComposition(deps: AppDependencies): {
           id: server.id,
           name: server.name ?? server.id,
         })),
+        firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings),
         fileUploads: {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
@@ -493,6 +541,22 @@ export function createAppComposition(deps: AppDependencies): {
     );
   });
 
+  app.use("/v1/workspaces/:workspaceId/*", async (c, next) => {
+    const workspaceId = c.req.param("workspaceId");
+    if (workspaceRequestRequiresCodexAccountPrevalidation(c.req.raw)) {
+      const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+      await validateCodexAccountTarget(c.req.raw);
+      await withAccessGrantSessionRlsContext(routeDeps, grant, next);
+      return;
+    }
+    if (workspaceActorContextExempt(c.req.method, new URL(c.req.url).pathname)) {
+      await next();
+      return;
+    }
+    const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+    await withAccessGrantSessionRlsContext(routeDeps, grant, next);
+  });
+
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     let boundedRequest: Request;
@@ -507,91 +571,138 @@ export function createAppComposition(deps: AppDependencies): {
       throw error;
     }
     const grant = await requireMcpAccessGrant(c, routeDeps, workspaceId);
-    const toolspaceGrant = isToolspaceGrant(routeDeps.settings, grant);
-    const boundSessionId = grant.metadata?.sessionId;
-    if (toolspaceGrant || typeof boundSessionId === "string") {
-      if (typeof boundSessionId !== "string") {
-        throw new HTTPException(404, { message: "session not found" });
-      }
-      try {
-        await requireSessionAuthorization(routeDeps, grant, {
-          sessionId: boundSessionId,
-          operation: toolspaceGrant ? "session.toolspace.call" : "session.first_party_mcp.call",
-          surface: toolspaceGrant ? "toolspace" : "first_party_mcp",
-        });
-      } catch (error) {
-        if (error instanceof SessionAuthorizationDeniedError) {
-          throw new HTTPException(404, { message: "session not found" });
-        }
-        if (error instanceof SessionAuthorizationUnavailableError) {
-          throw new HTTPException(503, {
-            message: "session authorization is unavailable",
+    return await withAccessGrantSessionRlsContext(routeDeps, grant, async () => {
+      const boundSessionId = grant.metadata?.sessionId;
+      if (typeof boundSessionId === "string") {
+        try {
+          await requireSessionAuthorization(routeDeps, grant, {
+            sessionId: boundSessionId,
+            operation: "session.first_party_mcp.call",
+            surface: "first_party_mcp",
           });
+        } catch (error) {
+          if (error instanceof SessionAuthorizationDeniedError) {
+            throw new HTTPException(404, { message: "session not found" });
+          }
+          if (error instanceof SessionAuthorizationUnavailableError) {
+            throw new HTTPException(503, {
+              message: "session authorization is unavailable",
+            });
+          }
+          throw error;
         }
-        throw error;
       }
-    }
-    let toolspace: Awaited<ReturnType<typeof prepareToolspaceMcpSurface>> = null;
-    if (toolspaceGrant) {
-      try {
-        toolspace = await prepareToolspaceMcpSurface({
-          deps: routeDeps,
-          grant,
-        });
-      } catch (error) {
-        if (error instanceof McpPayloadTooLargeError) {
-          throw new HTTPException(413, {
-            message: "MCP tool list exceeds the safety limit",
-          });
-        }
-        throw error;
-      }
-    }
-    const workspace = await getWorkspace(routeDeps.db, workspaceId);
-    const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
-    const transport = new WebStandardStreamableHTTPServerTransport({
-      enableJsonResponse: true,
-    });
-    const mcp = buildOpenGeniMcpServer(routeDeps, grant, {
-      requestOrigin: new URL(c.req.url).origin,
-      toolspace,
-      workspaceMemoryEnabled,
-    });
-    try {
+      const workspace = await getWorkspace(routeDeps.db, workspaceId);
+      const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
+      const workspaceMemoryPromptMode = resolveWorkspaceMemoryPromptMode(workspace?.settings);
+      const transport = new WebStandardStreamableHTTPServerTransport({
+        enableJsonResponse: true,
+      });
+      const mcp = buildOpenGeniMcpServer(routeDeps, grant, {
+        requestOrigin: new URL(c.req.url).origin,
+        workspaceMemoryEnabled,
+        workspaceMemoryPromptMode,
+      });
       await mcp.connect(transport);
       return await transport.handleRequest(boundedRequest);
-    } finally {
-      await toolspace?.close().catch(() => undefined);
+    });
+  });
+
+  app.get("/v1/workspaces/:workspaceId/codemode/catalog", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+    if (!isCodemodeGrant(grant)) {
+      throw new HTTPException(403, { message: "Codemode access denied" });
+    }
+    try {
+      return c.json((await requireActiveCodemodeCatalog(routeDeps, grant)).catalog);
+    } catch (error) {
+      throw codemodeHttpError(error);
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/codemode/calls", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+    if (!isCodemodeGrant(grant)) {
+      throw new HTTPException(403, { message: "Codemode access denied" });
+    }
+    const parsed = CodemodeCallRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "Invalid Codemode call" });
+    }
+    try {
+      const submission = await submitAndDispatchCodemodeCall(routeDeps, grant, parsed.data);
+      const terminal = ["completed", "failed", "outcome_unknown", "cancelled"].includes(
+        submission.operation.state,
+      );
+      return c.json(submission, terminal ? 200 : 202);
+    } catch (error) {
+      throw codemodeHttpError(error);
+    }
+  });
+
+  app.get("/v1/workspaces/:workspaceId/codemode/calls/:operationId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+    if (!isCodemodeGrant(grant)) {
+      throw new HTTPException(403, { message: "Codemode access denied" });
+    }
+    try {
+      const operation = await readCodemodeOperation(routeDeps, grant, c.req.param("operationId"));
+      if (!operation)
+        throw new HTTPException(404, {
+          message: "Codemode operation not found",
+        });
+      return c.json(operation);
+    } catch (error) {
+      if (error instanceof HTTPException) throw error;
+      throw codemodeHttpError(error);
     }
   });
 
   registerFileRoutes(app, routeDeps);
   registerApiKeyRoutes(app, routeDeps);
   registerBillingRoutes(app, routeDeps);
+  registerBrowserIdentityRoutes(app, routeDeps);
+  registerBrowserSessionRoutes(app, routeDeps);
+  registerComputerSessionRoutes(app, routeDeps);
   registerDocumentRoutes(app, routeDeps);
   registerGitHubRoutes(app, routeDeps);
   registerInstallRoutes(app, routeDeps);
+  registerInteractionResourceRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);
   registerInsightsRoutes(app, routeDeps);
   registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
   registerCompanyProfileRoutes(app, routeDeps);
+  registerSlackTaskPolicyRoutes(app, routeDeps);
   registerWorkspaceStateRoutes(app, routeDeps);
+  registerMemorySlackPublicationRoutes(app, routeDeps);
   registerWorkspaceArtifactRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
+  registerApiIntegrationRoutes(app, routeDeps);
+  registerIntegrationFacetRoutes(app, routeDeps);
   registerCatalogAssetRoutes(app, routeDeps);
   registerEnrollmentRoutes(app, routeDeps);
   registerMachineRoutes(app, routeDeps);
   registerEnvironmentRoutes(app, routeDeps);
+  registerChannelRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
   registerPackRoutes(app, routeDeps);
+  registerPluginRoutes(app, routeDeps);
+  registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
+  registerSuperGrokRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
   registerEditableArtifactRoutes(app, routeDeps);
+  registerVideoGenerationRoutes(app, routeDeps);
+  registerCanonicalHumanIdentityRoutes(app, routeDeps);
+  registerOrganizationMembershipRoutes(app, routeDeps);
   registerSlackInteractionRoutes(app, routeDeps);
 
   app.notFound((c) => {
@@ -633,6 +744,7 @@ export function createAppComposition(deps: AppDependencies): {
             ? (boundedPublicMessage(apiError.message) ?? "Request failed.")
             : publicErrorMessage(error, status),
         retryable: apiError?.retryable ?? retryableHttpStatus(status),
+        ...(mutationOutcomeUnknown(error, c.req.method) ? { outcomeUnknown: true } : {}),
         requestId,
         ...(apiError?.details ? { details: apiError.details } : {}),
       },
@@ -641,6 +753,14 @@ export function createAppComposition(deps: AppDependencies): {
   });
 
   return { app, routeDeps };
+}
+
+function mutationOutcomeUnknown(error: unknown, method: string): boolean {
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
+  const cause = error instanceof HTTPException ? error.cause : error;
+  return (
+    cause instanceof BrowserControlTransportError || cause instanceof BrowserControlProtocolError
+  );
 }
 
 export function appendVary(current: string | null, value: string): string {
@@ -654,6 +774,74 @@ export function appendVary(current: string | null, value: string): string {
   return values.join(", ");
 }
 
+const publicWorkspaceBrowserRoutePatterns = [
+  /^\/v1\/workspaces\/[^/]+\/github\/connect$/,
+  /^\/v1\/workspaces\/[^/]+\/github\/installations\/[^/]+\/configure$/,
+  /^\/v1\/workspaces\/[^/]+\/github\/installations\/select$/,
+] as const;
+
+export function workspaceActorContextExempt(method: string, pathname: string): boolean {
+  if (/^\/v1\/workspaces\/[^/]+\/mcp$/.test(pathname)) return true;
+  if (
+    method === "GET" &&
+    publicWorkspaceBrowserRoutePatterns.some((route) => route.test(pathname))
+  ) {
+    return true;
+  }
+  return method === "POST" && /^\/v1\/workspaces\/[^/]+\/github\/installations$/.test(pathname);
+}
+
+function workspaceRequestRequiresCodexAccountPrevalidation(request: Request): boolean {
+  return (
+    request.method === "POST" &&
+    /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/codex-account$/.test(new URL(request.url).pathname)
+  );
+}
+
+async function validateCodexAccountTarget(request: Request): Promise<void> {
+  const body = (await request
+    .clone()
+    .json()
+    .catch(() => null)) as { target?: unknown } | null;
+  if (typeof body?.target !== "string" || body.target.length === 0) {
+    throw new HTTPException(400, {
+      message: 'target is required ("auto" or an account id)',
+    });
+  }
+}
+
+async function withAccessGrantSessionRlsContext<T>(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (grant.principalKind !== "agent_attempt") {
+    return await withSessionRlsActorContext({ subjectId: grant.subjectId }, fn);
+  }
+  const callerSessionId = grant.metadata?.sessionId;
+  if (typeof callerSessionId !== "string") {
+    throw new HTTPException(403, { message: "agent attempt authority is invalid" });
+  }
+  try {
+    const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, callerSessionId);
+    return await withSessionRlsActorContext(
+      {
+        subjectId: actor.subjectId,
+        initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
+      },
+      fn,
+    );
+  } catch (error) {
+    if (error instanceof SessionAuthorizationDeniedError) {
+      throw new HTTPException(403, {
+        message: "agent attempt authority is invalid",
+        cause: error,
+      });
+    }
+    throw error;
+  }
+}
+
 async function requireMcpAccessGrant(
   c: Parameters<typeof requireAccessGrant>[0],
   deps: ApiRouteDeps,
@@ -663,8 +851,8 @@ async function requireMcpAccessGrant(
   if (hasPermission(grant.permissions, "workspace:read")) {
     return grant;
   }
-  if (isToolspaceGrant(deps.settings, grant)) {
-    return grant;
+  if (isCodemodeGrant(grant)) {
+    requirePermission(grant, "workspace:read");
   }
   // A worker-signed session-bound grant is allowed to reach the transport
   // without inheriting broad workspace read access. The exact session
@@ -695,6 +883,48 @@ function clientAuthConfig(settings: AppDependencies["settings"]) {
     };
   }
   return { mode: "none" as const };
+}
+
+function codemodeHttpError(error: unknown): HTTPException {
+  if (error instanceof SessionAuthorizationDeniedError) {
+    return new HTTPException(404, {
+      message: "session not found",
+      cause: error,
+    });
+  }
+  if (error instanceof SessionAuthorizationUnavailableError) {
+    return new HTTPException(503, {
+      message: "session authorization is unavailable",
+      cause: error,
+    });
+  }
+  if (
+    error instanceof CodemodeAuthorityError ||
+    error instanceof CodemodeOperationNotExecutableError
+  ) {
+    return new HTTPException(409, { message: error.message, cause: error });
+  }
+  if (error instanceof CodemodeOperationConflictError) {
+    return new HTTPException(409, { message: error.message, cause: error });
+  }
+  if (error instanceof CodemodeCallBudgetExceededError) {
+    return new HTTPException(429, { message: error.message, cause: error });
+  }
+  if (error instanceof CodemodeToolNotInCatalogError) {
+    return new HTTPException(404, { message: error.message, cause: error });
+  }
+  if (error instanceof CodemodeToolApprovalRequiredError) {
+    return new HTTPException(409, { message: error.message, cause: error });
+  }
+  if (error instanceof CodemodePayloadTooLargeError) {
+    return new HTTPException(413, { message: error.message, cause: error });
+  }
+  return error instanceof HTTPException
+    ? error
+    : new HTTPException(500, {
+        message: "Codemode request failed",
+        cause: error,
+      });
 }
 
 function clientAnalyticsConfig(settings: AppDependencies["settings"]) {
@@ -729,10 +959,6 @@ function structuredServicesHint(backend: string): {
 } {
   const hasBox = backend !== "none";
   return { fileSystem: hasBox, git: hasBox, terminalEvents: hasBox };
-}
-
-export function allowedCorsOrigin(pattern: string, origin: string): boolean {
-  return new RegExp(`^(?:${pattern})$`).test(origin);
 }
 
 function codexCompactionV2ProviderLockedError(
@@ -885,7 +1111,10 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
   }
 }
 
-const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
+const routeLabelPatterns: Array<{
+  pattern: RegExp;
+  label: string | ((match: RegExpMatchArray) => string);
+}> = [
   { pattern: /^\/healthz$/, label: "/healthz" },
   { pattern: /^\/readyz$/, label: "/readyz" },
   { pattern: /^\/traffic-readyz$/, label: "/traffic-readyz" },
@@ -900,6 +1129,22 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/codex\/status$/,
     label: "/v1/workspaces/:workspaceId/codex/status",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/supergrok\/connect\/(start|poll)$/,
+    label: (match) => `/v1/workspaces/:workspaceId/supergrok/connect/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/supergrok\/(status|accounts|settings)$/,
+    label: (match) => `/v1/workspaces/:workspaceId/supergrok/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/supergrok\/accounts\/[^/]+\/(activate|allocator)$/,
+    label: (match) => `/v1/workspaces/:workspaceId/supergrok/accounts/:accountId/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/supergrok\/accounts\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/supergrok/accounts/:accountId",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/codex\/usage$/,
@@ -946,6 +1191,154 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/control-events\/stream$/,
     label: "/v1/workspaces/:workspaceId/control-events/stream",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/live-events\/stream$/,
+    label: "/v1/workspaces/:workspaceId/live-events/stream",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/interaction-events\/stream$/,
+    label: "/v1/workspaces/:workspaceId/interaction-events/stream",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/attached-browsers\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/attached-browsers/:deviceId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/attached-browsers$/,
+    label: "/v1/workspaces/:workspaceId/attached-browsers",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-identities\/[^/]+\/revisions$/,
+    label: "/v1/workspaces/:workspaceId/browser-identities/:identityId/revisions",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-identities\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/browser-identities/:identityId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-identities$/,
+    label: "/v1/workspaces/:workspaceId/browser-identities",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/downloads\/[^/]+\/save$/,
+    label:
+      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId/save",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/downloads\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/downloads$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/auth-runs\/[^/]+\/external-auth\/interactive$/,
+    label:
+      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth/interactive",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/auth-runs\/[^/]+\/(external-auth|protected-fill|report|verify)$/,
+    label: (match) =>
+      `/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/auth-runs\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/auth-runs$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/targets\/[^/]+\/(diagnostics|observation|select)$/,
+    label: (match) =>
+      `/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/targets\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/operations\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/operations/:operationId",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/(actions|attachments|clipboard|end|heartbeat|resume|revisions|suspend|targets)$/,
+    label: (match) => `/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/computer-sessions\/[^/]+\/targets\/[^/]+\/observation$/,
+    label:
+      "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/observation",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/computer-sessions\/[^/]+\/operations\/[^/]+$/,
+    label:
+      "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/operations/:operationId",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/computer-sessions\/[^/]+\/(actions|attachments|clipboard|end|heartbeat|targets)$/,
+    label: (match) =>
+      `/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/computer-sessions\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/computer-sessions$/,
+    label: "/v1/workspaces/:workspaceId/computer-sessions",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/network-routes\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/network-routes/:networkRouteId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/network-routes$/,
+    label: "/v1/workspaces/:workspaceId/network-routes",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/site-auth-connections\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/site-auth-connections/:siteAuthConnectionId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/site-auth-connections$/,
+    label: "/v1/workspaces/:workspaceId/site-auth-connections",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/auth-runs\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/auth-runs/:authRunId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/auth-runs$/,
+    label: "/v1/workspaces/:workspaceId/auth-runs",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/interaction-interventions\/[^/]+\/resolve$/,
+    label: "/v1/workspaces/:workspaceId/interaction-interventions/:interventionId/resolve",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/interaction-interventions\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/interaction-interventions/:interventionId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/interaction-interventions$/,
+    label: "/v1/workspaces/:workspaceId/interaction-interventions",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/control-events$/,
@@ -1169,6 +1562,80 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/capabilities/:id/disable",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/preview$/,
+    label: "/v1/workspaces/:workspaceId/integrations/preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/install$/,
+    label: "/v1/workspaces/:workspaceId/integrations/install",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/definitions$/,
+    label: "/v1/workspaces/:workspaceId/integrations/definitions",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/uninstall-preview$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/uninstall-preview",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/facets\/[^/]+\/browse$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/browse",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/facets\/[^/]+\/source$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/source",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/facets\/[^/]+\/pause$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/pause",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/facets\/[^/]+\/resume$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/resume",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/facets\/[^/]+$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/facets$/,
+    label: "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations$/,
+    label: "/v1/workspaces/:workspaceId/integrations",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/skills\/preview$/,
+    label: "/v1/workspaces/:workspaceId/skills/preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/skills\/install$/,
+    label: "/v1/workspaces/:workspaceId/skills/install",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/skills\/[^/]+\/uninstall-preview$/,
+    label: "/v1/workspaces/:workspaceId/skills/:id/uninstall-preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/skills\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/skills/:id",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/environments$/,
     label: "/v1/workspaces/:workspaceId/environments",
   },
@@ -1201,6 +1668,26 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/packs/:id",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/plugins\/preview$/,
+    label: "/v1/workspaces/:workspaceId/plugins/preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/plugins$/,
+    label: "/v1/workspaces/:workspaceId/plugins",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/plugins\/install$/,
+    label: "/v1/workspaces/:workspaceId/plugins/install",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/plugins\/[^/]+\/uninstall-preview$/,
+    label: "/v1/workspaces/:workspaceId/plugins/:pluginKey/uninstall-preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/plugins\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/plugins/:pluginKey",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/social\/connections$/,
     label: "/v1/workspaces/:workspaceId/social/connections",
   },
@@ -1217,8 +1704,24 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/connections/oauth/start",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/oauth\/start$/,
+    label: "/v1/workspaces/:workspaceId/integrations/oauth/start",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/connections\/slack-bot\/install$/,
     label: "/v1/workspaces/:workspaceId/connections/slack-bot/install",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/fiken\/install$/,
+    label: "/v1/workspaces/:workspaceId/connections/fiken/install",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/fiken\/oauth\/start$/,
+    label: "/v1/workspaces/:workspaceId/connections/fiken/oauth/start",
+  },
+  {
+    pattern: /^\/v1\/integrations\/fiken\/callback$/,
+    label: "/v1/integrations/fiken/callback",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/connections\/[^/]+$/,
@@ -1228,6 +1731,14 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/integrations\/oauth\/callback$/,
     label: "/v1/integrations/oauth/callback",
+  },
+  {
+    pattern: /^\/v1\/integrations\/provider-oauth\/callback$/,
+    label: "/v1/integrations/provider-oauth/callback",
+  },
+  {
+    pattern: /^\/v1\/integrations\/google-drive\/callback$/,
+    label: "/v1/integrations/google-drive/callback",
   },
   {
     pattern: /^\/v1\/integrations\/oauth\/client-metadata\.json$/,
@@ -1285,9 +1796,11 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
 ];
 
 export function routeLabel(pathname: string): string {
-  const match = routeLabelPatterns.find(({ pattern }) => pattern.test(pathname));
-  if (match) {
-    return match.label;
+  for (const candidate of routeLabelPatterns) {
+    const match = pathname.match(candidate.pattern);
+    if (match) {
+      return typeof candidate.label === "string" ? candidate.label : candidate.label(match);
+    }
   }
   return pathname.startsWith("/v1/") ? "/v1/unknown" : "/unknown";
 }

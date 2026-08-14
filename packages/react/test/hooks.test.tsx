@@ -233,11 +233,20 @@ describe("useWorkspaceSessions", () => {
 
   test("does not report a query transition as loading while disabled", async () => {
     const client = fakeClient({
-      listSessionPage: async () => ({ pinned: [], sessions: [], nextCursor: null }),
+      listSessionPage: async () => ({
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+      }),
     });
     const hook = await renderHook(
       (search: string) =>
-        useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID, search, enabled: false }),
+        useWorkspaceSessions({
+          client,
+          workspaceId: WORKSPACE_ID,
+          search,
+          enabled: false,
+        }),
       "" as string,
     );
     await flush();
@@ -919,6 +928,7 @@ describe("useGoal", () => {
     const client = fakeClient({
       getGoal: async () => fakeGoal(),
       updateGoal: async (_ws, _session, request) => {
+        if (!("status" in request)) throw new Error("expected status mutation");
         calls.push({ status: request.status, rationale: request.rationale });
         return fakeGoal({
           status: request.status === "paused" ? "paused" : "active",
@@ -1720,7 +1730,11 @@ describe("useComposer queue-vs-steer", () => {
     type Props = { events: SessionEvent[] };
     const hook = await renderHook(
       (props: Props) =>
-        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: props.events }),
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: props.events,
+        }),
       { events: [] as SessionEvent[] },
     );
     await flush();
@@ -1918,7 +1932,9 @@ describe("useComposer queue-vs-steer", () => {
           ? [
               accepted,
               {
-                ...makeEvent(21, "turn.started", { triggerEventId: accepted.id }),
+                ...makeEvent(21, "turn.started", {
+                  triggerEventId: accepted.id,
+                }),
                 turnId: turn.id,
               },
             ]
@@ -2125,7 +2141,11 @@ describe("useComposer durable draft and control binding", () => {
         useComposer(SESSION_ID, {
           client,
           workspaceId: WORKSPACE_ID,
-          sendExtras: { model: "model-x", reasoningEffort: "medium", latencyMode },
+          sendExtras: {
+            model: "model-x",
+            reasoningEffort: "medium",
+            latencyMode,
+          },
           onDraftApplied: (draft) => applied.push(draft),
         }),
       "standard",
@@ -2223,8 +2243,16 @@ describe("useComposer durable draft and control binding", () => {
     expect(reads).toEqual([SESSION_ID]);
     expect(applied).toEqual([`0:${SESSION_ID}:read-1`]);
 
-    await hook.rerender({ sessionId: SESSION_ID, policyVersion: 1, events: noEvents });
-    await hook.rerender({ sessionId: SESSION_ID, policyVersion: 2, events: noEvents });
+    await hook.rerender({
+      sessionId: SESSION_ID,
+      policyVersion: 1,
+      events: noEvents,
+    });
+    await hook.rerender({
+      sessionId: SESSION_ID,
+      policyVersion: 2,
+      events: noEvents,
+    });
     await flush();
     expect(reads).toEqual([SESSION_ID]);
 
@@ -2241,7 +2269,11 @@ describe("useComposer durable draft and control binding", () => {
     expect(reads).toEqual([SESSION_ID, SESSION_ID, SESSION_ID]);
     expect(applied.at(-1)).toBe(`3:${SESSION_ID}:read-3`);
 
-    await hook.rerender({ sessionId: sessionB, policyVersion: 4, events: noEvents });
+    await hook.rerender({
+      sessionId: sessionB,
+      policyVersion: 4,
+      events: noEvents,
+    });
     await flush();
     expect(reads).toEqual([SESSION_ID, SESSION_ID, SESSION_ID, sessionB]);
     expect(applied.at(-1)).toBe(`4:${sessionB}:read-4`);
@@ -2328,7 +2360,11 @@ describe("useComposer durable draft and control binding", () => {
           client,
           workspaceId: WORKSPACE_ID,
           effectiveControl: queueSnapshot([]).effectiveControl,
-          sendExtras: { model: "model-x", reasoningEffort: "medium", latencyMode: "fast" },
+          sendExtras: {
+            model: "model-x",
+            reasoningEffort: "medium",
+            latencyMode: "fast",
+          },
         }),
       undefined,
     );
@@ -2704,15 +2740,34 @@ describe("useComposer durable draft and control binding", () => {
       );
       await flush();
 
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
-      expect(hook.result.current.error).toMatchObject({
-        status: 402,
-        code: "payment_required",
-        retryable: false,
-        outcomeUnknown: false,
-      });
-      expect(hook.result.current.value).toBe(serverDraft.text);
-      expect(hook.result.current.restoredResources).toEqual([resource]);
+      await flushing(async () =>
+        expect(await hook.result.current[delivery]()).toBe(delivery === "send"),
+      );
+      await flush();
+      if (delivery === "send") {
+        expect(hook.result.current.value).toBe("");
+        expect(hook.result.current.restoredResources).toEqual([]);
+        expect(
+          hook.result.current.optimisticMessages?.find(
+            (message) =>
+              message.resources[0]?.kind === "file" &&
+              message.resources[0].fileId === resource.fileId,
+          ),
+        ).toMatchObject({
+          state: "failed",
+          resources: [resource],
+          outcomeUnknown: false,
+        });
+      } else {
+        expect(hook.result.current.error).toMatchObject({
+          status: 402,
+          code: "payment_required",
+          retryable: false,
+          outcomeUnknown: false,
+        });
+        expect(hook.result.current.value).toBe(serverDraft.text);
+        expect(hook.result.current.restoredResources).toEqual([resource]);
+      }
       expect(attempts).toHaveLength(1);
       expect(attempts[0]).toMatchObject({
         text: "read the exact attached bytes",
@@ -2721,7 +2776,18 @@ describe("useComposer durable draft and control binding", () => {
       });
 
       await hook.rerender("codex/gpt-5.6-sol");
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      if (delivery === "send") {
+        const failed = hook.result.current.optimisticMessages?.find(
+          (message) =>
+            message.resources[0]?.kind === "file" &&
+            message.resources[0].fileId === resource.fileId,
+        );
+        expect(failed).toBeDefined();
+        await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
+        await flush();
+      } else {
+        await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      }
 
       expect(attempts).toHaveLength(2);
       expect(attempts[1]).toMatchObject({
@@ -2774,12 +2840,25 @@ describe("useComposer durable draft and control binding", () => {
       );
       await flush();
 
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
-      expect(hook.result.current.value).toBe(initial.text);
-      expect(hook.result.current.restoredResources).toEqual([resource]);
-      expect(hook.result.current.error).toMatchObject({ outcomeUnknown: true });
-
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      await flushing(async () =>
+        expect(await hook.result.current[delivery]()).toBe(delivery === "send"),
+      );
+      await flush();
+      if (delivery === "send") {
+        const failed = hook.result.current.optimisticMessages?.find(
+          (message) => message.outcomeUnknown,
+        );
+        expect(failed).toMatchObject({ state: "failed", outcomeUnknown: true });
+        await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
+        await flush();
+      } else {
+        expect(hook.result.current.value).toBe(initial.text);
+        expect(hook.result.current.restoredResources).toEqual([resource]);
+        expect(hook.result.current.error).toMatchObject({
+          outcomeUnknown: true,
+        });
+        await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      }
       expect(attempts).toHaveLength(2);
       expect(attempts[0]!.clientEventId).toBe(attempts[1]!.clientEventId);
       expect(attempts[0]!.resources).toEqual([resource]);
@@ -2825,12 +2904,21 @@ describe("useComposer durable draft and control binding", () => {
       );
       await flush();
 
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
+      await flushing(async () =>
+        expect(await hook.result.current[delivery]()).toBe(delivery === "send"),
+      );
+      await flush();
       acceptedEvent = {
         ...makeEvent(1, "user.message"),
         clientEventId: attempts[0]!.clientEventId,
       };
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      if (delivery === "send") {
+        const failed = hook.result.current.optimisticMessages?.[0];
+        await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
+        await flush();
+      } else {
+        await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      }
 
       expect(attempts).toHaveLength(1);
       expect(hook.result.current.value).toBe("");
@@ -2880,7 +2968,10 @@ describe("useComposer durable draft and control binding", () => {
         undefined,
       );
       await flush();
-      await flushing(async () => expect(await first.result.current[delivery]()).toBe(false));
+      await flushing(async () =>
+        expect(await first.result.current[delivery]()).toBe(delivery === "send"),
+      );
+      await flush();
       await first.unmount();
 
       const second = await renderHook(
@@ -2888,8 +2979,12 @@ describe("useComposer durable draft and control binding", () => {
         undefined,
       );
       await flush();
-      expect(second.result.current.value).toBe("original uncertain prompt");
-      expect(second.result.current.restoredResources).toEqual([originalResource]);
+      expect(second.result.current.value).toBe(
+        delivery === "send" ? "" : "original uncertain prompt",
+      );
+      expect(second.result.current.restoredResources).toEqual(
+        delivery === "send" ? [] : [originalResource],
+      );
       await flushing(() =>
         second.result.current.applyDraft({
           ...initial,
@@ -2899,7 +2994,16 @@ describe("useComposer durable draft and control binding", () => {
       );
       expect(second.result.current.value).toBe("edited after timeout");
       expect(second.result.current.restoredResources).toEqual([newerResource]);
-      await flushing(async () => expect(await second.result.current[delivery]()).toBe(true));
+      if (delivery === "send") {
+        const failed = second.result.current.optimisticMessages?.find(
+          (message) => message.outcomeUnknown,
+        );
+        expect(failed).toBeDefined();
+        await flushing(() => second.result.current.retryOptimisticMessage?.(failed!.clientEventId));
+        await flush();
+      } else {
+        await flushing(async () => expect(await second.result.current[delivery]()).toBe(true));
+      }
 
       expect(attempts).toHaveLength(2);
       expect(attempts[1]!.clientEventId).toBe(attempts[0]!.clientEventId);
@@ -2929,7 +3033,10 @@ describe("useComposer durable draft and control binding", () => {
         // the server revision — surfaces the keep_mine / use_remote banner.
         throw new OpenGeniApiError(
           409,
-          JSON.stringify({ code: "DRAFT_CHANGED", message: "Composer draft changed" }),
+          JSON.stringify({
+            code: "DRAFT_CHANGED",
+            message: "Composer draft changed",
+          }),
         );
       },
     });
@@ -2971,7 +3078,10 @@ describe("useComposer durable draft and control binding", () => {
         if (request.expectedRevision === 1) {
           throw new OpenGeniApiError(
             409,
-            JSON.stringify({ code: "DRAFT_CHANGED", message: "Composer draft changed" }),
+            JSON.stringify({
+              code: "DRAFT_CHANGED",
+              message: "Composer draft changed",
+            }),
           );
         }
         return {
@@ -3391,7 +3501,9 @@ describe("useComposer file-only send", () => {
         useComposer(SESSION_ID, {
           client,
           workspaceId: WORKSPACE_ID,
-          sendExtras: () => ({ resources: [{ kind: "file", fileId: "ready-file" }] }),
+          sendExtras: () => ({
+            resources: [{ kind: "file", fileId: "ready-file" }],
+          }),
           sendBlocked: () => blocked,
         }),
       true as boolean,
@@ -3461,7 +3573,9 @@ describe("useComposer file-only send", () => {
         useComposer(SESSION_ID, {
           client,
           workspaceId: WORKSPACE_ID,
-          sendExtras: () => ({ resources: [{ kind: "file", fileId: currentFileId }] }),
+          sendExtras: () => ({
+            resources: [{ kind: "file", fileId: currentFileId }],
+          }),
           onSent: (_text, input) => {
             accepted = input;
           },
@@ -3501,7 +3615,11 @@ describe("useComposer file-only send", () => {
       getComposerDraft: async () => initial,
       saveComposerDraft: async (_ws, _session, request) => {
         saved.push(request);
-        return { ...initial, ...request, revision: request.expectedRevision + 1 };
+        return {
+          ...initial,
+          ...request,
+          revision: request.expectedRevision + 1,
+        };
       },
       sendMessage: async (_ws, _session, message) => {
         sent.push(message);
@@ -3513,7 +3631,9 @@ describe("useComposer file-only send", () => {
         useComposer(SESSION_ID, {
           client,
           workspaceId: WORKSPACE_ID,
-          sendExtras: () => ({ resources: [{ kind: "file", fileId: "file-1" }] }),
+          sendExtras: () => ({
+            resources: [{ kind: "file", fileId: "file-1" }],
+          }),
         }),
       undefined,
     );
@@ -3618,14 +3738,19 @@ describe("useEnvironments", () => {
 });
 
 describe("usePacks", () => {
-  test("lists packs/installations and enables a pack", async () => {
-    let enabled = false;
+  test("previews, installs, and safely uninstalls a pack", async () => {
+    let installed = false;
     const installation = {
       id: "inst-1",
       accountId: "acc",
       workspaceId: WORKSPACE_ID,
       packId: "autonomous-devops",
       status: "active" as const,
+      version: 1,
+      manifestSnapshot: null,
+      manifestDigest: "a".repeat(64),
+      selectedRigId: null,
+      installedBySubjectId: "user:test",
       metadata: {},
       enabledAt: "",
       updatedAt: "",
@@ -3633,11 +3758,43 @@ describe("usePacks", () => {
     const client = fakeClient({
       listPacks: async () => ({
         packs: [{ id: "autonomous-devops", name: "Autonomous DevOps" } as never],
-        installations: enabled ? [installation] : [],
+        installations: installed ? [installation] : [],
       }),
-      enablePack: async (_ws, packId, request) => {
-        enabled = true;
-        return { ...installation, packId, metadata: request?.metadata ?? {} };
+      previewPackInstallation: async (_ws, packId) => ({
+        packId,
+        packVersion: "1.0.0",
+        manifestDigest: "a".repeat(64),
+        installationVersion: null,
+        action: "install",
+        ready: true,
+        blockers: [],
+        components: [],
+        rig: {
+          required: false,
+          status: "not_required",
+          requestedRigId: null,
+          rigId: null,
+          rigVersionId: null,
+          name: null,
+          image: null,
+        },
+        variableSetId: null,
+        legacyInlineSkillCount: 0,
+        legacySandboxImage: null,
+      }),
+      installPack: async (_ws, packId) => {
+        installed = true;
+        return { ...installation, packId };
+      },
+      previewPackUninstall: async (_ws, packId) => ({
+        packId,
+        installed,
+        installationVersion: installation.version,
+        components: [],
+      }),
+      uninstallPack: async (_ws, packId) => {
+        installed = false;
+        return { packId, status: "uninstalled", retainedComponents: [] };
       },
     });
     const hook = await renderHook(() => usePacks({ client, workspaceId: WORKSPACE_ID }), undefined);
@@ -3645,9 +3802,21 @@ describe("usePacks", () => {
     expect(hook.result.current.packs.map((pack) => pack.id)).toEqual(["autonomous-devops"]);
     expect(hook.result.current.installationFor("autonomous-devops")).toBeNull();
     await flushing(async () => {
-      await hook.result.current.enable("autonomous-devops");
+      const preview = await hook.result.current.previewInstallation("autonomous-devops");
+      await hook.result.current.install("autonomous-devops", {
+        expectedManifestDigest: preview!.manifestDigest,
+        idempotencyKey: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      });
     });
     expect(hook.result.current.installationFor("autonomous-devops")?.status).toBe("active");
+    await flushing(async () => {
+      const preview = await hook.result.current.previewUninstall("autonomous-devops");
+      await hook.result.current.uninstall("autonomous-devops", {
+        expectedInstallationVersion: preview!.installationVersion!,
+        idempotencyKey: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      });
+    });
+    expect(hook.result.current.installationFor("autonomous-devops")).toBeNull();
     await hook.unmount();
   });
 });

@@ -6,7 +6,7 @@ import {
   type DesktopRfbLike,
   type DesktopStreamCapability,
 } from "@opengeni/sdk";
-import { type RefObject, useEffect, useRef, useState } from "react";
+import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { type DesktopWebSocketFactory, useRelayFrameStream } from "./use-relay-frame-stream";
 
 export type UseDesktopStreamOptions = {
@@ -19,6 +19,8 @@ export type UseDesktopStreamOptions = {
   scaleViewport?: boolean | undefined;
   /** Custom RFB factory (tests / a WebRTC swap). Defaults to a lazy @novnc/novnc. */
   rfbFactory?: DesktopRfbFactory | undefined;
+  /** Additional WebSocket protocols for an authenticated placement proxy. */
+  webSocketProtocols?: string[] | undefined;
   /** Custom socket factory for the `relay-frames` transport (tests). Defaults to
    *  `new WebSocket(url)`. Mirrors `rfbFactory` for the frame renderer. */
   webSocketFactory?: DesktopWebSocketFactory | undefined;
@@ -29,6 +31,8 @@ export type UseDesktopStreamResult = {
   error: Error | null;
   /** Manual reconnect (e.g. after a securityfailure once a fresh URL arrives). */
   reconnect: () => void;
+  /** Synchronous input on the already-open RFB authority. */
+  sendKey?: ((keysym: number, code: string, down?: boolean) => boolean) | undefined;
 };
 
 /** Lazy-load @novnc/novnc's RFB as the default factory. Imported inside the
@@ -44,7 +48,10 @@ async function defaultRfbFactory(): Promise<DesktopRfbFactory> {
     default: new (
       t: HTMLElement,
       u: string,
-      o: { credentials?: { password?: string | undefined } | undefined },
+      o: {
+        credentials?: { password?: string | undefined } | undefined;
+        wsProtocols?: string[] | undefined;
+      },
     ) => DesktopRfbLike;
   };
   const RFB = mod.default;
@@ -71,8 +78,15 @@ async function defaultRfbFactory(): Promise<DesktopRfbFactory> {
  * way, so `DesktopViewer` is transport-agnostic.
  */
 export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopStreamResult {
-  const { capability, containerRef, interactive, scaleViewport, rfbFactory, webSocketFactory } =
-    options;
+  const {
+    capability,
+    containerRef,
+    interactive,
+    scaleViewport,
+    rfbFactory,
+    webSocketProtocols,
+    webSocketFactory,
+  } = options;
 
   // The self-hosted PNG-frame path. Always invoked (rules of hooks); dormant
   // unless `transport === "relay-frames"`, in which case it owns the surface.
@@ -91,6 +105,12 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
   };
 
   const reconnect = () => setNonce((n) => n + 1);
+  const sendKey = useCallback((keysym: number, code: string, down?: boolean): boolean => {
+    const rfb = rfbRef.current;
+    if (!rfb?.sendKey || rfb.viewOnly || stateRef.current !== "connected") return false;
+    rfb.sendKey(keysym, code, down);
+    return true;
+  }, []);
 
   const url = capability?.url ?? null;
   // The credential is keyed into the connect effect so a token rotation (new
@@ -99,6 +119,14 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
   const token = capability?.token ?? null;
   const transport = capability?.transport ?? null;
   const mode = capability?.mode ?? "read-only";
+  // For direct sandbox RFB, authorization is carried in WebSocket
+  // subprotocols rather than `capability.token`. The view grant rotates before
+  // expiry while the URL stays stable, so the protocol credential is a real
+  // connection boundary: keeping the old socket leaves the viewer black once
+  // browserd expires it. Key the effect on the primitive value (not the caller's
+  // array identity) so credential rotation reconnects exactly once without
+  // churning on ordinary renders.
+  const webSocketProtocolsKey = webSocketProtocols?.join("\u0000") ?? "";
 
   // The live RFB handle. Holding it in a ref lets us flip view-only (take
   // control / return control) and re-scale on the OPEN connection instead of
@@ -113,10 +141,12 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
   const scaleViewportRef = useRef(scaleViewport);
   const modeRef = useRef(mode);
   const rfbFactoryRef = useRef(rfbFactory);
+  const webSocketProtocolsRef = useRef(webSocketProtocols);
   interactiveRef.current = interactive;
   scaleViewportRef.current = scaleViewport;
   modeRef.current = mode;
   rfbFactoryRef.current = rfbFactory;
+  webSocketProtocolsRef.current = webSocketProtocols;
 
   // read-only is forced when the server says so OR the caller didn't opt in.
   const viewOnlyFor = (m: string, want: boolean | undefined) => m === "read-only" || !want;
@@ -164,6 +194,7 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
         setBoth(nextDesktopState(stateRef.current, { type: "negotiated" }));
         rfb = factory(container, socketUrl, {
           credentials: token ? { password: token } : undefined,
+          ...(webSocketProtocolsRef.current ? { wsProtocols: webSocketProtocolsRef.current } : {}),
         });
         rfb.viewOnly = viewOnlyFor(modeRef.current, interactiveRef.current);
         // Fit-to-panel: SCALE the 1280x800 framebuffer down to the container
@@ -200,11 +231,12 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
       }
     };
     // ONLY a real transport change reconnects: a fresh url (rotation), a new
-    // credential, the transport flipping, or an explicit manual reconnect
+    // credential (RFB password OR bearer subprotocol), the transport flipping,
+    // or an explicit manual reconnect
     // (`nonce`). `interactive`/`scaleViewport`/`mode`/`rfbFactory` are read via
     // refs and applied live below — they must never re-open the socket.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, token, transport, nonce]);
+  }, [url, token, transport, webSocketProtocolsKey, nonce]);
 
   // Apply take-control / return-control to the OPEN connection in place. noVNC
   // honours `viewOnly` live, so flipping it neither blinks the surface nor drops
@@ -236,5 +268,5 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
   // drives; for `vnc-ws` (and everything else) the noVNC path drives while the
   // frame renderer stays idle. Same public shape either way.
   if (transport === "relay-frames") return frameStream;
-  return { state, error, reconnect };
+  return { state, error, reconnect, sendKey };
 }

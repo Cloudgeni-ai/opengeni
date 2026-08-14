@@ -27,6 +27,7 @@ export type {
   MaybeContinueGoalInput,
   MaybeContinueGoalResult,
   CodexCapacityWaitRef,
+  XaiCapacityWaitRef,
   GetCodexCapacityWaitInput,
   ReconcileCodexCapacityWaitInput,
   ReconcileCodexCapacityWaitResult,
@@ -37,10 +38,14 @@ export type {
   PersistSessionAttemptQuiescenceInput,
   ReconcileSessionAttemptQuiescenceInput,
   ReconcileSessionAttemptQuiescenceResult,
+  FailSessionAttemptInput,
+  FailSessionAttemptResult,
   RunKnowledgeSourceSyncBatchInput,
   RunKnowledgeSourceSyncBatchResult,
   RunAgentTurnInput,
   RunAgentTurnResult,
+  VideoGenerationReconcileResult,
+  VideoGenerationTerminalStatus,
   SessionAttemptQuiescenceProof,
   SharedActivityServices,
   TurnActivityDependencies,
@@ -82,6 +87,8 @@ const defaultControlActivities = createControlActivities();
 const defaultTurnActivities = createTurnActivities();
 
 export const runAgentTurn = defaultTurnActivities.runAgentTurn;
+export const reconcileVideoGenerationOperation =
+  defaultTurnActivities.reconcileVideoGenerationOperation;
 export const indexDocument = defaultControlActivities.indexDocument;
 export const failSessionAttempt = defaultControlActivities.failSessionAttempt;
 export const settleSessionInterruptions = defaultControlActivities.settleSessionInterruptions;
@@ -93,6 +100,8 @@ export const recoverDispatch = defaultControlActivities.recoverDispatch;
 export const recoverEscapedMcpTimeout = defaultControlActivities.recoverEscapedMcpTimeout;
 export const peekSessionWork = defaultControlActivities.peekSessionWork;
 export const expireSessionHumanInput = defaultControlActivities.expireSessionHumanInput;
+export const expireSessionInteractionIntervention =
+  defaultControlActivities.expireSessionInteractionIntervention;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;
 export const runKnowledgeSourceSyncBatch = defaultControlActivities.runKnowledgeSourceSyncBatch;
@@ -105,7 +114,11 @@ export const drainSandboxLease = defaultControlActivities.drainSandboxLease;
 export const maintainSandboxLeaseSweep = defaultControlActivities.maintainSandboxLeaseSweep;
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
 export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
+export const recoverVideoGenerationWorkflows =
+  defaultControlActivities.recoverVideoGenerationWorkflows;
 export const maintainRetainedScreenshots = defaultControlActivities.maintainRetainedScreenshots;
+export const maintainBrowserStateArtifacts = defaultControlActivities.maintainBrowserStateArtifacts;
+export const maintainSiteAuthConnections = defaultControlActivities.maintainSiteAuthConnections;
 export const dispatchSessionWorkflowWakes = defaultControlActivities.dispatchSessionWorkflowWakes;
 export const verifyRigChange = defaultControlActivities.verifyRigChange;
 export const verifyRigVersion = defaultControlActivities.verifyRigVersion;

@@ -20,6 +20,7 @@ import {
   listConnectionsMetadata,
   listScheduledTasks,
   loadConnectionCredentialForBroker,
+  migrate,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -27,7 +28,9 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import postgres from "postgres";
 import { createApp } from "../src/app";
+import { wakeGoogleDriveSourcesFromWorkspaceEvent } from "../src/integrations/google-drive";
 
 const DELEGATION_SECRET = "google-drive-delegation-secret";
 const STATE_SECRET = "google-drive-state-secret";
@@ -39,14 +42,33 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 let settings: Settings;
 
+async function acquireDatabase(): Promise<SharedTestDatabase | null> {
+  const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_TEST_POSTGRES_APP_URL;
+  if (!adminUrl && !appUrl) return await acquireSharedTestDatabase("api_google_drive");
+  if (!adminUrl || !appUrl) {
+    throw new Error(
+      "OPENGENI_TEST_POSTGRES_ADMIN_URL and OPENGENI_TEST_POSTGRES_APP_URL must be set together",
+    );
+  }
+  const admin = postgres(adminUrl, { max: 4 });
+  return {
+    admin,
+    adminUrl,
+    appUrl,
+    release: async () => await admin.end().catch(() => undefined),
+  };
+}
+
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("api_google_drive");
+  shared = await acquireDatabase();
   if (!shared) {
     available = false;
     // eslint-disable-next-line no-console
     console.warn("[google-drive] docker unavailable, skipping");
     return;
   }
+  await migrate(shared.adminUrl);
   client = createDb(shared.appUrl);
   settings = testSettings({
     productAccessMode: "managed",
@@ -109,6 +131,7 @@ function googleFixture(
     permissionId?: string;
     omitRefreshToken?: boolean;
     scopes?: string[];
+    refreshScopes?: string[];
     refreshError?: { status: number; error: string; description: string };
     fileListError?: { status: number; reason: string; message: string };
   } = {},
@@ -124,7 +147,8 @@ function googleFixture(
           ? init.body
           : new URLSearchParams(typeof init?.body === "string" ? init.body : "");
       tokenRequests.push(body);
-      if (body.get("grant_type") === "refresh_token" && options.refreshError) {
+      const isRefresh = body.get("grant_type") === "refresh_token";
+      if (isRefresh && options.refreshError) {
         return Response.json(
           {
             error: options.refreshError.error,
@@ -138,7 +162,10 @@ function googleFixture(
         ...(options.omitRefreshToken ? {} : { refresh_token: "google-refresh-token" }),
         token_type: "Bearer",
         expires_in: 3600,
-        scope: (options.scopes ?? [GOOGLE_DRIVE_READONLY_SCOPE]).join(" "),
+        scope: (isRefresh
+          ? (options.refreshScopes ?? options.scopes ?? [GOOGLE_DRIVE_READONLY_SCOPE])
+          : (options.scopes ?? [GOOGLE_DRIVE_READONLY_SCOPE])
+        ).join(" "),
       });
     }
     apiAuthorizationHeaders.push(new Headers(init?.headers).get("authorization") ?? "");
@@ -310,15 +337,24 @@ describe("Google Drive local source preview", () => {
   test("requests drive.file independently and activates only an explicit writable destination", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const google = googleFixture({ scopes: [GOOGLE_DRIVE_FILE_SCOPE] });
-    const start = await startConnection(workspace, google.fetch, undefined, "publish");
+    const source = await connect(workspace, googleFixture());
+    const google = googleFixture({
+      scopes: [GOOGLE_DRIVE_READONLY_SCOPE, GOOGLE_DRIVE_FILE_SCOPE],
+    });
+    const start = await startConnection(workspace, google.fetch, source.connection.id, "publish");
     expect(start.response.status).toBe(200);
     const authorizationUrl = new URL(start.authorizationUrl);
     expect(authorizationUrl.searchParams.get("scope")).toBe(GOOGLE_DRIVE_FILE_SCOPE);
     expect(authorizationUrl.searchParams.get("include_granted_scopes")).toBe("true");
+    expect(authorizationUrl.searchParams.get("trigger_onepick")).toBe("true");
+    expect(authorizationUrl.searchParams.get("allow_folder_selection")).toBe("true");
+    expect(authorizationUrl.searchParams.get("allow_multiple")).toBe("false");
+    expect(authorizationUrl.searchParams.get("mimetypes")).toBe(
+      "application/vnd.google-apps.folder",
+    );
     const state = authorizationUrl.searchParams.get("state");
     const callback = await app(google.fetch).request(
-      `/v1/integrations/google-drive/callback?code=fixture-code&state=${encodeURIComponent(state!)}`,
+      `/v1/integrations/google-drive/callback?code=fixture-code&picked_file_ids=folder-1&state=${encodeURIComponent(state!)}`,
     );
     expect(callback.headers.get("location")).toContain("google_drive=connected");
     const [connection] = await listConnectionsMetadata(
@@ -327,43 +363,17 @@ describe("Google Drive local source preview", () => {
       "subject-a",
     );
     expect(connection).toMatchObject({
-      grantedScopes: [GOOGLE_DRIVE_FILE_SCOPE],
-      metadata: { accessMode: "file_only" },
-    });
-    expect(connection?.metadata.outputDestination).toBeUndefined();
-
-    const saved = await app(google.fetch).request(
-      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connection!.id}/output-destination`,
-      {
-        method: "POST",
-        headers: {
-          authorization: await bearer(workspace, "subject-a", [
-            "connections:read",
-            "connections:write",
-          ]),
-          "content-type": "application/json",
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+      id: source.connection.id,
+      grantedScopes: [GOOGLE_DRIVE_READONLY_SCOPE, GOOGLE_DRIVE_FILE_SCOPE].sort(),
+      metadata: {
+        accessMode: "readonly",
+        outputDestination: {
+          folderId: "folder-1",
+          folderName: "Product",
+          driveId: null,
+          location: "my_drive",
         },
-        body: JSON.stringify({
-          expectedVersion: connection!.version,
-          destination: {
-            folderId: "folder-1",
-          },
-        }),
       },
-    );
-    expect(saved.status).toBe(200);
-    const persisted = await getConnectionMetadata(
-      client.db,
-      workspace.workspaceId,
-      connection!.id,
-      "subject-a",
-    );
-    expect(persisted?.metadata.outputDestination).toMatchObject({
-      folderId: "folder-1",
-      folderName: "Product",
-      driveId: null,
-      location: "my_drive",
     });
     const policies = await shared!.admin<
       Array<{ policy: string; server_id: string; tool_name: string; action_name: string }>
@@ -375,7 +385,7 @@ describe("Google Drive local source preview", () => {
       {
         policy: "ask",
         server_id: "google-drive-publishing",
-        tool_name: "publish_editable_artifact",
+        tool_name: "google_drive_publish_file",
         action_name: "create",
       },
     ]);
@@ -388,7 +398,7 @@ describe("Google Drive local source preview", () => {
     const connected = await connect(workspace, google);
     expect(connected.callback.status).toBe(302);
     expect(connected.callback.headers.get("location")).toBe(
-      `http://127.0.0.1:3000/workspaces/${workspace.workspaceId}/capabilities?google_drive=connected&connectionId=${connected.connection.id}`,
+      `http://127.0.0.1:3000/workspaces/${workspace.workspaceId}/capabilities?google_drive=connected&connectionId=${connected.connection.id}&google_drive_capability=source_read`,
     );
     expect(google.tokenRequests).toHaveLength(1);
     expect(google.tokenRequests[0]?.get("code_verifier")?.length).toBeGreaterThan(40);
@@ -604,6 +614,105 @@ describe("Google Drive local source preview", () => {
       select id from documents where workspace_id = ${workspace.workspaceId}
     `,
     ).toHaveLength(0);
+  });
+
+  test("keeps Workspace Events default-off and emits deterministic wake-only provider events", async () => {
+    if (!available) return;
+    expect(
+      await wakeGoogleDriveSourcesFromWorkspaceEvent(
+        {
+          settings,
+        } as never,
+        {
+          accountId: crypto.randomUUID(),
+          workspaceId: crypto.randomUUID(),
+          connectionId: crypto.randomUUID(),
+          connectionOwnerSubjectId: "subject-a",
+          eventId: "event-disabled",
+          driveId: null,
+        },
+      ),
+    ).toEqual({ enabled: false, triggered: 0 });
+
+    const workspace = await freshWorkspace();
+    const google = googleFixture();
+    const connected = await connect(workspace, google);
+    const authorization = await bearer(workspace, "subject-a", [
+      "connections:read",
+      "connections:write",
+      "workspace:admin",
+    ]);
+    const save = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/source`,
+      {
+        method: "POST",
+        headers: {
+          authorization,
+          "content-type": "application/json",
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+        body: JSON.stringify({
+          sources: [
+            {
+              id: "folder-1",
+              name: "Product",
+              mimeType: "application/vnd.google-apps.folder",
+              driveId: null,
+            },
+          ],
+          destination: { authorityKind: "workspace", collectionId: null },
+          syncCadence: "hourly",
+          syncEnabled: true,
+          readPolicy: "allow",
+        }),
+      },
+    );
+    expect(save.status).toBe(200);
+
+    const triggered: Array<{
+      taskId: string;
+      triggerWorkflowId: string;
+      agentRunUsageIdempotencyKey: string;
+      triggerType: string | undefined;
+    }> = [];
+    const deps = {
+      settings: { ...settings, googleDriveWorkspaceEventsEnabled: true },
+      db: client.db,
+      workflowClient: {
+        triggerScheduledTask: async (input: {
+          task: { id: string };
+          triggerWorkflowId: string;
+          agentRunUsageIdempotencyKey: string;
+          triggerType?: string;
+        }) => {
+          triggered.push({
+            taskId: input.task.id,
+            triggerWorkflowId: input.triggerWorkflowId,
+            agentRunUsageIdempotencyKey: input.agentRunUsageIdempotencyKey,
+            triggerType: input.triggerType,
+          });
+        },
+      },
+    } as never;
+    const input = {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      connectionId: connected.connection.id,
+      connectionOwnerSubjectId: "subject-a",
+      eventId: "workspace-event-1",
+      driveId: null,
+    };
+    expect(await wakeGoogleDriveSourcesFromWorkspaceEvent(deps, input)).toEqual({
+      enabled: true,
+      triggered: 1,
+    });
+    expect(await wakeGoogleDriveSourcesFromWorkspaceEvent(deps, input)).toEqual({
+      enabled: true,
+      triggered: 1,
+    });
+    expect(triggered).toHaveLength(2);
+    expect(triggered[0]).toEqual(triggered[1]);
+    expect(triggered[0]).toMatchObject({ triggerType: "provider_event" });
   });
 
   test("schedule deletion durably disables sync until the initiating subject explicitly re-enables it", async () => {
@@ -950,6 +1059,90 @@ describe("Google Drive local source preview", () => {
         accessMode: "readonly",
         lifecycle: { state: "active", recoverable: true },
       },
+    });
+  });
+
+  test("revalidates refreshed Drive scopes before provider access", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const google = googleFixture({ refreshScopes: [GOOGLE_DRIVE_METADATA_READONLY_SCOPE] });
+    const connected = await connect(workspace, google);
+    await shared!.admin`
+      update connections
+      set expires_at = now() - interval '1 minute'
+      where id = ${connected.connection.id}
+    `;
+    google.apiAuthorizationHeaders.length = 0;
+
+    const browse = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
+      {
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:read"]),
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+
+    expect(browse.status).toBe(401);
+    expect(await browse.json()).toMatchObject({
+      error: {
+        message: "Google Drive needs permission re-consent for selected-source read access",
+      },
+    });
+    expect(google.tokenRequests).toHaveLength(2);
+    expect(google.apiAuthorizationHeaders).toEqual([]);
+    expect(
+      await getConnectionMetadata(
+        client.db,
+        workspace.workspaceId,
+        connected.connection.id,
+        "subject-a",
+      ),
+    ).toMatchObject({
+      status: "needs_reauth",
+      grantedScopes: [GOOGLE_DRIVE_METADATA_READONLY_SCOPE],
+      lastError: "google_drive_reconsent_required",
+      metadata: { lifecycle: { state: "reconsent_required", recoverable: true } },
+    });
+  });
+
+  test("continues after refresh when the refreshed scope preserves recursive access", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const google = googleFixture({ refreshScopes: ["openid", GOOGLE_DRIVE_FULL_SCOPE] });
+    const connected = await connect(workspace, google);
+    await shared!.admin`
+      update connections
+      set expires_at = now() - interval '1 minute'
+      where id = ${connected.connection.id}
+    `;
+    google.apiAuthorizationHeaders.length = 0;
+
+    const browse = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
+      {
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:read"]),
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+
+    expect(browse.status).toBe(200);
+    expect(google.tokenRequests).toHaveLength(2);
+    expect(google.apiAuthorizationHeaders).toEqual(["Bearer google-access-token"]);
+    expect(
+      await getConnectionMetadata(
+        client.db,
+        workspace.workspaceId,
+        connected.connection.id,
+        "subject-a",
+      ),
+    ).toMatchObject({
+      status: "active",
+      grantedScopes: ["openid", GOOGLE_DRIVE_FULL_SCOPE],
+      metadata: { lifecycle: { state: "active", recoverable: true } },
     });
   });
 

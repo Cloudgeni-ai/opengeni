@@ -42,6 +42,94 @@ const DEDICATED_ARTIFACT_CAPABILITY_ROUTINES = new Set<string>([
   ...ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES,
 ]);
 
+const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE =
+  "knowledge_source_sync_lock_authority(uuid, uuid, uuid)";
+const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
+  "knowledge_sources",
+  "knowledge_source_objects",
+] as const;
+const MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE =
+  "ensure_managed_human_personal_workspace(uuid, text, uuid)";
+const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
+  "organization_memberships",
+  "organization_user_retention_policies",
+  "organization_user_resource_authorities",
+  "organization_user_resource_grants",
+] as const;
+const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
+  "ensure_canonical_human_identity(text, text)",
+  "validate_canonical_human_session(text, text, boolean)",
+  "get_canonical_human_identity_projection(text)",
+  "apply_canonical_human_identity_operation(uuid, text, bigint, text, uuid, text, text, text)",
+] as const;
+const CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES = [
+  "canonical_human_identities",
+  "canonical_human_identity_subjects",
+  "canonical_human_login_bindings",
+  "canonical_human_identity_operations",
+] as const;
+const SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE =
+  "session_private_actor_visible(uuid, uuid, uuid, text)";
+const SESSION_REFERENCE_VISIBLE_ROUTINE = "session_reference_visible(uuid, uuid, uuid)";
+const TASK_NOTE_CAPABILITY_ROUTINES = [
+  "create_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, integer)",
+  "archive_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text)",
+  "list_task_notes_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, boolean, integer)",
+] as const;
+const TRANSITION_SESSION_VISIBILITY_ROUTINE =
+  "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)";
+const FORK_SESSION_CONTENT_ROUTINE =
+  "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)";
+const SESSION_AUTHORITY_ROUTINES = new Set<string>([
+  FORK_SESSION_CONTENT_ROUTINE,
+  SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
+  SESSION_REFERENCE_VISIBLE_ROUTINE,
+  TRANSITION_SESSION_VISIBILITY_ROUTINE,
+  ...TASK_NOTE_CAPABILITY_ROUTINES,
+]);
+const XAI_CREATE_CREDENTIAL_ROUTINE =
+  "create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone)";
+const XAI_DISCONNECT_CREDENTIAL_ROUTINE =
+  "disconnect_xai_subscription_credential(uuid, uuid, text, uuid, jsonb)";
+const XAI_SNAPSHOT_VALIDATOR_ROUTINE = "xai_provider_account_authority_snapshot_v1_valid(jsonb)";
+const XAI_AUTHORITY_LIVE_ROUTINE =
+  "xai_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint)";
+const XAI_POOL_VISIBLE_ROUTINE = "xai_subscription_pool_visible(uuid, uuid, text, text, uuid)";
+const XAI_RESOLVE_POOL_ROUTINE = "resolve_xai_authority_pool(uuid, uuid, text, jsonb)";
+const XAI_REVALIDATE_CREDENTIAL_ROUTINE =
+  "revalidate_xai_subscription_authority(uuid, text, uuid, jsonb)";
+const XAI_AUTHORITY_TABLES = [
+  "organization_memberships",
+  "organization_user_resource_authorities",
+  "workspace_memberships",
+  "xai_subscription_credentials",
+] as const;
+
+export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  FORK_SESSION_CONTENT_ROUTINE,
+  XAI_AUTHORITY_LIVE_ROUTINE,
+  XAI_CREATE_CREDENTIAL_ROUTINE,
+  XAI_DISCONNECT_CREDENTIAL_ROUTINE,
+  KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
+  MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
+  ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
+  SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
+  SESSION_REFERENCE_VISIBLE_ROUTINE,
+  TRANSITION_SESSION_VISIBILITY_ROUTINE,
+  XAI_POOL_VISIBLE_ROUTINE,
+  XAI_RESOLVE_POOL_ROUTINE,
+  XAI_REVALIDATE_CREDENTIAL_ROUTINE,
+  XAI_SNAPSHOT_VALIDATOR_ROUTINE,
+] as const;
+
+export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  SESSION_REFERENCE_VISIBLE_ROUTINE,
+  XAI_SNAPSHOT_VALIDATOR_ROUTINE,
+] as const;
+const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
+  RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
+);
+
 /**
  * The complete standalone tenant-table contract. Adding or removing a
  * FORCE-RLS table is an architectural change: update this list in the same
@@ -50,10 +138,37 @@ const DEDICATED_ARTIFACT_CAPABILITY_ROUTINES = new Set<string>([
 export const FORCE_RLS_TABLES = [
   "agent_run_states",
   "api_keys",
+  "attached_browser_devices",
+  "attached_browser_inventories",
   "audit_events",
+  "auth_runs",
   "billing_customers",
+  "browser_identities",
+  "browser_revision_components",
+  "browser_revisions",
+  "browser_session_associations",
+  "browser_sessions",
+  "browser_state_artifacts",
+  "browser_state_uploads",
+  "canonical_human_identities",
+  "canonical_human_identity_operations",
+  "canonical_human_identity_subjects",
+  "canonical_human_login_bindings",
+  "capability_api_facets",
   "capability_catalog_items",
+  "capability_component_owners",
+  "capability_facet_installations",
+  "capability_facets",
   "capability_installations",
+  "capability_integration_facets",
+  "capability_mcp_facets",
+  "capability_operations",
+  "capability_plugin_installations",
+  "capability_plugin_versions",
+  "capability_plugins",
+  "capability_skill_facets",
+  "capability_skill_files",
+  "channels",
   "codex_apps_settings",
   "codex_capacity_waiters",
   "codex_credential_leases",
@@ -65,6 +180,8 @@ export const FORCE_RLS_TABLES = [
   "company_profile_revisions",
   "company_profile_snapshots",
   "composer_drafts",
+  "computer_session_associations",
+  "computer_sessions",
   "connection_disconnect_operations",
   "connections",
   "connector_action_policies",
@@ -84,6 +201,7 @@ export const FORCE_RLS_TABLES = [
   "editable_artifact_replica_leases",
   "editable_artifact_scope_authorization_heads",
   "editable_artifact_sequence_checkpoints",
+  "editable_artifact_session_links",
   "editable_artifact_snapshots",
   "editable_artifact_transactions",
   "editable_artifact_undo_claims",
@@ -93,6 +211,7 @@ export const FORCE_RLS_TABLES = [
   "file_uploads",
   "files",
   "generated_image_artifacts",
+  "generated_video_artifacts",
   "github_installation_repositories",
   "github_installations",
   "host_export_config",
@@ -102,7 +221,15 @@ export const FORCE_RLS_TABLES = [
   "host_export_outbox",
   "image_generation_operations",
   "import_batches",
+  "integration_facet_binding_owners",
+  "integration_facet_bindings",
+  "integration_facet_definitions",
   "integration_oauth_state_nonces",
+  "integration_spec_revisions",
+  "integration_tools",
+  "interaction_interventions",
+  "interaction_operations",
+  "interaction_resource_operations",
   "knowledge_change_proposals",
   "knowledge_claim_evidence",
   "knowledge_claim_relations",
@@ -130,8 +257,17 @@ export const FORCE_RLS_TABLES = [
   "machine_metrics_latest",
   "machine_metrics_series",
   "machine_removal_operations",
+  "memory_slack_publication_configurations",
+  "memory_slack_publication_receipts",
+  "memory_slack_publications",
   "model_call_facts",
+  "network_routes",
   "new_session_drafts",
+  "organization_memberships",
+  "organization_user_resource_authorities",
+  "organization_user_resource_grants",
+  "organization_user_retention_policies",
+  "pack_installation_components",
   "pack_installations",
   "preference_registry_events",
   "preference_registry_preferences",
@@ -151,9 +287,12 @@ export const FORCE_RLS_TABLES = [
   "sandboxes",
   "scheduled_task_runs",
   "scheduled_tasks",
+  "session_attempt_codemode_calls",
   "session_attempt_interruptions",
+  "session_attempt_tool_catalogs",
   "session_command_receipts",
   "session_events",
+  "session_goal_revisions",
   "session_goals",
   "session_history_items",
   "session_human_input_requests",
@@ -172,22 +311,38 @@ export const FORCE_RLS_TABLES = [
   "session_system_updates",
   "session_turn_attempts",
   "session_turns",
+  "session_visibility_write_capabilities",
   "session_workflow_wake_outbox",
   "sessions",
+  "site_auth_connections",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
+  "slack_bot_update_operations",
   "slack_bot_user_links",
+  "slack_installation_bindings",
+  "slack_interaction_action_handles",
   "slack_interaction_inbox",
   "slack_interaction_progress_deliveries",
   "slack_interactions",
+  "slack_shared_task_origins",
+  "slack_task_policy_activation_events",
+  "slack_task_policy_heads",
+  "slack_task_policy_revisions",
+  "slack_user_link_access_request_operations",
+  "slack_user_link_access_requests",
   "social_connections",
   "social_posts",
+  "task_note_events",
+  "task_note_write_capabilities",
+  "task_notes",
   "temporal_schedule_cleanup_outbox",
   "transcription_recording_chunks",
   "transcription_recording_objects",
   "transcription_recording_segments",
   "transcription_recordings",
   "usage_events",
+  "video_generation_operations",
+  "video_generation_references",
   "workspace_artifact_events",
   "workspace_artifact_versions",
   "workspace_artifacts",
@@ -199,6 +354,7 @@ export const FORCE_RLS_TABLES = [
   "workspace_instruction_policy_onboarding_proposals",
   "workspace_instruction_policy_revisions",
   "workspace_instruction_policy_snapshots",
+  "workspace_interaction_revisions",
   "workspace_learning_policy_activation_events",
   "workspace_learning_policy_heads",
   "workspace_learning_policy_revisions",
@@ -209,6 +365,13 @@ export const FORCE_RLS_TABLES = [
   "workspace_session_activity_revisions",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
+  "workspace_video_generation_policies",
+  "workspace_video_generation_quotas",
+  "xai_capacity_waiters",
+  "xai_credential_leases",
+  "xai_rotation_settings",
+  "xai_session_account_pins",
+  "xai_subscription_credentials",
 ] as const;
 
 /**
@@ -245,8 +408,14 @@ export const RUNTIME_FULL_DML_TABLES = [
   "auth_users",
   "auth_verifications",
   "billing_customers",
+  "browser_session_associations",
   "capability_catalog_items",
+  "capability_component_owners",
+  "capability_facet_installations",
   "capability_installations",
+  "capability_operations",
+  "capability_plugin_installations",
+  "channels",
   "codex_apps_settings",
   "codex_capacity_waiters",
   "codex_credential_leases",
@@ -254,6 +423,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "codex_rotation_settings",
   "codex_subscription_credentials",
   "composer_drafts",
+  "computer_session_associations",
   "connection_disconnect_operations",
   "connections",
   "connector_action_policies",
@@ -268,10 +438,13 @@ export const RUNTIME_FULL_DML_TABLES = [
   "file_uploads",
   "files",
   "generated_image_artifacts",
+  "generated_video_artifacts",
   "github_installation_repositories",
   "github_installations",
   "image_generation_operations",
   "import_batches",
+  "integration_facet_binding_owners",
+  "integration_facet_bindings",
   "integration_oauth_clients",
   "integration_oauth_state_nonces",
   "knowledge_memories",
@@ -284,8 +457,12 @@ export const RUNTIME_FULL_DML_TABLES = [
   "machine_metrics_series",
   "machine_removal_operations",
   "managed_accounts",
+  "memory_slack_publication_configurations",
+  "memory_slack_publication_receipts",
+  "memory_slack_publications",
   "model_call_facts",
   "new_session_drafts",
+  "pack_installation_components",
   "pack_installations",
   "retained_screenshot_artifacts",
   "rig_changes",
@@ -325,7 +502,9 @@ export const RUNTIME_FULL_DML_TABLES = [
   "sessions",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
+  "slack_bot_update_operations",
   "slack_bot_user_links",
+  "slack_interaction_action_handles",
   "slack_interaction_inbox",
   "slack_interaction_progress_deliveries",
   "slack_interactions",
@@ -337,6 +516,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "transcription_recording_segments",
   "transcription_recordings",
   "usage_events",
+  "video_generation_operations",
+  "video_generation_references",
   "workspace_artifacts",
   "workspace_captures",
   "workspace_control_events",
@@ -346,10 +527,16 @@ export const RUNTIME_FULL_DML_TABLES = [
   "workspace_model_policies",
   "workspace_packs",
   "workspace_screenshot_quotas",
-  "workspace_session_activity_revisions",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
+  "workspace_video_generation_policies",
+  "workspace_video_generation_quotas",
   "workspaces",
+  "xai_capacity_waiters",
+  "xai_credential_leases",
+  "xai_rotation_settings",
+  "xai_session_account_pins",
+  "xai_subscription_credentials",
 ] as const;
 
 /** Configuration and lifecycle-owned audit rows are read-only at runtime. */
@@ -363,14 +550,23 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "nested_agent_depth_configuration",
   "preference_registry_events",
   "preference_registry_snapshots",
+  "slack_installation_bindings",
+  "slack_task_policy_activation_events",
+  "slack_task_policy_heads",
+  "slack_task_policy_revisions",
   "workspace_instruction_policy_snapshots",
   "workspace_learning_policy_activation_events",
   "workspace_learning_policy_heads",
   "workspace_learning_policy_snapshots",
 ] as const;
 
+/** Existing runtime authorities that may be observed and advanced, never created or deleted. */
+export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions"] as const;
+
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
+  "browser_revision_components",
+  "browser_revisions",
   "company_profile_revisions",
   "editable_artifact_blob_refs",
   "editable_artifact_idempotency_receipts",
@@ -400,7 +596,11 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "knowledge_sync_runs",
   "preference_registry_preferences",
   "preference_registry_revisions",
+  "session_attempt_tool_catalogs",
+  "session_goal_revisions",
   "session_spawn_denials",
+  "slack_shared_task_origins",
+  "slack_user_link_access_request_operations",
   "temporal_schedule_cleanup_outbox",
   "workspace_artifact_events",
   "workspace_artifact_versions",
@@ -410,14 +610,48 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "workspace_learning_policy_revisions",
 ] as const;
 
-/** Mutable authorities that intentionally forbid runtime deletion. */
-export const RUNTIME_READ_INSERT_UPDATE_TABLES = ["editable_artifacts"] as const;
+/** Durable operation journals are append/read plus claim/settle updates, never deletes. */
+export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
+  "attached_browser_devices",
+  "attached_browser_inventories",
+  "auth_runs",
+  "browser_identities",
+  "browser_sessions",
+  "browser_state_artifacts",
+  "browser_state_uploads",
+  "capability_api_facets",
+  "capability_facets",
+  "capability_integration_facets",
+  "capability_mcp_facets",
+  "capability_plugin_versions",
+  "capability_plugins",
+  "capability_skill_facets",
+  "capability_skill_files",
+  "computer_sessions",
+  "editable_artifact_session_links",
+  "editable_artifacts",
+  "integration_facet_definitions",
+  "integration_spec_revisions",
+  "integration_tools",
+  "interaction_interventions",
+  "interaction_operations",
+  "interaction_resource_operations",
+  "network_routes",
+  "session_attempt_codemode_calls",
+  "site_auth_connections",
+  "slack_user_link_access_requests",
+  "workspace_interaction_revisions",
+] as const;
 
 /**
  * These FORCE-RLS tables are owned by security-definer host-export routines.
  * The ordinary application role must have no direct table privileges on them.
  */
 export const PROTECTED_NO_DIRECT_DML_TABLES = [
+  "canonical_human_identities",
+  "canonical_human_identity_operations",
+  "canonical_human_identity_subjects",
+  "canonical_human_login_bindings",
   "editable_artifact_live_tickets",
   "editable_artifact_scope_authorization_heads",
   "host_export_config",
@@ -425,6 +659,14 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "host_export_cursor_state",
   "host_export_dead_letters",
   "host_export_outbox",
+  "organization_memberships",
+  "organization_user_resource_authorities",
+  "organization_user_resource_grants",
+  "organization_user_retention_policies",
+  "session_visibility_write_capabilities",
+  "task_note_events",
+  "task_note_write_capabilities",
+  "task_notes",
 ] as const;
 
 export type RuntimeTableDmlPrivilege = "SELECT" | "INSERT" | "UPDATE" | "DELETE";
@@ -438,6 +680,9 @@ const FULL_DML_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE"] as const;
 export const RUNTIME_TABLE_PRIVILEGES: RuntimeTablePrivilegeContract = Object.freeze({
   ...Object.fromEntries(RUNTIME_FULL_DML_TABLES.map((table) => [table, FULL_DML_PRIVILEGES])),
   ...Object.fromEntries(RUNTIME_READ_ONLY_TABLES.map((table) => [table, ["SELECT"] as const])),
+  ...Object.fromEntries(
+    RUNTIME_READ_UPDATE_TABLES.map((table) => [table, ["SELECT", "UPDATE"] as const]),
+  ),
   ...Object.fromEntries(
     RUNTIME_READ_INSERT_TABLES.map((table) => [table, ["SELECT", "INSERT"] as const]),
   ),
@@ -511,6 +756,10 @@ export type RuntimeRoutinePosture = {
   securityDefiner: boolean;
 };
 
+export type RuntimeTargetRoutinePosture = RuntimeRoutinePosture & {
+  publicExecute: boolean;
+};
+
 export type RuntimeDatabasePosture = {
   identity: RuntimeDatabaseIdentity;
   /** Privilege-bearing role relationships; exact PG16+ management-only grants are excluded. */
@@ -519,6 +768,7 @@ export type RuntimeDatabasePosture = {
   ownedSchemas: string[];
   ownedRelations: string[];
   tables: RuntimeTablePosture[];
+  targetRoutines: RuntimeTargetRoutinePosture[];
   privateRoutines: RuntimeRoutinePosture[];
 };
 
@@ -629,6 +879,7 @@ export async function inspectRuntimeDatabasePosture(
           ownedSchemas: [],
           ownedRelations: [],
           tables: [],
+          targetRoutines: [],
           privateRoutines: [],
         };
       }
@@ -748,6 +999,46 @@ export async function inspectRuntimeDatabasePosture(
         trigger: row.can_trigger,
       }));
 
+      const targetRoutines = resultRows<{
+        name: string;
+        owner: string;
+        can_execute: boolean;
+        public_execute: boolean;
+        security_definer: boolean;
+      }>(
+        await tx.execute(sql`
+          select
+            (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
+            pg_get_userbyid(p.proowner)::text as owner,
+            has_function_privilege(current_user, p.oid, 'EXECUTE') as can_execute,
+            exists (
+              select 1
+              from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+              where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+            ) as public_execute,
+            p.prosecdef as security_definer
+          from pg_proc p
+          join pg_namespace n on n.oid = p.pronamespace
+          where n.nspname = ${targetSchema}
+            and p.prokind in ('f', 'p')
+            and (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')') = any(
+              array[
+                ${sql.join(
+                  RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => sql`${name}`),
+                  sql`, `,
+                )}
+              ]::text[]
+            )
+          order by p.proname, pg_catalog.oidvectortypes(p.proargtypes)
+        `),
+      ).map((row) => ({
+        name: row.name,
+        owner: row.owner,
+        execute: row.can_execute,
+        publicExecute: row.public_execute,
+        securityDefiner: row.security_definer,
+      }));
+
       const privateRoutines = resultRows<{
         name: string;
         owner: string;
@@ -780,6 +1071,7 @@ export async function inspectRuntimeDatabasePosture(
         ownedSchemas,
         ownedRelations,
         tables,
+        targetRoutines,
         privateRoutines,
       };
     },
@@ -947,6 +1239,137 @@ export function evaluateRuntimeDatabasePosture(
     if (!table.rlsForced) violations.push(`table ${tableName} does not FORCE RLS`);
     if (!table.rlsActive) violations.push(`table ${tableName} has inactive RLS for runtime role`);
     if (table.policyCount < 1) violations.push(`table ${tableName} has no RLS policy`);
+  }
+
+  const targetSchemaOwner = posture.schemas.find((schema) => schema.name === targetSchema)?.owner;
+  for (const expectedRoutine of RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES) {
+    const matches = posture.targetRoutines.filter((routine) => routine.name === expectedRoutine);
+    if (matches.length !== 1) {
+      violations.push(
+        `target-schema runtime capability ${expectedRoutine} is missing or ambiguous`,
+      );
+      continue;
+    }
+    const routine = matches[0]!;
+    if (RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET.has(routine.name)) {
+      if (routine.securityDefiner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} must be SECURITY INVOKER`,
+        );
+      }
+    } else if (!routine.securityDefiner) {
+      violations.push(`target-schema runtime capability ${routine.name} is not SECURITY DEFINER`);
+    }
+    if (routine.name === KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE) {
+      const missingAuthorityTables = KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
+      }
+    } else if (routine.name === MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE) {
+      const authorityTables = MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES.filter(
+        (tableName) => tableByName.has(tableName),
+      ).map((tableName) => tableByName.get(tableName)!);
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityOwners.size > 1) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+        );
+      } else if (authorityTables[0] && routine.owner !== authorityTables[0].owner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0].owner}`,
+        );
+      }
+    } else if ((CANONICAL_HUMAN_IDENTITY_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES.filter((tableName) =>
+        tableByName.has(tableName),
+      ).map((tableName) => tableByName.get(tableName)!);
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityTables.length !== CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES.length) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} canonical identity authority tables are missing`,
+        );
+      } else if (authorityOwners.size !== 1) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+        );
+      } else if (routine.owner !== authorityTables[0]!.owner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+        );
+      }
+    } else if (SESSION_AUTHORITY_ROUTINES.has(routine.name)) {
+      const authorityOwner = tableByName.get("sessions")?.owner ?? targetSchemaOwner;
+      if (authorityOwner && routine.owner !== authorityOwner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match session authority owner ${authorityOwner}`,
+        );
+      }
+    } else if (routine.name === XAI_SNAPSHOT_VALIDATOR_ROUTINE) {
+      // The immutable SQL validator is invoker-rights and reads no table. Its
+      // exact ACL is posture-checked above; it does not participate in the
+      // SECURITY DEFINER same-owner authority graph.
+    } else if (
+      routine.name === XAI_CREATE_CREDENTIAL_ROUTINE ||
+      routine.name === XAI_DISCONNECT_CREDENTIAL_ROUTINE ||
+      routine.name === XAI_AUTHORITY_LIVE_ROUTINE ||
+      routine.name === XAI_POOL_VISIBLE_ROUTINE ||
+      routine.name === XAI_RESOLVE_POOL_ROUTINE ||
+      routine.name === XAI_REVALIDATE_CREDENTIAL_ROUTINE
+    ) {
+      if (!tableByName.has("xai_subscription_credentials")) {
+        continue;
+      }
+      const missingAuthorityTables = XAI_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = XAI_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
+      }
+    } else if (targetSchemaOwner && routine.owner !== targetSchemaOwner) {
+      violations.push(
+        `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match schema owner ${targetSchemaOwner}`,
+      );
+    }
+    if (!routine.execute) {
+      violations.push(`runtime role lacks target-schema capability ${routine.name}`);
+    }
+    if (routine.publicExecute) {
+      violations.push(`PUBLIC has forbidden target-schema capability ${routine.name}`);
+    }
   }
 
   const artifactOutbox = tableByName.get("editable_artifact_live_outbox");

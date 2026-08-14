@@ -35,6 +35,7 @@ import {
   updateWorkspaceSettings,
   upsertWorkspaceModelPolicy,
   workspaceCodexSubscriptionActive,
+  workspaceXaiSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
 } from "@opengeni/db";
 import { boundWorkspaceControlHttpPage } from "@opengeni/events";
@@ -55,6 +56,7 @@ import { processTemporalScheduleCleanupClaims } from "../temporal-schedule-clean
 import {
   AI_GATEWAY_REALTIME_MODELS,
   CODEX_REALTIME_MODEL_ID,
+  SUPERGROK_REALTIME_MODEL_ID,
   canonicalizeConfiguredModelId,
   type Settings,
 } from "@opengeni/config";
@@ -165,10 +167,16 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   // so bearer/federated definitions intentionally fail closed as not ready.
   app.get("/v1/workspaces/:workspaceId/model-catalog", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const [policy, codexSubscriptionActive, workspaceGatewayConnectionActive] = await Promise.all([
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const [
+      policy,
+      codexSubscriptionActive,
+      xaiSubscriptionActive,
+      workspaceGatewayConnectionActive,
+    ] = await Promise.all([
       getWorkspaceModelPolicy(deps.db, workspaceId),
       workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
+      workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
       workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
     ]);
     c.header("cache-control", "private, no-store");
@@ -178,6 +186,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           settings: deps.settings,
           policy,
           codexSubscriptionActive,
+          xaiSubscriptionActive,
           workspaceGatewayConnectionActive,
         }),
       ),
@@ -186,9 +195,10 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/realtime-model-catalog", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const [codexConnected, workspaceGatewayConnected] = await Promise.all([
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const [codexConnected, supergrokConnected, workspaceGatewayConnected] = await Promise.all([
       workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
+      workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
       workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
     ]);
     const availability = (
@@ -218,6 +228,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         provider: "Connected Codex" as const,
         description: "Deep session integration",
         ...availability(codexConnected, "Connect Codex to use this voice model"),
+        recommended: false,
+      },
+      {
+        id: SUPERGROK_REALTIME_MODEL_ID,
+        label: "Grok Voice Think Fast 2.0",
+        provider: "Connected SuperGrok" as const,
+        description: "Direct SuperGrok speech-to-speech",
+        ...availability(supergrokConnected, "Connect SuperGrok to use this voice model"),
         recommended: false,
       },
       ...gatewayModels.map((model) => ({
@@ -344,6 +362,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (deleted.status === "active_sessions") {
       throw new HTTPException(409, {
         message: "stop the workspace's running sessions before deleting it",
+      });
+    }
+    if (deleted.status === "active_video_generations") {
+      throw new HTTPException(409, {
+        message: "wait for the workspace's active video generations to finish before deleting it",
       });
     }
     if (deleted.status === "live_sandboxes") {

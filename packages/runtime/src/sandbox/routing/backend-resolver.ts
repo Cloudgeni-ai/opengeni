@@ -103,6 +103,8 @@ export interface ActiveBackendResolverDeps {
    * manifest environment variables". Omitted → `{}` (the test/negotiation path).
    */
   environment?: Record<string, string>;
+  /** Attempt-local values projected only onto selfhosted child exec requests. */
+  transientExecEnvironment?: () => Readonly<Record<string, string>>;
   /**
    * A pre-established selfhosted session to PIN for the STEADY-STATE machine
    * pointer (the worker turn's machine-primary path, Stage D). When the pointer
@@ -320,6 +322,9 @@ export function makeActiveBackendResolver(
         // the SDK's per-turn manifest-env delta is empty (no "cannot change manifest
         // environment variables" throw on a pin-to-vm turn).
         ...(deps.environment !== undefined ? { environment: deps.environment } : {}),
+        ...(deps.transientExecEnvironment !== undefined
+          ? { transientExecEnvironment: deps.transientExecEnvironment }
+          : {}),
         // The session's working directory (per-session pointer) → the path/cwd base
         // for this selfhosted backend. Absent/empty ⇒ the default workspace_root.
         ...(pointer.workingDir ? { workingDir: pointer.workingDir } : {}),

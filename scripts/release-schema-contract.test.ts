@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { buildSchemaContract } from "./release-schema-contract";
@@ -11,6 +11,44 @@ afterEach(async () => {
 });
 
 describe("release schema contract", () => {
+  test("installs the workspace activity initializer before its conflict-safe backfill", async () => {
+    const migration = await readFile(
+      join(import.meta.dir, "../packages/db/drizzle/0214_session_activity_commit_gate.sql"),
+      "utf8",
+    );
+    const scopedInitializer = migration.indexOf(
+      "CREATE OR REPLACE FUNCTION opengeni_private.ensure_workspace_session_activity_revision(",
+    );
+    const initializer = migration.indexOf(
+      "CREATE OR REPLACE FUNCTION opengeni_private.initialize_workspace_session_activity_revision()",
+    );
+    const trigger = migration.indexOf(
+      "CREATE TRIGGER workspaces_initialize_session_activity_revision",
+    );
+    const backfill = migration.indexOf(
+      "SELECT opengeni_private.ensure_workspace_session_activity_revision(",
+      trigger,
+    );
+
+    expect(scopedInitializer).toBeGreaterThanOrEqual(0);
+    expect(initializer).toBeGreaterThan(scopedInitializer);
+    expect(trigger).toBeGreaterThan(initializer);
+    expect(backfill).toBeGreaterThan(trigger);
+    expect(migration.slice(scopedInitializer, initializer)).toContain(
+      "set_config('opengeni.account_id', target_account_id::text, true)",
+    );
+    expect(migration.slice(scopedInitializer, initializer)).toContain(
+      "set_config('opengeni.workspace_id', target_workspace_id::text, true)",
+    );
+    expect(migration.slice(scopedInitializer, initializer)).toContain(
+      "ON CONFLICT (workspace_id) DO NOTHING",
+    );
+    expect(migration.slice(initializer, trigger)).toContain(
+      "opengeni_private.ensure_workspace_session_activity_revision(",
+    );
+    expect(migration.slice(backfill)).toContain('FROM "workspaces"');
+  });
+
   test("classifies the Codex quota owning-human cutover as maintenance-only", async () => {
     const contract = await buildSchemaContract();
     expect(
@@ -72,8 +110,172 @@ describe("release schema contract", () => {
   });
 
   test("preserves published host-export history and appends the forward repair", async () => {
-    const contract = await buildSchemaContract();
-    const migrations = new Map(contract.migrations.map((migration) => [migration.path, migration]));
+    const completeSourceContract = await buildSchemaContract();
+    const companyBrainMigrationPaths = [
+      "0238_goal_persistence_policy.sql",
+      "0239_task_tree_notes.sql",
+    ].filter((path) =>
+      completeSourceContract.migrations.some((migration) => migration.path === path),
+    );
+    const companyBrainMigrations = new Map(
+      completeSourceContract.migrations.map((migration) => [migration.path, migration]),
+    );
+    const goalPersistence = companyBrainMigrations.get("0238_goal_persistence_policy.sql");
+    if (goalPersistence) {
+      expect(goalPersistence).toMatchObject({ deploymentMode: "rolling" });
+    }
+    const taskTreeNotes = companyBrainMigrations.get("0239_task_tree_notes.sql");
+    if (taskTreeNotes) {
+      expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
+    }
+    const appendedMigrationPaths = [
+      "0237_interaction_transition_reaper.sql",
+      "0238_supergrok_realtime_model.sql",
+      "0239_supergrok_video_funding.sql",
+    ].filter((path) =>
+      completeSourceContract.migrations.some((migration) => migration.path === path),
+    );
+    const forwardMigrationPaths = [...companyBrainMigrationPaths, ...appendedMigrationPaths];
+    const sourceContract =
+      forwardMigrationPaths.length > 0
+        ? await contractWithoutMigrations(forwardMigrationPaths)
+        : completeSourceContract;
+    const transitionReaper = completeSourceContract.migrations.find(
+      (migration) => migration.path === "0237_interaction_transition_reaper.sql",
+    );
+    if (transitionReaper) {
+      expect(transitionReaper).toMatchObject({ deploymentMode: "maintenance" });
+    }
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0238_supergrok_realtime_model.sql",
+      ),
+    ).toMatchObject({
+      sha256: "1992505e5994cbef2d650b0eebae2a6c033b567ecbb9cf27301846c500dea66a",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0239_supergrok_video_funding.sql",
+      ),
+    ).toMatchObject({
+      sha256: "fbe4c79cb20c809767dad12e697ab6ad1becfc8b03eb314cbda38d6069a258f1",
+      deploymentMode: "rolling",
+    });
+    const migrations = new Map(
+      sourceContract.migrations.map((migration) => [migration.path, migration]),
+    );
+    const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
+      if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
+      if (migrations.has("0238_recover_unclaimed_session_turns.sql")) {
+        return includesActivation
+          ? "67209db60dbc5556cd8ec6bd89fdc037ecf12f27a16ceb2739d179b623126b0b"
+          : "da3ec4154e52954b78e1712b75b9b58211a4731aa82fad9e6615afd3ea9f325f";
+      }
+      if (migrations.has("0228_interaction_controller_data_plane.sql")) {
+        return includesActivation
+          ? "2f0bfa7a465e47bbca27a79cc594f953e59a94e42ff704ab11e258523d19ad42"
+          : "712d1680b4aa6e22346fc2f2ef33458543e8fcd0025b5d793d996ef5ec586452";
+      }
+      if (migrations.has("0229_slack_inbox_file_fact.sql")) {
+        return includesActivation
+          ? "b681853738c32371ca30328ccc1c3ceb9d8e767f84855f82d6abba334a62f38d"
+          : "d734d6198dfc91728f3e05ec5c3bc4e69cedb02b656697b6ecbf35f607ed4571";
+      }
+      return includesActivation
+        ? "0a3c326f21e67422bdc84e9409d72b489aac967e18b08fbc7a410aab51cb17af"
+        : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
+    };
+    const currentMainContractHash = migrations.has("0235_canonical_human_login_bindings.sql")
+      ? migrations.has("0234_xai_subscription_authority.sql")
+        ? migrations.has("0223_pending_tool_event_output.sql")
+          ? "94db34c0bd7ee7a3fe9c7a44f7e2705de9bdbe39d1503fa79ec52b024d71ad42"
+          : "5450adec25b4684b082ce97c0ab5ce76f33b15de2e943945b5e73534ff67be82"
+        : migrations.has("0223_pending_tool_event_output.sql")
+          ? "bdf9243aad43605eb2cc380992f564a706aa06ffea885854f6be5911abe2f5c3"
+          : "e0f7b19f681fee92ea7813660fee0227fef4ed885032a134f36b399591888d8c"
+      : migrations.has("0234_xai_subscription_authority.sql")
+        ? migrations.has("0223_pending_tool_event_output.sql")
+          ? "f6370d47ee43da07781d21a67fe07ffb353c9c8ea4e22ec3bf75ba3793f7634a"
+          : "035c70dfee83fe5b0962697bf7167bfd09b77d69ea3d3b0e25907998f58d7005"
+        : migrations.has("0233_skill_and_integration_authority_cutover.sql")
+          ? migrations.has("0223_pending_tool_event_output.sql")
+            ? "2ec6043704c9f0b8c635ff989d5155e2f047a2377b6a8784139c98b006bcc487"
+            : "03b2633febc6805e697fb5aa2002136a80c8699181f9b4c65b3b559ef6726d18"
+          : migrations.has("0232_integration_facet_authority_cutover.sql")
+            ? "329a693f62feec5c85716be710791c98c24933796f542a33fae8af82ccfba927"
+            : migrations.has("0231_integration_definition_identity_cutover.sql")
+              ? "4fe8a5b026a6e87309d8881e0fef4f06de895b3e9960d63a82f1bb0ad5200a10"
+              : migrations.has("0229_slack_inbox_file_fact.sql")
+                ? "f2210d9386b75dd644419fec0e69cf7157529fad0c4a81237dad7798bd4959b6"
+                : migrations.has("0228_slack_task_policy.sql")
+                  ? migrations.has("0226_personal_codex_authority_foundation.sql")
+                    ? "7b7fd3a19e1e2a9b5cf98b8ad8e5720f1e3c329ad42f9f012172b028c26e8363"
+                    : "bbedea10fef52aeaf32d6e16c27d1042a9f68483ba54c241f5184659e86b3c89"
+                  : migrations.has("0227_slack_native_actions.sql")
+                    ? migrations.has("0226_personal_codex_authority_foundation.sql")
+                      ? "fb41447bb063da5239197ceb5dc0c179427cc08f6593b77e5c18b98f85804dab"
+                      : "32e38ffe1fce657245e30bf413e594f84d967ef68ff9bc4cbd8e08e2bb5ebffc"
+                    : migrations.has("0226_personal_codex_authority_foundation.sql")
+                      ? migrations.has("0224_slack_post_outcome_reconciliation.sql")
+                        ? "b2daba323004014d21b87f53eb20993fda4216c249cd2c07e15a9fdab294742c"
+                        : "ad366c52845dde14bc42d9c42e93e02c72ba916b6e7ab7ec15d7e2d5f2f5f14f"
+                      : migrations.has("0224_slack_post_outcome_reconciliation.sql")
+                        ? "8c742400ca1e21ddc4fe1db810d58af7dca037df360406fc71dbd85205eb5a64"
+                        : migrations.has("0223_sessions_channel_fk_validate.sql")
+                          ? "6bc5dfdf4468f6be4adc5ea7c6ed98397ee865c21a0175106320159b15588a6c"
+                          : migrations.has("0221_sessions_channel_index.sql")
+                            ? "e7beb14a48c19cdc2d185fd27b77052a66e9d2e52fe321bc3e2fc14bba8d8712"
+                            : migrations.has("0220_memory_slack_append_only_cascade.sql")
+                              ? migrations.has(
+                                  "0219_organization_tenancy_managed_human_provisioning.sql",
+                                )
+                                ? "c9821a930c52d8c40604b9d2f39408227b377f3b2d70b4bb74c14ef93f605756"
+                                : migrations.has("0218_organization_tenancy_foundation.sql")
+                                  ? "d78d099f9393a3dcf7d8b54fd75d155448f1a3846712c0aee41d58e7b92b6e9b"
+                                  : "85c02e09061ba359a0fa747b1ccffa87a5dd115cbfd8f36ad90c62292ef27bba"
+                              : migrations.has("0219_site_auth_maintenance_sessions.sql")
+                                ? migrations.has("0218_organization_tenancy_foundation.sql")
+                                  ? "a002c6b3da822dfff2aca5fd88e76371ecadf87e1fc0c9f5a603b674f67676d1"
+                                  : "67238deb9f46f6459e46c882a4dd5231b0ba739f715dfc9e51d8539f54ff3039"
+                                : migrations.has("0218_organization_tenancy_foundation.sql")
+                                  ? "eb6d0099f5362add0eb799641deace18326831ac61c8922c3f4f91c6a489f6a9"
+                                  : migrations.has(
+                                        "0217_capability_definition_delete_authority.sql",
+                                      )
+                                    ? "2d8e3211f1526419a8421c4388f7cf2297839318d7a7dbd194362d81c503c70a"
+                                    : migrations.has("0216_pack_component_ownership.sql")
+                                      ? "85a5f5320fd7c673bfe16240d4615b93ce635e9724d8f1bc467ce336e5c93022"
+                                      : migrations.has("0214_session_activity_commit_gate.sql")
+                                        ? "00b9989ef287e75bceceabc94ddfa1c118a97553ccdbc523485300046058075f"
+                                        : "e3048091a81b7e122b3c6d17cf52e5ffccff4c082780f6d2d330031742aef792";
+    const activationMigration = migrations.get("0225_session_visibility_fork_activation.sql");
+    if (activationMigration) {
+      expect(sourceContract.sha256).toBe(sessionVisibilityContractHash(true));
+      expect(activationMigration).toMatchObject({
+        sha256: "43945bc115ddf5e7b4b6e73a757c6bb63dde6929e1b3a89714c9cf330de87a12",
+        deploymentMode: "rolling",
+      });
+      expect(migrations.get("0236_session_visibility_slack_policy.sql")).toMatchObject({
+        sha256: "64f9beb146d973cc0a6ab9f8cdef29955ef9edb68ecc9b07756eda5414709299",
+        deploymentMode: "rolling",
+      });
+
+      migrations.delete("0225_session_visibility_fork_activation.sql");
+      sourceContract.migrations = sourceContract.migrations.filter(
+        (migration) => migration.path !== "0225_session_visibility_fork_activation.sql",
+      );
+      sourceContract.fileCount -= 1;
+      sourceContract.latestMigration = sourceContract.migrations.at(-1)?.path ?? null;
+      sourceContract.sha256 = sessionVisibilityContractHash(false)!;
+    }
+    expect(sourceContract.sha256).toBe(
+      sessionVisibilityContractHash(false) ?? currentMainContractHash,
+    );
+    const contract = {
+      ...sourceContract,
+      sha256: sessionVisibilityContractHash(false) ?? currentMainContractHash,
+    };
     expect(migrations.get("0065_codex_subscription_overview.sql")).toMatchObject({
       deploymentMode: "maintenance",
     });
@@ -215,14 +417,114 @@ describe("release schema contract", () => {
         (migrations.has("0195_editable_artifact_import_authorization.sql") ? 1 : 0) +
         (migrations.has("0196_rig_provider_images.sql") ? 1 : 0) +
         (migrations.has("0197_knowledge_source_sync_schedules.sql") ? 1 : 0) +
+        (migrations.has("0198_memory_slack_publication_delivery.sql") ? 1 : 0) +
         (migrations.has("0199_workspace_learning_policy.sql") ? 1 : 0) +
         (migrations.has("0201_company_profile_authority.sql") ? 1 : 0) +
-        (migrations.has("0202_document_index_checkpoints.sql") ? 1 : 0),
+        (migrations.has("0202_document_index_checkpoints.sql") ? 1 : 0) +
+        (migrations.has("0203_durable_video_generation.sql") ? 1 : 0) +
+        (migrations.has("0204_video_generation_funding.sql") ? 1 : 0) +
+        (migrations.has("0205_attempt_tool_catalogs.sql") ? 1 : 0) +
+        (migrations.has("0206_browser_sessions.sql") ? 1 : 0) +
+        (migrations.has("0207_browser_identities.sql") ? 1 : 0) +
+        (migrations.has("0208_attached_browser_devices.sql") ? 1 : 0) +
+        (migrations.has("0209_computer_sessions.sql") ? 1 : 0) +
+        (migrations.has("0210_browser_auth_network_interventions.sql") ? 1 : 0) +
+        (migrations.has("0211_editable_artifact_session_links.sql") ? 1 : 0) +
+        (migrations.has("0212_browser_state_transfer_hardening.sql") ? 1 : 0) +
+        (migrations.has("0212_slack_installation_bindings.sql") ? 1 : 0) +
+        (migrations.has("0213_browser_interaction_authority.sql") ? 1 : 0) +
+        (migrations.has("0213_slack_user_link_access_requests.sql") ? 1 : 0) +
+        (migrations.has("0214_browser_download_saves.sql") ? 1 : 0) +
+        (migrations.has("0214_session_activity_commit_gate.sql") ? 1 : 0) +
+        (migrations.has("0215_browser_controller_host.sql") ? 1 : 0) +
+        (migrations.has("0215_capabilities_platform.sql") ? 1 : 0) +
+        (migrations.has("0216_browser_auth_health_evidence.sql") ? 1 : 0) +
+        (migrations.has("0216_pack_component_ownership.sql") ? 1 : 0) +
+        (migrations.has("0217_external_browser_auth_operations.sql") ? 1 : 0) +
+        (migrations.has("0217_capability_definition_delete_authority.sql") ? 1 : 0) +
+        (migrations.has("0218_organization_tenancy_foundation.sql") ? 1 : 0) +
+        (migrations.has("0219_site_auth_maintenance_sessions.sql") ? 1 : 0) +
+        (migrations.has("0220_memory_slack_append_only_cascade.sql") ? 1 : 0) +
+        (migrations.has("0219_organization_tenancy_managed_human_provisioning.sql") ? 1 : 0) +
+        (migrations.has("0220_session_channels.sql") ? 1 : 0) +
+        (migrations.has("0221_sessions_channel_index.sql") ? 1 : 0) +
+        (migrations.has("0222_session_visibility_authority_epochs.sql") ? 1 : 0) +
+        (migrations.has("0223_pending_tool_event_output.sql") ? 1 : 0) +
+        (migrations.has("0222_sessions_channel_fk.sql") ? 1 : 0) +
+        (migrations.has("0223_sessions_channel_fk_validate.sql") ? 1 : 0) +
+        (migrations.has("0224_slack_post_outcome_reconciliation.sql") ? 1 : 0) +
+        (migrations.has("0226_personal_codex_authority_foundation.sql") ? 1 : 0) +
+        (migrations.has("0227_slack_native_actions.sql") ? 1 : 0) +
+        (migrations.has("0228_slack_task_policy.sql") ? 1 : 0) +
+        (migrations.has("0228_interaction_controller_data_plane.sql") ? 1 : 0) +
+        (migrations.has("0229_slack_inbox_file_fact.sql") ? 1 : 0) +
+        (migrations.has("0230_user_scoped_variable_sets_rigs.sql") ? 1 : 0) +
+        (migrations.has("0231_integration_definition_identity_cutover.sql") ? 1 : 0) +
+        (migrations.has("0232_integration_facet_authority_cutover.sql") ? 1 : 0) +
+        (migrations.has("0233_skill_and_integration_authority_cutover.sql") ? 1 : 0) +
+        (migrations.has("0234_xai_subscription_authority.sql") ? 1 : 0) +
+        (migrations.has("0235_canonical_human_login_bindings.sql") ? 1 : 0) +
+        (migrations.has("0236_browser_identity_lifecycle.sql") ? 1 : 0) +
+        (migrations.has("0225_session_visibility_fork_activation.sql") ? 1 : 0) +
+        (migrations.has("0236_session_visibility_slack_policy.sql") ? 1 : 0) +
+        (migrations.has("0238_recover_unclaimed_session_turns.sql") ? 1 : 0),
     );
-    expect(contract.sha256).toBe(
-      "c9b19caabb946d91e6e2ec4b34bb48323a61efbfc76628fe338a277f5dcbe343",
+    expect(contract.sha256).toBe(sessionVisibilityContractHash(false) ?? currentMainContractHash);
+    expect(contract.latestMigration).toBe(
+      migrations.has("0238_recover_unclaimed_session_turns.sql")
+        ? "0238_recover_unclaimed_session_turns.sql"
+        : migrations.has("0236_session_visibility_slack_policy.sql")
+          ? "0236_session_visibility_slack_policy.sql"
+          : migrations.has("0235_canonical_human_login_bindings.sql")
+            ? "0235_canonical_human_login_bindings.sql"
+            : migrations.has("0234_xai_subscription_authority.sql")
+              ? "0234_xai_subscription_authority.sql"
+              : migrations.has("0233_skill_and_integration_authority_cutover.sql")
+                ? "0233_skill_and_integration_authority_cutover.sql"
+                : migrations.has("0232_integration_facet_authority_cutover.sql")
+                  ? "0232_integration_facet_authority_cutover.sql"
+                  : migrations.has("0231_integration_definition_identity_cutover.sql")
+                    ? "0231_integration_definition_identity_cutover.sql"
+                    : migrations.has("0230_user_scoped_variable_sets_rigs.sql")
+                      ? "0230_user_scoped_variable_sets_rigs.sql"
+                      : migrations.has("0228_slack_task_policy.sql")
+                        ? "0228_slack_task_policy.sql"
+                        : migrations.has("0229_slack_inbox_file_fact.sql")
+                          ? "0229_slack_inbox_file_fact.sql"
+                          : migrations.has("0227_slack_native_actions.sql")
+                            ? "0227_slack_native_actions.sql"
+                            : migrations.has("0224_slack_post_outcome_reconciliation.sql")
+                              ? "0224_slack_post_outcome_reconciliation.sql"
+                              : migrations.has("0223_sessions_channel_fk_validate.sql")
+                                ? "0223_sessions_channel_fk_validate.sql"
+                                : migrations.has("0221_sessions_channel_index.sql")
+                                  ? "0221_sessions_channel_index.sql"
+                                  : migrations.has("0220_memory_slack_append_only_cascade.sql")
+                                    ? "0220_memory_slack_append_only_cascade.sql"
+                                    : migrations.has("0219_site_auth_maintenance_sessions.sql")
+                                      ? "0219_site_auth_maintenance_sessions.sql"
+                                      : migrations.has("0218_organization_tenancy_foundation.sql")
+                                        ? "0218_organization_tenancy_foundation.sql"
+                                        : "0217_capability_definition_delete_authority.sql",
     );
-    expect(contract.latestMigration).toBe("0202_document_index_checkpoints.sql");
+    expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
+      sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",
+      deploymentMode: "maintenance",
+    });
+    if (migrations.has("0218_organization_tenancy_foundation.sql")) {
+      expect(migrations.get("0218_organization_tenancy_foundation.sql")).toMatchObject({
+        sha256: "6377522b4a7295150828bee39fffc90643adc46fec1907f1acc9671909ad6e75",
+        deploymentMode: "rolling",
+      });
+    }
+    if (migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")) {
+      expect(
+        migrations.get("0219_organization_tenancy_managed_human_provisioning.sql"),
+      ).toMatchObject({
+        sha256: "dcbc4dcf9c09255af4140ef1117938ec21148a1245dad85926aeb52c58e6e88f",
+        deploymentMode: "rolling",
+      });
+    }
     expect(migrations.get("0197_knowledge_source_sync_schedules.sql")).toMatchObject({
       sha256: "edd425be4e4db07f4fcab1e520ece71dc1a692072ce28256ec2b86248442f3c8",
       deploymentMode: "maintenance",
@@ -239,6 +541,10 @@ describe("release schema contract", () => {
       sha256: "c15bd3b6d71f15be9e163481c3cb698d8f46620d655a72a5e56d193bc16310cd",
       deploymentMode: "rolling",
     });
+    expect(migrations.get("0198_memory_slack_publication_delivery.sql")).toMatchObject({
+      sha256: "6cdc5d8cc22ff7c2e8abd0982223f75c414641857587bb7c0a736a88c20f0c1e",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0199_workspace_learning_policy.sql")).toMatchObject({
       sha256: "92286a9bbe8982fde66780bbe03fd92c0e5dbf1c9ff1fbf08a1d17fd2f8d595f",
       deploymentMode: "rolling",
@@ -247,6 +553,146 @@ describe("release schema contract", () => {
       sha256: "93b24b48e587fca5288af6042947f4592a3767bc6882fc8d5f52c973214e94ea",
       deploymentMode: "rolling",
     });
+    expect(migrations.get("0212_slack_installation_bindings.sql")).toMatchObject({
+      sha256: "aba5b603fc88237a2446fc66803f3c940f2f50e111fbe882abf4420307374b34",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0203_durable_video_generation.sql")).toMatchObject({
+      sha256: "a48d600cd51a4ed6ed2a68d443959b8754364ab7d60709b1d5cd23f2a5013d3a",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0204_video_generation_funding.sql")).toMatchObject({
+      sha256: "bdb70908f6e61ecc1d69228e2c05183c70527bf1bebac74bdab3294243ed9c3b",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0205_attempt_tool_catalogs.sql")).toMatchObject({
+      sha256: "65e121d067dc3df2cd23a4e78e9ad094a0450a0be648720af0ff50f2002418d5",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0206_browser_sessions.sql")).toMatchObject({
+      sha256: "bb21e1ec77eb9a92435abfd6bbaa969355ec61179b5ea4837ca363fc1f667c2f",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0207_browser_identities.sql")).toMatchObject({
+      sha256: "03790bd77a2b6e237c22d3dabc6f5a579feaf18931d5ce71da084d0958729e5e",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0208_attached_browser_devices.sql")).toMatchObject({
+      sha256: "5389ae763a5f8fa0b55f93f626dd4370154702695ab2c80da0a627c435b5792d",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0209_computer_sessions.sql")).toMatchObject({
+      sha256: "b6be91fdc83b54677e7a326245f0ac2fee93b032c26bc26b011eb3879745fcb0",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0210_browser_auth_network_interventions.sql")).toMatchObject({
+      sha256: "44fd93e8cf8b08ab7d5088a3b075a557a770474a5ac5c7d14ef1ebffe1c0e771",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0211_editable_artifact_session_links.sql")).toMatchObject({
+      sha256: "0d24c5387951f232e72d3af5fe116fd268c0d30d59e0ac55959ba87a2309c966",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0212_browser_state_transfer_hardening.sql")).toMatchObject({
+      sha256: "28aa25ba8262d54343dd092d21ec8853e8d050c91768a6350054724dae141f76",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0213_browser_interaction_authority.sql")).toMatchObject({
+      sha256: "ffb7ed93832e830d379cca04efb017193f29da6e07ccd1f4cb3f469c343a2fa2",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0214_browser_download_saves.sql")).toMatchObject({
+      sha256: "9c7b7ba708e77dd75870c1826d3ad8fdc1a5ce5d25c8a58b60edd13a27059059",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0215_browser_controller_host.sql")).toMatchObject({
+      sha256: "048418cf8c8c6445d18977ba93c3ca87debde85fee038be6a90edfae6e4b93f6",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0216_browser_auth_health_evidence.sql")).toMatchObject({
+      sha256: "9e42263bce8f501b01beff1983474deb232367d1fdbdf268fa42ac2e19f6a879",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0217_external_browser_auth_operations.sql")).toMatchObject({
+      sha256: "eeecfc514f894589446d350e8af7097387312536ad6e32d39ced3f13485a02cd",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0219_site_auth_maintenance_sessions.sql")).toMatchObject({
+      sha256: "e8e786a510ae169013c5eebab17b3cbe6fc3fd239c88e544c081f4767a0e13bd",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0220_memory_slack_append_only_cascade.sql")).toMatchObject({
+      sha256: "17a34e7b943b1c4456bfb64cd8fe6fbb410b4ca7238b6ad02e24343483d54db1",
+      deploymentMode: "rolling",
+    });
+    if (migrations.has("0222_session_visibility_authority_epochs.sql")) {
+      expect(migrations.get("0222_session_visibility_authority_epochs.sql")).toMatchObject({
+        sha256: "c28ab83cf3e79e11bd643dc485aeee44f4ba37eeefc7176af894eace9eeabeb3",
+        deploymentMode: "rolling",
+      });
+    }
+    if (migrations.has("0224_slack_post_outcome_reconciliation.sql")) {
+      expect(migrations.get("0224_slack_post_outcome_reconciliation.sql")).toMatchObject({
+        sha256: "fc88cdb5664c74480e1437d5e061e9e32f109afd17eb946985af38791f267c49",
+        deploymentMode: "rolling",
+      });
+    }
+    if (migrations.has("0229_slack_inbox_file_fact.sql")) {
+      expect(migrations.get("0229_slack_inbox_file_fact.sql")).toMatchObject({
+        sha256: "390361e1dba5830fabeaf7712e4108841a2ba267e8396599a632854da9b32ca9",
+        deploymentMode: "rolling",
+      });
+    }
+    expect(migrations.get("0230_user_scoped_variable_sets_rigs.sql")).toMatchObject({
+      sha256: "560adbe658efa212ec44ad18f6af22ac874568d60a331beddae4102d00a09e5f",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0226_personal_codex_authority_foundation.sql")).toMatchObject({
+      sha256: "34b72f6ab031596c90f2f35957c707aaf013c2f52aee8ca92a70fdb8ab9cb9ce",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0231_integration_definition_identity_cutover.sql")).toMatchObject({
+      sha256: "535a806746d99d9b338df230c133477ca0e3d554ae6950077a3409b077f4b1cb",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0232_integration_facet_authority_cutover.sql")).toMatchObject({
+      sha256: "acf779d1bd931ea208be8a97b9f930a2387f53151722198704f0aecbe76f1fb6",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0233_skill_and_integration_authority_cutover.sql")).toMatchObject({
+      sha256: "26ed3d2ffcaf572623ad263aaa0103625b4ed1e9d28bcb7b5d35eb972d9762d1",
+      deploymentMode: "maintenance",
+    });
+    if (migrations.has("0223_pending_tool_event_output.sql")) {
+      expect(migrations.get("0223_pending_tool_event_output.sql")).toMatchObject({
+        sha256: "851cdb5dfe14f1cf6323e6cf59e55269b87d2db4406ea2ad10147553635eb707",
+        deploymentMode: "rolling",
+      });
+    }
+    if (migrations.has("0234_xai_subscription_authority.sql")) {
+      expect(migrations.get("0234_xai_subscription_authority.sql")).toMatchObject({
+        sha256: "be0c23d624d545226068ce7627a2b458fe9aad996ea7ee750753c81eeb8988a8",
+        deploymentMode: "rolling",
+      });
+    }
+    if (migrations.has("0235_canonical_human_login_bindings.sql")) {
+      expect(migrations.get("0235_canonical_human_login_bindings.sql")).toMatchObject({
+        sha256: "c62984fc3016e0433e5dbc2049e14e11b343d9221b92b2e5dcc5238339579200",
+        deploymentMode: "rolling",
+      });
+    }
+    if (migrations.has("0236_session_visibility_slack_policy.sql")) {
+      expect(migrations.get("0236_session_visibility_slack_policy.sql")).toMatchObject({
+        sha256: "64f9beb146d973cc0a6ab9f8cdef29955ef9edb68ecc9b07756eda5414709299",
+        deploymentMode: "rolling",
+      });
+    }
+    if (migrations.has("0238_recover_unclaimed_session_turns.sql")) {
+      expect(migrations.get("0238_recover_unclaimed_session_turns.sql")).toMatchObject({
+        sha256: "7d63ad62f2dc91f8c5de87b95a35a366d4b23d4fc76f320b5376ef2412a2002d",
+        deploymentMode: "rolling",
+      });
+    }
     expect(migrations.get("0183_model_call_provider_cost_estimates.sql")).toMatchObject({
       sha256: "2cb087b69996c62e8836f2d65c9e2af3fb580fe1822d327600bf40e3a6977d64",
       deploymentMode: "rolling",
@@ -679,6 +1125,18 @@ describe("release schema contract", () => {
     });
   });
 });
+
+async function contractWithoutMigrations(excludedPaths: readonly string[]) {
+  const source = join(import.meta.dir, "../packages/db/drizzle");
+  const directory = await mkdtemp(join(tmpdir(), "opengeni-schema-contract-filtered-"));
+  directories.push(directory);
+  const excluded = new Set(excludedPaths);
+  for (const entry of await readdir(source, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".sql") || excluded.has(entry.name)) continue;
+    await copyFile(join(source, entry.name), join(directory, entry.name));
+  }
+  return await buildSchemaContract(directory);
+}
 
 async function fixture(files: Array<[string, string]>): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "opengeni-schema-contract-"));

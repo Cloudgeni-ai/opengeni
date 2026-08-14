@@ -14,6 +14,7 @@ const SESSION_ID = "22222222-2222-4222-8222-222222222222";
 
 const MODELS: readonly SessionRealtimeModel[] = [
   "gpt-live-1-boulder-alpha",
+  "supergrok/grok-voice-think-fast-2.0",
   "opengeni-gateway/openai/gpt-realtime-2.1",
   "opengeni-gateway/openai/gpt-realtime-mini",
   "opengeni-gateway/xai/grok-voice-think-fast-2.0",
@@ -32,13 +33,20 @@ function storageFixture() {
 }
 
 describe("@opengeni/sdk/realtime", () => {
-  test("selects the exact existing Codex Live or Gateway transport for every public model", () => {
+  test("selects the exact transport and owner namespace for every public model", () => {
     for (const model of MODELS) {
-      const expected = model === "gpt-live-1-boulder-alpha" ? "codex" : "gateway";
+      const expected =
+        model === "gpt-live-1-boulder-alpha"
+          ? "codex"
+          : model === "supergrok/grok-voice-think-fast-2.0"
+            ? "xai-subscription"
+            : "gateway";
       expect(sessionRealtimeTransportKind(model)).toBe(expected);
-      expect(sessionRealtimeOwnerStorageNamespace(model)).toBe(`${expected}-realtime-owner`);
+      const namespace =
+        expected === "xai-subscription" ? "xai-realtime-owner" : `${expected}-realtime-owner`;
+      expect(sessionRealtimeOwnerStorageNamespace(model)).toBe(namespace);
       expect(sessionRealtimeOwnerStorageKey(WORKSPACE_ID, SESSION_ID, model)).toBe(
-        `opengeni:${expected}-realtime-owner:${WORKSPACE_ID}:${SESSION_ID}`,
+        `opengeni:${namespace}:${WORKSPACE_ID}:${SESSION_ID}`,
       );
     }
   });
@@ -130,6 +138,7 @@ describe("@opengeni/sdk/realtime", () => {
       heartbeatSessionRealtime: async () => ({}) as never,
       negotiateCodexRealtimeWebrtc: async () => ({}) as never,
       negotiateGatewayRealtime: async () => ({}) as never,
+      negotiateXaiSubscriptionRealtime: async () => ({}) as never,
       activateCodexRealtimeConnection: async () => ({}) as never,
       syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
       endSessionRealtime: async () => ({}) as never,
@@ -144,6 +153,7 @@ describe("@opengeni/sdk/realtime", () => {
         "heartbeatSessionRealtime",
         "negotiateCodexRealtimeWebrtc",
         "negotiateGatewayRealtime",
+        "negotiateXaiSubscriptionRealtime",
         "syncSessionRealtimeLedger",
       ].sort(),
     );

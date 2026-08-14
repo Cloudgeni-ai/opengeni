@@ -43,6 +43,13 @@ export type SignalCodexCapacityWorkflow = (input: {
  * ScheduleActivity command across mixed-version worker pools. */
 export type StartSandboxReaperWorkflow = () => Promise<"started" | "already_running">;
 
+/** Start-or-observe the one durable reconciler for a paid video operation. */
+export type StartVideoGenerationWorkflow = (input: {
+  accountId: string;
+  workspaceId: string;
+  operationId: string;
+}) => Promise<"started" | "already_running">;
+
 /** Exact activity-owned proof that the hard sandbox/tool fence physically
  * drained. This is delivery evidence only: the workflow still validates the
  * persisted attempt dispatch and commits the authoritative Postgres receipt. */
@@ -84,6 +91,7 @@ export type SharedActivityServices = {
   /** Production control workers inject this Temporal client edge. A null edge
    * deliberately retains the composite implementation for embedded/test hosts. */
   startSandboxReaperWorkflow?: StartSandboxReaperWorkflow | null;
+  startVideoGenerationWorkflow?: StartVideoGenerationWorkflow | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
   // edge exposes on `AppDependencies`. When set, `ensureRunAllowed` (turn-entry
   // AND the mid-stream budget valve) delegates the funding decision to
@@ -134,11 +142,15 @@ export type ActivityServices = ControlActivityServices &
   };
 
 export type CodexCapacityWaitRef = {
+  /** Absent only for Temporal histories written before provider-tagged waits. */
+  provider?: "codex" | "xai";
   waiterId: string;
   generation: number;
   nextCheckAt: string;
   wakeRevision: number;
 };
+
+export type XaiCapacityWaitRef = CodexCapacityWaitRef & { provider: "xai" };
 
 export type GetCodexCapacityWaitInput = {
   workspaceId: string;
@@ -152,6 +164,8 @@ export type ReconcileCodexCapacityWaitInput = {
   waiterId: string;
   generation: number;
   cause: "timer" | "signal" | "queue" | "recovery";
+  /** Absent only for Codex waits and pre-provider-tagged workflow histories. */
+  provider?: "codex" | "xai";
 };
 
 export type ReconcileCodexCapacityWaitResult =
@@ -171,6 +185,17 @@ export type RunAgentTurnInput = {
   attemptId: string;
   trigger: { kind: "next" } | { kind: "approval"; triggerEventId: string };
 };
+
+export type VideoGenerationTerminalStatus =
+  | "completed"
+  | "provider_failed"
+  | "cancelled_before_submit"
+  | "outcome_unknown"
+  | "retention_failed";
+
+export type VideoGenerationReconcileResult =
+  | { action: "waiting"; delayMs: number }
+  | { action: "terminal"; status: VideoGenerationTerminalStatus };
 
 export type SettleSessionInterruptionsInput = {
   accountId: string;
@@ -205,8 +230,35 @@ export type FailSessionAttemptInput = {
   workspaceId: string;
   sessionId: string;
   attemptId: string;
+  /** Added in v2; old Temporal histories derive the session's canonical id. */
+  workflowId?: string;
+  /** Added in v2; old Temporal histories use the bounded 60-second floor. */
+  retryDelayMs?: number;
+  /** Added in v3. Upgraded turn workers classify failures from the atomic
+   * admission transaction; omission is a rolling-deploy/legacy unknown and
+   * deliberately keeps the recoverable wake behavior. */
+  preClaimFailureDisposition?: PreClaimFailureDisposition;
+  /** The workflow admission trigger is required to re-evaluate the same
+   * durable admission branch before terminally settling a permanent failure. */
+  trigger?: RunAgentTurnInput["trigger"];
   error?: string;
 };
+
+export type FailSessionAttemptResult =
+  | { action: "failed" }
+  | { action: "unclaimed" }
+  | { action: "terminal" }
+  | { action: "stale" };
+
+export type PreClaimFailureDisposition = "retryable" | "permanent";
+
+export type PreClaimFailureDetail = {
+  disposition: PreClaimFailureDisposition;
+  code: "db_deadlock" | "db_serialization_failure" | "db_failure" | "claim_invariant";
+};
+
+export const PRE_CLAIM_FAILURE_TYPE = "OpenGeniPreClaimFailure";
+export const PRE_CLAIM_FAILURE_MESSAGE = "Agent turn admission failed before attempt claim.";
 
 export type RecoverDispatchInput = {
   accountId: string;
@@ -264,6 +316,17 @@ export type ExpireSessionHumanInputInput = {
 };
 
 export type ExpireSessionHumanInputResult = {
+  action: "expired" | "stale" | "not_found";
+};
+
+export type ExpireSessionInteractionInterventionInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  interventionId: string;
+};
+
+export type ExpireSessionInteractionInterventionResult = {
   action: "expired" | "stale" | "not_found";
 };
 

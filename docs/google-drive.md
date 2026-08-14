@@ -1,4 +1,4 @@
-# Google Drive connection, scheduled knowledge sync, and artifact publishing
+# Google Drive connection and scheduled knowledge sync
 
 OpenGeni can connect a Google account once, choose multiple Shared Drives or
 folder boundaries, and explicitly enable scheduled synchronization from the
@@ -26,48 +26,46 @@ materializes a scoped knowledge source and a shared Schedule action:
   Background sync is authorized solely by **Enable synchronization** and does
   not pause for per-run approval.
 - Deleting a sync Schedule first disables that exact source selection and
-  tombstones its scoped source. Later saves keep it disabled until the same
-  initiating subject explicitly enables synchronization again.
+tombstones its scoped source. Later saves keep it disabled until the same
+initiating subject explicitly enables synchronization again.
+
+The Capabilities platform can install multiple named Drive instances (for
+example, Finance and Sales). Each instance is bound to one exact Personal or
+workspace Connection and its own feature configuration; provider-domain
+fallback and singleton credential reuse are not authority. The newer provider
+preset may expose separately reviewed Drive read/write tools, while scheduled
+knowledge ingestion remains an explicit source feature with its own destination
+and enablement fences.
 
 Google currently classifies `drive.readonly` as a restricted scope.
 Keep the OAuth app in Testing with explicit test users for local development.
 Production use requires Google's applicable verification and security review.
 
-Editable documents, spreadsheets, and presentations can also be published to
-Google Drive through the existing `publish_editable_artifact` tool. Publishing
-is a separate, outbound capability:
+## Current source-selection surface
 
-- the user explicitly starts incremental OAuth consent for
-  `https://www.googleapis.com/auth/drive.file`; it is never inferred from an
-  inbound source selection;
-- the user separately saves one exact output folder or Shared Drive folder;
-  the API normalizes a pasted Drive URL/ID, verifies `canAddChildren` at save
-  time, and persists the canonical folder name and Drive identity;
-- saving the first output destination installs the connector-action
-  default `Ask` for the exact connection/tool/create scope only when no policy
-  already exists; an existing `Allow`, `Ask`, or `Block` decision is preserved;
-- each model-visible tool request supplies only an explicit Drive-publication
-  intent and stable idempotency key. The host snapshots and injects the exact
-  subject-owned connection and configured destination before approval, so
-  private connection UUIDs never enter prompts. Inbound `selectedSources` are
-  never treated as an outbound destination;
-- the worker first promotes the editable artifact through the existing durable
-  source-file authority, then admits the provider write through the connector
-  action ledger immediately before credential resolution and Drive access;
-- a `Block` or unmanaged policy performs no Google credential resolution or
-  provider request;
-- the exact destination is re-read from Google immediately before upload and
-  must still be writable with the same folder name and Shared Drive identity;
-- DOCX, XLSX, and PPTX source bytes are uploaded as Google Docs, Sheets, and
-  Slides respectively. The durable receipt records the provider file ID, link,
-  native MIME type, exact destination, and whether the result was reconciled;
-- a deterministic, hashed operation marker is stored in Drive
-  `appProperties`. Retries list and reconcile that marker before create, so an
-  acknowledged or ambiguous prior create is not blindly duplicated.
+The shipped selector is OpenGeni's custom server-backed folder browser, not
+Google Picker. The browser starts at My Drive, asks the API to list folders with
+Shared Drive support enabled, and lets the user paste a folder or Shared Drive
+URL/ID when it is not reachable from My Drive navigation. The server resolves
+every selected boundary again before saving it; browser-supplied names, MIME
+types, and Drive IDs are not accepted as authority by themselves.
 
-Publishing does not deploy code, alter production configuration, or authorize
-arbitrary writes elsewhere in Drive. `drive.file` remains limited to files
-created by or explicitly opened/shared with the app.
+The Connect and reconnect surface must stay explicit about the current product
+contract:
+
+- OpenGeni requests read-only access to browse folders and Shared Drives and to
+  read supported files only after the user separately enables synchronization.
+- Selection alone remains inert. It records boundaries, destination authority,
+  cadence defaults, and interactive read policy without starting ingestion.
+- OpenGeni cannot create, edit, or delete files in Drive. Outbound publishing is
+  a separate capability and is not implied by this connector.
+- OAuth tokens remain encrypted and server-side. They do not enter browser
+  persistence, model context, agent sandboxes, source metadata, logs, or webhook
+  payloads.
+- The first enabled sync inventories existing supported files. Later scheduled
+  runs drain the Google Drive Changes feed and periodically perform a bounded
+  full repair that skips unchanged provider revisions. Workspace Events/Pub/Sub
+  delivery remains a separate, default-off release follow-on.
 
 ## Launch OAuth scope decision
 
@@ -91,21 +89,18 @@ Shared Drive boundary. That product mode requires
   not be represented as a recursively synchronized folder.
 
 OAuth start continues to use Google's incremental-authorization flag. A future
-Picker source mode may request `drive.file` without replacing the read-only
-source grant. Outbound publication already requests `drive.file` as a separate
-write capability. The callback and every active
+Drive publishing feature may request `drive.file` as a separate write capability
+without replacing the read-only source grant. The callback and every active
 source-browser admission evaluate the exact returned/stored scope set through
 one deterministic capability decision. Unknown, partial, write-only, or malformed
-source grants fail before Google identity lookup, credential persistence, or
-source-provider reads; a valid publishing-only grant remains usable for
-publication but cannot browse or configure recursive imports.
+grants fail before Google identity lookup, credential persistence, or
+source-provider reads.
 
 ## Local setup
 
 1. In Google Cloud, enable the Google Drive API.
 2. Configure the OAuth consent screen, add
-   `https://www.googleapis.com/auth/drive.readonly` and
-   `https://www.googleapis.com/auth/drive.file`, and add your
+   `https://www.googleapis.com/auth/drive.readonly`, and add your
    Google account as a test user.
 3. Create an OAuth client of type **Web application**.
 4. Add this exact authorized redirect URI:
@@ -141,9 +136,7 @@ to the exact ports printed by the dev stack.
 The Capabilities card projects one explicit, durable state for the current
 subject-owned Google Drive connection:
 
-- **Connected** permits only the capabilities proven by the stored grant:
-  `drive.readonly` enables source browsing/configuration and `drive.file`
-  enables explicit output-folder configuration and publishing.
+- **Connected** permits source browsing and configuration.
 - **Paused** is a local reversible stop. OpenGeni does not browse or use saved
   Drive locations until the same connection is resumed.
 - **Token revoked** means Google rejected the refresh grant. Reconnect with the
@@ -178,12 +171,53 @@ any visible subfolder; selecting a parent includes every nested folder. Multiple
 locations can be connected in one setup. A Shared Drive or shared folder can be
 added by pasting its full `https://drive.google.com/.../folders/...` URL or ID.
 
-The first successful run recursively inventories all existing supported
-documents inside an enabled boundary. Scheduled inventory currently remains a
-bounded repair scan: stable provider revisions avoid downloading unchanged
-objects, while a provider-specific change cursor is reserved for the separate
-Google Changes API follow-on. OpenGeni does not overload the scoped-knowledge
-`sync_cursor` column with execution checkpoint state.
+The first successful run captures a Google Drive Changes start page token before
+recursively inventorying all existing supported documents inside an enabled
+boundary. For My Drive, OpenGeni resolves Google's `root` alias to the actual
+root folder ID before using parent ancestry to classify later changes; an
+unresolved or non-folder root fails closed instead of advancing the cursor.
+After that complete inventory settles, normal scheduled runs drain the Changes
+feed page by page and durably advance the provider cursor only with the
+successful source lease settlement. Shared Drive token, change, metadata, and
+inventory requests carry the exact drive identity plus Google's all-drives
+support parameters. OpenGeni does not overload the scoped-knowledge
+`sync_cursor` column with provider cursor or execution checkpoint state.
+
+Changes checkpoints persist cumulative examined-change, provider-request, and
+elapsed-time budgets across every continuation. Every returned change counts,
+including removal-only pages, and ancestry metadata requests share the same
+provider-request budget. Page requests use only the remaining item allowance;
+hard item, request, or total-time exhaustion fails as `resource_limit` rather
+than creating another continuation. Bounded invocation-time pauses may resume,
+but retain their consumed totals. Repeated page tokens and oversized provider
+pages fail as invalid provider payloads. A delta that requires a full repair
+carries the same consumed budget into the full inventory checkpoint.
+
+That delta-to-full checkpoint also carries a bounded per-object provider
+revision floor for every accepted delta object and every accepted full-page
+object. Full inventory entries with an equal or older canonical decimal Drive
+revision are ignored, so they cannot replace the newer delta observation or
+current version before the terminal Changes token settles. Exact repeats of a
+fallback revision identity are likewise ignored; differing fallback identities,
+including a missing identity on only one side, are not ordered by guesswork and
+fail as invalid provider payloads without adopting the terminal token.
+Full-reconciliation checkpoints use version 3 for this contract. Older
+version-2 full checkpoints replay the still-unsettled Changes window before
+creating a replacement version-3 full checkpoint, while version-2 Changes
+checkpoints remain replay-compatible. The complete encoded execution checkpoint
+remains capped at the database's 2 MiB bound.
+
+Changes that cannot be represented safely as a bounded object update trigger a
+full repair instead of guessing. This includes known removals, trashing,
+reparenting or moves outside the configured boundary, unresolved ancestry, and
+folder topology changes. A later move/removal in the same drained window also
+removes any earlier pending import for that object before repair. A rejected or
+invalid Changes cursor similarly captures a fresh start token and completes a
+full repair before adopting that token; it never skips directly to the new
+cursor. Google documents start page tokens as non-expiring, so renewal is
+driven by explicit invalidation rather than a guessed TTL. A bounded daily full
+reconciliation remains an independent safety repair for missed provider history
+even when no invalid-cursor response is observed.
 
 Each repair scan has its own durable scan generation. Every object observed
 across checkpointed pages is stamped into that generation; only a provider
@@ -191,6 +225,24 @@ response that explicitly declares the scan complete may tombstone active
 objects absent from the complete generation. Partial, failed, paused, or
 reconnect-required scans never infer deletion, and a failed run clears its
 execution checkpoint before a later repair starts a new generation.
+The first accepted observation for one object within a scan generation becomes
+the durable floor. Canonical decimal Drive revisions may advance that floor
+monotonically, but an older/equal/conflicting replay cannot overwrite its
+provider revision or metadata hash. Acceptance is bound to the exact sync lease,
+initiating subject, scan generation, and execution-checkpoint generation before
+item processing begins. Version/metadata writes lock and revalidate the exact
+accepted floor, and checkpoint or terminal cursor settlement atomically
+revalidates the same floor and checkpoint generation.
+
+If a process dies after accepting and fully processing version 8 but before its
+returned full-page checkpoint is saved, replaying the same durable pre-page
+checkpoint against stale version 7 reads the version-8 observation floor. The
+stale entry is suppressed only when the current immutable version, metadata,
+source/object lifecycle generations, ACL generation, and indexed obligation
+prove version 8 was fully materialized; otherwise the run fails closed without
+saving the stale checkpoint or adopting the terminal Changes token. A paused
+replay that is safe to continue rewrites its returned checkpoint to the durable
+version-8 floor. A newer scan generation may replace the observation normally.
 
 `manual`, `hourly`, and `daily` map to an on-demand Schedule, a one-hour
 interval, and a daily 00:00 UTC calendar respectively. The Schedules UI exposes
@@ -286,16 +338,22 @@ removal, re-consent/reconnect requirements, and permission loss also advance a
 deny ACL generation, invalidate outstanding index obligations, revoke Document
 agent access, and delete materialized chunks. Resume or reconnect never restores
 the old retrieval eligibility: a newly observed immutable version, successful
-index obligation, and fresh generation-fenced ACL evidence are required. Durable
-Google Changes API event delivery and live Drive ACL/citation reauthorization
-remain separate follow-ons.
+index obligation, and fresh generation-fenced ACL evidence are required.
+
+As of August 10, 2026, Google Drive support in Workspace Events remains a
+Developer Preview. `OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED` is therefore
+default-off and exposes only an internal, deterministic `provider_event` wake
+seam. Event payloads never mutate source truth or advance provider cursors; the
+authoritative Changes drain and periodic full repair still do that work.
+Workspace Events subscription/Pub/Sub provisioning and live provider acceptance
+remain release work, as does Drive ACL/citation reauthorization.
 
 The **Only me**, **This workspace**, and **Company** options are immutable
 knowledge authority, not presentation labels. **Hourly**, **Daily**, and **On
 demand** seed the newly created shared Schedule; later edits happen there.
 **Allow**, **Ask**, and **Block** remain
 the connector read-policy configuration used by the common connector-action
-boundary. Google Changes API eventing, provider ACL projection,
+boundary. Workspace Events subscription provisioning, provider ACL projection,
 policy-UI wiring, and memory updates are not activated by the inventory planner.
 
 Disconnecting revokes the OpenGeni connection locally. The confirmation dialog
@@ -303,3 +361,180 @@ states that this deliberately does not call Google's project-wide token
 revocation endpoint, which can invalidate other grants for the same Google OAuth
 project. Reconnect replaces the credential in place and refuses a different
 Google account; disconnect first to switch accounts.
+
+## Restricted-scope external verification package
+
+This section is the source-controlled, non-secret package for Google OAuth
+verification and the applicable restricted-scope security assessment. It
+describes shipped behavior and the evidence an authorized human/operator must
+assemble. It does not authorize a Google submission, create production
+credentials, approve legal language, deploy OpenGeni, or prove production
+acceptance.
+
+### Shipped product and security facts
+
+Use these facts consistently in the OAuth consent screen, verification form,
+demo video, privacy policy, user help, and security-assessment evidence:
+
+1. OpenGeni requests only
+   `https://www.googleapis.com/auth/drive.readonly` for this connector. The
+   authorization request does not request full `drive` or a write scope.
+2. The product uses a custom server-backed folder/Shared Drive browser. A user
+   chooses one or more source boundaries and one immutable
+   organization/workspace/initiating-user personal destination authority.
+3. Saving a selection is inert. Content access begins only after the separate
+   **Enable synchronization** decision, and the user can manage cadence and
+   source pause state through Schedules.
+4. The first sync inventories existing supported files. Later runs drain the
+   Google Drive Changes feed and use bounded full repairs plus provider
+   revisions to avoid unchanged downloads. Workspace Events/Pub/Sub delivery is
+   not currently shipped.
+5. OpenGeni reads supported file metadata and content within enabled selected
+   boundaries. It does not create, edit, rename, move, share, or delete Google
+   Drive files.
+6. Signed OAuth state is short-lived and single-use, binds account, workspace,
+   initiating subject, exact return path, and reconnect generation, and carries
+   an encrypted PKCE verifier. The callback revalidates the initiating grant
+   before and after provider identity lookup.
+7. OAuth access/refresh tokens, the client secret, and PKCE verifier stay
+   encrypted on the server. Browser projections expose connection metadata but
+   not credentials.
+8. After token resolution or refresh, both the browser and scheduled-sync worker
+   reload the exact persisted connection generation and revalidate recursive
+   read scope before the first Drive provider request. A refreshed scope
+   downgrade therefore fails closed without exposing provider data.
+9. Reconnect is bound to Google's immutable `permissionId`; a different account
+   is rejected. Selected source identity and destination authority are frozen
+   into the sync authority and revalidated before provider access and durable
+   writes.
+10. Pause, disconnect, revoked grants, app removal, re-consent requirements, and
+   permission loss stop effective delivery and advance deny-side retrieval
+   authority. Disconnect is local and intentionally does not call Google's
+   project-wide token-revocation endpoint; users must remove CloudGeni access in
+   their Google Account when they also want provider-side revocation.
+11. Imported Drive Documents remain `agentAccess=false` until a separate fresh,
+    generation-fenced ACL evidence operation authorizes retrieval. Google ACL
+    projection and citation-time reauthorization are not part of this package.
+
+Canonical implementation and proof:
+
+- `apps/api/src/integrations/google-drive.ts`
+- `packages/contracts/src/google-drive.ts`
+- `packages/documents/src/google-drive.ts`
+- `apps/worker/src/activities/knowledge-source-sync.ts`
+- `apps/api/test/google-drive.test.ts`
+- `apps/api/test/google-drive-oauth-isolation.test.ts`
+- `packages/documents/test/google-drive.test.ts`
+- `apps/web/src/lib/google-drive-connection.test.ts`
+
+### Consent and in-product disclosure packet
+
+The Capabilities surface carries the just-in-time product disclosure immediately
+beside Connect/reconnect. The external consent configuration and demo must match
+that shipped statement: read-only folder/Shared Drive browsing, explicit
+sync-enable before content import, selected-boundary use, encrypted server-side
+tokens, and no Drive file creation/edit/deletion.
+
+Before submission, the Product/Privacy approver must approve and date all of the
+following without widening the claims beyond shipped behavior:
+
+- production app name, logo, homepage, support email, authorized domains, and
+  exact HTTPS callback URL;
+- scope justification for recursive selected-folder/Shared Drive synchronization;
+- consent-screen description and the in-product just-in-time disclosure;
+- demo-video narration showing Connect, consent, boundary selection, destination
+  authority, explicit sync enablement, pause, local disconnect, and separate
+  provider-side revocation guidance;
+- launch gating that does not claim Workspace Events/Pub/Sub delivery, Drive
+  writes, live Google ACL/citation reauthorization, or production deployment.
+
+### Privacy, Limited Use, retention, and deletion packet
+
+The public privacy policy and a Google Drive data-management/help page must be
+stable-dated, linked from the OAuth consent configuration, and approved by the
+named Product/Privacy owner. They must cover:
+
+- data collected: Google account display/email/permission identity, selected
+  folder/Shared Drive and file metadata, supported file content/exports,
+  provider revisions, derived Documents/chunks/provenance, and encrypted OAuth
+  credentials;
+- exact user-facing purposes: selected-boundary synchronization, indexing, and
+  authorized retrieval, with no claim that Drive data is used for unshipped
+  features;
+- sharing/transfers and subprocessors, including allowed human-access cases and
+  the controls/consent governing them;
+- an explicit, approved commitment to the Google API Services User Data Policy
+  and its Limited Use requirements, including the approved rules for sale,
+  advertising, generalized model training/improvement, and human access;
+- separately approved retention periods and deletion/export service levels for
+  OAuth credentials, source metadata, canonical blobs, Documents/chunks,
+  provenance/audit records, caches, and backups. Source code must not invent
+  these legal/product periods;
+- user controls for source pause, Schedule pause/delete, local connection
+  disconnect, workspace/account deletion, data export/deletion requests, and
+  removing CloudGeni access from the user's Google Account;
+- support contact, support owner, response target, escalation path, and the
+  evidence users receive when deletion completes.
+
+A generic privacy statement, a viewer-relative “Last updated” date, generic
+infrastructure retention, or a broad platform-improvement purpose is not enough
+to approve Google Workspace restricted-scope data use. The public policy must
+state the Drive-specific approved contract explicitly.
+
+### Restricted-scope security-assessment packet
+
+The Security/CASA owner must assemble the evidence required by Google and the
+approved assessor without copying production secrets into tickets, source,
+model context, sandboxes, logs, or browser storage. The package should include:
+
+- the selected-boundary data-flow and trust-boundary diagram from OAuth start
+  through token exchange/refresh, provider reads, encrypted storage, sync,
+  Documents/indexing, retrieval gating, pause/disconnect, and deletion;
+- inventory of environments, systems, data stores, subprocessors, encryption,
+  key ownership/rotation, least-privilege access, logging/audit, incident
+  response, vulnerability management, backup/deletion behavior, and secure
+  development/review controls;
+- the OAuth isolation proof covering signed-state expiry/tampering/replay,
+  exact redirect/reconnect shape, PKCE binding, grant revalidation, permission
+  identity, token rotation, refreshed-scope downgrade before provider access,
+  subject/workspace/account isolation, disconnect idempotency, and secret-sink
+  absence;
+- independent assessment/Letter of Validation owner, assessor, submission date,
+  approval date, expiry/renewal date, findings, remediation receipts, and final
+  Google disposition.
+
+### Environment and credential separation
+
+Development/testing and production must use separately owned Google Cloud
+projects and OAuth clients, audiences, redirect origins, authorized domains,
+test users, secrets, and approval records. Store only non-secret labels and
+status receipts in the operator-owned acceptance tracker. Never record a client
+secret, refresh/access token, authorization code, PKCE verifier, encryption key,
+or production credential value in source control, an issue tracker, model
+context, an agent sandbox, logs, or browser persistence.
+
+### Human approval ledger and release gate
+
+Record the following non-secret evidence in the operator-owned acceptance
+tracker before any provider submission or production use:
+
+| Gate | Required named owner and dated evidence |
+| --- | --- |
+| Product/Privacy | Approved consent, just-in-time disclosure, Drive-specific privacy/Limited Use, retention/deletion/export, and launch claims. |
+| Google OAuth operator | Production project/client label, audience, domains, exact redirects, verification submission/status, and explicit testing/production separation. |
+| Security/CASA | Assessment applicability decision, assessor, submission/findings/remediation, approval/Letter of Validation, and renewal date. |
+| Support | Published help/data-management URL, support contact, response/escalation target, and deletion-completion workflow. |
+
+Keep external acceptance blocked until every applicable row has a human owner,
+date, evidence link, and Google/assessor status. A source merge supplies reusable
+evidence only; it is not deployment, provider verification, security-assessment
+acceptance, legal approval, or production readiness.
+
+Official references to re-check at submission time:
+
+- <https://developers.google.com/workspace/workspace-api-user-data-developer-policy>
+- <https://developers.google.com/terms/api-services-user-data-policy>
+- <https://developers.google.com/workspace/drive/api/guides/api-specific-auth>
+- <https://developers.google.com/identity/protocols/oauth2/production-readiness/policy-compliance>
+- <https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification>
+- <https://support.google.com/cloud/answer/13464321>

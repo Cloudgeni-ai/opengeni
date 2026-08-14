@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFile } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +11,12 @@ import {
   establishSandboxSessionFromEnvelope,
   sandboxProviderContinuityForState,
   serializeEstablishedSandboxEnvelope,
+  RoutingSandboxSession,
+  SandboxChannelAService,
   terminateManagedSandboxSession,
+  codemodeTokenFileFromEnvironment,
+  withCodemodeTokenSession,
+  withRunCredentialsSession,
 } from "../src/sandbox";
 
 const execFileAsync = promisify(execFile);
@@ -41,6 +47,81 @@ afterEach(async () => {
 });
 
 describe("Docker sandbox lifecycle (live daemon)", () => {
+  test.skipIf(!enabled)(
+    "streams placement-private download authority through routing into the exact workspace",
+    async () => {
+      const workspaceBaseDir = await mkdtemp(join(tmpdir(), "opengeni-docker-import-"));
+      cleanupRoots.add(workspaceBaseDir);
+      const settings = testSettings({
+        sandboxBackend: "docker",
+        dockerImage: image,
+        dockerWorkspaceBaseDir: workspaceBaseDir,
+      });
+      const created = await establishSandboxSessionFromEnvelope(settings, null, {
+        sessionId: "docker-import-created",
+        recovery: "create-or-restore",
+        backendOverride: "docker",
+        environment: {},
+      });
+      cleanupContainers.add(created.instanceId);
+      const createdSession = created.session as DockerSession;
+      cleanupRoots.add(createdSession.state.workspaceRootPath);
+      const routing = new RoutingSandboxSession({
+        readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+        resolveActiveBackend: async () => ({
+          session: created.session,
+          sandboxId: null,
+          kind: "docker",
+          providerInstanceId: created.instanceId,
+          activeEpoch: 0,
+        }),
+      });
+      const bytes = Buffer.from("docker routed import proof\n", "utf8");
+      const source = Bun.serve({
+        hostname: "0.0.0.0",
+        port: 0,
+        fetch: () => new Response(bytes),
+      });
+      try {
+        const environment = {
+          HOME: "/workspace",
+          OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
+        };
+        const credentialSession = withRunCredentialsSession(routing, "docker-import-created");
+        const service = new SandboxChannelAService({
+          session: withCodemodeTokenSession(
+            credentialSession,
+            codemodeTokenFileFromEnvironment(environment, "docker-import-created"),
+          ),
+        });
+        expect(
+          await service.importWorkspaceFile({
+            operationId: randomUUID(),
+            destinationPath: "routed-import.txt",
+            overwrite: false,
+            mayReplaceExisting: false,
+            sizeBytes: bytes.byteLength,
+            sha256: createHash("sha256").update(bytes).digest("hex"),
+            source: {
+              url: `http://host.docker.internal:${source.port}/download?authority=private`,
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            },
+          }),
+        ).toMatchObject({
+          destinationPath: "routed-import.txt",
+          replayed: false,
+          sizeBytes: bytes.byteLength,
+        });
+        expect(
+          await createdSession.exec({ cmd: "cat /workspace/routed-import.txt" }),
+        ).toMatchObject({ exitCode: 0, stdout: bytes.toString("utf8") });
+      } finally {
+        source.stop(true);
+      }
+    },
+    180_000,
+  );
+
   test.skipIf(!enabled)(
     "preserves one workspace across exact attach, continuity restart, capture, cold restore, and teardown",
     async () => {

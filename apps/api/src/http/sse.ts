@@ -1,5 +1,14 @@
-import type { SessionEvent, WorkspaceControlEvent } from "@opengeni/contracts";
-import { listSessionEvents, listWorkspaceControlEvents, type Database } from "@opengeni/db";
+import {
+  WorkspaceInteractionRevisionEvent,
+  type SessionEvent,
+  type WorkspaceControlEvent,
+} from "@opengeni/contracts";
+import {
+  getWorkspaceInteractionRevisionState,
+  listSessionEvents,
+  listWorkspaceControlEvents,
+  type Database,
+} from "@opengeni/db";
 import {
   formatSessionEventSse,
   formatWorkspaceControlEventSse,
@@ -13,9 +22,11 @@ const WORKSPACE_CONTROL_REPLAY_PAGE_SIZE = 100;
 export const SSE_QUEUED_FRAME_MAX_COUNT = 1;
 export const SSE_WRITE_STALL_TIMEOUT_MS = 30_000;
 export const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
-const activeSseStreams: Record<"session" | "workspace_control", number> = {
+type SseStreamKind = "session" | "workspace_control" | "workspace_interaction";
+const activeSseStreams: Record<SseStreamKind, number> = {
   session: 0,
   workspace_control: 0,
+  workspace_interaction: 0,
 };
 
 export type SseDeliveryBoundObservation = {
@@ -586,8 +597,196 @@ export async function sseWorkspaceControlStream(
   });
 }
 
+export type WorkspaceInteractionSseOptions = SseDeliveryOptions & {
+  pollIntervalMs?: number | undefined;
+};
+
+/**
+ * One HTTP connection for the two workspace-wide invalidation domains used by
+ * every visible OpenGeni surface. Keeping these as separate HTTP/1 streams
+ * consumes all six per-origin browser connections with only two windows and
+ * starves ordinary mutations/terminal grants. The durable cursors remain
+ * independent; this function only multiplexes their already-bounded SSE frames.
+ */
+export async function sseWorkspaceLiveStream(
+  db: Database,
+  bus: EventBus,
+  accountId: string,
+  workspaceId: string,
+  controlAfter: number,
+  interactionAfter: number,
+  signal: AbortSignal,
+  options: WorkspaceInteractionSseOptions = {},
+): Promise<Response> {
+  const upstream = new AbortController();
+  const channel = createByteBoundedSseStream({
+    maxQueuedBytes: options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES,
+    ...(options.stallTimeoutMs === undefined ? {} : { stallTimeoutMs: options.stallTimeoutMs }),
+    onObservation: sseObservationReporter("workspace_interaction", options),
+    onStop: () => {
+      signal.removeEventListener("abort", abort);
+      upstream.abort();
+    },
+  });
+  const abort = () => {
+    upstream.abort();
+    channel.close();
+  };
+  if (signal.aborted) abort();
+  else signal.addEventListener("abort", abort, { once: true });
+
+  let writeTail = Promise.resolve(true);
+  const write = (frame: string): Promise<boolean> => {
+    const pending = writeTail.then(() => channel.write(frame));
+    writeTail = pending.catch(() => false);
+    return pending;
+  };
+  const pump = async (response: Response): Promise<void> => {
+    if (!response.body) throw new TypeError("workspace live upstream omitted its body");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    try {
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) {
+          const tail = decoder.decode();
+          if (tail) await write(tail);
+          return;
+        }
+        const frame = decoder.decode(next.value, { stream: true });
+        if (frame && !(await write(frame))) return;
+      }
+    } finally {
+      await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
+    }
+  };
+
+  void (async () => {
+    try {
+      const [control, interaction] = await Promise.all([
+        sseWorkspaceControlStream(db, bus, workspaceId, controlAfter, upstream.signal, options),
+        sseWorkspaceInteractionRevisionStream(
+          db,
+          accountId,
+          workspaceId,
+          interactionAfter,
+          upstream.signal,
+          options,
+        ),
+      ]);
+      const pumps = [pump(control), pump(interaction)];
+      let termination: unknown = new TypeError("workspace live upstream ended unexpectedly");
+      try {
+        await Promise.race(pumps);
+      } catch (error) {
+        termination = error;
+      } finally {
+        // Either durable domain ending makes the multiplexed connection stale.
+        // Stop its sibling immediately so the SDK reconnects both independent
+        // cursors instead of silently losing one domain forever.
+        upstream.abort();
+        await Promise.allSettled(pumps);
+      }
+      if (!signal.aborted && !channel.stopped()) channel.fail(termination);
+    } catch (error) {
+      if (!upstream.signal.aborted && !channel.stopped()) channel.fail(error);
+    }
+  })();
+
+  return new Response(channel.stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    },
+  });
+}
+
+/**
+ * Latest-wins interaction invalidation stream. The durable truth is one
+ * monotonic workspace row, not an ever-growing event log. Each poll reads only
+ * that row; reconnect immediately projects the newest revision after `after`.
+ */
+export async function sseWorkspaceInteractionRevisionStream(
+  db: Database,
+  accountId: string,
+  workspaceId: string,
+  after: number,
+  signal: AbortSignal,
+  options: WorkspaceInteractionSseOptions = {},
+): Promise<Response> {
+  const heartbeatIntervalMs = resolveHeartbeatInterval(options.heartbeatIntervalMs);
+  const pollIntervalMs = resolveInteractionPollInterval(options.pollIntervalMs);
+  let lastSent = after;
+  let lastWriteAt = Date.now();
+  let stopRequested = false;
+  let detachAbortListener = () => {};
+  let closeMetrics = () => {};
+  const channel = createByteBoundedSseStream({
+    maxQueuedBytes: options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES,
+    ...(options.stallTimeoutMs === undefined ? {} : { stallTimeoutMs: options.stallTimeoutMs }),
+    onObservation: sseObservationReporter("workspace_interaction", options),
+    onStop: () => {
+      stopRequested = true;
+      closeMetrics();
+      detachAbortListener();
+    },
+  });
+  closeMetrics = observeSseConnection("workspace_interaction", after, options.observability);
+
+  const write = async (frame: string): Promise<boolean> => {
+    const accepted = await channel.write(frame);
+    if (accepted) lastWriteAt = Date.now();
+    return accepted;
+  };
+
+  void (async () => {
+    try {
+      if (!(await write(": connected\n\n"))) return;
+      for (;;) {
+        if (stopRequested || signal.aborted || channel.stopped()) return;
+        const state = await getWorkspaceInteractionRevisionState(db, { accountId, workspaceId });
+        if (state.revision > lastSent) {
+          const event = WorkspaceInteractionRevisionEvent.parse({
+            workspaceId,
+            sequence: state.revision,
+            revision: state.revision,
+            type: "workspace.interaction.changed",
+            occurredAt: (state.updatedAt ?? new Date()).toISOString(),
+          });
+          if (!(await write(formatWorkspaceInteractionRevisionSse(event)))) return;
+          lastSent = event.revision;
+        } else if (Date.now() - lastWriteAt >= heartbeatIntervalMs) {
+          if (!(await write(": heartbeat\n\n"))) return;
+        }
+        await abortableDelay(pollIntervalMs, signal);
+      }
+    } catch (error) {
+      if (!signal.aborted && !channel.stopped()) {
+        channel.fail(retryableSseFailure("workspace interaction stream delivery failed", error));
+      }
+    }
+  })();
+
+  const abort = () => channel.close();
+  if (signal.aborted) abort();
+  else {
+    signal.addEventListener("abort", abort, { once: true });
+    detachAbortListener = () => signal.removeEventListener("abort", abort);
+  }
+
+  return new Response(channel.stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    },
+  });
+}
+
 function observeSseConnection(
-  stream: "session" | "workspace_control",
+  stream: SseStreamKind,
   after: number,
   observability: Observability | undefined,
 ): () => void {
@@ -659,7 +858,7 @@ export type SessionSseDeliveryOptions = SseDeliveryOptions & {
 };
 
 function sseObservationReporter(
-  stream: "session" | "workspace_control",
+  stream: SseStreamKind,
   options: SseDeliveryOptions,
 ): (observation: SseDeliveryBoundObservation) => void {
   return (observation) => {
@@ -691,4 +890,29 @@ function resolveHeartbeatInterval(value: number | undefined): number {
     throw new RangeError("SSE heartbeat interval must be between 1000 and 60000ms");
   }
   return interval;
+}
+
+function resolveInteractionPollInterval(value: number | undefined): number {
+  const interval = value ?? 1_000;
+  if (!Number.isSafeInteger(interval) || interval < 100 || interval > 60_000) {
+    throw new RangeError("interaction revision poll interval must be between 100 and 60000ms");
+  }
+  return interval;
+}
+
+function formatWorkspaceInteractionRevisionSse(event: WorkspaceInteractionRevisionEvent): string {
+  return `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+}
+
+async function abortableDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(done, delayMs);
+    function done() {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    }
+    signal.addEventListener("abort", done, { once: true });
+  });
 }

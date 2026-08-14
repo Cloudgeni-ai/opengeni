@@ -129,14 +129,14 @@ describe("RelayTokenPayload sign/verify (the agent producer token, M8b)", () => 
 });
 
 describe("sandbox workspace permissions", () => {
-  test("stream:* + files:write + terminal:attach + toolspace:call are in the Permission enum", () => {
+  test("stream:* + files:write + terminal:attach + codemode:call are in the Permission enum", () => {
     for (const perm of [
       "stream:view",
       "stream:control",
       "stream:acknowledge",
       "files:write",
       "terminal:attach",
-      "toolspace:call",
+      "codemode:call",
     ] as const) {
       expect(Permission.options).toContain(perm);
     }

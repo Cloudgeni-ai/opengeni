@@ -21,10 +21,12 @@ services:
 
   nats:
     image: nats:2-alpine
-    command: ["-m", "8222"]
+    command: ["-c", "/etc/nats/opengeni.conf"]
     ports:
       - "${OPENGENI_NATS_HOST_PORT:-4222}:4222"
       - "${OPENGENI_NATS_MONITOR_HOST_PORT:-8222}:8222"
+    volumes:
+      - "${OPENGENI_NATS_CONFIG_FILE:-./deploy/nats/local-development.conf}:/etc/nats/opengeni.conf:ro"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8222/healthz"]
       interval: 5s

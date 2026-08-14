@@ -1,6 +1,7 @@
 import {
   applyGitAuthPointerEnvironment,
-  firstPartyMcpWorkspaceUrl,
+  codemodeWorkspaceUrl,
+  resolveFirstPartyDelegationSecret,
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
@@ -67,35 +68,40 @@ export type GitHubTokenMintAuthorization = (selection: {
   repositoryIds: number[];
 }) => Promise<void>;
 
-export const TOOLSPACE_TOKEN_TTL_SECONDS = 60 * 60;
+export const CODEMODE_TOKEN_TTL_SECONDS = 60 * 60;
 
-export type MintedSandboxToolspaceToken = {
+export type MintedSandboxCodemodeToken = {
   token: string;
   expiresAt: Date;
 };
 
-export type SandboxToolspaceAuthority = {
+export type SandboxCodemodeAuthority = {
   sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
 };
 
-export async function mintSandboxToolspaceToken(
+export async function mintSandboxCodemodeToken(
   settings: Settings,
   scope: ConnectionScope,
-  authority: SandboxToolspaceAuthority,
+  authority: SandboxCodemodeAuthority,
   nowMs = Date.now(),
-): Promise<MintedSandboxToolspaceToken | undefined> {
-  if (!settings.toolspaceEnabled || !settings.delegationSecret) {
-    return undefined;
-  }
-  const expiresAtSeconds = Math.floor(nowMs / 1000) + TOOLSPACE_TOKEN_TTL_SECONDS;
-  const token = await signDelegatedAccessToken(settings.delegationSecret, {
+): Promise<MintedSandboxCodemodeToken | undefined> {
+  const delegationSecret = resolveFirstPartyDelegationSecret(settings);
+  if (!delegationSecret) return undefined;
+  const expiresAtSeconds = Math.floor(nowMs / 1000) + CODEMODE_TOKEN_TTL_SECONDS;
+  const token = await signDelegatedAccessToken(delegationSecret, {
     accountId: scope.accountId,
     workspaceId: scope.workspaceId,
-    subjectId: `sandbox:${authority.sessionId}`,
-    subjectLabel: "sandbox toolspace",
-    permissions: ["toolspace:call"],
+    subjectId: `sandbox:${authority.attemptId}`,
+    subjectLabel: "sandbox Codemode",
+    permissions: ["codemode:call"],
     sessionId: authority.sessionId,
-    principalKind: "service",
+    turnId: authority.turnId,
+    attemptId: authority.attemptId,
+    executionGeneration: authority.executionGeneration,
+    principalKind: "agent_attempt",
     exp: expiresAtSeconds,
   });
   return { token, expiresAt: new Date(expiresAtSeconds * 1000) };
@@ -203,9 +209,15 @@ export async function sandboxEnvironmentForRun(
   // value later. `= {}` default so the non-optional reads below are safe.
   options: RunGitCredentialOptions & {
     skipGitHubToken?: boolean;
-    skipToolspace?: boolean;
+    /**
+     * Codemode credential delivery for this attempt. Managed sandboxes receive
+     * stable URL/file pointers in their manifest and the bearer through the
+     * lifecycle file writer. Connected Machines receive no manifest pointers;
+     * the worker injects the minted bearer only into exact exec requests.
+     */
+    codemodeDelivery?: "managed_file" | "transient_exec" | "none";
     deferGitHubToken?: boolean;
-    toolspaceAuthority?: SandboxToolspaceAuthority;
+    codemodeAuthority?: SandboxCodemodeAuthority;
   } = {},
 ): Promise<{
   environment: Record<string, string>;
@@ -213,8 +225,8 @@ export async function sandboxEnvironmentForRun(
   gitTokens?: GitTokenSeeds;
   gitTokenExpiresAt?: GitTokenExpiries;
   gitCredentialBindings?: GitCredentialBindingSeed[];
-  toolspaceToken?: string;
-  toolspaceTokenExpiresAt?: Date;
+  codemodeToken?: string;
+  codemodeTokenExpiresAt?: Date;
 }> {
   // Precedence: deployment allowlist < git identity < workspace environment
   // < backend-aware HOME (the STABLE base, shared with the API-direct attach
@@ -235,25 +247,22 @@ export async function sandboxEnvironmentForRun(
   // proactively renews every selected provider behind these stable pointers.
   const stableOptions = options.scope ? { workspaceId: options.scope.workspaceId } : {};
   const environment = stableSandboxEnvironmentForRun(settings, workspaceEnvironment, stableOptions);
-  // Connected Machines own their environment and credentials. They do not
-  // receive OpenGeni Toolspace pointers, package hints, or delegated tokens.
-  // Scrub the stable pointers as well as skipping the mint because a session
-  // whose home backend is managed may be actively routed to selfhosted.
-  if (options.skipToolspace) {
-    delete environment.OPENGENI_TOOLSPACE_URL;
-    delete environment.OPENGENI_TOOLSPACE_TOKEN_FILE;
+  const codemodeDelivery = options.codemodeDelivery ?? "managed_file";
+  // Connected Machines keep their machine-wide environment untouched. Their
+  // URL, package hint, and direct bearer are projected only onto an exact child
+  // exec request by SelfhostedSession, never into the manifest or filesystem.
+  if (codemodeDelivery !== "managed_file") {
+    delete environment.OPENGENI_CODEMODE_URL;
+    delete environment.OPENGENI_CODEMODE_TOKEN_FILE;
     delete environment.OPENGENI_OGTOOL_PACKAGE_SPEC;
   }
-  const toolspaceScope = options.scope;
-  const toolspaceToken =
-    !options.skipToolspace && toolspaceScope && options.toolspaceAuthority
-      ? await mintSandboxToolspaceToken(settings, toolspaceScope, options.toolspaceAuthority)
+  const codemodeScope = options.scope;
+  const codemodeToken =
+    codemodeDelivery !== "none" && codemodeScope && options.codemodeAuthority
+      ? await mintSandboxCodemodeToken(settings, codemodeScope, options.codemodeAuthority)
       : undefined;
-  if (toolspaceToken && toolspaceScope) {
-    environment.OPENGENI_TOOLSPACE_URL ??= firstPartyMcpWorkspaceUrl(
-      settings,
-      toolspaceScope.workspaceId,
-    );
+  if (codemodeDelivery === "managed_file" && codemodeToken && codemodeScope) {
+    environment.OPENGENI_CODEMODE_URL ??= codemodeWorkspaceUrl(settings, codemodeScope.workspaceId);
   }
   const selections = gitCredentialSelections(resources);
   // NO-TOKEN SKIP (Stage D, change B): when the turn's EFFECTIVE compute backend is
@@ -268,10 +277,10 @@ export async function sandboxEnvironmentForRun(
   if (selections.length === 0 || options.skipGitHubToken) {
     return {
       environment,
-      ...(toolspaceToken
+      ...(codemodeToken
         ? {
-            toolspaceToken: toolspaceToken.token,
-            toolspaceTokenExpiresAt: toolspaceToken.expiresAt,
+            codemodeToken: codemodeToken.token,
+            codemodeTokenExpiresAt: codemodeToken.expiresAt,
           }
         : {}),
     };
@@ -283,10 +292,10 @@ export async function sandboxEnvironmentForRun(
     );
     return {
       environment,
-      ...(toolspaceToken
+      ...(codemodeToken
         ? {
-            toolspaceToken: toolspaceToken.token,
-            toolspaceTokenExpiresAt: toolspaceToken.expiresAt,
+            codemodeToken: codemodeToken.token,
+            codemodeTokenExpiresAt: codemodeToken.expiresAt,
           }
         : {}),
     };
@@ -313,10 +322,10 @@ export async function sandboxEnvironmentForRun(
     ...(Object.keys(minted.gitTokens).length > 0 ? { gitTokens: minted.gitTokens } : {}),
     ...(Object.keys(minted.expiresAt).length > 0 ? { gitTokenExpiresAt: minted.expiresAt } : {}),
     ...(minted.bindings.length > 0 ? { gitCredentialBindings: minted.bindings } : {}),
-    ...(toolspaceToken
+    ...(codemodeToken
       ? {
-          toolspaceToken: toolspaceToken.token,
-          toolspaceTokenExpiresAt: toolspaceToken.expiresAt,
+          codemodeToken: codemodeToken.token,
+          codemodeTokenExpiresAt: codemodeToken.expiresAt,
         }
       : {}),
   };

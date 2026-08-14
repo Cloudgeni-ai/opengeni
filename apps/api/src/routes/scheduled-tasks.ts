@@ -31,6 +31,7 @@ import {
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { revokeKnowledgeSourceScheduleAuthorization } from "../integrations/google-drive";
+import { revokeAtlassianScheduleAuthorization } from "../integrations/atlassian";
 
 export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { settings, db, workflowClient, objectStorage } = deps;
@@ -197,10 +198,11 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
-    await revokeKnowledgeSourceScheduleAuthorization(deps, {
-      task,
-      subjectId: grant.subjectId,
-    });
+    if (task.metadata.connectorKind === "atlassian") {
+      await revokeAtlassianScheduleAuthorization(deps, { task, subjectId: grant.subjectId });
+    } else {
+      await revokeKnowledgeSourceScheduleAuthorization(deps, { task, subjectId: grant.subjectId });
+    }
     await workflowClient.deleteScheduledTaskSchedule({
       temporalScheduleId: task.temporalScheduleId,
     });

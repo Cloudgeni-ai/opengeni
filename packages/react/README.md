@@ -381,6 +381,49 @@ loading, realtime-first creation, Codex Live, Gateway models, mute, recovery,
 delegation/context timeline updates, structured questions, and stop/restart
 through published package APIs only.
 
+## Browser and computer surfaces (`@opengeni/react/interaction`)
+
+The interaction subpath renders the same browser-native and semantic computer
+surfaces used by the OpenGeni web app. It consumes only the public SDK client:
+workspace discovery, peer switching, tabs/windows, live frames, human input,
+identity versions, interventions, diagnostics, reconnect, and lifecycle state do
+not require app-private controller glue.
+
+```tsx
+import { OpenGeniProvider } from "@opengeni/react";
+import { BrowserViewer, ComputerViewer } from "@opengeni/react/interaction";
+
+<OpenGeniProvider client={client} workspaceId={workspaceId}>
+  <BrowserViewer
+    sessionId={sessionId}
+    onOpenComputer={(computerSessionId) => setSelectedComputer(computerSessionId)}
+  />
+  {selectedComputer ? (
+    <ComputerViewer
+      sessionId={sessionId}
+      requestedComputerSessionId={selectedComputer}
+      requestedComputerRequestId={selectedComputer}
+    />
+  ) : null}
+</OpenGeniProvider>;
+```
+
+`BrowserViewer` follows the current agent until the human pins another workspace
+browser. A headed managed browser can receive `createLinkedComputer`; the
+returned ComputerSession must be the exact placement/window the browser uses.
+`onOpenComputer` then changes the host layout to that resource—it must not open a
+lookalike desktop. Closing either viewer never ends its durable resource.
+
+The provider opens one shared workspace interaction-revision stream and every
+catalog refreshes only when its revision advances; hidden or disconnected pages
+fall back to bounded polling and reconcile from the retained cursor. Hosts that
+do not use `OpenGeniProvider` may pass the same structural `client` and
+`workspaceId` directly.
+
+Run `bun run demo` and open `browser.html` or `computer.html`. Their `mode=mock`
+paths are deterministic; `mode=live&workspaceId=…&sessionId=…` uses the
+same-origin `/demo-api` proxy and the exact published SDK/React entrypoints.
+
 ## Composer customization (`@opengeni/react/composer`)
 
 Use `ChatComposer` for the standard layout and its `controlsStart`, `header`,
@@ -530,6 +573,11 @@ notices). User messages carry their attached `resources` and requested `tools`
 so consumers can render attachment chips. `groupTimeline` clusters consecutive
 activity for collapsed display. Use them directly if you want custom rendering
 with the same semantics.
+
+Failed worker items may also carry `failure: { code, message }`. The projection
+accepts only the bounded structured orchestration envelope retained in MCP
+output; it does not reinterpret arbitrary legacy error strings. `ActivityRail`
+renders the code and message directly beneath the failed worker row.
 
 ### Compatibility
 

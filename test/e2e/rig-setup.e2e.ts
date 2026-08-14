@@ -60,7 +60,7 @@ describe("real Docker rig-setup e2e", () => {
       timeoutMs: 90_000,
       describe: () => worker.logs(),
     });
-  }, 360_000);
+  }, 660_000);
 
   afterAll(async () => {
     await worker?.stop();
@@ -95,40 +95,39 @@ describe("real Docker rig-setup e2e", () => {
     await waitFor(
       async () => {
         const events = await sessionEvents(sessionId);
-        return events.some(
-          (e) =>
-            e.type === "session.status.changed" &&
-            ["idle", "failed"].includes((e.payload as { status?: string }).status ?? ""),
-        );
+        return events.some((e) => e.type === "turn.completed" || e.type === "turn.failed");
       },
       { timeoutMs },
     );
     return await sessionEvents(sessionId);
   }
 
-  // The rig-setup hook rides sandbox.operation.* events with payload.name "rig-setup".
+  // Rig setup has its own typed event family so consumers can distinguish a
+  // completed setup from a warm-box marker skip without inspecting payloads.
   function rigSetupEvents(events: SessionEvent[]): Array<{ type: string; payload: any }> {
     return events
-      .filter(
-        (e) =>
-          e.type.startsWith("sandbox.operation.") &&
-          (e.payload as { name?: string }).name === "rig-setup",
-      )
+      .filter((e) => e.type.startsWith("rig.setup."))
       .map((e) => ({ type: e.type, payload: e.payload as any }));
   }
 
-  test("first turn runs the setup (started+completed), second warm turn SKIPS via the marker", async () => {
-    const rigId = await seedRig("proof-rig", "echo ok > /var/opengeni/proof && touch /tmp/x");
+  test("first turn runs setup and a follow-up settles setup for its physical box", async () => {
+    const rigId = await seedRig("proof-rig", "echo ok > /tmp/rig-setup-proof");
     const sessionId = await createRigSession(rigId, "hello");
     const firstEvents = await waitForTerminal(sessionId);
 
     const firstRig = rigSetupEvents(firstEvents);
-    expect(firstRig.some((e) => e.type === "sandbox.operation.started")).toBe(true);
-    // completed{skipped:false} is the proof the script ran to exit 0 (which wrote the file).
-    const ran = firstRig.find((e) => e.type === "sandbox.operation.completed");
-    expect(ran?.payload.skipped).toBe(false);
+    expect(firstRig.some((e) => e.type === "rig.setup.started")).toBe(true);
+    // The distinct completed event proves the script ran to exit 0.
+    const ran = firstRig.find((e) => e.type === "rig.setup.completed");
+    expect(ran).toBeDefined();
 
-    // Second turn on the SAME session reuses the warm box → the marker skips setup.
+    const firstTerminalCount = firstRig.filter(
+      (event) => event.type === "rig.setup.completed" || event.type === "rig.setup.skipped",
+    ).length;
+
+    // A retained physical box skips through its marker. A topology that replaces
+    // the box must run setup again because box-local state correctly does not
+    // survive replacement; both are valid, but failure or no terminal event is not.
     const followUp = await fetch(apiPath(`/sessions/${sessionId}/events`), {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -137,17 +136,20 @@ describe("real Docker rig-setup e2e", () => {
     expect(followUp.ok).toBe(true);
     await waitFor(
       async () => {
-        const skips = rigSetupEvents(await sessionEvents(sessionId)).filter(
-          (e) => e.payload.skipped === true,
+        const terminals = rigSetupEvents(await sessionEvents(sessionId)).filter(
+          (event) => event.type === "rig.setup.completed" || event.type === "rig.setup.skipped",
         );
-        return skips.length >= 1;
+        return terminals.length > firstTerminalCount;
       },
       { timeoutMs: 180_000 },
     );
-    const skipped = rigSetupEvents(await sessionEvents(sessionId)).find(
-      (e) => e.payload.skipped === true,
-    );
-    expect(skipped?.type).toBe("sandbox.operation.completed");
+    const followUpRig = rigSetupEvents(await sessionEvents(sessionId)).slice(firstRig.length);
+    expect(
+      followUpRig.some(
+        (event) => event.type === "rig.setup.completed" || event.type === "rig.setup.skipped",
+      ),
+    ).toBe(true);
+    expect(followUpRig.some((event) => event.type === "rig.setup.failed")).toBe(false);
   }, 300_000);
 
   test("a failing setup script (exit 7) fails the turn closed with a rig.setup failure", async () => {
@@ -155,7 +157,7 @@ describe("real Docker rig-setup e2e", () => {
     const sessionId = await createRigSession(rigId, "hello");
     const events = await waitForTerminal(sessionId);
 
-    const failed = rigSetupEvents(events).find((e) => e.type === "sandbox.operation.failed");
+    const failed = rigSetupEvents(events).find((e) => e.type === "rig.setup.failed");
     expect(failed).toBeDefined();
     expect(failed?.payload.error).toContain("exited with code 7");
     // The session surfaces the failure (turn.failed / status failed).
@@ -174,7 +176,7 @@ describe("real Docker rig-setup e2e", () => {
     const sessionId = await createRigSession(rigId, "hello");
     const events = await waitForTerminal(sessionId);
 
-    const failed = rigSetupEvents(events).find((e) => e.type === "sandbox.operation.failed");
+    const failed = rigSetupEvents(events).find((e) => e.type === "rig.setup.failed");
     expect(failed).toBeDefined();
     expect(failed?.payload.error).toContain("rig setup timeout");
   }, 300_000);

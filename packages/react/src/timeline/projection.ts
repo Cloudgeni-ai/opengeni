@@ -1,4 +1,9 @@
-import type { SessionEvent, SessionStatus, TimelineAnnotation } from "@opengeni/sdk";
+import {
+  parseMediaGenerationResult,
+  type SessionEvent,
+  type SessionStatus,
+  type TimelineAnnotation,
+} from "@opengeni/sdk";
 import fleetDecisionItem from "./fleet-decision-projection";
 import {
   CREDIT_EXHAUSTION_MESSAGE,
@@ -44,6 +49,8 @@ export { toolDisplayName, mcpToolLeaf, toolMatchesLeaf } from "./tool-display-na
 /** Tool leaves on the first-party OpenGeni MCP server that operate on sessions. */
 const WORKER_SPAWN_TOOL = "session_create";
 const WORKER_MESSAGE_TOOL = "session_send_message";
+const WORKER_FAILURE_CODE_MAX_LENGTH = 128;
+const WORKER_FAILURE_MESSAGE_MAX_UTF8_BYTES = 1_024;
 
 /**
  * Tools whose durable side-effect events already own the timeline (MemoryRow).
@@ -354,6 +361,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
             action: toolMatchesLeaf(name, WORKER_SPAWN_TOOL) ? "spawn" : "message",
             prompt: workerPrompt(args),
             workerSessionId: extractSessionRef(args),
+            failure: null,
             status: "running",
             occurredAt: event.occurredAt,
           });
@@ -412,6 +420,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           // isError result) settles to "failed" too, so WorkerRow surfaces it.
           target.status = isErrorOutput(payload) ? "failed" : "complete";
           target.workerSessionId = target.workerSessionId ?? extractSessionRef(payload.output);
+          target.failure = target.status === "failed" ? workerFailure(payload.output) : null;
           break;
         }
         // An output carrying an explicit error flag (or an MCP isError result)
@@ -1295,6 +1304,8 @@ function isTurnBoundary(group: TimelineGroup | undefined): boolean {
     (group?.kind === "item" &&
       (group.item.kind === "user-message" ||
         group.item.kind === "context-compaction" ||
+        (group.item.kind === "machine-input-batch" &&
+          group.item.members.some((member) => member.kind === "media_generation_result")) ||
         (group.item.kind === "notice" && group.item.tone === "input")))
   );
 }
@@ -1423,6 +1434,7 @@ function machineInputMembers(value: unknown): MachineInputBatchItem["members"] {
     "agent_message",
     "agent_steer_instruction",
     "child_terminal_result",
+    "media_generation_result",
   ]);
   const classifications = new Set<MachineInputBatchItem["members"][number]["classification"]>([
     "success",
@@ -1441,16 +1453,24 @@ function machineInputMembers(value: unknown): MachineInputBatchItem["members"] {
             member.classification as MachineInputBatchItem["members"][number]["classification"],
           ) &&
           typeof member.sourceId === "string"
-          ? [
-              {
-                id: member.id,
-                kind: member.kind as MachineInputBatchItem["members"][number]["kind"],
-                classification:
-                  member.classification as MachineInputBatchItem["members"][number]["classification"],
-                sourceId: member.sourceId,
-                summary: stringValue(member.summary),
-              },
-            ]
+          ? (() => {
+              const kind = member.kind as MachineInputBatchItem["members"][number]["kind"];
+              const result =
+                kind === "media_generation_result"
+                  ? parseMediaGenerationResult(member.result)
+                  : null;
+              return [
+                {
+                  id: member.id,
+                  kind,
+                  classification:
+                    member.classification as MachineInputBatchItem["members"][number]["classification"],
+                  sourceId: member.sourceId,
+                  summary: stringValue(member.summary),
+                  ...(result ? { result } : {}),
+                },
+              ];
+            })()
           : [];
       })
     : [];
@@ -1777,6 +1797,58 @@ function workerPrompt(args: unknown): string | null {
     if (typeof value === "string" && value.trim().length > 0) {
       return value;
     }
+  }
+  return null;
+}
+
+function boundedWorkerFailureMessage(value: string): string | null {
+  const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  if (!normalized) return null;
+  const encoded = new TextEncoder().encode(normalized);
+  if (encoded.byteLength <= WORKER_FAILURE_MESSAGE_MAX_UTF8_BYTES) return normalized;
+  let end = WORKER_FAILURE_MESSAGE_MAX_UTF8_BYTES;
+  while (end > 0 && (encoded[end]! & 0xc0) === 0x80) end -= 1;
+  return new TextDecoder().decode(encoded.slice(0, end)).trim();
+}
+
+function boundedWorkerFailure(value: unknown): WorkerItem["failure"] {
+  const record = asRecord(value);
+  const code = typeof record.code === "string" ? record.code.trim() : "";
+  const message =
+    typeof record.message === "string" ? boundedWorkerFailureMessage(record.message) : null;
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(code) || !message) return null;
+  return { code: code.slice(0, WORKER_FAILURE_CODE_MAX_LENGTH), message };
+}
+
+/**
+ * Extract the API's structured orchestration failure from raw objects, JSON
+ * text, or retained MCP CallToolResult wrappers. Legacy flat strings remain
+ * unprojected rather than being mistaken for the trusted diagnostic contract.
+ */
+function workerFailure(value: unknown, depth = 0): WorkerItem["failure"] {
+  if (depth > 6 || value === null || value === undefined) return null;
+  if (typeof value === "string") {
+    const parsed = tryParseJson(value);
+    return parsed === value ? null : workerFailure(parsed, depth + 1);
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const failure = workerFailure(entry, depth + 1);
+      if (failure) return failure;
+    }
+    return null;
+  }
+  if (typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const direct = boundedWorkerFailure(record.error);
+  if (direct) return direct;
+  for (const key of ["structuredContent", "content", "result", "output"] as const) {
+    if (!(key in record)) continue;
+    const failure = workerFailure(record[key], depth + 1);
+    if (failure) return failure;
+  }
+  if (record.type === "text" && typeof record.text === "string") {
+    return workerFailure(record.text, depth + 1);
   }
   return null;
 }

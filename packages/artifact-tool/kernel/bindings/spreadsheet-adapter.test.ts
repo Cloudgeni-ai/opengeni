@@ -4,6 +4,8 @@ import { ArtifactCommandBatchCodec, type ArtifactCommandBatch } from "../../src/
 import { lowerSpreadsheetOperationEnvelope } from "./spreadsheet-adapter";
 
 describe("public spreadsheet operation to kernel ABI lowering", () => {
+  // This assertion cold-compiles the pinned Rust fixture. Shared CI runners can
+  // legitimately exceed the ordinary 30-second unit-test limit.
   test("matches the direct Rust command envelope byte-for-byte", async () => {
     const fixture = await directKernelFixture();
     const namespace = 0x0123_4567_89ab_cdefn;
@@ -56,7 +58,7 @@ describe("public spreadsheet operation to kernel ABI lowering", () => {
           expect(transaction.requestHash).toBe(`sha256:${toHex(new Uint8Array(expected))}`);
         });
     });
-  });
+  }, 120_000);
 
   test("rejects unsupported modality, commands, malformed ids, and unordered ranges", () => {
     const base: ArtifactCommandBatch = {

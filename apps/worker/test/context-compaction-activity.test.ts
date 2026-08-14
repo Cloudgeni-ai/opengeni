@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { MODEL_ATTACHMENT_REFS_FIELD } from "@opengeni/contracts";
 import {
+  ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES,
+  ACTIVE_SESSION_HISTORY_MAX_JSON_NODES,
+  ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES,
+  ACTIVE_SESSION_HISTORY_MAX_ROWS,
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
   addSessionSystemUpdate,
@@ -25,10 +29,9 @@ import {
   saveRunState,
   submitHumanPromptInTransaction,
   withWorkspaceRls,
-  withWorkspaceSubjectRls,
+  withWorkspaceSubjectSessionActivityRls,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
-import type { EventBus } from "@opengeni/events";
 import {
   CompactionNeededError,
   CompactionProviderResponseError,
@@ -39,12 +42,17 @@ import {
 } from "@opengeni/runtime";
 import {
   acquireSharedTestDatabase,
+  MemoryEventBus,
   ScriptedModel,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createActivityTestHarness } from "../src/activities";
-import { isContextWindowExceeded, maybeCompactContext } from "../src/activities/context-compaction";
+import {
+  isContextWindowExceeded,
+  isExactContextLengthExceeded,
+  maybeCompactContext,
+} from "../src/activities/context-compaction";
 
 async function claimCompactionForAttempt(
   db: Parameters<typeof claimSessionWorkForAttempt>[0],
@@ -81,6 +89,13 @@ describe("standalone context compaction execution", () => {
     await client?.close();
     await shared?.release();
   }, 60_000);
+
+  test("uses the production active-history materialization envelope", () => {
+    expect(ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES).toBe(15 * 1024 * 1024);
+    expect(ACTIVE_SESSION_HISTORY_MAX_ROWS).toBe(8_192);
+    expect(ACTIVE_SESSION_HISTORY_MAX_JSON_NODES).toBe(131_072);
+    expect(ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES).toBe(65_536);
+  });
 
   test("rejects an oversized active UTF-8 JSON transcript before paged item decoding", async () => {
     const suffix = crypto.randomUUID();
@@ -397,11 +412,7 @@ describe("standalone context compaction execution", () => {
       runStream: forbid,
       serializeApprovals: forbid,
     } as unknown as OpenGeniRuntime;
-    const bus = {
-      publish: async () => undefined,
-      subscribe: async function* () {},
-      close: async () => undefined,
-    } as unknown as EventBus;
+    const bus = new MemoryEventBus();
     const activities = createActivityTestHarness({
       settings: testSettings({
         databaseUrl: shared.appUrl,
@@ -532,11 +543,7 @@ describe("standalone context compaction execution", () => {
       runStream: forbid,
       serializeApprovals: forbid,
     } as unknown as OpenGeniRuntime;
-    const bus = {
-      publish: async () => undefined,
-      subscribe: async function* () {},
-      close: async () => undefined,
-    } as unknown as EventBus;
+    const bus = new MemoryEventBus();
     const activities = createActivityTestHarness({
       settings: testSettings({
         databaseUrl: shared.appUrl,
@@ -864,11 +871,7 @@ describe("standalone context compaction execution", () => {
         throw new Error("failed standalone compaction serialized approvals");
       },
     } as unknown as OpenGeniRuntime;
-    const bus = {
-      publish: async () => undefined,
-      subscribe: async function* () {},
-      close: async () => undefined,
-    } as unknown as EventBus;
+    const bus = new MemoryEventBus();
     const activities = createActivityTestHarness({
       settings: testSettings({
         databaseUrl: shared.appUrl,
@@ -1023,11 +1026,7 @@ describe("standalone context compaction execution", () => {
         throw new Error("transient standalone compaction serialized approvals");
       },
     } as unknown as OpenGeniRuntime;
-    const bus = {
-      publish: async () => undefined,
-      subscribe: async function* () {},
-      close: async () => undefined,
-    } as unknown as EventBus;
+    const bus = new MemoryEventBus();
     const activities = createActivityTestHarness({
       settings: testSettings({
         databaseUrl: shared.appUrl,
@@ -1167,11 +1166,7 @@ describe("standalone context compaction execution", () => {
         throw new Error("transient in-turn compaction serialized approvals");
       },
     } as unknown as OpenGeniRuntime;
-    const bus = {
-      publish: async () => undefined,
-      subscribe: async function* () {},
-      close: async () => undefined,
-    } as unknown as EventBus;
+    const bus = new MemoryEventBus();
     const activities = createActivityTestHarness({
       settings: testSettings({
         databaseUrl: shared.appUrl,
@@ -1366,11 +1361,7 @@ describe("standalone context compaction execution", () => {
         },
       }),
     };
-    const bus = {
-      publish: async () => undefined,
-      subscribe: async function* () {},
-      close: async () => undefined,
-    } as unknown as EventBus;
+    const bus = new MemoryEventBus();
     const activities = createActivityTestHarness({
       settings: testSettings({
         databaseUrl: shared.appUrl,
@@ -1477,28 +1468,25 @@ describe("standalone context compaction execution", () => {
       ),
     ).toEqual([newUpdate.update.id]);
 
-    await withWorkspaceSubjectRls(
+    await withWorkspaceSubjectSessionActivityRls(
       client.db,
       grant.workspaceId!,
       grant.subjectId,
       async (db) =>
-        await db.transaction(
-          async (tx) =>
-            await submitHumanPromptInTransaction(tx as typeof db, {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId!,
-              sessionId: session.id,
-              subjectId: grant.subjectId,
-              actor: { type: "human", subjectId: grant.subjectId },
-              operationKey: crypto.randomUUID(),
-              delivery: "send",
-              text: "Retry after the compaction failure with new human input",
-              resources: [],
-              tools: [],
-              reasoningEffortFallback: "low",
-              source: "user",
-            }),
-        ),
+        await submitHumanPromptInTransaction(db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          subjectId: grant.subjectId,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "Retry after the compaction failure with new human input",
+          resources: [],
+          tools: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
     );
     const retryClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
       sessionId: session.id,
@@ -1866,6 +1854,246 @@ describe("standalone context compaction execution", () => {
     ).toEqual(originalItems);
   });
 
+  test("remote v2 retries one exact overflow with only tool-result bodies projected", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Remote compaction overflow retry test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Remote compaction overflow retry test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      sandboxBackend: "none",
+    });
+    const originalItems = [
+      { type: "message", role: "user", content: "preserve the real request" },
+      {
+        type: "reasoning",
+        id: "reasoning-remote-retry",
+        content: [{ type: "input_text", text: "preserve reasoning" }],
+      },
+      {
+        type: "function_call",
+        callId: "remote-retry-call",
+        name: "exec",
+        status: "completed",
+        arguments: "{}",
+      },
+      {
+        type: "function_call_result",
+        id: "remote-retry-result",
+        callId: "remote-retry-call",
+        name: "exec",
+        status: "completed",
+        providerData: { receipt: "preserve" },
+        output: "large result ".repeat(2_000),
+      },
+    ];
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values(
+        originalItems.map((item, position) => ({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position,
+          item,
+        })),
+      );
+    });
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      attemptId,
+    );
+    const inputs: Array<Array<Record<string, unknown>>> = [];
+    const overflow = new CompactionProviderResponseError({
+      httpStatus: 400,
+      code: "context_length_exceeded",
+      type: "invalid_request_error",
+    });
+
+    const outcome = await maybeCompactContext(
+      client.db,
+      testSettings({ contextWindowTokens: 250_000 }),
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId,
+      },
+      null,
+      async () => {
+        throw new Error("remote v2 must not fall back to portable compaction");
+      },
+      {
+        force: true,
+        clearRequestedCompaction: true,
+        trigger: "operator",
+        codexCompactionMode: "remote_v2",
+        isCodexSubscriptionTurn: true,
+        requestRemoteCompactionV2: async (_settings, input) => {
+          inputs.push(input);
+          if (inputs.length === 1) throw overflow;
+          return { type: "compaction", encrypted_content: "opaque-retry-success" };
+        },
+      },
+    );
+
+    expect(outcome.compacted).toBe(true);
+    expect(inputs).toHaveLength(2);
+    expect(inputs[0]).toEqual(originalItems);
+    expect(inputs[1]).toHaveLength(originalItems.length);
+    for (const index of [0, 1, 2]) expect(inputs[1]![index]).toEqual(inputs[0]![index]);
+    expect(inputs[1]![3]).toMatchObject({
+      type: "function_call_result",
+      id: "remote-retry-result",
+      callId: "remote-retry-call",
+      name: "exec",
+      status: "completed",
+      providerData: { receipt: "preserve" },
+      output: expect.stringContaining("omitted tool result body"),
+    });
+    expect(
+      outcome.events.find((event) => event.type === "session.context.compacted")?.payload,
+    ).toMatchObject({
+      implementation: "responses_compaction_v2",
+      compactionInputProviderCalls: 2,
+      compactionInputToolOutputsRewritten: 1,
+    });
+    expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
+      false,
+    );
+    expect(
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
+        (row) => row.item,
+      ),
+    ).toEqual([
+      originalItems[0],
+      { type: "compaction", encrypted_content: "opaque-retry-success" },
+    ]);
+  });
+
+  test("remote v2 stops after one projected retry and preserves durable history", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Remote compaction terminal overflow test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Remote compaction terminal overflow test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      sandboxBackend: "none",
+    });
+    const originalItems = [
+      { type: "message", role: "user", content: "history must remain active" },
+      {
+        type: "function_call",
+        callId: "terminal-overflow-call",
+        name: "exec",
+        status: "completed",
+        arguments: "{}",
+      },
+      {
+        type: "function_call_result",
+        callId: "terminal-overflow-call",
+        name: "exec",
+        status: "completed",
+        output: "large result ".repeat(2_000),
+      },
+    ];
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values(
+        originalItems.map((item, position) => ({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position,
+          item,
+        })),
+      );
+    });
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      attemptId,
+    );
+    const firstOverflow = Object.assign(new Error("first overflow"), {
+      code: "context_length_exceeded",
+    });
+    const secondOverflow = Object.assign(new Error("retry overflow"), {
+      code: "context_length_exceeded",
+    });
+    let calls = 0;
+
+    await expect(
+      maybeCompactContext(
+        client.db,
+        testSettings({ contextWindowTokens: 250_000 }),
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          turnId: turn.id,
+          executionGeneration: turn.executionGeneration,
+          attemptId,
+        },
+        null,
+        async () => {
+          throw new Error("remote v2 must not fall back to portable compaction");
+        },
+        {
+          force: true,
+          clearRequestedCompaction: true,
+          trigger: "operator",
+          codexCompactionMode: "remote_v2",
+          isCodexSubscriptionTurn: true,
+          requestRemoteCompactionV2: async () => {
+            calls += 1;
+            throw calls === 1 ? firstOverflow : secondOverflow;
+          },
+        },
+      ),
+    ).rejects.toBe(secondOverflow);
+
+    expect(calls).toBe(2);
+    expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
+      true,
+    );
+    expect(
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
+        (row) => row.item,
+      ),
+    ).toEqual(originalItems);
+  });
+
   test("matches Codex's overflow floor by trying the checkpoint prompt alone once", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
@@ -1957,12 +2185,27 @@ describe("standalone context compaction execution", () => {
       providerOverflow,
     );
     expect(isContextWindowExceeded(wrapped)).toBe(true);
+    expect(isExactContextLengthExceeded(wrapped)).toBe(true);
     expect(
       isContextWindowExceeded(
         new CompactionProviderResponseError(
           { stage: "stream", responseFailed: true },
           new Error("provider authentication failed"),
         ),
+      ),
+    ).toBe(false);
+    expect(
+      isExactContextLengthExceeded(
+        Object.assign(new Error("maximum context length exceeded"), {
+          code: "different_provider_error",
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isExactContextLengthExceeded(
+        Object.assign(new Error("maximum context length exceeded"), {
+          code: "CONTEXT_LENGTH_EXCEEDED",
+        }),
       ),
     ).toBe(false);
   });

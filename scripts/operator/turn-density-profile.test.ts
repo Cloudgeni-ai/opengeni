@@ -106,14 +106,14 @@ describe("turn density profile release-gate helpers", () => {
       totalRowCount: 2_304,
       compactionTailRowCount: 49,
       persistentActiveInactiveMix: true,
-      maxActiveRows: 4_096,
+      maxActiveRows: 8_192,
       maxRowsPerTurn: 131_072,
     });
     expect(PRODUCTION_ACTIVE_HISTORY_LIMITS).toEqual({
-      jsonBytes: 3 * 1024 * 1024,
-      rows: 4_096,
-      jsonNodes: 65_536,
-      jsonProperties: 32_768,
+      jsonBytes: 15 * 1024 * 1024,
+      rows: 8_192,
+      jsonNodes: 131_072,
+      jsonProperties: 65_536,
     });
 
     const input = {
@@ -146,8 +146,8 @@ describe("turn density profile release-gate helpers", () => {
     expect(inactive[0]?.position).toBe(active.length);
     expect(active[0]?.item.content[0]?.text).toHaveLength(3_896);
     expect(new Set(active.map((row) => row.item.content[0]?.text)).size).toBe(active.length);
-    expect(() => historyRowShape(4_096 * 512 + 1, 0, 512, 200_000)).toThrow(
-      "active history row count must be at most 4096",
+    expect(() => historyRowShape(8_192 * 512 + 1, 0, 512, 200_000)).toThrow(
+      "active history row count must be at most 8192",
     );
   });
 
@@ -464,7 +464,7 @@ describe("turn density profile release-gate helpers", () => {
     ).toThrow("artifact.workload.history.shape does not match");
 
     const productionLimitAltered = JSON.parse(profileArtifactText());
-    productionLimitAltered.workload.history.productionActiveMaterializationLimits.rows = 8_192;
+    productionLimitAltered.workload.history.productionActiveMaterializationLimits.rows = 4_096;
     expect(() =>
       verifyDensityProfileArtifactText(`${JSON.stringify(productionLimitAltered)}\n`, undefined, {
         allowNoncanonical: true,

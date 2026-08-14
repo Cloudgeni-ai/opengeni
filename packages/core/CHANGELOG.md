@@ -1,5 +1,253 @@
 # @opengeni/core
 
+## 0.28.1
+
+### Patch Changes
+
+- Updated dependencies [944be7f]
+- Updated dependencies [499c70c]
+  - @opengeni/codex@0.2.17
+  - @opengeni/runtime@0.23.1
+  - @opengeni/db@0.36.1
+  - @opengeni/config@0.16.2
+  - @opengeni/documents@0.5.39
+  - @opengeni/events@0.3.110
+  - @opengeni/storage@0.2.94
+
+## 0.28.0
+
+### Minor Changes
+
+- 6435af7: Add a provider-neutral conversation integration kernel with strict normalized
+  identities, inbound envelopes, delivery operations, receipts, outcome safety,
+  and deterministic wire projections.
+
+### Patch Changes
+
+- d86610d: Prevent deterministic model-generated worker-spawn failures, hide exhausted nested-agent creation, and show bounded structured session orchestration diagnostics in worker timeline rows while preserving the advanced public REST/SDK create contract.
+- d86610d: Show elapsed UTC-hour buckets for the Insights Today range while retaining UTC-day buckets for longer ranges.
+- d86610d: Run published HTML artifacts as exact source in an opaque-origin sandbox, raise their UTF-8 ceiling to 4 MiB, and expose reusable React rendering. Add deployment-configurable default and allowed built-in session tools plus configured shared-key delegation fallback.
+- Updated dependencies [d86610d]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [d86610d]
+- Updated dependencies [d86610d]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+  - @opengeni/contracts@0.50.0
+  - @opengeni/runtime@0.23.0
+  - @opengeni/db@0.36.0
+  - @opengeni/config@0.16.1
+  - @opengeni/documents@0.5.38
+  - @opengeni/events@0.3.109
+  - @opengeni/observability@0.7.5
+  - @opengeni/storage@0.2.93
+
+## 0.27.2
+
+### Patch Changes
+
+- Updated dependencies [b0b2bed]
+- Updated dependencies [a01170c]
+  - @opengeni/config@0.16.0
+  - @opengeni/contracts@0.49.0
+  - @opengeni/runtime@0.22.0
+  - @opengeni/db@0.35.1
+  - @opengeni/documents@0.5.37
+  - @opengeni/storage@0.2.92
+  - @opengeni/events@0.3.108
+  - @opengeni/observability@0.7.4
+
+## 0.27.1
+
+### Patch Changes
+
+- Updated dependencies [61e0b89]
+  - @opengeni/runtime@0.21.2
+
+## 0.27.0
+
+### Minor Changes
+
+- 8beed26: Activate server-authoritative session visibility and content forking. Add user-private session ownership, authority-epoch transitions, explicit cross-workspace fork operations, session-scoped RLS actor propagation, and API authorization that preserves workspace-shared access while enforcing private-session ownership.
+
+### Patch Changes
+
+- 8beed26: Add workspace-governed Slack shared-conversation task policies with durable enforcement and public contracts, and enforce vertical-only agent session authority across core and persistence.
+- Updated dependencies [8beed26]
+- Updated dependencies [8beed26]
+- Updated dependencies [8beed26]
+- Updated dependencies [8beed26]
+  - @opengeni/contracts@0.48.0
+  - @opengeni/db@0.35.0
+  - @opengeni/config@0.15.1
+  - @opengeni/documents@0.5.36
+  - @opengeni/events@0.3.107
+  - @opengeni/observability@0.7.3
+  - @opengeni/runtime@0.21.1
+  - @opengeni/storage@0.2.91
+
+## 0.26.0
+
+### Minor Changes
+
+- 1e78f58: Make Facet definitions and bindings authoritative throughout the Integration domain. Public routes, SDK methods, Pack components, owner identities, physical tables, persisted manifests, and runtime projections now use one Facet vocabulary with a maintenance cutover and no compatibility aliases.
+- 746bbbe: Add canonical human identities with multiple verified login bindings, revisioned and audited lifecycle operations, immediate session invalidation, fail-closed recovery and collision handling, and metadata-minimal managed identity API routes.
+- 1e78f58: Make normalized Plugin, Version, Skill Facet, and component-owner records authoritative for curated and imported Skills. Add reviewed library install, list, update, preview, and uninstall contracts; preserve Pack and Plugin ownership independently; and retire every non-MCP row from the generic capability catalog and installation ledger through a collision-free maintenance migration.
+
+### Patch Changes
+
+- Updated dependencies [1e78f58]
+- Updated dependencies [1c4ac69]
+- Updated dependencies [1e78f58]
+- Updated dependencies [746bbbe]
+- Updated dependencies [1e78f58]
+- Updated dependencies [9849e25]
+- Updated dependencies [1e78f58]
+  - @opengeni/config@0.15.0
+  - @opengeni/contracts@0.47.0
+  - @opengeni/db@0.34.0
+  - @opengeni/runtime@0.21.0
+  - @opengeni/documents@0.5.35
+  - @opengeni/storage@0.2.90
+  - @opengeni/events@0.3.106
+  - @opengeni/observability@0.7.2
+
+## 0.25.1
+
+### Patch Changes
+
+- Updated dependencies [73d34d6]
+- Updated dependencies [3d74340]
+  - @opengeni/codex@0.2.16
+  - @opengeni/contracts@0.46.0
+  - @opengeni/db@0.33.0
+  - @opengeni/config@0.14.1
+  - @opengeni/runtime@0.20.1
+  - @opengeni/documents@0.5.34
+  - @opengeni/events@0.3.105
+  - @opengeni/observability@0.7.1
+  - @opengeni/storage@0.2.89
+
+## 0.25.0
+
+### Minor Changes
+
+- d2def0c: Add the complete browser-native and semantic computer interaction system across managed sandboxes, Connected Machines, attached Chrome, and external browser placements. Ship durable browser identities, authentication repair, network routing, downloads/uploads, shared causal control, public SDK and React workbench surfaces, and one exact MCP/Codemode execution catalog with native Connected Machine access.
+- 5215c0e: Add the first-party Fiken connector: a registered-app OAuth flow (`startFikenOAuth` + public callback, Basic-auth code exchange, broker-owned refresh with rotating refresh tokens) and a verified paste-a-token install route, both storing one workspace-owned `fiken.no` connection; explicit-only `fiken_*` first-party MCP tools (reads plus contact-create and idempotent invoice-draft-create); a serialized single-concurrent-request Fiken client; an `api:fiken` capability tile whose connect sheet leads with OAuth and folds the token form behind a toggle; and operator config `OPENGENI_FIKEN_OAUTH_CLIENT_ID`/`_SECRET`.
+
+### Patch Changes
+
+- Updated dependencies [d2def0c]
+- Updated dependencies [314c7ba]
+- Updated dependencies [5215c0e]
+- Updated dependencies [d15d3e8]
+- Updated dependencies [d241d13]
+- Updated dependencies [3f81608]
+- Updated dependencies [733c22f]
+- Updated dependencies [42a1242]
+  - @opengeni/config@0.14.0
+  - @opengeni/contracts@0.45.0
+  - @opengeni/db@0.32.0
+  - @opengeni/observability@0.7.0
+  - @opengeni/runtime@0.20.0
+  - @opengeni/documents@0.5.33
+  - @opengeni/storage@0.2.88
+  - @opengeni/events@0.3.104
+
+## 0.24.1
+
+### Patch Changes
+
+- 5c5ea4a: Add the universal capabilities platform with named API integration instances,
+  provider-specific feature bindings, and local runtime adapters.
+- Updated dependencies [b57d61f]
+- Updated dependencies [5c5ea4a]
+- Updated dependencies [98e807e]
+  - @opengeni/contracts@0.44.1
+  - @opengeni/runtime@0.19.2
+  - @opengeni/db@0.31.1
+  - @opengeni/config@0.13.2
+  - @opengeni/documents@0.5.32
+  - @opengeni/events@0.3.103
+  - @opengeni/observability@0.6.2
+  - @opengeni/storage@0.2.87
+
+## 0.24.0
+
+### Minor Changes
+
+- aeb07f4: Add durable workspace decision publication to verified Slack bot channels with immutable configuration revisions, outbox attempts and receipts, bounded retries and terminal states, admin review/history UX, typed SDK methods, and a post-persistence governed-learning outcome adapter.
+
+### Patch Changes
+
+- 87e9ae6: Add durable Google Drive Changes cursors, Shared Drive-aware delta draining,
+  bounded full reconciliation, cursor-invalid repair, and a default-off
+  Workspace Events wake seam. Normalize My Drive's root alias before ancestry
+  checks and preserve cumulative item, provider-request, and elapsed budgets
+  across delta, continuation, and full-repair checkpoints. Carry bounded
+  per-object revision floors across delta-to-full and checkpointed full scans so
+  older or equal Drive revisions cannot regress accepted metadata/current-version
+  state, fail closed on conflicting fallback identities, and keep the first
+  observation in one scan generation as a durable monotonic floor. Fence item
+  version/metadata writes plus checkpoint and terminal cursor settlement to the
+  exact lease, initiating subject, scan, checkpoint generation, and accepted
+  floor, so a lost full-page checkpoint cannot replay version 8 as version 7.
+- 8b6803a: Make Modal sandbox recovery command-ready and accurately diagnosed, use workspace-only snapshots for new sessions, enforce checkpoint cadence, and publish cached rig images only after an independent cold boot.
+- ff7203c: Add a read-only Atlassian Jira and Confluence connector with shared OAuth setup, selected-source live agent search and reads, and optional governed knowledge synchronization.
+- Updated dependencies [87e9ae6]
+- Updated dependencies [8b6803a]
+- Updated dependencies [aeb07f4]
+- Updated dependencies [ff7203c]
+  - @opengeni/config@0.13.1
+  - @opengeni/db@0.31.0
+  - @opengeni/contracts@0.44.0
+  - @opengeni/runtime@0.19.1
+  - @opengeni/documents@0.5.31
+  - @opengeni/storage@0.2.86
+  - @opengeni/events@0.3.102
+  - @opengeni/observability@0.6.1
+
+## 0.23.0
+
+### Minor Changes
+
+- dcfe6eb: Add canonical attempt-scoped CodeMode, browser and computer interaction, and durable collaborative editable artifacts. Agents and humans now share one artifact head through the same application authority; direct MCP and CodeMode support bounded inspection, fenced edits, trusted Office import, and asynchronous export to workspace files. The session UI gains a first-class Artifacts workspace, and React interaction viewers move to an explicit lazy-loadable subpath.
+
+### Patch Changes
+
+- 2f4ce5e: Add durable Seedance video generation with workspace model and funding policy,
+  secure media references, retained video artifacts, sandbox materialization,
+  OpenGeni-credit and workspace-gateway funding, and SDK/React playback surfaces.
+- d1db1d3: Make agent-spawned workers inherit omitted model, reasoning, and latency settings from the exact calling turn so Codex subscription sessions do not silently fall back to OpenGeni-credit models.
+- bd5514e: Add explicitly enabled provider-neutral knowledge-source schedules with durable wake provenance, generation-fenced execution checkpoints and index obligations, fail-closed ACL activation seams, no-agent execution, layered pause state, shared schedule administration, and Google Drive source lifecycle integration.
+- Updated dependencies [b46f4de]
+- Updated dependencies [2f4ce5e]
+- Updated dependencies [d55a093]
+- Updated dependencies [7954468]
+- Updated dependencies [dcfe6eb]
+- Updated dependencies [cccc2b3]
+- Updated dependencies [96965c2]
+- Updated dependencies [a8e44ae]
+- Updated dependencies [ad9123b]
+- Updated dependencies [eade67f]
+- Updated dependencies [31666e2]
+- Updated dependencies [bd5514e]
+- Updated dependencies [90eea29]
+- Updated dependencies [a858835]
+- Updated dependencies [5fcad0a]
+  - @opengeni/contracts@0.43.0
+  - @opengeni/db@0.30.0
+  - @opengeni/config@0.13.0
+  - @opengeni/runtime@0.19.0
+  - @opengeni/observability@0.6.0
+  - @opengeni/documents@0.5.30
+  - @opengeni/events@0.3.101
+  - @opengeni/storage@0.2.85
+  - @opengeni/codex@0.2.15
+
 ## 0.22.2
 
 ### Patch Changes

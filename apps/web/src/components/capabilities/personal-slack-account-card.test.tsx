@@ -150,7 +150,7 @@ describe("PersonalSlackAccountCard", () => {
       accessTokenRefreshDue: false,
     });
     try {
-      expect(rendered.container.textContent).toContain("Personal Slack access");
+      expect(rendered.container.textContent).toContain("Your Slack account");
       expect(rendered.container.textContent).toContain(
         "This connection belongs only to your account",
       );

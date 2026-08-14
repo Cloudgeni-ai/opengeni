@@ -603,7 +603,7 @@ describe("Google Drive OAuth isolation proof", () => {
       readFile(new URL("../../web/src/lib/google-drive-connection.ts", import.meta.url), "utf8"),
       readFile(
         new URL(
-          "../../web/src/components/capabilities/google-drive-connector-card.tsx",
+          "../../web/src/components/capabilities/integration-control-center.tsx",
           import.meta.url,
         ),
         "utf8",

@@ -536,6 +536,8 @@ function DockChrome({
   /** Right-aligned chrome controls (maximize / collapse, or the overlay close). */
   controls: ReactNode;
 }) {
+  const chromeRef = useRef<HTMLDivElement | null>(null);
+  const [compact, setCompact] = useState(false);
   const active = tabs.find((t) => t.id === current) ?? tabs[0];
   const tabsetId = useId();
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -544,6 +546,31 @@ function DockChrome({
   const [tabOverflow, setTabOverflow] = useState({ start: false, end: false });
   const activeId = active?.id ?? "";
   const activeTabIndex = tabs.findIndex((tab) => tab.id === activeId);
+
+  // A desktop dock can be much narrower than the viewport after the user drags
+  // its separator. Viewport breakpoints therefore cannot protect the tab strip:
+  // the status + controls used to squeeze it to zero width, leaving visible but
+  // unclickable ARIA tabs. At narrow *dock* widths, give status/controls their
+  // own row and the horizontally scrollable tabs the complete second row.
+  useDockLayoutEffect(() => {
+    const node = chromeRef.current;
+    if (!node) return;
+    const update = () => {
+      const desktop =
+        typeof window.matchMedia !== "function" || window.matchMedia("(min-width: 1024px)").matches;
+      const next = desktop && node.getBoundingClientRect().width < 420;
+      setCompact((previous) => (previous === next ? previous : next));
+    };
+    update();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", update);
+      return () => window.removeEventListener("resize", update);
+    }
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
   const keepActiveTabVisible = useCallback(() => {
     const selected = activeTabIndex >= 0 ? tabRefs.current[activeTabIndex] : null;
     selected?.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -631,8 +658,22 @@ function DockChrome({
 
   return (
     <>
-      <div className="grid shrink-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-x-2 border-b border-og-border px-1.5 py-1 max-[1023px]:grid-cols-[auto_minmax(0,1fr)_auto] max-[1023px]:gap-y-0 max-[1023px]:px-2 max-[1023px]:pb-1 max-[1023px]:pt-0 min-[640px]:max-[1023px]:grid-cols-[auto_minmax(0,1fr)_auto_auto]">
-        <div className="flex min-w-0 shrink-0 items-center max-[1023px]:min-h-11 min-[640px]:max-[1023px]:col-start-1 min-[640px]:max-[1023px]:row-start-1">
+      <div
+        ref={chromeRef}
+        data-dock-chrome
+        data-compact={compact ? "true" : undefined}
+        className={cn(
+          "grid shrink-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-x-2 border-b border-og-border px-1.5 py-1 max-[1023px]:grid-cols-[auto_minmax(0,1fr)_auto] max-[1023px]:gap-y-0 max-[1023px]:px-2 max-[1023px]:pb-1 max-[1023px]:pt-0 min-[640px]:max-[1023px]:grid-cols-[auto_minmax(0,1fr)_auto_auto]",
+          compact && "gap-y-1",
+        )}
+        style={compact ? { gridTemplateColumns: "minmax(0, 1fr) auto" } : undefined}
+      >
+        <div
+          className={cn(
+            "flex min-w-0 shrink-0 items-center max-[1023px]:min-h-11 min-[640px]:max-[1023px]:col-start-1 min-[640px]:max-[1023px]:row-start-1",
+            compact && "hidden",
+          )}
+        >
           {leading ?? (
             <span className="hidden truncate px-1 text-og-sm font-semibold text-og-fg max-[1023px]:inline">
               Workspace
@@ -648,7 +689,10 @@ function DockChrome({
             absorbing any unusually long host-injected labels. */}
         <div
           ref={tabListRef}
-          className="flex min-w-0 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-[1023px]:col-span-3 max-[1023px]:row-start-2 max-[1023px]:w-full min-[640px]:max-[1023px]:col-span-1 min-[640px]:max-[1023px]:col-start-2 min-[640px]:max-[1023px]:row-start-1"
+          className={cn(
+            "flex min-w-0 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-[1023px]:col-span-3 max-[1023px]:row-start-2 max-[1023px]:w-full min-[640px]:max-[1023px]:col-span-1 min-[640px]:max-[1023px]:col-start-2 min-[640px]:max-[1023px]:row-start-1",
+            compact && "col-span-2 col-start-1 row-start-2 w-full",
+          )}
           role="tablist"
           aria-orientation="horizontal"
           style={{
@@ -683,10 +727,20 @@ function DockChrome({
             </button>
           ))}
         </div>
-        <div className="flex min-w-0 shrink-0 items-center justify-self-end min-[640px]:max-[1023px]:col-start-3 min-[640px]:max-[1023px]:row-start-1">
+        <div
+          className={cn(
+            "flex min-w-0 shrink-0 items-center justify-self-end min-[640px]:max-[1023px]:col-start-3 min-[640px]:max-[1023px]:row-start-1",
+            compact && "col-start-1 row-start-1 justify-self-start",
+          )}
+        >
           {accessory}
         </div>
-        <div className="flex shrink-0 items-center gap-0.5 text-og-fg-subtle min-[640px]:max-[1023px]:col-start-4 min-[640px]:max-[1023px]:row-start-1">
+        <div
+          className={cn(
+            "flex shrink-0 items-center gap-0.5 text-og-fg-subtle min-[640px]:max-[1023px]:col-start-4 min-[640px]:max-[1023px]:row-start-1",
+            compact && "col-start-2 row-start-1",
+          )}
+        >
           {controls}
         </div>
       </div>

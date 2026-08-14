@@ -1,5 +1,189 @@
 # @opengeni/runtime
 
+## 0.23.1
+
+### Patch Changes
+
+- 944be7f: Reduce and attribute turn startup latency with lazy sandbox defaults for local development, bounded validator reuse, parallel durable input reads, exact stale-Docker recovery, and low-cardinality worker, runtime, credential, and provider preparation diagnostics.
+- Updated dependencies [944be7f]
+  - @opengeni/codemode@0.4.2
+  - @opengeni/codex@0.2.17
+  - @opengeni/config@0.16.2
+  - @opengeni/sdk@0.57.0
+
+## 0.23.0
+
+### Minor Changes
+
+- 478d7fe: Persist exact accepted-turn goal authority, separate semantic goal revisions
+  from execution progress, and add policy-controlled rewrite proposals with API,
+  SDK, MCP, and runtime support.
+
+### Patch Changes
+
+- d86610d: Prevent deterministic model-generated worker-spawn failures, hide exhausted nested-agent creation, and show bounded structured session orchestration diagnostics in worker timeline rows while preserving the advanced public REST/SDK create contract.
+- d86610d: Add opt-in document-parsing guidance for the pinned AnyDoc sandbox runtime.
+- d86610d: Reissue the complete MCP result fidelity release source after the prior automated Version PR was merged without the required provider-native approval.
+- 478d7fe: Add a reversible workspace memory prompt mode that removes the legacy standing memory block, keeps preference observations out of agent behavioral authority, contains company-profile context for child agents, and reports metadata-only model-context contribution telemetry.
+- Updated dependencies [d86610d]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+  - @opengeni/contracts@0.50.0
+  - @opengeni/sdk@0.57.0
+  - @opengeni/config@0.16.1
+  - @opengeni/codemode@0.4.1
+
+## 0.22.0
+
+### Minor Changes
+
+- b0b2bed: Add unified browser and computer interaction APIs, reusable browser identities, native input, live streaming, and React viewer controls across managed sandboxes and connected machines.
+
+### Patch Changes
+
+- a01170c: Reissue the embedded distribution through corrected source-bound candidate receipt validation.
+- Updated dependencies [b0b2bed]
+  - @opengeni/agent-proto@0.5.0
+  - @opengeni/codemode@0.4.0
+  - @opengeni/config@0.16.0
+  - @opengeni/contracts@0.49.0
+  - @opengeni/sdk@0.56.0
+
+## 0.21.2
+
+### Patch Changes
+
+- 61e0b89: Restore verified Modal workspace snapshots with the persistence mode recorded by the selected artifact.
+
+## 0.21.1
+
+### Patch Changes
+
+- Updated dependencies [8beed26]
+- Updated dependencies [8beed26]
+  - @opengeni/contracts@0.48.0
+  - @opengeni/sdk@0.55.0
+  - @opengeni/codemode@0.3.3
+  - @opengeni/config@0.15.1
+
+## 0.21.0
+
+### Minor Changes
+
+- 1e78f58: Replace implicit optional Skill bundles and parallel Pack/session materialization paths with one explicit, provenance-bearing runtime Skill activation model. Curated Skills now require workspace installation, Pack ownership, or exact session selection; native artifact and video Skills remain available only with their matching executable tool surfaces.
+
+### Patch Changes
+
+- 1c4ac69: Preserve complete MCP tool results through the runtime, durable database settlement, and worker recovery path without changing model-visible output, including nested prefixed servers, compact approval snapshots, and bounded live-memory retention after durable capture.
+- Updated dependencies [1e78f58]
+- Updated dependencies [1e78f58]
+- Updated dependencies [746bbbe]
+- Updated dependencies [9849e25]
+- Updated dependencies [1e78f58]
+  - @opengeni/config@0.15.0
+  - @opengeni/contracts@0.47.0
+  - @opengeni/sdk@0.54.0
+  - @opengeni/codemode@0.3.2
+
+## 0.20.1
+
+### Patch Changes
+
+- Updated dependencies [73d34d6]
+- Updated dependencies [3d74340]
+  - @opengeni/codex@0.2.16
+  - @opengeni/contracts@0.46.0
+  - @opengeni/config@0.14.1
+  - @opengeni/sdk@0.53.1
+  - @opengeni/codemode@0.3.1
+
+## 0.20.0
+
+### Minor Changes
+
+- d2def0c: Add the complete browser-native and semantic computer interaction system across managed sandboxes, Connected Machines, attached Chrome, and external browser placements. Ship durable browser identities, authentication repair, network routing, downloads/uploads, shared causal control, public SDK and React workbench surfaces, and one exact MCP/Codemode execution catalog with native Connected Machine access.
+
+### Patch Changes
+
+- 314c7ba: Let bundled OpenGeni skills deterministically shadow same-name workspace copies while preserving fail-closed conflicts for user-configured skills.
+- Updated dependencies [d2def0c]
+- Updated dependencies [5215c0e]
+- Updated dependencies [d15d3e8]
+- Updated dependencies [733c22f]
+  - @opengeni/codemode@0.3.0
+  - @opengeni/config@0.14.0
+  - @opengeni/contracts@0.45.0
+  - @opengeni/sdk@0.53.0
+
+## 0.19.2
+
+### Patch Changes
+
+- b57d61f: Keep Codex image-tool schemas within the provider-supported regex subset and
+  restore all bundled runtime skills to production API and worker process builds.
+- 5c5ea4a: Add the universal capabilities platform with named API integration instances,
+  provider-specific feature bindings, and local runtime adapters.
+- 98e807e: Keep the normal remote context-compaction request unchanged, then recover once from an exact context-length rejection by temporarily reducing only tool-result bodies. Preserve the full durable history unless the retry returns a valid compaction checkpoint.
+- Updated dependencies [b57d61f]
+- Updated dependencies [5c5ea4a]
+  - @opengeni/contracts@0.44.1
+  - @opengeni/sdk@0.52.1
+  - @opengeni/codemode@0.2.2
+  - @opengeni/config@0.13.2
+
+## 0.19.1
+
+### Patch Changes
+
+- 8b6803a: Make Modal sandbox recovery command-ready and accurately diagnosed, use workspace-only snapshots for new sessions, enforce checkpoint cadence, and publish cached rig images only after an independent cold boot.
+- Updated dependencies [87e9ae6]
+- Updated dependencies [8b6803a]
+- Updated dependencies [aeb07f4]
+- Updated dependencies [ff7203c]
+  - @opengeni/config@0.13.1
+  - @opengeni/contracts@0.44.0
+  - @opengeni/sdk@0.52.0
+  - @opengeni/codemode@0.2.1
+
+## 0.19.0
+
+### Minor Changes
+
+- dcfe6eb: Add canonical attempt-scoped CodeMode, browser and computer interaction, and durable collaborative editable artifacts. Agents and humans now share one artifact head through the same application authority; direct MCP and CodeMode support bounded inspection, fenced edits, trusted Office import, and asynchronous export to workspace files. The session UI gains a first-class Artifacts workspace, and React interaction viewers move to an explicit lazy-loadable subpath.
+
+### Patch Changes
+
+- 2f4ce5e: Add durable Seedance video generation with workspace model and funding policy,
+  secure media references, retained video artifacts, sandbox materialization,
+  OpenGeni-credit and workspace-gateway funding, and SDK/React playback surfaces.
+- cccc2b3: Split the package-private model-provider implementation into acyclic client,
+  error, request-policy, routing, and transport modules while preserving the
+  existing public runtime surface and provider behavior.
+- 96965c2: Retain explicit image-tool outputs before they enter live agent history, preventing inline image bytes from reaching durable session history during SDK event/state ordering skew.
+- a8e44ae: Extract provider client construction, request policy, and model routing into a package-private runtime module while preserving the existing public entrypoint and exports.
+- eade67f: Allow Modal cold filesystem-snapshot restores up to 60 seconds to become command-ready before failing lease warm-up.
+- Updated dependencies [b46f4de]
+- Updated dependencies [2f4ce5e]
+- Updated dependencies [d55a093]
+- Updated dependencies [dcfe6eb]
+- Updated dependencies [ad9123b]
+- Updated dependencies [31666e2]
+- Updated dependencies [bd5514e]
+- Updated dependencies [90eea29]
+- Updated dependencies [a858835]
+- Updated dependencies [5fcad0a]
+  - @opengeni/contracts@0.43.0
+  - @opengeni/sdk@0.51.0
+  - @opengeni/config@0.13.0
+  - @opengeni/network@0.2.2
+  - @opengeni/agent-proto@0.4.0
+  - @opengeni/codemode@0.2.0
+  - @opengeni/codex@0.2.15
+
 ## 0.18.39
 
 ### Patch Changes

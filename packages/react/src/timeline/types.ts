@@ -1,4 +1,5 @@
 import type {
+  MediaGenerationResult,
   ResourceRef,
   SessionStatus,
   TimelineAnnotation,
@@ -39,6 +40,15 @@ export type UserMessageItem = {
   /** Tools requested for the turn this message starts. */
   tools: ToolRef[];
   occurredAt: string;
+  /** Local-only delivery projection; absent for authoritative durable events. */
+  delivery?:
+    | {
+        state: "sending" | "queued" | "failed";
+        error?: string | undefined;
+        onRetry?: (() => void) | undefined;
+        onRemove?: (() => void) | undefined;
+      }
+    | undefined;
 };
 
 export type AgentMessageItem = {
@@ -117,6 +127,8 @@ export type WorkerItem = {
   prompt: string | null;
   /** The target/spawned worker session id, when parseable from args/output. */
   workerSessionId: string | null;
+  /** Bounded structured failure retained from session_create/session_send_message. */
+  failure: { code: string; message: string } | null;
   status: "running" | "complete" | "failed" | "cancelled";
   occurredAt: string;
 };
@@ -294,10 +306,12 @@ export type MachineInputMember = {
     | "goal_continuation"
     | "agent_message"
     | "agent_steer_instruction"
-    | "child_terminal_result";
+    | "child_terminal_result"
+    | "media_generation_result";
   classification: "success" | "failure" | "action_required" | "info";
   sourceId: string;
   summary: string;
+  result?: MediaGenerationResult | undefined;
 };
 
 /**

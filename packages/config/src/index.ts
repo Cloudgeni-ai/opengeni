@@ -1,20 +1,26 @@
 import {
   BillingMode,
   CAPABILITY_DESCRIPTORS,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   Entitlements,
   EntitlementsMode,
   LatencyMode,
   MAX_NESTED_AGENT_DEPTH,
   ProductAccessMode,
   ReasoningEffort,
+  FIRST_PARTY_MCP_TOOL_NAMES,
+  FirstPartyMcpToolName,
   SandboxBackend,
   SessionMcpApprovalPolicy,
+  SEEDANCE_2_5_MODEL_ID,
   StaticUsageLimits,
   TurnExecutionPolicyV1,
   UsageLimitsMode,
   type TurnExecutionLatencyModeSourceV1,
   type TurnExecutionModelSourceV1,
   type TurnExecutionReasoningSourceV1,
+  type VideoGenerationResolution,
+  type FirstPartyMcpToolName as FirstPartyMcpToolNameType,
 } from "@opengeni/contracts";
 import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
 import {
@@ -26,6 +32,16 @@ import {
   CODEX_PROVIDER_BASE_URL,
   CODEX_PROVIDER_ID,
 } from "@opengeni/codex/constants";
+import {
+  XAI_SUBSCRIPTION_MODEL_SLUGS,
+  XAI_SUBSCRIPTION_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+  XAI_SUBSCRIPTION_MODEL_CONTEXT_WINDOW_TOKENS,
+  XAI_SUBSCRIPTION_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+  XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
+  XAI_SUBSCRIPTION_PROVIDER_ID,
+  XAI_SUBSCRIPTION_PROXY_BASE_URL,
+} from "@opengeni/xai-subscription";
+export { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
@@ -62,6 +78,38 @@ const EnvBoolean = z.preprocess((value) => {
   }
   return value;
 }, z.boolean());
+
+const EnvFirstPartyMcpTools = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") return value;
+    const source = value.trim();
+    if (!source) return undefined;
+    if (source.startsWith("[")) {
+      try {
+        return JSON.parse(source);
+      } catch {
+        return value;
+      }
+    }
+    return source.split(",").map((entry) => entry.trim());
+  },
+  z
+    .array(FirstPartyMcpToolName)
+    .superRefine((tools, context) => {
+      const seen = new Set<FirstPartyMcpToolNameType>();
+      for (const [index, tool] of tools.entries()) {
+        if (seen.has(tool)) {
+          context.addIssue({
+            code: "custom",
+            message: "first-party MCP tool lists must not contain duplicates",
+            path: [index],
+          });
+        }
+        seen.add(tool);
+      }
+    })
+    .optional(),
+);
 
 export const sandboxPreparationProfiles: Record<string, { env: string[]; hooks: string[] }> = {
   none: {
@@ -128,7 +176,7 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
   "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
   "File resources are mounted under .opengeni/files/<file-id>/ unless the session specifies another mount path.",
   "Attached files are mounted read-only; copy them before modifying.",
-  "Bundled skills are under .agents/ and can include infrastructure, marketing, or other role-specific guidance.",
+  "Installed and selected Skills are indexed under .agents/ and may include role-specific guidance.",
   "Use Checkov, Terraform, Azure CLI, git provider CLIs, and repository tools when relevant; gh, glab, and az repos are pre-authenticated when the host brokers matching git credentials.",
   "When the Azure sandbox preparation profile is enabled and service-principal variables are present, the sandbox is pre-authenticated with normal Azure CLI before work starts.",
   "Treat code-changing work as GitOps work: create a focused branch/commit/PR when git provider credentials are available; otherwise report exact commands and blockers.",
@@ -287,6 +335,8 @@ const SettingsSchema = z.object({
   staticEntitlementsJson: z.string().default("{}"),
   staticUsageLimitsJson: z.string().default("{}"),
   delegationSecret: z.string().optional(),
+  defaultFirstPartyMcpTools: EnvFirstPartyMcpTools,
+  allowedFirstPartyMcpTools: EnvFirstPartyMcpTools,
   // sandbox workspace scoped stream-token HMAC secret (sandbox contract §C.3 / stream-token availability contract).
   // When unset, the API falls back to `delegationSecret` (the same HMAC envelope
   // family, `ogs_` vs `ogd_` prefix). REQUIRED-WHEN-DESKTOP, but the absence of
@@ -297,8 +347,7 @@ const SettingsSchema = z.object({
   // holder of stream:control gets 403 until this flips. Keeps stream:control a
   // declared-but-inert permission so later hardening is a flag flip.
   streamControlEnabled: EnvBoolean.default(false),
-  toolspaceEnabled: EnvBoolean.default(false),
-  toolspaceMaxCallsPerTurn: z.coerce.number().int().positive().default(200),
+  codemodeMaxCallsPerTurn: z.coerce.number().int().positive().default(200),
   // Optional release-coherent bootstrap hint for custom rigs/connected machines
   // that do not carry the stock-image ogtool binary. Exact stable versions only:
   // the agent must never guess a tag or silently install `latest`.
@@ -311,11 +360,17 @@ const SettingsSchema = z.object({
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
   integrationsOauthClientsJson: z.string().default("{}"),
+  gmailRestAdapterEnabled: EnvBoolean.default(false),
   slackClientId: z.string().optional(),
   slackClientSecret: z.string().optional(),
   slackSigningSecret: z.string().optional(),
   googleDriveClientId: z.string().optional(),
   googleDriveClientSecret: z.string().optional(),
+  fikenClientId: z.string().optional(),
+  fikenClientSecret: z.string().optional(),
+  googleDriveWorkspaceEventsEnabled: EnvBoolean.optional(),
+  atlassianClientId: z.string().optional(),
+  atlassianClientSecret: z.string().optional(),
   // Undefined is meaningful: the migration boundary persists the product
   // default of 3 when no deployment override is supplied.
   maxNestedAgentDepth: z.coerce.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH).optional(),
@@ -391,6 +446,43 @@ const SettingsSchema = z.object({
   vercelAiGatewayApiKey: z.string().optional(),
   /** Image adapter route; native hosted providers ignore this model. */
   imageGenerationModel: z.string().trim().min(1).max(256).default("openai/gpt-image-2"),
+  /** Durable video generation uses the workspace-owned Gateway credential. */
+  videoGenerationPollIntervalMs: z.coerce.number().int().min(1_000).max(60_000).default(5_000),
+  videoGenerationRecoveryDeadlineMs: z.coerce
+    .number()
+    .int()
+    .min(60_000)
+    .max(24 * 60 * 60_000)
+    .default(2 * 60 * 60_000),
+  videoGenerationReferenceUrlTtlSeconds: z.coerce
+    .number()
+    .int()
+    .min(300)
+    .max(6 * 60 * 60)
+    .default(60 * 60),
+  videoGenerationMaxConcurrentPerWorkspace: z.coerce.number().int().min(1).max(16).default(2),
+  videoGenerationWorkspaceQuotaBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(20 * 1024 * 1024 * 1024),
+  videoGenerationTempDirectory: z.string().trim().min(1).max(1_024).default("/tmp/opengeni-video"),
+  videoGenerationFfprobePath: z.string().trim().min(1).max(1_024).default("ffprobe"),
+  // OpenGeni's customer price, not a claim about the provider's delayed cost report.
+  // The durable operation freezes the exact resulting price before provider submit.
+  videoGenerationCredit480pMicrosPerSecond: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(10_000_000)
+    .default(155_000),
+  videoGenerationCredit720pMicrosPerSecond: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(10_000_000)
+    .default(350_000),
   // Native composer voice input (browser MediaRecorder → API transcription).
   // Provider credentials stay server-side; ClientConfig only projects availability
   // and hard ceilings. Selection happens once before audio is sent — never retry
@@ -432,10 +524,12 @@ const SettingsSchema = z.object({
     .default(24 * 60 * 60),
   voiceInputFfmpegPath: z.string().trim().min(1).max(1024).default("ffmpeg"),
   // Preferred provider order (comma-separated ids). First configured+ready wins.
-  // Codex subscription STT is preferred by default when subscription routing is
-  // enabled; operators can put openai/azure-openai first explicitly.
-  // Supported: openai, azure-openai, codex-subscription.
-  voiceInputProviderOrder: z.string().default("codex-subscription,openai,azure-openai"),
+  // Connected subscription STT is preferred by default; operators can put
+  // openai/azure-openai first explicitly.
+  // Supported: supergrok-subscription, codex-subscription, openai, azure-openai.
+  voiceInputProviderOrder: z
+    .string()
+    .default("supergrok-subscription,codex-subscription,openai,azure-openai"),
   // OpenAI public /v1/audio/transcriptions path. Reuses OPENGENI_OPENAI_API_KEY
   // when voiceInputOpenaiApiKey is unset. Default model is gpt-transcribe.
   voiceInputOpenaiEnabled: EnvBoolean.default(true),
@@ -467,6 +561,9 @@ const SettingsSchema = z.object({
   // subscription is injected as a synthetic "codex-subscription" registry
   // provider whose models route through the ChatGPT backend (@opengeni/codex).
   codexSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_CODEX_SUBSCRIPTION_ENABLED
+  // SuperGrok/xAI connected subscription. This is a workspace-scoped OAuth
+  // account pool and a distinct rail from the existing xai/* API-key provider.
+  supergrokSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED
   // Expose the connected apps attached to a Codex subscription through the
   // synthetic codex_apps MCP server. Independent from subscription routing so
   // operators can use Codex models without exposing ChatGPT connectors.
@@ -566,7 +663,13 @@ const SettingsSchema = z.object({
   // the Modal session envelope persists the actual image ID.
   modalImageId: z
     .string()
-    .regex(/^im-[A-Za-z0-9]{22}$/)
+    // Modal image IDs are provider-opaque. Older builds use a 22-character
+    // random suffix while current filesystem snapshots use a 26-character
+    // ULID suffix. Validate the stable namespace/safe alphabet and let Modal
+    // remain authoritative over current/future suffix lengths.
+    .min(4)
+    .max(128)
+    .regex(/^im-[A-Za-z0-9]+$/)
     .optional(),
   // Name of a Modal Secret (containing REGISTRY_USERNAME + REGISTRY_PASSWORD) used
   // to authenticate the pull of `modalImageRef` from a PRIVATE registry. When UNSET
@@ -609,17 +712,17 @@ const SettingsSchema = z.object({
   // SOONER than the hard lifetime; the boot invariant forbids a value that would
   // reap before reaperPeriod + idleGrace elapses.
   modalIdleTimeoutSeconds: z.coerce.number().int().positive().optional(),
-  // /workspace FILE PERSISTENCE across warm/cold cycles. Defaults to
-  // `snapshot_filesystem` so EVERY box is created persistence-capable: the reaper
-  // snapshots the live box before it terminates a drained group, and a later
-  // cold-restore hydrates a fresh box from that snapshot (sandbox-file-persistence).
-  // `snapshot_filesystem` requires the manifest declare NO ephemeralPersistencePaths
-  // (buildManifest never sets entry.ephemeral, so it never downgrades to tar). Set
-  // OPENGENI_MODAL_WORKSPACE_PERSISTENCE=tar to opt back out (no native snapshot;
-  // the reaper persists a tar archive — same store+hydrate plumbing, slower).
+  // /workspace FILE PERSISTENCE across warm/cold cycles. Directory snapshots
+  // preserve only the durable user workspace, so provider recovery does not
+  // restore an entire machine image or replace the selected rig/base image.
+  // Cold restore derives the mode from its verified native artifact, so existing
+  // serialized sessions remain recoverable; this default governs archive-free
+  // Modal creations only.
+  // `snapshot_filesystem` remains available for explicit compatibility and
+  // immutable rig-image materialization. `tar` is the portable fallback.
   modalWorkspacePersistence: z
     .enum(["tar", "snapshot_filesystem", "snapshot_directory"])
-    .default("snapshot_filesystem"),
+    .default("snapshot_directory"),
   // Shared desktop toggle: this module reads it for the 6080 port-merge; the
   // owner module (P4.x) acts on it to launch the display stack.
   sandboxDesktopEnabled: EnvBoolean.default(false),
@@ -698,6 +801,14 @@ const SettingsSchema = z.object({
   // --- cloudflare (headless) ---
   cloudflareWorkerUrl: z.string().url().optional(),
   cloudflareApiKey: z.string().optional(),
+  // --- remote browser placements ---
+  // Provider credentials are injected only into the placement-resident
+  // browserd launch. They never enter session contracts, journals, or sandboxes.
+  browserbaseApiKey: z.string().min(1).max(8192).optional(),
+  kernelApiKey: z.string().min(1).max(8192).optional(),
+  kernelEndpoint: z.string().url().optional(),
+  kernelBrowserTimeoutSeconds: z.coerce.number().int().positive().max(86_400).default(3_600),
+  kernelBrowserStealth: EnvBoolean.default(false),
   // --- vercel (headless) ---
   vercelToken: z.string().optional(),
   vercelProjectId: z.string().optional(),
@@ -827,6 +938,10 @@ const SettingsSchema = z.object({
   // snapshotted before the box dies (sandbox-file-persistence).
   sandboxLeaseReaperPeriodMs: z.coerce.number().int().positive().default(30_000),
   sandboxViewerHolderTtlMs: z.coerce.number().int().positive().default(90_000),
+  // A BrowserSession controller refreshes its durable resource and exact
+  // interaction lease holder together. This longer crash horizon tolerates API
+  // replacement while still releasing a placement whose controller died.
+  sandboxInteractionHolderTtlMs: z.coerce.number().int().positive().default(180_000),
   // The DRAIN grace: how long a refcount-0 (draining) lease stays WARM before the
   // reaper resume-by-ids the box and terminates it. This is the cost-vs-snappiness
   // dial — when the user navigates away the box keeps refcount 0, but it survives
@@ -982,7 +1097,11 @@ export type Settings = z.infer<typeof SettingsSchema>;
 export type McpServerConfig = Settings["mcpServers"][number];
 
 /** Declarative voice-input transcription provider ids. */
-export type VoiceInputProviderId = "openai" | "azure-openai" | "codex-subscription";
+export type VoiceInputProviderId =
+  | "openai"
+  | "azure-openai"
+  | "codex-subscription"
+  | "supergrok-subscription";
 
 export type VoiceInputProviderConfig =
   | {
@@ -1004,6 +1123,11 @@ export type VoiceInputProviderConfig =
   | {
       id: "codex-subscription";
       kind: "codex-subscription";
+      experimental: true;
+    }
+  | {
+      id: "supergrok-subscription";
+      kind: "supergrok-subscription";
       experimental: true;
     };
 
@@ -1041,7 +1165,10 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
     .map((part) => part.trim())
     .filter(
       (part): part is VoiceInputProviderId =>
-        part === "openai" || part === "azure-openai" || part === "codex-subscription",
+        part === "openai" ||
+        part === "azure-openai" ||
+        part === "codex-subscription" ||
+        part === "supergrok-subscription",
     );
   const seen = new Set<VoiceInputProviderId>();
   const providers: VoiceInputProviderConfig[] = [];
@@ -1129,6 +1256,15 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
         kind: "codex-subscription",
         experimental: true,
       });
+      continue;
+    }
+    if (id === "supergrok-subscription") {
+      if (!settings.supergrokSubscriptionEnabled) continue;
+      providers.push({
+        id: "supergrok-subscription",
+        kind: "supergrok-subscription",
+        experimental: true,
+      });
     }
   }
   return providers;
@@ -1137,7 +1273,8 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
 /** True when the deployment has at least one supported (non-experimental) provider. */
 export function voiceInputDeploymentConfigured(settings: Settings): boolean {
   return resolveVoiceInputProviderRegistry(settings).some(
-    (provider) => provider.kind !== "codex-subscription",
+    (provider) =>
+      provider.kind !== "codex-subscription" && provider.kind !== "supergrok-subscription",
   );
 }
 
@@ -1353,7 +1490,7 @@ export type ModelExecutionLimitsV1 = {
 
 export type CredentialSourceV1 =
   | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
-  | { kind: "connected_subscription"; provider: "codex" }
+  | { kind: "connected_subscription"; provider: "codex" | "xai" }
   | { kind: "workspace_connection"; mechanism: "api_key" };
 
 export type BillingAttributionV1 = {
@@ -1373,12 +1510,13 @@ export type ModelProviderApi = z.infer<typeof ModelProviderApi>;
 
 /**
  * Registry provider kind. "api-key" providers carry their own static key/headers;
- * "codex-subscription" providers authenticate per-request with a ChatGPT/Codex
- * subscription token resolved at call time (no static key) — see @opengeni/codex.
+ * connected-subscription providers resolve a workspace account token at call
+ * time and never carry a static key in the registry definition.
  */
 export const RegistryProviderKind = z.enum([
   "api-key",
   "codex-subscription",
+  "xai-subscription",
   "vercel-gateway-managed",
   "vercel-gateway-workspace",
 ]);
@@ -1528,6 +1666,7 @@ export const VERCEL_AI_GATEWAY_CONNECTION_DOMAIN = "ai-gateway.vercel.sh" as con
 export const VERCEL_AI_GATEWAY_CONNECTION_ROLE = "vercel_ai_gateway" as const;
 
 export const CODEX_REALTIME_MODEL_ID = "gpt-live-1-boulder-alpha" as const;
+export const SUPERGROK_REALTIME_MODEL_ID = "supergrok/grok-voice-think-fast-2.0" as const;
 export const OPENGENI_REALTIME_MODEL_ID_PREFIX = "opengeni-gateway/" as const;
 export const WORKSPACE_REALTIME_MODEL_ID_PREFIX = "workspace-gateway/" as const;
 
@@ -1822,10 +1961,11 @@ export function getSettings(): Settings {
     staticEntitlementsJson: optional("OPENGENI_STATIC_ENTITLEMENTS_JSON"),
     staticUsageLimitsJson: optional("OPENGENI_STATIC_USAGE_LIMITS_JSON"),
     delegationSecret: optional("OPENGENI_DELEGATION_SECRET"),
+    defaultFirstPartyMcpTools: optional("OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS"),
+    allowedFirstPartyMcpTools: optional("OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS"),
     streamTokenSecret: optional("OPENGENI_STREAM_TOKEN_SECRET"),
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
-    toolspaceEnabled: optional("OPENGENI_TOOLSPACE_ENABLED"),
-    toolspaceMaxCallsPerTurn: optional("OPENGENI_TOOLSPACE_MAX_CALLS_PER_TURN"),
+    codemodeMaxCallsPerTurn: optional("OPENGENI_CODEMODE_MAX_CALLS_PER_TURN"),
     ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
@@ -1834,11 +1974,17 @@ export function getSettings(): Settings {
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
     ),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
+    gmailRestAdapterEnabled: optional("OPENGENI_GMAIL_REST_ADAPTER_ENABLED"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
     slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
     googleDriveClientSecret: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET"),
+    fikenClientId: optional("OPENGENI_FIKEN_OAUTH_CLIENT_ID"),
+    fikenClientSecret: optional("OPENGENI_FIKEN_OAUTH_CLIENT_SECRET"),
+    googleDriveWorkspaceEventsEnabled: optional("OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED"),
+    atlassianClientId: optional("OPENGENI_ATLASSIAN_CLIENT_ID"),
+    atlassianClientSecret: optional("OPENGENI_ATLASSIAN_CLIENT_SECRET"),
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
     socialOauthClientsJson: optional("OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
@@ -1866,6 +2012,23 @@ export function getSettings(): Settings {
     openaiAllowedModels: optional("OPENGENI_OPENAI_ALLOWED_MODELS"),
     vercelAiGatewayApiKey: optional("OPENGENI_VERCEL_AI_GATEWAY_API_KEY"),
     imageGenerationModel: optional("OPENGENI_IMAGE_GENERATION_MODEL"),
+    videoGenerationPollIntervalMs: optional("OPENGENI_VIDEO_GENERATION_POLL_INTERVAL_MS"),
+    videoGenerationRecoveryDeadlineMs: optional("OPENGENI_VIDEO_GENERATION_RECOVERY_DEADLINE_MS"),
+    videoGenerationReferenceUrlTtlSeconds: optional(
+      "OPENGENI_VIDEO_GENERATION_REFERENCE_URL_TTL_SECONDS",
+    ),
+    videoGenerationMaxConcurrentPerWorkspace: optional(
+      "OPENGENI_VIDEO_GENERATION_MAX_CONCURRENT_PER_WORKSPACE",
+    ),
+    videoGenerationWorkspaceQuotaBytes: optional("OPENGENI_VIDEO_GENERATION_WORKSPACE_QUOTA_BYTES"),
+    videoGenerationTempDirectory: optional("OPENGENI_VIDEO_GENERATION_TEMP_DIRECTORY"),
+    videoGenerationFfprobePath: optional("OPENGENI_VIDEO_GENERATION_FFPROBE_PATH"),
+    videoGenerationCredit480pMicrosPerSecond: optional(
+      "OPENGENI_VIDEO_GENERATION_CREDIT_480P_MICROS_PER_SECOND",
+    ),
+    videoGenerationCredit720pMicrosPerSecond: optional(
+      "OPENGENI_VIDEO_GENERATION_CREDIT_720P_MICROS_PER_SECOND",
+    ),
     voiceInputMaxDurationSeconds: optional("OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS"),
     voiceInputMaxSizeBytes: optional("OPENGENI_VOICE_INPUT_MAX_SIZE_BYTES"),
     voiceInputResumableEnabled: optional("OPENGENI_VOICE_INPUT_RESUMABLE_ENABLED"),
@@ -1895,6 +2058,7 @@ export function getSettings(): Settings {
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
+    supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
     codexConnectedAppsEnabled: optional("OPENGENI_CODEX_CONNECTED_APPS_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
@@ -1975,6 +2139,11 @@ export function getSettings(): Settings {
     blaxelTtl: optional("OPENGENI_BLAXEL_TTL"),
     cloudflareWorkerUrl: optional("OPENGENI_CLOUDFLARE_WORKER_URL"),
     cloudflareApiKey: optional("OPENGENI_CLOUDFLARE_API_KEY"),
+    browserbaseApiKey: optional("OPENGENI_BROWSERBASE_API_KEY"),
+    kernelApiKey: optional("OPENGENI_KERNEL_API_KEY"),
+    kernelEndpoint: optional("OPENGENI_KERNEL_ENDPOINT"),
+    kernelBrowserTimeoutSeconds: optional("OPENGENI_KERNEL_BROWSER_TIMEOUT_SECONDS"),
+    kernelBrowserStealth: optional("OPENGENI_KERNEL_BROWSER_STEALTH"),
     vercelToken: optional("OPENGENI_VERCEL_TOKEN"),
     vercelProjectId: optional("OPENGENI_VERCEL_PROJECT_ID"),
     vercelTeamId: optional("OPENGENI_VERCEL_TEAM_ID"),
@@ -2001,6 +2170,7 @@ export function getSettings(): Settings {
     sandboxSelfhostedControlTimeoutMs: optional("OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS"),
     sandboxLeaseReaperPeriodMs: optional("OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS"),
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
+    sandboxInteractionHolderTtlMs: optional("OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
     sandboxSnapshotIntervalMs: optional("OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS"),
     sandboxSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS"),
@@ -2098,10 +2268,42 @@ const LOCAL_FIRST_PARTY_DELEGATION_SECRET = "opengeni-local-first-party-delegati
 export function resolveFirstPartyDelegationSecret(settings: Settings): string | undefined {
   const explicit = settings.delegationSecret?.trim();
   if (explicit) return explicit;
+  const configuredAccessKey = settings.accessKey?.trim();
+  if (settings.productAccessMode === "configured" && settings.authRequired && configuredAccessKey) {
+    return configuredAccessKey;
+  }
   return settings.productAccessMode === "local" &&
     (settings.environment === "local" || settings.environment === "test")
     ? LOCAL_FIRST_PARTY_DELEGATION_SECRET
     : undefined;
+}
+
+export type FirstPartyMcpToolPolicy = {
+  default: FirstPartyMcpToolNameType[];
+  allowed: FirstPartyMcpToolNameType[];
+};
+
+/** Resolve the deployment's session-tool defaults and hard execution ceiling. */
+export function resolveFirstPartyMcpToolPolicy(
+  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+): FirstPartyMcpToolPolicy {
+  const allowed = settings.allowedFirstPartyMcpTools ?? [...FIRST_PARTY_MCP_TOOL_NAMES];
+  const allowedSet = new Set(allowed);
+  const defaults = settings.defaultFirstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS];
+  return {
+    default: defaults.filter((tool) => allowedSet.has(tool)),
+    allowed: [...allowed],
+  };
+}
+
+/** Apply the deployment ceiling to an existing durable session selection. */
+export function allowedFirstPartyMcpToolsForSession(
+  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+  selected: readonly FirstPartyMcpToolNameType[] | null | undefined,
+): FirstPartyMcpToolNameType[] {
+  const policy = resolveFirstPartyMcpToolPolicy(settings);
+  const allowed = new Set(policy.allowed);
+  return [...(selected ?? policy.default)].filter((tool) => allowed.has(tool));
 }
 
 /**
@@ -2589,12 +2791,17 @@ const GPT56_FAST_BILLING_MULTIPLIER_BPS = 20_000;
 /**
  * Product display label for catalog/picker UI.
  * Same string for OpenAI and Codex copies of a slug (`gpt-5.6-luna` and
- * `codex/gpt-5.6-luna` → `GPT-5.6 Luna`). Non-gpt ids pass through unchanged.
+ * `codex/gpt-5.6-luna` → `GPT-5.6 Luna`). Curated Grok slugs receive the same
+ * product casing; other ids pass through unchanged.
  */
 export function productLabelForModelId(modelId: string): string {
   const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
     ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
     : modelId;
+  const grokMatch = /^grok-(\d+(?:\.\d+)?)$/i.exec(slug);
+  if (grokMatch) {
+    return `Grok ${grokMatch[1]}`;
+  }
   const match = /^(gpt-\d+(?:\.\d+)?)(?:-(.+))?$/i.exec(slug);
   if (!match) {
     return slug;
@@ -2613,14 +2820,16 @@ export function productLabelForModelId(modelId: string): string {
 }
 
 /**
- * Curated compact product labels for dense UI. Only known GPT family slugs;
- * everything else returns null so callers fall back to the full `label`.
+ * Curated compact product labels for dense UI. Unknown model slugs return null
+ * so callers fall back to the full `label`.
  */
 export function productShortLabelForModelId(modelId: string): string | null {
   const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
     ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
     : modelId;
   switch (slug) {
+    case "grok-4.6":
+      return "4.6";
     case "gpt-5.6-sol":
       return "5.6 Sol";
     case "gpt-5.6-terra":
@@ -2699,7 +2908,7 @@ export function isDirectOpenAiApiBaseUrl(baseUrl: string | undefined): boolean {
 
 /**
  * Map OpenGeni latency mode to the provider `service_tier` wire value.
- * Azure and Codex ChatGPT accept `priority`; OpenAI API accepts `fast` (alias of priority).
+ * Azure, Codex ChatGPT, and xAI accept `priority`; OpenAI API accepts `fast`.
  * Standard omits the field.
  */
 export function serviceTierForLatencyMode(
@@ -2709,7 +2918,11 @@ export function serviceTierForLatencyMode(
   if (latencyMode === "standard") {
     return undefined;
   }
-  if (providerId === "azure" || providerId === CODEX_PROVIDER_ID) {
+  if (
+    providerId === "azure" ||
+    providerId === CODEX_PROVIDER_ID ||
+    providerId === XAI_SUBSCRIPTION_PROVIDER_ID
+  ) {
     return "priority";
   }
   return "fast";
@@ -2756,6 +2969,9 @@ function registryCredentialSource(provider: RegistryProvider): CredentialSourceV
   if (provider.kind === "codex-subscription") {
     return { kind: "connected_subscription", provider: "codex" };
   }
+  if (provider.kind === "xai-subscription") {
+    return { kind: "connected_subscription", provider: "xai" };
+  }
   if (provider.kind === "vercel-gateway-workspace") {
     return { kind: "workspace_connection", mechanism: "api_key" };
   }
@@ -2763,7 +2979,7 @@ function registryCredentialSource(provider: RegistryProvider): CredentialSourceV
 }
 
 function registryBilling(provider: RegistryProvider): BillingAttributionV1 {
-  if (provider.kind === "codex-subscription") {
+  if (provider.kind === "codex-subscription" || provider.kind === "xai-subscription") {
     return { upstreamPayer: "connected_subscription", metering: "external" };
   }
   if (provider.kind === "vercel-gateway-workspace") {
@@ -2984,6 +3200,55 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
 }
 
 /**
+ * Static SuperGrok product catalogue, matching the Codex subscription seam.
+ * The overlay never contains a concrete account id or bearer; selection and
+ * per-turn credential freeze remain worker/DB responsibilities.
+ */
+export function withXaiSubscriptionCatalogProvider(settings: Settings): Settings {
+  const providers = parseModelProvidersJson(settings.modelProvidersJson);
+  if (providers.some((provider) => provider.id === XAI_SUBSCRIPTION_PROVIDER_ID)) {
+    return settings;
+  }
+  const provider: RegistryProvider = {
+    kind: "xai-subscription",
+    id: XAI_SUBSCRIPTION_PROVIDER_ID,
+    label: "SuperGrok (xAI subscription)",
+    api: "responses",
+    baseUrl: XAI_SUBSCRIPTION_PROXY_BASE_URL,
+    models: XAI_SUBSCRIPTION_MODEL_SLUGS.map((slug) => {
+      const capabilities = legacyModelCapabilities(settings, {
+        reasoningEffort: true,
+        hostedWebSearch: true,
+      });
+      capabilities.reasoning.efforts = ["low", "medium", "high", "xhigh"];
+      capabilities.reasoning.defaultEffort = "high";
+      capabilities.latencyModes = [
+        { id: "standard", upstream: "supported", runnable: true },
+        { id: "fast", upstream: "supported", runnable: true },
+      ];
+      capabilities.hostedTools.xSearch = { upstream: "supported", runnable: true };
+      capabilities.hostedTools.imageGeneration = { upstream: "supported", runnable: true };
+      return {
+        id: `${XAI_SUBSCRIPTION_MODEL_ID_PREFIX}${slug}`,
+        upstreamModelId: slug,
+        label: productLabelForModelId(slug),
+        ...(productShortLabelForModelId(slug)
+          ? { shortLabel: productShortLabelForModelId(slug)! }
+          : {}),
+        reasoningEffort: true,
+        hostedWebSearch: true,
+        capabilities,
+        contextWindowTokens: XAI_SUBSCRIPTION_MODEL_CONTEXT_WINDOW_TOKENS,
+        effectiveContextWindowTokens: XAI_SUBSCRIPTION_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+        autoCompactTokenLimit: XAI_SUBSCRIPTION_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+        toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+      };
+    }),
+  };
+  return { ...settings, modelProvidersJson: JSON.stringify([...providers, provider]) };
+}
+
+/**
  * The provider identity a model id resolves to, for workspace model-policy
  * evaluation — MUST agree with the real router (resolveTurnModel /
  * MultiProviderModelProvider) on every case:
@@ -3000,6 +3265,9 @@ export function policyProviderIdForModel(settings: Settings, modelId: string): s
   const canonicalModelId = canonicalizeConfiguredModelId(settings, modelId);
   if (canonicalModelId.startsWith(CODEX_MODEL_ID_PREFIX)) {
     return CODEX_PROVIDER_ID;
+  }
+  if (canonicalModelId.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)) {
+    return XAI_SUBSCRIPTION_PROVIDER_ID;
   }
   if (canonicalModelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
     return WORKSPACE_GATEWAY_PROVIDER_ID;
@@ -3121,6 +3389,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
   );
   const isRegistryNamespaced = (id: string): boolean =>
     id.startsWith(CODEX_MODEL_ID_PREFIX) ||
+    id.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX) ||
     registryAliases.has(id) ||
     (id.includes("/") && registryOwnedIds.has(id));
   const builtinProvider = providerById.get(builtinId);
@@ -3286,6 +3555,12 @@ export type ResolveTurnExecutionPolicyV1Input = {
 function settingsForTurnExecutionPolicy(settings: Settings, modelId: string): Settings {
   if (settings.codexSubscriptionEnabled && modelId.startsWith(CODEX_MODEL_ID_PREFIX)) {
     return withCodexCatalogProvider(settings);
+  }
+  if (
+    settings.supergrokSubscriptionEnabled &&
+    modelId.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)
+  ) {
+    return withXaiSubscriptionCatalogProvider(settings);
   }
   if (modelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
     return withWorkspaceGatewayCatalogProvider(settings);
@@ -3635,6 +3910,36 @@ export function calculateGatewayReportedCostBreakdown(
   };
 }
 
+/**
+ * Exact OpenGeni product price frozen before a managed video request starts.
+ * Gateway reporting is delayed for asynchronous video, so this deliberately
+ * does not masquerade as provider-reported cost.
+ */
+export function calculateVideoGenerationCreditCostMicros(
+  settings: Settings,
+  input: {
+    modelId: string;
+    resolution: VideoGenerationResolution;
+    durationSeconds: number;
+  },
+): number {
+  if (input.modelId !== SEEDANCE_2_5_MODEL_ID) {
+    throw new Error(`Missing video generation credit pricing for ${input.modelId}`);
+  }
+  if (!Number.isSafeInteger(input.durationSeconds) || input.durationSeconds < 1) {
+    throw new Error("Video generation duration is invalid for credit pricing");
+  }
+  const rate =
+    input.resolution === "480p"
+      ? settings.videoGenerationCredit480pMicrosPerSecond
+      : settings.videoGenerationCredit720pMicrosPerSecond;
+  const cost = rate * input.durationSeconds;
+  if (!Number.isSafeInteger(cost) || cost <= 0 || cost > 1_000_000_000) {
+    throw new Error("Video generation credit price exceeds the supported range");
+  }
+  return cost;
+}
+
 export function configuredAllowedReasoningEfforts(
   settings: Settings,
 ): Array<z.infer<typeof ReasoningEffort>> {
@@ -3846,16 +4151,13 @@ export function stableSandboxEnvironmentForRun(
     environment.OPENGENI_GIT_CLI_WRAPPER_DIR ??= `${home}/.opengeni/bin`;
     environment.PATH = prependPathEntry(environment.PATH, environment.OPENGENI_GIT_CLI_WRAPPER_DIR);
   }
-  if (settings.toolspaceEnabled && settings.sandboxBackend !== "selfhosted") {
-    environment.OPENGENI_TOOLSPACE_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/toolspace-token`;
+  if (settings.sandboxBackend !== "selfhosted" && resolveFirstPartyDelegationSecret(settings)) {
+    environment.OPENGENI_CODEMODE_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/codemode-token`;
     if (settings.ogtoolPackageSpec) {
       environment.OPENGENI_OGTOOL_PACKAGE_SPEC ??= settings.ogtoolPackageSpec;
     }
     if (options.workspaceId) {
-      environment.OPENGENI_TOOLSPACE_URL ??= firstPartyMcpWorkspaceUrl(
-        settings,
-        options.workspaceId,
-      );
+      environment.OPENGENI_CODEMODE_URL ??= codemodeWorkspaceUrl(settings, options.workspaceId);
     }
   }
   return environment;
@@ -4362,6 +4664,8 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
               "list_document_bases",
               "list_indexed_documents",
               "knowledge_search",
+              "knowledge_get",
+              "knowledge_browse",
               "knowledge_fetch",
               "memory_search",
               "memory_propose",
@@ -4413,6 +4717,34 @@ export function firstPartyMcpWorkspaceUrl(settings: Settings, workspaceId: strin
   return url.toString();
 }
 
+export function codemodeWorkspaceUrl(settings: Settings, workspaceId: string): string {
+  if (settings.opengeniMcpUrl) {
+    const url = new URL(firstPartyMcpWorkspaceUrl(settings, workspaceId));
+    if (!url.pathname.endsWith("/mcp")) {
+      throw new Error("First-party MCP URL cannot be projected to the Codemode endpoint");
+    }
+    url.pathname = `${url.pathname.slice(0, -4)}/codemode`;
+    return url.toString();
+  }
+
+  // Codemode executes inside the selected placement, not beside the worker.
+  // Local Docker reaches the host through Docker's canonical host alias; an
+  // in-process local sandbox uses loopback; remote managed providers use the
+  // deployment's public origin. `OPENGENI_MCP_URL` above remains the explicit
+  // escape hatch for mounted deployments and local remote-provider tunnels.
+  const executionOrigin =
+    settings.sandboxBackend === "docker"
+      ? `http://host.docker.internal:${settings.apiPort}`
+      : settings.sandboxBackend === "local"
+        ? `http://127.0.0.1:${settings.apiPort}`
+        : (settings.publicBaseUrl ?? `http://127.0.0.1:${settings.apiPort}`);
+  const url = new URL(executionOrigin);
+  url.pathname = `${url.pathname.replace(/\/+$/u, "")}/v1/workspaces/${workspaceId}/codemode`;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
 function firstPartyMcpServerUrl(settings: Settings): string {
   return firstPartyMcpBaseUrl(settings);
 }
@@ -4427,8 +4759,16 @@ function firstPartyFilesMcpServerUrl(mcpUrl: string): string {
 
 function validateSettings(settings: Settings): void {
   temporalConnectionOptions(settings);
-  if (settings.toolspaceEnabled && !settings.delegationSecret) {
-    throw new Error("OPENGENI_DELEGATION_SECRET is required when OPENGENI_TOOLSPACE_ENABLED=true");
+  const allowedFirstPartyMcpTools = new Set(
+    settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES,
+  );
+  const disallowedDefaults = (settings.defaultFirstPartyMcpTools ?? []).filter(
+    (tool) => !allowedFirstPartyMcpTools.has(tool),
+  );
+  if (disallowedDefaults.length > 0) {
+    throw new Error(
+      `OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS must be a subset of OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS: ${disallowedDefaults.join(", ")}`,
+    );
   }
   if (settings.productAccessMode === "managed") {
     if (!settings.publicBaseUrl) {
@@ -4507,6 +4847,31 @@ function validateSettings(settings: Settings): void {
       "OPENGENI_GOOGLE_DRIVE_CLIENT_ID and OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET must be configured together",
     );
   }
+  if (Boolean(settings.fikenClientId) !== Boolean(settings.fikenClientSecret)) {
+    throw new Error(
+      "OPENGENI_FIKEN_OAUTH_CLIENT_ID and OPENGENI_FIKEN_OAUTH_CLIENT_SECRET must be configured together",
+    );
+  }
+  if (settings.fikenClientId) {
+    if (!settings.publicBaseUrl) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL is required when the Fiken OAuth integration is configured",
+      );
+    }
+    if (
+      !settings.publicBaseUrl.startsWith("https://") &&
+      !["local", "test"].includes(settings.environment)
+    ) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when the Fiken OAuth integration is configured outside local/test",
+      );
+    }
+    if (!settings.integrationsStateSecret) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Fiken OAuth integration is configured",
+      );
+    }
+  }
   if (settings.googleDriveClientId) {
     if (!settings.publicBaseUrl) {
       throw new Error(
@@ -4524,6 +4889,31 @@ function validateSettings(settings: Settings): void {
     if (!settings.integrationsStateSecret) {
       throw new Error(
         "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Google Drive integration is configured",
+      );
+    }
+  }
+  if (Boolean(settings.atlassianClientId) !== Boolean(settings.atlassianClientSecret)) {
+    throw new Error(
+      "OPENGENI_ATLASSIAN_CLIENT_ID and OPENGENI_ATLASSIAN_CLIENT_SECRET must be configured together",
+    );
+  }
+  if (settings.atlassianClientId) {
+    if (!settings.publicBaseUrl) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL is required when the Atlassian integration is configured",
+      );
+    }
+    if (
+      !settings.publicBaseUrl.startsWith("https://") &&
+      !["local", "test"].includes(settings.environment)
+    ) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when the Atlassian integration is configured outside local/test",
+      );
+    }
+    if (!settings.integrationsStateSecret) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Atlassian integration is configured",
       );
     }
   }
@@ -4750,6 +5140,7 @@ function validateSettings(settings: Settings): void {
   {
     const reaperPeriod = settings.sandboxLeaseReaperPeriodMs;
     const viewerTtl = settings.sandboxViewerHolderTtlMs;
+    const interactionTtl = settings.sandboxInteractionHolderTtlMs;
     const idleGraceMs = settings.sandboxIdleGraceMs;
     const providerLifetimeMs = settings.modalTimeoutSeconds * 1000;
     const rotationLeadMs = settings.sandboxRotationLeadMs;
@@ -4766,6 +5157,13 @@ function validateSettings(settings: Settings): void {
         `OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS (${reaperPeriod}) must be strictly less than ` +
           `OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS (${viewerTtl}): the reaper must run more often ` +
           `than the TTL it polices, or stale viewer holders outlive a full reaper period.`,
+      );
+    }
+    if (!(reaperPeriod < interactionTtl)) {
+      throw new Error(
+        `OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS (${reaperPeriod}) must be strictly less than ` +
+          `OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS (${interactionTtl}): the reaper must run ` +
+          `more often than the controller-heartbeat horizon.`,
       );
     }
     if (!(idleTimeoutMs <= providerLifetimeMs)) {
@@ -4797,6 +5195,13 @@ function validateSettings(settings: Settings): void {
         `OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS (${viewerTtl}) must be strictly less than the effective box ` +
           `idle timeout (${idleTimeoutMs}): a viewer holder must be reapable before the box idles out from ` +
           `under it (the provider idle-timeout is the backstop).`,
+      );
+    }
+    if (!(interactionTtl < idleTimeoutMs)) {
+      throw new Error(
+        `OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS (${interactionTtl}) must be strictly less than ` +
+          `the effective box idle timeout (${idleTimeoutMs}): a dead browser controller must be ` +
+          `reapable before the provider reclaims its placement.`,
       );
     }
     if (!(reaperPeriod + idleGraceMs < idleTimeoutMs)) {
@@ -4840,10 +5245,11 @@ function validateSettings(settings: Settings): void {
   for (const provider of registryProviders) {
     if (
       provider.kind === "vercel-gateway-managed" ||
-      provider.kind === "vercel-gateway-workspace"
+      provider.kind === "vercel-gateway-workspace" ||
+      provider.kind === "xai-subscription"
     ) {
       throw new Error(
-        `OPENGENI_MODEL_PROVIDERS_JSON provider kind ${provider.kind} is reserved for the reviewed AI Gateway broker`,
+        `OPENGENI_MODEL_PROVIDERS_JSON provider kind ${provider.kind} is reserved for a reviewed OpenGeni credential broker`,
       );
     }
     if (provider.id === builtinId) {

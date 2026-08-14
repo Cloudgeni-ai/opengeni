@@ -6,6 +6,12 @@ import { fileURLToPath } from "node:url";
 
 type ProcessTarget = "api" | "worker" | "artifact-materializer" | "artifact-outbox";
 
+export const RUNTIME_SKILL_ASSET_DIRECTORY_NAMES = [
+  "curated_skill_library",
+  "bundled_artifact_skills",
+  "bundled_video_skills",
+] as const;
+
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const requested = process.argv.slice(2);
 const targets: ProcessTarget[] =
@@ -35,6 +41,17 @@ async function copyDirectory(source: string, destination: string): Promise<void>
   await cp(source, destination, { recursive: true, force: true });
 }
 
+export async function copyRuntimeSkillAssets(root: string, outdir: string): Promise<void> {
+  await Promise.all(
+    RUNTIME_SKILL_ASSET_DIRECTORY_NAMES.map((directoryName) =>
+      copyDirectory(
+        join(root, "packages/runtime/src", directoryName),
+        join(outdir, "assets/runtime", directoryName),
+      ),
+    ),
+  );
+}
+
 const sharedBuild = {
   target: "bun" as const,
   format: "esm" as const,
@@ -62,10 +79,7 @@ async function buildApi(): Promise<void> {
     external: [...nativeRuntimeExternals, "better-auth", "better-auth/*", "@better-auth/*"],
   });
   await copyDirectory(join(repositoryRoot, "agent/install"), join(outdir, "assets/agent-install"));
-  await copyDirectory(
-    join(repositoryRoot, "packages/runtime/src/bundled_hashicorp_terraform_skills"),
-    join(outdir, "assets/runtime/bundled_hashicorp_terraform_skills"),
-  );
+  await copyRuntimeSkillAssets(repositoryRoot, outdir);
 }
 
 async function buildWorker(): Promise<void> {
@@ -94,14 +108,7 @@ async function buildWorker(): Promise<void> {
     join(repositoryRoot, "apps/worker/dist/workflow-bundle.js"),
     join(outdir, "workflow-bundle.js"),
   );
-  await copyDirectory(
-    join(repositoryRoot, "packages/runtime/src/bundled_hashicorp_terraform_skills"),
-    join(outdir, "assets/runtime/bundled_hashicorp_terraform_skills"),
-  );
-  await copyDirectory(
-    join(repositoryRoot, "packages/runtime/src/bundled_skill_library"),
-    join(outdir, "assets/runtime/bundled_skill_library"),
-  );
+  await copyRuntimeSkillAssets(repositoryRoot, outdir);
 }
 
 async function buildArtifactSidecar(
@@ -124,9 +131,11 @@ async function buildArtifactSidecar(
   });
 }
 
-for (const target of targets) {
-  if (target === "api") await buildApi();
-  else if (target === "worker") await buildWorker();
-  else await buildArtifactSidecar(target);
-  process.stdout.write(`[runtime-process] built ${target}\n`);
+if (import.meta.main) {
+  for (const target of targets) {
+    if (target === "api") await buildApi();
+    else if (target === "worker") await buildWorker();
+    else await buildArtifactSidecar(target);
+    process.stdout.write(`[runtime-process] built ${target}\n`);
+  }
 }

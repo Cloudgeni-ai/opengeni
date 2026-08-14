@@ -4,6 +4,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import type {
+  ConnectionCredentialPlacement,
   ConnectionKind,
   ConnectionCredentialsPort,
   ConnectionStatus,
@@ -27,6 +28,24 @@ import { Buffer } from "node:buffer";
 import { isIP } from "node:net";
 import { encryptEnvironmentValue } from "./environment-crypto";
 import type { Database } from "./database";
+
+const MAX_CREDENTIAL_PLACEMENTS = 32;
+const MAX_CREDENTIAL_NAME_BYTES = 256;
+const MAX_CREDENTIAL_VALUE_BYTES = 16_384;
+const HEADER_NAME_PATTERN = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+const QUERY_NAME_PATTERN = /^[A-Za-z0-9._~-]+$/;
+const COOKIE_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+const FORBIDDEN_CREDENTIAL_HEADERS = new Set([
+  "connection",
+  "content-length",
+  "host",
+  "proxy-authorization",
+  "proxy-connection",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
 
 export type ConnectionCredentialForBroker = {
   id: string;
@@ -74,6 +93,8 @@ export type ResolveConnectionCredentialResult =
   | {
       status: "ok";
       headers: Record<string, string>;
+      /** Present when the credential bundle or embedding host supplied explicit placements. */
+      placements?: ConnectionCredentialPlacement[];
       connectionId: string;
       /** Exact durable version when the credential came from the local connection store. */
       connectionVersion?: number;
@@ -105,6 +126,8 @@ export type ResolveConnectionCredentialInput = {
   connectionRef: McpServerConnectionRef;
   /** Exact MCP destination whose request would receive the resolved headers. */
   destinationUrl: string;
+  /** Defaults to header-only MCP transport. */
+  credentialTarget?: "mcp" | "http_api";
   forceRefresh?: boolean;
 };
 
@@ -119,6 +142,7 @@ export type HostMcpCredentialResolverContext = {
   initiator: TurnInitiator;
   initiatorContext: TurnInitiatorContext;
   surface: McpCredentialsRequest["surface"];
+  allowOfficialGmailRestDestination?: boolean;
 };
 
 export class HostMcpCredentialScopeError extends Error {
@@ -137,11 +161,41 @@ export class HostMcpCredentialBindingError extends Error {
       | "scopes"
       | "resource"
       | "selectedResources"
-      | "destinationUrl",
+      | "destinationUrl"
+      | "credentialPlacements",
   ) {
     super(`host MCP credential ${field} binding mismatch`);
     this.name = "HostMcpCredentialBindingError";
   }
+}
+
+const OFFICIAL_GMAIL_MCP_RESOURCE = "https://gmailmcp.googleapis.com/mcp/v1";
+const OFFICIAL_GMAIL_REST_HOST = "gmail.googleapis.com";
+
+/**
+ * The opt-in Gmail REST adapter reuses the exact OAuth grant created for
+ * Google's hosted Gmail MCP while the preview endpoint is unavailable. Keep
+ * this exception narrower than ordinary provider-domain binding: HTTPS only,
+ * Google's canonical Gmail API host, and the authenticated `users/me` path.
+ */
+function isOfficialGmailRestDestination(
+  destinationUrl: string,
+  ref: McpServerConnectionRef,
+): boolean {
+  if (
+    ref.providerDomain.toLowerCase() !== "gmailmcp.googleapis.com" ||
+    ref.kind !== "oauth2" ||
+    ref.subjectScope !== "subject"
+  ) {
+    return false;
+  }
+  const destination = new URL(destinationUrl);
+  return (
+    destination.protocol === "https:" &&
+    destination.hostname.toLowerCase() === OFFICIAL_GMAIL_REST_HOST &&
+    (destination.pathname === "/gmail/v1/users/me" ||
+      destination.pathname.startsWith("/gmail/v1/users/me/"))
+  );
 }
 
 /**
@@ -161,7 +215,11 @@ export function buildHostConnectionTokenResolver(
     const destinationUrl = canonicalHttpUrl(input.destinationUrl);
     if (
       !destinationUrl ||
-      !destinationHostMatchesProvider(destinationUrl, input.connectionRef.providerDomain)
+      (!destinationHostMatchesProvider(destinationUrl, input.connectionRef.providerDomain) &&
+        !(
+          context.allowOfficialGmailRestDestination === true &&
+          isOfficialGmailRestDestination(destinationUrl, input.connectionRef)
+        ))
     ) {
       throw new HostMcpCredentialBindingError("destinationUrl");
     }
@@ -178,6 +236,7 @@ export function buildHostConnectionTokenResolver(
       initiatorContext: { ...context.initiatorContext },
       surface: context.surface,
       destinationUrl,
+      credentialTarget: input.credentialTarget ?? "mcp",
       serverId: input.serverId,
       connectionRef: {
         providerDomain: input.connectionRef.providerDomain,
@@ -221,10 +280,30 @@ export function buildHostConnectionTokenResolver(
     if (result.connectionId.length === 0) {
       throw new Error("host MCP credential returned an empty connectionId");
     }
+    const explicitPlacements =
+      result.placements === undefined
+        ? undefined
+        : normalizedCredentialPlacements(result.placements);
+    const headers = normalizedHostCredentialHeaders(
+      result.headers,
+      explicitPlacements !== undefined,
+    );
+    if (explicitPlacements) {
+      if (!sameHeaderMap(headers, headerMapForPlacements(explicitPlacements))) {
+        throw new HostMcpCredentialBindingError("credentialPlacements");
+      }
+      if (
+        (input.credentialTarget ?? "mcp") !== "http_api" &&
+        explicitPlacements.some((placement) => placement.carrier !== "header")
+      ) {
+        throw new HostMcpCredentialBindingError("credentialPlacements");
+      }
+    }
     const expiresAt = parseHostCredentialExpiry(result.expiresAt);
     return {
       status: "ok",
-      headers: normalizedHostCredentialHeaders(result.headers),
+      headers,
+      ...(explicitPlacements ? { placements: explicitPlacements } : {}),
       connectionId: result.connectionId,
       ...(expiresAt !== undefined ? { expiresAt } : {}),
     };
@@ -318,25 +397,127 @@ function assertHostMcpCredentialScope(
   }
 }
 
-function normalizedHostCredentialHeaders(headers: Record<string, string>): Record<string, string> {
+function normalizedHostCredentialHeaders(
+  headers: Record<string, string>,
+  allowEmpty = false,
+): Record<string, string> {
   const entries = Object.entries(headers);
-  if (entries.length === 0 || entries.length > 32) {
+  if ((!allowEmpty && entries.length === 0) || entries.length > 32) {
     throw new Error("host MCP credential returned an invalid header count");
   }
   const normalized: Record<string, string> = {};
   for (const [name, value] of entries) {
     if (
       name.length > 256 ||
-      !/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(name) ||
+      !HEADER_NAME_PATTERN.test(name) ||
       value.length === 0 ||
       value.length > 16_384 ||
-      /[\r\n\0]/.test(value)
+      /[\r\n\0]/.test(value) ||
+      FORBIDDEN_CREDENTIAL_HEADERS.has(name.toLowerCase()) ||
+      name.toLowerCase().startsWith("sec-")
     ) {
       throw new Error("host MCP credential returned an invalid header");
+    }
+    if (Object.keys(normalized).some((existing) => existing.toLowerCase() === name.toLowerCase())) {
+      throw new Error("host MCP credential returned duplicate headers");
     }
     normalized[name] = value;
   }
   return normalized;
+}
+
+function normalizedCredentialPlacements(value: unknown): ConnectionCredentialPlacement[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_CREDENTIAL_PLACEMENTS) {
+    throw new Error("connection credential returned an invalid placement count");
+  }
+  const seen = new Set<string>();
+  return value.map((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error("connection credential returned an invalid placement");
+    }
+    const record = raw as Record<string, unknown>;
+    if (
+      Object.keys(record).some(
+        (key) => key !== "carrier" && key !== "name" && key !== "value" && key !== "prefix",
+      )
+    ) {
+      throw new Error("connection credential returned an invalid placement");
+    }
+    const carrier = record.carrier;
+    const name = record.name;
+    const credentialValue = record.value;
+    const prefix = record.prefix;
+    if (
+      (carrier !== "header" && carrier !== "query" && carrier !== "cookie") ||
+      typeof name !== "string" ||
+      name.length === 0 ||
+      Buffer.byteLength(name) > MAX_CREDENTIAL_NAME_BYTES ||
+      typeof credentialValue !== "string" ||
+      credentialValue.length === 0 ||
+      (typeof prefix !== "undefined" && typeof prefix !== "string") ||
+      /[\r\n\0]/.test(name) ||
+      /[\r\n\0]/.test(credentialValue) ||
+      (typeof prefix === "string" && /[\r\n\0]/.test(prefix)) ||
+      Buffer.byteLength(`${typeof prefix === "string" ? prefix : ""}${credentialValue}`) >
+        MAX_CREDENTIAL_VALUE_BYTES
+    ) {
+      throw new Error("connection credential returned an invalid placement");
+    }
+    const normalizedName = carrier === "header" ? name.toLowerCase() : name;
+    if (
+      (carrier === "header" &&
+        (!HEADER_NAME_PATTERN.test(name) ||
+          FORBIDDEN_CREDENTIAL_HEADERS.has(normalizedName) ||
+          normalizedName.startsWith("sec-"))) ||
+      (carrier === "query" && !QUERY_NAME_PATTERN.test(name)) ||
+      (carrier === "cookie" &&
+        (!COOKIE_NAME_PATTERN.test(name) || /;/.test(`${prefix ?? ""}${credentialValue}`)))
+    ) {
+      throw new Error("connection credential returned an invalid placement");
+    }
+    const key = `${carrier}\0${normalizedName}`;
+    if (seen.has(key)) {
+      throw new Error("connection credential returned duplicate placements");
+    }
+    seen.add(key);
+    return {
+      carrier,
+      name,
+      value: credentialValue,
+      ...(typeof prefix === "string" && prefix.length > 0 ? { prefix } : {}),
+    };
+  });
+}
+
+function headerMapForPlacements(
+  placements: readonly ConnectionCredentialPlacement[],
+): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const placement of placements) {
+    if (placement.carrier === "header") {
+      headers[placement.name] = `${placement.prefix ?? ""}${placement.value}`;
+    }
+  }
+  return headers;
+}
+
+function sameHeaderMap(
+  left: Readonly<Record<string, string>>,
+  right: Readonly<Record<string, string>>,
+): boolean {
+  const canonical = (headers: Readonly<Record<string, string>>) =>
+    Object.entries(headers)
+      .map(([name, value]) => [name.toLowerCase(), value] as const)
+      .sort(([leftName], [rightName]) => leftName.localeCompare(rightName));
+  const leftEntries = canonical(left);
+  const rightEntries = canonical(right);
+  return (
+    leftEntries.length === rightEntries.length &&
+    leftEntries.every(
+      ([name, value], index) =>
+        rightEntries[index]?.[0] === name && rightEntries[index]?.[1] === value,
+    )
+  );
 }
 
 function normalizedAuthorizationUrl(value: string | undefined): string | undefined {
@@ -469,11 +650,12 @@ export function buildConnectionTokenResolver(
     cred: ConnectionCredentialForBroker,
     ref: McpServerConnectionRef,
     destinationUrl: string,
+    inputCredentialTarget: "mcp" | "http_api",
   ): Promise<ResolveConnectionCredentialResult> => {
     if (cred.status !== "active") {
       return authNeededForStatus(cred, ref);
     }
-    if (!connectionBindingMatches(cred, ref, destinationUrl)) {
+    if (!connectionBindingMatches(cred, ref, destinationUrl, settings.gmailRestAdapterEnabled)) {
       return authNeeded(ref, "missing_connection", cred.id);
     }
     const missingScopes = missingRequestedScopes(ref.scopes, cred.grantedScopes);
@@ -491,11 +673,11 @@ export function buildConnectionTokenResolver(
           : {}),
       };
     }
-    const headers = headersForCredential(cred);
-    if (!headers) {
+    const material = credentialMaterialForConnection(cred, inputCredentialTarget);
+    if (material.status !== "ok") {
       return {
         status: "auth_needed",
-        reason: "refresh_failed",
+        reason: material.status === "unsupported" ? "unsupported_auth" : "refresh_failed",
         providerDomain: ref.providerDomain,
         ...(ref.provider ? { provider: ref.provider } : {}),
         connectionId: cred.id,
@@ -509,7 +691,8 @@ export function buildConnectionTokenResolver(
     await deps.recordUsed(db, cred.workspaceId, cred.id, cred.subjectId);
     return {
       status: "ok",
-      headers,
+      headers: material.headers,
+      ...(material.placements ? { placements: material.placements } : {}),
       connectionId: cred.id,
       connectionVersion: cred.version,
       expiresAt: cred.expiresAt,
@@ -604,7 +787,9 @@ export function buildConnectionTokenResolver(
     // Reject an audience/destination mismatch before any provider-side refresh
     // or usage update. Refreshing first would still create an unauthorized
     // external side effect even though the token was never sent to the target.
-    if (!connectionBindingMatches(cred, ref, input.destinationUrl)) {
+    if (
+      !connectionBindingMatches(cred, ref, input.destinationUrl, settings.gmailRestAdapterEnabled)
+    ) {
       return authNeeded(ref, "missing_connection", cred.id);
     }
     if (shouldRefresh(cred, input.forceRefresh === true, deps.now())) {
@@ -643,7 +828,7 @@ export function buildConnectionTokenResolver(
         return authNeeded(ref, "refresh_failed", cred.id);
       }
     }
-    return await snapshot(cred, ref, input.destinationUrl);
+    return await snapshot(cred, ref, input.destinationUrl, input.credentialTarget ?? "mcp");
   };
 }
 
@@ -651,6 +836,7 @@ function connectionBindingMatches(
   cred: ConnectionCredentialForBroker,
   ref: McpServerConnectionRef,
   destinationUrl: string,
+  gmailRestAdapterEnabled: boolean,
 ): boolean {
   if (cred.providerDomain.toLowerCase() !== ref.providerDomain.toLowerCase()) return false;
   if (ref.kind && cred.kind !== ref.kind) return false;
@@ -662,7 +848,17 @@ function connectionBindingMatches(
   if (!destination) return false;
   if (boundMcpUrl) {
     const binding = canonicalHttpUrl(boundMcpUrl);
-    if (!binding || destination !== binding) return false;
+    if (
+      !binding ||
+      (destination !== binding &&
+        !(
+          gmailRestAdapterEnabled &&
+          binding === canonicalHttpUrl(OFFICIAL_GMAIL_MCP_RESOURCE) &&
+          isOfficialGmailRestDestination(destination, ref)
+        ))
+    ) {
+      return false;
+    }
   } else if (!destinationHostMatchesProvider(destination, cred.providerDomain)) {
     // Legacy/manual API-key rows may predate mcpUrl metadata. They are still
     // host-bound to their canonical provider domain, never usable as an
@@ -801,20 +997,55 @@ export function normalizeBearerScheme(tokenType: string | null | undefined): str
   return !tokenType || /^bearer$/i.test(tokenType) ? "Bearer" : tokenType;
 }
 
-function headersForCredential(cred: ConnectionCredentialForBroker): Record<string, string> | null {
-  if (cred.kind === "api_key") {
-    return stringRecord((cred.credential as { headers?: unknown }).headers);
-  }
+type ConnectionCredentialMaterial =
+  | {
+      status: "ok";
+      headers: Record<string, string>;
+      placements?: ConnectionCredentialPlacement[];
+    }
+  | { status: "invalid" | "unsupported" };
+
+function credentialMaterialForConnection(
+  cred: ConnectionCredentialForBroker,
+  target: "mcp" | "http_api",
+): ConnectionCredentialMaterial {
   if (cred.kind === "oauth2") {
     const accessToken = stringValue((cred.credential as { access_token?: unknown }).access_token);
     if (!accessToken) {
-      return null;
+      return { status: "invalid" };
     }
     return {
-      authorization: `${normalizeBearerScheme(stringValue((cred.credential as { token_type?: unknown }).token_type))} ${accessToken}`,
+      status: "ok",
+      headers: {
+        authorization: `${normalizeBearerScheme(stringValue((cred.credential as { token_type?: unknown }).token_type))} ${accessToken}`,
+      },
     };
   }
-  return stringRecord((cred.credential as { headers?: unknown }).headers);
+  const rawPlacements = (cred.credential as { placements?: unknown }).placements;
+  if (rawPlacements !== undefined) {
+    let placements: ConnectionCredentialPlacement[];
+    try {
+      placements = normalizedCredentialPlacements(rawPlacements);
+    } catch {
+      return { status: "invalid" };
+    }
+    if (target !== "http_api" && placements.some((placement) => placement.carrier !== "header")) {
+      return { status: "unsupported" };
+    }
+    return {
+      status: "ok",
+      headers: headerMapForPlacements(placements),
+      placements,
+    };
+  }
+  try {
+    const headers = normalizedHostCredentialHeaders(
+      stringRecord((cred.credential as { headers?: unknown }).headers) ?? {},
+    );
+    return { status: "ok", headers };
+  } catch {
+    return { status: "invalid" };
+  }
 }
 
 export async function refreshOAuthConnectionCredential(
@@ -869,7 +1100,16 @@ export async function refreshOAuthConnectionCredential(
   if (clientId) {
     body.set("client_id", clientId);
   }
-  const headers: Record<string, string> = { "content-type": "application/x-www-form-urlencoded" };
+  const tokenRequestEncoding =
+    stringValue(
+      (cred.credential as { token_request_encoding?: unknown }).token_request_encoding,
+    ) === "json"
+      ? "json"
+      : "form";
+  const headers: Record<string, string> = {
+    "content-type":
+      tokenRequestEncoding === "json" ? "application/json" : "application/x-www-form-urlencoded",
+  };
   if (clientSecret && authMethod === "client_secret_post") {
     body.set("client_secret", clientSecret);
   } else if (clientId && clientSecret && authMethod === "client_secret_basic") {
@@ -877,18 +1117,23 @@ export async function refreshOAuthConnectionCredential(
   }
   const resource =
     ref.resource ?? stringValue((cred.credential as { resource?: unknown }).resource);
-  if (resource) {
+  const resourceParameterSupported =
+    (cred.credential as { resource_parameter_supported?: unknown }).resource_parameter_supported !==
+    false;
+  if (resource && resourceParameterSupported) {
     body.set("resource", resource);
   }
   if (ref.scopes?.length) {
     body.set("scope", ref.scopes.join(" "));
   }
+  const requestBody: BodyInit =
+    tokenRequestEncoding === "json" ? JSON.stringify(Object.fromEntries(body.entries())) : body;
   const response = await pinnedFetch(
     validatedTokenEndpoint,
     {
       method: "POST",
       headers,
-      body,
+      body: requestBody,
       signal: AbortSignal.timeout(CONNECTION_REFRESH_TIMEOUT_MS),
     },
     settings,

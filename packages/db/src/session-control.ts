@@ -7,7 +7,7 @@ import {
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
 import { and, eq, inArray, sql } from "drizzle-orm";
-import type { Database } from "./database";
+import type { Database, SessionActivityDatabase } from "./database";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
@@ -200,7 +200,7 @@ export class SessionCommandIdempotencyError extends Error {
 
 export class AgentCommandAuthorityError extends Error {
   constructor(
-    readonly code: "CALLER_STALE" | "CALLER_INTERRUPTED" | "SELF_OR_ANCESTOR_PAUSE" | "SELF_STEER",
+    readonly code: "CALLER_STALE" | "CALLER_INTERRUPTED" | "TARGET_NOT_VERTICAL" | "SELF_STEER",
     message: string,
   ) {
     super(message);
@@ -232,10 +232,12 @@ export async function assertAgentCommandAuthorityInTransaction(
     attemptIds: [input.actor.attemptId],
   });
   const lockedSessions = authorityLocks.sessions;
-  if (!lockedSessions.some((row) => row.id === input.actor.sessionId)) {
+  const callerSession = lockedSessions.find((row) => row.id === input.actor.sessionId);
+  if (!callerSession) {
     throw new AgentCommandAuthorityError("CALLER_STALE", "The calling session no longer exists");
   }
-  if (!lockedSessions.some((row) => row.id === input.targetSessionId)) {
+  const targetSession = lockedSessions.find((row) => row.id === input.targetSessionId);
+  if (!targetSession) {
     throw new SessionControlInvariantError(`Target session not found: ${input.targetSessionId}`);
   }
   const rows = await db.execute<{
@@ -298,37 +300,21 @@ export async function assertAgentCommandAuthorityInTransaction(
   if (input.action === "steer" && input.targetSessionId === input.actor.sessionId) {
     throw new AgentCommandAuthorityError("SELF_STEER", "An agent cannot steer its own session");
   }
-  if (input.action !== "pause") return;
-  const ancestry = await db.execute<{
-    containsCaller: boolean;
-    invalid: boolean;
-  }>(sql`
-    with recursive caller_ancestry(id, parent_id, depth, path, cycle) as (
-      select session.id, session.parent_session_id, 0, array[session.id], false
-      from ${schema.sessions} session
-      where session.workspace_id = ${input.workspaceId}
-        and session.id = ${input.actor.sessionId}
-      union all
-      select parent.id, parent.parent_session_id, child.depth + 1,
-             child.path || parent.id, parent.id = any(child.path)
-      from caller_ancestry child
-      join ${schema.sessions} parent
-        on parent.workspace_id = ${input.workspaceId} and parent.id = child.parent_id
-      where child.depth < ${SESSION_ANCESTRY_LIMIT} and not child.cycle
-    )
-    select
-      coalesce(bool_or(id = ${input.targetSessionId}), false) as "containsCaller",
-      coalesce(bool_or(cycle), false) or coalesce(max(depth), 0) >= ${SESSION_ANCESTRY_LIMIT}
-        as invalid
-    from caller_ancestry
-  `);
-  if (ancestry[0]?.invalid) {
-    throw new SessionControlInvariantError("Caller ancestry is invalid");
-  }
-  if (ancestry[0]?.containsCaller) {
+  const targetsSelf = targetSession.id === callerSession.id;
+  const targetsDirectParent = callerSession.parentSessionId === targetSession.id;
+  const targetsDirectChild = targetSession.parentSessionId === callerSession.id;
+  const verticalTargetAllowed =
+    input.action === "goal"
+      ? targetsSelf
+      : input.action === "message"
+        ? targetsSelf || targetsDirectParent || targetsDirectChild
+        : targetsDirectChild;
+  if (!verticalTargetAllowed) {
     throw new AgentCommandAuthorityError(
-      "SELF_OR_ANCESTOR_PAUSE",
-      "An agent cannot pause its own session or an ancestor workstream",
+      "TARGET_NOT_VERTICAL",
+      input.action === "message"
+        ? "An agent may message only its own session, direct parent, or direct child"
+        : "An agent may control only a direct child session",
     );
   }
 }
@@ -430,7 +416,7 @@ export type SessionEventWriteLocks = {
  *
  *   workspace_inference_controls (when control-aware)
  *     -> actual workspaces row FOR KEY SHARE
- *     -> session rows FOR UPDATE, UUID ordered
+ *     -> session rows FOR NO KEY UPDATE, UUID ordered
  *     -> exact turn rows FOR UPDATE, UUID ordered
  *     -> exact attempt rows FOR UPDATE, UUID ordered
  *
@@ -438,6 +424,11 @@ export type SessionEventWriteLocks = {
  * stable for their FK, but they do not mutate the workspace. The old generic
  * `FOR UPDATE` lock serialized unrelated sessions and inverted the activity
  * path's session -> implicit workspace-FK edge.
+ *
+ * `FOR NO KEY UPDATE` is equally deliberate for sessions. Session primary and
+ * composite identity keys are immutable, so writers need to exclude only concurrent
+ * non-key mutation. Keeping FK `FOR KEY SHARE` checks compatible prevents the
+ * activity finalizer's workspace counter from participating in a lock cycle.
  *
  * Complex lifecycle transactions may acquire allocator/control locks before
  * this helper and may discover exact turn IDs only after locking the session.
@@ -478,7 +469,7 @@ export async function lockSessionEventWriteRows(
             ),
           )
           .orderBy(schema.sessions.id)
-          .for("update")
+          .for("no key update")
       : [];
 
   const turnIds = [...new Set(input.turnIds ?? [])].sort();
@@ -529,14 +520,24 @@ export async function registerSessionTurnAttemptClaim(
     temporalWorkflowRunId: string;
     temporalActivityId: string;
     verifiedControlRevision: number;
+    authorityEpoch: number;
+    authorityVisibility: "user_private" | "workspace_shared";
+    authorityOwnerOrganizationMembershipId: string | null;
     mcpApprovalPolicies: Record<string, SessionMcpApprovalPolicy>;
     connectorActionPolicies: schema.ConnectorActionPolicySnapshotEntry[];
   },
 ): Promise<typeof schema.sessionTurnAttempts.$inferSelect> {
+  const authoritySnapshot = assertSessionAuthoritySnapshot({
+    attemptId: input.id,
+    authorityEpoch: input.authorityEpoch,
+    authorityVisibility: input.authorityVisibility,
+    authorityOwnerOrganizationMembershipId: input.authorityOwnerOrganizationMembershipId,
+  });
   const [inserted] = await db
     .insert(schema.sessionTurnAttempts)
     .values({
       ...input,
+      ...authoritySnapshot,
       state: "claimed",
     })
     // Only an idempotent replay of this exact preallocated attempt ID may
@@ -557,12 +558,22 @@ export async function registerSessionTurnAttemptClaim(
     )
     .for("update")
     .limit(1);
+  const existingAuthoritySnapshot = existing
+    ? assertSessionAuthoritySnapshot({
+        attemptId: existing.id,
+        authorityEpoch: existing.authorityEpoch,
+        authorityVisibility: existing.authorityVisibility,
+        authorityOwnerOrganizationMembershipId: existing.authorityOwnerOrganizationMembershipId,
+      })
+    : null;
   if (
     !existing ||
     existing.accountId !== input.accountId ||
     existing.sessionId !== input.sessionId ||
     existing.turnId !== input.turnId ||
     existing.executionGeneration !== input.executionGeneration ||
+    !existingAuthoritySnapshot ||
+    !sessionAuthoritySnapshotsEqual(existingAuthoritySnapshot, authoritySnapshot) ||
     existing.temporalWorkflowId !== input.temporalWorkflowId ||
     existing.temporalWorkflowRunId !== input.temporalWorkflowRunId ||
     existing.temporalActivityId !== input.temporalActivityId ||
@@ -575,6 +586,80 @@ export async function registerSessionTurnAttemptClaim(
     );
   }
   return existing;
+}
+
+export type SessionAuthoritySnapshot = {
+  authorityEpoch: number;
+  authorityVisibility: "user_private" | "workspace_shared";
+  authorityOwnerOrganizationMembershipId: string | null;
+};
+
+/**
+ * Validate the complete accepted-attempt authority tuple. Missing or partial
+ * values are not legacy defaults: current claim writers must provide the
+ * exact locked session authority explicitly.
+ */
+export function assertSessionAuthoritySnapshot(input: {
+  attemptId?: string;
+  authorityEpoch: unknown;
+  authorityVisibility: unknown;
+  authorityOwnerOrganizationMembershipId: unknown;
+}): SessionAuthoritySnapshot {
+  const valid =
+    Number.isSafeInteger(input.authorityEpoch) &&
+    (input.authorityEpoch as number) > 0 &&
+    (input.authorityVisibility === "user_private" ||
+      input.authorityVisibility === "workspace_shared") &&
+    ((input.authorityVisibility === "user_private" &&
+      typeof input.authorityOwnerOrganizationMembershipId === "string") ||
+      (input.authorityVisibility === "workspace_shared" &&
+        (input.authorityOwnerOrganizationMembershipId === null ||
+          typeof input.authorityOwnerOrganizationMembershipId === "string")));
+  if (!valid) {
+    throw new SessionControlInvariantError(
+      `Attempt ${input.attemptId ?? "unknown"} has an invalid session authority snapshot`,
+    );
+  }
+  return {
+    authorityEpoch: input.authorityEpoch as number,
+    authorityVisibility:
+      input.authorityVisibility as SessionAuthoritySnapshot["authorityVisibility"],
+    authorityOwnerOrganizationMembershipId: input.authorityOwnerOrganizationMembershipId as
+      | string
+      | null,
+  };
+}
+
+export function sessionAuthoritySnapshotMatchesSession(
+  snapshot: SessionAuthoritySnapshot,
+  session: Pick<
+    typeof schema.sessions.$inferSelect,
+    "authorityEpoch" | "visibility" | "ownerOrganizationMembershipId"
+  >,
+): boolean {
+  return (
+    snapshot.authorityEpoch === session.authorityEpoch &&
+    snapshot.authorityVisibility === session.visibility &&
+    snapshot.authorityOwnerOrganizationMembershipId ===
+      (session.ownerOrganizationMembershipId ?? null)
+  );
+}
+
+export function sessionAuthoritySnapshotsEqual(
+  left: Pick<
+    SessionAuthoritySnapshot,
+    "authorityEpoch" | "authorityVisibility" | "authorityOwnerOrganizationMembershipId"
+  >,
+  right: Pick<
+    SessionAuthoritySnapshot,
+    "authorityEpoch" | "authorityVisibility" | "authorityOwnerOrganizationMembershipId"
+  >,
+): boolean {
+  return (
+    left.authorityEpoch === right.authorityEpoch &&
+    left.authorityVisibility === right.authorityVisibility &&
+    left.authorityOwnerOrganizationMembershipId === right.authorityOwnerOrganizationMembershipId
+  );
 }
 
 /**
@@ -1163,7 +1248,10 @@ export async function evaluateSessionDiscoveryControls(
     );
   }
 
-  const workspace = await lockWorkspaceInferenceControl(db, workspaceId, "share");
+  // Discovery owns one read-only repeatable-read snapshot, so this projection
+  // must not join the writer lock graph merely to keep workspace/session facts
+  // coherent. The snapshot is the consistency boundary.
+  const workspace = await lockWorkspaceInferenceControl(db, workspaceId, "none");
   const workspacePauseRevision = asSafeRevision(
     workspace.workspacePauseRevision,
     "workspace pause revision",
@@ -1412,12 +1500,12 @@ export async function reserveSessionCommandReceipt(
   if (
     identityScope === "goal_operation" &&
     (input.actor.type !== "agent_attempt" ||
-      input.action !== "goal.update" ||
+      !["goal.update", "goal.progress"].includes(input.action) ||
       input.targetSessionId === null ||
       input.targetTurnId !== null)
   ) {
     throw new SessionControlInvariantError(
-      "Target-scoped receipt identity is reserved for agent goal.update commands",
+      "Target-scoped receipt identity is reserved for agent goal commands",
     );
   }
   const actorSubjectId = input.actor.type === "agent_attempt" ? null : input.actor.subjectId;
@@ -2050,7 +2138,7 @@ async function assertSessionBranchIsNotCancelled(
 }
 
 async function cancelSessionSubtreeInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -2375,7 +2463,7 @@ async function cancelSessionSubtreeInTransaction(
 }
 
 export async function mutateSessionControlInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -2694,7 +2782,7 @@ export async function mutateSessionControlInTransaction(
 }
 
 export async function autoResumeSessionBranchInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     workspaceId: string;
     sessionId: string;

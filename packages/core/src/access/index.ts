@@ -20,6 +20,7 @@ import type { ManagedAuth } from "../managed-auth-type";
 import { getManagedSession } from "../managed-session";
 
 const bearerPrefix = "Bearer ";
+const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null>>();
 
 export type AccessDeps = {
   db: Database;
@@ -28,7 +29,12 @@ export type AccessDeps = {
 };
 
 export async function requireAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext> {
-  const context = await resolveAccessContext(c, deps);
+  let pending = accessContextByRequest.get(c.req.raw);
+  if (!pending) {
+    pending = resolveAccessContext(c, deps);
+    accessContextByRequest.set(c.req.raw, pending);
+  }
+  const context = await pending;
   if (!context) {
     throw new HTTPException(401, { message: "authentication required" });
   }
@@ -252,7 +258,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
   }
 
   if (deps.managedAuth) {
-    const session = await getManagedSession(c, deps.managedAuth);
+    const session = await getManagedSession(c, deps.managedAuth, { db: deps.db });
     if (session?.user) {
       return await ensureManagedAccessForUser(deps.db, {
         userId: session.user.id,
@@ -354,6 +360,12 @@ async function delegatedAccessContext(
           ...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
           ...(payload.firstPartyMcpTools !== undefined
             ? { firstPartyMcpTools: payload.firstPartyMcpTools }
+            : {}),
+          ...(payload.nestedAgentDepth !== undefined
+            ? { nestedAgentDepth: payload.nestedAgentDepth }
+            : {}),
+          ...(payload.effectiveMaxNestedAgentDepth !== undefined
+            ? { effectiveMaxNestedAgentDepth: payload.effectiveMaxNestedAgentDepth }
             : {}),
           // Caller identity: the turn that minted this token. Tools classify the
           // CALLER from this instead of re-reading the live active pointer.

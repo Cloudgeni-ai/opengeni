@@ -39,6 +39,17 @@ type ConnectionRef = { workspaceId: string; connectionId: string; subjectId?: st
 
 const MAX_LIVE_RESULTS = 50;
 
+export function assertSocialConnectionProvider(
+  connection: Pick<SocialConnection, "provider">,
+  expected: "x" | "reddit",
+): void {
+  if (connection.provider !== expected) {
+    throw new Error(
+      `Selected account belongs to ${connection.provider}, not the ${expected} integration`,
+    );
+  }
+}
+
 export async function socialSearchLive(
   deps: SocialApiDeps,
   ref: ConnectionRef,

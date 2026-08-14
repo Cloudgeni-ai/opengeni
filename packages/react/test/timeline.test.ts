@@ -1058,23 +1058,41 @@ describe("buildTimeline", () => {
     expect(item.prompt).toBe("Run the drift check on prod");
     expect(item.status).toBe("complete");
     expect(item.workerSessionId).toBe(workerId);
+    expect(item.failure).toBeNull();
   });
 
-  test("a worker spawn whose output carries an error flag settles to failed, not complete", () => {
+  test("a worker spawn retains a bounded structured failure diagnostic", () => {
     reset();
+    const message = `shared placement rejected ${"🧪".repeat(600)}`;
     const items = buildTimeline([
       event("agent.toolCall.created", {
         id: "call-1",
         name: "session_create",
         arguments: JSON.stringify({ initialMessage: "Run the drift check on prod" }),
       }),
-      event("agent.toolCall.output", { id: "call-1", output: "spawn rejected", error: true }),
+      event("agent.toolCall.output", {
+        id: "call-1",
+        output: {
+          isError: true,
+          structuredContent: {
+            error: { code: "session_create_rejected", message },
+          },
+          content: [{ type: "text", text: "legacy fallback text" }],
+        },
+      }),
     ]);
-    expect((items[0] as WorkerItem).kind).toBe("worker");
-    expect((items[0] as WorkerItem).status).toBe("failed");
+    const item = items[0] as WorkerItem;
+    expect(item.kind).toBe("worker");
+    expect(item.status).toBe("failed");
+    expect(item.failure?.code).toBe("session_create_rejected");
+    expect(item.failure?.message).toStartWith("shared placement rejected");
+    expect(item.failure?.message).not.toContain("�");
+    expect(new TextEncoder().encode(item.failure?.message ?? "").byteLength).toBeLessThanOrEqual(
+      1_024,
+    );
   });
 
-  test("a worker message whose MCP output isError settles to failed", () => {
+  test("a worker message retains structured failure from MCP text JSON", () => {
     reset();
     const items = buildTimeline([
       event("agent.toolCall.created", {
@@ -1087,10 +1105,28 @@ describe("buildTimeline", () => {
       }),
       event("agent.toolCall.output", {
         id: "call-1",
-        output: { isError: true, content: [{ type: "text", text: "delivery failed" }] },
+        output: {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: {
+                  code: "session_send_message_conflict",
+                  message: "The target session no longer accepts this update.",
+                },
+              }),
+            },
+          ],
+        },
       }),
     ]);
-    expect((items[0] as WorkerItem).status).toBe("failed");
+    const item = items[0] as WorkerItem;
+    expect(item.status).toBe("failed");
+    expect(item.failure).toEqual({
+      code: "session_send_message_conflict",
+      message: "The target session no longer accepts this update.",
+    });
   });
 
   test("session_send_message becomes a worker message item targeting the session in the arguments", () => {
@@ -2023,6 +2059,89 @@ describe("groupTimeline", () => {
       kind: "agent-message",
       text: "Final answer: tests are green.",
     });
+  });
+
+  test("keeps a durable generated-video result outside the settled turn fold", () => {
+    reset();
+    const operationId = "66666666-6666-4666-8666-666666666666";
+    const artifactId = "55555555-5555-4555-8555-555555555555";
+    const groups = groupTimeline(
+      buildTimeline([
+        event("user.message", { text: "make a video" }, { turnId: null }),
+        event(
+          "system.update.delivered",
+          {
+            members: [
+              {
+                id: "video-update-1",
+                kind: "media_generation_result",
+                classification: "success",
+                sourceId: operationId,
+                summary: "The requested video is ready.",
+                result: {
+                  type: "media_generation_result",
+                  schemaVersion: 1,
+                  status: "ready",
+                  operationId,
+                  receipt: {
+                    type: "generated_video",
+                    schemaVersion: 1,
+                    operationId,
+                    artifact: {
+                      available: true,
+                      artifactId,
+                      kind: "generated_video",
+                      contentType: "video/mp4",
+                      originalBytes: 2_000_000,
+                      sha256: "a".repeat(64),
+                      retainedAt: "2026-08-10T10:00:00.000Z",
+                      dimensions: { width: 480, height: 480 },
+                      retention: { policy: "workspace_file", expiresAt: null },
+                      retrieval: {
+                        method: "GET",
+                        path: `/v1/workspaces/11111111-1111-4111-8111-111111111111/artifacts/${artifactId}/content`,
+                        acceptRanges: "bytes",
+                        maxRangeBytes: 1024 * 1024,
+                      },
+                    },
+                    video: {
+                      durationSeconds: 4,
+                      width: 480,
+                      height: 480,
+                      fps: 24,
+                      hasAudio: true,
+                      videoCodec: "h264",
+                      audioCodec: "aac",
+                    },
+                    sandboxPath: `/workspace/generated-videos/generated-video-${artifactId}.mp4`,
+                  },
+                },
+              },
+            ],
+          },
+          { turnId: "turn-video-ready" },
+        ),
+        event(
+          "agent.reasoning.delta",
+          { text: "checking the artifact" },
+          { turnId: "turn-video-ready" },
+        ),
+        event(
+          "agent.message.completed",
+          { text: "The video is ready." },
+          { turnId: "turn-video-ready" },
+        ),
+        event("turn.completed", {}, { turnId: "turn-video-ready" }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["item", "item", "turn", "item"]);
+    const media = groups[1];
+    expect(media?.kind === "item" ? media.item : null).toMatchObject({
+      kind: "machine-input-batch",
+      members: [expect.objectContaining({ kind: "media_generation_result" })],
+    });
+    expect(turnGroups(groups)[0]?.groups).toEqual([expect.objectContaining({ kind: "activity" })]);
   });
 
   test("a turn that ends on activity folds everything and extracts nothing", () => {

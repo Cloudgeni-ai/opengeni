@@ -52,7 +52,7 @@ function resourceKeys(resources: McpConnectionResourceScope[] | undefined): stri
 }
 
 describe("provider-neutral host DevOps MCP conformance", () => {
-  test("routes two same-provider bindings plus GitLab and Azure across model and Toolspace", async () => {
+  test("routes two same-provider bindings plus GitLab and Azure across model and Codemode", async () => {
     const allowed = new Map(BINDINGS.map((binding) => [binding.connectionId, binding]));
     const calls: McpCredentialsRequest[] = [];
     const hostResolve = async (
@@ -103,7 +103,7 @@ describe("provider-neutral host DevOps MCP conformance", () => {
 
     for (const [surface, forceRefresh] of [
       ["model", false],
-      ["toolspace", true],
+      ["codemode", true],
     ] as const) {
       const resolver = buildHostConnectionTokenResolver(hostResolve, {
         accountId: "account-one",

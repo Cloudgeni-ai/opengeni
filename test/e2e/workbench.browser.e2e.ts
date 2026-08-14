@@ -715,7 +715,7 @@ describe("workbench browser acceptance", () => {
     await page.goto(dockUrl(baseUrl, "warm-live", "dark", "changes"), {
       waitUntil: "networkidle",
     });
-    const tabs = page.getByRole("tab");
+    const tabs = page.getByRole("tablist").getByRole("tab");
     expect(await tabs.nth(0).evaluate((tab) => tab === document.activeElement)).toBe(true);
     await tabs.nth(0).focus();
     await page.keyboard.press("ArrowRight");
@@ -728,7 +728,7 @@ describe("workbench browser acceptance", () => {
     );
 
     await page.keyboard.press("End");
-    expect(await tabs.nth(3).getAttribute("aria-selected")).toBe("true");
+    expect(await tabs.last().getAttribute("aria-selected")).toBe("true");
     await page.keyboard.press("ArrowRight");
     expect(await tabs.nth(0).getAttribute("aria-selected")).toBe("true");
 
@@ -756,6 +756,35 @@ describe("workbench browser acceptance", () => {
       );
     }
     await context.close();
+  });
+
+  test("desktop tabs remain reachable when the dock reaches its minimum width", async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    try {
+      const page = await context.newPage();
+      await page.goto(dockUrl(baseUrl, "warm-live", "dark", "changes"), {
+        waitUntil: "networkidle",
+      });
+      await waitForWorkbenchVisualReady(page);
+
+      await page.locator("[data-workspace-surface]").evaluate((surface) => {
+        surface.style.width = "380px";
+        surface.style.maxWidth = "380px";
+      });
+
+      const chrome = page.locator("[data-dock-chrome]");
+      await expectEventually(async () => (await chrome.getAttribute("data-compact")) === "true");
+      const tabs = page.getByRole("tablist").getByRole("tab");
+      await tabs.first().focus();
+      await page.keyboard.press("ArrowRight");
+      await page.keyboard.press("ArrowRight");
+      await page.keyboard.press("ArrowRight");
+      const browserTab = page.getByRole("tab", { name: "Browser" });
+      expect(await browserTab.isVisible()).toBe(true);
+      expect(await browserTab.getAttribute("aria-selected")).toBe("true");
+    } finally {
+      await context.close();
+    }
   });
 
   test("desktop maximize and collapse preserve one viewport-correct mounted surface", async () => {

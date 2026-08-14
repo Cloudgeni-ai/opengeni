@@ -10,6 +10,7 @@ import type {
   SessionAuthorizationSurface,
   CreateScheduledTaskRequest as CreateScheduledTaskPayload,
   UpdateScheduledTaskRequest as UpdateScheduledTaskPayload,
+  XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import { OPENGENI_SLACK_BOT_SESSION_METADATA_KEY } from "@opengeni/contracts";
 import {
@@ -21,9 +22,12 @@ import {
   getRig,
   getScheduledTask,
   getScheduledTaskPersonalConnectionDelegations,
+  getSessionTurnXaiProviderAccountAuthoritySnapshot,
   getSession,
   requireWorkspace,
+  scopedKnowledgeScopeKey,
   updateScheduledTask,
+  resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   type Database,
   type UpdateScheduledTaskInput,
 } from "@opengeni/db";
@@ -154,11 +158,24 @@ export async function createValidatedScheduledTask(input: {
           input.db,
           input.grant.workspaceId,
           input.settings,
+          { subjectId: input.grant.subjectId },
         ),
         tools: [...agentConfig.tools, { kind: "mcp", id: "opengeni" }],
         source: personalConnectionDelegationSourceForGrant(input.grant),
       });
   const creationInitiator = creationInitiatorForGrant(input.grant);
+  const xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 =
+    creationInitiator.actor
+      ? await getSessionTurnXaiProviderAccountAuthoritySnapshot(
+          input.db,
+          input.grant.workspaceId,
+          creationInitiator.actor.sessionId,
+          creationInitiator.actor.turnId,
+        )
+      : await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(input.db, {
+          workspaceId: input.grant.workspaceId,
+          subjectId: input.grant.subjectId,
+        });
   return await createScheduledTask(input.db, {
     id,
     accountId: input.grant.accountId,
@@ -175,6 +192,7 @@ export async function createValidatedScheduledTask(input: {
     ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
     createdByActor: creationInitiator.actor ?? null,
     personalConnectionDelegations,
+    xaiProviderAccountAuthoritySnapshot,
     targetSessionId: target?.id ?? null,
     variableSetId: input.payload.variableSetId ?? null,
     rigId: input.payload.rigId ?? null,
@@ -476,6 +494,7 @@ export async function validatedScheduledTaskUpdate(input: {
       input.db,
       input.existing.workspaceId,
       input.settings,
+      { subjectId: input.grant.subjectId },
     );
     const personalConnectionDelegations = await freezePersonalConnectionDelegations({
       db: input.db,
@@ -620,7 +639,8 @@ async function validateKnowledgeSourceSyncAction(input: {
   if (
     resolved.source.syncGeneration !== input.action.sourceGeneration ||
     resolved.source.lifecycleGeneration !== input.action.sourceLifecycleGeneration ||
-    JSON.stringify(resolved.source.scope) !== JSON.stringify(input.action.destination)
+    scopedKnowledgeScopeKey(resolved.source.scope) !==
+      scopedKnowledgeScopeKey(input.action.destination)
   ) {
     throw new HTTPException(409, {
       message: "knowledge source authority or generation changed",
@@ -768,6 +788,7 @@ async function validateScheduledTaskAgentConfig(input: {
     input.db,
     input.workspaceId,
     input.settings,
+    { subjectId: input.grant.subjectId },
   );
   const requestedTools = validateToolRefs(input.payload.agentConfig.tools ?? [], runtimeSettings);
   // A task whose creator did not choose tools gets the workspace's enabled

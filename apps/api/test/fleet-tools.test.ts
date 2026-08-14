@@ -155,7 +155,9 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
 
 /** Seed a session (Modal group box) + an enrolled selfhosted machine + its sandbox
  *  record, and return the fleet context for the session. */
-async function seedFleet(opts: { online?: boolean; hostname?: string } = {}) {
+async function seedFleet(
+  opts: { online?: boolean; hostname?: string; sandboxBackend?: "modal" | "none" } = {},
+) {
   const { accountId, workspaceId } = await freshWorkspace();
   const session = await createSession(db, {
     accountId,
@@ -164,7 +166,7 @@ async function seedFleet(opts: { online?: boolean; hostname?: string } = {}) {
     resources: [],
     metadata: {},
     model: "gpt-test",
-    sandboxBackend: "modal",
+    sandboxBackend: opts.sandboxBackend ?? "modal",
   });
   const enrollment = await createEnrollment(db, {
     accountId,
@@ -190,7 +192,7 @@ async function seedFleet(opts: { online?: boolean; hostname?: string } = {}) {
     accountId,
     workspaceId,
     sessionId: session.id,
-    sessionBackend: "modal",
+    sessionBackend: opts.sandboxBackend ?? "modal",
     sessionGroupId: session.sandboxGroupId,
   };
   const services: FleetServices = {
@@ -229,6 +231,28 @@ afterAll(async () => {
 }, 180_000);
 
 describe("M7 fleet service — list / attach / swap / run_on / provision", () => {
+  test("a backend:none session lists and attaches an owned Connected Machine without inventing a home box", async () => {
+    if (!available) return;
+    const { ctx, services, sandbox } = await seedFleet({ sandboxBackend: "none" });
+
+    const before = await listFleet(services, ctx);
+    expect(before.activeSandboxId).toBeNull();
+    expect(before.sandboxes).toHaveLength(1);
+    expect(before.sandboxes[0]?.id).toBe(sandbox.id);
+    expect(before.sandboxes[0]?.active).toBe(false);
+
+    const attached = await swapActiveSandbox(services, ctx, sandbox.id);
+    expect(attached.swapped).toBe(true);
+    expect(attached.activeSandboxId).toBe(sandbox.id);
+
+    const noHome = await swapActiveSandbox(services, ctx, "session");
+    expect(noHome.swapped).toBe(false);
+    expect(noHome.code).toBe("unsupported_backend_context");
+    expect((await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))?.activeSandboxId).toBe(
+      sandbox.id,
+    );
+  }, 60_000);
+
   test("sandboxes_list: the session Modal box + the enrolled machine, each with liveness + active marker", async () => {
     if (!available) return;
     const { ctx, services, session, sandbox } = await seedFleet({ hostname: "vm-list" });

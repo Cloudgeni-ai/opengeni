@@ -15,13 +15,12 @@ import {
   createSession,
   createSessionGoal,
   enqueueSessionWorkflowWakeIfRunnable,
-  getBillingBalance,
   getScheduledTask,
   ensureKnowledgeSourceSyncState,
   getScheduledTaskPersonalConnectionDelegations,
+  getScheduledTaskXaiProviderAccountAuthoritySnapshot,
   getRig,
   getVariableSet,
-  isCodexBilledTurn,
   markScheduledTaskRunFailedIfQueued,
   recordKnowledgeSourceSyncWake,
   recordUsageEvent,
@@ -30,19 +29,19 @@ import {
   setTemporalWorkflowId,
   settleScheduledTaskRunInTransaction,
   SessionSpawnDeniedDbError,
-  sumUsageQuantity,
   updateScheduledTask,
   updateScheduledTaskRun,
   upsertSessionGoal,
 } from "@opengeni/db";
 import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/events";
-import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
+import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
 import {
   assertReusableSessionRevivable,
   scheduledUserMessagePayload,
   workflowIdForSession,
 } from "./common";
 import { withFirstPartyTools } from "./goals";
+import { agentRunAdmissionDenial } from "./agent-run-admission";
 import type {
   ControlActivityServices,
   DispatchScheduledTaskRunInput,
@@ -54,7 +53,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
     dispatchScheduledTaskRun: async (
       input: DispatchScheduledTaskRunInput,
     ): Promise<DispatchScheduledTaskRunResult> => {
-      const { settings, db, bus, wakeSessionWorkflow } = await services();
+      const service = await services();
+      const { settings, db, bus, wakeSessionWorkflow } = service;
       // Histories created before the manual-initiator workflow patch already
       // contain this activity command. Reject their incomplete wire input here
       // so replay consumes the recorded command and the retry loop settles.
@@ -131,6 +131,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         task.workspaceId,
         task.id,
       );
+      const taskXaiProviderAccountAuthoritySnapshot =
+        await getScheduledTaskXaiProviderAccountAuthoritySnapshot(db, task.workspaceId, task.id);
       // A scheduled bot selection was authorized when the task was written,
       // but connection status and tenant/role binding are mutable. Revalidate
       // before any session/model cost and never fall back to a personal Slack
@@ -148,25 +150,13 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (slackBotConnection && !slackBotMetadata) {
         throw new Error("OpenGeni Slack bot connection metadata is invalid");
       }
-      // The scheduled task's model can be codex/<slug>; resolve it here so the
-      // admission gate can skip the credit/cost gates for a codex-billed run
-      // (paid by the user's ChatGPT/Codex plan). This file uses BASE settings (no
-      // codex overlay), so the predicate does its own active-credential read.
       const model = task.agentConfig.model ?? settings.openaiModel;
-      const isCodexRun = await isCodexBilledTurn({
-        db,
-        settings,
+      const admissionDenial = await agentRunAdmissionDenial(service, {
+        accountId: task.accountId,
         workspaceId: task.workspaceId,
         model,
+        requestedAgentRuns: input.agentRunUsageIdempotencyKey ? 0 : 1,
       });
-      const admissionDenial = await scheduledRunAdmissionDenial(
-        settings,
-        db,
-        task.accountId,
-        task.workspaceId,
-        input.agentRunUsageIdempotencyKey ? 0 : 1,
-        isCodexRun,
-      );
       if (admissionDenial) {
         return { action: "blocked", reason: admissionDenial };
       }
@@ -287,6 +277,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               initialMessage: task.agentConfig.prompt,
               resources: task.agentConfig.resources,
               tools: taskTools,
+              firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(settings).default,
               metadata: {
                 ...taskMetadata,
                 model,
@@ -314,6 +305,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               rigId: frozenRigId,
               rigVersionId: frozenRigVersionId,
               personalConnectionDelegations: taskPersonalConnectionDelegations,
+              initialXaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
               maxNestedAgentDepthOverride: task.agentConfig.maxNestedAgentDepth ?? null,
               // The durable agent config was privilege-checked when the task
               // was created/updated. Preserve that explicit policy if a broader
@@ -404,8 +396,16 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 task.id,
                 run.id,
               ),
-              lineage: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
+              lineage: {
+                scheduledTaskId: task.id,
+                scheduledTaskRunId: run.id,
+                ...(taskXaiProviderAccountAuthoritySnapshot.scope === "user" &&
+                task.createdBy.kind === "subject"
+                  ? { xaiAuthoritySubjectId: task.createdBy.subjectId }
+                  : {}),
+              },
               personalConnectionDelegations: taskPersonalConnectionDelegations,
+              xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
             },
             async (tx, wakeEventId) => {
               if (!wakeEventId) throw new Error("Scheduled delivery has no wake event");
@@ -500,6 +500,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   ],
                 };
               },
+              { activity: "semantic" },
             );
             await publishDurableSessionEvents(bus, task.workspaceId, session.id, goalEvents);
           }
@@ -521,8 +522,16 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 task.id,
                 run.id,
               ),
-              lineage: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
+              lineage: {
+                scheduledTaskId: task.id,
+                scheduledTaskRunId: run.id,
+                ...(taskXaiProviderAccountAuthoritySnapshot.scope === "user" &&
+                task.createdBy.kind === "subject"
+                  ? { xaiAuthoritySubjectId: task.createdBy.subjectId }
+                  : {}),
+              },
               personalConnectionDelegations: taskPersonalConnectionDelegations,
+              xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
             },
             async (tx, wakeEventId) => {
               if (task.runMode === "existing_session") {
@@ -605,55 +614,4 @@ function knowledgeSourceSyncEffectivelyPaused(task: {
   if (!value || typeof value !== "object") return false;
   const control = value as Record<string, unknown>;
   return control.sourceEnabled === false || control.connectionPaused === true;
-}
-
-async function scheduledRunAdmissionDenial(
-  settings: Settings,
-  db: ControlActivityServices["db"],
-  accountId: string,
-  workspaceId: string,
-  requestedAgentRuns: number,
-  isCodexRun: boolean,
-): Promise<"insufficient_credits" | "monthly_model_cost_limit" | "monthly_agent_run_limit" | null> {
-  // Codex-billed runs are paid by the user's ChatGPT/Codex plan: skip the
-  // credit-balance gate and the monthly model-cost cap. The agent-run COUNT cap
-  // below is a volume quota (not a credit/cost gate) and is intentionally kept.
-  if (
-    !isCodexRun &&
-    (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
-  ) {
-    const balance = await getBillingBalance(db, accountId);
-    if (balance.balanceMicros <= 0) {
-      return "insufficient_credits";
-    }
-  }
-  if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
-    const limits = configuredStaticUsageLimits(settings);
-    if (!isCodexRun && limits.maxMonthlyCostMicrosPerAccount) {
-      const used = await sumUsageQuantity(db, {
-        accountId,
-        eventType: "model.cost",
-        since: startOfUtcMonth(),
-      });
-      if (used >= limits.maxMonthlyCostMicrosPerAccount) {
-        return "monthly_model_cost_limit";
-      }
-    }
-    if (limits.maxMonthlyAgentRunsPerWorkspace) {
-      const used = await sumUsageQuantity(db, {
-        workspaceId,
-        eventType: "agent_run.created",
-        since: startOfUtcMonth(),
-      });
-      if (used + requestedAgentRuns > limits.maxMonthlyAgentRunsPerWorkspace) {
-        return "monthly_agent_run_limit";
-      }
-    }
-  }
-  return null;
-}
-
-function startOfUtcMonth(): Date {
-  const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
 }

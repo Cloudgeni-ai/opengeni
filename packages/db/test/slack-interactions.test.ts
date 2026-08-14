@@ -15,13 +15,16 @@ import {
   createSessionWithIdempotencyKeyResult,
   enqueueSlackInteractionInbox,
   getOrCreateSlackInteraction,
+  getSlackInteractionActionHandle,
   getSessionForSubject,
   grantWorkspaceAccess,
   listSessionsForSubject,
   releaseSlackInteractionInbox,
+  reserveSlackInteractionActionHandles,
   resolveSlackInstallationRoute,
   saveSlackInteractionInboxReactionCheckpoint,
   settleSlackInteractionInbox,
+  settleSlackInteractionActionHandles,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -30,6 +33,12 @@ const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const migrationPath = new URL("../drizzle/0150_slack_task_interactions.sql", import.meta.url)
   .pathname;
 const reactionMigrationPath = new URL("../drizzle/0156_slack_reaction_trigger.sql", import.meta.url)
+  .pathname;
+const nativeActionMigrationPath = new URL(
+  "../drizzle/0227_slack_native_actions.sql",
+  import.meta.url,
+).pathname;
+const fileFactMigrationPath = new URL("../drizzle/0229_slack_inbox_file_fact.sql", import.meta.url)
   .pathname;
 
 let available = true;
@@ -106,6 +115,19 @@ async function botConnection(
   });
 }
 
+async function expectSlackBindingConflict(operation: Promise<unknown>) {
+  let failure: unknown;
+  try {
+    await operation;
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error & { cause?: { message?: string } }).cause?.message).toContain(
+    "OPENGENI_SLACK_BINDING_CONFLICT",
+  );
+}
+
 function inboxInput(input: {
   accountId: string;
   workspaceId: string;
@@ -127,6 +149,7 @@ function inboxInput(input: {
     slackThreadTs: null,
     triggerKind: input.triggerKind ?? ("dm" as const),
     text: input.triggerKind === "reaction" ? "genie" : "Start a private task",
+    hasFiles: false,
   };
 }
 
@@ -157,6 +180,27 @@ describe("Slack interaction migration and durable database boundary", () => {
     expect(sql).toContain('octet_length("reaction_context_checkpoint"::text) <= 131072');
     expect(sql).not.toContain("CREATE TABLE");
     expect(sql).not.toContain("ALTER TYPE");
+  });
+
+  test("adds requester-bound native action and update ledgers", async () => {
+    const sql = await readFile(nativeActionMigrationPath, "utf8");
+    expect(sql).toContain('ADD COLUMN "initiating_slack_user_id" text');
+    expect(sql).toContain("'block_action'");
+    expect(sql).toContain('CREATE TABLE "slack_interaction_action_handles"');
+    expect(sql).toContain('CREATE TABLE "slack_bot_update_operations"');
+    expect(sql.match(/FORCE ROW LEVEL SECURITY/g)).toHaveLength(2);
+    expect(sql).toContain("slack_interaction_action_handles_identity_uq");
+    expect(sql).toContain("slack_bot_update_operations_workspace_operation_uq");
+    expect(sql).not.toContain("rawItem");
+    expect(sql).not.toContain("arguments");
+  });
+
+  test("persists one bounded file-presence fact for ordinary Slack inbox rows", async () => {
+    const sql = await readFile(fileFactMigrationPath, "utf8");
+    expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
+    expect(sql).toContain('ADD COLUMN "has_files" boolean NOT NULL DEFAULT false');
+    expect(sql).not.toContain("jsonb");
+    expect(sql).not.toContain("provider payload");
   });
 
   test("enforces FORCE RLS and grants only the declared runtime DML", async () => {
@@ -204,28 +248,31 @@ describe("Slack interaction migration and durable database boundary", () => {
     }
   });
 
-  test("collapses one Slack principal deterministically and fails closed on tenant ambiguity", async () => {
+  test("routes one Slack team and rejects duplicate or cross-tenant installations", async () => {
     if (!available) return;
     const first = await workspace("resolver-a");
     const original = await botConnection(first, "T_RESOLVER", {
       botId: "B_RESOLVER",
       botUserId: "U_RESOLVER_BOT",
     });
-    const duplicate = await botConnection(first, "T_RESOLVER", {
-      botId: "B_RESOLVER",
-      botUserId: "U_RESOLVER_BOT",
-    });
-    expect((await resolveSlackInstallationRoute(db, "T_RESOLVER"))?.connectionId).toBe(
-      duplicate.id,
+    await expectSlackBindingConflict(
+      botConnection(first, "T_RESOLVER", {
+        botId: "B_RESOLVER",
+        botUserId: "U_RESOLVER_BOT",
+      }),
     );
-    expect(duplicate.id).not.toBe(original.id);
+    expect((await resolveSlackInstallationRoute(db, "T_RESOLVER"))?.connectionId).toBe(original.id);
 
     const second = await workspace("resolver-b");
-    await botConnection(second, "T_RESOLVER", {
-      botId: "B_OTHER",
-      botUserId: "U_OTHER_BOT",
-    });
-    expect(await resolveSlackInstallationRoute(db, "T_RESOLVER")).toBeNull();
+    await expectSlackBindingConflict(
+      botConnection(second, "T_RESOLVER", {
+        botId: "B_OTHER",
+        botUserId: "U_OTHER_BOT",
+      }),
+    );
+    expect((await resolveSlackInstallationRoute(db, "T_RESOLVER"))?.workspaceId).toBe(
+      first.workspaceId,
+    );
   });
 
   test("deduplicates reaction event and remove-readd identities, reclaims expired leases, and scopes settlement", async () => {
@@ -487,6 +534,103 @@ describe("Slack interaction migration and durable database boundary", () => {
     expect(await getSessionForSubject(db, target.workspaceId, root.id, other)).toBeNull();
     expect(await getSessionForSubject(db, target.workspaceId, child.id, other)).toBeNull();
     expect(await getSessionForSubject(db, target.workspaceId, child.id, owner)).not.toBeNull();
+  });
+
+  test("reserves opaque requester-bound actions and settles one card once", async () => {
+    if (!available) return;
+    const target = await workspace("native-actions");
+    const owner = `user:slack-action-owner-${crypto.randomUUID()}`;
+    await member(target, owner);
+    const connection = await botConnection(target, "T_NATIVE_ACTION", {
+      botId: "B_NATIVE_ACTION",
+      botUserId: "U_NATIVE_ACTION_BOT",
+    });
+    const { interaction: reserved } = await getOrCreateSlackInteraction(db, {
+      ...target,
+      connectionId: connection.id,
+      slackTeamId: "T_NATIVE_ACTION",
+      slackChannelId: "C_NATIVE_ACTION",
+      slackThreadTs: "1710000000.000030",
+      routeKey: "C_NATIVE_ACTION:1710000000.000030",
+      triggeringProviderEventId: "E_NATIVE_ACTION",
+      initiatingSlackUserId: "U_NATIVE_ACTION",
+      owningSubjectId: owner,
+      visibility: "workspace",
+    });
+    const session = await createSession(db, {
+      ...target,
+      requestedSessionId: reserved.sessionReservationId,
+      initialMessage: "native action root",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: owner },
+      model: "test-model",
+      sandboxBackend: "none",
+    });
+    const interaction = await bindSlackInteractionSession(db, {
+      ...reserved,
+      owningSubjectId: owner,
+      sessionId: session.id,
+    });
+    if (!interaction) throw new Error("native action interaction did not bind");
+    const messageOperationId = crypto.randomUUID();
+    const handles = await reserveSlackInteractionActionHandles(db, {
+      interaction,
+      sessionEventSequence: 7,
+      messageOperationId,
+      expiresAt: new Date(Date.now() + 60_000),
+      actions: [
+        {
+          actionKind: "approval_approve",
+          actionKey: "approval:call-1:approve",
+          targetId: "call-1",
+        },
+        {
+          actionKind: "approval_reject",
+          actionKey: "approval:call-1:reject",
+          targetId: "call-1",
+        },
+      ],
+    });
+    expect(handles).toHaveLength(2);
+    expect(handles[0]).toMatchObject({
+      authorizedSubjectId: owner,
+      authorizedSlackUserId: "U_NATIVE_ACTION",
+      messageOperationId,
+      status: "pending",
+    });
+    const replay = await reserveSlackInteractionActionHandles(db, {
+      interaction,
+      sessionEventSequence: 7,
+      messageOperationId,
+      expiresAt: new Date(Date.now() + 60_000),
+      actions: [
+        {
+          actionKind: "approval_approve",
+          actionKey: "approval:call-1:approve",
+          targetId: "call-1",
+        },
+        {
+          actionKind: "approval_reject",
+          actionKey: "approval:call-1:reject",
+          targetId: "call-1",
+        },
+      ],
+    });
+    expect(replay.map((handle) => handle.id)).toEqual(handles.map((handle) => handle.id));
+    expect(
+      await settleSlackInteractionActionHandles(db, {
+        ...target,
+        handleId: handles[0]!.id,
+        result: "approved",
+      }),
+    ).toMatchObject({ status: "completed", result: "approved" });
+    expect(
+      await getSlackInteractionActionHandle(db, {
+        ...target,
+        handleId: handles[1]!.id,
+      }),
+    ).toMatchObject({ status: "stale", result: "superseded" });
   });
 
   test("keeps a reserved private session unreadable before, during, and after bind across crash retry", async () => {

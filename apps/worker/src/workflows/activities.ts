@@ -5,6 +5,7 @@ type WorkflowControlActivities = Pick<
   typeof activities,
   | "enqueueGoalRetryWake"
   | "expireSessionHumanInput"
+  | "expireSessionInteractionIntervention"
   | "failSessionAttempt"
   | "getCodexCapacityWait"
   | "markSessionIdle"
@@ -88,6 +89,19 @@ export function turnActivityForTaskQueue(baseTaskQueue: string, receiptGatedCanc
       ? ActivityCancellationType.TRY_CANCEL
       : ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
     retry: { maximumAttempts: 1 },
+  });
+}
+
+export function videoGenerationActivityForTaskQueue(baseTaskQueue: string) {
+  return proxyActivities<Pick<typeof activities, "reconcileVideoGenerationOperation">>({
+    taskQueue: turnTaskQueue(baseTaskQueue),
+    startToCloseTimeout: "20 minutes",
+    retry: {
+      initialInterval: "1 second",
+      backoffCoefficient: 2,
+      maximumInterval: "30 seconds",
+      maximumAttempts: 3,
+    },
   });
 }
 

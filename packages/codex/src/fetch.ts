@@ -17,11 +17,23 @@ import { opaqueProviderArtifactFingerprints } from "./opaque-artifact";
 import {
   codexRequestStorage,
   type CodexModelRequestEvent,
+  type CodexRequestPreparationPhase,
   type CodexRequestContext,
   type CodexResponseTimeoutPolicy,
   type CodexTokenSnapshot,
   type CodexUsageHeaderSnapshot,
 } from "./request-context";
+
+function emitRequestPreparationDiagnostic(
+  ctx: CodexRequestContext,
+  phase: CodexRequestPreparationPhase,
+): void {
+  try {
+    ctx.onRequestPreparationDiagnostic?.(phase);
+  } catch {
+    // Diagnostic observers are non-blocking and cannot affect transport.
+  }
+}
 import {
   CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
   CodexResponseTimeoutError,
@@ -200,9 +212,131 @@ type RequestAudit = {
   transportAttempt: number;
   model?: string;
   logicalStartedAt: number;
-  attemptStartedAt: number;
+  attemptStartedAtMonotonic: number;
   policy: CodexResponseTimeoutPolicy;
+  terminalOutcome: RequestTerminalOutcome | null;
 };
+
+type RequestTerminalOutcome = "completed" | "failed" | "timed_out";
+
+type SemanticTerminalState = {
+  phase: "completed" | "failed" | null;
+  /** Non-streaming callers must parse the complete SSE body before settling. */
+  deferTransportTerminal: boolean;
+};
+
+type CodexSseEvent = {
+  type?: string;
+  response?: Record<string, unknown>;
+  error?: unknown;
+  code?: unknown;
+  message?: unknown;
+  param?: unknown;
+  item?: unknown;
+};
+
+type CodexSseTerminalClassification =
+  | { phase: "completed" }
+  | {
+      phase: "failed";
+      rawError: unknown;
+      fallbackCode: string;
+      fallbackMessage: string;
+    }
+  | null;
+
+function classifyCodexSseTerminal(ev: CodexSseEvent): CodexSseTerminalClassification {
+  if (ev.type === "response.failed") {
+    return {
+      phase: "failed",
+      rawError: ev.response?.error,
+      fallbackCode: "response_failed",
+      fallbackMessage: "The Codex response failed",
+    };
+  }
+  if (ev.type === "error" || ev.type === "response.error") {
+    return {
+      phase: "failed",
+      rawError: ev.error ?? ev.response?.error ?? ev,
+      fallbackCode: "response_error",
+      fallbackMessage: "The Codex response stream reported an error",
+    };
+  }
+  if (ev.type === "response.incomplete") {
+    const details = ev.response?.incomplete_details;
+    const reason =
+      details && typeof details === "object"
+        ? (details as Record<string, unknown>).reason
+        : undefined;
+    return {
+      phase: "failed",
+      rawError: {
+        code: "response_incomplete",
+        message:
+          typeof reason === "string" && reason.length > 0
+            ? `The Codex response was incomplete (${reason})`
+            : "The Codex response was incomplete",
+      },
+      fallbackCode: "response_incomplete",
+      fallbackMessage: "The Codex response was incomplete",
+    };
+  }
+  if (ev.type !== "response.completed" && ev.type !== "response.done") {
+    return null;
+  }
+  if (!ev.response) {
+    return null;
+  }
+
+  const responseStatus = ev.response.status;
+  if (
+    (responseStatus !== undefined && responseStatus !== "completed") ||
+    (ev.response.error !== null && ev.response.error !== undefined)
+  ) {
+    const incomplete = responseStatus === "incomplete";
+    return {
+      phase: "failed",
+      rawError: ev.response.error,
+      fallbackCode: incomplete ? "response_incomplete" : "response_failed",
+      fallbackMessage: incomplete
+        ? "The Codex response was incomplete"
+        : "The Codex response failed",
+    };
+  }
+  return { phase: "completed" };
+}
+
+function markSemanticTerminal(state: SemanticTerminalState, phase: "completed" | "failed"): void {
+  if (state.phase === null) {
+    state.phase = phase;
+  }
+}
+
+function terminalOutcomeForPhase(
+  phase: CodexModelRequestEvent["phase"],
+): RequestTerminalOutcome | null {
+  if (phase === "completed" || phase === "failed" || phase === "timed_out") {
+    return phase;
+  }
+  return null;
+}
+
+function requestEventFor(
+  audit: RequestAudit,
+  event: Omit<
+    CodexModelRequestEvent,
+    "requestId" | "transportAttempt" | "model" | "durationMs" | "timeoutPolicy"
+  >,
+): CodexModelRequestEvent {
+  return {
+    requestId: audit.requestId,
+    transportAttempt: audit.transportAttempt,
+    ...(audit.model ? { model: audit.model } : {}),
+    durationMs: Math.max(0, performance.now() - audit.attemptStartedAtMonotonic),
+    timeoutPolicy: audit.policy,
+    ...event,
+  };
+}
 
 async function emitRequestEvent(
   audit: RequestAudit,
@@ -210,15 +344,25 @@ async function emitRequestEvent(
     CodexModelRequestEvent,
     "requestId" | "transportAttempt" | "model" | "durationMs" | "timeoutPolicy"
   >,
-): Promise<void> {
-  await audit.ctx.onModelRequestEvent?.({
-    requestId: audit.requestId,
-    transportAttempt: audit.transportAttempt,
-    ...(audit.model ? { model: audit.model } : {}),
-    durationMs: Math.max(0, Date.now() - audit.attemptStartedAt),
-    timeoutPolicy: audit.policy,
-    ...event,
-  });
+): Promise<boolean> {
+  const terminalOutcome = terminalOutcomeForPhase(event.phase);
+  if (terminalOutcome !== null) {
+    if (audit.terminalOutcome !== null) {
+      return false;
+    }
+    // Fence before invoking either observer. The durable observer may reject,
+    // but a later transport callback must never turn that one terminal into a
+    // contradictory second terminal.
+    audit.terminalOutcome = terminalOutcome;
+  }
+  const observed = requestEventFor(audit, event);
+  try {
+    audit.ctx.onModelRequestDiagnostic?.(observed);
+  } catch {
+    // Diagnostic observers are strictly non-blocking and cannot affect transport.
+  }
+  await audit.ctx.onModelRequestEvent?.(observed);
+  return true;
 }
 
 function providerRequestId(headers: Headers): string | undefined {
@@ -275,11 +419,13 @@ async function observedResponse(
   res: Response,
   audit: RequestAudit,
   externalSignal: AbortSignal | null | undefined,
+  semanticTerminal?: SemanticTerminalState,
 ): Promise<Response> {
   const requestId = providerRequestId(res.headers);
   if (!res.body) {
+    if (semanticTerminal) markSemanticTerminal(semanticTerminal, "failed");
     await emitRequestEvent(audit, {
-      phase: res.ok ? "completed" : "failed",
+      phase: semanticTerminal?.phase ?? (res.ok ? "completed" : "failed"),
       responseObserved: true,
       status: res.status,
       ...(requestId ? { providerRequestId: requestId } : {}),
@@ -307,17 +453,19 @@ async function observedResponse(
         if (terminal) return;
         terminal = true;
         clearTimers();
+        const semanticPhase = semanticTerminal?.phase;
+        const phase = semanticPhase ?? "timed_out";
         const error = new CodexResponseTimeoutError(klass, audit.requestId, true);
         void reader.cancel(error).catch(() => undefined);
         void emitRequestEvent(audit, {
-          phase: "timed_out",
+          phase,
           responseObserved: true,
-          timeoutClass: klass,
+          ...(phase === "timed_out" ? { timeoutClass: klass } : {}),
           status: res.status,
           ...(requestId ? { providerRequestId: requestId } : {}),
         }).then(
-          () => controller.error(error),
-          () => controller.error(error),
+          () => (phase === "completed" ? controller.close() : controller.error(error)),
+          () => (phase === "completed" ? controller.close() : controller.error(error)),
         );
       };
       armIdle = () => {
@@ -337,13 +485,15 @@ async function observedResponse(
         const reason = externalSignal?.reason ?? new DOMException("Aborted", "AbortError");
         void reader.cancel(reason).catch(() => undefined);
         void emitRequestEvent(audit, {
-          phase: "failed",
+          phase: semanticTerminal?.phase ?? "failed",
           responseObserved: true,
           status: res.status,
           ...(requestId ? { providerRequestId: requestId } : {}),
         }).then(
-          () => controller.error(reason),
-          () => controller.error(reason),
+          () =>
+            semanticTerminal?.phase === "completed" ? controller.close() : controller.error(reason),
+          () =>
+            semanticTerminal?.phase === "completed" ? controller.close() : controller.error(reason),
         );
       };
       if (externalSignal?.aborted) {
@@ -362,12 +512,19 @@ async function observedResponse(
         if (chunk.done) {
           terminal = true;
           clearTimers();
-          await emitRequestEvent(audit, {
-            phase: res.ok ? "completed" : "failed",
-            responseObserved: true,
-            status: res.status,
-            ...(requestId ? { providerRequestId: requestId } : {}),
-          });
+          if (semanticTerminal && semanticTerminal.phase === null) {
+            if (!semanticTerminal.deferTransportTerminal) {
+              markSemanticTerminal(semanticTerminal, "failed");
+            }
+          }
+          if (!semanticTerminal?.deferTransportTerminal || semanticTerminal.phase !== null) {
+            await emitRequestEvent(audit, {
+              phase: semanticTerminal?.phase ?? (res.ok ? "completed" : "failed"),
+              responseObserved: true,
+              status: res.status,
+              ...(requestId ? { providerRequestId: requestId } : {}),
+            });
+          }
           controller.close();
           return;
         }
@@ -392,21 +549,32 @@ async function observedResponse(
         if (terminal) return;
         terminal = true;
         clearTimers();
+        const semanticPhase = semanticTerminal?.phase;
+        if (semanticTerminal && semanticPhase === null) {
+          markSemanticTerminal(semanticTerminal, "failed");
+        }
         await emitRequestEvent(audit, {
-          phase: "failed",
+          phase: semanticPhase ?? "failed",
           responseObserved: true,
           status: res.status,
           ...(requestId ? { providerRequestId: requestId } : {}),
         });
-        controller.error(error);
+        if (semanticPhase === "completed") {
+          controller.close();
+        } else {
+          controller.error(error);
+        }
       }
     },
     async cancel(reason) {
       if (!terminal) {
         terminal = true;
         clearTimers();
+        if (semanticTerminal && semanticTerminal.phase === null) {
+          markSemanticTerminal(semanticTerminal, "failed");
+        }
         await emitRequestEvent(audit, {
-          phase: "failed",
+          phase: semanticTerminal?.phase ?? "failed",
           responseObserved: true,
           status: res.status,
           ...(requestId ? { providerRequestId: requestId } : {}),
@@ -458,6 +626,7 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
     if (!ctx) {
       return base(input, init); // not a codex turn — passthrough, untouched
     }
+    emitRequestPreparationDiagnostic(ctx, "transport_entry");
 
     const rawUrl =
       typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -544,7 +713,10 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         throw new Error("Model request could not be prepared");
       }
       if (!bodyAlreadyNormalized) {
-        ctx.onRequestOpaqueArtifacts?.({ requestId, fingerprints: requestOpaqueArtifacts });
+        ctx.onRequestOpaqueArtifacts?.({
+          requestId,
+          fingerprints: requestOpaqueArtifacts,
+        });
       }
       headers.set(
         "Idempotency-Key",
@@ -566,13 +738,19 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         transportAttempt,
         ...(model ? { model } : {}),
         logicalStartedAt,
-        attemptStartedAt: Date.now(),
+        attemptStartedAtMonotonic: performance.now(),
         policy,
+        terminalOutcome: null,
       };
+      emitRequestPreparationDiagnostic(ctx, "wire_request_ready");
       await emitRequestEvent(audit, {
         phase: "started",
         responseObserved: false,
       });
+      const semanticTerminal: SemanticTerminalState = {
+        phase: null,
+        deferTransportTerminal: !callerWantsStream,
+      };
       try {
         res = await fetchBeforeHeaders(base, rewritten, nextInit, audit);
         const upstreamRequestId = providerRequestId(res.headers);
@@ -582,8 +760,7 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
           status: res.status,
           ...(upstreamRequestId ? { providerRequestId: upstreamRequestId } : {}),
         });
-        const observed = await observedResponse(res, audit, nextInit.signal);
-        res = observed;
+        res = await observedResponse(res, audit, nextInit.signal, semanticTerminal);
       } catch (error) {
         if (nextInit.signal?.aborted) {
           await emitRequestEvent(audit, {
@@ -645,13 +822,31 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         // Response lets the SDK reconstruct error.error for EVERY codex error
         // (401/400/5xx too). For a hard usage cap we also pin x-should-retry:false
         // so the SDK does not burn its retry budget on a limit that won't lift.
-        return await bufferCodexErrorResponse(res);
+        const buffered = await bufferCodexErrorResponse(res);
+        const upstreamRequestId = providerRequestId(res.headers);
+        markSemanticTerminal(semanticTerminal, "failed");
+        await emitRequestEvent(audit, {
+          phase: "failed",
+          responseObserved: true,
+          status: res.status,
+          ...(upstreamRequestId ? { providerRequestId: upstreamRequestId } : {}),
+        }).catch(() => undefined);
+        return buffered;
       }
-      return callerWantsStream ? validateCodexStream(res) : await sseToJsonResponse(res);
+      if (callerWantsStream) {
+        res = validateCodexStream(res, (phase) => {
+          markSemanticTerminal(semanticTerminal, phase);
+        });
+      } else {
+        res = await sseToJsonResponse(res, audit, semanticTerminal);
+      }
+      return res;
     };
 
     try {
-      let res = await attempt(await ctx.getToken(), 0);
+      const token = await ctx.getToken();
+      emitRequestPreparationDiagnostic(ctx, "credential_ready");
+      let res = await attempt(token, 0);
       if (res.status === 401) {
         res = await attempt(await ctx.refresh(), 1); // single refresh-on-401 retry (spec §1.9)
       }
@@ -808,7 +1003,12 @@ async function readBoundedResponseText(
  * non-streaming `responses.create` caller expects: the terminal response.*
  * event carries the full `response` payload.
  */
-async function sseToJsonResponse(res: Response): Promise<Response> {
+async function sseToJsonResponse(
+  res: Response,
+  audit: RequestAudit,
+  semanticTerminal: SemanticTerminalState,
+): Promise<Response> {
+  const upstreamRequestId = providerRequestId(res.headers);
   const text = await res.text();
   let final: Record<string, unknown> | null = null;
   let terminalError: Response | null = null;
@@ -819,75 +1019,49 @@ async function sseToJsonResponse(res: Response): Promise<Response> {
       continue;
     }
     try {
-      const ev = JSON.parse(data) as {
-        type?: string;
-        response?: Record<string, unknown>;
-        error?: unknown;
-        code?: unknown;
-        message?: unknown;
-        param?: unknown;
-        item?: unknown;
-      };
+      const ev = JSON.parse(data) as CodexSseEvent;
       if (ev.type === "response.output_item.done" && ev.item !== undefined) {
         items.push(ev.item);
-      } else if (ev.type === "response.failed") {
-        terminalError = codexSseFailureResponse(
-          res,
-          ev.response?.error,
-          "response_failed",
-          "The Codex response failed",
-          {
-            eventType: ev.type,
-            responseId: ev.response?.id,
-            responseStatus: ev.response?.status,
-          },
-        );
-      } else if (ev.type === "error" || ev.type === "response.error") {
-        terminalError = codexSseFailureResponse(
-          res,
-          ev.error ?? ev.response?.error ?? ev,
-          "response_error",
-          "The Codex response stream reported an error",
-          {
-            eventType: ev.type,
-            responseId: ev.response?.id,
-            responseStatus: ev.response?.status,
-          },
-        );
-      } else if (ev.type === "response.incomplete") {
-        const details = ev.response?.incomplete_details;
-        const reason =
-          details && typeof details === "object"
-            ? (details as Record<string, unknown>).reason
-            : undefined;
-        terminalError = codexSseFailureResponse(
-          res,
-          {
-            code: "response_incomplete",
-            message:
-              typeof reason === "string" && reason.length > 0
-                ? `The Codex response was incomplete (${reason})`
-                : "The Codex response was incomplete",
-          },
-          "response_incomplete",
-          "The Codex response was incomplete",
-          {
-            eventType: ev.type,
-            responseId: ev.response?.id,
-            responseStatus: ev.response?.status,
-          },
-        );
-      } else if (ev.type === "response.completed" || ev.type === "response.done") {
-        final = ev.response ?? null;
+      } else {
+        const terminal = classifyCodexSseTerminal(ev);
+        if (terminal?.phase === "failed") {
+          terminalError = codexSseFailureResponse(
+            res,
+            terminal.rawError,
+            terminal.fallbackCode,
+            terminal.fallbackMessage,
+            {
+              eventType: ev.type,
+              responseId: ev.response?.id,
+              responseStatus: ev.response?.status,
+            },
+          );
+        } else if (terminal?.phase === "completed") {
+          final = ev.response ?? null;
+        }
       }
     } catch {
       /* ignore non-JSON keepalive lines */
     }
   }
   if (terminalError) {
+    markSemanticTerminal(semanticTerminal, "failed");
+    await emitRequestEvent(audit, {
+      phase: "failed",
+      responseObserved: true,
+      status: res.status,
+      ...(upstreamRequestId ? { providerRequestId: upstreamRequestId } : {}),
+    });
     return terminalError;
   }
   if (!final) {
+    markSemanticTerminal(semanticTerminal, "failed");
+    await emitRequestEvent(audit, {
+      phase: "failed",
+      responseObserved: true,
+      status: res.status,
+      ...(upstreamRequestId ? { providerRequestId: upstreamRequestId } : {}),
+    });
     return codexSseFailureResponse(
       res,
       null,
@@ -903,6 +1077,13 @@ async function sseToJsonResponse(res: Response): Promise<Response> {
       `[codex-debug] sse->json items=${items.length} outputLen=${Array.isArray(final?.output) ? (final.output as unknown[]).length : "?"}`,
     );
   }
+  markSemanticTerminal(semanticTerminal, "completed");
+  await emitRequestEvent(audit, {
+    phase: "completed",
+    responseObserved: true,
+    status: res.status,
+    ...(upstreamRequestId ? { providerRequestId: upstreamRequestId } : {}),
+  });
   const headers = new Headers(res.headers);
   headers.set("content-type", "application/json");
   headers.delete("content-length");
@@ -1178,8 +1359,12 @@ function codexSseFailureError(
  * output reconstruction belongs to the model reducer, so this layer retains no
  * duplicate output-item graph.
  */
-function validateCodexStream(res: Response): Response {
+function validateCodexStream(
+  res: Response,
+  onSemanticTerminal?: (phase: "completed" | "failed") => void,
+): Response {
   if (!res.body) {
+    onSemanticTerminal?.("failed");
     const error = codexSseFailureError(
       res,
       null,
@@ -1212,7 +1397,7 @@ function validateCodexStream(res: Response): Response {
       const block = buffer.slice(0, boundary.start);
       const separator = buffer.slice(boundary.start, boundary.end);
       buffer = buffer.slice(boundary.end);
-      successfulTerminalSeen ||= inspectCodexSseBlock(block, res);
+      successfulTerminalSeen ||= inspectCodexSseBlock(block, res, onSemanticTerminal);
       controller.enqueue(encoder.encode(`${block}${separator}`));
       boundary = findSseBlockBoundary(buffer, final);
     }
@@ -1226,7 +1411,7 @@ function validateCodexStream(res: Response): Response {
       buffer += decoder.decode();
       emitCompleteBlocks(controller, true);
       if (buffer.length > 0) {
-        successfulTerminalSeen ||= inspectCodexSseBlock(buffer, res);
+        successfulTerminalSeen ||= inspectCodexSseBlock(buffer, res, onSemanticTerminal);
         controller.enqueue(encoder.encode(buffer));
         buffer = "";
       }
@@ -1293,7 +1478,11 @@ const CODEX_TERMINAL_TYPE_HINTS = [
  * without object allocation; failed/error/incomplete terminals throw before the
  * model can mistake them for an ordinary response_done event.
  */
-function inspectCodexSseBlock(block: string, source: Response): boolean {
+function inspectCodexSseBlock(
+  block: string,
+  source: Response,
+  onSemanticTerminal?: (phase: "completed" | "failed") => void,
+): boolean {
   const lines = block.split(/\r\n|\r|\n/);
   const dataStr = lines
     .filter((l) => l.startsWith("data:"))
@@ -1305,26 +1494,20 @@ function inspectCodexSseBlock(block: string, source: Response): boolean {
   if (!CODEX_TERMINAL_TYPE_HINTS.some((terminalType) => dataStr.includes(terminalType))) {
     return false;
   }
-  let ev: {
-    type?: string;
-    item?: unknown;
-    response?: Record<string, unknown>;
-    error?: unknown;
-    code?: unknown;
-    message?: unknown;
-    param?: unknown;
-  };
+  let ev: CodexSseEvent;
   try {
     ev = JSON.parse(dataStr);
   } catch {
     return false;
   }
-  if (ev.type === "response.failed") {
+  const terminal = classifyCodexSseTerminal(ev);
+  if (terminal?.phase === "failed") {
+    onSemanticTerminal?.("failed");
     throw codexSseFailureError(
       source,
-      ev.response?.error,
-      "response_failed",
-      "The Codex response failed",
+      terminal.rawError,
+      terminal.fallbackCode,
+      terminal.fallbackMessage,
       {
         eventType: ev.type,
         responseId: ev.response?.id,
@@ -1332,62 +1515,8 @@ function inspectCodexSseBlock(block: string, source: Response): boolean {
       },
     );
   }
-  if (ev.type === "error" || ev.type === "response.error") {
-    throw codexSseFailureError(
-      source,
-      ev.error ?? ev.response?.error ?? ev,
-      "response_error",
-      "The Codex response stream reported an error",
-      {
-        eventType: ev.type,
-        responseId: ev.response?.id,
-        responseStatus: ev.response?.status,
-      },
-    );
-  }
-  if (ev.type === "response.incomplete") {
-    const details = ev.response?.incomplete_details;
-    const reason =
-      details && typeof details === "object"
-        ? (details as Record<string, unknown>).reason
-        : undefined;
-    throw codexSseFailureError(
-      source,
-      {
-        code: "response_incomplete",
-        message:
-          typeof reason === "string" && reason.length > 0
-            ? `The Codex response was incomplete (${reason})`
-            : "The Codex response was incomplete",
-      },
-      "response_incomplete",
-      "The Codex response was incomplete",
-      {
-        eventType: ev.type,
-        responseId: ev.response?.id,
-        responseStatus: ev.response?.status,
-      },
-    );
-  }
-  if ((ev.type === "response.completed" || ev.type === "response.done") && ev.response) {
-    if (
-      (ev.response.status !== undefined && ev.response.status !== "completed") ||
-      (ev.response.error !== null && ev.response.error !== undefined)
-    ) {
-      throw codexSseFailureError(
-        source,
-        ev.response.error,
-        ev.response.status === "incomplete" ? "response_incomplete" : "response_failed",
-        ev.response.status === "incomplete"
-          ? "The Codex response was incomplete"
-          : "The Codex response failed",
-        {
-          eventType: ev.type,
-          responseId: ev.response.id,
-          responseStatus: ev.response.status,
-        },
-      );
-    }
+  if (terminal?.phase === "completed") {
+    onSemanticTerminal?.("completed");
     return true;
   }
   return false;

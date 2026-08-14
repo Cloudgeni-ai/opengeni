@@ -20,7 +20,10 @@ import {
   type CreateCodexRealtimeControllerOptions,
   type RealtimeControllerTransportStarter,
 } from "./codex-realtime-controller";
-import { createGatewayRealtimeTransportStarter } from "./gateway-realtime-transport";
+import {
+  createGatewayRealtimeTransportStarter,
+  createXaiSubscriptionRealtimeTransportStarter,
+} from "./gateway-realtime-transport";
 import type { SessionRealtimeModel, WorkspaceRealtimeModelCatalogResponse } from "./types";
 
 /** Exact backend-facing methods required by the batteries-included realtime SDK. */
@@ -30,7 +33,7 @@ export type SessionRealtimeClientLike = CodexRealtimeControllerClient & {
   ): Promise<WorkspaceRealtimeModelCatalogResponse>;
 };
 
-export type SessionRealtimeTransportKind = "codex" | "gateway";
+export type SessionRealtimeTransportKind = "codex" | "gateway" | "xai-subscription";
 
 /** Provider-neutral names for the existing, battle-tested controller projection. */
 export type SessionRealtimeController = CodexRealtimeController;
@@ -53,7 +56,9 @@ export type CreateSessionRealtimeControllerOptions = Omit<
 export function sessionRealtimeTransportKind(
   model: SessionRealtimeModel,
 ): SessionRealtimeTransportKind {
-  return model === "gpt-live-1-boulder-alpha" ? "codex" : "gateway";
+  if (model === "gpt-live-1-boulder-alpha") return "codex";
+  if (model === "supergrok/grok-voice-think-fast-2.0") return "xai-subscription";
+  return "gateway";
 }
 
 /**
@@ -68,13 +73,18 @@ export function createSessionRealtimeController(
   return createCodexRealtimeController({
     ...options,
     ownerStorageNamespace: sessionRealtimeOwnerStorageNamespace(options.model),
-    ...(transport === "gateway" ? { startTransport: createGatewayRealtimeTransportStarter() } : {}),
+    ...(transport === "gateway"
+      ? { startTransport: createGatewayRealtimeTransportStarter() }
+      : transport === "xai-subscription"
+        ? { startTransport: createXaiSubscriptionRealtimeTransportStarter() }
+        : {}),
   });
 }
 
 export {
   createCodexRealtimeController,
   createGatewayRealtimeTransportStarter,
+  createXaiSubscriptionRealtimeTransportStarter,
   hasStoredSessionRealtimeOwnerProof,
   sessionRealtimeOwnerStorageKey,
   sessionRealtimeOwnerStorageNamespace,

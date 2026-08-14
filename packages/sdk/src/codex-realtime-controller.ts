@@ -123,6 +123,12 @@ export type CodexRealtimeControllerClient = {
     request: GatewayRealtimeConnectRequest,
     options?: { signal?: AbortSignal | undefined },
   ): Promise<GatewayRealtimeConnectResponse>;
+  negotiateXaiSubscriptionRealtime?(
+    workspaceId: string,
+    sessionId: string,
+    request: GatewayRealtimeConnectRequest,
+    options?: { signal?: AbortSignal | undefined },
+  ): Promise<GatewayRealtimeConnectResponse>;
   activateCodexRealtimeConnection(
     workspaceId: string,
     sessionId: string,
@@ -149,7 +155,9 @@ export type CodexRealtimeOwnerStorage = Pick<Storage, "getItem" | "setItem" | "r
 
 /** Canonical browser-owner storage namespace for a public realtime model. */
 export function sessionRealtimeOwnerStorageNamespace(model: SessionRealtimeModel): string {
-  return model === "gpt-live-1-boulder-alpha" ? "codex-realtime-owner" : "gateway-realtime-owner";
+  if (model === "gpt-live-1-boulder-alpha") return "codex-realtime-owner";
+  if (model === "supergrok/grok-voice-think-fast-2.0") return "xai-realtime-owner";
+  return "gateway-realtime-owner";
 }
 
 /** Canonical browser-owner storage key shared by the SDK controller and React facade. */
@@ -454,16 +462,26 @@ export function createCodexRealtimeController(
       publish({ microphone: "active" });
       return acquired;
     } catch (error) {
-      if (error instanceof CodexRealtimeMicrophoneError) {
-        const kind = error.code === "permission_denied" ? "permission_failure" : "device_failure";
+      const microphoneError =
+        error instanceof CodexRealtimeMicrophoneError
+          ? error
+          : signal.aborted && state.microphone === "acquiring"
+            ? new CodexRealtimeMicrophoneError(
+                "acquisition_failed",
+                "Microphone did not become available before voice startup timed out",
+              )
+            : null;
+      if (microphoneError) {
+        const kind =
+          microphoneError.code === "permission_denied" ? "permission_failure" : "device_failure";
         publish({
-          microphone: error.code,
+          microphone: microphoneError.code,
           status: state.mode?.state === "active" ? "recovering" : "error",
-          diagnostic: diagnostic(kind, error.message, true),
-          error: error.message,
+          diagnostic: diagnostic(kind, microphoneError.message, true),
+          error: microphoneError.message,
         });
       }
-      throw error;
+      throw microphoneError ?? error;
     }
   };
 

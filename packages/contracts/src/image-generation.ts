@@ -1,10 +1,55 @@
 import { z } from "zod";
 import { RETAINED_OUTPUT_MAX_PAGE_BYTES, RetainedArtifactReferenceSchema } from "./retained-output";
 
+// Codex accepts five references, while the current Gateway GPT Image 2 route
+// accepts four. Keep the provider-neutral tool at the reliable shared limit.
+export const IMAGE_GENERATION_MAX_REFERENCES = 4;
+
+const WorkspaceImagePathSchema = z
+  .string()
+  .max(512)
+  // Keep the provider-visible pattern within the portable JSON Schema regex
+  // subset. Codex rejects lookaround before inference.
+  .regex(/^\/workspace\/.+$/)
+  // Path traversal remains an exact runtime validation concern. Zod does not
+  // project custom refinements into JSON Schema, so this preserves the guard
+  // without sending unsupported regex syntax to model providers.
+  .refine((path) => path.split("/").every((segment) => segment !== "." && segment !== ".."), {
+    message: "Sandbox image paths cannot contain dot segments",
+  });
+
+/** One ordered, workspace-owned input used to guide or edit an image. */
+export const ImageGenerationReferenceSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("sandbox_path"),
+      path: WorkspaceImagePathSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("file"),
+      fileId: z.string().uuid(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("artifact"),
+      artifactId: z.string().uuid(),
+    })
+    .strict(),
+]);
+export type ImageGenerationReference = z.infer<typeof ImageGenerationReferenceSchema>;
+
 /** Provider-neutral minimum shared by native and adapter-backed image tools. */
 export const GenerateImageToolInput = z
   .object({
     prompt: z.string().trim().min(1).max(32_000),
+    references: z
+      .array(ImageGenerationReferenceSchema)
+      .max(IMAGE_GENERATION_MAX_REFERENCES)
+      .optional()
+      .default([]),
   })
   .strict();
 export type GenerateImageToolInput = z.infer<typeof GenerateImageToolInput>;

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/api-router",
-  "version": "0.24.2",
+  "version": "0.30.1",
   "description": "OpenGeni HTTP surface: the Hono adapter/router (createApp), routes, MCP HTTP transport, and HTTP access adapters over @opengeni/core. An engine-distribution surface — its runtime closure includes engine-internal packages.",
   "license": "Apache-2.0",
   "repository": {
@@ -45,6 +45,8 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@opengeni/agent-proto": "workspace:*",
     "@opengeni/artifact-tool": "workspace:*",
+    "@opengeni/capabilities": "workspace:*",
+    "@opengeni/codemode": "workspace:*",
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
@@ -57,6 +59,7 @@
     "@opengeni/observability": "workspace:*",
     "@opengeni/runtime": "workspace:*",
     "@opengeni/storage": "workspace:*",
+    "@opengeni/xai-subscription": "workspace:*",
     "@temporalio/client": "^1.17.0",
     "better-auth": "^1.6.14",
     "hono": "^4.12.18",

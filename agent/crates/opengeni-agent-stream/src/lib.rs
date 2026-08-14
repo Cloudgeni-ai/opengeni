@@ -11,7 +11,7 @@
 //!   feature.
 //! * [`codec`] — the relay framing ([`MsgTag`](codec::MsgTag) + a protobuf body).
 //! * [`channel`] — a [`RelayChannel`](channel::RelayChannel) keyed by
-//!   `{workspaceId, agentId, port}`, authorized by a scoped token, AUTO-RECONNECTING
+//!   `{workspaceId, agentId, port, channelId}`, authorized by a scoped token, AUTO-RECONNECTING
 //!   + RESUMING on a relay blip (§10.6).
 //! * [`pty_pump`] / [`framebuffer_pump`] — the byte/frame pumps bridging a
 //!   platform PTY / desktop backend to a channel.
@@ -31,7 +31,7 @@
 //!
 //! Both the agent (producer) and the viewer (consumer) DIAL OUT to the relay — no
 //! inbound ports. The dial URL is `wss://<relay-host>/<path>?<channel-key>` where
-//! the channel-key query is `ws=<workspaceId>&agent=<agentId>&port=<port>`
+//! the channel-key query is `ws=<workspaceId>&agent=<agentId>&port=<port>&channel=<channelId>`
 //! ([`ChannelKey::query`](channel::ChannelKey::query)). For the agent the base
 //! `wss://…` comes from its enrollment (`relay_url`); for the viewer the control
 //! plane mints the URL via `resolveExposedPort(port)` →
@@ -97,6 +97,7 @@
 #![doc(html_root_url = "https://docs.rs/opengeni-agent-stream")]
 
 pub mod backoff;
+pub mod browser_pump;
 pub mod channel;
 pub mod codec;
 pub mod error;

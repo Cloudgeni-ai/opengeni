@@ -1,5 +1,112 @@
 # @opengeni/contracts
 
+## 0.50.0
+
+### Minor Changes
+
+- 478d7fe: Add explicit, bounded root-task-tree coordination note tools with exact-attempt authority, private-session visibility, expiry, immutable create/archive receipts, and safe retry semantics.
+- 478d7fe: Add a reversible workspace memory prompt mode that removes the legacy standing memory block, keeps preference observations out of agent behavioral authority, contains company-profile context for child agents, and reports metadata-only model-context contribution telemetry.
+- 478d7fe: Persist exact accepted-turn goal authority, separate semantic goal revisions
+  from execution progress, and add policy-controlled rewrite proposals with API,
+  SDK, MCP, and runtime support.
+
+### Patch Changes
+
+- d86610d: Prevent deterministic model-generated worker-spawn failures, hide exhausted nested-agent creation, and show bounded structured session orchestration diagnostics in worker timeline rows while preserving the advanced public REST/SDK create contract.
+- d86610d: Show elapsed UTC-hour buckets for the Insights Today range while retaining UTC-day buckets for longer ranges.
+- d86610d: Run published HTML artifacts as exact source in an opaque-origin sandbox, raise their UTF-8 ceiling to 4 MiB, and expose reusable React rendering. Add deployment-configurable default and allowed built-in session tools plus configured shared-key delegation fallback.
+- 478d7fe: Add permission-first agent Knowledge search, exact fetch, and cursor-bounded browsing over authorized Documents.
+
+## 0.49.0
+
+### Minor Changes
+
+- b0b2bed: Add unified browser and computer interaction APIs, reusable browser identities, native input, live streaming, and React viewer controls across managed sandboxes and connected machines.
+
+## 0.48.0
+
+### Minor Changes
+
+- 8beed26: Add workspace-governed Slack shared-conversation task policies with durable enforcement and public contracts, and enforce vertical-only agent session authority across core and persistence.
+- 8beed26: Add managed-human organization membership discovery. Expose the exact active
+  self-membership and personal-workspace identity returned by the existing
+  narrow provisioning capability through a managed-session-only API route and
+  typed SDK method, while denying delegated/API-key principals and terminal
+  memberships.
+
+## 0.47.0
+
+### Minor Changes
+
+- 1e78f58: Replace provider presets and nullable integration identities with immutable Integration Definitions. Curated and workspace-authored integrations now share one definition-based contract, provenance model, OAuth callback, SDK route, runtime projection, and maintenance migration with no legacy API alias or fallback authority.
+- 1e78f58: Make Facet definitions and bindings authoritative throughout the Integration domain. Public routes, SDK methods, Pack components, owner identities, physical tables, persisted manifests, and runtime projections now use one Facet vocabulary with a maintenance cutover and no compatibility aliases.
+- 746bbbe: Add canonical human identities with multiple verified login bindings, revisioned and audited lifecycle operations, immediate session invalidation, fail-closed recovery and collision handling, and metadata-minimal managed identity API routes.
+- 9849e25: Add strict identifier-free xAI provider-account authority snapshots and durable
+  SuperGrok/xAI multi-account persistence with live user authority revalidation,
+  encrypted credential boundaries, fair exact-turn leases, pool-scoped pins,
+  quota/cooldown metadata, capacity waiters, immutable accepted-work snapshots,
+  FORCE RLS, and explicit runtime privilege posture.
+- 1e78f58: Make normalized Plugin, Version, Skill Facet, and component-owner records authoritative for curated and imported Skills. Add reviewed library install, list, update, preview, and uninstall contracts; preserve Pack and Plugin ownership independently; and retire every non-MCP row from the generic capability catalog and installation ledger through a collision-free maintenance migration.
+
+## 0.46.0
+
+### Minor Changes
+
+- 3d74340: Add the inert personal Codex provider-account authority foundation and opaque
+  accepted-work snapshot contract without activating user-scoped consumption.
+
+## 0.45.0
+
+### Minor Changes
+
+- d2def0c: Add the complete browser-native and semantic computer interaction system across managed sandboxes, Connected Machines, attached Chrome, and external browser placements. Ship durable browser identities, authentication repair, network routing, downloads/uploads, shared causal control, public SDK and React workbench surfaces, and one exact MCP/Codemode execution catalog with native Connected Machine access.
+- 5215c0e: Add the first-party Fiken connector: a registered-app OAuth flow (`startFikenOAuth` + public callback, Basic-auth code exchange, broker-owned refresh with rotating refresh tokens) and a verified paste-a-token install route, both storing one workspace-owned `fiken.no` connection; explicit-only `fiken_*` first-party MCP tools (reads plus contact-create and idempotent invoice-draft-create); a serialized single-concurrent-request Fiken client; an `api:fiken` capability tile whose connect sheet leads with OAuth and folds the token form behind a toggle; and operator config `OPENGENI_FIKEN_OAUTH_CLIENT_ID`/`_SECRET`.
+- 733c22f: Add the organization-tenancy foundation contracts and inert database scaffolding for organization memberships, user-owned resource authority and grants, personal retention, and generic session visibility, fork provenance, and authority epochs.
+
+### Patch Changes
+
+- d15d3e8: Repair the Slack reaction-task experience with initial-only session links, disabled link/media unfurls, workspace-service-principal delivery, conservative terminal-output coalescing, direct execution of safe specified requests, and bounded deterministic import of exact reacted-message PNG/JPEG/WebP attachments as reference-only workspace files. Preserve fail-closed provider-outcome reconciliation and keep generic model-facing posting unavailable without a trusted durable logical-delivery identity.
+
+## 0.44.1
+
+### Patch Changes
+
+- b57d61f: Keep Codex image-tool schemas within the provider-supported regex subset and
+  restore all bundled runtime skills to production API and worker process builds.
+- 5c5ea4a: Add the universal capabilities platform with named API integration instances,
+  provider-specific feature bindings, and local runtime adapters.
+
+## 0.44.0
+
+### Minor Changes
+
+- aeb07f4: Add durable workspace decision publication to verified Slack bot channels with immutable configuration revisions, outbox attempts and receipts, bounded retries and terminal states, admin review/history UX, typed SDK methods, and a post-persistence governed-learning outcome adapter.
+
+### Patch Changes
+
+- 8b6803a: Make Modal sandbox recovery command-ready and accurately diagnosed, use workspace-only snapshots for new sessions, enforce checkpoint cadence, and publish cached rig images only after an independent cold boot.
+- ff7203c: Add a read-only Atlassian Jira and Confluence connector with shared OAuth setup, selected-source live agent search and reads, and optional governed knowledge synchronization.
+
+## 0.43.0
+
+### Minor Changes
+
+- b46f4de: Add a compact, cursor-paginated agent-topology read surface with root, direct-child, and search filters for lazy hierarchy browsers.
+- dcfe6eb: Add canonical attempt-scoped CodeMode, browser and computer interaction, and durable collaborative editable artifacts. Agents and humans now share one artifact head through the same application authority; direct MCP and CodeMode support bounded inspection, fenced edits, trusted Office import, and asynchronous export to workspace files. The session UI gains a first-class Artifacts workspace, and React interaction viewers move to an explicit lazy-loadable subpath.
+- 31666e2: Add immutable workspace learning-policy revisions, lifecycle-only activation and rollback, accepted-attempt snapshots, and deterministic effective-mode resolution for `off`, `suggest`, and `automatic`.
+- a858835: Add unambiguous Slack installation bindings and a token-free, subject-bound workspace access-request lifecycle for signed Slack identity links.
+
+### Patch Changes
+
+- 2f4ce5e: Add durable Seedance video generation with workspace model and funding policy,
+  secure media references, retained video artifacts, sandbox materialization,
+  OpenGeni-credit and workspace-gateway funding, and SDK/React playback surfaces.
+- d55a093: Use truthful Google Drive read-only source-sync metadata for new connections while retaining compatibility with the legacy metadata-browser label.
+- ad9123b: Pin the Slack reaction shortcut to the OpenGeni genie emoji across contracts and SDK types.
+- bd5514e: Add explicitly enabled provider-neutral knowledge-source schedules with durable wake provenance, generation-fenced execution checkpoints and index obligations, fail-closed ACL activation seams, no-agent execution, layered pause state, shared schedule administration, and Google Drive source lifecycle integration.
+- 90eea29: Make connected-machine removal show every dependent session and support an explicit canonical move-to-default-sandbox confirmation before revocation. Default moves prove managed sandbox readiness through the existing fleet route, active turns remain fail-closed, and typed swap rejections surface as visible errors instead of false success.
+- 5fcad0a: Expose an agent-safe checkpointed listing of newly indexed documents with source and provenance metadata.
+
 ## 0.42.1
 
 ### Patch Changes

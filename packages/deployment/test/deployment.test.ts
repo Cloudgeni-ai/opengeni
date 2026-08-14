@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import {
   contractForProfile,
   deploymentProfiles,
+  EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
   generateRuntimeArtifacts,
   missingRuntimeEnvVars,
   parseDeploymentContract,
@@ -265,7 +266,7 @@ describe("deployment contract", () => {
     expect(vars).toContain("OPENGENI_NATS_URL");
     expect(vars).toContain("OPENGENI_AUTH_REQUIRED");
     expect(vars).toContain("OPENGENI_ACCESS_KEY");
-    expect(vars).toContain("OPENGENI_DELEGATION_SECRET");
+    expect(vars).not.toContain("OPENGENI_DELEGATION_SECRET");
     expect(vars).toContain("OPENGENI_PRODUCT_ACCESS_MODE");
     expect(vars).toContain("OPENGENI_OBJECT_STORAGE_BACKEND");
     expect(vars).toContain("OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING");
@@ -326,7 +327,7 @@ describe("deployment contract", () => {
     expect(plan.platformDependencies[1]?.requiredEnvVars).toContain("TEMPORAL_POSTGRES_PASSWORD");
     expect(plan.creates).toContain("GKE cluster");
     expect(plan.requiredSecretKeys).toContain("OPENGENI_ACCESS_KEY");
-    expect(plan.requiredSecretKeys).toContain("OPENGENI_DELEGATION_SECRET");
+    expect(plan.requiredSecretKeys).not.toContain("OPENGENI_DELEGATION_SECRET");
     expect(plan.requiredSecretKeys).toContain("opengeni-temporal-postgres/password");
     expect(plan.deployCommands.some((command) => command.includes("helm repo add nats"))).toBe(
       true,
@@ -940,7 +941,7 @@ describe("deployment contract", () => {
     );
 
     expect(artifacts.missingEnvVars).toContain("OPENGENI_ACCESS_KEY");
-    expect(artifacts.missingEnvVars).toContain("OPENGENI_DELEGATION_SECRET");
+    expect(artifacts.missingEnvVars).not.toContain("OPENGENI_DELEGATION_SECRET");
     expect(artifacts.missingEnvVars).toContain("OPENGENI_DATABASE_URL");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_ACCESS_KEY=");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_DATABASE_URL=");
@@ -982,6 +983,13 @@ describe("deployment contract", () => {
         "OPENGENI_SANDBOX_WARMING_TIMEOUT_MS",
       ]),
     );
+    expect(EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV).toEqual([
+      "OPENGENI_BROWSERBASE_API_KEY",
+      "OPENGENI_KERNEL_API_KEY",
+      "OPENGENI_KERNEL_ENDPOINT",
+      "OPENGENI_KERNEL_BROWSER_TIMEOUT_SECONDS",
+      "OPENGENI_KERNEL_BROWSER_STEALTH",
+    ]);
     expect(SANDBOX_REQUIRED_ENV.daytona.required).toEqual(["OPENGENI_DAYTONA_API_KEY"]);
     expect(SANDBOX_REQUIRED_ENV.docker.required).toEqual([]);
     expect(SANDBOX_REQUIRED_ENV.none.required).toEqual([]);
@@ -1090,5 +1098,44 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_MODAL_IMAGE_REF=ghcr.io/opengeni/modal:latest",
     );
+  });
+
+  test("renders configured external browser providers without making them mandatory", () => {
+    const env = {
+      OPENGENI_BROWSERBASE_API_KEY: "browserbase-private",
+      OPENGENI_KERNEL_API_KEY: "kernel-private",
+      OPENGENI_KERNEL_ENDPOINT: "https://kernel.example.test",
+      OPENGENI_KERNEL_BROWSER_TIMEOUT_SECONDS: "1800",
+      OPENGENI_KERNEL_BROWSER_STEALTH: "true",
+    };
+    const artifacts = generateRuntimeArtifacts(
+      withSandboxBackend("docker"),
+      {
+        temporal_host: { value: "host:7233" },
+        object_storage_bucket: { value: "opengeni-files" },
+        object_storage_azure_connection_string: { value: "x", sensitive: true },
+        helm_set_values: { value: {} },
+      },
+      env,
+    );
+
+    for (const [key, value] of Object.entries(env)) {
+      expect(artifacts.runtimeEnv).toContain(`${key}=${value}`);
+      expect(artifacts.missingEnvVars).not.toContain(key);
+    }
+    const absent = generateRuntimeArtifacts(
+      withSandboxBackend("docker"),
+      {
+        temporal_host: { value: "host:7233" },
+        object_storage_bucket: { value: "opengeni-files" },
+        object_storage_azure_connection_string: { value: "x", sensitive: true },
+        helm_set_values: { value: {} },
+      },
+      {},
+    );
+    for (const key of EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV) {
+      expect(absent.runtimeEnv).not.toContain(`${key}=`);
+      expect(absent.missingEnvVars).not.toContain(key);
+    }
   });
 });

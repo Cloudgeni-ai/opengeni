@@ -106,6 +106,12 @@ enum StreamKind {
   STREAM_KIND_PTY = 1;
   // A desktop framebuffer (noVNC-equivalent) for view + computer-use.
   STREAM_KIND_DESKTOP = 2;
+  // Browser-native encoded frames from one BrowserSession target. The payload is
+  // the canonical OpenGeni browser-frame message, not a desktop capture.
+  STREAM_KIND_BROWSER = 3;
+  // Native app/window/screen frames from one ComputerSession target. Browser and
+  // Computer frames share the relay transport, but never the resource label.
+  STREAM_KIND_COMPUTER = 4;
 }
 
 // =============================================================================
@@ -167,6 +173,51 @@ message Capabilities {
   // monolithic ops run exactly as today. Additive — absent (false) on an older
   // runner means "legacy path", no version coupling.
   bool op_stream = 10;
+  // A local attached-browser bridge is available. The bridge inventories live
+  // browser-profile endpoints separately from this machine enrollment because
+  // one machine may host multiple Chrome profiles.
+  bool browser_bridge = 11;
+}
+
+// Capabilities of one live browser-profile bridge endpoint. This describes the
+// transport endpoint only; reusable login/profile state is a separate control-
+// plane BrowserIdentity resource.
+message AttachedBrowserDeviceCapabilities {
+  bool tab_inventory = 1;
+  bool debugger_attachment = 2;
+  bool semantic_observation = 3;
+  bool screenshots = 4;
+  bool live_frames = 5;
+  bool human_input = 6;
+  bool diagnostics = 7;
+  bool raw_cdp = 8;
+  bool linked_computer = 9;
+}
+
+message AttachedBrowserDeviceAnnouncement {
+  string id = 1;
+  string name = 2;
+  // Empty means Chrome did not expose a profile label.
+  string profile_label = 3;
+  string browser_name = 4;
+  string browser_version = 5;
+  string extension_version = 6;
+  Os platform = 7;
+  Arch arch = 8;
+  // Changes whenever this extension/native-host connection restarts.
+  string connection_generation = 9;
+  uint64 inventory_revision = 10;
+  uint32 tab_count = 11;
+  AttachedBrowserDeviceCapabilities capabilities = 12;
+}
+
+// One complete, monotonically-versioned snapshot from the machine's browser
+// bridge. Presence on a heartbeat makes the list authoritative, including an
+// empty list; absence means an older/no-bridge agent and changes nothing.
+message AttachedBrowserInventorySnapshot {
+  string bridge_generation = 1;
+  uint64 revision = 2;
+  repeated AttachedBrowserDeviceAnnouncement devices = 3;
 }
 
 // Detail about the agent's graphical display, when one is present.
@@ -472,6 +523,13 @@ message PtyOpenRequest {
   uint32 rows = 5;
   // The TERM value to advertise (e.g. "xterm-256color").
   string term = 6;
+  // Stable caller-owned identity for an idempotent terminal. Repeating pty_open
+  // with the same non-empty scope_id returns the existing live PTY/channel rather
+  // than spawning another shell. Empty preserves the explicit "open a new PTY"
+  // behavior. The control plane uses the durable OpenGeni session id here so
+  // capability/token refreshes reattach the same terminal while separate sessions
+  // on one machine remain isolated.
+  string scope_id = 7;
 }
 
 message PtyOpenResponse {
@@ -566,6 +624,69 @@ message DesktopScreenshotResponse {
 }
 
 // =============================================================================
+// Browser controller sidecar + browser-native frame stream
+// =============================================================================
+
+// Ensure the agent-owned browserd sidecar for one physical attached-browser
+// generation. The authenticated control plane supplies the placement-scoped
+// authority; the runner writes it owner-only and never places it in argv/logs.
+message BrowserControlEnsureRequest {
+  string scope_id = 1;
+  string scope_generation = 2;
+  string admin_token = 3;
+  repeated string allowed_origins = 4;
+}
+
+message BrowserControlEnsureResponse {
+  uint32 port = 1;
+  string sidecar_generation = 2;
+}
+
+// Open one browserd frame subscription and relay its canonical binary browser
+// frame messages over a fresh STREAM_KIND_BROWSER channel. browserd remains
+// loopback-only; only the short-lived view grant crosses this local boundary.
+message BrowserFramesOpenRequest {
+  string scope_id = 1;
+  string scope_generation = 2;
+  string browser_session_id = 3;
+  string controller_generation = 4;
+  string target_id = 5;
+  string view_token = 6;
+  int64 expires_at_ms = 7;
+  string format = 8;
+  uint32 quality = 9;
+  uint32 max_width = 10;
+  uint32 max_height = 11;
+  uint32 every_nth_frame = 12;
+}
+
+message BrowserFramesOpenResponse {
+  StreamChannel channel = 1;
+}
+
+// ComputerSession equivalent of BrowserFramesOpen. The relay carries the same
+// canonical binary frame envelope, while the distinct resource id keeps
+// controller authorization and URL routing unambiguous.
+message ComputerFramesOpenRequest {
+  string scope_id = 1;
+  string scope_generation = 2;
+  string computer_session_id = 3;
+  string controller_generation = 4;
+  string target_id = 5;
+  string view_token = 6;
+  int64 expires_at_ms = 7;
+  string format = 8;
+  uint32 quality = 9;
+  uint32 max_width = 10;
+  uint32 max_height = 11;
+  uint32 every_nth_frame = 12;
+}
+
+message ComputerFramesOpenResponse {
+  StreamChannel channel = 1;
+}
+
+// =============================================================================
 // Heartbeat + metrics
 // =============================================================================
 
@@ -590,6 +711,8 @@ message Heartbeat {
   // Point-in-time op-admission counts (queues only ever fill once a derived
   // pathology breaker saturates — nonzero queued figures are telemetry-worthy).
   AdmissionTelemetry admission = 7;
+  // Full live browser-profile inventory, when this runner has a browser bridge.
+  AttachedBrowserInventorySnapshot attached_browser_inventory = 8;
 }
 
 // A point-in-time host-capacity sample: the impure sampler's reading of
@@ -1024,6 +1147,9 @@ message ControlRequest {
     OpQuery op_query = 33;
     OpAttach op_attach = 34;
     WriteChunk write_chunk = 35;
+    BrowserControlEnsureRequest browser_control_ensure = 36;
+    BrowserFramesOpenRequest browser_frames_open = 37;
+    ComputerFramesOpenRequest computer_frames_open = 38;
   }
 }
 
@@ -1059,6 +1185,9 @@ message ControlResponse {
     OpStarted op_start = 31;
     OpStatus op_status = 32;
     WriteChunkAck write_chunk = 35;
+    BrowserControlEnsureResponse browser_control_ensure = 36;
+    BrowserFramesOpenResponse browser_frames_open = 37;
+    ComputerFramesOpenResponse computer_frames_open = 38;
   }
 }
 

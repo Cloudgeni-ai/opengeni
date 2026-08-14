@@ -37,6 +37,7 @@ import { observabilityEventLogger } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
+import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
 import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -238,18 +239,25 @@ export async function createTemporalWorkflowClient(
       if (!targetId) {
         throw new Error("rig verification requires changeId or versionId");
       }
-      await temporal.workflow.start("rigVerificationWorkflow", {
-        taskQueue: settings.temporalTaskQueue,
-        workflowId: workflowId ?? `rig-verification-${targetId}-${crypto.randomUUID()}`,
-        workflowIdReusePolicy: "ALLOW_DUPLICATE",
-        args: [
-          {
-            workspaceId,
-            ...(changeId ? { changeId } : {}),
-            ...(versionId ? { versionId } : {}),
-          },
-        ],
-      });
+      try {
+        await temporal.workflow.start("rigVerificationWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: workflowId ?? `rig-verification-${targetId}-${crypto.randomUUID()}`,
+          workflowIdReusePolicy: "REJECT_DUPLICATE",
+          args: [
+            {
+              workspaceId,
+              ...(changeId ? { changeId } : {}),
+              ...(versionId ? { versionId } : {}),
+            },
+          ],
+        });
+      } catch (error) {
+        // A lost start acknowledgement is indistinguishable from a retry. The
+        // caller-owned workflow id makes both cases the same successful start.
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
     },
     check: async () => {
       await connection.workflowService.getSystemInfo({});
@@ -362,6 +370,8 @@ export async function startApi() {
       ? {
           editableArtifacts: editableArtifactComposition.application,
           editableArtifactExports: editableArtifactComposition.durableExports,
+          editableArtifactAgent: editableArtifactComposition.agent,
+          editableArtifactOfficeImports: editableArtifactComposition.officeImports,
         }
       : {}),
     observability,
@@ -398,6 +408,7 @@ export async function startApi() {
   const stopSlackInteractionPump = settings.slackSigningSecret
     ? startSlackInteractionPump(routeDeps)
     : undefined;
+  const stopMemorySlackPublicationPump = startMemorySlackPublicationPump(routeDeps);
   const stopTemporalScheduleCleanupPump = startTemporalScheduleCleanupPump({
     db: dbClient.db,
     deleteSchedule: async (temporalScheduleId) => {
@@ -464,6 +475,7 @@ export async function startApi() {
     close: async () => {
       server.stop(true);
       stopSlackInteractionPump?.();
+      await stopMemorySlackPublicationPump();
       stopMetricsIngestion?.();
       stopHelloIngestion?.();
       await stopTemporalScheduleCleanupPump();

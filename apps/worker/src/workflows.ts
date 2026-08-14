@@ -26,6 +26,12 @@ export {
   sandboxReaperWorkflowV2,
 } from "./workflows/sandbox-reaper";
 export { fileUploadReaperWorkflow } from "./workflows/file-upload-reaper";
+export { siteAuthMaintenanceWorkflow } from "./workflows/site-auth-maintenance";
+export {
+  videoGenerationWorkflow,
+  videoGenerationWorkflowId,
+  type VideoGenerationWorkflowInput,
+} from "./workflows/video-generation";
 export { sessionWorkflowWakeDispatcherWorkflow } from "./workflows/workflow-wake";
 export {
   rigVerificationWorkflow,

@@ -20,6 +20,41 @@ import {
 } from "../src";
 
 type Capture = { url: string; init?: RequestInit | undefined };
+type TerminalPhase = Extract<CodexModelRequestEvent["phase"], "completed" | "failed" | "timed_out">;
+
+function expectExactlyOneTerminalPerAttempt(
+  events: readonly CodexModelRequestEvent[],
+  expected: ReadonlyArray<{
+    requestId?: string;
+    transportAttempt: number;
+    phase: TerminalPhase;
+  }>,
+): void {
+  const terminalEvents = events.filter(
+    (event): event is CodexModelRequestEvent & { phase: TerminalPhase } =>
+      event.phase === "completed" || event.phase === "failed" || event.phase === "timed_out",
+  );
+  expect(terminalEvents).toHaveLength(expected.length);
+  expect(
+    new Set(terminalEvents.map((event) => `${event.requestId}:${event.transportAttempt}`)).size,
+  ).toBe(expected.length);
+  expect(
+    terminalEvents.map((event) => ({
+      transportAttempt: event.transportAttempt,
+      phase: event.phase,
+    })),
+  ).toEqual(
+    expected.map(({ transportAttempt, phase }) => ({
+      transportAttempt,
+      phase,
+    })),
+  );
+  for (const [index, expectation] of expected.entries()) {
+    if (expectation.requestId !== undefined) {
+      expect(terminalEvents[index]?.requestId).toBe(expectation.requestId);
+    }
+  }
+}
 
 function baseRecorder(statuses: number[] = [200]): {
   base: FetchLike;
@@ -195,7 +230,10 @@ describe("codexSubscriptionFetch", () => {
 
   test("reports only the exact opaque artifacts on the normalized wire request", async () => {
     const { base } = baseRecorder();
-    const observed: Array<{ requestId: string; fingerprints: readonly string[] }> = [];
+    const observed: Array<{
+      requestId: string;
+      fingerprints: readonly string[];
+    }> = [];
     const opaque = {
       type: "reasoning",
       id: "rs-wire",
@@ -264,7 +302,10 @@ describe("codexSubscriptionFetch", () => {
         betaFeatures: ["remote_compaction_v2"],
         turnMetadata: {
           request_kind: "compaction",
-          compaction: { implementation: "responses_compaction_v2", strategy: "memento" },
+          compaction: {
+            implementation: "responses_compaction_v2",
+            strategy: "memento",
+          },
         },
       }),
       () =>
@@ -281,7 +322,10 @@ describe("codexSubscriptionFetch", () => {
     expect(headers.get("x-codex-beta-features")).toBe("remote_compaction_v2");
     expect(JSON.parse(headers.get("x-codex-turn-metadata")!)).toEqual({
       request_kind: "compaction",
-      compaction: { implementation: "responses_compaction_v2", strategy: "memento" },
+      compaction: {
+        implementation: "responses_compaction_v2",
+        strategy: "memento",
+      },
     });
     const body = JSON.parse(captures[0]?.init?.body as string) as {
       input: Array<{ type: string }>;
@@ -303,10 +347,15 @@ describe("codexSubscriptionFetch", () => {
 
   test("retries once with a refreshed token on 401", async () => {
     const { base, captures } = baseRecorder([401, 200]);
+    const events: CodexModelRequestEvent[] = [];
     let refreshed = 0;
     const fetchImpl = codexSubscriptionFetch(base);
     const res = await codexRequestStorage.run(
       ctx({
+        nextRequestId: () => "dispatch-401",
+        onModelRequestEvent: (event) => {
+          events.push(event);
+        },
         refresh: async () => {
           refreshed += 1;
           return {
@@ -329,6 +378,10 @@ describe("codexSubscriptionFetch", () => {
       new Headers(captures[1]?.init?.headers).get("idempotency-key"),
     );
     expect(res.status).toBe(200);
+    expectExactlyOneTerminalPerAttempt(events, [
+      { requestId: "dispatch-401", transportAttempt: 1, phase: "failed" },
+      { requestId: "dispatch-401", transportAttempt: 2, phase: "completed" },
+    ]);
   });
 
   test("replays a pristine streamed JSON body on the 401 refresh retry", async () => {
@@ -345,7 +398,11 @@ describe("codexSubscriptionFetch", () => {
         },
       );
     };
-    const expected = JSON.stringify({ model: "gpt-5.6-sol", stream: true, input: [] });
+    const expected = JSON.stringify({
+      model: "gpt-5.6-sol",
+      stream: true,
+      input: [],
+    });
     const bytes = new TextEncoder().encode(expected);
     const factory = () =>
       new ReadableStream<Uint8Array>({
@@ -534,6 +591,68 @@ describe("codexSubscriptionFetch", () => {
     });
   });
 
+  test.each([
+    [
+      "response.failed",
+      {
+        type: "response.failed",
+        response: {
+          id: "resp_nonstream_failed",
+          status: "failed",
+          error: { code: "provider_failed", message: "provider failed" },
+        },
+      },
+    ],
+    [
+      "response.incomplete",
+      {
+        type: "response.incomplete",
+        response: {
+          id: "resp_nonstream_incomplete",
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+        },
+      },
+    ],
+    ["top-level error", { type: "error", code: "provider_error", message: "provider error" }],
+    [
+      "response.error",
+      {
+        type: "response.error",
+        error: { code: "response_error", message: "response error" },
+      },
+    ],
+  ] as const)("non-streaming %s emits exactly one failed terminal", async (_name, event) => {
+    const events: CodexModelRequestEvent[] = [];
+    const response = await codexRequestStorage.run(
+      ctx({
+        nextRequestId: () => `nonstream-${_name}`,
+        onModelRequestEvent: (observed) => {
+          events.push(observed);
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(
+          async () =>
+            new Response(`data: ${JSON.stringify(event)}\n\n`, {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            }),
+        )("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({
+            model: "gpt-5.6-sol",
+            stream: false,
+            input: [],
+          }),
+        }),
+    );
+
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    await response.text();
+    expectExactlyOneTerminalPerAttempt(events, [{ transportAttempt: 1, phase: "failed" }]);
+  });
+
   test("partial streaming body failure is surfaced without a transport replay", async () => {
     let calls = 0;
     const body = new ReadableStream<Uint8Array>({
@@ -611,6 +730,7 @@ describe("codexSubscriptionFetch", () => {
     expect(events.map((event) => event.phase)).toEqual(["started", "timed_out"]);
     expect(events[0]?.timeoutPolicy.noByteRetries).toBe(0);
     expect(events[1]?.willRetry).toBe(false);
+    expectExactlyOneTerminalPerAttempt(events, [{ transportAttempt: 1, phase: "timed_out" }]);
   });
 
   test("a late response after a pre-headers timeout does not trigger a second upstream call", async () => {
@@ -787,6 +907,7 @@ describe("codexSubscriptionFetch", () => {
       timeoutClass: "idle_stream",
       responseObserved: true,
     });
+    expectExactlyOneTerminalPerAttempt(events, [{ transportAttempt: 1, phase: "timed_out" }]);
   });
 
   test("slow first-byte audit persistence cannot manufacture an idle timeout", async () => {
@@ -857,6 +978,7 @@ describe("codexSubscriptionFetch", () => {
       timeoutClass: "whole_request",
       responseObserved: true,
     });
+    expectExactlyOneTerminalPerAttempt(events, [{ transportAttempt: 1, phase: "timed_out" }]);
   });
 
   test("external cancellation after headers cancels the body without a timeout retry", async () => {
@@ -903,6 +1025,7 @@ describe("codexSubscriptionFetch", () => {
     expect(events.some((event) => event.phase === "timed_out")).toBe(false);
     expect(events.at(-1)?.phase).toBe("failed");
     expect(observed).toBe(abortReason);
+    expectExactlyOneTerminalPerAttempt(events, [{ transportAttempt: 1, phase: "failed" }]);
   });
 
   // A realistic stream: response.completed leaves output empty and the assistant
@@ -946,6 +1069,152 @@ describe("codexSubscriptionFetch", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ id: "r1", status: "completed" });
   });
+
+  test.each([
+    [
+      "response.completed with embedded failed",
+      {
+        type: "response.completed",
+        response: {
+          id: "resp_failed_completed",
+          status: "failed",
+          error: { code: "provider_failed", message: "provider failed" },
+        },
+      },
+      "failed",
+      "provider_failed",
+    ],
+    [
+      "response.done with embedded incomplete",
+      {
+        type: "response.done",
+        response: {
+          id: "resp_incomplete_done",
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+        },
+      },
+      "incomplete",
+      "response_incomplete",
+    ],
+  ] as const)(
+    "non-streaming success-spelled terminal honors embedded %s status",
+    async (_name, event, responseStatus, errorCode) => {
+      const events: CodexModelRequestEvent[] = [];
+      const response = await codexRequestStorage.run(
+        ctx({
+          nextRequestId: () => `nonstream-contradictory-${responseStatus}`,
+          onModelRequestEvent: (observed) => {
+            events.push(observed);
+          },
+        }),
+        () =>
+          codexSubscriptionFetch(
+            async () =>
+              new Response(`data: ${JSON.stringify(event)}\n\n`, {
+                status: 200,
+                headers: { "content-type": "text/event-stream" },
+              }),
+          )("https://chatgpt.com/backend-api/responses", {
+            method: "POST",
+            body: JSON.stringify({
+              model: "gpt-5.6-sol",
+              stream: false,
+              input: [],
+            }),
+          }),
+      );
+
+      expect(response.status).toBe(502);
+      expect(await response.json()).toMatchObject({
+        error: {
+          code: errorCode,
+          response_status: responseStatus,
+        },
+      });
+      expect(events.map((observed) => observed.phase)).toEqual([
+        "started",
+        "headers",
+        "first_byte",
+        "failed",
+      ]);
+      expectExactlyOneTerminalPerAttempt(events, [{ transportAttempt: 1, phase: "failed" }]);
+    },
+  );
+
+  test.each([
+    [
+      "response.completed with embedded failed",
+      {
+        type: "response.completed",
+        response: {
+          id: "resp_failed_completed_stream",
+          status: "failed",
+          error: { code: "provider_failed", message: "provider failed" },
+        },
+      },
+      "failed",
+      "provider_failed",
+    ],
+    [
+      "response.done with embedded incomplete",
+      {
+        type: "response.done",
+        response: {
+          id: "resp_incomplete_done_stream",
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+        },
+      },
+      "incomplete",
+      "response_incomplete",
+    ],
+  ] as const)(
+    "streaming success-spelled terminal honors embedded %s status",
+    async (_name, terminalEvent, _responseStatus, errorCode) => {
+      const events: CodexModelRequestEvent[] = [];
+      const response = await codexRequestStorage.run(
+        ctx({
+          nextRequestId: () => `stream-contradictory-${errorCode}`,
+          onModelRequestEvent: (observed) => {
+            events.push(observed);
+          },
+        }),
+        () =>
+          codexSubscriptionFetch(
+            async () =>
+              new Response(`data: ${JSON.stringify(terminalEvent)}\n\n`, {
+                status: 200,
+                headers: { "content-type": "text/event-stream" },
+              }),
+          )("https://chatgpt.com/backend-api/responses", {
+            method: "POST",
+            body: JSON.stringify({
+              model: "gpt-5.6-sol",
+              stream: true,
+              input: [],
+            }),
+          }),
+      );
+
+      let observed: unknown;
+      try {
+        await response.text();
+      } catch (error) {
+        observed = error;
+      }
+      expect(response.status).toBe(200);
+      expect(observed).toMatchObject({ status: 502, code: errorCode });
+      expect(isCodexTransportError(observed)).toBe(true);
+      expect(events.map((observedEvent) => observedEvent.phase)).toEqual([
+        "started",
+        "headers",
+        "first_byte",
+        "failed",
+      ]);
+      expectExactlyOneTerminalPerAttempt(events, [{ transportAttempt: 1, phase: "failed" }]);
+    },
+  );
 
   test("non-streaming caller: response.failed becomes a marked non-retried provider error", async () => {
     let calls = 0;
@@ -1154,6 +1423,110 @@ describe("codexSubscriptionFetch", () => {
     });
     expect(body).not.toContain("stack");
     expect(body).not.toContain("nested");
+  });
+
+  test("semantic success remains completed when downstream cleanup cancels after response.completed", async () => {
+    const auditEvents: CodexModelRequestEvent[] = [];
+    const diagnosticEvents: CodexModelRequestEvent[] = [];
+    const response = await codexRequestStorage.run(
+      ctx({
+        onModelRequestDiagnostic: (event) => diagnosticEvents.push(event),
+        onModelRequestEvent: (event) => {
+          auditEvents.push(event);
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(codexBase)("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({
+            model: "gpt-5.6-sol",
+            stream: true,
+            input: [],
+          }),
+        }),
+    );
+
+    const reader = response.body!.getReader();
+    await reader.read();
+    await reader.cancel("downstream parsed the semantic terminal");
+
+    expect(auditEvents.map((event) => event.phase)).toEqual([
+      "started",
+      "headers",
+      "first_byte",
+      "completed",
+    ]);
+    expect(diagnosticEvents.map((event) => event.phase)).toEqual(
+      auditEvents.map((event) => event.phase),
+    );
+    expect(auditEvents.at(-1)?.phase).toBe("completed");
+    expect(auditEvents.filter((event) => event.phase === "failed")).toHaveLength(0);
+    expect(auditEvents.every((event) => event.durationMs >= 0)).toBe(true);
+  });
+
+  test("semantic success remains completed when the stream is fully drained", async () => {
+    const auditEvents: CodexModelRequestEvent[] = [];
+    const response = await codexRequestStorage.run(
+      ctx({
+        onModelRequestEvent: (event) => {
+          auditEvents.push(event);
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(codexBase)("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({
+            model: "gpt-5.6-sol",
+            stream: true,
+            input: [],
+          }),
+        }),
+    );
+
+    await response.text();
+
+    expect(auditEvents.at(-1)?.phase).toBe("completed");
+    expect(auditEvents.filter((event) => event.phase === "failed")).toHaveLength(0);
+  });
+
+  test("diagnostic observer is synchronous/no-throw and runs before durable audit", async () => {
+    const order: string[] = [];
+    const response = await codexRequestStorage.run(
+      ctx({
+        onModelRequestDiagnostic: () => {
+          order.push("diagnostic");
+          throw new Error("metrics exporter failure");
+        },
+        onModelRequestEvent: (event) => {
+          order.push(`audit:${event.phase}`);
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(codexBase)("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "gpt-5.6-sol", input: [] }),
+        }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(order.slice(0, 2)).toEqual(["diagnostic", "audit:started"]);
+  });
+
+  test("request-preparation diagnostics expose bounded pre-network checkpoints", async () => {
+    const phases: string[] = [];
+    const response = await codexRequestStorage.run(
+      ctx({
+        onRequestPreparationDiagnostic: (phase) => phases.push(phase),
+      }),
+      () =>
+        codexSubscriptionFetch(codexBase)("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "gpt-5.6-sol", input: [] }),
+        }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(phases).toEqual(["transport_entry", "credential_ready", "wire_request_ready"]);
   });
 
   test("streaming caller: successful bytes pass through for model-level reconstruction", async () => {
@@ -1511,7 +1884,11 @@ describe("codexSubscriptionFetch", () => {
     const res = await codexRequestStorage.run(ctx(), () =>
       codexSubscriptionFetch(base)("https://chatgpt.com/backend-api/responses", {
         method: "POST",
-        body: JSON.stringify({ model: "gpt-5.6-sol", stream: true, input: [] }),
+        body: JSON.stringify({
+          model: "gpt-5.6-sol",
+          stream: true,
+          input: [],
+        }),
       }),
     );
     expect(cancelled).toBe(true);

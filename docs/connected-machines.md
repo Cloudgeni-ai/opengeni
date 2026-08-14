@@ -29,17 +29,19 @@ client. The matching UI ships in
 | Backend enum | `docker`/`modal`/`local`/… | `selfhosted` |
 
 The model that follows from this: a machine-bound session has **no phantom Modal
-"home box"**, **no OpenGeni git token is distributed to the machine** (it uses
-its own ssh / `gh` / credential helper), repos are **not cloned onto it**, and
+"home box"**, **no OpenGeni Git token is distributed to the machine** (it uses
+its own SSH / `gh` / credential helper), repos are **not cloned onto it**, and
 the agent runs under a **per-session working directory** (making its own
 worktrees under that path as it needs them).
 
-OpenGeni does not mint, seed, renew, or advertise Toolspace credentials on a
-Connected Machine. It sends no Toolspace URL, token-file pointer, package hint,
-or other manifest environment to machine commands. If an operator wants a
-machine-local integration, they may provision and store an ordinary API
-credential themselves; that credential remains machine-owned and outside the
-Connected Machine lifecycle.
+The exact model-visible tool catalog remains available through Codemode without
+installing a machine credential. OpenGeni sends no Codemode manifest pointer or
+token file. Instead, the worker snapshots a renewable exact-attempt URL/bearer
+only into each new child exec. It is never written to disk or stable machine
+state. The installed binary exposes its absolute path to that authorized child,
+so `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list|call` works even without
+Bun/Node/`ogtool`. It reaches the same journal/executor as model MCP; the machine
+still owns every ordinary credential and ambient environment.
 
 Machine availability is also not a turn-admission dependency. A text-only turn
 can start while the selected machine is offline. If the model invokes a machine
@@ -93,16 +95,25 @@ Rules to keep in mind:
   target the backend is the machine itself, so leave it off (or `"none"`) and
   point at the machine with `targetSandboxId`.
 
+The model-facing first-party `session_create` tool makes the dependency
+structural: it accepts an optional `machineTarget` object containing required
+`targetSandboxId` plus optional `workingDir`, then maps that object to the stable
+flat REST/SDK fields above. Consequently the model cannot generate a standalone
+`workingDir`. This is a model-contract hardening only; existing REST/SDK callers
+continue to use the flat fields.
+
 ## Discover machines + metrics
 
 `listMachines` returns the workspace fleet plus the active-sandbox pointer. Pass
 `sessionId` for an in-session view, which also folds in that session's synthetic
-Modal group box and the session's active-sandbox pointer.
+home group box when one exists and the session's active-sandbox pointer. A
+`backend:none` session has no synthetic home, but its owned Connected Machines
+remain visible and attachable.
 
 ```ts
 const res = await client.listMachines(workspaceId, { sessionId });
 // res.activeSandboxId — the session's currently-active sandbox (null ⇒ the
-//                       session's own group box is active)
+//                       home box is active, or none is attached for backend:none)
 // res.activeEpoch     — monotonic fence for the pointer (see "swap" below)
 // res.machines        — MachineView[]
 ```
@@ -149,17 +160,30 @@ answers `ping` and publishes heartbeats outside command execution. Production
 admission has no ordinary fixed concurrency or queue-wait limit: its only
 circuit breakers are derived from host file-descriptor and process headroom and
 sit above normal workloads (including 100 concurrent command requests). Linux
-puts the supervisor and each operation in separate cgroup-v2 leaves for fate
-isolation and accounting. Before moving itself, the supervisor stamps its own leaf
-with systemd-oomd's `user.oomd_avoid=1` marker; if that protection cannot be
-established, it stays in the already-protected unit cgroup. The generated systemd
+puts the supervisor and each operation in separate cgroup-v2 leaves for accounting
+and systemd-oomd selection. Before moving itself, the supervisor stamps its own leaf
+with systemd-oomd's `user.oomd_avoid=1` marker; if that preference cannot be
+established, it stays in the unit cgroup. systemd-oomd honors the marker only when
+the monitored ancestor and candidate cgroup have the same owner, so host policy
+must preserve that ownership relationship. Cgroup placement alone does not change
+host-wide kernel OOM victim selection: the generated service requests a negative
+supervisor `OOMScoreAdjust`, startup reports the effective `/proc` value because an
+unprivileged user manager may clamp it, and a pre-exec hook raises commands to
+`+500` before user code can fork descendants. Work delegated over a socket to an
+external privileged daemon (for example, a container build) is not a descendant
+of the command: the daemon chooses that workload's cgroup and OOM score. Operators
+must configure such delegated workloads so they are not more protected from
+global OOM selection than the supervisor. The generated systemd
 unit explicitly clears stale aggregate resource limits and enables accounting
 without a parent `MemoryHigh`; the default operation leaf has no memory maximum or
-throttle. At spawn, the agent stops the command's process group, moves its direct
+throttle. Each operation leaf sets `memory.oom.group=1`, so a memcg OOM terminates
+the complete operation instead of leaving sibling descendants with partial state.
+At spawn, the agent stops the command's process group, moves its direct
 roots, then repeatedly drains any same-group descendants still inherited in the
 supervisor leaf into the same operation leaf before resuming it. Correctness does
 not depend on synchronous stop-signal delivery: after a parent moves, future
-children inherit its operation leaf. This closes the post-spawn fork race. A
+process descendants inherit its operation leaf. Daemon-mediated work remains
+subject to the external-daemon boundary above. This closes the post-spawn fork race. A
 same-group fork storm that keeps creating escaped descendants during this tiny
 pre-containment window is terminated only after crossing a PID breaker derived
 from that machine's process ceiling; it cannot wedge command admission forever.

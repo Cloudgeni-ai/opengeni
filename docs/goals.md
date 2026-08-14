@@ -20,6 +20,12 @@ workflow history are replaceable delivery nudges over Postgres truth. Goal and
 workflow-wake revisions are bounded to JavaScript's maximum safe integer in
 Postgres, so corruption or theoretical exhaustion fails the producing
 transaction instead of rounding one producer's revision into another's.
+The standing objective has a separate monotonic `objective_revision`; the
+existing `version` remains the continuation/lifecycle fence. Every logical
+turn freezes either the exact goal projection or an explicit no-goal projection
+in `session_turns.goal_snapshot` when the turn is accepted. Ordinary turns,
+goal continuations, recovery, and both compaction modes compose only that
+snapshot, never a later mutable goal head.
 
 ## Lifecycle
 
@@ -27,12 +33,20 @@ A goal is `active`, `paused`, or `completed`.
 
 - `goal_set` (agent tool), `CreateSessionRequest.goal`, or
   `ScheduledTaskAgentConfig.goal` create it. Setting a goal on a session that
-  already has one replaces it in place: text/criteria are overwritten, the goal
-  is re-activated (even from `paused`/`completed`), the version bumps, progress
-  counters reset, and a new monotonic continuation revision is armed. Revision
-  numbers themselves never reset or move backward.
-- `goal_update` revises text/criteria or records a progress note. The version
-  bump counts as progress for the no-progress detector. Status is unchanged.
+  already has one remains a supported low-level/API/scheduler redirect: it
+  re-activates the goal, resets continuation counters, and arms a wake. The
+  agent-facing `goal_set` creates only; an existing goal is changed through the
+  policy-fenced `goal_update`, so an incidental set cannot silently redirect it.
+- `goal_update` declares `refinement`, `adaptation`, or `replacement`, a
+  rationale, and the expected objective revision. `review_changes` always
+  records an immutable proposal; `preserve_intent` directly applies only a
+  refinement; `autonomous_adaptation` may apply every declared kind. API/user
+  redirects apply directly. An applied semantic change advances both objective
+  and lifecycle revisions but is not execution progress. Proposed content is
+  not composed into model instructions until a user applies it.
+- `goal_progress` records a concrete, attempt-fenced progress fact without
+  changing text, criteria, policy, objective revision, or lifecycle version.
+  Legacy `goal_update.progressNote` calls route through this separate operation.
   Agent calls require a stable UUID `idempotencyKey`. That operation identity
   belongs to the target session across replacement attempts, while its durable
   receipt retains the attempt that first applied it for audit. The receipt,
@@ -45,7 +59,15 @@ A goal is `active`, `paused`, or `completed`.
 - `goal_pause { rationale }` stops the loop until the goal is resumed or
   replaced.
 
+New goal text and success criteria are each limited to 8 KiB of UTF-8, rewrite
+and pause rationales to 2 KiB, and progress notes to 4 KiB. Rolling legacy
+goals remain exact and lifecycle-mutable even when larger. Their immutable
+accepted-turn prompt snapshot uses a deterministic UTF-8 prefix with an
+explicit original-byte truncation fact, so ordinary turns, recovery, and
+compaction stay bounded without rewriting canonical history.
+
 Every transition lands on the session timeline as `goal.set`, `goal.updated`,
+`goal.progress`, `goal.rewrite.proposed`,
 `goal.completed`, `goal.paused`, `goal.resumed`, `goal.cleared`, or
 `goal.continuation` events.
 
@@ -83,9 +105,11 @@ The locked decision applies these rules:
    A pending human/API prompt and an authoritative Steer instruction also win
    even if they race materialization.
 3. Otherwise progress since the previous continuation is scored: a continuation
-   turn that produced zero tool calls and no goal revision increments a
+   turn that produced no non-goal execution tool call and no committed
+   `goal.progress` fact increments a
    no-progress streak (a user/scheduled turn in between resets the streak and
-   the budget — human re-engagement re-arms the loop).
+   the budget — human re-engagement re-arms the loop). A semantic rewrite or
+   proposal alone never resets the streak.
 4. Guards: `noProgressStreak >= OPENGENI_GOAL_NO_PROGRESS_LIMIT` (default 3)
    auto-pauses the goal with a visible `goal.paused` event
    (`reason: "no_progress"`). Goals are NOT capped by continuation count by
@@ -167,6 +191,14 @@ recovery of the same turn, not creation or charging of another continuation.
   and wakes the session workflow — resume works even on a fully idle session
   because `signalWithStart` restarts a completed workflow. Invalid transitions
   (e.g. resuming a completed goal) return 409.
+- The same `PATCH` accepts a direct semantic redirect with `{ text,
+successCriteria?, mutationPolicy?, rationale, expectedObjectiveRevision }`.
+  This user-authoritative path may replace/re-activate a completed goal and
+  wakes an otherwise idle session.
+- `GET .../goal/revisions` lists immutable applied/proposed history.
+  `POST .../goal/revisions/:revisionId/apply` applies a proposal under an exact
+  objective-revision fence; the proposal row remains immutable and the new
+  applied revision links it by `proposalId`.
 - `DELETE /v1/workspaces/:id/sessions/:sessionId/goal` clears the session's
   active goal (`sessions:control`). It deletes the goal row, emits
   `goal.cleared` when a goal existed, and is idempotent when no goal exists.
@@ -183,7 +215,7 @@ re-establishes its objective each time.
 The goal tools are session-scoped first-party MCP tools. The worker signs the
 session id into the delegated access token it uses for first-party MCP calls
 (HMAC, worker-asserted — not agent-controlled), and the API registers
-`goal_set`/`goal_update`/`goal_complete`/`goal_pause` only for grants carrying
+`goal_set`/`goal_update`/`goal_progress`/`goal_complete`/`goal_pause` only for grants carrying
 that claim plus the `goals:manage` permission. A top-level session with no
 first-party permission override uses the worker default. A child inherits its
 creator's exact effective permissions, and an explicit set may only narrow
@@ -202,7 +234,7 @@ arguments is rejected as `IDEMPOTENCY_KEY_REUSED`.
 
 ## Settings
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
+| Variable                               | Default            | Meaning                                                                                                                                                                                                                                                                             |
+| -------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS` | _(unset — no cap)_ | Optional hard ceiling on synthesized continuation turns per goal arming. Unset by default: goals are bounded by the progress and budget guards, not by count, so a run can legitimately span days. When set, it is a ceiling that a per-goal `maxAutoContinuations` can only lower. |
-| `OPENGENI_GOAL_NO_PROGRESS_LIMIT` | `3` | Consecutive zero-progress continuations tolerated before auto-pause. |
+| `OPENGENI_GOAL_NO_PROGRESS_LIMIT`      | `3`                | Consecutive zero-progress continuations tolerated before auto-pause.                                                                                                                                                                                                                |

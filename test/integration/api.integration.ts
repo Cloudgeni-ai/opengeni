@@ -10,7 +10,9 @@ import {
   bindAuthorizedGitHubInstallationRepositories,
   bindGitHubInstallationRepositories,
   buildConnectionTokenResolver,
+  claimCodemodeOperation,
   claimSessionWorkForAttempt,
+  completeCodemodeOperation,
   isSessionCompactionRequested,
   createDb,
   createSession,
@@ -20,7 +22,6 @@ import {
   decodeSessionListCursor,
   encodeSessionListCursor,
   enableCapabilityInstallation,
-  encryptEnvironmentValue,
   getActiveSessionHistoryItems,
   getBillingBalance,
   getCapabilityInstallation,
@@ -35,22 +36,27 @@ import {
   grantWorkspaceAccess,
   listGitHubInstallationAccessForWorkspace,
   initializeSessionStartAtomically,
+  listInstalledPortableSkills,
   listSessionEvents,
   listScheduledTasks,
   listOutstandingSessionSystemUpdates,
   listSessionTurns,
   listSessionMcpServersForRun,
   listUsageEvents,
+  markCodemodeOperationExecutionStarted,
   recordStripeWebhookEvent,
   recordUsageEvent,
+  persistAttemptToolCatalog,
   requireFile,
   requireSession,
   saveRunState,
   setSessionGoalStatus,
   sumUsageQuantity,
+  synchronizeCanonicalHumanLoginBindings,
   updateScheduledTask,
   updateWorkspaceSettings,
   upsertCapabilityCatalogItem,
+  withWorkspaceSessionActivityRls,
   withWorkspaceRls,
   type Database,
 } from "@opengeni/db";
@@ -81,6 +87,7 @@ import {
   type TestServices,
 } from "@opengeni/testing";
 import { prepareAgentTools } from "@opengeni/runtime";
+import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { buildTimeline } from "../../packages/react/src/timeline";
 import {
   createDocumentServices,
@@ -98,7 +105,7 @@ async function setSessionStatus(
   status: SessionStatus,
   activeTurnId: string | null = null,
 ): Promise<void> {
-  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
     await scopedDb.execute(dbSql`
       update sessions
       set status = ${status}, active_turn_id = ${activeTurnId}, updated_at = now()
@@ -899,6 +906,7 @@ describe("API component integration", () => {
 
     const grant = {
       ...baseGrant,
+      principalKind: "agent_attempt" as const,
       metadata: {
         delegated: true,
         sessionId: session.id,
@@ -941,13 +949,26 @@ describe("API component integration", () => {
     expect(pausedGoal.resource.state).toBe("paused");
     expect(JSON.stringify(pausedGoal)).not.toContain("waiting on upstream fix");
 
-    const replacedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_set", {
+    await expect(
+      callMcpTool(mcp, "goal_set", {
+        text: "upstream fixed; finish the job",
+      }),
+    ).rejects.toThrow("use goal_update to revise it");
+    const revisedWhilePaused = await callMcpTool<{
+      version: number;
+      text: string;
+      outcome: string;
+    }>(mcp, "goal_update", {
       text: "upstream fixed; finish the job",
+      expectedObjectiveRevision: 2,
+      changeKind: "refinement",
+      rationale: "the upstream blocker cleared without changing the objective",
+      idempotencyKey: crypto.randomUUID(),
     });
-    expect(replacedGoal).toMatchObject({
-      outcome: "updated",
-      resource: { state: "active" },
-      facts: { replaced: true },
+    expect(revisedWhilePaused).toMatchObject({
+      version: 4,
+      text: "upstream fixed; finish the job",
+      outcome: "applied",
     });
 
     const completedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_complete", {
@@ -968,7 +989,14 @@ describe("API component integration", () => {
     const events = await listSessionEvents(dbClient.db, baseGrant.workspaceId, session.id);
     expect(
       events.filter((event) => event.type.startsWith("goal.")).map((event) => event.type),
-    ).toEqual(["goal.set", "goal.updated", "goal.paused", "goal.set", "goal.completed"]);
+    ).toEqual([
+      "goal.set",
+      "goal.updated",
+      "goal.progress",
+      "goal.paused",
+      "goal.updated",
+      "goal.completed",
+    ]);
     expect((await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id))?.status).toBe(
       "completed",
     );
@@ -1297,6 +1325,25 @@ describe("API component integration", () => {
   test("managed session cookie still authenticates when an invalid bearer header is present", async () => {
     const userId = `managed-user-${crypto.randomUUID()}`;
     const email = `managed-cookie-${crypto.randomUUID()}@example.com`;
+    await dbClient.db.execute(dbSql`
+      insert into auth_users (id, name, email, email_verified)
+      values (${userId}, 'Managed Cookie User', ${email}, true)
+    `);
+    await dbClient.db.execute(dbSql`
+      insert into auth_identities (id, user_id, provider_id, account_id)
+      values (${crypto.randomUUID()}, ${userId}, 'credential', ${userId})
+    `);
+    const identity = await synchronizeCanonicalHumanLoginBindings(dbClient.db, userId);
+    const authSessionId = crypto.randomUUID();
+    await dbClient.db.execute(dbSql`
+      insert into auth_sessions (
+        id, user_id, token, expires_at,
+        identity_id, identity_revision, auth_revision
+      ) values (
+        ${authSessionId}, ${userId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+        ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision}
+      )
+    `);
     const app = createApp({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -1312,6 +1359,7 @@ describe("API component integration", () => {
           getSession: async () => ({
             headers: new Headers(),
             response: {
+              session: { id: authSessionId },
               user: { id: userId, email, name: "Managed Cookie User" },
             },
           }),
@@ -2363,6 +2411,82 @@ describe("API component integration", () => {
     expect(after).toBe(before + 1);
   });
 
+  test("returns a committed prompt before replayable fanout and wake work runs", async () => {
+    class FailingPromptBus extends MemoryEventBus {
+      fail = false;
+
+      override async publish(
+        workspaceId: string,
+        sessionId: string,
+        events: SessionEvent[],
+      ): Promise<void> {
+        if (this.fail) throw new Error("nats unavailable");
+        await super.publish(workspaceId, sessionId, events);
+      }
+    }
+    const bus = new FailingPromptBus();
+    const workflowClient = new FakeWorkflowClient();
+    const postCommitTasks: Array<() => Promise<void>> = [];
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus,
+      workflowClient,
+      schedulePromptPostCommit: (task) => postCommitTasks.push(task),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const created = await app.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({ initialMessage: "hello" }),
+      headers: { "content-type": "application/json" },
+    });
+    const session = (await created.json()) as { id: string };
+    await setSessionStatus(dbClient.db, workspaceId, session.id, "idle", null);
+    const publishedBefore = bus.published.length;
+    const wakeupsBefore = workflowClient.wakeups.length;
+    const usageBefore = await sumUsageQuantity(dbClient.db, {
+      workspaceId,
+      eventType: "agent_run.created",
+      since: startOfUtcMonth(),
+    });
+
+    const response = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/events`),
+      {
+        method: "POST",
+        body: JSON.stringify({
+          type: "user.message",
+          clientEventId: "prompt-response-boundary",
+          payload: { text: "commit before fanout" },
+        }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+
+    expect(response.status).toBe(202);
+    expect(postCommitTasks).toHaveLength(1);
+    expect(bus.published).toHaveLength(publishedBefore);
+    expect(workflowClient.wakeups).toHaveLength(wakeupsBefore);
+    const accepted = (await response.json()) as SessionEvent;
+    expect(accepted).toMatchObject({
+      type: "user.message",
+      clientEventId: "prompt-response-boundary",
+    });
+    const durableEvents = await listSessionEvents(dbClient.db, workspaceId, session.id);
+    expect(durableEvents.some((event) => event.id === accepted.id)).toBe(true);
+    expect(
+      await sumUsageQuantity(dbClient.db, {
+        workspaceId,
+        eventType: "agent_run.created",
+        since: startOfUtcMonth(),
+      }),
+    ).toBe(usageBefore + 1);
+
+    bus.fail = true;
+    workflowClient.wakeError = new Error("temporal unavailable");
+    await expect(postCommitTasks[0]!()).resolves.toBeUndefined();
+  });
+
   test("rejects concurrent removed one-turn tool overrides without partial mutation", async () => {
     const mcpServers = Array.from({ length: 12 }, (_, index) => ({
       id: `docs-${index}`,
@@ -2534,11 +2658,9 @@ describe("API component integration", () => {
         .filter((item) => item.id.startsWith("api:"))
         .map((item) => [item.id, item.metadata.endpointPath]),
     );
-    expect(apiPaths).toMatchObject({
-      "api:github-app": "/v1/workspaces/{workspaceId}/github/app",
-      "api:documents": "/v1/workspaces/{workspaceId}/document-bases",
-      "api:social": "/v1/workspaces/{workspaceId}/social/connections",
-      "api:scheduled-tasks": "/v1/workspaces/{workspaceId}/scheduled-tasks",
+    expect(apiPaths).toEqual({
+      "api:x": undefined,
+      "api:reddit": undefined,
     });
     expect(catalog.items.find((item) => item.id === capabilityId)).toMatchObject({
       enabled: true,
@@ -2985,15 +3107,15 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
-    const capabilityId = `custom-skill:test-${crypto.randomUUID()}`;
+    const capabilityId = `custom-mcp:test-${crypto.randomUUID()}`;
     const workspaceId = await defaultWorkspaceId(app);
     const created = await app.request(workspacePath(workspaceId, "/capabilities"), {
       method: "POST",
       body: JSON.stringify({
         id: capabilityId,
-        kind: "skill",
+        kind: "mcp",
         source: "manual",
-        name: "Test Skill",
+        name: "Test MCP",
         category: "test",
       }),
       headers: { "content-type": "application/json" },
@@ -3493,7 +3615,7 @@ describe("API component integration", () => {
     expect(enabledMissingVariable.status).toBe(422);
     expect(await enabledMissingVariable.text()).toContain("CLOUD_TOKEN");
 
-    const capabilityEnableWithoutAttachment = await app.request(
+    const genericPackEnable = await app.request(
       workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`),
       {
         method: "POST",
@@ -3501,7 +3623,8 @@ describe("API component integration", () => {
         headers: { "content-type": "application/json" },
       },
     );
-    expect(capabilityEnableWithoutAttachment.status).toBe(422);
+    expect(genericPackEnable.status).toBe(409);
+    expect(await genericPackEnable.text()).toContain("Pack installation preview flow");
 
     const setVariable = await app.request(
       workspacePath(workspaceId, `/environments/${environment.id}/variables/CLOUD_TOKEN`),
@@ -3513,47 +3636,12 @@ describe("API component integration", () => {
     );
     expect(setVariable.status).toBeLessThan(300);
 
-    // Env-on-enable through the unified capability path: an environment.required
-    // pack with no prior attachment enables when an environmentId is supplied
-    // (no 422), and the initial attachment is persisted — mirroring what the
-    // dedicated /packs/:id/enable endpoint does.
-    const capabilityEnableWithEnvironment = await app.request(
-      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({ environmentId: environment.id }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(capabilityEnableWithEnvironment.status).toBe(201);
-    const capabilityInstallation = (await capabilityEnableWithEnvironment.json()) as {
-      status: string;
-    };
-    expect(capabilityInstallation.status).toBe("active");
-    // The attachment is persisted on the pack installation (mirroring the
-    // dedicated /packs/:id/enable endpoint), which the catalog reads for
-    // enablement; the returned capability installation is the pack:{id} row.
-    const storedAfterUnifiedEnable = await getPackInstallation(dbClient.db, workspaceId, packId);
-    expect(storedAfterUnifiedEnable?.status).toBe("active");
-    expect(storedAfterUnifiedEnable?.metadata.variableSetId).toBe(environment.id);
-
-    // A bogus environmentId on the unified path is rejected up front.
-    const capabilityEnableUnknownEnvironment = await app.request(
-      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({ environmentId: crypto.randomUUID() }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(capabilityEnableUnknownEnvironment.status).toBe(422);
-
     const enabled = await app.request(workspacePath(workspaceId, `/packs/${packId}/enable`), {
       method: "POST",
       body: JSON.stringify({ environmentId: environment.id }),
       headers: { "content-type": "application/json" },
     });
-    expect(enabled.status).toBe(200);
+    expect(enabled.status).toBe(201);
     const installation = (await enabled.json()) as {
       status: string;
       metadata: Record<string, unknown>;
@@ -3578,8 +3666,8 @@ describe("API component integration", () => {
       enabled: true,
     });
 
-    // Re-enabling through the generic capabilities path keeps the stored
-    // environment attachment instead of overwriting it.
+    // Pack lifecycle remains owned by the dedicated Pack route even after the
+    // Pack is active; the generic capability path cannot mutate the install.
     const capabilityEnable = await app.request(
       workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`),
       {
@@ -3588,7 +3676,8 @@ describe("API component integration", () => {
         headers: { "content-type": "application/json" },
       },
     );
-    expect(capabilityEnable.status).toBe(201);
+    expect(capabilityEnable.status).toBe(409);
+    expect(await capabilityEnable.text()).toContain("Pack installation preview flow");
     const installationAfterCapabilityEnable = await getPackInstallation(
       dbClient.db,
       workspaceId,
@@ -3602,7 +3691,7 @@ describe("API component integration", () => {
     );
     expect(deletedBuiltIn.status).toBe(409);
 
-    // Once the required variable disappears, the generic enable path
+    // Once the required variable disappears, the dedicated Pack enable path
     // re-validates the stored attachment and refuses.
     const removeVariable = await app.request(
       workspacePath(workspaceId, `/environments/${environment.id}/variables/CLOUD_TOKEN`),
@@ -3610,7 +3699,7 @@ describe("API component integration", () => {
     );
     expect(removeVariable.status).toBeLessThan(300);
     const capabilityEnableMissingVariable = await app.request(
-      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`),
+      workspacePath(workspaceId, `/packs/${packId}/enable`),
       {
         method: "POST",
         body: JSON.stringify({}),
@@ -3628,17 +3717,17 @@ describe("API component integration", () => {
     expect(missing.status).toBe(404);
     const installationAfterDelete = await getPackInstallation(dbClient.db, workspaceId, packId);
     expect(installationAfterDelete?.status).toBe("disabled");
-    // The capability installation row is disabled too, so a future
-    // re-registration does not inherit stale enablement.
+    // Pack lifecycle is dedicated. The MCP-only generic installation ledger
+    // must not retain a shadow Pack row after uninstall.
     const capabilityInstallationAfterDelete = await getCapabilityInstallation(
       dbClient.db,
       workspaceId,
       `pack:${packId}`,
     );
-    expect(capabilityInstallationAfterDelete?.status).toBe("disabled");
+    expect(capabilityInstallationAfterDelete).toBeNull();
   });
 
-  test("allows only one enabled pack per workspace to declare a sandbox image", async () => {
+  test("installs image Packs through explicit Rigs and shares identical inline Skills", async () => {
     const app = createApp({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -3650,6 +3739,7 @@ describe("API component integration", () => {
     });
     const workspaceId = await defaultWorkspaceId(app);
     const suffix = crypto.randomUUID().slice(0, 8);
+    const skillName = `infra-ops-${suffix}`;
     const imagePackManifest = (id: string, image: string, modalImageId?: string) => ({
       id,
       name: `Pack ${id}`,
@@ -3661,13 +3751,12 @@ describe("API component integration", () => {
       ...(modalImageId ? { sandboxProviderImages: { modal: { imageId: modalImageId } } } : {}),
       skills: [
         {
-          name: "infra-ops",
+          name: skillName,
           description: "Operate infrastructure with the pack runbook.",
           files: [
             {
               path: "SKILL.md",
-              content:
-                "---\nname: infra-ops\ndescription: Operate infrastructure.\n---\n# Infra ops\n",
+              content: `---\nname: ${skillName}\ndescription: Operate infrastructure.\n---\n# Infra ops\n`,
             },
             { path: "references/runbook.md", content: "Runbook." },
           ],
@@ -3685,10 +3774,12 @@ describe("API component integration", () => {
     const packB = `img-b-${suffix}`;
     const packAImage =
       "example.com/sandbox-a@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const packBImage =
+      "example.com/sandbox-b@sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
     const packAModalImageId = "im-1234567890123456789012";
     for (const [packId, image, modalImageId] of [
       [packA, packAImage, packAModalImageId],
-      [packB, "example.com/sandbox-b@sha256:bbbb", undefined],
+      [packB, packBImage, undefined],
     ] as const) {
       const registered = await app.request(workspacePath(workspaceId, "/packs"), {
         method: "POST",
@@ -3698,12 +3789,155 @@ describe("API component integration", () => {
       expect(registered.status).toBe(201);
     }
 
-    const enabledA = await app.request(workspacePath(workspaceId, `/packs/${packA}/enable`), {
+    // Packs that compose runtime components cannot use the legacy enable
+    // paths. They must be reviewed against an explicit Rig first.
+    const legacyEnableA = await app.request(workspacePath(workspaceId, `/packs/${packA}/enable`), {
       method: "POST",
       body: JSON.stringify({}),
       headers: { "content-type": "application/json" },
     });
-    expect(enabledA.status).toBe(201);
+    expect(legacyEnableA.status).toBe(409);
+    expect(await legacyEnableA.text()).toContain("Pack installation flow");
+    const capabilityEnableB = await app.request(
+      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packB}`)}/enable`),
+      {
+        method: "POST",
+        body: JSON.stringify({}),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(capabilityEnableB.status).toBe(409);
+
+    const previewWithoutRig = await app.request(
+      workspacePath(workspaceId, `/packs/${packA}/installation-preview`),
+      {
+        method: "POST",
+        body: JSON.stringify({}),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(previewWithoutRig.status).toBe(200);
+    expect(await previewWithoutRig.json()).toMatchObject({
+      ready: false,
+      rig: { required: true, status: "missing" },
+      legacyInlineSkillCount: 1,
+      legacySandboxImage: packAImage,
+    });
+
+    const createRig = async (name: string, image: string): Promise<{ id: string }> => {
+      const response = await app.request(workspacePath(workspaceId, "/rigs"), {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          image,
+          checks: [],
+          credentialHooks: [],
+          defaultVariableSetIds: [],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const body = await response.text();
+      expect(response.status, body).toBe(201);
+      return JSON.parse(body) as { id: string };
+    };
+    const [rigA, rigB] = await Promise.all([
+      createRig(`Pack A ${suffix}`, packAImage),
+      createRig(`Pack B ${suffix}`, packBImage),
+    ]);
+
+    const previewPack = async (
+      packId: string,
+      rigId: string,
+    ): Promise<{
+      manifestDigest: string;
+      installationVersion: number | null;
+      ready: boolean;
+      components: Array<{
+        key: string;
+        kind: string;
+        status: string;
+        resolvedId: string | null;
+      }>;
+    }> => {
+      const response = await app.request(
+        workspacePath(workspaceId, `/packs/${packId}/installation-preview`),
+        {
+          method: "POST",
+          body: JSON.stringify({ rigId }),
+          headers: { "content-type": "application/json" },
+        },
+      );
+      const body = await response.text();
+      expect(response.status, body).toBe(200);
+      return JSON.parse(body) as {
+        manifestDigest: string;
+        installationVersion: number | null;
+        ready: boolean;
+        components: Array<{
+          key: string;
+          kind: string;
+          status: string;
+          resolvedId: string | null;
+        }>;
+      };
+    };
+    const installPack = async (
+      packId: string,
+      rigId: string,
+      preview: Awaited<ReturnType<typeof previewPack>>,
+    ): Promise<{ status: string; selectedRigId: string | null; version: number }> => {
+      const response = await app.request(workspacePath(workspaceId, `/packs/${packId}/install`), {
+        method: "POST",
+        body: JSON.stringify({
+          expectedManifestDigest: preview.manifestDigest,
+          ...(preview.installationVersion === null
+            ? {}
+            : { expectedInstallationVersion: preview.installationVersion }),
+          rigId,
+          idempotencyKey: crypto.randomUUID(),
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const body = await response.text();
+      expect(response.status, body).toBe(preview.installationVersion === null ? 201 : 200);
+      return JSON.parse(body) as {
+        status: string;
+        selectedRigId: string | null;
+        version: number;
+      };
+    };
+
+    const previewA = await previewPack(packA, rigA.id);
+    expect(previewA).toMatchObject({ ready: true, installationVersion: null });
+    expect(previewA.components).toEqual([
+      expect.objectContaining({
+        key: `inline-skill/${skillName}`,
+        kind: "inline_skill",
+        status: "ready",
+      }),
+    ]);
+    const installedA = await installPack(packA, rigA.id, previewA);
+    expect(installedA).toMatchObject({ status: "active", selectedRigId: rigA.id });
+
+    const previewB = await previewPack(packB, rigB.id);
+    expect(previewB).toMatchObject({ ready: true, installationVersion: null });
+    expect(previewB.components).toEqual([
+      expect.objectContaining({
+        key: `inline-skill/${skillName}`,
+        kind: "inline_skill",
+        status: "ready",
+      }),
+    ]);
+    expect(previewB.components[0]?.resolvedId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    const installedB = await installPack(packB, rigB.id, previewB);
+    expect(installedB).toMatchObject({ status: "active", selectedRigId: rigB.id });
+    expect(
+      (await listInstalledPortableSkills(dbClient.db, workspaceId)).filter(
+        (skill) => skill.name === skillName,
+      ),
+    ).toHaveLength(1);
 
     // The catalog surfaces the pack's runtime composition (image ref and
     // skill names) without leaking skill file content.
@@ -3716,39 +3950,12 @@ describe("API component integration", () => {
     expect(packAItem?.metadata.sandboxProviderImages).toEqual({
       modal: { imageId: packAModalImageId },
     });
-    expect(packAItem?.metadata.skills).toEqual(["infra-ops"]);
+    expect(packAItem?.metadata.skills).toEqual([skillName]);
     expect(JSON.stringify(packAItem?.metadata)).not.toContain("spoofed");
     expect(JSON.stringify(packAItem?.metadata)).not.toContain("Runbook.");
 
-    // A second image-declaring pack cannot be enabled, on either enable path.
-    const enabledB = await app.request(workspacePath(workspaceId, `/packs/${packB}/enable`), {
-      method: "POST",
-      body: JSON.stringify({}),
-      headers: { "content-type": "application/json" },
-    });
-    expect(enabledB.status).toBe(409);
-    expect(await enabledB.text()).toContain(
-      "only one enabled pack per workspace may declare sandboxImage",
-    );
-    const capabilityEnabledB = await app.request(
-      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packB}`)}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(capabilityEnabledB.status).toBe(409);
-
-    // Re-enabling the already-enabled image pack stays allowed.
-    const reenabledA = await app.request(workspacePath(workspaceId, `/packs/${packA}/enable`), {
-      method: "POST",
-      body: JSON.stringify({}),
-      headers: { "content-type": "application/json" },
-    });
-    expect(reenabledA.status).toBe(200);
-
-    // Disabling the first pack frees the slot for the second.
+    // V2 Packs cannot be disabled or unregistered through legacy paths while
+    // their component ownership ledger is active.
     const disabledA = await app.request(
       workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packA}`)}/disable`),
       {
@@ -3757,16 +3964,96 @@ describe("API component integration", () => {
         headers: { "content-type": "application/json" },
       },
     );
-    expect(disabledA.status).toBeLessThan(300);
-    const enabledBAfterDisable = await app.request(
-      workspacePath(workspaceId, `/packs/${packB}/enable`),
+    expect(disabledA.status).toBe(409);
+    expect(await disabledA.text()).toContain("Pack uninstall preview flow");
+    const unregisterActiveA = await app.request(workspacePath(workspaceId, `/packs/${packA}`), {
+      method: "DELETE",
+    });
+    expect(unregisterActiveA.status).toBe(409);
+
+    const uninstallPreviewAResponse = await app.request(
+      workspacePath(workspaceId, `/packs/${packA}/uninstall-preview`),
+    );
+    expect(uninstallPreviewAResponse.status).toBe(200);
+    const uninstallPreviewA = (await uninstallPreviewAResponse.json()) as {
+      installed: boolean;
+      installationVersion: number;
+      components: Array<{
+        key: string;
+        kind: string;
+        retainedByOtherOwners: boolean;
+      }>;
+    };
+    expect(uninstallPreviewA).toMatchObject({ installed: true });
+    expect(uninstallPreviewA.components).toEqual([
+      expect.objectContaining({
+        key: `inline-skill/${skillName}`,
+        kind: "inline_skill",
+        retainedByOtherOwners: true,
+      }),
+    ]);
+    const uninstallAResponse = await app.request(
+      workspacePath(workspaceId, `/packs/${packA}/installation`),
       {
-        method: "POST",
-        body: JSON.stringify({}),
+        method: "DELETE",
+        body: JSON.stringify({
+          expectedInstallationVersion: uninstallPreviewA.installationVersion,
+          idempotencyKey: crypto.randomUUID(),
+        }),
         headers: { "content-type": "application/json" },
       },
     );
-    expect(enabledBAfterDisable.status).toBe(201);
+    const uninstallABody = await uninstallAResponse.text();
+    expect(uninstallAResponse.status, uninstallABody).toBe(200);
+    expect(JSON.parse(uninstallABody)).toMatchObject({
+      packId: packA,
+      status: "uninstalled",
+    });
+    expect(
+      (await listInstalledPortableSkills(dbClient.db, workspaceId)).filter(
+        (skill) => skill.name === skillName,
+      ),
+    ).toHaveLength(1);
+
+    const unregisterA = await app.request(workspacePath(workspaceId, `/packs/${packA}`), {
+      method: "DELETE",
+    });
+    expect(unregisterA.status).toBe(204);
+
+    const uninstallPreviewBResponse = await app.request(
+      workspacePath(workspaceId, `/packs/${packB}/uninstall-preview`),
+    );
+    expect(uninstallPreviewBResponse.status).toBe(200);
+    const uninstallPreviewB = (await uninstallPreviewBResponse.json()) as {
+      installationVersion: number;
+      components: Array<{ retainedByOtherOwners: boolean }>;
+    };
+    expect(uninstallPreviewB.components).toEqual([
+      expect.objectContaining({ retainedByOtherOwners: false }),
+    ]);
+    const uninstallBResponse = await app.request(
+      workspacePath(workspaceId, `/packs/${packB}/installation`),
+      {
+        method: "DELETE",
+        body: JSON.stringify({
+          expectedInstallationVersion: uninstallPreviewB.installationVersion,
+          idempotencyKey: crypto.randomUUID(),
+        }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    const uninstallBBody = await uninstallBResponse.text();
+    expect(uninstallBResponse.status, uninstallBBody).toBe(200);
+    expect(JSON.parse(uninstallBBody)).toMatchObject({
+      packId: packB,
+      status: "uninstalled",
+      retainedComponents: [],
+    });
+    expect(
+      (await listInstalledPortableSkills(dbClient.db, workspaceId)).filter(
+        (skill) => skill.name === skillName,
+      ),
+    ).toHaveLength(0);
   });
 
   test("keeps scheduled task persistence consistent when schedule sync fails", async () => {
@@ -8429,13 +8716,17 @@ describe("API component integration", () => {
       permissions: ["workspace:read", "sessions:create", "sessions:read"] as Permission[],
     };
     const managerMcp = buildOpenGeniMcpServer(mcpDeps, managerGrant);
-    await expect(
-      callMcpTool(managerMcp, "session_create", {
+    await expectMcpOrchestrationFailure(
+      managerMcp,
+      "session_create",
+      {
         initialMessage: "spawn an over-privileged worker",
         model: "scripted-model",
         firstPartyMcpPermissions: ["environments:manage"],
-      }),
-    ).rejects.toThrow("cannot grant first-party MCP permission beyond the creating grant");
+      },
+      "session_create_forbidden",
+      "cannot grant first-party MCP permission beyond the creating grant",
+    );
     const spawnedReceipt = await callMcpTool<McpMutationReceiptType>(managerMcp, "session_create", {
       initialMessage: "spawn a delegated worker",
       model: "scripted-model",
@@ -8926,310 +9217,182 @@ describe("API component integration", () => {
     });
   });
 
-  test("toolspace bearer expands to selected session MCP servers, proxies calls, and cannot escalate", async () => {
+  test("Codemode exposes the exact frozen attempt catalog and journals idempotent calls", async () => {
     const grant = await bootstrapMcpGrant(dbClient.db);
     const delegationSecret = "test-delegation-secret";
-    const requiredAuthorization = "Bearer crm-session-secret";
-    const upstream = startTestMcpServer({
-      requiredHeaders: { authorization: requiredAuthorization },
-    });
+    const bus = new MemoryEventBus();
     const app = createApp({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         productAccessMode: "configured",
         delegationSecret,
-        environmentsEncryptionKey: environmentsTestKey,
-        toolspaceEnabled: true,
+        codemodeMaxCallsPerTurn: 1,
       }),
       db: dbClient.db,
-      bus: new MemoryEventBus(),
+      bus,
       workflowClient: new FakeWorkflowClient(),
     });
-    const server = Bun.serve({
-      port: 0,
-      hostname: "127.0.0.1",
-      fetch: app.fetch,
-    });
-    let toolspaceClient: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
-    let workspaceClient: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
-    try {
-      const { session, turnId, attemptId, executionGeneration } = await createToolspaceMcpSession(
-        dbClient.db,
-        grant,
-        {
-          url: upstream.url,
-          headers: { authorization: requiredAuthorization },
-        },
-      );
-      await dbClient.db.execute(dbSql`
-        update workspaces set settings = '{"memoryEnabled":true}'::jsonb where id = ${grant.workspaceId}
-      `);
-      const mcpUrl = `http://127.0.0.1:${server.port}/v1/workspaces/${grant.workspaceId}/mcp`;
-      const toolspaceAuth = await signDelegatedBearer(delegationSecret, grant, {
-        subjectId: "sandbox:run-proxy",
-        permissions: ["toolspace:call"],
+    const { session, turnId, attemptId, executionGeneration } = await createCodemodeAttempt(
+      dbClient.db,
+      grant,
+    );
+    const environment = createAttemptToolEnvironment({
+      scope: {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
         sessionId: session.id,
         turnId,
         attemptId,
         executionGeneration,
-      });
-      toolspaceClient = await prepareToolspaceClient(mcpUrl, toolspaceAuth);
-
-      const listed = await toolspaceClient.mcpServers[0]!.listTools();
-      const toolNames = listed.map((tool) => tool.name);
-      expect(toolNames).toContain("toolspace__crm__search_documents");
-      // Toolspace is a narrowed proxy surface: the bare toolspace:call bearer
-      // does not receive unpermissioned first-party session tools, including
-      // workspace memory even when the workspace setting is enabled.
-      expect(toolNames).not.toContain("set_session_title");
-      expect(toolNames).not.toContain("goal_set");
-      expect(toolNames).not.toContain("memory_search");
-      expect(toolNames).not.toContain("memory_save");
-      expect(toolNames).not.toContain("memory_correct");
-      expect(toolNames).not.toContain("session_create");
-      expect(toolNames).not.toContain("mcp_servers_attach");
-      expect(toolNames).not.toContain("environment_set_variable");
-
-      const output = await toolspaceClient.mcpServers[0]!.callTool(
-        "toolspace__crm__search_documents",
-        { query: "network policy" },
-      );
-      expect(mcpText(output)).toContain("found document for network policy");
-      expect(upstream.calls).toEqual([
-        { tool: "search_documents", args: { query: "network policy" } },
-      ]);
-
-      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
-      const toolspaceEvents = events.filter(
-        (event) =>
-          event.type === "agent.toolCall.created" || event.type === "agent.toolCall.output",
-      );
-      expect(toolspaceEvents.map((event) => event.type)).toEqual([
-        "agent.toolCall.created",
-        "agent.toolCall.output",
-      ]);
-      expect(toolspaceEvents.every((event) => event.turnId === turnId)).toBe(true);
-      const producerRows = await dbClient.db.execute(dbSql<{
-        producer_id: string | null;
-      }>`
-        select producer_id from session_events
-        where workspace_id = ${grant.workspaceId}
-          and session_id = ${session.id}
-          and type in ('agent.toolCall.created', 'agent.toolCall.output')
-        order by sequence
-      `);
-      expect(producerRows.map((row) => row.producer_id)).toEqual([
-        "sandbox:run-proxy",
-        "sandbox:run-proxy",
-      ]);
-      expect(
-        (
-          toolspaceEvents[0]?.payload as {
-            origin?: string;
-            subjectId?: string;
-            raw?: { serverId?: string; toolName?: string };
-          }
-        )?.origin,
-      ).toBe("toolspace");
-      expect(
-        (
-          toolspaceEvents[0]?.payload as {
-            origin?: string;
-            subjectId?: string;
-            raw?: { serverId?: string; toolName?: string };
-          }
-        )?.subjectId,
-      ).toBe("sandbox:run-proxy");
-      expect(
-        (
-          toolspaceEvents[0]?.payload as
-            | { raw?: { serverId?: string; toolName?: string } }
-            | undefined
-        )?.raw,
-      ).toEqual({
-        type: "toolspace_call",
-        serverId: "crm",
-        toolName: "search_documents",
-      });
-
-      const workspaceAuth = await signDelegatedBearer(delegationSecret, grant, {
-        subjectId: "test:workspace-mcp",
-        permissions: ["workspace:read"],
-      });
-      workspaceClient = await prepareToolspaceClient(mcpUrl, workspaceAuth);
-      const workspaceToolNames = (await workspaceClient.mcpServers[0]!.listTools()).map(
-        (tool) => tool.name,
-      );
-      expect(workspaceToolNames).not.toContain("toolspace__crm__search_documents");
-
-      const missingSessionAuth = await signDelegatedBearer(delegationSecret, grant, {
-        subjectId: "sandbox:no-session",
-        permissions: ["toolspace:call"],
-      });
-      const missingSession = await app.request(workspacePath(grant.workspaceId, "/mcp"), {
-        headers: { authorization: missingSessionAuth },
-      });
-      expect(missingSession.status).toBe(403);
-
-      const restRead = await app.request(
-        workspacePath(grant.workspaceId, `/sessions/${session.id}`),
+      },
+      generation: 1,
+      definitions: [
         {
-          headers: { authorization: toolspaceAuth },
-        },
-      );
-      expect(restRead.status).toBe(403);
-
-      const attachAttempt = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
-        method: "POST",
-        body: JSON.stringify({
-          initialMessage: "try attach",
-          model: "scripted-model",
-          mcpServers: [
-            {
-              id: "denied",
-              url: upstream.url,
-              headers: { authorization: "Bearer denied" },
-            },
-          ],
-        }),
-        headers: {
-          "content-type": "application/json",
-          authorization: toolspaceAuth,
-        },
-      });
-      expect(attachAttempt.status).toBe(403);
-    } finally {
-      await toolspaceClient?.close().catch(() => undefined);
-      await workspaceClient?.close().catch(() => undefined);
-      server.stop(true);
-      upstream.close();
-    }
-  });
-
-  test("toolspace excludes approval-required session MCP tool execution", async () => {
-    const grant = await bootstrapMcpGrant(dbClient.db);
-    const delegationSecret = "test-delegation-secret";
-    const upstream = startTestMcpServer();
-    const app = createApp({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        productAccessMode: "configured",
-        delegationSecret,
-        environmentsEncryptionKey: environmentsTestKey,
-        toolspaceEnabled: true,
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const server = Bun.serve({
-      port: 0,
-      hostname: "127.0.0.1",
-      fetch: app.fetch,
-    });
-    let client: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
-    try {
-      const { session, turnId, attemptId, executionGeneration } = await createToolspaceMcpSession(
-        dbClient.db,
-        grant,
-        {
-          url: upstream.url,
-          requireApproval: ["search_documents"],
-        },
-      );
-      const mcpUrl = `http://127.0.0.1:${server.port}/v1/workspaces/${grant.workspaceId}/mcp`;
-      const auth = await signDelegatedBearer(delegationSecret, grant, {
-        subjectId: "sandbox:approval",
-        permissions: ["toolspace:call"],
-        sessionId: session.id,
-        turnId,
-        attemptId,
-        executionGeneration,
-      });
-      client = await prepareToolspaceClient(mcpUrl, auth);
-      const listed = await client.mcpServers[0]!.listTools();
-      const search = listed.find((tool) => tool.name === "toolspace__crm__search_documents");
-      expect(search?.description).toContain(
-        "unavailable: requires approval - invoke via the agent",
-      );
-
-      const denied = await rawMcpRequest(mcpUrl, auth, "tools/call", {
-        name: "crm__search_documents",
-        arguments: { query: "approval path" },
-      });
-      expect((denied.result as { isError?: boolean }).isError).toBe(true);
-      expect(mcpText(denied.result)).toContain("requires approval - invoke via the agent");
-      expect(upstream.calls).toEqual([]);
-    } finally {
-      await client?.close().catch(() => undefined);
-      server.stop(true);
-      upstream.close();
-    }
-  });
-
-  test("toolspace enforces the per-turn call budget before proxying", async () => {
-    const grant = await bootstrapMcpGrant(dbClient.db);
-    const delegationSecret = "test-delegation-secret";
-    const upstream = startTestMcpServer();
-    const app = createApp({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        productAccessMode: "configured",
-        delegationSecret,
-        environmentsEncryptionKey: environmentsTestKey,
-        toolspaceEnabled: true,
-        toolspaceMaxCallsPerTurn: 1,
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const server = Bun.serve({
-      port: 0,
-      hostname: "127.0.0.1",
-      fetch: app.fetch,
-    });
-    let client: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
-    try {
-      const { session, turnId, attemptId, executionGeneration } = await createToolspaceMcpSession(
-        dbClient.db,
-        grant,
-        {
-          url: upstream.url,
-        },
-      );
-      const mcpUrl = `http://127.0.0.1:${server.port}/v1/workspaces/${grant.workspaceId}/mcp`;
-      const auth = await signDelegatedBearer(delegationSecret, grant, {
-        subjectId: "sandbox:budget",
-        permissions: ["toolspace:call"],
-        sessionId: session.id,
-        turnId,
-        attemptId,
-        executionGeneration,
-      });
-      client = await prepareToolspaceClient(mcpUrl, auth);
-      expect(
-        mcpText(
-          await client.mcpServers[0]!.callTool("toolspace__crm__search_documents", {
-            query: "first",
+          identity: { serverId: "crm", toolName: "search_documents" },
+          modelName: "crm__search_documents",
+          codemodePath: ["crm", "searchDocuments"],
+          description: "Search CRM documents",
+          inputSchema: {
+            type: "object",
+            properties: { query: { type: "string" } },
+            required: ["query"],
+          },
+          source: "mcp",
+          approval: "none",
+          execute: async () => ({
+            content: [{ type: "text", text: "worker-owned executor" }],
           }),
-        ),
-      ).toContain("found document for first");
+        },
+      ],
+    });
+    await persistAttemptToolCatalog(dbClient.db, environment.catalog);
+    const authorization = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: `sandbox:${attemptId}`,
+      permissions: ["codemode:call"],
+      sessionId: session.id,
+      turnId,
+      attemptId,
+      executionGeneration,
+    });
+    const base = workspacePath(grant.workspaceId, "/codemode");
 
-      const exhausted = await rawMcpRequest(mcpUrl, auth, "tools/call", {
-        name: "crm__search_documents",
-        arguments: { query: "second" },
-      });
-      expect((exhausted.result as { isError?: boolean }).isError).toBe(true);
-      expect(mcpText(exhausted.result)).toContain("toolspace call budget exhausted (1/turn)");
-      expect(upstream.calls).toEqual([{ tool: "search_documents", args: { query: "first" } }]);
-    } finally {
-      await client?.close().catch(() => undefined);
-      server.stop(true);
-      upstream.close();
-    }
+    const catalogResponse = await app.request(`${base}/catalog`, {
+      headers: { authorization },
+    });
+    expect(catalogResponse.status).toBe(200);
+    expect(await catalogResponse.json()).toEqual(environment.catalog);
+
+    const operationId = crypto.randomUUID();
+    const request = {
+      operationId,
+      catalogDigest: environment.catalog.digest,
+      identity: { serverId: "crm", toolName: "search_documents" },
+      arguments: { query: "network policy" },
+    };
+    const first = await app.request(`${base}/calls`, {
+      method: "POST",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    expect(first.status).toBe(202);
+    expect(await first.json()).toMatchObject({
+      operation: { operationId, state: "queued", arguments: request.arguments },
+      dispatch: "unavailable",
+    });
+
+    const replay = await app.request(`${base}/calls`, {
+      method: "POST",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    expect(replay.status).toBe(202);
+    expect(await replay.json()).toMatchObject({
+      operation: { operationId, state: "queued" },
+    });
+
+    const exhausted = await app.request(`${base}/calls`, {
+      method: "POST",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({ ...request, operationId: crypto.randomUUID() }),
+    });
+    expect(exhausted.status).toBe(429);
+
+    const queued = await app.request(`${base}/calls/${operationId}`, {
+      headers: { authorization },
+    });
+    expect(queued.status).toBe(200);
+    expect(await queued.json()).toMatchObject({ operationId, state: "queued" });
+
+    const claimId = crypto.randomUUID();
+    expect(
+      (
+        await claimCodemodeOperation(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          turnId,
+          attemptId,
+          executionGeneration,
+          catalogDigest: environment.catalog.digest,
+          operationId,
+          claimId,
+        })
+      ).status,
+    ).toBe("claimed");
+    expect(
+      await markCodemodeOperationExecutionStarted(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        attemptId,
+        operationId,
+        claimId,
+      }),
+    ).toBe(true);
+    expect(
+      await completeCodemodeOperation(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        attemptId,
+        operationId,
+        claimId,
+        result: { content: [{ type: "text", text: "found" }] },
+      }),
+    ).toBe(true);
+    const completed = await app.request(`${base}/calls/${operationId}`, {
+      headers: { authorization },
+    });
+    expect(completed.status).toBe(200);
+    expect(await completed.json()).toMatchObject({
+      operationId,
+      state: "completed",
+      result: { content: [{ type: "text", text: "found" }] },
+    });
+
+    const workspaceAuthorization = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: "test:workspace",
+      permissions: ["workspace:read"],
+    });
+    expect(
+      (
+        await app.request(`${base}/catalog`, {
+          headers: { authorization: workspaceAuthorization },
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await app.request(workspacePath(grant.workspaceId, "/mcp"), {
+          method: "POST",
+          headers: {
+            authorization,
+            "content-type": "application/json",
+            accept: "application/json",
+          },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+        })
+      ).status,
+    ).toBe(403);
   });
-
   test("cancelled-session user messages do not rotate per-session MCP credentials", async () => {
     const wf = new FakeWorkflowClient();
     const grant = await bootstrapMcpGrant(dbClient.db);
@@ -9449,15 +9612,19 @@ describe("API component integration", () => {
 
     // Omission inherits the manager's exact effective set. If that set lacks
     // goals:manage, a goal-bearing child is rejected instead of being widened.
-    await expect(
-      callMcpTool(managerMcp, "session_create", {
+    await expectMcpOrchestrationFailure(
+      managerMcp,
+      "session_create",
+      {
         initialMessage: "spawn an under-authorized goal worker",
         model: "scripted-model",
         sandboxBackend: "none",
         sandbox: "new",
         goal: { text: "fleet healthy" },
-      }),
-    ).rejects.toThrow("goal-bearing sessions require goals:manage");
+      },
+      "session_create_rejected",
+      "goal-bearing sessions require goals:manage",
+    );
 
     const authorizedParent = await createSession(dbClient.db, {
       accountId: grant.accountId,
@@ -9503,16 +9670,20 @@ describe("API component integration", () => {
 
     // Even an authorized creator cannot ask for a goal while explicitly
     // narrowing goals:manage out of the child token.
-    await expect(
-      callMcpTool(authorizedMcp, "session_create", {
+    await expectMcpOrchestrationFailure(
+      authorizedMcp,
+      "session_create",
+      {
         initialMessage: "narrow away goal authority",
         model: "scripted-model",
         sandboxBackend: "none",
         sandbox: "new",
         goal: { text: "fleet healthy" },
         firstPartyMcpPermissions: ["workspace:read"],
-      }),
-    ).rejects.toThrow("goal-bearing sessions require goals:manage");
+      },
+      "session_create_rejected",
+      "goal-bearing sessions require goals:manage",
+    );
   });
 
   test("manager MCP session tools enforce environment attachment permission and billing limits", async () => {
@@ -9548,13 +9719,17 @@ describe("API component integration", () => {
       permissions: ["workspace:read", "sessions:create"] as Permission[],
     };
     const spawnOnlyMcp = buildOpenGeniMcpServer(mcpDeps, spawnOnlyGrant);
-    await expect(
-      callMcpTool(spawnOnlyMcp, "session_create", {
+    await expectMcpOrchestrationFailure(
+      spawnOnlyMcp,
+      "session_create",
+      {
         initialMessage: "exfiltrate",
         model: "scripted-model",
         environmentId: environment.id,
-      }),
-    ).rejects.toThrow("missing permission: variable-sets:use (deprecated alias: environments:use)");
+      },
+      "session_create_forbidden",
+      "missing permission: variable-sets:use (deprecated alias: environments:use)",
+    );
 
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
     const attachedReceipt = await callMcpTool<McpMutationReceiptType>(mcp, "session_create", {
@@ -9568,13 +9743,17 @@ describe("API component integration", () => {
       attachedReceipt.resource.id,
     );
     expect(attached.variableSetId).toBe(environment.id);
-    await expect(
-      callMcpTool(mcp, "session_create", {
+    await expectMcpOrchestrationFailure(
+      mcp,
+      "session_create",
+      {
         initialMessage: "unknown environment",
         model: "scripted-model",
         environmentId: crypto.randomUUID(),
-      }),
-    ).rejects.toThrow("unknown variableSetId");
+      },
+      "session_create_rejected",
+      "unknown variableSetId",
+    );
 
     // The successful create recorded one agent_run.created usage event, so a
     // one-run monthly cap now blocks both spawn and send-message.
@@ -9592,18 +9771,26 @@ describe("API component integration", () => {
       },
       grant,
     );
-    await expect(
-      callMcpTool(limitedMcp, "session_create", {
+    await expectMcpOrchestrationFailure(
+      limitedMcp,
+      "session_create",
+      {
         initialMessage: "over the cap",
         model: "scripted-model",
-      }),
-    ).rejects.toThrow("monthly agent run limit reached");
-    await expect(
-      callMcpTool(limitedMcp, "session_send_message", {
+      },
+      "session_create_limit_exceeded",
+      "monthly agent run limit reached",
+    );
+    await expectMcpOrchestrationFailure(
+      limitedMcp,
+      "session_send_message",
+      {
         sessionId: attached.id,
         text: "over the cap",
-      }),
-    ).rejects.toThrow("monthly agent run limit reached");
+      },
+      "session_send_message_limit_exceeded",
+      "monthly agent run limit reached",
+    );
   });
 
   test("manager MCP session_create forwards targetSandboxId to the domain (create-time machine targeting)", async () => {
@@ -9643,14 +9830,18 @@ describe("API component integration", () => {
     // which PROVES the value flowed end-to-end. Before the fix the unknown key
     // was dropped and this create would have succeeded, silently swallowing the
     // agent's machine-targeting request.
-    await expect(
-      callMcpTool(mcp, "session_create", {
+    await expectMcpOrchestrationFailure(
+      mcp,
+      "session_create",
+      {
         initialMessage: "pin to a machine",
         model: "scripted-model",
         sandboxBackend: "none",
-        targetSandboxId: crypto.randomUUID(),
-      }),
-    ).rejects.toThrow(/cannot target a machine for a session with no sandbox/);
+        machineTarget: { targetSandboxId: crypto.randomUUID() },
+      },
+      "session_create_rejected",
+      "cannot target a machine for a session with no sandbox",
+    );
   });
 
   test("manager MCP environment tools set variables write-only and create environments by name", async () => {
@@ -9862,6 +10053,7 @@ describe("API component integration", () => {
     }
     const liveGrant = {
       ...grant,
+      principalKind: "agent_attempt" as const,
       metadata: {
         delegated: true,
         sessionId: session.id,
@@ -9906,6 +10098,7 @@ describe("API component integration", () => {
     const foreignGrant = await bootstrapMcpGrant(dbClient.db);
     const wrongWorkspace = buildOpenGeniMcpServer(mcpDeps, {
       ...foreignGrant,
+      principalKind: "agent_attempt" as const,
       metadata: liveGrant.metadata,
     });
     await expect(
@@ -10428,98 +10621,28 @@ async function signDelegatedBearer(
   })}`;
 }
 
-async function prepareToolspaceClient(
-  url: string,
-  authorization: string,
-): Promise<Awaited<ReturnType<typeof prepareAgentTools>>> {
-  return await prepareAgentTools(
-    testSettings({
-      mcpServers: [
-        {
-          id: "toolspace",
-          name: "Toolspace",
-          url,
-          headers: { authorization },
-          cacheToolsList: false,
-        },
-      ],
-    }),
-    [{ kind: "mcp", id: "toolspace" }],
-  );
-}
-
-async function rawMcpRequest(
-  url: string,
-  authorization: string,
-  method: string,
-  params?: Record<string, unknown>,
-): Promise<{ result?: unknown; error?: unknown }> {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      accept: "application/json, text/event-stream",
-      authorization,
-    },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: crypto.randomUUID(),
-      method,
-      ...(params ? { params } : {}),
-    }),
-  });
-  const text = await response.text();
-  if (response.status !== 200) {
-    throw new Error(`MCP request failed ${response.status}: ${text}`);
-  }
-  return JSON.parse(text) as { result?: unknown; error?: unknown };
-}
-
-async function createToolspaceMcpSession(
+async function createCodemodeAttempt(
   db: ReturnType<typeof createDb>["db"],
   grant: TestWorkspaceGrant,
-  input: {
-    url: string;
-    headers?: Record<string, string>;
-    requireApproval?: boolean | string[];
-  },
 ) {
-  const key = new Uint8Array(Buffer.from(environmentsTestKey, "base64"));
-  const headersEncrypted = Object.fromEntries(
-    Object.entries(input.headers ?? {}).map(([name, value]) => [
-      name,
-      encryptEnvironmentValue(key, value),
-    ]),
-  );
   const session = await createSession(db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
-    initialMessage: "use the crm server from toolspace",
+    initialMessage: "use Codemode",
     resources: [],
-    tools: [{ kind: "mcp", id: "crm" }],
+    tools: [],
     metadata: {},
     model: "scripted-model",
     sandboxBackend: "none",
-    mcpServers: [
-      {
-        id: "crm",
-        name: "CRM MCP",
-        url: input.url,
-        allowedTools: ["search_documents"],
-        cacheToolsList: false,
-        ...(input.requireApproval !== undefined ? { requireApproval: input.requireApproval } : {}),
-        headersEncrypted,
-      },
-    ],
   });
   const queued = await submitTestHumanPrompt(db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     sessionId: session.id,
     subjectId: grant.subjectId,
-    text: "start toolspace turn",
+    text: "start Codemode turn",
     resources: [],
-    tools: [{ kind: "mcp", id: "crm" }],
+    tools: [],
     delivery: "send",
     reasoningEffortFallback: "medium",
   });
@@ -10533,7 +10656,7 @@ async function createToolspaceMcpSession(
     trigger: { kind: "next" },
   });
   if (running.action !== "claimed" || running.turn.id !== queued.turn.id) {
-    throw new Error("failed to claim the toolspace fixture turn");
+    throw new Error("failed to claim the Codemode fixture turn");
   }
   return {
     session,
@@ -10542,7 +10665,6 @@ async function createToolspaceMcpSession(
     executionGeneration: running.turn.executionGeneration,
   };
 }
-
 async function readSseEvents(
   response: Response,
   count: number,
@@ -10604,6 +10726,38 @@ async function callMcpTool<T = unknown>(
     throw new Error(`MCP tool returned no text: ${name}`);
   }
   return JSON.parse(text) as T;
+}
+
+async function expectMcpOrchestrationFailure(
+  server: unknown,
+  name: "session_create" | "session_send_message",
+  args: Record<string, unknown>,
+  code: string,
+  message: string,
+): Promise<void> {
+  const result = await (
+    server as {
+      _registeredTools?: Record<
+        string,
+        {
+          handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown>;
+        }
+      >;
+    }
+  )._registeredTools?.[name]?.handler(args, {});
+  expect(result).toMatchObject({
+    isError: true,
+    structuredContent: { error: { code } },
+  });
+  const structured = (
+    result as { structuredContent?: { error?: { code?: string; message?: string } } }
+  ).structuredContent;
+  expect(structured?.error?.message).toContain(message);
+  expect(new TextEncoder().encode(structured?.error?.message ?? "").byteLength).toBeLessThanOrEqual(
+    1_024,
+  );
+  const text = (result as { content?: Array<{ text?: string }> }).content?.[0]?.text;
+  expect(text ? JSON.parse(text) : null).toEqual(structured);
 }
 
 class FakeWorkflowClient implements SessionWorkflowClient {

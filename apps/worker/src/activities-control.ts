@@ -1,5 +1,6 @@
 import { createSharedActivityServices } from "./activity-services";
 import { createCodexCapacityActivities } from "./activities/codex-capacity";
+import { createBrowserStateArtifactMaintenanceActivities } from "./activities/browser-state-artifact-reaper";
 import { createDocumentActivities } from "./activities/documents";
 import { createFileUploadReaperActivities } from "./activities/file-upload-reaper";
 import { createGoalActivities } from "./activities/goals";
@@ -8,6 +9,7 @@ import { createRetainedScreenshotMaintenanceActivities } from "./activities/reta
 import { createRigVerificationActivities } from "./activities/rig-verification";
 import { createSandboxLeaseActivities } from "./activities/sandbox-lease";
 import { createScheduledTaskActivities } from "./activities/scheduled-tasks";
+import { createSiteAuthMaintenanceActivities } from "./activities/site-auth-maintenance";
 import { createSessionStateActivities } from "./activities/session-state";
 import type { ActivityDependencies, ControlActivityServices } from "./activities/types";
 import { createWorkflowWakeActivities } from "./activities/workflow-wake";
@@ -28,9 +30,11 @@ export function createControlActivitiesFromServices(
     ...createKnowledgeSourceSyncActivities(services, resolveDocumentServices),
     ...createSessionStateActivities(services),
     ...createScheduledTaskActivities(services),
+    ...createSiteAuthMaintenanceActivities(services),
     ...createGoalActivities(services),
     ...createCodexCapacityActivities(services),
     ...createRigVerificationActivities(services),
+    ...createBrowserStateArtifactMaintenanceActivities(services),
     ...createFileUploadReaperActivities(services),
     ...createRetainedScreenshotMaintenanceActivities(services),
     ...createWorkflowWakeActivities(services),

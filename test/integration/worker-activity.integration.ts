@@ -47,6 +47,7 @@ import {
   sumUsageQuantity,
   updateSessionMcpServerCredentials,
   updateScheduledTask,
+  withWorkspaceSessionActivityRls,
   withWorkspaceRls,
   withWorkspaceSubjectRls,
   type Database,
@@ -71,6 +72,10 @@ import { createActivityTestHarness as createWorkerActivities } from "../../apps/
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { PROVIDER_BACKPRESSURE_DELAY_MS } from "../../apps/worker/src/activities/agent-turn";
 import {
+  PRE_CLAIM_FAILURE_MESSAGE,
+  PRE_CLAIM_FAILURE_TYPE,
+} from "../../apps/worker/src/activities/types";
+import {
   loadWorkspaceEnvironmentForRun,
   sandboxEnvironmentForRun,
 } from "../../apps/worker/src/activities/environment";
@@ -92,7 +97,7 @@ async function setSessionStatus(
   status: SessionStatus,
   activeTurnId: string | null = null,
 ): Promise<void> {
-  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
     await scopedDb.execute(dbSql`
       update sessions
       set status = ${status}, active_turn_id = ${activeTurnId}, updated_at = now()
@@ -574,7 +579,7 @@ describe("worker activities integration", () => {
     }
   });
 
-  test("session_create links the spawned worker to the manager via the caller's session claim", async () => {
+  test("session_create links the worker and inherits the calling turn's model", async () => {
     // A manager session calls session_create through its OWN first-party MCP
     // token. That token carries the manager's session id as a worker-signed
     // claim, so the spawned worker records parent_session_id = manager — no
@@ -596,6 +601,10 @@ describe("worker activities integration", () => {
       natsUrl: services.natsUrl,
       productAccessMode: "configured",
       delegationSecret,
+      // Deliberately differs from the manager. An omitted child model must not
+      // fall back to this deployment default (which could be a credits model
+      // while the manager is using a Codex subscription).
+      openaiModel: "gpt-5.6-sol",
     });
     const app = createApp({
       settings: apiSettings,
@@ -672,6 +681,8 @@ describe("worker activities integration", () => {
       const worker = allSessions.find((candidate) => candidate.id !== manager.id);
       expect(worker).toBeDefined();
       expect(worker?.parentSessionId).toBe(manager.id);
+      expect(worker?.model).toBe("scripted-model");
+      expect(worker?.metadata.reasoningEffort).toBe("medium");
     } finally {
       server.stop(true);
     }
@@ -1643,7 +1654,12 @@ describe("worker activities integration", () => {
         workflowId: "workflow-missing-session",
         workflowRunId: crypto.randomUUID(),
       }),
-    ).rejects.toThrow("Session not found");
+    ).rejects.toMatchObject({
+      message: PRE_CLAIM_FAILURE_MESSAGE,
+      type: PRE_CLAIM_FAILURE_TYPE,
+      nonRetryable: true,
+      details: [{ disposition: "permanent", code: "claim_invariant" }],
+    });
     await Bun.sleep(0);
 
     expect(exported).toHaveLength(1);
@@ -1715,7 +1731,12 @@ describe("worker activities integration", () => {
         workflowId: "workflow-status-update-fails",
         workflowRunId: crypto.randomUUID(),
       }),
-    ).rejects.toThrow("status update failed");
+    ).rejects.toMatchObject({
+      message: PRE_CLAIM_FAILURE_MESSAGE,
+      type: PRE_CLAIM_FAILURE_TYPE,
+      nonRetryable: true,
+      details: [{ disposition: "permanent", code: "claim_invariant" }],
+    });
 
     const eventTypes = (
       await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50)
@@ -1910,7 +1931,7 @@ describe("worker activities integration", () => {
     }
   });
 
-  test("runs repository clone hook for Modal repository-backed sessions before SDK sandbox use", async () => {
+  test("seeds Codemode authority and clones Modal repositories before SDK sandbox use", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "read repo",
@@ -1964,14 +1985,20 @@ describe("worker activities integration", () => {
     });
 
     expect(result.status).toBe("failed");
-    expect(sandboxExecCalls).toHaveLength(1);
+    expect(sandboxExecCalls).toHaveLength(2);
     expect(String(sandboxExecCalls[0]?.cmd)).toContain(
+      "OPENGENI_CODEMODE_TOKEN_FILE='/workspace/.opengeni/codemode-tokens/",
+    );
+    expect(String(sandboxExecCalls[0]?.cmd)).toContain(
+      'printf \'%s\' "$OPENGENI_CODEMODE_TOKEN_SEED" > "$token_file.tmp.$$"',
+    );
+    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
       "clone_repository '/workspace/repos/github.com/Futhark-AS/aifilesearch.git'",
     );
-    expect(String(sandboxExecCalls[0]?.cmd)).toContain(
+    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
       'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',
     );
-    expect(String(sandboxExecCalls[0]?.cmd)).toContain("x-access-token");
+    expect(String(sandboxExecCalls[1]?.cmd)).toContain("x-access-token");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "sandbox.operation.started")).toBe(true);
     expect(events.some((event) => event.type === "sandbox.operation.completed")).toBe(true);

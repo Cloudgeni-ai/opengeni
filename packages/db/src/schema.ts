@@ -1,12 +1,20 @@
 import type {
+  AttemptToolCatalog,
+  AttemptToolResult,
   DraftTimelineAnnotation,
   FirstPartyMcpToolName,
   McpPersonalConnectionDelegation,
   McpServerConnectionRef,
   RigProviderImages,
   SessionMcpApprovalPolicy,
+  SessionGoalChangeKind,
+  SessionGoalMutationPolicy,
+  SessionGoalSnapshot,
+  SlackUserLinkAccessRequest,
   TimelineAnnotation,
+  XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
+import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import type { SessionToolPolicy } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
@@ -21,8 +29,10 @@ import {
   jsonb,
   numeric,
   pgTable,
+  primaryKey,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
@@ -364,10 +374,10 @@ export const workspaceInferenceControls = pgTable(
   }),
 );
 
-// One transactionally allocated activity clock per workspace. An updated-order
-// first page takes a SHARE lock on this row after the workspace-control lock;
-// semantic writers allocate after UUID-ordered session locks. Plain MVCC page
-// reads never lock session rows, so that ordering cannot form a cycle.
+// One transactionally allocated activity clock per workspace. Updated-order
+// discovery reads the committed value through plain MVCC. Semantic writers
+// advance it once at their explicit commit gate, after every other deferred
+// constraint and row lock has settled.
 export const workspaceSessionActivityRevisions = pgTable(
   "workspace_session_activity_revisions",
   {
@@ -415,6 +425,165 @@ export const workspaceMemberships = pgTable(
   }),
 );
 
+// Organization membership is distinct from workspace access. `account_id` is
+// the physical organization identifier; `personal_workspace_id` is lifecycle
+// metadata only and never the ownership anchor for user resources.
+export const organizationMemberships = pgTable(
+  "organization_memberships",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    subjectId: text("subject_id").notNull(),
+    status: text("status").notNull().default("provisioning"),
+    personalWorkspaceId: uuid("personal_workspace_id"),
+    authorizationRevision: bigint("authorization_revision", { mode: "number" })
+      .notNull()
+      .default(1),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    personalRetentionUntil: timestamp("personal_retention_until", {
+      withTimezone: true,
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountIdentity: uniqueIndex("organization_memberships_id_account_idx").on(
+      table.id,
+      table.accountId,
+    ),
+    accountSubject: uniqueIndex("organization_memberships_account_subject_idx").on(
+      table.accountId,
+      table.subjectId,
+    ),
+    personalWorkspace: uniqueIndex("organization_memberships_personal_workspace_idx")
+      .on(table.accountId, table.personalWorkspaceId)
+      .where(sql`${table.personalWorkspaceId} is not null`),
+    personalWorkspaceAccount: foreignKey({
+      name: "organization_memberships_personal_workspace_account_fk",
+      columns: [table.personalWorkspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("restrict"),
+    statusValid: check(
+      "organization_memberships_status_check",
+      sql`${table.status} in ('provisioning', 'active', 'suspended', 'revoked')`,
+    ),
+    activePersonalWorkspace: check(
+      "organization_memberships_active_personal_workspace_check",
+      sql`${table.status} <> 'active' or ${table.personalWorkspaceId} is not null`,
+    ),
+    subjectValid: check(
+      "organization_memberships_subject_check",
+      sql`length(btrim(${table.subjectId})) between 1 and 1024`,
+    ),
+    revisionValid: check(
+      "organization_memberships_revision_check",
+      sql`${table.authorizationRevision} > 0`,
+    ),
+    revocationValid: check(
+      "organization_memberships_revocation_check",
+      sql`(${table.status} = 'revoked' and ${table.revokedAt} is not null)
+        or (${table.status} <> 'revoked' and ${table.revokedAt} is null)`,
+    ),
+  }),
+);
+
+export const organizationUserRetentionPolicies = pgTable(
+  "organization_user_retention_policies",
+  {
+    accountId: uuid("account_id")
+      .primaryKey()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    mode: text("mode").notNull().default("retain"),
+    retentionDays: integer("retention_days"),
+    version: bigint("version", { mode: "number" }).notNull().default(1),
+    updatedByMembershipId: uuid("updated_by_membership_id"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    updater: foreignKey({
+      name: "organization_user_retention_policies_updater_fk",
+      columns: [table.updatedByMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    modeValid: check(
+      "organization_user_retention_policies_mode_check",
+      sql`${table.mode} in ('retain', 'delete_after')`,
+    ),
+    durationValid: check(
+      "organization_user_retention_policies_duration_check",
+      sql`(${table.mode} = 'retain' and ${table.retentionDays} is null)
+        or (
+          ${table.mode} = 'delete_after'
+          and ${table.retentionDays} is not null
+          and ${table.retentionDays} between 1 and 3650
+        )`,
+    ),
+    versionValid: check(
+      "organization_user_retention_policies_version_check",
+      sql`${table.version} > 0`,
+    ),
+  }),
+);
+
+export const organizationUserResourceAuthorities = pgTable(
+  "organization_user_resource_authorities",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    organizationMembershipId: uuid("organization_membership_id").notNull(),
+    resourceKind: text("resource_kind").notNull(),
+    resourceId: uuid("resource_id").notNull(),
+    // Provenance only. The migration owns a composite same-organization FK
+    // whose delete action clears only this column, never account_id.
+    originWorkspaceId: uuid("origin_workspace_id"),
+    generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    status: text("status").notNull().default("active"),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountIdentity: uniqueIndex("organization_user_resource_authorities_id_account_idx").on(
+      table.id,
+      table.accountId,
+    ),
+    accountMembershipIdentity: uniqueIndex(
+      "organization_user_resource_authorities_id_account_membership_idx",
+    ).on(table.id, table.accountId, table.organizationMembershipId),
+    resourceIdentity: uniqueIndex(
+      "organization_user_resource_authorities_resource_identity_idx",
+    ).on(table.accountId, table.organizationMembershipId, table.resourceKind, table.resourceId),
+    membership: foreignKey({
+      name: "organization_user_resource_authorities_membership_fk",
+      columns: [table.organizationMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    resourceKindValid: check(
+      "organization_user_resource_authorities_kind_check",
+      sql`${table.resourceKind} = lower(btrim(${table.resourceKind}))
+        and length(${table.resourceKind}) between 1 and 64
+        and ${table.resourceKind} ~ '^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$'`,
+    ),
+    generationValid: check(
+      "organization_user_resource_authorities_generation_check",
+      sql`${table.generation} > 0`,
+    ),
+    statusValid: check(
+      "organization_user_resource_authorities_status_check",
+      sql`${table.status} in ('active', 'retained', 'revoked')`,
+    ),
+    revocationValid: check(
+      "organization_user_resource_authorities_revocation_check",
+      sql`(${table.status} = 'revoked' and ${table.revokedAt} is not null)
+        or (${table.status} <> 'revoked' and ${table.revokedAt} is null)`,
+    ),
+  }),
+);
+
 export const apiKeys = pgTable(
   "api_keys",
   {
@@ -455,6 +624,13 @@ export const workspaceVariableSets = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     description: text("description"),
+    // Migration 0230 is schema-only: all shipped CRUD continues to omit these
+    // fields and therefore remains workspace-scoped. A later activation slice
+    // must provide the complete owner authority and runtime protocol.
+    authorityScope: text("authority_scope").notNull().default("workspace"),
+    authorityId: uuid("authority_id"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    originWorkspaceId: uuid("origin_workspace_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -467,6 +643,33 @@ export const workspaceVariableSets = pgTable(
       table.workspaceId,
       table.createdAt,
     ),
+    authorityShape: check(
+      "workspace_variable_sets_authority_shape_check",
+      sql`(
+          ${table.authorityScope} = 'workspace'
+          and ${table.authorityId} is null
+          and ${table.ownerOrganizationMembershipId} is null
+        ) or (
+          ${table.authorityScope} = 'user'
+          and ${table.authorityId} is not null
+          and ${table.ownerOrganizationMembershipId} is not null
+        )`,
+    ),
+    authorityScopeValid: check(
+      "workspace_variable_sets_authority_scope_check",
+      sql`${table.authorityScope} in ('workspace', 'user')`,
+    ),
+    authority: foreignKey({
+      name: "workspace_variable_sets_authority_fk",
+      columns: [table.authorityId, table.accountId, table.ownerOrganizationMembershipId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+        organizationUserResourceAuthorities.organizationMembershipId,
+      ],
+    }).onDelete("restrict"),
+    // PostgreSQL's column-subset SET NULL action preserves account_id; Drizzle
+    // cannot represent that action, so migration 0230 owns the origin FK.
   }),
 );
 
@@ -554,12 +757,16 @@ export const codexSubscriptionCredentials = pgTable(
     // continues to own `version`; quota/cache writes own neither counter.
     allocatorVersion: integer("allocator_version").notNull().default(1),
     allocatorUpdatedBySubjectId: text("allocator_updated_by_subject_id"),
-    allocatorUpdatedAt: timestamp("allocator_updated_at", { withTimezone: true }),
+    allocatorUpdatedAt: timestamp("allocator_updated_at", {
+      withTimezone: true,
+    }),
     // Authoritative count-only summary cached from /wham/usage. Detailed rows
     // are never persisted as redemption authority; every first POST preflights
     // the provider's fresh detail endpoint.
     resetCreditAvailableCount: integer("reset_credit_available_count"),
-    resetCreditsCheckedAt: timestamp("reset_credits_checked_at", { withTimezone: true }),
+    resetCreditsCheckedAt: timestamp("reset_credits_checked_at", {
+      withTimezone: true,
+    }),
     // Set only by a direct Better Auth cookie connection/reconnection. Legacy,
     // configured, delegated, API-key, and agent-created rows remain view-only.
     connectedBySubjectId: text("connected_by_subject_id"),
@@ -657,7 +864,9 @@ export const codexResetRedemptionAttempts = pgTable(
     outcome: text("outcome"),
     claimHolderId: uuid("claim_holder_id"),
     claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
-    confirmationExpiresAt: timestamp("confirmation_expires_at", { withTimezone: true }).notNull(),
+    confirmationExpiresAt: timestamp("confirmation_expires_at", {
+      withTimezone: true,
+    }).notNull(),
     providerStartedAt: timestamp("provider_started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     lastFailureKind: text("last_failure_kind"),
@@ -762,6 +971,72 @@ export const connections = pgTable(
       table.workspaceId,
       table.expiresAt,
     ),
+  }),
+);
+
+// One durable routing authority per installed Slack team. The active partial
+// unique index is the database fence that prevents a team from being routed to
+// two OpenGeni workspaces. Legacy ambiguous rows are retained as quarantined
+// evidence instead of deleting credentials or guessing a winner.
+export const slackInstallationBindings = pgTable(
+  "slack_installation_bindings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    slackTeamId: text("slack_team_id").notNull(),
+    slackTeamName: text("slack_team_name").notNull(),
+    botId: text("bot_id").notNull(),
+    botUserId: text("bot_user_id").notNull(),
+    botDisplayName: text("bot_display_name").notNull(),
+    state: text("state").$type<"active" | "quarantined">().notNull(),
+    quarantineReason: text("quarantine_reason"),
+    version: integer("version").notNull().default(1),
+    createdBySubjectId: text("created_by_subject_id"),
+    updatedBySubjectId: text("updated_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    connection: uniqueIndex("slack_installation_bindings_connection_uq").on(table.connectionId),
+    activeTeam: uniqueIndex("slack_installation_bindings_active_team_uq")
+      .on(table.slackTeamId)
+      .where(sql`${table.state} = 'active'`),
+    workspaceState: index("slack_installation_bindings_workspace_state_idx").on(
+      table.workspaceId,
+      table.state,
+      table.updatedAt,
+    ),
+    workspaceAccount: foreignKey({
+      name: "slack_installation_bindings_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    stateValid: check(
+      "slack_installation_bindings_state_check",
+      sql`${table.state} in ('active', 'quarantined')`,
+    ),
+    quarantineConsistent: check(
+      "slack_installation_bindings_quarantine_check",
+      sql`(${table.state} = 'active' and ${table.quarantineReason} is null)
+        or (${table.state} = 'quarantined' and length(btrim(${table.quarantineReason})) > 0)`,
+    ),
+    identityBounded: check(
+      "slack_installation_bindings_identity_check",
+      sql`octet_length(${table.slackTeamId}) between 1 and 64
+        and octet_length(${table.slackTeamName}) between 1 and 256
+        and octet_length(${table.botId}) between 1 and 64
+        and octet_length(${table.botUserId}) between 1 and 64
+        and ${table.botDisplayName} = 'OpenGeni'`,
+    ),
+    versionPositive: check("slack_installation_bindings_version_check", sql`${table.version} > 0`),
   }),
 );
 
@@ -883,6 +1158,173 @@ export const slackBotUserLinks = pgTable(
   }),
 );
 
+export const slackUserLinkAccessRequests = pgTable(
+  "slack_user_link_access_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    tokenDigest: text("token_digest").notNull(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    slackTeamId: text("slack_team_id").notNull(),
+    slackUserId: text("slack_user_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    subjectLabel: text("subject_label"),
+    status: text("status").notNull().default("prepared"),
+    version: integer("version").notNull().default(1),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    requestedAt: timestamp("requested_at", { withTimezone: true }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decisionBySubjectId: text("decision_by_subject_id"),
+    approvedRole: text("approved_role"),
+    approvedPermissions: jsonb("approved_permissions").$type<string[]>(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "slack_user_link_access_requests_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    tenantIdentity: unique("slack_user_link_access_requests_tenant_uq").on(
+      table.id,
+      table.workspaceId,
+      table.accountId,
+    ),
+    tokenDigestUnique: uniqueIndex("slack_user_link_access_requests_token_digest_uq").on(
+      table.tokenDigest,
+    ),
+    activePrincipal: uniqueIndex("slack_user_link_access_requests_active_principal_uq")
+      .on(table.workspaceId, table.connectionId, table.slackUserId, table.subjectId)
+      .where(sql`${table.status} in ('prepared', 'pending')`),
+    workspacePending: index("slack_user_link_access_requests_workspace_pending_idx").on(
+      table.workspaceId,
+      table.status,
+      table.expiresAt,
+      table.createdAt,
+    ),
+    subjectLookup: index("slack_user_link_access_requests_subject_idx").on(
+      table.workspaceId,
+      table.subjectId,
+      table.id,
+    ),
+    identityValid: check(
+      "slack_user_link_access_requests_identity_check",
+      sql`length(${table.tokenDigest}) = 64
+        and ${table.tokenDigest} ~ '^[0-9a-f]{64}$'
+        and length(${table.slackTeamId}) between 1 and 64
+        and length(${table.slackUserId}) between 1 and 64
+        and length(${table.subjectId}) between 1 and 512
+        and (${table.subjectLabel} is null or length(${table.subjectLabel}) between 1 and 512)
+        and ${table.version} > 0`,
+    ),
+    statusValid: check(
+      "slack_user_link_access_requests_status_check",
+      sql`${table.status} in ('prepared', 'pending', 'completed', 'denied', 'cancelled', 'expired')`,
+    ),
+    lifecycleValid: check(
+      "slack_user_link_access_requests_lifecycle_check",
+      sql`(${table.status} = 'prepared' and ${table.requestedAt} is null and ${table.decidedAt} is null and ${table.completedAt} is null)
+        or (${table.status} = 'pending' and ${table.requestedAt} is not null and ${table.decidedAt} is null and ${table.completedAt} is null)
+        or (${table.status} = 'completed' and ${table.completedAt} is not null)
+        or (${table.status} in ('denied', 'cancelled', 'expired') and ${table.decidedAt} is not null and ${table.completedAt} is null)`,
+    ),
+  }),
+);
+
+export const slackUserLinkAccessRequestOperations = pgTable(
+  "slack_user_link_access_request_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    requestId: uuid("request_id").notNull(),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    operation: text("operation").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    expectedVersion: integer("expected_version").notNull(),
+    resultVersion: integer("result_version").notNull(),
+    resultStatus: text("result_status").notNull(),
+    result: jsonb("result").$type<SlackUserLinkAccessRequest>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "slack_user_link_access_request_operations_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    requestTenant: foreignKey({
+      name: "slack_user_link_access_request_operations_request_tenant_fk",
+      columns: [table.requestId, table.workspaceId, table.accountId],
+      foreignColumns: [
+        slackUserLinkAccessRequests.id,
+        slackUserLinkAccessRequests.workspaceId,
+        slackUserLinkAccessRequests.accountId,
+      ],
+    }).onDelete("cascade"),
+    idempotency: uniqueIndex("slack_user_link_access_request_operations_idempotency_uq").on(
+      table.requestId,
+      table.actorSubjectId,
+      table.operation,
+      table.idempotencyKey,
+    ),
+    resultVersionUnique: uniqueIndex(
+      "slack_user_link_access_request_operations_result_version_uq",
+    ).on(table.requestId, table.resultVersion),
+    identityValid: check(
+      "slack_user_link_access_request_operations_identity_check",
+      sql`length(${table.actorSubjectId}) between 1 and 512
+        and length(${table.idempotencyKey}) between 1 and 200
+        and ${table.idempotencyKey} = btrim(${table.idempotencyKey})
+        and length(${table.requestDigest}) = 64
+        and ${table.requestDigest} ~ '^[0-9a-f]{64}$'
+        and ${table.expectedVersion} > 0
+        and ${table.resultVersion} = ${table.expectedVersion} + 1
+        and ${table.operation} in ('request', 'cancel', 'approve', 'deny')
+        and ${table.resultStatus} in ('pending', 'completed', 'denied', 'cancelled')
+        and jsonb_typeof(${table.result}) = 'object'
+        and ${table.result} ?& array[
+          'id', 'workspaceId', 'workspaceDisplayName', 'subjectLabel', 'status', 'version',
+          'expiresAt', 'requestedAt', 'decidedAt', 'completedAt', 'createdAt', 'updatedAt'
+        ]
+        and ${table.result} - array[
+          'id', 'workspaceId', 'workspaceDisplayName', 'subjectLabel', 'status', 'version',
+          'expiresAt', 'requestedAt', 'decidedAt', 'completedAt', 'createdAt', 'updatedAt'
+        ] = '{}'::jsonb
+        and jsonb_typeof(${table.result}->'id') = 'string'
+        and jsonb_typeof(${table.result}->'workspaceId') = 'string'
+        and jsonb_typeof(${table.result}->'workspaceDisplayName') in ('string', 'null')
+        and jsonb_typeof(${table.result}->'subjectLabel') in ('string', 'null')
+        and jsonb_typeof(${table.result}->'status') = 'string'
+        and jsonb_typeof(${table.result}->'version') = 'number'
+        and jsonb_typeof(${table.result}->'expiresAt') = 'string'
+        and jsonb_typeof(${table.result}->'requestedAt') in ('string', 'null')
+        and jsonb_typeof(${table.result}->'decidedAt') in ('string', 'null')
+        and jsonb_typeof(${table.result}->'completedAt') in ('string', 'null')
+        and jsonb_typeof(${table.result}->'createdAt') = 'string'
+        and jsonb_typeof(${table.result}->'updatedAt') = 'string'
+        and ${table.result}->>'id' = ${table.requestId}::text
+        and ${table.result}->>'workspaceId' = ${table.workspaceId}::text
+        and ${table.result}->>'status' = ${table.resultStatus}
+        and ${table.result}->'version' = to_jsonb(${table.resultVersion})`,
+    ),
+  }),
+);
+
 export const slackInteractionInbox = pgTable(
   "slack_interaction_inbox",
   {
@@ -905,10 +1347,17 @@ export const slackInteractionInbox = pgTable(
     slackThreadTs: text("slack_thread_ts"),
     triggerKind: text("trigger_kind")
       .$type<
-        "app_mention" | "dm" | "reaction" | "slash_command" | "message_shortcut" | "thread_reply"
+        | "app_mention"
+        | "dm"
+        | "reaction"
+        | "slash_command"
+        | "message_shortcut"
+        | "thread_reply"
+        | "block_action"
       >()
       .notNull(),
     text: text("text").notNull(),
+    hasFiles: boolean("has_files").notNull().default(false),
     status: text("status")
       .$type<"pending" | "processing" | "processed" | "failed">()
       .notNull()
@@ -959,6 +1408,7 @@ export const slackInteractions = pgTable(
     slackThreadTs: text("slack_thread_ts").notNull(),
     routeKey: text("route_key").notNull(),
     triggeringProviderEventId: text("triggering_provider_event_id").notNull(),
+    initiatingSlackUserId: text("initiating_slack_user_id"),
     owningSubjectId: text("owning_subject_id").notNull(),
     visibility: text("visibility").$type<"private" | "workspace">().notNull(),
     sessionReservationId: uuid("session_reservation_id").notNull().defaultRandom(),
@@ -1007,6 +1457,73 @@ export const slackInteractions = pgTable(
   }),
 );
 
+export const slackInteractionActionHandles = pgTable(
+  "slack_interaction_action_handles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    interactionId: uuid("interaction_id").notNull(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    sessionEventSequence: integer("session_event_sequence").notNull(),
+    actionKind: text("action_kind")
+      .$type<
+        | "approval_approve"
+        | "approval_reject"
+        | "human_input_select"
+        | "human_input_skip"
+        | "session_status"
+        | "session_pause"
+        | "session_resume"
+        | "shared_result_publish"
+      >()
+      .notNull(),
+    actionKey: text("action_key").notNull(),
+    targetId: text("target_id"),
+    targetValue: text("target_value"),
+    authorizedSubjectId: text("authorized_subject_id").notNull(),
+    authorizedSlackUserId: text("authorized_slack_user_id").notNull(),
+    messageOperationId: uuid("message_operation_id").notNull(),
+    status: text("status").$type<"pending" | "completed" | "stale">().notNull().default("pending"),
+    result: text("result"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    interactionIdentity: foreignKey({
+      columns: [table.accountId, table.workspaceId, table.interactionId],
+      foreignColumns: [
+        slackInteractions.accountId,
+        slackInteractions.workspaceId,
+        slackInteractions.id,
+      ],
+      name: "slack_interaction_action_handles_interaction_fk",
+    }).onDelete("cascade"),
+    identity: uniqueIndex("slack_interaction_action_handles_identity_uq").on(
+      table.interactionId,
+      table.sessionEventSequence,
+      table.actionKey,
+    ),
+    pending: index("slack_interaction_action_handles_pending_idx").on(
+      table.workspaceId,
+      table.status,
+      table.expiresAt,
+      table.id,
+    ),
+  }),
+);
+
 export const slackInteractionProgressDeliveries = pgTable(
   "slack_interaction_progress_deliveries",
   {
@@ -1049,9 +1566,9 @@ export const slackInteractionProgressDeliveries = pgTable(
 );
 
 // Durable provider-operation identity for OpenGeni Slack bot posts. The
-// caller-supplied operation UUID is also Slack's client_msg_id; a bounded claim
-// serializes live attempts while an expired/released claim can safely retry the
-// same provider identity after response loss or process death.
+// server-owned durable operation UUID is also Slack's client_msg_id. `pending` is
+// safe to send, `provider_started` and `outcome_unknown` require provider read
+// reconciliation, and only `completed` may expose the provider result.
 export const slackBotPostOperations = pgTable(
   "slack_bot_post_operations",
   {
@@ -1070,9 +1587,12 @@ export const slackBotPostOperations = pgTable(
     targetKind: text("target_kind").$type<"channel" | "user">().notNull(),
     targetId: text("target_id").notNull(),
     requestDigest: text("request_digest").notNull(),
-    status: text("status").$type<"provider_started" | "completed">().notNull(),
+    status: text("status")
+      .$type<"pending" | "provider_started" | "outcome_unknown" | "completed">()
+      .notNull(),
     claimHolderId: uuid("claim_holder_id"),
     claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    claimMode: text("claim_mode").$type<"send" | "reconcile">(),
     attemptCount: integer("attempt_count").notNull().default(0),
     lastFailureCode: text("last_failure_code"),
     slackChannelId: text("slack_channel_id"),
@@ -1098,7 +1618,7 @@ export const slackBotPostOperations = pgTable(
     ),
     statusValid: check(
       "slack_bot_post_operations_status_check",
-      sql`${table.status} in ('provider_started', 'completed')`,
+      sql`${table.status} in ('pending', 'provider_started', 'outcome_unknown', 'completed')`,
     ),
     identityValid: check(
       "slack_bot_post_operations_identity_check",
@@ -1106,12 +1626,26 @@ export const slackBotPostOperations = pgTable(
         and length(${table.targetId}) between 1 and 64
         and ${table.requestDigest} ~ '^[0-9a-f]{64}$'
         and ${table.attemptCount} > 0
-        and ((${table.claimHolderId} is null) = (${table.claimExpiresAt} is null))`,
+        and (
+          (
+            ${table.claimHolderId} is null
+            and ${table.claimExpiresAt} is null
+            and ${table.claimMode} is null
+          )
+          or (
+            ${table.claimHolderId} is not null
+            and ${table.claimExpiresAt} is not null
+            and (
+              (${table.claimMode} = 'send' and ${table.status} in ('pending', 'provider_started'))
+              or (${table.claimMode} = 'reconcile' and ${table.status} = 'outcome_unknown')
+            )
+          )
+        )`,
     ),
     completionValid: check(
       "slack_bot_post_operations_completion_check",
       sql`(
-          ${table.status} = 'provider_started'
+          ${table.status} <> 'completed'
           and ${table.slackChannelId} is null
           and ${table.slackMessageTimestamp} is null
           and ${table.completedAt} is null
@@ -1123,6 +1657,345 @@ export const slackBotPostOperations = pgTable(
           and ${table.slackMessageTimestamp} is not null
           and ${table.completedAt} is not null
         )`,
+    ),
+  }),
+);
+
+export const slackBotUpdateOperations = pgTable(
+  "slack_bot_update_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    operationId: uuid("operation_id").notNull(),
+    slackChannelId: text("slack_channel_id").notNull(),
+    slackMessageTimestamp: text("slack_message_timestamp").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    status: text("status").$type<"provider_started" | "completed">().notNull(),
+    claimHolderId: uuid("claim_holder_id"),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    lastFailureCode: text("last_failure_code"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceOperation: uniqueIndex("slack_bot_update_operations_workspace_operation_uq").on(
+      table.workspaceId,
+      table.connectionId,
+      table.operationId,
+    ),
+    workspaceStatus: index("slack_bot_update_operations_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+      table.updatedAt,
+    ),
+  }),
+);
+
+export const memorySlackPublicationConfigurations = pgTable(
+  "memory_slack_publication_configurations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    revision: integer("revision").notNull(),
+    enabled: boolean("enabled").notNull(),
+    connectionId: uuid("connection_id"),
+    slackTeamId: text("slack_team_id"),
+    slackChannelId: text("slack_channel_id"),
+    slackChannelName: text("slack_channel_name"),
+    autoImportances: text("auto_importances").array().notNull().default(["major"]),
+    reviewImportances: text("review_importances").array().notNull().default(["normal"]),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceRevision: uniqueIndex(
+      "memory_slack_publication_configurations_workspace_revision_uq",
+    ).on(table.workspaceId, table.revision),
+    workspaceCreated: index("memory_slack_publication_configurations_workspace_created_idx").on(
+      table.workspaceId,
+      table.revision,
+    ),
+    revisionValid: check(
+      "memory_slack_publication_configurations_revision_check",
+      sql`${table.revision} > 0`,
+    ),
+    destinationValid: check(
+      "memory_slack_publication_configurations_destination_check",
+      sql`not ${table.enabled} or (
+        ${table.connectionId} is not null
+        and octet_length(${table.slackTeamId}) between 1 and 64
+        and octet_length(${table.slackChannelId}) between 1 and 64
+      )`,
+    ),
+    channelNameValid: check(
+      "memory_slack_publication_configurations_channel_name_check",
+      sql`${table.slackChannelName} is null
+        or octet_length(${table.slackChannelName}) between 1 and 256`,
+    ),
+    policyValid: check(
+      "memory_slack_publication_configurations_policy_check",
+      sql`${table.autoImportances} <@ array['major', 'normal', 'minor']::text[]
+        and ${table.reviewImportances} <@ array['major', 'normal', 'minor']::text[]
+        and cardinality(${table.autoImportances}) <= 3
+        and cardinality(${table.reviewImportances}) <= 3
+        and not (${table.autoImportances} && ${table.reviewImportances})`,
+    ),
+    actorValid: check(
+      "memory_slack_publication_configurations_actor_check",
+      sql`octet_length(${table.createdBySubjectId}) between 1 and 1024`,
+    ),
+  }),
+);
+
+export const memorySlackPublications = pgTable(
+  "memory_slack_publications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    configurationId: uuid("configuration_id")
+      .notNull()
+      .references(() => memorySlackPublicationConfigurations.id, {
+        onDelete: "restrict",
+      }),
+    configurationRevision: integer("configuration_revision").notNull(),
+    connectionId: uuid("connection_id").notNull(),
+    slackTeamId: text("slack_team_id").notNull(),
+    slackChannelId: text("slack_channel_id").notNull(),
+    sourceType: text("source_type").$type<"workspace_memory" | "durable_learning">().notNull(),
+    sourceId: text("source_id").notNull(),
+    sourceVersion: text("source_version"),
+    sourceIdempotencyKey: text("source_idempotency_key").notNull(),
+    projection: jsonb("projection").$type<Record<string, unknown>>().notNull(),
+    projectionSha256: text("projection_sha256").notNull(),
+    importance: text("importance").$type<"major" | "normal" | "minor">().notNull(),
+    deliveryMode: text("delivery_mode").$type<"auto" | "review">().notNull(),
+    state: text("state")
+      .$type<
+        | "review_pending"
+        | "queued"
+        | "delivering"
+        | "retry_wait"
+        | "delivered"
+        | "rejected"
+        | "failed"
+        | "cancelled"
+      >()
+      .notNull(),
+    operationId: uuid("operation_id").notNull(),
+    initiatorKind: text("initiator_kind").$type<"human" | "agent" | "service">().notNull(),
+    initiatorSubjectId: text("initiator_subject_id").notNull(),
+    initiatingHumanSubjectId: text("initiating_human_subject_id"),
+    sessionId: uuid("session_id"),
+    turnId: uuid("turn_id"),
+    attemptId: uuid("attempt_id"),
+    claimHolderId: uuid("claim_holder_id"),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    retryAt: timestamp("retry_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+    slackMessageTimestamp: text("slack_message_timestamp"),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    terminalAt: timestamp("terminal_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    source: uniqueIndex("memory_slack_publications_source_uq").on(
+      table.workspaceId,
+      table.sourceIdempotencyKey,
+    ),
+    operation: uniqueIndex("memory_slack_publications_operation_uq").on(
+      table.workspaceId,
+      table.operationId,
+    ),
+    claim: index("memory_slack_publications_claim_idx").on(
+      table.state,
+      table.retryAt,
+      table.createdAt,
+      table.id,
+    ),
+    workspaceHistory: index("memory_slack_publications_workspace_history_idx").on(
+      table.workspaceId,
+      table.createdAt,
+      table.id,
+    ),
+    sourceTypeValid: check(
+      "memory_slack_publications_source_type_check",
+      sql`${table.sourceType} in ('workspace_memory', 'durable_learning')`,
+    ),
+    sourceValid: check(
+      "memory_slack_publications_source_check",
+      sql`octet_length(${table.sourceId}) between 1 and 1024
+        and (${table.sourceVersion} is null or octet_length(${table.sourceVersion}) between 1 and 512)
+        and octet_length(${table.sourceIdempotencyKey}) between 1 and 256`,
+    ),
+    projectionValid: check(
+      "memory_slack_publications_projection_check",
+      sql`jsonb_typeof(${table.projection}) = 'object'
+        and octet_length(${table.projection}::text) between 2 and 8192
+        and ${table.projectionSha256} ~ '^[0-9a-f]{64}$'`,
+    ),
+    distributionValid: check(
+      "memory_slack_publications_distribution_check",
+      sql`${table.importance} in ('major', 'normal', 'minor')
+        and ${table.deliveryMode} in ('auto', 'review')`,
+    ),
+    stateValid: check(
+      "memory_slack_publications_state_check",
+      sql`${table.state} in (
+        'review_pending', 'queued', 'delivering', 'retry_wait',
+        'delivered', 'rejected', 'failed', 'cancelled'
+      )`,
+    ),
+    destinationValid: check(
+      "memory_slack_publications_destination_check",
+      sql`${table.configurationRevision} > 0
+        and octet_length(${table.slackTeamId}) between 1 and 64
+        and octet_length(${table.slackChannelId}) between 1 and 64`,
+    ),
+    initiatorValid: check(
+      "memory_slack_publications_initiator_check",
+      sql`${table.initiatorKind} in ('human', 'agent', 'service')
+        and octet_length(${table.initiatorSubjectId}) between 1 and 1024
+        and (${table.initiatingHumanSubjectId} is null
+          or octet_length(${table.initiatingHumanSubjectId}) between 1 and 1024)`,
+    ),
+    claimValid: check(
+      "memory_slack_publications_claim_check",
+      sql`(${table.state} = 'delivering'
+          and ${table.claimHolderId} is not null
+          and ${table.claimExpiresAt} is not null
+          and ${table.retryAt} is null)
+        or (${table.state} = 'retry_wait'
+          and ${table.claimHolderId} is null
+          and ${table.claimExpiresAt} is null
+          and ${table.retryAt} is not null)
+        or (${table.state} not in ('delivering', 'retry_wait')
+          and ${table.claimHolderId} is null
+          and ${table.claimExpiresAt} is null
+          and ${table.retryAt} is null)`,
+    ),
+    attemptValid: check("memory_slack_publications_attempt_check", sql`${table.attemptCount} >= 0`),
+    errorValid: check(
+      "memory_slack_publications_error_check",
+      sql`${table.lastErrorCode} is null or octet_length(${table.lastErrorCode}) between 1 and 128`,
+    ),
+  }),
+);
+
+export const memorySlackPublicationReceipts = pgTable(
+  "memory_slack_publication_receipts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    publicationId: uuid("publication_id")
+      .notNull()
+      .references(() => memorySlackPublications.id, { onDelete: "cascade" }),
+    sequence: integer("sequence").notNull(),
+    kind: text("kind")
+      .$type<
+        | "enqueued"
+        | "review_approved"
+        | "review_rejected"
+        | "delivery_claimed"
+        | "retry_scheduled"
+        | "delivered"
+        | "failed"
+        | "cancelled"
+        | "manual_retry"
+      >()
+      .notNull(),
+    state: text("state")
+      .$type<
+        | "review_pending"
+        | "queued"
+        | "delivering"
+        | "retry_wait"
+        | "delivered"
+        | "rejected"
+        | "failed"
+        | "cancelled"
+      >()
+      .notNull(),
+    attemptNumber: integer("attempt_number").notNull(),
+    actorKind: text("actor_kind").$type<"human" | "agent" | "service">().notNull(),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    errorCode: text("error_code"),
+    retryAt: timestamp("retry_at", { withTimezone: true }),
+    slackChannelId: text("slack_channel_id"),
+    slackMessageTimestamp: text("slack_message_timestamp"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    sequenceUnique: uniqueIndex("memory_slack_publication_receipts_sequence_uq").on(
+      table.publicationId,
+      table.sequence,
+    ),
+    workspaceHistory: index("memory_slack_publication_receipts_workspace_history_idx").on(
+      table.workspaceId,
+      table.publicationId,
+      table.sequence,
+    ),
+    kindValid: check(
+      "memory_slack_publication_receipts_kind_check",
+      sql`${table.kind} in (
+        'enqueued', 'review_approved', 'review_rejected', 'delivery_claimed',
+        'retry_scheduled', 'delivered', 'failed', 'cancelled', 'manual_retry'
+      )`,
+    ),
+    stateValid: check(
+      "memory_slack_publication_receipts_state_check",
+      sql`${table.state} in (
+        'review_pending', 'queued', 'delivering', 'retry_wait',
+        'delivered', 'rejected', 'failed', 'cancelled'
+      )`,
+    ),
+    attemptValid: check(
+      "memory_slack_publication_receipts_attempt_check",
+      sql`${table.sequence} > 0 and ${table.attemptNumber} >= 0`,
+    ),
+    actorValid: check(
+      "memory_slack_publication_receipts_actor_check",
+      sql`${table.actorKind} in ('human', 'agent', 'service')
+        and octet_length(${table.actorSubjectId}) between 1 and 1024`,
+    ),
+    errorValid: check(
+      "memory_slack_publication_receipts_error_check",
+      sql`${table.errorCode} is null or octet_length(${table.errorCode}) between 1 and 128`,
+    ),
+    providerValid: check(
+      "memory_slack_publication_receipts_provider_check",
+      sql`((${table.slackChannelId} is null) = (${table.slackMessageTimestamp} is null))
+        and (${table.slackChannelId} is null
+          or octet_length(${table.slackChannelId}) between 1 and 64)
+        and (${table.slackMessageTimestamp} is null
+          or octet_length(${table.slackMessageTimestamp}) between 1 and 64)`,
     ),
   }),
 );
@@ -1366,6 +2239,218 @@ export const codexCredentialLeases = pgTable(
   }),
 );
 
+// Encrypted multi-account xAI/SuperGrok credentials. Provider tokens and
+// cookies live only inside credential_encrypted; every other column is bounded
+// allocation/health metadata. User-scoped rows are created only by the
+// migration-owned lifecycle function that also creates their exact generic
+// organization_user_resource_authorities row.
+export const xaiSubscriptionCredentials = pgTable(
+  "xai_subscription_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    credentialEncrypted: text("credential_encrypted").notNull(),
+    providerAccountId: text("provider_account_id"),
+    label: text("label"),
+    accountEmail: text("account_email"),
+    planType: text("plan_type"),
+    status: text("status").notNull().default("active"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    lastRefreshAt: timestamp("last_refresh_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    version: integer("version").notNull().default(1),
+    allocatorEnabled: boolean("allocator_enabled").notNull().default(true),
+    allocatorVersion: integer("allocator_version").notNull().default(1),
+    allocatorUpdatedAt: timestamp("allocator_updated_at", {
+      withTimezone: true,
+    }),
+    quotaUsedPercent: integer("quota_used_percent"),
+    quotaResetAt: timestamp("quota_reset_at", { withTimezone: true }),
+    quotaCheckedAt: timestamp("quota_checked_at", { withTimezone: true }),
+    exhaustedUntil: timestamp("exhausted_until", { withTimezone: true }),
+    selectionCount: integer("selection_count").notNull().default(0),
+    lastSelectedAt: timestamp("last_selected_at", { withTimezone: true }),
+    authorityScope: text("authority_scope").notNull().default("workspace"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    organizationUserResourceAuthorityId: uuid("organization_user_resource_authority_id"),
+    organizationUserResourceKind: text("organization_user_resource_kind"),
+    organizationUserResourceAuthorityGeneration: bigint(
+      "organization_user_resource_authority_generation",
+      { mode: "number" },
+    ),
+    // Connection attribution only. Ownership/execution authority comes from
+    // the explicit authority tuple above and the frozen acceptance snapshot.
+    connectedBySubjectId: text("connected_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceIdentity: uniqueIndex("xai_subscription_credentials_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    workspaceAccountIdentity: uniqueIndex(
+      "xai_subscription_credentials_workspace_account_id_uq",
+    ).on(table.workspaceId, table.accountId, table.id),
+    providerIdentity: uniqueIndex("xai_subscription_credentials_provider_identity_uq")
+      .on(
+        table.workspaceId,
+        table.authorityScope,
+        table.ownerOrganizationMembershipId,
+        table.providerAccountId,
+      )
+      .where(sql`${table.providerAccountId} is not null`),
+    workspaceStatus: index("xai_subscription_credentials_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+      table.allocatorEnabled,
+    ),
+    scopeValid: check(
+      "xai_subscription_credentials_authority_scope_chk",
+      sql`${table.authorityScope} in ('workspace', 'user')`,
+    ),
+    authorityShapeValid: check(
+      "xai_subscription_credentials_authority_shape_chk",
+      sql`(
+          ${table.authorityScope} = 'workspace'
+          and ${table.ownerOrganizationMembershipId} is null
+          and ${table.organizationUserResourceAuthorityId} is null
+          and ${table.organizationUserResourceKind} is null
+          and ${table.organizationUserResourceAuthorityGeneration} is null
+        ) or (
+          ${table.authorityScope} = 'user'
+          and ${table.ownerOrganizationMembershipId} is not null
+          and ${table.organizationUserResourceAuthorityId} is not null
+          and ${table.organizationUserResourceKind} = 'xai_subscription'
+          and ${table.organizationUserResourceAuthorityGeneration} > 0
+        )`,
+    ),
+    statusValid: check(
+      "xai_subscription_credentials_status_chk",
+      sql`${table.status} in ('active', 'needs_relogin', 'error', 'disabled')`,
+    ),
+    versionValid: check(
+      "xai_subscription_credentials_version_chk",
+      sql`${table.version} > 0 and ${table.allocatorVersion} > 0`,
+    ),
+    quotaValid: check(
+      "xai_subscription_credentials_quota_chk",
+      sql`${table.quotaUsedPercent} is null or ${table.quotaUsedPercent} between 0 and 100`,
+    ),
+  }),
+);
+
+// One fair-allocation serialization row per workspace or exact user pool.
+export const xaiRotationSettings = pgTable(
+  "xai_rotation_settings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    authorityScope: text("authority_scope").notNull().default("workspace"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    activeCredentialId: uuid("active_credential_id"),
+    rotationEnabled: boolean("rotation_enabled").notNull().default(true),
+    fairnessCursor: bigint("fairness_cursor", { mode: "number" }).notNull().default(0),
+    version: integer("version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspacePool: uniqueIndex("xai_rotation_settings_workspace_pool_uq").on(
+      table.workspaceId,
+      table.authorityScope,
+      table.ownerOrganizationMembershipId,
+    ),
+    scopeValid: check(
+      "xai_rotation_settings_authority_scope_chk",
+      sql`(${table.authorityScope} = 'workspace' and ${table.ownerOrganizationMembershipId} is null)
+        or (${table.authorityScope} = 'user' and ${table.ownerOrganizationMembershipId} is not null)`,
+    ),
+    countersValid: check(
+      "xai_rotation_settings_counters_chk",
+      sql`${table.fairnessCursor} >= 0 and ${table.version} > 0`,
+    ),
+  }),
+);
+
+// Exact logical-turn lease. A replacement holder for the same turn preserves
+// the credential and advances generation; stale holders must match both.
+export const xaiCredentialLeases = pgTable(
+  "xai_credential_leases",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    authorityScope: text("authority_scope").notNull(),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    credentialId: uuid("credential_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    holderId: text("holder_id").notNull(),
+    generation: integer("generation").notNull().default(1),
+    leasedUntil: timestamp("leased_until", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceTurn: uniqueIndex("xai_credential_leases_workspace_turn_uq").on(
+      table.workspaceId,
+      table.turnId,
+    ),
+    activeCredential: index("xai_credential_leases_active_credential_idx").on(
+      table.workspaceId,
+      table.credentialId,
+      table.leasedUntil,
+    ),
+    expiry: index("xai_credential_leases_expiry_idx").on(table.leasedUntil),
+    scopeValid: check(
+      "xai_credential_leases_authority_scope_chk",
+      sql`(${table.authorityScope} = 'workspace' and ${table.ownerOrganizationMembershipId} is null)
+        or (${table.authorityScope} = 'user' and ${table.ownerOrganizationMembershipId} is not null)`,
+    ),
+    generationValid: check("xai_credential_leases_generation_chk", sql`${table.generation} > 0`),
+  }),
+);
+
+// Workspace-shared channels organize root sessions ("workstreams") by work
+// type in the rail. Pure organizational metadata: filing a session into a
+// channel never affects execution, authority, memory, or history.
+export const channels = pgTable(
+  "channels",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    // Attribution string: 'user:<subject>' | 'session:<id>' | 'system'.
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    // The migration owns the case-insensitive lower(name) uniqueness.
+    workspaceIdentity: uniqueIndex("channels_workspace_id_uq").on(table.workspaceId, table.id),
+  }),
+);
+
 export const sessions = pgTable(
   "sessions",
   {
@@ -1409,6 +2494,21 @@ export const sessions = pgTable(
       .$type<Record<string, unknown>>()
       .notNull()
       .default({ backfill: true }),
+    // Generic tenancy metadata is additive foundation only. Existing rows are
+    // explicitly workspace-shared and have no owner membership, so absent
+    // fields can never manufacture user authority.
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    ownerSubjectId: text("owner_subject_id"),
+    visibility: text("visibility").notNull().default("workspace_shared"),
+    authorityEpoch: integer("authority_epoch").notNull().default(1),
+    // Independent-copy provenance. A destination may use either visibility and
+    // may live in another workspace in the same organization; no live process,
+    // credential, grant, or delegation is represented by these facts.
+    forkedFromSessionId: uuid("forked_from_session_id"),
+    forkedFromAuthorityEpoch: integer("forked_from_authority_epoch"),
+    forkedFromVisibility: text("forked_from_visibility"),
+    forkedAt: timestamp("forked_at", { withTimezone: true }),
+    forkedByOrganizationMembershipId: uuid("forked_by_organization_membership_id"),
     model: text("model").notNull(),
     sandboxBackend: text("sandbox_backend").notNull(),
     // The OS this session's box runs. Defaults to 'linux' (today's only OS, so
@@ -1457,6 +2557,12 @@ export const sessions = pgTable(
     // file (forward-reference pattern, same as activeSandboxId). Consumed in M3.
     rigId: uuid("rig_id"),
     rigVersionId: uuid("rig_version_id"),
+    // Workspace channel this session is filed under (rail organization only;
+    // the rail groups a tree by its ROOT session's channel). Null = unfiled
+    // (inbox). ON DELETE SET NULL detaches sessions when a channel is removed.
+    channelId: uuid("channel_id").references(() => channels.id, {
+      onDelete: "set null",
+    }),
     // Non-default first-party MCP token permissions (manager-style sessions);
     // null means the fixed worker default set in @opengeni/runtime.
     firstPartyMcpPermissions: jsonb("first_party_mcp_permissions").$type<string[]>(),
@@ -1471,6 +2577,12 @@ export const sessions = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    initialXaiProviderAccountAuthoritySnapshot: jsonb(
+      "initial_xai_provider_account_authority_snapshot",
+    )
+      .$type<XaiProviderAccountAuthoritySnapshotV1>()
+      .notNull()
+      .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
     // Durable tool-policy origin. Migration 0136 removes the old null/legacy
     // representation so every session has one explicit policy mode.
     toolPolicy: jsonb("tool_policy").$type<SessionToolPolicy>().notNull(),
@@ -1553,12 +2665,18 @@ export const sessions = pgTable(
     codexCompactionMode: text("codex_compaction_mode").notNull().default("portable"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-    // Assigned by the database trigger whenever canonical updated_at activity
-    // advances. Legacy rows remain zero until touched; raw delta-only writers
-    // intentionally omit updated_at and therefore do not allocate revisions.
+    // Assigned once by the explicit transaction commit gate whenever canonical
+    // updated_at activity advances. Raw delta-only writers intentionally omit
+    // updated_at and therefore do not allocate revisions.
     activityRevision: bigint("activity_revision", { mode: "number" }).notNull().default(0),
+    // Transaction ownership marker between the cheap row trigger and the
+    // once-per-transaction commit gate. Committed rows must always be null.
+    activityRevisionPendingXid: bigint("activity_revision_pending_xid", {
+      mode: "bigint",
+    }),
   },
   (table) => ({
+    accountIdentity: uniqueIndex("sessions_id_account_idx").on(table.id, table.accountId),
     workspaceIdentity: uniqueIndex("sessions_workspace_id_idx").on(table.workspaceId, table.id),
     workspaceCreated: index("sessions_workspace_created_idx").on(
       table.workspaceId,
@@ -1583,6 +2701,50 @@ export const sessions = pgTable(
       table.updatedAt.desc(),
       table.id.desc(),
     ),
+    workspaceActivityPending: index("sessions_workspace_activity_pending_idx")
+      .on(table.workspaceId, table.activityRevisionPendingXid, table.id)
+      .where(sql`${table.activityRevisionPendingXid} is not null`),
+    ownerOrganizationMembership: foreignKey({
+      name: "sessions_owner_organization_membership_fk",
+      columns: [table.ownerOrganizationMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    forkedFromSession: foreignKey({
+      name: "sessions_forked_from_session_account_fk",
+      columns: [table.forkedFromSessionId, table.accountId],
+      foreignColumns: [table.id, table.accountId],
+    }).onDelete("restrict"),
+    forkedByOrganizationMembership: foreignKey({
+      name: "sessions_forked_by_organization_membership_fk",
+      columns: [table.forkedByOrganizationMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    visibilityValid: check(
+      "sessions_visibility_check",
+      sql`${table.visibility} in ('user_private', 'workspace_shared')`,
+    ),
+    privateOwnerValid: check(
+      "sessions_private_owner_check",
+      sql`${table.visibility} <> 'user_private' or ${table.ownerOrganizationMembershipId} is not null`,
+    ),
+    authorityEpochValid: check("sessions_authority_epoch_check", sql`${table.authorityEpoch} > 0`),
+    forkProvenanceValid: check(
+      "sessions_fork_provenance_check",
+      sql`(
+          ${table.forkedFromSessionId} is null
+          and ${table.forkedFromAuthorityEpoch} is null
+          and ${table.forkedFromVisibility} is null
+          and ${table.forkedAt} is null
+          and ${table.forkedByOrganizationMembershipId} is null
+        ) or (
+          ${table.forkedFromSessionId} is not null
+          and ${table.forkedFromAuthorityEpoch} is not null
+          and ${table.forkedFromAuthorityEpoch} > 0
+          and ${table.forkedFromVisibility} in ('user_private', 'workspace_shared')
+          and ${table.forkedAt} is not null
+          and ${table.forkedByOrganizationMembershipId} is not null
+        )`,
+    ),
     variableSet: index("sessions_variable_set_idx").on(table.workspaceId, table.variableSetId),
     parent: index("sessions_parent_idx").on(table.workspaceId, table.parentSessionId),
     // Routing index: resolve session_id -> sandbox_group_id at every lease entry
@@ -1599,6 +2761,114 @@ export const sessions = pgTable(
       table.workspaceId,
       table.rootSessionId,
       table.nestedAgentDepth,
+    ),
+  }),
+);
+
+export const organizationUserResourceGrants = pgTable(
+  "organization_user_resource_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    authorityId: uuid("authority_id").notNull(),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id"),
+    action: text("action").notNull(),
+    mode: text("mode").notNull(),
+    context: text("context").notNull(),
+    authorityEpoch: integer("authority_epoch"),
+    generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    status: text("status").notNull().default("active"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountIdentity: uniqueIndex("organization_user_resource_grants_id_account_idx").on(
+      table.id,
+      table.accountId,
+    ),
+    authorityWorkspace: index("organization_user_resource_grants_authority_workspace_idx").on(
+      table.authorityId,
+      table.workspaceId,
+      table.status,
+    ),
+    authority: foreignKey({
+      name: "organization_user_resource_grants_authority_fk",
+      columns: [table.authorityId, table.accountId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+      ],
+    }).onDelete("restrict"),
+    ownerMembership: foreignKey({
+      name: "organization_user_resource_grants_owner_membership_fk",
+      columns: [table.ownerOrganizationMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    authorityOwner: foreignKey({
+      name: "organization_user_resource_grants_authority_owner_fk",
+      columns: [table.authorityId, table.accountId, table.ownerOrganizationMembershipId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+        organizationUserResourceAuthorities.organizationMembershipId,
+      ],
+    }).onDelete("restrict"),
+    workspaceAccount: foreignKey({
+      name: "organization_user_resource_grants_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    sessionWorkspace: foreignKey({
+      name: "organization_user_resource_grants_session_workspace_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("restrict"),
+    actionValid: check(
+      "organization_user_resource_grants_action_check",
+      sql`${table.action} = lower(btrim(${table.action}))
+        and length(${table.action}) between 1 and 64
+        and ${table.action} ~ '^[a-z0-9](?:[a-z0-9._:-]*[a-z0-9])?$'`,
+    ),
+    modeValid: check(
+      "organization_user_resource_grants_mode_check",
+      sql`${table.mode} in ('once', 'session', 'always')`,
+    ),
+    contextValid: check(
+      "organization_user_resource_grants_context_check",
+      sql`${table.context} in ('user_private', 'workspace_shared')`,
+    ),
+    sessionFenceValid: check(
+      "organization_user_resource_grants_session_fence_check",
+      sql`(
+          ${table.mode} = 'always'
+          and ${table.sessionId} is null
+          and ${table.authorityEpoch} is null
+        ) or (
+          ${table.mode} in ('once', 'session')
+          and
+          ${table.sessionId} is not null
+          and ${table.authorityEpoch} is not null
+          and ${table.authorityEpoch} > 0
+        )`,
+    ),
+    generationValid: check(
+      "organization_user_resource_grants_generation_check",
+      sql`${table.generation} > 0`,
+    ),
+    statusValid: check(
+      "organization_user_resource_grants_status_check",
+      sql`${table.status} in ('active', 'consumed', 'revoked', 'expired')`,
+    ),
+    revocationValid: check(
+      "organization_user_resource_grants_revocation_check",
+      sql`(${table.status} = 'revoked' and ${table.revokedAt} is not null)
+        or (${table.status} <> 'revoked' and ${table.revokedAt} is null)`,
     ),
   }),
 );
@@ -1620,15 +2890,21 @@ export const sessionRealtimeModes = pgTable(
     state: text("state").notNull().default("active"),
     version: integer("version").notNull().default(1),
     connectionEpoch: integer("connection_epoch").notNull().default(1),
-    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }).notNull(),
-    lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }).notNull(),
+    leaseExpiresAt: timestamp("lease_expires_at", {
+      withTimezone: true,
+    }).notNull(),
+    lastHeartbeatAt: timestamp("last_heartbeat_at", {
+      withTimezone: true,
+    }).notNull(),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
     endReason: text("end_reason"),
     // The rolling migration owns this forward reference. End commits at most
     // one canonical transcript-tail Steer and binds its audit projection here.
     contextProjectionId: uuid("context_projection_id"),
-    contextProjectedAt: timestamp("context_projected_at", { withTimezone: true }),
+    contextProjectedAt: timestamp("context_projected_at", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1662,6 +2938,7 @@ export const sessionRealtimeModes = pgTable(
       "session_realtime_modes_model_check",
       sql`${table.model} in (
         'gpt-live-1-boulder-alpha',
+        'supergrok/grok-voice-think-fast-2.0',
         'opengeni-gateway/openai/gpt-realtime-2.1',
         'opengeni-gateway/openai/gpt-realtime-mini',
         'opengeni-gateway/xai/grok-voice-think-fast-2.0',
@@ -1719,7 +2996,9 @@ export const sessionRealtimeConnections = pgTable(
     failureCode: text("failure_code"),
     providerSessionId: text("provider_session_id"),
     startupEventId: text("startup_event_id"),
-    startupAcknowledgedAt: timestamp("startup_acknowledged_at", { withTimezone: true }),
+    startupAcknowledgedAt: timestamp("startup_acknowledged_at", {
+      withTimezone: true,
+    }),
     negotiatedAt: timestamp("negotiated_at", { withTimezone: true }),
     closedAt: timestamp("closed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2188,7 +3467,9 @@ export const generatedImageArtifacts = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "set null" }),
+    sessionId: uuid("session_id").references(() => sessions.id, {
+      onDelete: "set null",
+    }),
     // Turn/attempt foreign keys are installed by the migration; those tables
     // are declared later in this monolithic schema module.
     turnId: uuid("turn_id"),
@@ -2367,6 +3648,360 @@ export const imageGenerationOperations = pgTable(
   }),
 );
 
+/** Workspace policy for provider-neutral video generation. Disabled by default. */
+export const workspaceVideoGenerationPolicies = pgTable(
+  "workspace_video_generation_policies",
+  {
+    workspaceId: uuid("workspace_id")
+      .primaryKey()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    revision: bigint("revision", { mode: "number" }).notNull().default(0),
+    fundingSource: text("funding_source").notNull().default("workspace_gateway"),
+    enabledModelIds: jsonb("enabled_model_ids").$type<string[]>().notNull().default([]),
+    defaultModelId: text("default_model_id"),
+    updatedBySubjectId: text("updated_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_video_generation_policies_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    revisionValid: check(
+      "workspace_video_generation_policies_revision_chk",
+      sql`${table.revision} between 0 and 9007199254740991`,
+    ),
+    modelsValid: check(
+      "workspace_video_generation_policies_models_chk",
+      sql`jsonb_typeof(${table.enabledModelIds}) = 'array'
+        and jsonb_array_length(${table.enabledModelIds}) <= 16
+        and (${table.defaultModelId} is null or ${table.enabledModelIds} ? ${table.defaultModelId})`,
+    ),
+    fundingSourceValid: check(
+      "workspace_video_generation_policies_funding_source_chk",
+      sql`${table.fundingSource} in ('opengeni_credits', 'workspace_gateway', 'supergrok_subscription')`,
+    ),
+  }),
+);
+
+/** Exact pending/ready accounting for permanent generated-video files. */
+export const workspaceVideoGenerationQuotas = pgTable(
+  "workspace_video_generation_quotas",
+  {
+    workspaceId: uuid("workspace_id")
+      .primaryKey()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    reservedBytes: bigint("reserved_bytes", { mode: "number" }).notNull().default(0),
+    readyBytes: bigint("ready_bytes", { mode: "number" }).notNull().default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_video_generation_quotas_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    nonnegative: check(
+      "workspace_video_generation_quotas_nonnegative_chk",
+      sql`${table.reservedBytes} >= 0 and ${table.readyBytes} >= 0`,
+    ),
+  }),
+);
+
+/**
+ * Paid asynchronous provider operation. This aggregate owns recovery; the
+ * originating session is nullable provenance and never owns its lifecycle.
+ */
+export const videoGenerationOperations = pgTable(
+  "video_generation_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").references(() => sessions.id, {
+      onDelete: "set null",
+    }),
+    turnId: uuid("turn_id"),
+    attemptId: uuid("attempt_id"),
+    toolCallId: text("tool_call_id").notNull(),
+    admissionKey: text("admission_key").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    promptDigest: text("prompt_digest").notNull(),
+    requestEncrypted: text("request_encrypted"),
+    modelId: text("model_id").notNull(),
+    sourceMode: text("source_mode").notNull(),
+    capabilityRevision: text("capability_revision").notNull(),
+    fundingSource: text("funding_source").notNull().default("workspace_gateway"),
+    pricedCostMicros: bigint("priced_cost_micros", { mode: "number" }).notNull().default(0),
+    creditState: text("credit_state").notNull().default("not_applicable"),
+    connectionId: uuid("connection_id"),
+    credentialVersion: integer("credential_version").notNull(),
+    credentialEncrypted: text("credential_encrypted"),
+    providerIdempotencyKey: text("provider_idempotency_key").notNull(),
+    providerJobId: text("provider_job_id"),
+    /** Exact provider start body, encrypted before the first network byte. */
+    providerRequestEncrypted: text("provider_request_encrypted"),
+    /** Bearer URLs inside the frozen body are unusable after this instant. */
+    providerRequestExpiresAt: timestamp("provider_request_expires_at", {
+      withTimezone: true,
+    }),
+    expectedArtifactId: uuid("expected_artifact_id").notNull(),
+    expectedFileId: uuid("expected_file_id").notNull(),
+    reservedBytes: bigint("reserved_bytes", { mode: "number" }).notNull(),
+    quotaState: text("quota_state").notNull().default("reserved"),
+    status: text("status").notNull().default("preparing"),
+    admissionOutputState: text("admission_output_state").notNull().default("pending"),
+    terminalUpdateState: text("terminal_update_state").notNull().default("ineligible"),
+    terminalUpdateId: uuid("terminal_update_id"),
+    reconcileRevision: bigint("reconcile_revision", { mode: "number" }).notNull().default(0),
+    reconcileLeaseOwner: text("reconcile_lease_owner"),
+    reconcileLeaseExpiresAt: timestamp("reconcile_lease_expires_at", {
+      withTimezone: true,
+    }),
+    nextReconcileAt: timestamp("next_reconcile_at", { withTimezone: true }),
+    providerRequestSentAt: timestamp("provider_request_sent_at", {
+      withTimezone: true,
+    }),
+    providerStartedAt: timestamp("provider_started_at", { withTimezone: true }),
+    recoveryDeadlineAt: timestamp("recovery_deadline_at", {
+      withTimezone: true,
+    }).notNull(),
+    terminalAt: timestamp("terminal_at", { withTimezone: true }),
+    privateDataEraseAfter: timestamp("private_data_erase_after", {
+      withTimezone: true,
+    }),
+    boundedPublicReason: text("bounded_public_reason"),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    admission: uniqueIndex("video_generation_operations_admission_uq").on(
+      table.workspaceId,
+      table.admissionKey,
+    ),
+    expectedArtifact: uniqueIndex("video_generation_operations_expected_artifact_uq").on(
+      table.workspaceId,
+      table.expectedArtifactId,
+    ),
+    expectedFile: uniqueIndex("video_generation_operations_expected_file_uq").on(
+      table.workspaceId,
+      table.expectedFileId,
+    ),
+    due: index("video_generation_operations_due_idx").on(
+      table.status,
+      table.nextReconcileAt,
+      table.id,
+    ),
+    workspaceCreated: index("video_generation_operations_workspace_created_idx").on(
+      table.workspaceId,
+      table.createdAt,
+      table.id,
+    ),
+    workspaceAccount: foreignKey({
+      name: "video_generation_operations_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    hashesValid: check(
+      "video_generation_operations_hashes_chk",
+      sql`${table.admissionKey} ~ '^[0-9a-f]{64}$'
+        and ${table.requestDigest} ~ '^[0-9a-f]{64}$'
+        and ${table.promptDigest} ~ '^[0-9a-f]{64}$'
+        and ${table.capabilityRevision} ~ '^[0-9a-f]{64}$'`,
+    ),
+    shapeValid: check(
+      "video_generation_operations_shape_chk",
+      sql`octet_length(${table.toolCallId}) between 1 and 512
+        and octet_length(${table.modelId}) between 1 and 256
+        and octet_length(${table.providerIdempotencyKey}) between 1 and 128
+        and ${table.sourceMode} in ('text','first_frame','first_and_last_frames','image_reference','video_reference')
+        and ${table.reservedBytes} > 0 and ${table.reservedBytes} <= 536870912
+        and (${table.boundedPublicReason} is null or octet_length(${table.boundedPublicReason}) <= 4000)
+        and (${table.lastError} is null or octet_length(${table.lastError}) <= 16384)`,
+    ),
+    stateValid: check(
+      "video_generation_operations_state_chk",
+      sql`${table.status} in ('preparing','prepared','accepted','submission_uncertain','provider_started','retaining','completed','provider_failed','cancelled_before_submit','outcome_unknown','retention_failed')
+        and ${table.admissionOutputState} in ('pending','recorded')
+        and ${table.terminalUpdateState} in ('ineligible','pending','leased','delivered','suppressed')
+        and ${table.quotaState} in ('reserved','ready','released')
+        and ((${table.terminalAt} is not null) = (${table.status} in ('completed','provider_failed','cancelled_before_submit','outcome_unknown','retention_failed')))
+        and (${table.status} <> 'submission_uncertain' or (${table.providerRequestEncrypted} is not null and ${table.providerRequestExpiresAt} is not null))
+        and (${table.providerRequestEncrypted} is null or ${table.status} = 'submission_uncertain')
+        and (${table.status} not in ('provider_started','retaining','completed','retention_failed') or ${table.providerJobId} is not null)
+        and (${table.providerJobId} is null or ${table.status} in ('provider_started','retaining','completed','provider_failed','retention_failed'))`,
+    ),
+    fundingStateValid: check(
+      "video_generation_operations_funding_state_chk",
+      sql`(${table.fundingSource} = 'workspace_gateway'
+          and ${table.connectionId} is not null
+          and ${table.pricedCostMicros} = 0
+          and ${table.creditState} = 'not_applicable')
+        or (${table.fundingSource} = 'opengeni_credits'
+          and ${table.connectionId} is null
+          and ((${table.pricedCostMicros} = 0 and ${table.creditState} = 'not_applicable')
+            or (${table.pricedCostMicros} > 0
+              and ((${table.status} in ('provider_failed','cancelled_before_submit','outcome_unknown','retention_failed')
+                    and ${table.creditState} = 'refunded')
+                or (${table.status} not in ('provider_failed','cancelled_before_submit','outcome_unknown','retention_failed')
+                    and ${table.creditState} = 'debited'))))
+        or (${table.fundingSource} = 'supergrok_subscription'
+          and ${table.connectionId} is null
+          and ${table.pricedCostMicros} = 0
+          and ${table.creditState} = 'not_applicable'))`,
+    ),
+    fundingValuesValid: check(
+      "video_generation_operations_funding_values_chk",
+      sql`${table.fundingSource} in ('opengeni_credits','workspace_gateway','supergrok_subscription')
+        and ${table.pricedCostMicros} between 0 and 1000000000
+        and ${table.creditState} in ('not_applicable','debited','refunded')`,
+    ),
+  }),
+);
+
+/** Immutable operation reference snapshots; provider-facing URLs never persist here. */
+export const videoGenerationReferences = pgTable(
+  "video_generation_references",
+  {
+    operationId: uuid("operation_id")
+      .notNull()
+      .references(() => videoGenerationOperations.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    ordinal: integer("ordinal").notNull(),
+    role: text("role").notNull(),
+    contentType: text("content_type").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    sha256: text("sha256").notNull(),
+    stagingObjectKey: text("staging_object_key"),
+    grantExpiresAt: timestamp("grant_expires_at", { withTimezone: true }),
+    cleanupAfter: timestamp("cleanup_after", { withTimezone: true }),
+    cleanedAt: timestamp("cleaned_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({
+      name: "video_generation_references_pk",
+      columns: [table.operationId, table.ordinal],
+    }),
+    workspaceAccount: foreignKey({
+      name: "video_generation_references_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    hashValid: check(
+      "video_generation_references_hash_chk",
+      sql`${table.sha256} ~ '^[0-9a-f]{64}$'`,
+    ),
+    boundsValid: check(
+      "video_generation_references_bounds_chk",
+      sql`${table.ordinal} between 0 and 1
+        and ${table.role} in ('first_frame','last_frame','image_reference','video_reference')
+        and octet_length(${table.contentType}) between 3 and 128
+        and ${table.sizeBytes} > 0 and ${table.sizeBytes} <= 209715200`,
+    ),
+  }),
+);
+
+/** Permanent generated-video product; canonical bytes remain a separate File. */
+export const generatedVideoArtifacts = pgTable(
+  "generated_video_artifacts",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    primaryFileId: uuid("primary_file_id")
+      .notNull()
+      .references(() => files.id, { onDelete: "restrict" }),
+    operationId: uuid("operation_id")
+      .notNull()
+      .references(() => videoGenerationOperations.id, { onDelete: "restrict" }),
+    sessionId: uuid("session_id").references(() => sessions.id, {
+      onDelete: "set null",
+    }),
+    turnId: uuid("turn_id"),
+    attemptId: uuid("attempt_id"),
+    modelId: text("model_id").notNull(),
+    sourceMode: text("source_mode").notNull(),
+    promptDigest: text("prompt_digest").notNull(),
+    contentType: text("content_type").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    sha256: text("sha256").notNull(),
+    durationMillis: integer("duration_millis").notNull(),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    fpsMilli: integer("fps_milli").notNull(),
+    videoCodec: text("video_codec").notNull(),
+    audioCodec: text("audio_codec"),
+    hasAudio: boolean("has_audio").notNull(),
+    sandboxFilename: text("sandbox_filename").notNull(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    readyAt: timestamp("ready_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceFile: uniqueIndex("generated_video_artifacts_workspace_file_uq").on(
+      table.workspaceId,
+      table.primaryFileId,
+    ),
+    workspaceOperation: uniqueIndex("generated_video_artifacts_workspace_operation_uq").on(
+      table.workspaceId,
+      table.operationId,
+    ),
+    sessionCreated: index("generated_video_artifacts_session_created_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.createdAt,
+      table.id,
+    ),
+    workspaceAccount: foreignKey({
+      name: "generated_video_artifacts_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceFileScope: foreignKey({
+      name: "generated_video_artifacts_workspace_file_scope_fk",
+      columns: [table.accountId, table.workspaceId, table.primaryFileId],
+      foreignColumns: [files.accountId, files.workspaceId, files.id],
+    }).onDelete("restrict"),
+    valuesValid: check(
+      "generated_video_artifacts_values_chk",
+      sql`${table.contentType} = 'video/mp4'
+        and ${table.sizeBytes} > 0 and ${table.sizeBytes} <= 536870912
+        and ${table.sha256} ~ '^[0-9a-f]{64}$'
+        and ${table.promptDigest} ~ '^[0-9a-f]{64}$'
+        and ${table.durationMillis} between 1 and 120000
+        and ${table.width} between 1 and 8192
+        and ${table.height} between 1 and 8192
+        and ${table.fpsMilli} between 1 and 120000
+        and ${table.videoCodec} = 'h264'
+        and ((${table.hasAudio} and ${table.audioCodec} = 'aac') or (not ${table.hasAudio} and ${table.audioCodec} is null))
+        and ${table.sandboxFilename} = 'generated-video-' || ${table.id}::text || '.mp4'`,
+    ),
+  }),
+);
+
 /** Exact pending/ready byte accounting for retained computer screenshots. */
 export const workspaceScreenshotQuotas = pgTable(
   "workspace_screenshot_quotas",
@@ -2440,12 +4075,16 @@ export const retainedScreenshotArtifacts = pgTable(
     sha256: text("sha256").notNull(),
     width: integer("width").notNull(),
     height: integer("height").notNull(),
-    retentionExpiresAt: timestamp("retention_expires_at", { withTimezone: true }).notNull(),
+    retentionExpiresAt: timestamp("retention_expires_at", {
+      withTimezone: true,
+    }).notNull(),
     readyAt: timestamp("ready_at", { withTimezone: true }),
     cleanupReason: text("cleanup_reason"),
     lastError: text("last_error"),
     maintenanceClaimId: uuid("maintenance_claim_id"),
-    maintenanceClaimedAt: timestamp("maintenance_claimed_at", { withTimezone: true }),
+    maintenanceClaimedAt: timestamp("maintenance_claimed_at", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -2896,19 +4535,27 @@ export const sessionTurns = pgTable(
     // causal turn's value while retaining a service initiator. Null means the
     // turn has no human preference authority.
     initiatingHumanSubjectId: text("initiating_human_subject_id"),
+    // Exact goal authority frozen when the logical turn is accepted. The
+    // migration trigger fills this for old and rolling writers; claim only
+    // reconstructs legacy nulls from events as-of created_at.
+    goalSnapshot: jsonb("goal_snapshot").$type<SessionGoalSnapshot>(),
     // Immutable exact personal MCP authority for this logical turn. Recovery,
-    // approval, retries, and Toolspace reuse this row; no runtime may infer
+    // approval, retries, and Codemode reuse this row; no runtime may infer
     // broader authority from the session creator or mutable session state.
     personalConnectionDelegations: jsonb("personal_connection_delegations")
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    xaiProviderAccountAuthoritySnapshot: jsonb("xai_provider_account_authority_snapshot")
+      .$type<XaiProviderAccountAuthoritySnapshotV1>()
+      .notNull()
+      .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
     cancelledBy: text("cancelled_by"),
     cancelReason: text("cancel_reason"),
-    // Atomic per-turn toolspace call budget counter (migration 0043). Incremented
+    // Atomic per-turn codemode call budget counter (migration 0043). Incremented
     // by a single conditional UPDATE at tools/call time; the row lock serializes
-    // concurrent reservations so exactly `toolspaceMaxCallsPerTurn` succeed.
-    toolspaceCallCount: integer("toolspace_call_count").notNull().default(0),
+    // concurrent reservations so exactly `codemodeMaxCallsPerTurn` succeed.
+    codemodeCallCount: integer("codemode_call_count").notNull().default(0),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3013,6 +4660,16 @@ export const sessionTurnAttempts = pgTable(
     verifiedControlRevision: bigint("verified_control_revision", {
       mode: "number",
     }).notNull(),
+    // Immutable generic session-tenancy authority admitted with this exact
+    // attempt. A later visibility/ownership epoch change fences the attempt;
+    // these are snapshots, never live lookups or mutable metadata.
+    // Pre-0222 SQL writers may omit these columns; the migration-owned BEFORE
+    // INSERT trigger fills them from the exact session row. Current claim
+    // writers pass both explicitly, so no client-side default may bypass the
+    // trigger and manufacture stale authority.
+    authorityEpoch: integer("authority_epoch").notNull(),
+    authorityVisibility: text("authority_visibility").notNull(),
+    authorityOwnerOrganizationMembershipId: uuid("authority_owner_organization_membership_id"),
     // Immutable policy snapshot captured under the session lock at claim.
     mcpApprovalPolicies: jsonb("mcp_approval_policies")
       .$type<Record<string, SessionMcpApprovalPolicy>>()
@@ -3070,6 +4727,11 @@ export const sessionTurnAttempts = pgTable(
       table.startedAt.desc(),
       table.id.desc(),
     ),
+    authorityEpoch: index("session_turn_attempts_authority_epoch_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.authorityEpoch,
+    ),
     dispatch: uniqueIndex("session_turn_attempts_dispatch_uq").on(
       table.workspaceId,
       table.temporalWorkflowRunId,
@@ -3094,6 +4756,267 @@ export const sessionTurnAttempts = pgTable(
       "session_turn_attempts_closed_check",
       sql`(${table.state} = 'closed' and ${table.outcome} is not null and ${table.closedAt} is not null)
         or (${table.state} <> 'closed' and ${table.outcome} is null and ${table.closedAt} is null)`,
+    ),
+    authorityEpochValid: check(
+      "session_turn_attempts_authority_epoch_check",
+      sql`${table.authorityEpoch} is not null
+        and ${table.authorityVisibility} is not null
+        and ${table.authorityEpoch} > 0`,
+    ),
+    authorityVisibilityValid: check(
+      "session_turn_attempts_authority_visibility_check",
+      sql`${table.authorityEpoch} is not null
+        and ${table.authorityVisibility} is not null
+        and ${table.authorityVisibility} in ('user_private', 'workspace_shared')`,
+    ),
+    authorityOwnerShape: check(
+      "session_turn_attempts_authority_owner_shape_check",
+      sql`${table.authorityVisibility} <> 'user_private'
+        or ${table.authorityOwnerOrganizationMembershipId} is not null`,
+    ),
+    authorityOwner: foreignKey({
+      name: "session_turn_attempts_authority_owner_fk",
+      columns: [table.authorityOwnerOrganizationMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+  }),
+);
+
+// Immutable executable tool universe admitted to one exact attempt. Model MCP
+// and sandbox Codemode use the same digest and opaque identities from this row.
+export const sessionAttemptToolCatalogs = pgTable(
+  "session_attempt_tool_catalogs",
+  {
+    attemptId: uuid("attempt_id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
+    catalogVersion: integer("catalog_version").notNull(),
+    generation: integer("generation").notNull(),
+    digest: text("digest").notNull(),
+    catalog: jsonb("catalog").$type<AttemptToolCatalog>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    attemptOwner: foreignKey({
+      name: "session_attempt_tool_catalogs_attempt_owner_fk",
+      columns: [table.accountId, table.workspaceId, table.sessionId, table.turnId, table.attemptId],
+      foreignColumns: [
+        sessionTurnAttempts.accountId,
+        sessionTurnAttempts.workspaceId,
+        sessionTurnAttempts.sessionId,
+        sessionTurnAttempts.turnId,
+        sessionTurnAttempts.id,
+      ],
+    }).onDelete("cascade"),
+    sessionTurn: index("session_attempt_tool_catalogs_session_turn_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.turnId,
+    ),
+    exactAuthorityDigest: uniqueIndex(
+      "session_attempt_tool_catalogs_exact_authority_digest_uidx",
+    ).on(
+      table.accountId,
+      table.workspaceId,
+      table.sessionId,
+      table.turnId,
+      table.attemptId,
+      table.executionGeneration,
+      table.digest,
+    ),
+    versionValid: check(
+      "session_attempt_tool_catalogs_version_check",
+      sql`${table.catalogVersion} = 1 and ${table.generation} > 0 and ${table.executionGeneration} > 0`,
+    ),
+    digestValid: check(
+      "session_attempt_tool_catalogs_digest_check",
+      sql`${table.digest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    catalogSize: check(
+      "session_attempt_tool_catalogs_size_check",
+      sql`octet_length(${table.catalog}::text) between 2 and 16777216`,
+    ),
+    catalogIdentity: check(
+      "session_attempt_tool_catalogs_catalog_identity_check",
+      sql`jsonb_typeof(${table.catalog}) = 'object'
+        and ${table.catalog} ?& array[
+          'version', 'accountId', 'workspaceId', 'sessionId', 'turnId',
+          'attemptId', 'executionGeneration', 'generation', 'createdAt',
+          'digest', 'entries'
+        ]::text[]
+        and ${table.catalog}->>'accountId' = ${table.accountId}::text
+        and ${table.catalog}->>'workspaceId' = ${table.workspaceId}::text
+        and ${table.catalog}->>'sessionId' = ${table.sessionId}::text
+        and ${table.catalog}->>'turnId' = ${table.turnId}::text
+        and ${table.catalog}->>'attemptId' = ${table.attemptId}::text
+        and (${table.catalog}->>'executionGeneration')::integer = ${table.executionGeneration}
+        and (${table.catalog}->>'version')::integer = ${table.catalogVersion}
+        and (${table.catalog}->>'generation')::integer = ${table.generation}
+        and ${table.catalog}->>'digest' = ${table.digest}
+        and jsonb_typeof(${table.catalog}->'entries') = 'array'
+        and jsonb_array_length(${table.catalog}->'entries') <= 4096`,
+    ),
+  }),
+);
+
+// Durable idempotency and outcome journal for calls made programmatically from
+// an attempt's sandbox. The active worker executes these through the exact same
+// in-memory AttemptToolEnvironment as model MCP calls.
+export const sessionAttemptCodemodeCalls = pgTable(
+  "session_attempt_codemode_calls",
+  {
+    operationId: uuid("operation_id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
+    catalogDigest: text("catalog_digest").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    serverId: text("server_id").notNull(),
+    toolName: text("tool_name").notNull(),
+    arguments: jsonb("arguments").$type<Record<string, unknown>>().notNull(),
+    callerSubjectId: text("caller_subject_id").notNull(),
+    state: text("state", {
+      enum: ["queued", "running", "completed", "failed", "outcome_unknown", "cancelled"],
+    })
+      .notNull()
+      .default("queued"),
+    claimId: uuid("claim_id"),
+    result: jsonb("result").$type<AttemptToolResult>(),
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    executionStartedAt: timestamp("execution_started_at", {
+      withTimezone: true,
+    }),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    catalog: foreignKey({
+      name: "session_attempt_codemode_calls_catalog_fk",
+      columns: [
+        table.accountId,
+        table.workspaceId,
+        table.sessionId,
+        table.turnId,
+        table.attemptId,
+        table.executionGeneration,
+        table.catalogDigest,
+      ],
+      foreignColumns: [
+        sessionAttemptToolCatalogs.accountId,
+        sessionAttemptToolCatalogs.workspaceId,
+        sessionAttemptToolCatalogs.sessionId,
+        sessionAttemptToolCatalogs.turnId,
+        sessionAttemptToolCatalogs.attemptId,
+        sessionAttemptToolCatalogs.executionGeneration,
+        sessionAttemptToolCatalogs.digest,
+      ],
+    }).onDelete("cascade"),
+    sessionTurn: index("session_attempt_codemode_calls_session_turn_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.turnId,
+      table.createdAt,
+    ),
+    activeAttempt: index("session_attempt_codemode_calls_active_attempt_idx")
+      .on(table.workspaceId, table.attemptId, table.state)
+      .where(sql`${table.state} in ('queued', 'running')`),
+    generationsValid: check(
+      "session_attempt_codemode_calls_generation_check",
+      sql`${table.executionGeneration} > 0`,
+    ),
+    digestsValid: check(
+      "session_attempt_codemode_calls_digests_check",
+      sql`${table.catalogDigest} ~ '^[0-9a-f]{64}$' and ${table.requestDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    identityValid: check(
+      "session_attempt_codemode_calls_identity_check",
+      sql`octet_length(${table.serverId}) between 1 and 256
+        and octet_length(${table.toolName}) between 1 and 512
+        and octet_length(${table.callerSubjectId}) between 1 and 1024`,
+    ),
+    argumentsSize: check(
+      "session_attempt_codemode_calls_arguments_size_check",
+      sql`jsonb_typeof(${table.arguments}) = 'object'
+        and octet_length(${table.arguments}::text) between 2 and 4194304`,
+    ),
+    resultSize: check(
+      "session_attempt_codemode_calls_result_size_check",
+      sql`${table.result} is null or (
+        jsonb_typeof(${table.result}) = 'object'
+        and octet_length(${table.result}::text) between 2 and 16777216
+      )`,
+    ),
+    lifecycleValid: check(
+      "session_attempt_codemode_calls_lifecycle_check",
+      sql`(
+        ${table.state} = 'queued'
+        and ${table.claimId} is null
+        and ${table.claimedAt} is null
+        and ${table.executionStartedAt} is null
+        and ${table.claimExpiresAt} is null
+        and ${table.completedAt} is null
+        and ${table.result} is null
+        and ${table.errorCode} is null
+        and ${table.errorMessage} is null
+      ) or (
+        ${table.state} = 'running'
+        and ${table.claimId} is not null
+        and ${table.claimedAt} is not null
+        and ${table.claimExpiresAt} is not null
+        and ${table.completedAt} is null
+        and ${table.result} is null
+        and ${table.errorCode} is null
+        and ${table.errorMessage} is null
+      ) or (
+        ${table.state} = 'completed'
+        and ${table.claimId} is not null
+        and ${table.claimedAt} is not null
+        and ${table.executionStartedAt} is not null
+        and ${table.claimExpiresAt} is not null
+        and ${table.completedAt} is not null
+        and ${table.result} is not null
+        and ${table.errorCode} is null
+        and ${table.errorMessage} is null
+      ) or (
+        ${table.state} = 'failed'
+        and ${table.claimId} is not null
+        and ${table.claimedAt} is not null
+        and ${table.claimExpiresAt} is not null
+        and ${table.completedAt} is not null
+        and ${table.result} is null
+        and ${table.errorCode} is not null
+        and ${table.errorMessage} is not null
+      ) or (
+        ${table.state} = 'outcome_unknown'
+        and ${table.claimId} is not null
+        and ${table.claimedAt} is not null
+        and ${table.executionStartedAt} is not null
+        and ${table.claimExpiresAt} is not null
+        and ${table.completedAt} is not null
+        and ${table.result} is null
+        and ${table.errorCode} is not null
+        and ${table.errorMessage} is not null
+      ) or (
+        ${table.state} = 'cancelled'
+        and ${table.claimId} is null
+        and ${table.claimedAt} is null
+        and ${table.executionStartedAt} is null
+        and ${table.claimExpiresAt} is null
+        and ${table.completedAt} is not null
+        and ${table.result} is null
+        and ${table.errorCode} is not null
+        and ${table.errorMessage} is not null
+      )`,
     ),
   }),
 );
@@ -3144,8 +5067,12 @@ export const connectorActionRequests = pgTable(
     decisionBySubjectId: text("decision_by_subject_id"),
     decisionEventId: uuid("decision_event_id"),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
-    executionStartedAt: timestamp("execution_started_at", { withTimezone: true }),
-    executionFinishedAt: timestamp("execution_finished_at", { withTimezone: true }),
+    executionStartedAt: timestamp("execution_started_at", {
+      withTimezone: true,
+    }),
+    executionFinishedAt: timestamp("execution_finished_at", {
+      withTimezone: true,
+    }),
     outcome: text("outcome"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3528,6 +5455,10 @@ export const sessionSystemUpdates = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    xaiProviderAccountAuthoritySnapshot: jsonb("xai_provider_account_authority_snapshot")
+      .$type<XaiProviderAccountAuthoritySnapshotV1>()
+      .notNull()
+      .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
     // pending is visible queue truth; delivered means its exact model-memory
     // batch was durably claimed. Terminal cancellation/supersession is explicit.
     state: text("state").notNull().default("pending"),
@@ -3543,7 +5474,7 @@ export const sessionSystemUpdates = pgTable(
   (table) => ({
     kindValid: check(
       "system_updates_kind_check",
-      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'child_terminal_result')`,
+      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'child_terminal_result', 'media_generation_result')`,
     ),
     payloadKindValid: check(
       "system_updates_payload_kind_check",
@@ -3615,6 +5546,10 @@ export const sessionSystemUpdateOutbox = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    xaiProviderAccountAuthoritySnapshot: jsonb("xai_provider_account_authority_snapshot")
+      .$type<XaiProviderAccountAuthoritySnapshotV1>()
+      .notNull()
+      .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
     status: text("status").notNull().default("pending"),
     attempts: integer("attempts").notNull().default(0),
     updateId: uuid("update_id"),
@@ -3717,6 +5652,13 @@ export const sessionGoals = pgTable(
     pausedReason: text("paused_reason"), // agent | user_pause | api | no_progress | max_auto_continuations | limits
     createdBy: text("created_by").notNull().default("api"), // api | agent | scheduled_task
     version: integer("version").notNull().default(1), // bumped on every set/update; progress signal
+    // Semantic objective changes use a separate fence. `version` remains the
+    // established lifecycle/wake identity for continuation compatibility.
+    objectiveRevision: integer("objective_revision").notNull().default(1),
+    mutationPolicy: text("mutation_policy")
+      .$type<SessionGoalMutationPolicy>()
+      .notNull()
+      .default("preserve_intent"),
     autoContinuations: integer("auto_continuations").notNull().default(0),
     noProgressStreak: integer("no_progress_streak").notNull().default(0),
     maxAutoContinuations: integer("max_auto_continuations"), // per-goal override; a configured settings cap (if any) remains the hard ceiling
@@ -3728,10 +5670,14 @@ export const sessionGoals = pgTable(
     // update, timeline events, usage row, and workflow-wake outbox row.
     // Temporal signals and workflow history are replaceable nudges over these
     // monotonic revisions.
-    continuationWakeRevision: bigint("continuation_wake_revision", { mode: "number" })
+    continuationWakeRevision: bigint("continuation_wake_revision", {
+      mode: "number",
+    })
       .notNull()
       .default(0),
-    continuationObservedRevision: bigint("continuation_observed_revision", { mode: "number" })
+    continuationObservedRevision: bigint("continuation_observed_revision", {
+      mode: "number",
+    })
       .notNull()
       .default(0),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
@@ -3751,6 +5697,88 @@ export const sessionGoals = pgTable(
     continuationRevisionValid: check(
       "session_goals_continuation_revision_check",
       sql`${table.continuationWakeRevision} >= 0 and ${table.continuationObservedRevision} >= 0 and ${table.continuationObservedRevision} <= ${table.continuationWakeRevision} and ${table.continuationWakeRevision} <= 9007199254740991 and ${table.continuationObservedRevision} <= 9007199254740991`,
+    ),
+  }),
+);
+
+/**
+ * Immutable semantic goal history. A proposal is never model-visible until a
+ * later applied row references it; rejection is another immutable decision
+ * row rather than mutation of the original proposal.
+ */
+export const sessionGoalRevisions = pgTable(
+  "session_goal_revisions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    goalId: uuid("goal_id").notNull(),
+    disposition: text("disposition").$type<"applied" | "proposed" | "rejected">().notNull(),
+    changeKind: text("change_kind").$type<SessionGoalChangeKind>().notNull(),
+    baseObjectiveRevision: integer("base_objective_revision").notNull(),
+    resultObjectiveRevision: integer("result_objective_revision"),
+    text: text("text").notNull(),
+    successCriteria: text("success_criteria"),
+    mutationPolicy: text("mutation_policy").$type<SessionGoalMutationPolicy>().notNull(),
+    rationale: text("rationale").notNull(),
+    actor: text("actor").$type<"agent" | "api" | "scheduled_task">().notNull(),
+    actorTurnId: uuid("actor_turn_id"),
+    actorAttemptId: uuid("actor_attempt_id"),
+    proposalId: uuid("proposal_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_goal_revisions_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "session_goal_revisions_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    actorTurn: foreignKey({
+      name: "session_goal_revisions_actor_turn_fk",
+      columns: [table.workspaceId, table.actorTurnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("restrict"),
+    actorAttempt: foreignKey({
+      name: "session_goal_revisions_actor_attempt_fk",
+      columns: [table.workspaceId, table.actorAttemptId],
+      foreignColumns: [sessionTurnAttempts.workspaceId, sessionTurnAttempts.id],
+    }).onDelete("restrict"),
+    proposal: foreignKey({
+      name: "session_goal_revisions_proposal_fk",
+      columns: [table.workspaceId, table.proposalId],
+      foreignColumns: [table.workspaceId, table.id],
+    }).onDelete("restrict"),
+    appliedRevision: uniqueIndex("session_goal_revisions_applied_revision_uq")
+      .on(table.workspaceId, table.goalId, table.resultObjectiveRevision)
+      .where(sql`${table.disposition} = 'applied'`),
+    goalTimeline: index("session_goal_revisions_goal_timeline_idx").on(
+      table.workspaceId,
+      table.goalId,
+      table.createdAt,
+      table.id,
+    ),
+    dispositionValid: check(
+      "session_goal_revisions_disposition_chk",
+      sql`${table.disposition} in ('applied', 'proposed', 'rejected')`,
+    ),
+    changeKindValid: check(
+      "session_goal_revisions_change_kind_chk",
+      sql`${table.changeKind} in ('refinement', 'adaptation', 'replacement')`,
+    ),
+    policyValid: check(
+      "session_goal_revisions_policy_chk",
+      sql`${table.mutationPolicy} in ('review_changes', 'preserve_intent', 'autonomous_adaptation')`,
+    ),
+    revisionShape: check(
+      "session_goal_revisions_revision_shape_chk",
+      sql`(${table.disposition} = 'applied' and ${table.resultObjectiveRevision} = ${table.baseObjectiveRevision} + 1)
+        or (${table.disposition} in ('proposed', 'rejected') and ${table.resultObjectiveRevision} is null)`,
     ),
   }),
 );
@@ -3818,6 +5846,126 @@ export const codexCapacityWaiters = pgTable(
       table.status,
       table.wakeRevision,
       table.observedWakeRevision,
+    ),
+  }),
+);
+
+// Per-session pin and last-account state is kept outside the shared session row
+// so user-scoped account identifiers remain behind the same exact-subject RLS
+// policy as every other xAI persistence table.
+export const xaiSessionAccountPins = pgTable(
+  "xai_session_account_pins",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").notNull(),
+    authorityScope: text("authority_scope").notNull().default("workspace"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    pinnedCredentialId: uuid("pinned_credential_id"),
+    pinSource: text("pin_source"),
+    lastCredentialId: uuid("last_credential_id"),
+    version: integer("version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    // Migration 0231 adds NULLS NOT DISTINCT so workspace scope is also a
+    // singleton; Drizzle 0.45 cannot encode that PostgreSQL index modifier.
+    workspaceSessionPool: uniqueIndex("xai_session_account_pins_workspace_session_uq").on(
+      table.workspaceId,
+      table.sessionId,
+      table.authorityScope,
+      table.ownerOrganizationMembershipId,
+    ),
+    scopeValid: check(
+      "xai_session_account_pins_authority_scope_chk",
+      sql`(${table.authorityScope} = 'workspace' and ${table.ownerOrganizationMembershipId} is null)
+        or (${table.authorityScope} = 'user' and ${table.ownerOrganizationMembershipId} is not null)`,
+    ),
+    pinValid: check(
+      "xai_session_account_pins_pin_chk",
+      sql`(${table.pinnedCredentialId} is null and ${table.pinSource} is null)
+        or (${table.pinnedCredentialId} is not null and ${table.pinSource} in ('manual', 'policy'))`,
+    ),
+    versionValid: check("xai_session_account_pins_version_chk", sql`${table.version} > 0`),
+  }),
+);
+
+// Durable same-turn capacity wait. The blocked turn owns the immutable xAI
+// authority snapshot; this row carries only pool scope and wake/retry metadata.
+export const xaiCapacityWaiters = pgTable(
+  "xai_capacity_waiters",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").notNull(),
+    goalId: uuid("goal_id"),
+    goalVersion: integer("goal_version"),
+    blockedTurnId: uuid("blocked_turn_id").notNull(),
+    blockedTurnGeneration: integer("blocked_turn_generation").notNull(),
+    workflowId: text("workflow_id").notNull(),
+    authorityScope: text("authority_scope").notNull(),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    status: text("status").notNull().default("waiting"),
+    generation: integer("generation").notNull().default(1),
+    earliestResetAt: timestamp("earliest_reset_at", { withTimezone: true }),
+    nextCheckAt: timestamp("next_check_at", { withTimezone: true }).notNull(),
+    wakeRevision: integer("wake_revision").notNull().default(1),
+    observedWakeRevision: integer("observed_wake_revision").notNull().default(0),
+    lastWakeReason: text("last_wake_reason").notNull().default("capacity_wait_armed"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    // Migration 0234 uses NULLS NOT DISTINCT so workspace scope is also a
+    // singleton; Drizzle 0.45 cannot encode that PostgreSQL index modifier.
+    workspaceSessionPool: uniqueIndex("xai_capacity_waiters_workspace_session_uq").on(
+      table.workspaceId,
+      table.sessionId,
+      table.authorityScope,
+      table.ownerOrganizationMembershipId,
+    ),
+    pending: index("xai_capacity_waiters_pending_idx").on(
+      table.workspaceId,
+      table.status,
+      table.nextCheckAt,
+    ),
+    wakeRepair: index("xai_capacity_waiters_wake_repair_idx").on(
+      table.status,
+      table.wakeRevision,
+      table.observedWakeRevision,
+    ),
+    scopeValid: check(
+      "xai_capacity_waiters_authority_scope_chk",
+      sql`(${table.authorityScope} = 'workspace' and ${table.ownerOrganizationMembershipId} is null)
+        or (${table.authorityScope} = 'user' and ${table.ownerOrganizationMembershipId} is not null)`,
+    ),
+    statusValid: check(
+      "xai_capacity_waiters_status_chk",
+      sql`${table.status} in ('waiting', 'resumed', 'superseded')`,
+    ),
+    countersValid: check(
+      "xai_capacity_waiters_counters_chk",
+      sql`${table.blockedTurnGeneration} >= 0
+        and ${table.generation} > 0
+        and ${table.wakeRevision} > 0
+        and ${table.observedWakeRevision} >= 0
+        and ${table.observedWakeRevision} <= ${table.wakeRevision}`,
+    ),
+    goalFenceValid: check(
+      "xai_capacity_waiters_goal_fence_chk",
+      sql`(${table.goalId} is null and ${table.goalVersion} is null)
+        or (${table.goalId} is not null and ${table.goalVersion} > 0)`,
     ),
   }),
 );
@@ -4111,6 +6259,8 @@ export const sessionPendingToolCalls = pgTable(
     modelToolOutputTruncationTokens: integer("model_tool_output_truncation_tokens"),
     resultItem: losslessJsonb("result_item").$type<Record<string, unknown>>(),
     resultItemCodecVersion: losslessCodecVersion("result_item_codec_version"),
+    eventOutput: losslessJsonb("event_output").$type<{ value: unknown }>(),
+    eventOutputCodecVersion: losslessCodecVersion("event_output_codec_version"),
     resultRecordedAt: timestamp("result_recorded_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -4345,6 +6495,11 @@ export const sandboxLeases = pgTable(
     // data_plane_url.
     terminalDataPlaneUrl: text("terminal_data_plane_url"),
 
+    // Cached browserd HTTP/WebSocket tunnel (7682). Controller requests use
+    // this epoch-fenced endpoint directly after the first provider resolution;
+    // provider-handle coordination remains limited to lifecycle/provisioning.
+    controllerDataPlaneUrl: text("controller_data_plane_url"),
+
     // integer (NOT bigint): the lease-epoch spike proved a raw int8 read returns a
     // JS STRING from postgres-js, breaking the strict epoch-fence comparison (it
     // was always-true → every turn fenced); int4 returns a JS number, the fix.
@@ -4557,7 +6712,9 @@ export const sandboxLeaseHolders = pgTable(
     leaseId: uuid("lease_id")
       .notNull()
       .references(() => sandboxLeases.id, { onDelete: "cascade" }),
-    kind: text("kind", { enum: ["turn", "viewer", "direct", "process"] }).notNull(),
+    kind: text("kind", {
+      enum: ["turn", "viewer", "direct", "process", "interaction"],
+    }).notNull(),
     holderId: text("holder_id").notNull(),
     // The attributing session within the (possibly shared) group.
     subjectId: uuid("subject_id"),
@@ -4602,7 +6759,9 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
       .references(() => sandboxLeases.id, { onDelete: "cascade" }),
     sandboxGroupId: uuid("sandbox_group_id").notNull(),
     sessionId: uuid("session_id").notNull(),
-    actorKind: text("actor_kind", { enum: sandboxWorkspaceMutationActorKindValues }).notNull(),
+    actorKind: text("actor_kind", {
+      enum: sandboxWorkspaceMutationActorKindValues,
+    }).notNull(),
     actorId: uuid("actor_id").notNull(),
     // Exact turn authority is present only for actor_kind='turn'. Direct HTTP
     // requests and retained processes never invent a turn or quiescence owner.
@@ -4749,7 +6908,9 @@ export const sandboxRetainedProcesses = pgTable(
     sandboxGroupId: uuid("sandbox_group_id").notNull(),
     parentAdmissionId: uuid("parent_admission_id").notNull(),
     holderId: text("holder_id").notNull(),
-    ownerActorKind: text("owner_actor_kind", { enum: ["turn", "direct"] }).notNull(),
+    ownerActorKind: text("owner_actor_kind", {
+      enum: ["turn", "direct"],
+    }).notNull(),
     ownerActorId: uuid("owner_actor_id").notNull(),
     ownerTurnId: uuid("owner_turn_id"),
     ownerAttemptId: uuid("owner_attempt_id"),
@@ -4777,13 +6938,19 @@ export const sandboxRetainedProcesses = pgTable(
     // never exit/loss proof.
     reconcileAfter: timestamp("reconcile_after", { withTimezone: true }).notNull().defaultNow(),
     reconcileClaimId: uuid("reconcile_claim_id"),
-    reconcileClaimedAt: timestamp("reconcile_claimed_at", { withTimezone: true }),
+    reconcileClaimedAt: timestamp("reconcile_claimed_at", {
+      withTimezone: true,
+    }),
     reconcileAttempts: integer("reconcile_attempts").notNull().default(0),
     lastReconcileOutcome: text("last_reconcile_outcome"),
-    reconcileProofOutcome: text("reconcile_proof_outcome", { enum: ["exited", "lost"] }),
+    reconcileProofOutcome: text("reconcile_proof_outcome", {
+      enum: ["exited", "lost"],
+    }),
     reconcileProofExitCode: integer("reconcile_proof_exit_code"),
     reconcileProofReason: text("reconcile_proof_reason"),
-    reconcileProofObservedAt: timestamp("reconcile_proof_observed_at", { withTimezone: true }),
+    reconcileProofObservedAt: timestamp("reconcile_proof_observed_at", {
+      withTimezone: true,
+    }),
   },
   (table) => ({
     workspaceAccount: foreignKey({
@@ -5257,7 +7424,9 @@ export const machineRemovalOperations = pgTable(
       .references(() => enrollments.id, { onDelete: "restrict" }),
     operationKey: text("operation_key").notNull(),
     requestFingerprint: text("request_fingerprint").notNull(),
-    outcome: text("outcome", { enum: machineRemovalOperationOutcomeValues }).notNull(),
+    outcome: text("outcome", {
+      enum: machineRemovalOperationOutcomeValues,
+    }).notNull(),
     result: jsonb("result").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -5523,6 +7692,10 @@ export const scheduledTasks = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    xaiProviderAccountAuthoritySnapshot: jsonb("xai_provider_account_authority_snapshot")
+      .$type<XaiProviderAccountAuthoritySnapshotV1>()
+      .notNull()
+      .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
     reusableSessionId: uuid("reusable_session_id").references(() => sessions.id, {
       onDelete: "set null",
     }),
@@ -5660,8 +7833,12 @@ export const githubInstallations = pgTable(
     githubActorId: bigint("github_actor_id", { mode: "number" }),
     githubActorLogin: text("github_actor_login"),
     authorityKind: text("authority_kind"),
-    authorityCheckedAt: timestamp("authority_checked_at", { withTimezone: true }),
-    authorityExpiresAt: timestamp("authority_expires_at", { withTimezone: true }),
+    authorityCheckedAt: timestamp("authority_checked_at", {
+      withTimezone: true,
+    }),
+    authorityExpiresAt: timestamp("authority_expires_at", {
+      withTimezone: true,
+    }),
     authorityNonce: text("authority_nonce"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -5879,7 +8056,9 @@ export const modelCallFacts = pgTable(
     reasoningTokens: bigint("reasoning_tokens", { mode: "number" }),
     totalTokens: bigint("total_tokens", { mode: "number" }),
     pricedCostMicros: bigint("priced_cost_micros", { mode: "number" }).notNull().default(0),
-    estimatedProviderCostMicros: bigint("estimated_provider_cost_micros", { mode: "number" }),
+    estimatedProviderCostMicros: bigint("estimated_provider_cost_micros", {
+      mode: "number",
+    }),
     pricingSource: text("pricing_source"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
@@ -6005,7 +8184,9 @@ export const hostExportOutbox = pgTable(
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     envelopeBytes: integer("envelope_bytes").notNull(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
-    sourceRecordedAt: timestamp("source_recorded_at", { withTimezone: true }).notNull(),
+    sourceRecordedAt: timestamp("source_recorded_at", {
+      withTimezone: true,
+    }).notNull(),
     enqueuedAt: timestamp("enqueued_at", { withTimezone: true }).notNull(),
   },
   (table) => ({
@@ -6240,6 +8421,13 @@ export const packInstallations = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     packId: text("pack_id").notNull(),
     status: text("status").notNull().default("active"),
+    version: integer("version").notNull().default(1),
+    manifestSnapshot: jsonb("manifest_snapshot").$type<Record<string, unknown>>(),
+    manifestDigest: text("manifest_digest"),
+    selectedRigId: uuid("selected_rig_id").references(() => rigs.id, {
+      onDelete: "set null",
+    }),
+    installedBySubjectId: text("installed_by_subject_id"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     enabledAt: timestamp("enabled_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -6250,6 +8438,44 @@ export const packInstallations = pgTable(
       table.packId,
     ),
     status: index("pack_installations_workspace_status_idx").on(table.workspaceId, table.status),
+    selectedRig: index("pack_installations_workspace_rig_idx")
+      .on(table.workspaceId, table.selectedRigId)
+      .where(sql`${table.selectedRigId} is not null`),
+  }),
+);
+
+export const packInstallationComponents = pgTable(
+  "pack_installation_components",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    packInstallationId: uuid("pack_installation_id")
+      .notNull()
+      .references(() => packInstallations.id, { onDelete: "cascade" }),
+    componentKey: text("component_key").notNull(),
+    kind: text("kind").notNull(),
+    capabilityId: text("capability_id").notNull(),
+    resolvedId: text("resolved_id").notNull(),
+    digest: text("digest").notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    installationKey: uniqueIndex("pack_installation_components_pack_key_uq").on(
+      table.packInstallationId,
+      table.componentKey,
+    ),
+    workspaceCapability: index("pack_installation_components_workspace_capability_idx").on(
+      table.workspaceId,
+      table.kind,
+      table.capabilityId,
+    ),
   }),
 );
 
@@ -6344,6 +8570,7 @@ export const capabilityCatalogItems = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    kindAuthority: check("capability_catalog_items_kind_authority_chk", sql`${table.kind} = 'mcp'`),
     workspaceCapability: uniqueIndex("capability_catalog_items_workspace_capability_idx").on(
       table.workspaceId,
       table.id,
@@ -6390,6 +8617,7 @@ export const capabilityInstallations = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    kindAuthority: check("capability_installations_kind_authority_chk", sql`${table.kind} = 'mcp'`),
     workspaceCapability: uniqueIndex("capability_installations_workspace_capability_idx").on(
       table.workspaceId,
       table.capabilityId,
@@ -6398,6 +8626,493 @@ export const capabilityInstallations = pgTable(
     status: index("capability_installations_workspace_status_idx").on(
       table.workspaceId,
       table.status,
+    ),
+  }),
+);
+
+// --- Capabilities platform ---------------------------------------------------
+// Authoritative Plugin, immutable Version, Facet, installation, and ownership
+// state. The generic catalog/installations ledger is reserved for MCP.
+
+export const capabilityPlugins = pgTable(
+  "capability_plugins",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    pluginKey: text("plugin_key").notNull(),
+    accountId: uuid("account_id").references(() => managedAccounts.id, {
+      onDelete: "cascade",
+    }),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id, {
+      onDelete: "cascade",
+    }),
+    name: text("name").notNull(),
+    description: text("description"),
+    category: text("category").notNull(),
+    tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    provenance: text("provenance").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    globalKey: uniqueIndex("capability_plugins_global_key_idx")
+      .on(table.pluginKey)
+      .where(sql`${table.workspaceId} is null`),
+    workspaceKey: uniqueIndex("capability_plugins_workspace_key_idx").on(
+      table.workspaceId,
+      table.pluginKey,
+    ),
+    scope: index("capability_plugins_scope_idx").on(table.workspaceId, table.category),
+  }),
+);
+
+export const capabilityPluginVersions = pgTable(
+  "capability_plugin_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    pluginId: uuid("plugin_id")
+      .notNull()
+      .references(() => capabilityPlugins.id, { onDelete: "cascade" }),
+    version: text("version").notNull(),
+    manifestDigest: text("manifest_digest").notNull(),
+    manifest: jsonb("manifest").$type<Record<string, unknown>>().notNull().default({}),
+    status: text("status").notNull().default("published"),
+    importBatchId: uuid("import_batch_id").references(() => importBatches.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pluginVersion: uniqueIndex("capability_plugin_versions_plugin_version_idx").on(
+      table.pluginId,
+      table.version,
+    ),
+    pluginDigest: uniqueIndex("capability_plugin_versions_plugin_digest_idx").on(
+      table.pluginId,
+      table.manifestDigest,
+    ),
+    pluginIdentity: uniqueIndex("capability_plugin_versions_plugin_identity_idx").on(
+      table.pluginId,
+      table.id,
+    ),
+  }),
+);
+
+export const capabilityFacets = pgTable(
+  "capability_facets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    pluginVersionId: uuid("plugin_version_id")
+      .notNull()
+      .references(() => capabilityPluginVersions.id, { onDelete: "cascade" }),
+    facetKey: text("facet_key").notNull(),
+    kind: text("kind").notNull(),
+    activationMode: text("activation_mode").notNull(),
+    required: boolean("required").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    versionKey: uniqueIndex("capability_facets_version_key_idx").on(
+      table.pluginVersionId,
+      table.facetKey,
+    ),
+    versionKind: index("capability_facets_version_kind_idx").on(table.pluginVersionId, table.kind),
+  }),
+);
+
+export const capabilityIntegrationFacets = pgTable("capability_integration_facets", {
+  facetId: uuid("facet_id")
+    .primaryKey()
+    .references(() => capabilityFacets.id, { onDelete: "cascade" }),
+  providerDomain: text("provider_domain").notNull(),
+  connectionKinds: jsonb("connection_kinds").$type<string[]>().notNull().default([]),
+  ownership: text("ownership").notNull(),
+  requiredScopes: jsonb("required_scopes").$type<string[]>().notNull().default([]),
+  resourceSelection: text("resource_selection").notNull().default("none"),
+});
+
+export const capabilityMcpFacets = pgTable(
+  "capability_mcp_facets",
+  {
+    facetId: uuid("facet_id")
+      .primaryKey()
+      .references(() => capabilityFacets.id, { onDelete: "cascade" }),
+    serverId: text("server_id").notNull(),
+    endpointUrl: text("endpoint_url").notNull(),
+    transport: text("transport").notNull(),
+    authKind: text("auth_kind").notNull(),
+    integrationFacetId: uuid("integration_facet_id").references(
+      () => capabilityIntegrationFacets.facetId,
+      { onDelete: "restrict" },
+    ),
+    allowedTools: jsonb("allowed_tools").$type<string[]>().notNull().default([]),
+  },
+  (table) => ({
+    server: index("capability_mcp_facets_server_idx").on(table.serverId),
+  }),
+);
+
+export const capabilityApiFacets = pgTable("capability_api_facets", {
+  facetId: uuid("facet_id")
+    .primaryKey()
+    .references(() => capabilityFacets.id, { onDelete: "cascade" }),
+  protocol: text("protocol").notNull(),
+  baseUrl: text("base_url").notNull(),
+  specSourceUrl: text("spec_source_url"),
+  authScheme: jsonb("auth_scheme").$type<Record<string, unknown>>().notNull().default({}),
+  integrationFacetId: uuid("integration_facet_id").references(
+    () => capabilityIntegrationFacets.facetId,
+    { onDelete: "restrict" },
+  ),
+});
+
+export const capabilitySkillFacets = pgTable(
+  "capability_skill_facets",
+  {
+    facetId: uuid("facet_id")
+      .primaryKey()
+      .references(() => capabilityFacets.id, { onDelete: "cascade" }),
+    capabilityId: text("capability_id").notNull(),
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    sourceUrl: text("source_url").notNull(),
+    sourceCommit: text("source_commit").notNull(),
+    sourcePath: text("source_path").notNull(),
+    contentSha256: text("content_sha256").notNull(),
+    fileCount: integer("file_count").notNull(),
+    totalBytes: integer("total_bytes").notNull(),
+    license: text("license"),
+  },
+  (table) => ({
+    content: index("capability_skill_facets_content_idx").on(table.contentSha256),
+  }),
+);
+
+export const capabilitySkillFiles = pgTable(
+  "capability_skill_files",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    skillFacetId: uuid("skill_facet_id")
+      .notNull()
+      .references(() => capabilitySkillFacets.facetId, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    content: text("content").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    contentSha256: text("content_sha256").notNull(),
+  },
+  (table) => ({
+    skillPath: uniqueIndex("capability_skill_files_skill_path_idx").on(
+      table.skillFacetId,
+      table.path,
+    ),
+  }),
+);
+
+export const capabilityPluginInstallations = pgTable(
+  "capability_plugin_installations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    pluginId: uuid("plugin_id")
+      .notNull()
+      .references(() => capabilityPlugins.id, { onDelete: "restrict" }),
+    pluginVersionId: uuid("plugin_version_id").notNull(),
+    status: text("status").notNull().default("active"),
+    version: integer("version").notNull().default(1),
+    installedBySubjectId: text("installed_by_subject_id").notNull(),
+    installedAt: timestamp("installed_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pluginVersion: foreignKey({
+      columns: [table.pluginId, table.pluginVersionId],
+      foreignColumns: [capabilityPluginVersions.pluginId, capabilityPluginVersions.id],
+      name: "capability_plugin_installations_plugin_version_fk",
+    }).onDelete("restrict"),
+    workspacePlugin: uniqueIndex("capability_plugin_installations_workspace_plugin_idx").on(
+      table.workspaceId,
+      table.pluginId,
+    ),
+    workspaceStatus: index("capability_plugin_installations_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+    ),
+  }),
+);
+
+export const capabilityFacetInstallations = pgTable(
+  "capability_facet_installations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    pluginInstallationId: uuid("plugin_installation_id")
+      .notNull()
+      .references(() => capabilityPluginInstallations.id, {
+        onDelete: "cascade",
+      }),
+    facetId: uuid("facet_id")
+      .notNull()
+      .references(() => capabilityFacets.id, { onDelete: "restrict" }),
+    connectionId: uuid("connection_id").references(() => connections.id, {
+      onDelete: "restrict",
+    }),
+    status: text("status").notNull().default("active"),
+    config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
+    version: integer("version").notNull().default(1),
+    attentionCode: text("attention_code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    installationFacet: uniqueIndex("capability_facet_installations_installation_facet_idx").on(
+      table.pluginInstallationId,
+      table.facetId,
+    ),
+    workspaceStatus: index("capability_facet_installations_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+    ),
+  }),
+);
+
+export const capabilityComponentOwners = pgTable(
+  "capability_component_owners",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    facetInstallationId: uuid("facet_installation_id")
+      .notNull()
+      .references(() => capabilityFacetInstallations.id, {
+        onDelete: "cascade",
+      }),
+    ownerKind: text("owner_kind").notNull(),
+    ownerId: text("owner_id").notNull(),
+    removable: boolean("removable").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    uniqueOwner: uniqueIndex("capability_component_owners_unique_idx").on(
+      table.facetInstallationId,
+      table.ownerKind,
+      table.ownerId,
+    ),
+    workspaceOwner: index("capability_component_owners_workspace_owner_idx").on(
+      table.workspaceId,
+      table.ownerKind,
+      table.ownerId,
+    ),
+  }),
+);
+
+export const integrationSpecRevisions = pgTable(
+  "integration_spec_revisions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    apiFacetId: uuid("api_facet_id")
+      .notNull()
+      .references(() => capabilityApiFacets.facetId, { onDelete: "cascade" }),
+    revision: integer("revision").notNull(),
+    protocol: text("protocol").notNull(),
+    sourceUrl: text("source_url"),
+    specDigest: text("spec_digest").notNull(),
+    spec: jsonb("spec").$type<Record<string, unknown>>().notNull(),
+    status: text("status").notNull().default("active"),
+    fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    facetRevision: uniqueIndex("integration_spec_revisions_facet_revision_idx").on(
+      table.apiFacetId,
+      table.revision,
+    ),
+    facetDigest: uniqueIndex("integration_spec_revisions_facet_digest_idx").on(
+      table.apiFacetId,
+      table.specDigest,
+    ),
+  }),
+);
+
+export const integrationTools = pgTable(
+  "integration_tools",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    facetId: uuid("facet_id")
+      .notNull()
+      .references(() => capabilityFacets.id, { onDelete: "cascade" }),
+    toolKey: text("tool_key").notNull(),
+    name: text("name").notNull(),
+    description: text("description"),
+    inputSchema: jsonb("input_schema").$type<Record<string, unknown>>().notNull().default({}),
+    outputSchema: jsonb("output_schema").$type<Record<string, unknown>>(),
+    effect: text("effect").notNull().default("read"),
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    facetTool: uniqueIndex("integration_tools_facet_tool_idx").on(table.facetId, table.toolKey),
+  }),
+);
+
+export const integrationFacetDefinitions = pgTable(
+  "integration_facet_definitions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    integrationFacetId: uuid("integration_facet_id")
+      .notNull()
+      .references(() => capabilityIntegrationFacets.facetId, {
+        onDelete: "cascade",
+      }),
+    facetKey: text("facet_key").notNull(),
+    kind: text("kind").notNull(),
+    configSchema: jsonb("config_schema").$type<Record<string, unknown>>().notNull().default({}),
+    capabilities: jsonb("capabilities").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    integrationFacet: uniqueIndex("integration_facet_definitions_integration_facet_idx").on(
+      table.integrationFacetId,
+      table.facetKey,
+    ),
+    integrationKind: index("integration_facet_definitions_integration_kind_idx").on(
+      table.integrationFacetId,
+      table.kind,
+    ),
+  }),
+);
+
+export const integrationFacetBindings = pgTable(
+  "integration_facet_bindings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    facetDefinitionId: uuid("facet_definition_id")
+      .notNull()
+      .references(() => integrationFacetDefinitions.id, {
+        onDelete: "restrict",
+      }),
+    integrationFacetInstallationId: uuid("integration_facet_installation_id")
+      .notNull()
+      .references(() => capabilityFacetInstallations.id, {
+        onDelete: "cascade",
+      }),
+    bindingKey: text("binding_key").notNull(),
+    displayName: text("display_name").notNull(),
+    runtimeKey: text("runtime_key"),
+    connectionId: uuid("connection_id").references(() => connections.id, {
+      onDelete: "restrict",
+    }),
+    status: text("status").notNull().default("active"),
+    config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
+    cursor: jsonb("cursor").$type<Record<string, unknown>>().notNull().default({}),
+    version: integer("version").notNull().default(1),
+    lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    installationFacetKey: uniqueIndex("integration_facet_bindings_installation_facet_key_idx").on(
+      table.workspaceId,
+      table.integrationFacetInstallationId,
+      table.facetDefinitionId,
+      table.bindingKey,
+    ),
+    workspaceRuntime: uniqueIndex("integration_facet_bindings_workspace_runtime_idx")
+      .on(table.workspaceId, table.runtimeKey)
+      .where(sql`${table.runtimeKey} is not null`),
+    workspaceStatus: index("integration_facet_bindings_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+    ),
+  }),
+);
+
+export const integrationFacetBindingOwners = pgTable(
+  "integration_facet_binding_owners",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    bindingId: uuid("binding_id")
+      .notNull()
+      .references(() => integrationFacetBindings.id, { onDelete: "cascade" }),
+    ownerKind: text("owner_kind").notNull(),
+    ownerId: text("owner_id").notNull(),
+    removable: boolean("removable").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    uniqueOwner: uniqueIndex("integration_facet_binding_owners_unique_idx").on(
+      table.bindingId,
+      table.ownerKind,
+      table.ownerId,
+    ),
+    workspaceOwner: index("integration_facet_binding_owners_workspace_owner_idx").on(
+      table.workspaceId,
+      table.ownerKind,
+      table.ownerId,
+    ),
+  }),
+);
+
+export const capabilityOperations = pgTable(
+  "capability_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    idempotencyKey: text("idempotency_key").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    kind: text("kind").notNull(),
+    targetKind: text("target_kind").notNull(),
+    targetId: text("target_id").notNull(),
+    status: text("status").notNull().default("pending"),
+    phase: text("phase").notNull().default("admitted"),
+    version: integer("version").notNull().default(1),
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    errorCode: text("error_code"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (table) => ({
+    workspaceIdempotency: uniqueIndex("capability_operations_workspace_idempotency_idx").on(
+      table.workspaceId,
+      table.idempotencyKey,
+    ),
+    workspaceStatus: index("capability_operations_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+      table.updatedAt,
     ),
   }),
 );
@@ -6508,12 +9223,44 @@ export const rigs = pgTable(
     description: text("description"),
     // Attribution string: 'user:<subject>' | 'session:<id>' | 'system'.
     createdBy: text("created_by"),
+    // Inert migration-0230 identity foundation. Existing DAO/API/runtime paths
+    // omit these fields and keep their historical workspace authority.
+    authorityScope: text("authority_scope").notNull().default("workspace"),
+    authorityId: uuid("authority_id"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    originWorkspaceId: uuid("origin_workspace_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
     workspaceName: uniqueIndex("rigs_workspace_name_idx").on(table.workspaceId, table.name),
     workspaceCreated: index("rigs_workspace_created_idx").on(table.workspaceId, table.createdAt),
+    authorityShape: check(
+      "rigs_authority_shape_check",
+      sql`(
+          ${table.authorityScope} = 'workspace'
+          and ${table.authorityId} is null
+          and ${table.ownerOrganizationMembershipId} is null
+        ) or (
+          ${table.authorityScope} = 'user'
+          and ${table.authorityId} is not null
+          and ${table.ownerOrganizationMembershipId} is not null
+        )`,
+    ),
+    authorityScopeValid: check(
+      "rigs_authority_scope_check",
+      sql`${table.authorityScope} in ('workspace', 'user')`,
+    ),
+    authority: foreignKey({
+      name: "rigs_authority_fk",
+      columns: [table.authorityId, table.accountId, table.ownerOrganizationMembershipId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+        organizationUserResourceAuthorities.organizationMembershipId,
+      ],
+    }).onDelete("restrict"),
+    // Migration 0230 owns the origin-workspace FK's column-subset SET NULL.
   }),
 );
 
@@ -6615,8 +9362,11 @@ export const rigChanges = pgTable(
 export * from "./workspace-instruction-policies-schema";
 export * from "./company-profile-schema";
 export * from "./workspace-learning-policy-schema";
+export * from "./slack-task-policy-schema";
 export * from "./preference-registry-schema";
 export * from "./memory-governance-schema";
 export * from "./scoped-knowledge-schema";
+export * from "./task-notes-schema";
 export * from "./knowledge-source-sync-schema";
 export * from "./transcription-recordings-schema";
+export * from "./interaction-schema";

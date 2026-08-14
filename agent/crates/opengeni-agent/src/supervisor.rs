@@ -47,6 +47,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::backoff::Backoff;
+use crate::browser_bridge::BrowserBridgeInventory;
 use crate::config::StoredCredentials;
 use crate::dispatch::{self, DispatchContext};
 use crate::engine::Engine;
@@ -253,6 +254,8 @@ pub struct SupervisorLink<P: Platform> {
     pub platform: Arc<P>,
     /// Workspace-scoped control-plane credentials.
     pub credentials: StoredCredentials,
+    /// Authoritative deployment origin persisted by a non-legacy enrollment.
+    pub api_url: Option<String>,
 }
 
 impl<P: Platform> Clone for SupervisorLink<P> {
@@ -261,6 +264,7 @@ impl<P: Platform> Clone for SupervisorLink<P> {
             connection_id: self.connection_id.clone(),
             platform: self.platform.clone(),
             credentials: self.credentials.clone(),
+            api_url: self.api_url.clone(),
         }
     }
 }
@@ -277,7 +281,15 @@ impl<P: Platform> SupervisorLink<P> {
             connection_id: connection_id.into(),
             platform,
             credentials,
+            api_url: None,
         }
+    }
+
+    /// Attach the deployment origin that this exact link enrolled against.
+    #[must_use]
+    pub fn with_api_url(mut self, api_url: impl Into<String>) -> Self {
+        self.api_url = Some(api_url.into());
+        self
     }
 }
 
@@ -287,6 +299,7 @@ struct WorkspaceLink<P: Platform> {
     connection_id: String,
     platform: Arc<P>,
     creds: StoredCredentials,
+    api_url: Option<String>,
     epoch: Arc<EpochCell>,
     shutdown: ShutdownSignal,
     /// The CURRENT generation's bulk frame channel (op-frame publishes ride a
@@ -303,6 +316,7 @@ impl<P: Platform> WorkspaceLink<P> {
             connection_id: definition.connection_id,
             platform: definition.platform,
             creds: definition.credentials,
+            api_url: definition.api_url,
             epoch: Arc::new(EpochCell::default()),
             shutdown: ShutdownSignal::default(),
             bulk_tx: Arc::new(std::sync::RwLock::new(None)),
@@ -324,6 +338,8 @@ pub struct Supervisor<P: Platform> {
     /// CPU delta blocks ~200ms — awaited inline it head-of-line-blocked every
     /// rpc arriving during a heartbeat, found live by harness scenario E3).
     metrics: Arc<std::sync::RwLock<v1::MetricsSample>>,
+    /// Live attached-browser inventory shared by every workspace link.
+    browser_bridge: Option<BrowserBridgeInventory>,
     /// Latched once a clean shutdown (SIGINT/SIGTERM) is requested.
     shutdown: ShutdownSignal,
 }
@@ -367,6 +383,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             agent_version: agent_version.into(),
             started: Instant::now(),
             metrics: Arc::new(std::sync::RwLock::new(v1::MetricsSample::default())),
+            browser_bridge: None,
             shutdown: ShutdownSignal::default(),
         }
     }
@@ -378,6 +395,14 @@ impl<P: Platform + 'static> Supervisor<P> {
     pub fn with_spool_root(mut self, spool_root: std::path::PathBuf) -> Self {
         let capacity = sampled_capacity(&spool_root);
         self.engine = Engine::new(spool_root, capacity);
+        self
+    }
+
+    /// Advertise and heartbeat one process-wide attached-browser bridge across
+    /// every configured workspace link.
+    #[must_use]
+    pub fn with_browser_bridge(mut self, browser_bridge: BrowserBridgeInventory) -> Self {
+        self.browser_bridge = Some(browser_bridge);
         self
     }
 
@@ -835,7 +860,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             return;
         };
         let max_payload = client.server_info().max_payload;
-        let request = match ControlRequest::decode(message.payload.as_ref()) {
+        let mut request = match ControlRequest::decode(message.payload.as_ref()) {
             Ok(request) => request,
             Err(decode_error) => {
                 error!(error = %decode_error, "undecodable ControlRequest");
@@ -850,6 +875,13 @@ impl<P: Platform + 'static> Supervisor<P> {
                 return;
             }
         };
+        if let Some(api_url) = link.api_url.as_deref() {
+            crate::codemode::bind_connection_origin(
+                &mut request,
+                api_url,
+                &link.creds.workspace_id,
+            );
+        }
         let request_id = request.request_id.clone();
         let label = op_label(&request);
         match classify(&request) {
@@ -1171,6 +1203,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             // The server uses this path iff its own feature flag is also on
             // (PROTOCOL.md §Compatibility — no flag day, rollback safe).
             op_stream: true,
+            browser_bridge: self.browser_bridge.is_some(),
         }
     }
 
@@ -1231,6 +1264,10 @@ impl<P: Platform + 'static> Supervisor<P> {
                     op_frames_dropped_total: self.engine.frames_dropped_total(),
                     evicted_unacked_total: self.engine.registry_counters().evicted_unacked_total,
                 }),
+                attached_browser_inventory: self
+                    .browser_bridge
+                    .as_ref()
+                    .map(BrowserBridgeInventory::snapshot),
             })),
         };
         client
@@ -1468,6 +1505,9 @@ fn op_label(req: &ControlRequest) -> &'static str {
         Some(Op::DesktopEnsure(_)) => "desktop_ensure",
         Some(Op::DesktopInput(_)) => "desktop_input",
         Some(Op::DesktopScreenshot(_)) => "desktop_screenshot",
+        Some(Op::BrowserControlEnsure(_)) => "browser_control_ensure",
+        Some(Op::BrowserFramesOpen(_)) => "browser_frames_open",
+        Some(Op::ComputerFramesOpen(_)) => "computer_frames_open",
         Some(Op::Metrics(_)) => "metrics",
         Some(Op::UpdateMayProceed(_)) => "update_may_proceed",
         // Op-stream (v1.1) — wire types present; no runtime serves them yet.

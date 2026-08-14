@@ -5,6 +5,7 @@ import {
   createDb,
   encryptEnvironmentValue,
   listCodexAccountStatuses,
+  synchronizeCanonicalHumanLoginBindings,
   upsertCodexSubscriptionCredential,
   type DbClient,
 } from "@opengeni/db";
@@ -246,6 +247,38 @@ beforeAll(async () => {
   }
   admin = shared.admin;
   client = createDb(shared.appUrl, { max: 16 });
+
+  for (const userId of [OWNER_USER_ID, OTHER_USER_ID]) {
+    await admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (
+        ${userId},
+        ${userId === OWNER_USER_ID ? "Owner" : "Other admin"},
+        ${`${userId}@example.com`},
+        true
+      )
+    `;
+    await admin`
+      insert into auth_identities (id, user_id, provider_id, account_id)
+      values (${crypto.randomUUID()}, ${userId}, 'credential', ${userId})
+    `;
+    const identity = await synchronizeCanonicalHumanLoginBindings(client.db, userId);
+    const sessionIds =
+      userId === OWNER_USER_ID
+        ? [`session-${OWNER_USER_ID}`, `session-${OWNER_USER_ID}-rotated`]
+        : [`session-${OTHER_USER_ID}`];
+    for (const sessionId of sessionIds) {
+      await admin`
+        insert into auth_sessions (
+          id, user_id, token, expires_at,
+          identity_id, identity_revision, auth_revision
+        ) values (
+          ${sessionId}, ${userId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+          ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision}
+        )
+      `;
+    }
+  }
 }, 180_000);
 
 afterAll(async () => {

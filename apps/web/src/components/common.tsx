@@ -16,7 +16,7 @@ export function LoadingPanel({ label }: { label: string }) {
   );
 }
 
-export function ProblemPanel(props: { title: string; description: string; action?: ReactNode }) {
+export function ProblemPanel(props: { title: string; description: ReactNode; action?: ReactNode }) {
   return (
     <section className="grid flex-1 place-items-center px-4 text-center">
       <div className="w-full max-w-md rounded-lg border border-border bg-surface p-5">

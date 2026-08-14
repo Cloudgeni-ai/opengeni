@@ -66,6 +66,73 @@ async function withNarrowViewport(run: () => Promise<void>): Promise<void> {
 }
 
 describe("WorkspaceDock", () => {
+  test("gives tabs a full row when the desktop dock itself is narrow", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    const originalMatchMedia = window.matchMedia;
+    const originalRect = HTMLElement.prototype.getBoundingClientRect;
+    const callbacks: ResizeObserverCallback[] = [];
+    let dockWidth = 300;
+    globalThis.ResizeObserver = class {
+      constructor(callback: ResizeObserverCallback) {
+        callbacks.push(callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    window.matchMedia = ((query: string) => ({
+      matches: query === "(min-width: 1024px)",
+      media: query,
+      onchange: null,
+      addEventListener() {},
+      removeEventListener() {},
+      addListener() {},
+      removeListener() {},
+      dispatchEvent() {
+        return false;
+      },
+    })) as typeof window.matchMedia;
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      if (this.hasAttribute("data-dock-chrome")) return new DOMRect(0, 0, dockWidth, 40);
+      return originalRect.call(this);
+    };
+
+    let rendered: Awaited<ReturnType<typeof renderComponent>> | null = null;
+    try {
+      rendered = await renderComponent(
+        <WorkspaceDock
+          primary={<div>Chat pane</div>}
+          headerAccessory={<div>Offline — as of just now</div>}
+          tabs={[
+            { id: "changes", label: "Changes", content: <div>Changes content</div> },
+            { id: "files", label: "Files", content: <div>Files content</div> },
+            { id: "terminal", label: "Terminal", content: <div>Terminal content</div> },
+            { id: "browser", label: "Browser", content: <div>Browser content</div> },
+          ]}
+        />,
+      );
+      const chrome = rendered.container.querySelector<HTMLElement>("[data-dock-chrome]");
+      expect(chrome?.dataset.compact).toBe("true");
+
+      const browserTab = [...rendered.container.querySelectorAll('[role="tab"]')].find(
+        (tab) => tab.textContent === "Browser",
+      );
+      await click(browserTab ?? null);
+      expect(browserTab?.getAttribute("aria-selected")).toBe("true");
+
+      dockWidth = 700;
+      await act(async () => {
+        for (const callback of callbacks) callback([], {} as ResizeObserver);
+      });
+      expect(chrome?.dataset.compact).toBeUndefined();
+    } finally {
+      await rendered?.unmount();
+      globalThis.ResizeObserver = originalResizeObserver;
+      window.matchMedia = originalMatchMedia;
+      HTMLElement.prototype.getBoundingClientRect = originalRect;
+    }
+  });
+
   test("tabs implement roving focus, arrow navigation, and a complete ARIA relationship", async () => {
     const rendered = await renderComponent(
       <WorkspaceDock

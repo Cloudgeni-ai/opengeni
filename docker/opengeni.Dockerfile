@@ -1,4 +1,4 @@
-FROM oven/bun:1.3.14 AS base
+FROM oven/bun:1.3.14 AS source-base
 
 WORKDIR /app
 
@@ -7,6 +7,7 @@ ENV OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 
 COPY package.json bun.lock tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json
+COPY apps/browser-extension/package.json apps/browser-extension/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY examples/northstar-support/package.json examples/northstar-support/package.json
@@ -15,6 +16,9 @@ COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kerne
 COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
 COPY packages/artifact-kernel-wasm-spreadsheet/package.json packages/artifact-kernel-wasm-spreadsheet/package.json
 COPY packages/artifact-tool/package.json packages/artifact-tool/package.json
+COPY packages/browserd/package.json packages/browserd/package.json
+COPY packages/capabilities/package.json packages/capabilities/package.json
+COPY packages/codemode/package.json packages/codemode/package.json
 COPY packages/codex/package.json packages/codex/package.json
 COPY packages/config/package.json packages/config/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
@@ -24,6 +28,7 @@ COPY packages/deployment/package.json packages/deployment/package.json
 COPY packages/documents/package.json packages/documents/package.json
 COPY packages/events/package.json packages/events/package.json
 COPY packages/github/package.json packages/github/package.json
+COPY packages/interaction/package.json packages/interaction/package.json
 COPY packages/network/package.json packages/network/package.json
 COPY packages/observability/package.json packages/observability/package.json
 COPY packages/ogtool/package.json packages/ogtool/package.json
@@ -32,17 +37,24 @@ COPY packages/runtime/package.json packages/runtime/package.json
 COPY packages/sdk/package.json packages/sdk/package.json
 COPY packages/storage/package.json packages/storage/package.json
 COPY packages/testing/package.json packages/testing/package.json
+COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
 COPY patches patches
 
 RUN bun install --frozen-lockfile
 
 COPY --chown=bun:bun . .
 
+ENV NODE_ENV=production
+USER bun
+
+# Most workloads share the same network/source-control tools. Keep that stable
+# package layer reusable, while workloads with larger target-specific package
+# unions inherit source-base directly and install their complete union once.
+FROM source-base AS base
+USER root
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git openssh-client \
   && rm -rf /var/lib/apt/lists/*
-
-ENV NODE_ENV=production
 USER bun
 
 FROM base AS northstar-demo-build
@@ -58,7 +70,7 @@ CMD ["bun", "run", "--cwd", "examples/northstar-support", "start"]
 # architecture at `.release/artifact-runtime/<amd64|arm64>/`. The bundle is
 # root-owned/read-only, and both API and materializer image builds fail before
 # publication if its complete release/install chain or facade probe is invalid.
-FROM base AS artifact-runtime-base
+FROM source-base AS artifact-runtime-base
 ARG TARGETARCH
 ARG OPENGENI_ARTIFACT_RUNTIME_BUNDLE=.release/artifact-runtime
 USER root
@@ -83,7 +95,7 @@ RUN bun packages/artifact-tool/src/runtime-cli-entry.ts doctor --json
 FROM artifact-runtime-base AS api
 USER root
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg \
+  && apt-get install -y --no-install-recommends ca-certificates ffmpeg git openssh-client \
   && rm -rf /var/lib/apt/lists/*
 USER bun
 RUN bun scripts/build-runtime-processes.ts api
@@ -100,14 +112,14 @@ RUN bun scripts/build-runtime-processes.ts api
 EXPOSE 8000
 CMD ["bun", "apps/api/dist/process/index.js"]
 
-FROM base AS worker
+FROM source-base AS worker
 # The docker sandbox backend needs the Docker CLI to talk to the mounted host
 # daemon socket. Interactive/cancellable commands use the Agents SDK's
 # host-side Python PTY bridge, so Python must live in this worker image rather
 # than only inside the sandbox. The daemon remains outside this image.
 USER root
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl gnupg python3 \
+  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg git gnupg openssh-client python3 \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
   && chmod a+r /etc/apt/keyrings/docker.asc \
@@ -136,7 +148,7 @@ CMD ["bun", "apps/worker/dist/process/artifact-outbox/artifact-outbox-entry.js"]
 FROM artifact-runtime-base AS artifact-materializer
 USER root
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends bubblewrap util-linux \
+  && apt-get install -y --no-install-recommends bubblewrap ca-certificates git openssh-client util-linux \
   && rm -rf /var/lib/apt/lists/* \
   && install -d -o bun -g bun -m 0755 /opt/opengeni/bin
 USER bun

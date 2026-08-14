@@ -21,7 +21,6 @@ import {
   createSession,
   deadLetterHostExportHead,
   getActiveSessionHistoryItemsPaged,
-  getSession,
   getSessionHistoryItems,
   initializeSessionStartAtomically,
   listSessionEventPage,
@@ -57,6 +56,24 @@ const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle"
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
 let app: ReturnType<typeof createDb> | null = null;
+
+async function readHistoricalSessionInitialMessage(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string | null> {
+  const [row] = await withWorkspaceRls(db, workspaceId, (scopedDb) =>
+    scopedDb
+      .select({
+        initialMessage: schema.sessions.initialMessage,
+        initialMessageCodecVersion: schema.sessions.initialMessageCodecVersion,
+      })
+      .from(schema.sessions)
+      .where(eq(schema.sessions.id, sessionId))
+      .limit(1),
+  );
+  return row ? fromPostgresLosslessText(row.initialMessage, row.initialMessageCodecVersion) : null;
+}
 
 setDefaultTimeout(60_000);
 
@@ -233,6 +250,19 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         payloadVersion: null,
       });
 
+      // The assertions above deliberately exercise the exact historical
+      // migration boundary. Advance the populated database to the current
+      // schema before opening current application connections so unrelated
+      // future session columns cannot invalidate this compatibility test.
+      for (const file of files.filter((entry) => entry.localeCompare(migrationFile) > 0)) {
+        await admin.unsafe(await readFile(join(migrationsDir, file), "utf8"));
+        await admin`
+          insert into schema_migrations (name)
+          values (${file})
+          on conflict do nothing
+        `;
+      }
+
       const testValue = String.fromCharCode(97, 112, 112, 112, 119);
       const firstKey = String.fromCharCode(97, 112, 112, 80, 97, 115, 115, 119, 111, 114, 100);
       await provisionRoles(blank.databaseUrl, {
@@ -289,8 +319,9 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
           .set({ title: "unrelated new-app update" })
           .where(eq(schema.sessions.id, sessionId)),
       );
-      const legacySession = await getSession(rollingApp.db, workspace!.id, sessionId);
-      expect(legacySession?.initialMessage).toBe(legacyTextMarker);
+      expect(
+        await readHistoricalSessionInitialMessage(rollingApp.db, workspace!.id, sessionId),
+      ).toBe(legacyTextMarker);
       const [afterUnrelatedUpdate] = await admin<
         Array<{ initialMessage: string; initialVersion: number | null }>
       >`
@@ -364,9 +395,9 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         initialMessage: legacyTextMarker,
         initialVersion: null,
       });
-      expect((await getSession(rollingApp.db, workspace!.id, sessionId))?.initialMessage).toBe(
-        legacyTextMarker,
-      );
+      expect(
+        await readHistoricalSessionInitialMessage(rollingApp.db, workspace!.id, sessionId),
+      ).toBe(legacyTextMarker);
 
       const embeddedExact = `embedded${nul}${loneHigh}${loneLow}${LOSSLESS_TEXT_PREFIX}`;
       await withWorkspaceRls(injectedDb, workspace!.id, (db) =>
@@ -448,6 +479,9 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         throw new Error(`goal continuation did not materialize: ${materialized.action}`);
       }
       expect(materialized.update.summary).toBe(newUnsafePrompt);
+      if (materialized.update.payload.type !== "goal_continuation") {
+        throw new Error("goal continuation materialized with the wrong payload kind");
+      }
       expect(materialized.update.payload.prompt).toBe(newUnsafePrompt);
 
       const [quarantined] = await admin<
@@ -760,6 +794,12 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       callId,
       output: { type: "text", text: unsafeText },
     };
+    const eventOutput = {
+      content: [{ type: "text", text: unsafeText }],
+      structuredContent: { exactCommand },
+      isError: false,
+      vendorReceipt: { id: unsafeText },
+    };
     expect(
       await registerPendingSessionToolCall(app.db, {
         accountId: grant.accountId,
@@ -783,6 +823,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         attemptId,
         callId,
         resultItem,
+        eventOutput,
       }),
     ).toEqual({ accepted: true, recorded: true });
     const [pending] = await withWorkspaceRls(app.db, workspaceId, (db) =>
@@ -792,14 +833,19 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
           callItemCodecVersion: schema.sessionPendingToolCalls.callItemCodecVersion,
           resultItem: schema.sessionPendingToolCalls.resultItem,
           resultItemCodecVersion: schema.sessionPendingToolCalls.resultItemCodecVersion,
+          eventOutput: schema.sessionPendingToolCalls.eventOutput,
+          eventOutputCodecVersion: schema.sessionPendingToolCalls.eventOutputCodecVersion,
         })
         .from(schema.sessionPendingToolCalls)
         .where(eq(schema.sessionPendingToolCalls.callId, callId)),
     );
+    if (!pending?.eventOutput) throw new Error("Pending tool event output was not retained");
     expect({
-      callItem: fromPostgresLosslessJson(pending!.callItem, pending!.callItemCodecVersion),
-      resultItem: fromPostgresLosslessJson(pending!.resultItem, pending!.resultItemCodecVersion),
-    }).toEqual({ callItem, resultItem });
+      callItem: fromPostgresLosslessJson(pending.callItem, pending.callItemCodecVersion),
+      resultItem: fromPostgresLosslessJson(pending.resultItem, pending.resultItemCodecVersion),
+      eventOutput: fromPostgresLosslessJson(pending.eventOutput, pending.eventOutputCodecVersion)
+        .value,
+    }).toEqual({ callItem, resultItem, eventOutput });
     const [rawPending] = await shared.admin<
       Array<{ callType: string | null; resultType: string | null }>
     >`
@@ -809,6 +855,22 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       callType: "function_call",
       resultType: "function_call_result",
     });
+    const legacyApp = postgres(shared.appUrl, { max: 1, onnotice: () => undefined });
+    try {
+      await expect(
+        legacyApp.begin(async (sql) => {
+          await sql`select set_config('opengeni.account_id', ${grant.accountId}, true)`;
+          await sql`select set_config('opengeni.workspace_id', ${workspaceId}, true)`;
+          await sql`delete from session_pending_tool_calls where call_id = ${callId}`;
+        }),
+      ).rejects.toThrow("rich pending tool output requires a v1-aware settlement worker");
+    } finally {
+      await legacyApp.end();
+    }
+    const [retainedAfterLegacyDelete] = await shared.admin<Array<{ eventOutput: unknown | null }>>`
+      select event_output as "eventOutput"
+      from session_pending_tool_calls where call_id = ${callId}`;
+    expect(retainedAfterLegacyDelete?.eventOutput).not.toBeNull();
 
     const settled = await withWorkspaceRls(app.db, workspaceId, (db) =>
       db.transaction(async (tx) => {
@@ -834,6 +896,12 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       }),
     );
     expect(settled.closed).toBe(1);
+    expect(settled.events).toContainEqual(
+      expect.objectContaining({
+        type: "agent.toolCall.output",
+        payload: expect.objectContaining({ id: callId, output: eventOutput }),
+      }),
+    );
     const settledHistory = await withWorkspaceRls(app.db, workspaceId, (db) =>
       db
         .select({

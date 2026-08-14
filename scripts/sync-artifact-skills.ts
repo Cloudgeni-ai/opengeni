@@ -9,19 +9,30 @@ export const ARTIFACT_SKILL_NAMES = [
   "opengeni-documents",
   "opengeni-presentations",
 ] as const;
+export const VIDEO_SKILL_NAMES = ["opengeni-video-generation"] as const;
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const sourceRoot = join(repoRoot, ".agents", "skills");
 const targetRoot = join(repoRoot, "packages", "runtime", "src", "bundled_artifact_skills");
+const videoTargetRoot = join(repoRoot, "packages", "runtime", "src", "bundled_video_skills");
 
 export async function checkArtifactSkillBundle(): Promise<void> {
-  const expected = await skillFiles(sourceRoot);
-  const actual = await skillFiles(targetRoot);
+  await checkSkillBundle(ARTIFACT_SKILL_NAMES, targetRoot, "artifact");
+  await checkSkillBundle(VIDEO_SKILL_NAMES, videoTargetRoot, "video");
+}
+
+async function checkSkillBundle(
+  names: readonly string[],
+  destination: string,
+  label: string,
+): Promise<void> {
+  const expected = await skillFiles(sourceRoot, names);
+  const actual = await skillFiles(destination, names);
   const expectedPaths = [...expected.keys()].sort();
   const actualPaths = [...actual.keys()].sort();
   if (JSON.stringify(actualPaths) !== JSON.stringify(expectedPaths)) {
     throw new Error(
-      `Bundled artifact skill paths differ. Run: bun scripts/sync-artifact-skills.ts`,
+      `Bundled ${label} skill paths differ. Run: bun scripts/sync-artifact-skills.ts`,
     );
   }
   for (const path of expectedPaths) {
@@ -29,35 +40,40 @@ export async function checkArtifactSkillBundle(): Promise<void> {
     const bundled = actual.get(path)!;
     if (!source.equals(bundled)) {
       throw new Error(
-        `Bundled artifact skill is stale: ${path}. Run: bun scripts/sync-artifact-skills.ts`,
+        `Bundled ${label} skill is stale: ${path}. Run: bun scripts/sync-artifact-skills.ts`,
       );
     }
   }
 }
 
 export async function syncArtifactSkillBundle(): Promise<void> {
-  const temporary = `${targetRoot}.tmp-${process.pid}`;
+  await syncSkillBundle(ARTIFACT_SKILL_NAMES, targetRoot);
+  await syncSkillBundle(VIDEO_SKILL_NAMES, videoTargetRoot);
+  await checkArtifactSkillBundle();
+}
+
+async function syncSkillBundle(names: readonly string[], destination: string): Promise<void> {
+  const temporary = `${destination}.tmp-${process.pid}`;
   await rm(temporary, { recursive: true, force: true });
   await mkdir(temporary, { recursive: true });
   try {
-    for (const name of ARTIFACT_SKILL_NAMES) {
+    for (const name of names) {
       await cp(join(sourceRoot, name), join(temporary, name), {
         recursive: true,
         errorOnExist: true,
       });
     }
-    await rm(targetRoot, { recursive: true, force: true });
-    await mkdir(dirname(targetRoot), { recursive: true });
-    await rename(temporary, targetRoot);
+    await rm(destination, { recursive: true, force: true });
+    await mkdir(dirname(destination), { recursive: true });
+    await rename(temporary, destination);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
-  await checkArtifactSkillBundle();
 }
 
-async function skillFiles(root: string): Promise<Map<string, Buffer>> {
+async function skillFiles(root: string, names: readonly string[]): Promise<Map<string, Buffer>> {
   const files = new Map<string, Buffer>();
-  for (const skill of ARTIFACT_SKILL_NAMES) {
+  for (const skill of names) {
     const directory = join(root, skill);
     await walk(directory, async (path) => {
       files.set(relative(root, path).replaceAll("\\", "/"), await readFile(path));

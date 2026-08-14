@@ -405,7 +405,7 @@ export interface EditableArtifactStorePort {
     request: ReadEditableArtifactTransactionBasisRequest,
   ): Promise<EditableArtifactTransactionBasis>;
   /** Detached exact-head replay basis, fenced by the authorization revision observed by core. */
-  readSnapshotCompactionBasis(
+  readCurrentKernelState(
     scope: EditableArtifactScope,
     artifactId: EditableArtifactId,
     expectedAuthorizationRevision: number,

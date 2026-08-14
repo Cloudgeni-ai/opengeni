@@ -148,6 +148,7 @@ export type SyncSessionRealtimeLedgerResponse = {
 
 export type SessionRealtimeModel =
   | "gpt-live-1-boulder-alpha"
+  | "supergrok/grok-voice-think-fast-2.0"
   | "opengeni-gateway/openai/gpt-realtime-2.1"
   | "opengeni-gateway/openai/gpt-realtime-mini"
   | "opengeni-gateway/xai/grok-voice-think-fast-2.0"
@@ -158,7 +159,7 @@ export type SessionRealtimeModel =
 export type WorkspaceRealtimeModelCatalogItem = {
   id: SessionRealtimeModel;
   label: string;
-  provider: "OpenGeni" | "Connected Codex" | "Your Gateway";
+  provider: "OpenGeni" | "Connected Codex" | "Connected SuperGrok" | "Your Gateway";
   description: string;
   available: boolean;
   unavailableReason: string | null;
@@ -282,7 +283,7 @@ export type SessionCapabilities = {
     reason: CapabilityUnavailableReason | null;
   };
   Terminal: {
-    transport: "sse-events" | "pty-ws" | null;
+    transport: "sse-events" | "pty-ws" | "relay-pty" | null;
     ptyCapable: boolean;
     shell: string;
     url: string | null;
@@ -416,7 +417,7 @@ export type AttachViewerResponse = ViewerHolder & {
   terminalUrl: string | null;
   terminalToken: string | null;
   terminalExpiresAt: string | null;
-  terminalTransport: "pty-ws" | null;
+  terminalTransport: "pty-ws" | "relay-pty" | null;
 };
 
 // Mirror of `@opengeni/contracts` AcknowledgeStreamRequest/Response — the
@@ -527,6 +528,7 @@ export type GoalSpec = {
   text: string;
   successCriteria?: string | undefined;
   maxAutoContinuations?: number | undefined;
+  mutationPolicy?: SessionGoalMutationPolicy | undefined;
 };
 
 export type SessionMcpServerInput = {
@@ -640,9 +642,53 @@ export type OpenGeniSlackBotInstallRequest = {
   connectionId?: string | undefined;
 };
 
+export type FikenInstallRequest = {
+  apiToken: string;
+  defaultCompanySlug?: string | undefined;
+  /** Existing Fiken connection to rewrite in place (reconnect). */
+  connectionId?: string | undefined;
+};
+
+export type FikenOAuthStartRequest = {
+  /** Existing Fiken connection to re-authorize in place (reconnect). */
+  connectionId?: string | undefined;
+};
+
+export type FikenOAuthStartResponse = {
+  authorizationUrl: string;
+  expiresAt: string;
+};
+
 export type OpenGeniSlackBotInstallStart = {
   authorizationUrl: string;
   expiresAt: string;
+};
+
+export type SlackInstallationBindingState = "active" | "quarantined";
+
+export type SlackInstallationBinding = {
+  id: string;
+  accountId: string;
+  accountName: string;
+  workspaceId: string;
+  workspaceName: string;
+  connectionId: string;
+  connectionStatus: ConnectionStatus;
+  connectionVersion: number;
+  slackTeamId: string;
+  slackTeamName: string;
+  botId: string;
+  botUserId: string;
+  botDisplayName: "OpenGeni";
+  state: SlackInstallationBindingState;
+  quarantineReason: string | null;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ListSlackInstallationBindingsResponse = {
+  bindings: SlackInstallationBinding[];
 };
 
 export type GoogleDriveTargetScope = "user" | "workspace" | "organization";
@@ -692,7 +738,7 @@ export type GoogleDriveSelectedSource = {
 
 export type GoogleDriveConnectionMetadata = {
   credentialRole: "google_drive_metadata";
-  credentialLabel: "Google Drive metadata browser";
+  credentialLabel: "Google Drive read-only source sync" | "Google Drive metadata browser";
   googlePermissionId: string;
   googleEmail: string;
   googleDisplayName: string | null;
@@ -735,13 +781,6 @@ export type GoogleDriveDisconnectRequest = {
   idempotencyKey: string;
 };
 
-export type SaveGoogleDriveOutputDestinationRequest = {
-  expectedVersion: number;
-  destination: {
-    folderId: string;
-  };
-};
-
 export type GoogleDriveBrowseItem = {
   id: string;
   name: string;
@@ -762,6 +801,85 @@ export type GoogleDriveBrowseResponse = {
   incompleteSearch: boolean;
 };
 
+export type AtlassianSourceKind = "jira_project" | "confluence_space";
+export type AtlassianSyncCadence = "manual" | "hourly" | "daily";
+export type AtlassianReadPolicy = "allow" | "ask" | "block";
+export type AtlassianConnectionLifecycle = {
+  state:
+    | "active"
+    | "paused"
+    | "token_revoked"
+    | "app_removed"
+    | "disconnected"
+    | "reconnect_required"
+    | "reconsent_required";
+  recoverable: boolean;
+  observedAt: string;
+};
+export type AtlassianSelectedSource = {
+  id: string;
+  cloudId: string;
+  siteName: string;
+  siteUrl: string;
+  resourceId: string;
+  key: string;
+  name: string;
+  kind: AtlassianSourceKind;
+  destination?: ConnectorDocumentDestination | undefined;
+  syncCadence: AtlassianSyncCadence;
+  syncEnabled: boolean;
+  configGeneration: number;
+  readPolicy: AtlassianReadPolicy;
+  selectedAt: string;
+};
+export type AtlassianConnectionMetadata = {
+  credentialRole: "atlassian_knowledge";
+  credentialLabel: "Atlassian read-only knowledge sync";
+  atlassianAccountId: string;
+  displayName: string;
+  email?: string | null | undefined;
+  sites: Array<{
+    cloudId: string;
+    name: string;
+    url: string;
+    products: Array<"jira" | "confluence">;
+  }>;
+  verifiedAt: string;
+  accessMode: "readonly";
+  lifecycle?: AtlassianConnectionLifecycle | undefined;
+  documentDestination?: ConnectorDocumentDestination | undefined;
+  selectedSources: AtlassianSelectedSource[];
+  [key: string]: unknown;
+};
+export type AtlassianOAuthStartResponse = {
+  authorizationUrl: string;
+  expiresAt: string;
+};
+export type AtlassianLifecycleActionRequest = {
+  action: "pause" | "resume";
+  expectedVersion: number;
+};
+export type AtlassianDisconnectRequest = {
+  expectedVersion: number;
+  idempotencyKey: string;
+};
+export type AtlassianBrowseItem = {
+  id: string;
+  cloudId: string;
+  siteName: string;
+  siteUrl: string;
+  resourceId: string;
+  key: string;
+  name: string;
+  kind: AtlassianSourceKind;
+  description: string | null;
+  webUrl: string;
+};
+export type AtlassianBrowseResponse = {
+  connection: ConnectionMetadata;
+  items: AtlassianBrowseItem[];
+};
+
 export type SaveGoogleDriveSourceRequest = {
   sources: Array<Pick<GoogleDriveBrowseItem, "id" | "name" | "mimeType" | "driveId">>;
   destination?: ConnectorDocumentDestinationSelection | undefined;
@@ -770,6 +888,35 @@ export type SaveGoogleDriveSourceRequest = {
   syncCadence: GoogleDriveSyncCadence;
   syncEnabled: boolean;
   readPolicy: GoogleDriveReadPolicy;
+};
+
+export type GoogleDriveKnowledgeSourceItem = {
+  id: string;
+  name: string;
+  mimeType: string;
+  driveId?: string | undefined;
+  sourceKind: "my_drive" | "shared_drive" | "folder";
+  includeDescendants: boolean;
+};
+
+export type GoogleDriveKnowledgeSourceDestination = {
+  authorityKind: ConnectorDocumentDestinationAuthority;
+  authorityAccountId: string;
+  authorityWorkspaceId?: string | undefined;
+  authoritySubjectId?: string | undefined;
+  collectionId?: string | undefined;
+};
+
+export type GoogleDriveKnowledgeSourceConfig = {
+  sources: GoogleDriveKnowledgeSourceItem[];
+  destination: GoogleDriveKnowledgeSourceDestination;
+  syncCadence: GoogleDriveSyncCadence;
+  readPolicy: GoogleDriveReadPolicy;
+};
+
+export type SaveGoogleDriveIntegrationSourceRequest = SaveGoogleDriveSourceRequest & {
+  expectedVersion?: number | undefined;
+  idempotencyKey: string;
 };
 
 export type UpdateConnectionRequest = {
@@ -916,6 +1063,8 @@ export type Session = {
   // rig-less session. Frozen at create; a later rig promote never moves them.
   rigId: string | null;
   rigVersionId: string | null;
+  /** Workspace channel the session is filed under; null = unfiled (inbox). */
+  channelId: string | null;
   firstPartyMcpPermissions: string[] | null;
   firstPartyMcpTools: FirstPartyMcpToolName[];
   mcpServers: SessionMcpServerMetadata[];
@@ -992,7 +1141,11 @@ export type AgentTopologySession = {
   parentSessionId: string | null;
   rootSessionId: string;
   nestedAgentDepth: number;
-  ancestorPath: Array<{ id: string; title: string | null; titleTruncated: boolean }>;
+  ancestorPath: Array<{
+    id: string;
+    title: string | null;
+    titleTruncated: boolean;
+  }>;
   status: SessionStatus;
   pause: {
     state: "active" | "paused";
@@ -1235,6 +1388,9 @@ export const SESSION_EVENT_TYPES = [
   "artifact.created",
   "goal.set",
   "goal.updated",
+  "goal.progress",
+  "goal.rewrite.proposed",
+  "goal.rewrite.rejected",
   "goal.completed",
   "goal.paused",
   "goal.resumed",
@@ -1274,6 +1430,7 @@ export const SESSION_EVENT_TYPES = [
   "terminal.pty.output.delta",
   "terminal.pty.exited",
   "session.title_set",
+  "session.visibility.changed",
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
   // Multi-account Codex (P1): the session's inference account changed.
@@ -1764,6 +1921,9 @@ export type GitStatusRequest = { path?: string };
 export type GitStatusResponse = {
   isRepo: boolean;
   head: string | null;
+  /** Exact commit object identity. null for unborn/non-repositories; absent on
+   *  legacy adapters. */
+  headOid?: string | null | undefined;
   detached: boolean;
   upstream: string | null;
   ahead: number;
@@ -1872,6 +2032,9 @@ export type WorkspaceCaptureFile = {
 export type WorkspaceCaptureRepo = {
   root: string;
   head: string | null;
+  /** Exact HEAD commit object identity. null for unborn repositories; absent
+   *  on legacy captures. */
+  headOid?: string | null | undefined;
   detached: boolean;
   upstream: string | null;
   ahead: number;
@@ -2214,7 +2377,7 @@ export const KNOWN_PERMISSIONS = [
   "secrets:read",
   "secrets:write",
   "mcp_servers:attach",
-  "toolspace:call",
+  "codemode:call",
   "goals:manage",
   "enrollments:read",
   "enrollments:manage",
@@ -2236,6 +2399,7 @@ export type FirstPartyMcpToolName =
   | "set_session_title"
   | "goal_set"
   | "goal_update"
+  | "goal_progress"
   | "goal_complete"
   | "goal_pause"
   | "memory_search"
@@ -2243,12 +2407,14 @@ export type FirstPartyMcpToolName =
   | "memory_correct"
   | "preference_registry_summary"
   | "preference_registry_get"
+  | "task_notes_list"
+  | "task_note_save"
+  | "task_note_archive"
   | "sandboxes_list"
   | "sandbox_attach"
   | "sandbox_swap"
   | "run_on"
   | "sandbox_provision"
-  | "connected_machine_remove"
   | "connected_machine_remove"
   | "rig_list"
   | "rig_get"
@@ -2264,6 +2430,24 @@ export type FirstPartyMcpToolName =
   | "session_resume"
   | "session_steer"
   | "set_other_session_title"
+  | "interaction_discover"
+  | "browser_open"
+  | "browser_tabs"
+  | "browser_observe"
+  | "browser_act"
+  | "browser_clipboard"
+  | "browser_debug"
+  | "browser_auth"
+  | "interaction_request_human"
+  | "browser_identity"
+  | "browser_publish"
+  | "browser_lifecycle"
+  | "computer_open"
+  | "computer_targets"
+  | "computer_observe"
+  | "computer_clipboard"
+  | "computer_act"
+  | "computer_lifecycle"
   | "variable_set_list"
   | "environment_list"
   | "variable_set_get_variable"
@@ -2281,6 +2465,18 @@ export type FirstPartyMcpToolName =
   | "social_thread_fetch"
   | "social_posts_sync"
   | "social_post_reply"
+  | "x_accounts_list"
+  | "x_search_live"
+  | "x_mentions_live"
+  | "x_thread_fetch"
+  | "x_posts_sync"
+  | "x_post_reply"
+  | "reddit_accounts_list"
+  | "reddit_search_live"
+  | "reddit_mentions_live"
+  | "reddit_thread_fetch"
+  | "reddit_posts_sync"
+  | "reddit_post_reply"
   | "scheduled_tasks_list"
   | "scheduled_tasks_get"
   | "scheduled_tasks_create"
@@ -2299,11 +2495,32 @@ export type FirstPartyMcpToolName =
   | "slack_bot_file_content"
   | "slack_bot_post_message"
   | "slack_bot_delete_message"
+  | "fiken_companies_list"
+  | "fiken_contacts_list"
+  | "fiken_contact_create"
+  | "fiken_products_list"
+  | "fiken_invoices_list"
+  | "fiken_invoice_get"
+  | "fiken_invoice_draft_create"
+  | "fiken_bank_accounts_list"
+  | "fiken_purchases_list"
+  | "fiken_sales_list"
+  | "atlassian_sources_list"
+  | "atlassian_search"
+  | "atlassian_get"
   | "artifacts_list"
   | "artifacts_get_source"
   | "artifacts_create"
   | "artifacts_publish"
-  | "artifacts_rollback";
+  | "artifacts_rollback"
+  | "editable_artifact_list"
+  | "editable_artifact_create"
+  | "editable_artifact_import"
+  | "editable_artifact_get"
+  | "editable_artifact_inspect"
+  | "editable_artifact_apply"
+  | "editable_artifact_export"
+  | "editable_artifact_export_status";
 
 export type ProductAccessMode = "local" | "configured" | "managed";
 
@@ -2350,7 +2567,7 @@ export type ModelCapabilitiesV1 = {
 
 export type ModelCredentialSourceV1 =
   | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
-  | { kind: "connected_subscription"; provider: "codex" }
+  | { kind: "connected_subscription"; provider: "codex" | "xai" }
   | { kind: "workspace_connection"; mechanism: "api_key" };
 
 export type ModelBillingAttributionV1 = {
@@ -2390,7 +2607,7 @@ export type ClientModel = {
   provider: string;
   providerLabel: string;
   api: "responses" | "chat";
-  source?: "opengeni" | "codex" | "workspace_gateway" | undefined;
+  source?: "opengeni" | "codex" | "supergrok" | "workspace_gateway" | undefined;
   contextWindowTokens?: number | undefined;
   schemaVersion?: 1 | undefined;
   aliases?: string[] | undefined;
@@ -2672,6 +2889,89 @@ export type CodexConnectPoll =
       isActive?: boolean;
     };
 
+/** Explicit authority of one connected SuperGrok/xAI subscription account. */
+export type SuperGrokAccountScope = "workspace" | "user";
+
+/** Metadata-only connected SuperGrok account. Secret OAuth material never crosses the API. */
+export type SuperGrokAccount = {
+  id: string;
+  scope: SuperGrokAccountScope;
+  subject: string;
+  email?: string | null;
+  label?: string | null;
+  status: "active" | "needs_relogin" | "error";
+  active: boolean;
+  expiresAt?: string | null;
+  lastRefreshAt?: string | null;
+  lastError?: string | null;
+  allocatorEnabled: boolean;
+  allocatorVersion: number;
+  allocatorUpdatedAt?: string | null;
+  exhaustedUntil?: string | null;
+  quota?: {
+    usedPercent: number | null;
+    periodStart: string | null;
+    periodEnd: string | null;
+    subscriptionTier: string | null;
+    checkedAt: string | null;
+  } | null;
+};
+
+export type SuperGrokRotationSettings = {
+  rotationEnabled: boolean;
+  rotationStrategy: "sharded";
+  activeCredentialId: string | null;
+};
+
+/** GET /supergrok/accounts — visible accounts plus the workspace active pointer. */
+export type SuperGrokAccountsResponse = {
+  accounts: SuperGrokAccount[];
+  activeAccountId: string | null;
+  settings: SuperGrokRotationSettings;
+};
+
+export type SuperGrokConnectionStatus = {
+  connected: boolean;
+  valid?: boolean;
+  accountCount?: number;
+  models?: ClientModel[];
+  activeAccount?: {
+    id: string;
+    label?: string | null;
+    subject?: string | null;
+    scope: SuperGrokAccountScope;
+  } | null;
+};
+
+/** Workspace is the deliberately simple/default connection authority. */
+export type SuperGrokConnectStart = {
+  userCode: string;
+  verificationUri: string;
+  verificationUriComplete?: string | null;
+  intervalSeconds: number;
+  expiresInSeconds: number;
+  scope: SuperGrokAccountScope;
+  state: string;
+};
+
+export type SuperGrokConnectPoll =
+  | { status: "pending" | "slow_down"; intervalSeconds?: number }
+  | { status: "expired" | "denied" }
+  | {
+      status: "connected";
+      accountId: string;
+      scope: SuperGrokAccountScope;
+      isActive: boolean;
+      email?: string | null;
+    };
+
+export type SuperGrokAllocatorUpdate = {
+  allocatorEnabled: boolean;
+  allocatorVersion: number;
+  allocatorUpdatedAt: string | null;
+  changed: boolean;
+};
+
 /** Remaining usage/limits for one account. `usage` is the normalized P2 payload. */
 export type CodexUsage = {
   status: "ok" | "limit_reached" | "error" | "no-data";
@@ -2694,7 +2994,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-workspace-artifacts-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-social-provider-tools-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -2716,6 +3016,13 @@ export type ClientConfig = {
   defaultReasoningEffort: ReasoningEffort;
   allowedReasoningEfforts: ReasoningEffort[];
   mcpServers: { id: string; name: string }[];
+  /** Deployment defaults and hard maximum for built-in OpenGeni session tools. */
+  firstPartyMcpTools?:
+    | {
+        default: FirstPartyMcpToolName[];
+        allowed: FirstPartyMcpToolName[];
+      }
+    | undefined;
   fileUploads: { enabled: boolean; maxSizeBytes: number };
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
@@ -2886,6 +3193,17 @@ export type AccessContext = {
   defaultWorkspaceId: string | null;
 };
 
+export type ManagedOrganizationMembership = {
+  id: string;
+  organizationId: string;
+  status: "active";
+  personalWorkspaceId: string;
+};
+
+export type ListManagedOrganizationMembershipsResponse = {
+  memberships: ManagedOrganizationMembership[];
+};
+
 export type Workspace = {
   id: string;
   accountId: string;
@@ -2909,6 +3227,8 @@ export type Workspace = {
 
 export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
+  /** Reversible Memory V1 prompt composition rollout. */
+  memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -2943,6 +3263,7 @@ export type WorkspaceVoiceInputSettings = {
 
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
+  memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -3027,11 +3348,86 @@ export type UpdateWorkspaceMemberRequest = {
   permissions: Permission[];
 };
 
+export type SlackUserLinkAccessRequestStatus =
+  | "prepared"
+  | "pending"
+  | "completed"
+  | "denied"
+  | "cancelled"
+  | "expired";
+
+/** Token-free durable projection of one signed Slack identity-link intent. */
+export type SlackUserLinkAccessRequest = {
+  id: string;
+  workspaceId: string;
+  workspaceDisplayName: string | null;
+  subjectLabel: string | null;
+  status: SlackUserLinkAccessRequestStatus;
+  version: number;
+  expiresAt: string;
+  requestedAt: string | null;
+  decidedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PrepareSlackUserLinkAccessRequest = {
+  linkToken: string;
+};
+
+export type SlackUserLinkAccessMutationRequest = {
+  expectedVersion: number;
+  idempotencyKey: string;
+};
+
+export type ApproveSlackUserLinkAccessRequest = SlackUserLinkAccessMutationRequest & {
+  role?: string | undefined;
+  permissions: Permission[];
+};
+
+export type ListSlackUserLinkAccessRequestsResponse = {
+  requests: SlackUserLinkAccessRequest[];
+};
+
 // --- Goals -------------------------------------------------------------------
 
 export type SessionGoalStatus = "active" | "paused" | "completed";
 
 export type SessionGoalCreatedBy = "api" | "agent" | "scheduled_task";
+
+export type SessionGoalMutationPolicy =
+  | "review_changes"
+  | "preserve_intent"
+  | "autonomous_adaptation";
+
+export type SessionGoalChangeKind = "refinement" | "adaptation" | "replacement";
+
+export type SessionGoalRevision = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  goalId: string;
+  disposition: "applied" | "proposed" | "rejected";
+  changeKind: SessionGoalChangeKind;
+  baseObjectiveRevision: number;
+  resultObjectiveRevision: number | null;
+  text: string;
+  successCriteria: string | null;
+  mutationPolicy: SessionGoalMutationPolicy;
+  rationale: string;
+  actor: "agent" | "api" | "scheduled_task";
+  actorTurnId: string | null;
+  actorAttemptId: string | null;
+  proposalId: string | null;
+  createdAt: string;
+};
+
+export type ApplySessionGoalRevisionRequest = {
+  expectedObjectiveRevision: number;
+  rationale?: string | undefined;
+};
 
 export type SessionGoalContinuationState =
   | "inactive"
@@ -3076,6 +3472,8 @@ export type SessionGoal = {
   pausedReason: string | null;
   createdBy: SessionGoalCreatedBy;
   version: number;
+  objectiveRevision: number;
+  mutationPolicy: SessionGoalMutationPolicy;
   autoContinuations: number;
   noProgressStreak: number;
   maxAutoContinuations: number | null;
@@ -3086,10 +3484,18 @@ export type SessionGoal = {
   updatedAt: string;
 };
 
-export type UpdateSessionGoalRequest = {
-  status: "paused" | "active";
-  rationale?: string | undefined;
-};
+export type UpdateSessionGoalRequest =
+  | {
+      status: "paused" | "active";
+      rationale?: string | undefined;
+    }
+  | {
+      text: string;
+      successCriteria?: string | null | undefined;
+      mutationPolicy?: SessionGoalMutationPolicy | undefined;
+      rationale: string;
+      expectedObjectiveRevision: number;
+    };
 
 export type UpdateSessionRequest = {
   title: string;
@@ -3222,7 +3628,8 @@ export type SessionSystemUpdateKind =
   | "goal_continuation"
   | "agent_message"
   | "agent_steer_instruction"
-  | "child_terminal_result";
+  | "child_terminal_result"
+  | "media_generation_result";
 
 export type SessionSystemUpdateState =
   | "pending"
@@ -3552,6 +3959,12 @@ export type RigProviderImage = {
   imageDigest: string | null;
   artifactId: string | null;
   providerBindingKeyHash: string | null;
+  coldBootValidation?:
+    | {
+        version: 1;
+        checkedAt: string;
+      }
+    | undefined;
   provenance: {
     kind: "rig_verification";
     targetKind: "change" | "version";
@@ -3585,6 +3998,36 @@ export type RigVersion = {
 export type RigVerificationHealth = {
   checkHealth: "passing" | "failing" | "unknown";
   lastVerifiedAt: string | null;
+};
+
+/**
+ * Workspace-shared channel organizing root sessions ("workstreams") by work
+ * type in the rail. Pure organizational metadata.
+ */
+export type Channel = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  name: string;
+  description: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateChannelRequest = {
+  name: string;
+  description?: string;
+};
+
+export type UpdateChannelRequest = {
+  name?: string;
+  description?: string | null;
+};
+
+/** Re-files one session; null moves it back to the unfiled inbox. */
+export type UpdateSessionChannelRequest = {
+  channelId: string | null;
 };
 
 export type Rig = {
@@ -3691,6 +4134,7 @@ export const RETAINED_OUTPUT_DEFAULT_PAGE_BYTES = 256 * 1024;
 export const RETAINED_OUTPUT_MAX_PAGE_BYTES = 1024 * 1024;
 export const COMPUTER_SCREENSHOT_MAX_BYTES = 32 * 1024 * 1024;
 export const GENERATED_IMAGE_MAX_BYTES = 64 * 1024 * 1024;
+export const GENERATED_VIDEO_MAX_BYTES = 512 * 1024 * 1024;
 
 export type RetainedOutputKind =
   | "tool_result"
@@ -3699,6 +4143,7 @@ export type RetainedOutputKind =
   | "event_media"
   | "computer_screenshot"
   | "generated_image"
+  | "generated_video"
   | "file";
 
 export type RetainedOutputUnavailableReason =
@@ -3746,6 +4191,154 @@ export type GeneratedImageReceipt = {
   type: "generated_image";
   artifact: RetainedArtifactReference;
   sandboxPath: string;
+};
+
+export type VideoGenerationSourceMode =
+  | "text"
+  | "first_frame"
+  | "first_and_last_frames"
+  | "image_reference"
+  | "video_reference";
+
+export type VideoGenerationResolution = "480p" | "720p";
+
+export type VideoGenerationAspectRatio =
+  | "16:9"
+  | "4:3"
+  | "1:1"
+  | "3:4"
+  | "9:16"
+  | "21:9"
+  | "adaptive";
+
+export type VideoGenerationModelCapability = {
+  modelId: string;
+  label: string;
+  providerLabel: string;
+  sourceModes: VideoGenerationSourceMode[];
+  resolutions: VideoGenerationResolution[];
+  aspectRatios: VideoGenerationAspectRatio[];
+  duration: {
+    minSeconds: number;
+    maxSeconds: number;
+    stepSeconds: number;
+  };
+  supportsAudio: boolean;
+};
+
+export type VideoGenerationCapabilities = {
+  schemaVersion: 1;
+  capabilityRevision: string;
+  defaultModelId: string;
+  models: VideoGenerationModelCapability[];
+};
+
+export type VideoGenerationPolicy = {
+  schemaVersion: 1;
+  revision: number;
+  fundingSource: VideoGenerationFundingSource;
+  enabledModelIds: string[];
+  defaultModelId: string | null;
+};
+
+export type UpdateVideoGenerationPolicyRequest = {
+  expectedRevision: number;
+  fundingSource: VideoGenerationFundingSource;
+  enabledModelIds: string[];
+  defaultModelId: string | null;
+};
+
+export type VideoGenerationFundingSource =
+  | "opengeni_credits"
+  | "workspace_gateway"
+  | "supergrok_subscription";
+
+export type VideoGenerationFundingOption = {
+  source: VideoGenerationFundingSource;
+  label: string;
+  description: string;
+  available: boolean;
+  unavailableReason: string | null;
+};
+
+export type WorkspaceVideoGenerationSettings = {
+  schemaVersion: 1;
+  policy: VideoGenerationPolicy;
+  fundingOptions: VideoGenerationFundingOption[];
+  availableModels: VideoGenerationModelCapability[];
+  capabilities: VideoGenerationCapabilities | null;
+};
+
+export type GeneratedVideoFacts = {
+  durationSeconds: number;
+  width: number;
+  height: number;
+  fps: number;
+  hasAudio: boolean;
+  videoCodec: "h264";
+  audioCodec: "aac" | null;
+};
+
+export type GeneratedVideoReceipt = {
+  type: "generated_video";
+  schemaVersion: 1;
+  operationId: string;
+  artifact: RetainedArtifactReference;
+  video: GeneratedVideoFacts;
+  sandboxPath: string;
+};
+
+export type VideoGenerationTerminalFailureStatus =
+  | "provider_failed"
+  | "retention_failed"
+  | "cancelled_before_submit"
+  | "outcome_unknown";
+
+export type MediaGenerationResult =
+  | {
+      type: "media_generation_result";
+      schemaVersion: 1;
+      status: "ready";
+      operationId: string;
+      receipt: GeneratedVideoReceipt;
+    }
+  | {
+      type: "media_generation_result";
+      schemaVersion: 1;
+      status: VideoGenerationTerminalFailureStatus;
+      operationId: string;
+      boundedPublicReason: string;
+    };
+
+export type VideoGenerationPublicStatus =
+  | "preparing"
+  | "prepared"
+  | "accepted"
+  | "provider_started"
+  | "retaining"
+  | "completed"
+  | VideoGenerationTerminalFailureStatus;
+
+export type VideoGenerationOperationSummary = {
+  schemaVersion: 1;
+  operationId: string;
+  modelId: string;
+  status: VideoGenerationPublicStatus;
+  createdAt: string;
+  updatedAt: string;
+  terminal: MediaGenerationResult | null;
+};
+
+/** Ephemeral source minted for native browser playback; never persist the URL. */
+export type VideoArtifactPlaybackSource = {
+  schemaVersion: 1;
+  artifactId: string;
+  url: string;
+  expiresAt: string;
+  contentType: "video/mp4";
+  sizeBytes: number;
+  sha256: string;
+  acceptRanges: "bytes";
 };
 
 export type RetainedArtifactContentOptions = {
@@ -4125,6 +4718,49 @@ export type CapabilityPackVariableSetSpec = {
   required: boolean;
 };
 
+export type CapabilityPackComponentReference =
+  | {
+      key: string;
+      kind: "plugin";
+      pluginKey: string;
+      version: string;
+      manifestDigest: string;
+      required: boolean;
+    }
+  | {
+      key: string;
+      kind: "skill";
+      capabilityId: string;
+      contentSha256: string;
+      required: boolean;
+    }
+  | {
+      key: string;
+      kind: "integration";
+      capabilityId: string;
+      instanceKey: string;
+      revisionId: string;
+      contentSha256: string;
+      required: boolean;
+    }
+  | {
+      key: string;
+      kind: "facet";
+      capabilityId: string;
+      instanceKey: string;
+      facetKey: string;
+      bindingKey: string;
+      configDigest: string;
+      required: boolean;
+    };
+
+export type CapabilityPackRigRequirement = {
+  description?: string | undefined;
+  required: boolean;
+  rigId?: string | undefined;
+  requireVerified: boolean;
+};
+
 export type CapabilityPack = {
   id: string;
   name: string;
@@ -4139,6 +4775,8 @@ export type CapabilityPack = {
       }
     | undefined;
   skills: CapabilityPackSkill[];
+  components: CapabilityPackComponentReference[];
+  rig?: CapabilityPackRigRequirement | undefined;
   tools: ToolRef[];
   connectors: CapabilityPackConnector[];
   knowledge: CapabilityPackKnowledge[];
@@ -4167,6 +4805,52 @@ export type RegisterCapabilityPackRequest = {
         description?: string | undefined;
         files: CapabilityPackSkillFile[];
       }[]
+    | undefined;
+  components?:
+    | (
+        | {
+            key: string;
+            kind: "plugin";
+            pluginKey: string;
+            version: string;
+            manifestDigest: string;
+            required?: boolean | undefined;
+          }
+        | {
+            key: string;
+            kind: "skill";
+            capabilityId: string;
+            contentSha256: string;
+            required?: boolean | undefined;
+          }
+        | {
+            key: string;
+            kind: "integration";
+            capabilityId: string;
+            instanceKey: string;
+            revisionId: string;
+            contentSha256: string;
+            required?: boolean | undefined;
+          }
+        | {
+            key: string;
+            kind: "facet";
+            capabilityId: string;
+            instanceKey: string;
+            facetKey: string;
+            bindingKey: string;
+            configDigest: string;
+            required?: boolean | undefined;
+          }
+      )[]
+    | undefined;
+  rig?:
+    | {
+        description?: string | undefined;
+        required?: boolean | undefined;
+        rigId?: string | undefined;
+        requireVerified?: boolean | undefined;
+      }
     | undefined;
   tools?: ToolRef[] | undefined;
   connectors?:
@@ -4219,7 +4903,7 @@ export type WorkspaceRegisteredPack = {
   updatedAt: string;
 };
 
-export type PackInstallationStatus = "active" | "disabled";
+export type PackInstallationStatus = "installing" | "active" | "needs_attention" | "disabled";
 
 export type PackInstallation = {
   id: string;
@@ -4227,6 +4911,11 @@ export type PackInstallation = {
   workspaceId: string;
   packId: string;
   status: PackInstallationStatus;
+  version: number;
+  manifestSnapshot: CapabilityPack | null;
+  manifestDigest: string | null;
+  selectedRigId: string | null;
+  installedBySubjectId: string | null;
   metadata: Record<string, unknown>;
   enabledAt: string;
   updatedAt: string;
@@ -4237,6 +4926,82 @@ export type EnablePackRequest = {
   /** @deprecated use variableSetId */
   environmentId?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
+};
+
+export type PackComponentResolutionStatus = "ready" | "missing" | "mismatch";
+
+export type PackComponentResolution = {
+  key: string;
+  kind: "plugin" | "skill" | "integration" | "facet" | "inline_skill";
+  capabilityId: string;
+  required: boolean;
+  status: PackComponentResolutionStatus;
+  expectedDigest: string;
+  actualDigest: string | null;
+  resolvedId: string | null;
+  label: string;
+};
+
+export type PackRigResolution = {
+  required: boolean;
+  status: "not_required" | "ready" | "missing" | "mismatch" | "unverified";
+  requestedRigId: string | null;
+  rigId: string | null;
+  rigVersionId: string | null;
+  name: string | null;
+  image: string | null;
+};
+
+export type PreviewPackInstallationRequest = {
+  rigId?: string | undefined;
+  variableSetId?: string | undefined;
+};
+
+export type PackInstallationPreview = {
+  packId: string;
+  packVersion: string;
+  manifestDigest: string;
+  installationVersion: number | null;
+  action: "install" | "update" | "repair";
+  ready: boolean;
+  blockers: string[];
+  components: PackComponentResolution[];
+  rig: PackRigResolution;
+  variableSetId: string | null;
+  legacyInlineSkillCount: number;
+  legacySandboxImage: string | null;
+};
+
+export type InstallPackRequest = {
+  expectedManifestDigest: string;
+  expectedInstallationVersion?: number | undefined;
+  rigId?: string | undefined;
+  variableSetId?: string | undefined;
+  idempotencyKey: string;
+  metadata?: Record<string, unknown> | undefined;
+};
+
+export type PackUninstallPreview = {
+  packId: string;
+  installed: boolean;
+  installationVersion: number | null;
+  components: Array<{
+    key: string;
+    kind: "plugin" | "skill" | "integration" | "facet" | "inline_skill";
+    capabilityId: string;
+    retainedByOtherOwners: boolean;
+  }>;
+};
+
+export type UninstallPackRequest = {
+  expectedInstallationVersion: number;
+  idempotencyKey: string;
+};
+
+export type UninstallPackResult = {
+  packId: string;
+  status: "not_installed" | "uninstalled";
+  retainedComponents: string[];
 };
 
 export type ListPacksResponse = {
@@ -4266,6 +5031,34 @@ export type CapabilityInstallationStatus = "active" | "disabled";
 export type CapabilityCatalogAuthKind = "oauth2" | "api_key" | "none" | "unknown";
 
 export type CapabilityCatalogTier = "verified" | "community";
+
+export type CapabilityLifecycleStatus =
+  | "available"
+  | "installed"
+  | "connected"
+  | "ready"
+  | "needs_attention"
+  | "unavailable"
+  | "managed";
+
+export type CapabilityReadiness = "ready" | "setup_required" | "attention" | "unavailable";
+
+export type CapabilityAction =
+  | "install"
+  | "connect"
+  | "configure"
+  | "update"
+  | "repair"
+  | "disconnect"
+  | "uninstall"
+  | "inspect";
+
+export type CapabilityLifecycle = {
+  status: CapabilityLifecycleStatus;
+  readiness: CapabilityReadiness;
+  detail: string | null;
+  managedBy: "deployment" | "platform" | "workspace" | null;
+};
 
 export type CapabilityRuntime = {
   available: boolean;
@@ -4313,7 +5106,11 @@ export type CapabilityCatalogItem = {
   staleAt: string | null;
   tools: ToolRef[];
   runtime: CapabilityRuntime;
+  lifecycle: CapabilityLifecycle;
+  actions: CapabilityAction[];
+  /** @deprecated Use lifecycle and actions. */
   enabled: boolean;
+  /** @deprecated Use lifecycle.detail. */
   enabledReason: string | null;
   /** The connection backing this enabled installation, or null when none is involved. */
   connectionRef: {
@@ -4347,7 +5144,7 @@ export type CapabilityCatalogResponse = {
 
 export type CreateCapabilityCatalogItemRequest = {
   id?: string | undefined;
-  kind: Exclude<CapabilityKind, "pack">;
+  kind: "mcp";
   source?: CapabilitySource | undefined;
   name: string;
   description?: string | undefined;
@@ -4370,20 +5167,497 @@ export type EnableCapabilityRequest = {
    * API (responses expose header names only).
    */
   headers?: Record<string, string> | undefined;
-  /**
-   * Initial variableSet attachment for kind=pack capabilities — mirrors the
-   * dedicated POST /packs/:id/enable body. Required to enable an
-   * variableSet.required pack through this unified path; ignored otherwise.
-   */
-  variableSetId?: string | undefined;
-  /** @deprecated use variableSetId */
-  environmentId?: string | undefined;
 };
 
 export type DiscoverMcpCapabilitiesResponse = {
   items: CapabilityCatalogItem[];
   source: "official_mcp_registry";
   sourceUrl: string;
+};
+
+export type SkillImportSource = "github" | "skills_sh";
+
+export type SkillInstallationSource = "library" | "github" | "skills_sh" | "pack";
+
+export type PreviewSkillImportRequest = {
+  url: string;
+};
+
+export type SkillImportFileSummary = {
+  path: string;
+  byteSize: number;
+  contentSha256: string;
+};
+
+export type SkillImportPreview = {
+  source: SkillImportSource;
+  sourceUrl: string;
+  repositoryUrl: string;
+  owner: string;
+  repository: string;
+  sourcePath: string;
+  sourceCommit: string;
+  name: string;
+  description: string;
+  contentSha256: string;
+  totalBytes: number;
+  files: SkillImportFileSummary[];
+  warnings: string[];
+  installed: boolean;
+  installationVersion: number | null;
+};
+
+export type InstallSkillRequest = {
+  url: string;
+  expectedSourceCommit: string;
+  expectedContentSha256: string;
+  expectedInstallationVersion?: number | undefined;
+};
+
+export type InstallLibrarySkillRequest = {
+  expectedVersion: string;
+  expectedContentSha256: string;
+  expectedInstallationVersion?: number | undefined;
+};
+
+export type InstalledSkill = {
+  capabilityId: string;
+  pluginId: string;
+  pluginVersionId: string;
+  facetId: string;
+  pluginInstallationId: string;
+  facetInstallationId: string;
+  installationVersion: number;
+  source: SkillInstallationSource;
+  version: string;
+  sourceUrl: string;
+  sourceCommit: string;
+  contentSha256: string;
+  name: string;
+  status: "installed";
+};
+
+export type CapabilityComponentOwner = {
+  kind: "direct" | "plugin" | "pack" | "migration";
+  id: string;
+  removable: boolean;
+};
+
+export type InstalledSkillSummary = {
+  capabilityId: string;
+  pluginKey: string;
+  installationVersion: number;
+  name: string;
+  description: string;
+  category: string;
+  tags: string[];
+  provenance: string;
+  source: SkillInstallationSource;
+  version: string;
+  sourceUrl: string;
+  repositoryUrl: string;
+  sourceCommit: string;
+  sourcePath: string;
+  contentSha256: string;
+  fileCount: number;
+  totalBytes: number;
+  license: string | null;
+  installedAt: string;
+  updatedAt: string;
+  owners: CapabilityComponentOwner[];
+};
+
+export type ListInstalledSkillsResponse = {
+  skills: InstalledSkillSummary[];
+};
+
+export type SkillUninstallPreview = {
+  capabilityId: string;
+  installed: boolean;
+  installationVersion: number | null;
+  directOwner: CapabilityComponentOwner | null;
+  remainingOwners: CapabilityComponentOwner[];
+  removesRuntimeSkill: boolean;
+};
+
+export type UninstallSkillRequest = {
+  expectedInstallationVersion: number;
+};
+
+export type UninstallSkillResult = {
+  capabilityId: string;
+  status: "not_installed" | "uninstalled" | "retained_by_other_owners";
+  remainingOwners: CapabilityComponentOwner[];
+};
+
+export type ApiIntegrationProtocol = "openapi" | "graphql";
+export type IntegrationDefinitionProvenance = "curated" | "workspace";
+
+export type IntegrationFacetKind =
+  | "tools"
+  | "knowledge_source"
+  | "inbound_trigger"
+  | "delivery_destination"
+  | "identity_link";
+
+export type IntegrationFacetStatus = "active" | "paused" | "needs_attention" | "disabled";
+
+export type IntegrationFacetDefinitionSummary = {
+  facetKey: string;
+  kind: Exclude<IntegrationFacetKind, "tools">;
+  configSchema: Record<string, unknown>;
+  capabilities: Record<string, unknown>;
+};
+
+export type IntegrationFacetBindingSummary = {
+  id: string;
+  facetKey: string;
+  kind: Exclude<IntegrationFacetKind, "tools">;
+  bindingKey: string;
+  displayName: string;
+  connectionId: string | null;
+  status: IntegrationFacetStatus;
+  config: Record<string, unknown>;
+  version: number;
+  hasCursor: boolean;
+  lastSuccessAt: string | null;
+  lastErrorCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type IntegrationInstanceFacetsResponse = {
+  capabilityId: string;
+  instanceKey: string;
+  providerDomain: string;
+  connectionId: string | null;
+  facets: {
+    definition: IntegrationFacetDefinitionSummary;
+    binding: IntegrationFacetBindingSummary | null;
+  }[];
+};
+
+export type UpsertIntegrationFacetRequest = {
+  displayName: string;
+  config?: Record<string, unknown> | undefined;
+  expectedVersion?: number | undefined;
+  idempotencyKey: string;
+};
+
+export type MutateIntegrationFacetRequest = {
+  expectedVersion: number;
+  idempotencyKey: string;
+};
+
+export type IntegrationFacetMutationResult = {
+  capabilityId: string;
+  instanceKey: string;
+  facetKey: string;
+  status: "configured" | "paused" | "active";
+  binding: IntegrationFacetBindingSummary;
+};
+
+export type IntegrationFacetRemovalResult = {
+  capabilityId: string;
+  instanceKey: string;
+  facetKey: string;
+  status: "not_configured" | "removed" | "retained_by_other_owners";
+  binding: IntegrationFacetBindingSummary | null;
+  remainingOwners: CapabilityComponentOwner[];
+};
+
+export type IntegrationDefinitionSummary = {
+  id: string;
+  name: string;
+  summary: string;
+  protocol: "openapi";
+  provider: {
+    id: "google" | "microsoft";
+    domain: string;
+  };
+  authentication: {
+    kind: "oauth2";
+    scopes: string[];
+  };
+  facets: IntegrationFacetDefinitionSummary[];
+};
+
+export type ListIntegrationDefinitionsResponse = {
+  definitions: IntegrationDefinitionSummary[];
+};
+
+export type IntegrationSource =
+  | { kind: "definition"; definitionId: string }
+  | { kind: "openapi"; url: string; baseUrl?: string | undefined }
+  | { kind: "graphql"; endpoint: string; name?: string | undefined }
+  | { kind: "auto"; url: string; baseUrl?: string | undefined };
+
+export type PreviewApiIntegrationRequest = {
+  source: IntegrationSource;
+  connectionId?: string | undefined;
+  ownership?: ConnectionOwnership | undefined;
+};
+
+export type ApiIntegrationOAuthStartRequest = {
+  definitionId: string;
+  ownership?: ConnectionOwnership | undefined;
+  connectionId?: string | undefined;
+  returnPath?: string | undefined;
+};
+
+export type ApiIntegrationAuthPreview =
+  | { kind: "none" }
+  | { kind: "oauth2"; providerDomain: string; scopes: string[] }
+  | {
+      kind: "api_key";
+      providerDomain: string;
+      carrier: "header" | "query" | "cookie";
+      name: string;
+    }
+  | { kind: "http"; providerDomain: string; scheme: string };
+
+export type ApiIntegrationToolPreview = {
+  id: string;
+  operationKey: string;
+  name: string;
+  description: string;
+  safety: "read" | "write" | "destructive";
+  approvalMode: "never" | "ask";
+  deprecated: boolean;
+};
+
+export type ApiIntegrationPreview = {
+  source: IntegrationSource;
+  definitionId: string;
+  definitionProvenance: IntegrationDefinitionProvenance;
+  protocol: ApiIntegrationProtocol;
+  capabilityId: string;
+  pluginKey: string;
+  serverId: string;
+  name: string;
+  description: string | null;
+  provider: string | null;
+  providerDomain: string;
+  baseUrl: string;
+  sourceUrl: string | null;
+  revisionId: string;
+  contentSha256: string;
+  auth: ApiIntegrationAuthPreview;
+  connectionId: string | null;
+  connectionOwnership: ConnectionOwnership | null;
+  tools: ApiIntegrationToolPreview[];
+  warnings: string[];
+};
+
+export type InstallApiIntegrationRequest = {
+  source: IntegrationSource;
+  expectedRevisionId: string;
+  expectedContentSha256: string;
+  connectionId?: string | undefined;
+  ownership?: ConnectionOwnership | undefined;
+  instanceKey?: string | undefined;
+  displayName?: string | undefined;
+  expectedInstanceVersion?: number | undefined;
+  allowedTools?: string[] | undefined;
+};
+
+export type InstalledApiIntegration = {
+  capabilityId: string;
+  pluginId: string;
+  pluginVersionId: string;
+  integrationFacetId: string;
+  apiFacetId: string;
+  pluginInstallationId: string;
+  integrationFacetInstallationId: string;
+  apiFacetInstallationId: string;
+  installationVersion: number;
+  instanceId: string;
+  instanceKey: string;
+  displayName: string;
+  instanceVersion: number;
+  revisionId: string;
+  serverId: string;
+  status: "installed";
+};
+
+export type ApiIntegrationInstallationSummary = {
+  capabilityId: string;
+  pluginKey: string;
+  installationVersion: number;
+  instanceId: string;
+  instanceKey: string;
+  displayName: string;
+  instanceVersion: number;
+  serverId: string;
+  name: string;
+  description: string | null;
+  protocol: ApiIntegrationProtocol;
+  definitionId: string;
+  definitionProvenance: IntegrationDefinitionProvenance;
+  providerDomain: string;
+  baseUrl: string;
+  sourceUrl: string | null;
+  connected: boolean;
+  requiresConnection: boolean;
+  connectionId: string | null;
+  ownership: "workspace" | "personal" | "none";
+  allowedTools: string[];
+  toolCount: number;
+  approvalRequiredToolCount: number;
+  revisionId: string;
+  contentSha256: string;
+};
+
+export type ListApiIntegrationsResponse = {
+  integrations: ApiIntegrationInstallationSummary[];
+};
+
+export type ApiIntegrationUninstallPreview = {
+  capabilityId: string;
+  instanceKey: string;
+  displayName: string | null;
+  installed: boolean;
+  installationVersion: number | null;
+  instanceVersion: number | null;
+  directOwner: CapabilityComponentOwner | null;
+  remainingOwners: CapabilityComponentOwner[];
+  removesRuntimeIntegration: boolean;
+  removesDefinition: boolean;
+};
+
+export type UninstallApiIntegrationRequest = {
+  expectedInstallationVersion: number;
+  expectedInstanceVersion: number;
+};
+
+export type UninstallApiIntegrationResult = {
+  capabilityId: string;
+  instanceKey: string;
+  status: "not_installed" | "uninstalled" | "retained_by_other_owners";
+  remainingOwners: CapabilityComponentOwner[];
+  definitionStatus: "retained" | "disabled";
+};
+
+export type PluginManifestComponent =
+  | { key: string; kind: "skill"; url: string }
+  | { key: string; kind: "integration"; source: IntegrationSource }
+  | { key: string; kind: "mcp"; serverId: string };
+
+export type PluginManifest = {
+  schemaVersion: 1;
+  pluginKey: string;
+  version: string;
+  name: string;
+  description: string;
+  category: string;
+  tags: string[];
+  components: PluginManifestComponent[];
+};
+
+export type PluginComponentBinding = {
+  connectionId?: string | undefined;
+  instanceKey?: string | undefined;
+  displayName?: string | undefined;
+};
+
+export type PreviewPluginRequest = {
+  url: string;
+  bindings?: Record<string, PluginComponentBinding> | undefined;
+};
+
+export type PluginComponentPreview = {
+  key: string;
+  kind: "skill" | "integration" | "mcp";
+  name: string;
+  capabilityId: string;
+  digest: string;
+  connectionRequired: boolean;
+  connectionId: string | null;
+  instanceKey: string | null;
+  displayName: string | null;
+  facts: Record<string, unknown>;
+};
+
+export type PluginUpdateDiff = {
+  fromVersion: string | null;
+  toVersion: string;
+  added: string[];
+  removed: string[];
+  changed: string[];
+  unchanged: string[];
+};
+
+export type PluginPreview = {
+  sourceUrl: string;
+  manifest: PluginManifest;
+  manifestDigest: string;
+  installed: boolean;
+  installationVersion: number | null;
+  components: PluginComponentPreview[];
+  diff: PluginUpdateDiff;
+};
+
+export type InstallPluginRequest = {
+  url: string;
+  expectedManifestDigest: string;
+  expectedComponents: Array<{ key: string; digest: string }>;
+  bindings?: Record<string, PluginComponentBinding> | undefined;
+  idempotencyKey: string;
+  expectedInstallationVersion?: number | undefined;
+};
+
+export type InstalledPlugin = {
+  pluginKey: string;
+  version: string;
+  pluginId: string;
+  pluginVersionId: string;
+  pluginInstallationId: string;
+  installationVersion: number;
+  componentCount: number;
+  status: "installed";
+};
+
+export type PluginInstallationSummary = {
+  pluginKey: string;
+  version: string;
+  name: string;
+  description: string;
+  category: string;
+  tags: string[];
+  sourceUrl: string | null;
+  manifestDigest: string;
+  installationVersion: number;
+  componentCount: number;
+  status: "active" | "needs_attention";
+  installedAt: string;
+  updatedAt: string;
+};
+
+export type ListInstalledPluginsResponse = {
+  plugins: PluginInstallationSummary[];
+};
+
+export type PluginUninstallPreview = {
+  pluginKey: string;
+  installed: boolean;
+  version: string | null;
+  installationVersion: number | null;
+  components: Array<{
+    capabilityId: string;
+    kind: "skill" | "integration" | "mcp";
+    retainedByOtherOwners: boolean;
+  }>;
+};
+
+export type UninstallPluginRequest = {
+  expectedInstallationVersion: number;
+  idempotencyKey: string;
+};
+
+export type UninstallPluginResult = {
+  pluginKey: string;
+  status: "not_installed" | "uninstalled";
+  retainedComponents: string[];
 };
 
 // --- GitHub ---------------------------------------------------------------------
@@ -4869,12 +6143,14 @@ export type RemoveEnrollmentResponse = {
   code:
     | "active_route"
     | "active_commands"
+    | "machine_home"
     | "active_lease"
     | "recovery_pending"
     | "not_selfhosted"
     | null;
   message: string;
   action: string;
+  dependentSessions: Array<{ id: string; title: string | null }>;
 };
 
 /** POST /v1/workspaces/:ws/sessions/:sessionId/active-sandbox — swap a session's

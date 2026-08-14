@@ -22,6 +22,10 @@ import {
   FsEntryKind,
   StreamKind,
   type DesktopInputRequest,
+  type BrowserControlEnsureRequest,
+  type BrowserControlEnsureResponse,
+  type BrowserFramesOpenRequest,
+  type ComputerFramesOpenRequest,
   type ExecRequest,
   type ExecResponse,
   type StreamChannel,
@@ -56,6 +60,9 @@ import { OpStreamUnavailableError, type OpStreamTransport } from "./op-transport
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
+// Keep one RPC reply comfortably below the agent's negotiated 1 MiB payload
+// ceiling. `fsRead` is ranged, so larger logical reads are assembled here.
+const SELFHOSTED_FS_READ_CHUNK_BYTES = 512 * 1024;
 
 /**
  * The SDK's VIRTUAL sandbox root. The `@openai/agents` agent loop presents the
@@ -253,6 +260,11 @@ export interface SelfhostedSessionDeps {
   agentId: string;
   controlRpc: ControlRpc;
   relay: SelfhostedRelayConfig;
+  /** Stable identity for the session's interactive terminal. Repeated stream
+   *  capability mints carrying this value reattach the existing PTY/channel
+   *  instead of spawning a replacement shell. Omitted preserves explicit
+   *  create-new semantics for non-viewer callers. */
+  terminalScopeId?: string;
   /** Op-stream exec transport (present = enabled; see SelfhostedOpStreamDeps). */
   opStream?: SelfhostedOpStreamDeps;
   /** The lease/active epoch this session is fenced under (echoed on every
@@ -293,6 +305,13 @@ export interface SelfhostedSessionDeps {
    * / test path, which never applies a turn manifest, so there is no delta).
    */
   environment?: Record<string, string>;
+  /**
+   * Attempt-local values projected onto each newly launched child process.
+   * They are deliberately absent from `state`, the manifest, serialized session
+   * envelopes, argv, and the machine filesystem. The callback is reread for
+   * every exec so worker-side bearer renewal is visible without reconnecting.
+   */
+  transientExecEnvironment?: () => Readonly<Record<string, string>>;
   /**
    * The session's working directory — the BASE every path/cwd is rooted under (see
    * `toMachinePath` / SELFHOSTED_VIRTUAL_ROOT). A launch-workspace_root-relative
@@ -345,6 +364,7 @@ export class SelfhostedSession {
   readonly agentId: string;
   private readonly controlRpc: ControlRpc;
   private readonly relay: SelfhostedRelayConfig;
+  private readonly terminalScopeId: string;
   private readonly epoch: number;
   private readonly timeoutMs: number;
   /** The exec process deadline (0 = none; omission is legacy embedding behavior). */
@@ -358,6 +378,7 @@ export class SelfhostedSession {
   /** The session working directory — the path/cwd base every op is rooted under
    *  (see `toMachinePath`). "" by default ⇒ today's workspace_root behavior. */
   private readonly workingDir: string;
+  private readonly transientExecEnvironment: (() => Readonly<Record<string, string>>) | undefined;
 
   /**
    * The structural `state` slice consumers read. `agentId`/`instanceId` serve the
@@ -398,6 +419,7 @@ export class SelfhostedSession {
     this.agentId = deps.agentId;
     this.controlRpc = deps.controlRpc;
     this.relay = deps.relay;
+    this.terminalScopeId = deps.terminalScopeId ?? "";
     this.epoch = deps.epoch ?? 0;
     this.timeoutMs = deps.timeoutMs ?? SELFHOSTED_DEFAULT_TIMEOUT_MS;
     this.execTimeoutMs = deps.execTimeoutMs;
@@ -405,6 +427,7 @@ export class SelfhostedSession {
     this.onOp = deps.onOp;
     this.subject = subjectFor(deps.workspaceId, deps.agentId);
     this.workingDir = deps.workingDir ?? "";
+    this.transientExecEnvironment = deps.transientExecEnvironment;
     this.opStreamClient = deps.opStream
       ? new OpStreamExecClient({
           workspaceId: deps.workspaceId,
@@ -613,9 +636,10 @@ export class SelfhostedSession {
       // SELFHOSTED_VIRTUAL_ROOT). Empty → the session workingDir (itself "" by
       // default ⇒ the agent runs in its workspace_root).
       cwd: toMachinePath(args.workdir, this.workingDir),
-      // The machine owns its own shell environment and credentials. Platform
-      // manifest values never cross this boundary.
-      env: {},
+      // The machine owns its ambient shell environment and ordinary credentials.
+      // Only attempt-local values explicitly supplied by the worker cross here;
+      // snapshot now so a later renewal cannot mutate an in-flight request.
+      env: { ...(this.transientExecEnvironment?.() ?? {}) },
       stdin: new Uint8Array(0),
       timeoutMs: executionTimeoutMs,
     };
@@ -889,18 +913,38 @@ export class SelfhostedSession {
 
   /** Channel-A `readFile`: read a file off the machine (binary-safe). */
   async readFile(args: { path: string; runAs?: string; maxBytes?: number }): Promise<Uint8Array> {
-    const result = await this.call({
-      $case: "fsRead",
-      fsRead: {
-        path: toMachinePath(args.path, this.workingDir),
-        offset: "0",
-        length: args.maxBytes ? String(args.maxBytes) : "0",
-      },
-    });
-    if (result.$case !== "fsRead") {
-      throw new Error(`selfhosted readFile: unexpected result ${result.$case}`);
+    const path = toMachinePath(args.path, this.workingDir);
+    const requestedBytes = args.maxBytes ?? Number.POSITIVE_INFINITY;
+    const chunks: Uint8Array[] = [];
+    let offset = 0;
+    let totalSize = Number.POSITIVE_INFINITY;
+
+    while (offset < requestedBytes && offset < totalSize) {
+      const remaining = Math.min(requestedBytes - offset, SELFHOSTED_FS_READ_CHUNK_BYTES);
+      const result = await this.call({
+        $case: "fsRead",
+        fsRead: {
+          path,
+          offset: String(offset),
+          length: String(remaining),
+        },
+      });
+      if (result.$case !== "fsRead") {
+        throw new Error(`selfhosted readFile: unexpected result ${result.$case}`);
+      }
+      totalSize = safeWireSize(result.fsRead.totalSize, "selfhosted file size");
+      if (result.fsRead.content.byteLength === 0) break;
+      chunks.push(result.fsRead.content);
+      offset += result.fsRead.content.byteLength;
     }
-    return result.fsRead.content;
+
+    const content = new Uint8Array(offset);
+    let cursor = 0;
+    for (const chunk of chunks) {
+      content.set(chunk, cursor);
+      cursor += chunk.byteLength;
+    }
+    return content;
   }
 
   /** Write a file onto the machine (the fs surface the descriptor advertises). */
@@ -1008,6 +1052,54 @@ export class SelfhostedSession {
     };
   }
 
+  /** Ensure the loopback browser controller sidecar owned by this connected
+   * machine. The authority scope is supplied by the caller and remains local. */
+  async ensureBrowserControl(
+    request: BrowserControlEnsureRequest,
+  ): Promise<BrowserControlEnsureResponse> {
+    const result = await this.call({
+      $case: "browserControlEnsure",
+      browserControlEnsure: request,
+    });
+    if (result.$case !== "browserControlEnsure") {
+      throw new Error(`selfhosted ensureBrowserControl: unexpected result ${result.$case}`);
+    }
+    return result.browserControlEnsure;
+  }
+
+  /** Open one browser-native frame producer and return its canonical relay
+   * endpoint. This does not route through `resolveExposedPort`: that legacy
+   * method allocates PTY/desktop resources based on fixed ports, while this op
+   * returns the exact fresh browser StreamChannel allocated by the agent. */
+  async openBrowserFrames(
+    request: BrowserFramesOpenRequest,
+  ): Promise<{ channel: StreamChannel; endpoint: ExposedPortEndpoint }> {
+    const result = await this.call({
+      $case: "browserFramesOpen",
+      browserFramesOpen: request,
+    });
+    if (result.$case !== "browserFramesOpen" || !result.browserFramesOpen.channel) {
+      throw new Error(`selfhosted openBrowserFrames: unexpected result ${result.$case}`);
+    }
+    const channel = result.browserFramesOpen.channel;
+    return { channel, endpoint: this.relayEndpoint(channel) };
+  }
+
+  /** Open one ComputerSession frame producer through the same relay fabric. */
+  async openComputerFrames(
+    request: ComputerFramesOpenRequest,
+  ): Promise<{ channel: StreamChannel; endpoint: ExposedPortEndpoint }> {
+    const result = await this.call({
+      $case: "computerFramesOpen",
+      computerFramesOpen: request,
+    });
+    if (result.$case !== "computerFramesOpen" || !result.computerFramesOpen.channel) {
+      throw new Error(`selfhosted openComputerFrames: unexpected result ${result.$case}`);
+    }
+    const channel = result.computerFramesOpen.channel;
+    return { channel, endpoint: this.relayEndpoint(channel) };
+  }
+
   /** A cheap liveness probe — request a Ping on the subject; returns true iff a
    *  responder answered (no AgentError). Used by `negotiateSelfhostedCapabilities`.
    *  The wire `nonce` is a uint64 (a numeric string), so the default is a random
@@ -1029,10 +1121,11 @@ export class SelfhostedSession {
    * real relay tier (the byte pump) behind THIS seam.
    *
    * THE CHANNEL-KEY QUERY (the M8b relay-dial contract): the relay
-   * routes by `{workspaceId, agentId, port}` — the EXACT `ChannelKey::query` the
+   * routes by `{workspaceId, agentId, port, channelId}` — the EXACT `ChannelKey::query` the
    * agent's relay client (`opengeni-agent-stream`) appends when it registers the
-   * producer side: `ws=<workspaceId>&agent=<agentId>&port=<port>`. We append the
-   * agent-registered `channel=<channelId>` as a correlation hint. So the viewer
+   * producer side: `ws=<workspaceId>&agent=<agentId>&port=<port>&channel=<channelId>`.
+   * Channel id is routing identity, not a correlation hint, so concurrent PTYs
+   * on one connected machine never replace one another. The viewer
    * dials `wss://<relay>/stream?ws=&agent=&port=&channel=` and presents the minted
    * `ogs_` token in-band (NEVER as a URL param) — the relay pairs it with the
    * producer by the routing key.
@@ -1046,7 +1139,7 @@ export class SelfhostedSession {
     // EVERY port — that wrongly coupled the terminal to the desktop probe, so a
     // headless (or display-degraded) machine could never get a terminal even though
     // `ptyOpen` would have succeeded. The returned channelId is the relay
-    // correlation hint; both ops carry a `StreamChannel` on their response.
+    // routing identity; both ops carry a `StreamChannel` on their response.
     let channel: StreamChannel | undefined;
     if (port === DESKTOP_STREAM_PORT) {
       const result = await this.call({
@@ -1075,6 +1168,7 @@ export class SelfhostedSession {
           cols: 0,
           rows: 0,
           term: "xterm-256color",
+          scopeId: this.terminalScopeId,
         },
       });
       if (result.$case !== "ptyOpen") {
@@ -1084,10 +1178,11 @@ export class SelfhostedSession {
       }
       channel = result.ptyOpen.channel;
     }
-    const channelId = channel?.channelId ?? channelKey(this.workspaceId, this.agentId, port);
+    if (channel) return this.relayEndpoint(channel);
+    const channelId = channelKey(this.workspaceId, this.agentId, port);
     const tls = this.relay.tls ?? true;
     // The routing key the relay pairs producer↔consumer by — IDENTICAL to the
-    // agent's `ChannelKey::query` — plus the channel-id correlation hint.
+    // agent's `ChannelKey::query`, including the stream-instance channel id.
     const routingQuery =
       `ws=${encodeURIComponent(this.workspaceId)}` +
       `&agent=${encodeURIComponent(this.agentId)}` +
@@ -1100,7 +1195,23 @@ export class SelfhostedSession {
       // The relay's wss route (`/stream`); buildStreamUrl honors `path`.
       path: this.relay.path ?? SELFHOSTED_RELAY_STREAM_PATH,
       query: routingQuery,
-      protocol: kindToProtocol(channel?.kind),
+    };
+  }
+
+  private relayEndpoint(channel: StreamChannel): ExposedPortEndpoint {
+    const tls = this.relay.tls ?? true;
+    const routingQuery =
+      `ws=${encodeURIComponent(channel.workspaceId)}` +
+      `&agent=${encodeURIComponent(channel.agentId)}` +
+      `&port=${channel.port}` +
+      `&channel=${encodeURIComponent(channel.channelId)}`;
+    return {
+      host: this.relay.host,
+      port: this.relay.port ?? (tls ? 443 : 80),
+      tls,
+      path: this.relay.path ?? SELFHOSTED_RELAY_STREAM_PATH,
+      query: routingQuery,
+      protocol: kindToProtocol(channel.kind),
     };
   }
 
@@ -1131,10 +1242,12 @@ export class SelfhostedSandboxClient {
   private readonly relay: SelfhostedRelayConfig;
   private readonly controlRpcFactory: () => ControlRpc;
   private readonly defaultAgentId: string | undefined;
+  private readonly terminalScopeId: string | undefined;
   private readonly epoch: number | undefined;
   private readonly timeoutMs: number | undefined;
   private readonly execTimeoutMs: number | undefined;
   private readonly environment: Record<string, string> | undefined;
+  private readonly transientExecEnvironment: (() => Readonly<Record<string, string>>) | undefined;
   private readonly workingDir: string | undefined;
   private readonly onOp: SelfhostedOpObserver | undefined;
   private readonly opStream: SelfhostedOpStreamDeps | undefined;
@@ -1148,6 +1261,8 @@ export class SelfhostedSandboxClient {
     /** The agentId a bare create()/resume() (no state) binds to. Optional: the
      *  resume path supplies it via deserializeSessionState. */
     agentId?: string;
+    /** Stable terminal identity (normally the durable OpenGeni session id). */
+    terminalScopeId?: string;
     epoch?: number;
     /** The control-op timeout threaded into every bound session. */
     timeoutMs?: number;
@@ -1160,6 +1275,8 @@ export class SelfhostedSandboxClient {
      *  empty (validateNoEnvironmentDelta). See SelfhostedSessionDeps.environment.
      *  Omitted → `{}` (the negotiation-only path; no turn manifest is applied). */
     environment?: Record<string, string>;
+    /** Attempt-local child-process environment; never persisted or manifested. */
+    transientExecEnvironment?: () => Readonly<Record<string, string>>;
     /** The session working directory threaded into every bound session (the path/
      *  cwd base; see SelfhostedSessionDeps.workingDir). Omitted/empty ⇒ the default
      *  workspace_root behavior. */
@@ -1174,10 +1291,12 @@ export class SelfhostedSandboxClient {
     this.relay = opts.relay;
     this.controlRpcFactory = opts.controlRpcFactory;
     this.defaultAgentId = opts.agentId;
+    this.terminalScopeId = opts.terminalScopeId;
     this.epoch = opts.epoch;
     this.timeoutMs = opts.timeoutMs;
     this.execTimeoutMs = opts.execTimeoutMs;
     this.environment = opts.environment;
+    this.transientExecEnvironment = opts.transientExecEnvironment;
     this.workingDir = opts.workingDir;
     this.onOp = opts.onOp;
     this.opStream = opts.opStream;
@@ -1196,10 +1315,14 @@ export class SelfhostedSandboxClient {
       agentId,
       controlRpc: this.controlRpc(),
       relay: this.relay,
+      ...(this.terminalScopeId !== undefined ? { terminalScopeId: this.terminalScopeId } : {}),
       ...(this.epoch !== undefined ? { epoch: this.epoch } : {}),
       ...(this.timeoutMs !== undefined ? { timeoutMs: this.timeoutMs } : {}),
       ...(this.execTimeoutMs !== undefined ? { execTimeoutMs: this.execTimeoutMs } : {}),
       ...(this.environment !== undefined ? { environment: this.environment } : {}),
+      ...(this.transientExecEnvironment !== undefined
+        ? { transientExecEnvironment: this.transientExecEnvironment }
+        : {}),
       ...(this.workingDir !== undefined ? { workingDir: this.workingDir } : {}),
       ...(this.onOp !== undefined ? { onOp: this.onOp } : {}),
       ...(this.opStream !== undefined ? { opStream: this.opStream } : {}),
@@ -1266,6 +1389,8 @@ export interface SelfhostedSessionBuild {
   agentId: string;
   /** The relay-URL shape for stream endpoints. */
   relay: SelfhostedRelayConfig;
+  /** Stable terminal identity; normally the durable OpenGeni session id. */
+  terminalScopeId?: string;
   /** Lazily build the live ControlRpc (the request-scoped NATS connection). */
   controlRpcFactory: () => ControlRpc;
   /** The lease/active epoch the session is fenced under (echoed on every op). */
@@ -1273,6 +1398,8 @@ export interface SelfhostedSessionBuild {
   /** The run's declared sandbox environment → the session manifest.environment
    *  (env-parity; see SelfhostedSessionDeps.environment). */
   environment?: Record<string, string>;
+  /** Attempt-local child-process values; see SelfhostedSessionDeps. */
+  transientExecEnvironment?: () => Readonly<Record<string, string>>;
   /** The session working directory (the path/cwd base). Null/absent ⇒ workspace_root. */
   workingDir?: string | null;
   /** The control-op timeout (ping/fs/desktop/pty). Absent ⇒ the 30s default. */
@@ -1312,10 +1439,14 @@ export async function buildSelfhostedBackendSession(
     controlRpcFactory: deps.controlRpcFactory,
     agentId: deps.agentId,
     epoch: deps.epoch,
+    ...(deps.terminalScopeId !== undefined ? { terminalScopeId: deps.terminalScopeId } : {}),
     ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
     ...(deps.execTimeoutMs !== undefined ? { execTimeoutMs: deps.execTimeoutMs } : {}),
     ...(deps.onOp !== undefined ? { onOp: deps.onOp } : {}),
     ...(deps.environment !== undefined ? { environment: deps.environment } : {}),
+    ...(deps.transientExecEnvironment !== undefined
+      ? { transientExecEnvironment: deps.transientExecEnvironment }
+      : {}),
     ...(deps.workingDir ? { workingDir: deps.workingDir } : {}),
     ...(deps.opStream !== undefined ? { opStream: deps.opStream } : {}),
   });
@@ -1333,6 +1464,14 @@ function readAgentId(state: unknown): string | undefined {
     }
   }
   return undefined;
+}
+
+function safeWireSize(value: string, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`${label} is outside the supported range`);
+  }
+  return parsed;
 }
 
 function execResultToChannelA(res: ExecResponse, execDeadlineMs: number): SelfhostedExecResult {

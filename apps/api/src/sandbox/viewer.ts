@@ -891,7 +891,10 @@ export type TerminalStreamMint = {
   token: string;
   expiresAt: string;
   leaseEpoch: number;
+  transport: "pty-ws" | "relay-pty";
 };
+
+type SelfhostedStreamMint = Omit<TerminalStreamMint, "transport">;
 
 export type MintTerminalStreamInput = {
   accountId: string;
@@ -950,7 +953,7 @@ export async function mintTerminalStream(
   if (session.activeSandboxId) {
     const active = await getSandbox(db, workspaceId, session.activeSandboxId);
     if (active?.kind === "selfhosted") {
-      return await tryMintActiveSelfhostedStream(
+      const stream = await tryMintActiveSelfhostedStream(
         services,
         {
           session,
@@ -961,6 +964,7 @@ export async function mintTerminalStream(
         },
         input.resolveSelfhostedSession,
       );
+      return stream ? { ...stream, transport: "relay-pty" } : null;
     }
     // A Modal swap target (or unknown) falls through to the existing group-box path
     // (unchanged — Modal swap-target streaming is out of scope for this fix).
@@ -1052,6 +1056,7 @@ export async function mintTerminalStream(
       token: exposed.token,
       expiresAt: exposed.expiresAt,
       leaseEpoch: lease.leaseEpoch,
+      transport: "pty-ws",
     };
   } catch {
     // Any other failure degrades the terminal pty-ws cell to the sse-events
@@ -1107,7 +1112,7 @@ async function tryMintActiveSelfhostedStream(
   resolveSelfhostedSession?: (
     sandbox: SandboxRecord,
   ) => Promise<{ resolveExposedPort?: (port: number) => Promise<unknown> }>,
-): Promise<TerminalStreamMint | null> {
+): Promise<SelfhostedStreamMint | null> {
   const { settings, bus } = services;
   const { session, workspaceId, port, sandbox } = input;
   if (!sandbox.enrollmentId) {
@@ -1128,6 +1133,8 @@ async function tryMintActiveSelfhostedStream(
         controlRpcFactory: () => controlRpc(bus),
         agentId: sandbox.enrollmentId,
         epoch: session.activeEpoch,
+        // Stream authority rotates; terminal process identity does not.
+        terminalScopeId: session.id,
       });
       shSession = await client.resume({ agentId: sandbox.enrollmentId });
     }
@@ -1185,7 +1192,7 @@ export type MintSelfhostedStreamInput = {
 export async function mintSelfhostedStream(
   services: ViewerServices,
   input: MintSelfhostedStreamInput,
-): Promise<TerminalStreamMint | null> {
+): Promise<SelfhostedStreamMint | null> {
   const { settings } = services;
   const secret = resolveStreamTokenSecret(settings);
   if (!secret) {

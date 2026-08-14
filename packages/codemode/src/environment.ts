@@ -1,0 +1,113 @@
+import { readFile } from "node:fs/promises";
+import { CodemodeClient, type CodemodeCallOptions, type CodemodeToolFunction } from "./index";
+
+export const CODEMODE_ENVIRONMENT = {
+  url: "OPENGENI_CODEMODE_URL",
+  token: "OPENGENI_CODEMODE_TOKEN",
+  tokenFile: "OPENGENI_CODEMODE_TOKEN_FILE",
+} as const;
+
+/** Minimal environment shape; public declarations must not require `@types/node`. */
+export type CodemodeEnvironment = Readonly<Record<string, string | undefined>>;
+
+export type CodemodeClientProvider = () => CodemodeClient | Promise<CodemodeClient>;
+
+/** A lazy catalog path. Every nested property remains callable at runtime. */
+export type CodemodeDynamicTool = CodemodeToolFunction & {
+  readonly [segment: string]: CodemodeDynamicTool;
+};
+
+export type CodemodeDynamicTools = {
+  readonly [segment: string]: CodemodeDynamicTool;
+};
+
+/** Catalog-specific generated declarations augment this interface. */
+export interface CodemodeGeneratedTools {}
+
+export type CodemodeToolsNamespace = CodemodeDynamicTools & CodemodeGeneratedTools;
+
+let cachedEnvironmentClient: { key: string; client: CodemodeClient } | null = null;
+
+/**
+ * Build (or reuse) the persistent client for the exact sandbox attempt.
+ * The bearer file is reread for every HTTP request so worker renewal is live.
+ */
+export function environmentCodemodeClient(
+  environment: CodemodeEnvironment = process.env,
+): CodemodeClient {
+  const baseUrl = requiredEnvironment(environment, CODEMODE_ENVIRONMENT.url);
+  const directTokenConfigured = environment[CODEMODE_ENVIRONMENT.token] !== undefined;
+  const tokenFile = directTokenConfigured
+    ? undefined
+    : requiredEnvironment(environment, CODEMODE_ENVIRONMENT.tokenFile);
+  // Never place bearer bytes in the cache identity. The callback rereads the
+  // selected source for every request: managed token-file renewal is live, and
+  // a Connected Machine child never leaves its direct bearer in module state.
+  const key = `${baseUrl}\u0000${directTokenConfigured ? "direct" : `file:${tokenFile}`}`;
+  if (environment === process.env && cachedEnvironmentClient?.key === key) {
+    return cachedEnvironmentClient.client;
+  }
+  const client = new CodemodeClient({
+    baseUrl,
+    token: directTokenConfigured
+      ? async () => requiredEnvironment(environment, CODEMODE_ENVIRONMENT.token)
+      : async () => await readBearerFile(tokenFile!),
+  });
+  if (environment === process.env) cachedEnvironmentClient = { key, client };
+  return client;
+}
+
+/**
+ * Lazy namespace used by ordinary sandbox programs:
+ * `await tools.slack.search({ query: "..." })`.
+ */
+export function createCodemodeTools(
+  client: CodemodeClientProvider = () => environmentCodemodeClient(),
+): CodemodeToolsNamespace {
+  const node = (path: readonly string[]): CodemodeDynamicTool =>
+    new Proxy(
+      (async (args: Record<string, unknown> = {}, options: CodemodeCallOptions = {}) =>
+        await (await client()).callPathValue(path, args, options)) as CodemodeDynamicTool,
+      {
+        get(_target, property) {
+          if (property === "then") return undefined;
+          if (property === Symbol.toStringTag) return "CodemodeTool";
+          if (typeof property !== "string") return undefined;
+          return node([...path, property]);
+        },
+        set() {
+          return false;
+        },
+      },
+    );
+  return new Proxy(Object.create(null) as CodemodeToolsNamespace, {
+    get(_target, property) {
+      if (property === "then") return undefined;
+      if (property === Symbol.toStringTag) return "CodemodeTools";
+      if (typeof property !== "string") return undefined;
+      return node([property]);
+    },
+    set() {
+      return false;
+    },
+  });
+}
+
+export const tools = createCodemodeTools();
+
+async function readBearerFile(path: string): Promise<string> {
+  let token: string;
+  try {
+    token = (await readFile(path, "utf8")).trim();
+  } catch {
+    throw new Error(`${CODEMODE_ENVIRONMENT.tokenFile} is not readable`);
+  }
+  if (!token) throw new Error(`${CODEMODE_ENVIRONMENT.tokenFile} is empty`);
+  return token;
+}
+
+function requiredEnvironment(environment: CodemodeEnvironment, name: string): string {
+  const value = environment[name]?.trim();
+  if (!value) throw new Error(`${name} is required`);
+  return value;
+}

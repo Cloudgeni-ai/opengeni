@@ -9,13 +9,23 @@ import {
   normalizedCodexRequestBody,
   opaqueProviderArtifactFingerprints,
 } from "@opengeni/codex";
+import {
+  XAI_SUBSCRIPTION_REQUEST_BODY_NORMALIZED_HEADER,
+  XAI_SUBSCRIPTION_REQUEST_ID_HEADER,
+  XAI_SUBSCRIPTION_REQUEST_MODEL_HEADER,
+  normalizeXaiSubscriptionRequestBody,
+  xaiSubscriptionRequestStorage,
+} from "@opengeni/xai-subscription";
 import { randomUUID } from "node:crypto";
 
 import {
   rewriteComputerCallsToActionsOnly,
   rewriteEmptyComputerCallOutputImageUrls,
 } from "./history-sanitizer";
-import { CodexSubscriptionUnavailableError } from "./model-provider-errors";
+import {
+  CodexSubscriptionUnavailableError,
+  XaiSubscriptionUnavailableError,
+} from "./model-provider-errors";
 import type { ModelJsonRequestPolicy } from "./replayable-json-body";
 
 /**
@@ -192,6 +202,29 @@ export function modelRequestPolicyForProvider(
           [CODEX_REQUEST_MODEL_HEADER]:
             typeof normalizedBody.model === "string" ? normalizedBody.model : fallbackModel,
           [CODEX_REQUEST_ID_HEADER]: requestId,
+        },
+      };
+    }
+    if (provider.kind === "xai-subscription") {
+      if (!(path.split("?", 1)[0] ?? path).endsWith("/responses")) {
+        throw new Error("SuperGrok subscription models require the Responses API");
+      }
+      const fallbackModel = typeof body.model === "string" ? body.model : provider.id;
+      const context = xaiSubscriptionRequestStorage.getStore();
+      if (!context) throw new XaiSubscriptionUnavailableError(fallbackModel);
+
+      const normalizedBody = normalizeXaiSubscriptionRequestBody(
+        body,
+        context.resolveModel,
+        context.hostedSearch,
+      );
+      return {
+        body: normalizedBody,
+        headers: {
+          [XAI_SUBSCRIPTION_REQUEST_BODY_NORMALIZED_HEADER]: "1",
+          [XAI_SUBSCRIPTION_REQUEST_MODEL_HEADER]:
+            typeof normalizedBody.model === "string" ? normalizedBody.model : fallbackModel,
+          [XAI_SUBSCRIPTION_REQUEST_ID_HEADER]: context.nextRequestId?.() ?? randomUUID(),
         },
       };
     }

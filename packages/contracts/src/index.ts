@@ -6,15 +6,23 @@ import {
   sessionEventJsonBytes,
   type SessionEventBoundarySurface,
 } from "./event-preview";
+import { MemorySlackPublicationDistribution } from "./memory-slack-delivery";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
+import { MediaGenerationResult } from "./video-generation";
 
 export * from "./slack-bot-scopes";
+export * from "./slack-task-policy";
+export * from "./atlassian";
 export * from "./connector-destinations";
+export * from "./memory-slack-delivery";
 export * from "./image-generation";
+export * from "./video-generation";
 export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
+export * from "./tool-catalog";
+export * from "./interaction";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -77,6 +85,7 @@ export {
   COMPUTER_SCREENSHOT_RETENTION_MS,
   COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES,
   GENERATED_IMAGE_MAX_BYTES,
+  GENERATED_VIDEO_MAX_BYTES,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
   RETAINED_OUTPUT_RECEIPT_MAX_BYTES,
@@ -88,6 +97,7 @@ export {
   RetainedOutputUnavailableReason,
   retainedArtifactReferenceFromFile,
   retainedGeneratedImageReferenceFromFile,
+  retainedGeneratedVideoReferenceFromFile,
   retainedScreenshotReferenceFromFile,
   retainedOutputUnavailable,
   resolveRetainedOutputRange,
@@ -96,6 +106,7 @@ export {
   type RetainedArtifactMetadata,
   type RetainedArtifactReference,
   type RetainedGeneratedImageArtifactInput,
+  type RetainedGeneratedVideoArtifactInput,
   type RetainedScreenshotArtifactInput,
   type RetainedArtifactUnavailable,
   type RetainedOutputAvailableEvidence,
@@ -235,7 +246,7 @@ export type CapabilityDescriptor = {
     FileSystem: { available: boolean; readOnly: boolean };
     Terminal: {
       available: boolean;
-      transport: "sse-events" | "pty-ws" | null;
+      transport: "sse-events" | "pty-ws" | "relay-pty" | null;
       pty: boolean;
     };
     Git: { available: boolean };
@@ -274,6 +285,7 @@ export const DESKTOP_STREAM_PORT = 6080;
 // ttyd's default; the box bakes ttyd and launches it on this port. The pty-ws
 // Terminal cell's `url` is the tunnel address resolved against this port.
 export const TERMINAL_STREAM_PORT = 7681;
+export const BROWSER_CONTROL_PORT = 7682;
 
 // The provider capability matrix (sandbox contract PART D + module 03-providers). One row per
 // backend (10 rows). v1 reachable cells are all Linux; macos/windows are seam
@@ -556,7 +568,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     os: { supported: ["linux", "macos", "windows"], default: "linux" },
     capabilities: {
       FileSystem: { available: true, readOnly: false },
-      Terminal: { available: true, transport: "pty-ws", pty: true }, // real PTY over the relay
+      Terminal: { available: true, transport: "relay-pty", pty: true }, // real PTY over the relay
       Git: { available: true },
       DesktopStream: { available: true, transport: "vnc-ws" }, // proclaimed; consent-gated at enroll
       Recording: { available: true }, // boot invariant: == DesktopStream.available
@@ -614,6 +626,7 @@ export const ErrorEnvelope = z.object({
     code: ErrorCode,
     message: z.string(),
     retryable: z.boolean(),
+    outcomeUnknown: z.boolean().optional(),
     requestId: z.string().optional(),
     details: z.record(z.string(), z.unknown()).optional(),
   }),
@@ -721,7 +734,7 @@ export const Permission = z.enum([
   // Programmatic sandbox -> tool access through the first-party MCP gate. This is
   // intentionally narrow and is never part of first-party MCP defaults; callers
   // must receive it through an explicit delegated `ogd_` mint carrying sessionId.
-  "toolspace:call",
+  "codemode:call",
   "goals:manage",
   // Bring-your-own-compute (M5). enrollments:read lists a workspace's machines;
   // enrollments:manage approves a device-flow enrollment (the LOUD whole-machine
@@ -754,6 +767,7 @@ export type Permission = z.infer<typeof Permission>;
  */
 export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
   "workspace:read",
+  "files:upload",
   "files:read",
   "documents:search",
   "scheduled_tasks:manage",
@@ -786,6 +800,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "set_session_title",
   "goal_set",
   "goal_update",
+  "goal_progress",
   "goal_complete",
   "goal_pause",
   "memory_search",
@@ -793,6 +808,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "memory_correct",
   "preference_registry_summary",
   "preference_registry_get",
+  "task_notes_list",
+  "task_note_save",
+  "task_note_archive",
   "sandboxes_list",
   "sandbox_attach",
   "sandbox_swap",
@@ -813,6 +831,24 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "session_resume",
   "session_steer",
   "set_other_session_title",
+  "interaction_discover",
+  "browser_open",
+  "browser_tabs",
+  "browser_observe",
+  "browser_act",
+  "browser_clipboard",
+  "browser_debug",
+  "browser_auth",
+  "interaction_request_human",
+  "browser_identity",
+  "browser_publish",
+  "browser_lifecycle",
+  "computer_open",
+  "computer_targets",
+  "computer_observe",
+  "computer_clipboard",
+  "computer_act",
+  "computer_lifecycle",
   "variable_set_list",
   "environment_list",
   "variable_set_get_variable",
@@ -830,6 +866,18 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "social_thread_fetch",
   "social_posts_sync",
   "social_post_reply",
+  "x_accounts_list",
+  "x_search_live",
+  "x_mentions_live",
+  "x_thread_fetch",
+  "x_posts_sync",
+  "x_post_reply",
+  "reddit_accounts_list",
+  "reddit_search_live",
+  "reddit_mentions_live",
+  "reddit_thread_fetch",
+  "reddit_posts_sync",
+  "reddit_post_reply",
   "scheduled_tasks_list",
   "scheduled_tasks_get",
   "scheduled_tasks_create",
@@ -848,14 +896,100 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_file_content",
   "slack_bot_post_message",
   "slack_bot_delete_message",
+  "fiken_companies_list",
+  "fiken_contacts_list",
+  "fiken_contact_create",
+  "fiken_products_list",
+  "fiken_invoices_list",
+  "fiken_invoice_get",
+  "fiken_invoice_draft_create",
+  "fiken_bank_accounts_list",
+  "fiken_purchases_list",
+  "fiken_sales_list",
+  "atlassian_sources_list",
+  "atlassian_search",
+  "atlassian_get",
   "artifacts_list",
   "artifacts_get_source",
   "artifacts_create",
   "artifacts_publish",
   "artifacts_rollback",
+  "editable_artifact_list",
+  "editable_artifact_create",
+  "editable_artifact_import",
+  "editable_artifact_get",
+  "editable_artifact_inspect",
+  "editable_artifact_apply",
+  "editable_artifact_export",
+  "editable_artifact_export_status",
 ] as const;
 export const FirstPartyMcpToolName = z.enum(FIRST_PARTY_MCP_TOOL_NAMES);
 export type FirstPartyMcpToolName = z.infer<typeof FirstPartyMcpToolName>;
+
+/**
+ * First-party interaction tools executed inside the frozen attempt rather than
+ * registered on the remote `opengeni` MCP server. They still belong to the
+ * same user-selectable first-party catalog and use the same attempt executor.
+ */
+export const FIRST_PARTY_IN_PROCESS_TOOL_NAMES = [
+  "interaction_discover",
+  "browser_open",
+  "browser_tabs",
+  "browser_observe",
+  "browser_act",
+  "browser_clipboard",
+  "browser_debug",
+  "browser_auth",
+  "interaction_request_human",
+  "browser_identity",
+  "browser_publish",
+  "browser_lifecycle",
+  "computer_open",
+  "computer_targets",
+  "computer_observe",
+  "computer_clipboard",
+  "computer_act",
+  "computer_lifecycle",
+] as const satisfies readonly FirstPartyMcpToolName[];
+
+const FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
+  FIRST_PARTY_IN_PROCESS_TOOL_NAMES,
+);
+
+/**
+ * Names accepted for stored-selection compatibility but intentionally omitted
+ * from the remote first-party `opengeni` MCP server.
+ *
+ * `slack_bot_post_message` cannot accept a model/caller-supplied UUID as a
+ * trustworthy logical-delivery identity. Server-owned Slack delivery paths
+ * call the internal client directly with their own durable operation IDs.
+ */
+const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
+  "slack_bot_post_message",
+] as const satisfies readonly FirstPartyMcpToolName[];
+
+const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
+  FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES,
+);
+
+/** Exact catalog registered by the remote first-party `opengeni` MCP server. */
+export const FIRST_PARTY_REMOTE_MCP_TOOL_NAMES = FIRST_PARTY_MCP_TOOL_NAMES.filter(
+  (name) =>
+    !FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET.has(name) &&
+    !FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET.has(name),
+) satisfies readonly FirstPartyMcpToolName[];
+
+/** Authored CodeMode paths for the canonical collaborative artifact surface. */
+export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
+  editable_artifact_list: ["artifacts", "list"],
+  editable_artifact_create: ["artifacts", "create"],
+  editable_artifact_import: ["artifacts", "import"],
+  editable_artifact_get: ["artifacts", "get"],
+  editable_artifact_inspect: ["artifacts", "inspect"],
+  editable_artifact_apply: ["artifacts", "apply"],
+  editable_artifact_export: ["artifacts", "export"],
+  editable_artifact_export_status: ["artifacts", "exportStatus"],
+} as const satisfies Partial<Record<FirstPartyMcpToolName, readonly [string, string]>>;
 
 /**
  * Connector-wide tools are explicit-only. Ordinary session omission selects
@@ -863,7 +997,13 @@ export type FirstPartyMcpToolName = z.infer<typeof FirstPartyMcpToolName>;
  * any catalogued connector tool and remains independently permission-gated.
  */
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
-  (name) => !name.startsWith("social_") && !name.startsWith("slack_bot_"),
+  (name) =>
+    !name.startsWith("social_") &&
+    !name.startsWith("x_") &&
+    !name.startsWith("reddit_") &&
+    !name.startsWith("slack_bot_") &&
+    !name.startsWith("fiken_") &&
+    !name.startsWith("atlassian_"),
 ) satisfies readonly FirstPartyMcpToolName[];
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
@@ -884,6 +1024,255 @@ export type UsageLimitsMode = z.infer<typeof UsageLimitsMode>;
 
 export const AccountRole = z.enum(["owner", "admin", "member"]);
 export type AccountRole = z.infer<typeof AccountRole>;
+
+/**
+ * Settled tenancy vocabulary for resources that may outlive or be used from
+ * more than one workspace. This names authority only; parsing one of these
+ * contracts never authorizes access by itself.
+ */
+export const ResourceAuthorityScope = z.enum(["organization", "workspace", "user"]);
+export type ResourceAuthorityScope = z.infer<typeof ResourceAuthorityScope>;
+
+export const ResourceAuthorityListScope = z.enum([
+  "effective",
+  "organization",
+  "workspace",
+  "user",
+]);
+export type ResourceAuthorityListScope = z.infer<typeof ResourceAuthorityListScope>;
+
+export const OrganizationMembershipStatus = z.enum([
+  "provisioning",
+  "active",
+  "suspended",
+  "revoked",
+]);
+export type OrganizationMembershipStatus = z.infer<typeof OrganizationMembershipStatus>;
+
+export const PersonalResourceRetentionMode = z.enum(["retain", "delete_after"]);
+export type PersonalResourceRetentionMode = z.infer<typeof PersonalResourceRetentionMode>;
+
+export const SessionTenancyVisibility = z.enum(["user_private", "workspace_shared"]);
+export type SessionTenancyVisibility = z.infer<typeof SessionTenancyVisibility>;
+
+/** Public/session API vocabulary. Persistence keeps the explicit tenancy names. */
+export const SessionVisibility = z.enum(["private", "workspace"]);
+export type SessionVisibility = z.infer<typeof SessionVisibility>;
+
+export function sessionVisibilityToPublic(value: SessionTenancyVisibility): SessionVisibility {
+  return value === "user_private" ? "private" : "workspace";
+}
+
+export function sessionVisibilityFromPublic(value: SessionVisibility): SessionTenancyVisibility {
+  return value === "private" ? "user_private" : "workspace_shared";
+}
+
+export const UserResourceGrantMode = z.enum(["once", "session", "always"]);
+export type UserResourceGrantMode = z.infer<typeof UserResourceGrantMode>;
+
+/** Canonical non-wildcard action named by a personal-resource grant. */
+export const UserResourceGrantAction = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9](?:[a-z0-9._:-]*[a-z0-9])?$/u);
+export type UserResourceGrantAction = z.infer<typeof UserResourceGrantAction>;
+
+export const UserResourceGrantStatus = z.enum(["active", "consumed", "revoked", "expired"]);
+export type UserResourceGrantStatus = z.infer<typeof UserResourceGrantStatus>;
+
+function refineUserResourceGrantFence(
+  value: {
+    mode: UserResourceGrantMode;
+    sessionId: string | null;
+    authorityEpoch: number | null;
+  },
+  context: z.RefinementCtx,
+): void {
+  const sessionBoundMode = value.mode === "once" || value.mode === "session";
+  const hasSession = value.sessionId !== null;
+  const hasAuthorityEpoch = value.authorityEpoch !== null;
+
+  if (sessionBoundMode && !hasSession) {
+    context.addIssue({
+      code: "custom",
+      path: ["sessionId"],
+      message: "once and session grants require an exact sessionId",
+    });
+  }
+  if (sessionBoundMode && !hasAuthorityEpoch) {
+    context.addIssue({
+      code: "custom",
+      path: ["authorityEpoch"],
+      message: "once and session grants require an authorityEpoch fence",
+    });
+  }
+  if (!sessionBoundMode && (hasSession || hasAuthorityEpoch)) {
+    context.addIssue({
+      code: "custom",
+      path: ["mode"],
+      message: "always grants must not carry a session or authority-epoch fence",
+    });
+  }
+  if (hasSession !== hasAuthorityEpoch) {
+    context.addIssue({
+      code: "custom",
+      path: ["authorityEpoch"],
+      message: "sessionId and authorityEpoch must be present or absent together",
+    });
+  }
+}
+
+/** Self-only organization membership projection; no subject identifier leaks. */
+export const OrganizationMembershipProjection = z.object({
+  id: z.string().uuid(),
+  organizationId: z.string().uuid(),
+  status: OrganizationMembershipStatus,
+  personalWorkspaceId: z.string().uuid().nullable(),
+  personalRetentionUntil: z.string().datetime({ offset: true }).nullable(),
+});
+export type OrganizationMembershipProjection = z.infer<typeof OrganizationMembershipProjection>;
+
+/**
+ * Exact active-membership facts returned by managed-human login provisioning.
+ * Retention is intentionally absent because the narrow provisioning capability
+ * neither reads nor mutates offboarding policy.
+ */
+export const ManagedOrganizationMembershipProjection = z.object({
+  id: z.string().uuid(),
+  organizationId: z.string().uuid(),
+  status: z.literal("active"),
+  personalWorkspaceId: z.string().uuid(),
+});
+export type ManagedOrganizationMembershipProjection = z.infer<
+  typeof ManagedOrganizationMembershipProjection
+>;
+
+export const ListManagedOrganizationMembershipsResponse = z.object({
+  memberships: z.array(ManagedOrganizationMembershipProjection),
+});
+export type ListManagedOrganizationMembershipsResponse = z.infer<
+  typeof ListManagedOrganizationMembershipsResponse
+>;
+
+/**
+ * Opaque user-resource authority projection. Ownership is represented by the
+ * server-issued authority id, never a raw subject or membership id.
+ */
+export const UserResourceAuthorityProjection = z.object({
+  id: z.string().uuid(),
+  organizationId: z.string().uuid(),
+  scope: z.literal("user"),
+  resourceKind: z.string().min(1).max(64),
+  originWorkspaceId: z.string().uuid().nullable(),
+  generation: z.number().int().positive(),
+  status: z.enum(["active", "retained", "revoked"]),
+});
+export type UserResourceAuthorityProjection = z.infer<typeof UserResourceAuthorityProjection>;
+
+/**
+ * Opaque grant projection. A grant is still inert until a server-side access
+ * boundary proves the organization, owner, workspace, session context, and
+ * current authority epoch.
+ */
+export const UserResourceGrantProjection = z
+  .object({
+    id: z.string().uuid(),
+    authorityId: z.string().uuid(),
+    organizationId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid().nullable(),
+    action: UserResourceGrantAction,
+    mode: UserResourceGrantMode,
+    context: SessionTenancyVisibility,
+    authorityEpoch: z.number().int().positive().nullable(),
+    generation: z.number().int().positive(),
+    status: UserResourceGrantStatus,
+    expiresAt: z.string().datetime({ offset: true }).nullable(),
+  })
+  .superRefine(refineUserResourceGrantFence);
+export type UserResourceGrantProjection = z.infer<typeof UserResourceGrantProjection>;
+
+/**
+ * Extensible immutable delegation payload for accepted work. It contains only
+ * opaque authority/grant identity and execution fences, never owner identity
+ * or credential material.
+ */
+export const UserResourceDelegation = z
+  .object({
+    authorityId: z.string().uuid(),
+    grantId: z.string().uuid(),
+    organizationId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid().nullable(),
+    action: UserResourceGrantAction,
+    mode: UserResourceGrantMode,
+    context: SessionTenancyVisibility,
+    authorityEpoch: z.number().int().positive().nullable(),
+    authorityGeneration: z.number().int().positive(),
+    grantGeneration: z.number().int().positive(),
+    resourceVersionId: z.string().uuid().nullable().optional(),
+  })
+  .superRefine(refineUserResourceGrantFence);
+export type UserResourceDelegation = z.infer<typeof UserResourceDelegation>;
+
+/**
+ * Compatibility envelope for future resource selectors. Omitted scope and
+ * authority parse to workspace-only behavior; user authority is impossible
+ * without one complete opaque delegation.
+ */
+export const ResourceAuthorityEnvelope = z
+  .object({
+    scope: ResourceAuthorityScope.default("workspace"),
+    userDelegation: UserResourceDelegation.optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.scope === "user" && value.userDelegation === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["userDelegation"],
+        message: "user scope requires an explicit immutable delegation",
+      });
+    }
+    if (value.scope !== "user" && value.userDelegation !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["userDelegation"],
+        message: "only user scope may carry a user delegation",
+      });
+    }
+  });
+export type ResourceAuthorityEnvelope = z.infer<typeof ResourceAuthorityEnvelope>;
+
+/** Secret-safe generic session tenancy metadata for an authorized viewer. */
+export const SessionTenancyProjection = z.object({
+  visibility: SessionTenancyVisibility,
+  authorityEpoch: z.number().int().positive(),
+  ownedByCurrentUser: z.boolean(),
+  fork: z
+    .object({
+      sourceVisibility: SessionTenancyVisibility,
+      sourceAuthorityEpoch: z.number().int().positive(),
+      forkedAt: z.string().datetime({ offset: true }),
+    })
+    .nullable(),
+});
+export type SessionTenancyProjection = z.infer<typeof SessionTenancyProjection>;
+
+/** Secret-safe public projection used by activated session APIs. */
+export const SessionTenancyPublicProjection = z.object({
+  visibility: SessionVisibility,
+  authorityEpoch: z.number().int().positive(),
+  ownedByCurrentUser: z.boolean(),
+  fork: z
+    .object({
+      sourceVisibility: SessionVisibility,
+      sourceAuthorityEpoch: z.number().int().positive(),
+      forkedAt: z.string().datetime({ offset: true }),
+    })
+    .nullable(),
+});
+export type SessionTenancyPublicProjection = z.infer<typeof SessionTenancyPublicProjection>;
 
 export const ManagedAccount = z.object({
   id: z.string().uuid(),
@@ -1325,12 +1714,17 @@ export const DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS = {
   channelPolicy: { mode: "bot_member" },
 } as const satisfies WorkspaceSlackReactionSummonSettings;
 
+export const WorkspaceMemoryPromptMode = z.enum(["legacy_standing", "retrieval_only"]);
+export type WorkspaceMemoryPromptMode = z.infer<typeof WorkspaceMemoryPromptMode>;
+
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
-// (future) keys rather than stripping them. memoryEnabled defaults off;
+// (future) keys rather than stripping them. memoryEnabled defaults off and the
+// reversible Memory V1 containment rollout defaults to legacy standing context;
 // voiceInput defaults to enabled when the deployment has a provider.
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
     /** Preferred workspace voice-input toggle. */
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /**
@@ -1358,6 +1752,12 @@ export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
 export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
   return parsed.success ? parsed.data.memoryEnabled === true : false;
+}
+
+/** Reversible Memory V1 prompt rollout. Absent preserves legacy composition. */
+export function resolveWorkspaceMemoryPromptMode(settings: unknown): WorkspaceMemoryPromptMode {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? (parsed.data.memoryPromptMode ?? "legacy_standing") : "legacy_standing";
 }
 
 /** Default Codex compaction mode for new Codex sessions (remote_v2 when unset). */
@@ -1430,6 +1830,7 @@ export function workspaceSlackReactionChannelAllowed(
 export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
     transcription: WorkspaceTranscriptionPolicy.optional(),
@@ -1497,6 +1898,8 @@ const reservedServiceTurnInitiatorContextKeys = new Set([
   "backfill",
   "label",
   "provenanceError",
+  "opengeniSiteAuthConnectionId",
+  "opengeniSiteAuthMaintenanceOperationId",
   "via",
   "viaTruncated",
 ]);
@@ -1598,6 +2001,11 @@ export const DelegatedAccessTokenPayload = z
     // Model-visible first-party tool selection for a worker-bound session.
     // This is visibility only; permissions remain the authorization boundary.
     firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+    // Trusted root-relative depth facts frozen when the worker prepares this
+    // attempt. They shape only the model-visible tool catalog; the database
+    // remains authoritative for admission and concurrent policy changes.
+    nestedAgentDepth: NestedAgentDepthValue.optional(),
+    effectiveMaxNestedAgentDepth: NestedAgentDepthValue.optional(),
     // The turn making the call (the caller's identity), HMAC-signed by the worker
     // at turn setup. Lets a tool classify WHO is calling from the token itself,
     // instead of racily re-reading the session's live active_turn_id — e.g. the
@@ -1618,6 +2026,23 @@ export const DelegatedAccessTokenPayload = z
       payload.executionGeneration,
     ];
     const exactAttemptClaimCount = exactAttemptClaims.filter((value) => value !== undefined).length;
+    const depthClaimCount = [payload.nestedAgentDepth, payload.effectiveMaxNestedAgentDepth].filter(
+      (value) => value !== undefined,
+    ).length;
+    if (depthClaimCount !== 0 && depthClaimCount !== 2) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["nestedAgentDepth"],
+        message: "nested-agent depth claims must be supplied together",
+      });
+    }
+    if (depthClaimCount > 0 && payload.principalKind !== "agent_attempt") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["principalKind"],
+        message: "nested-agent depth claims require an agent_attempt principal",
+      });
+    }
     if (
       payload.principalKind === "human_session" &&
       (exactAttemptClaimCount !== 0 || payload.serviceInitiator !== undefined)
@@ -2140,6 +2565,61 @@ export const UpdateWorkspaceMemberRequest = z.object({
 });
 export type UpdateWorkspaceMemberRequest = z.infer<typeof UpdateWorkspaceMemberRequest>;
 
+export const SlackUserLinkAccessRequestStatus = z.enum([
+  "prepared",
+  "pending",
+  "completed",
+  "denied",
+  "cancelled",
+  "expired",
+]);
+export type SlackUserLinkAccessRequestStatus = z.infer<typeof SlackUserLinkAccessRequestStatus>;
+
+/**
+ * Durable, token-free projection of one signed Slack identity-link intent.
+ * The original bearer and its digest are deliberately absent from every
+ * public response.
+ */
+export const SlackUserLinkAccessRequest = z.object({
+  id: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  workspaceDisplayName: z.string().min(1).max(256).nullable(),
+  subjectLabel: z.string().min(1).max(512).nullable(),
+  status: SlackUserLinkAccessRequestStatus,
+  version: z.number().int().positive(),
+  expiresAt: z.string().datetime({ offset: true }),
+  requestedAt: z.string().datetime({ offset: true }).nullable(),
+  decidedAt: z.string().datetime({ offset: true }).nullable(),
+  completedAt: z.string().datetime({ offset: true }).nullable(),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type SlackUserLinkAccessRequest = z.infer<typeof SlackUserLinkAccessRequest>;
+
+export const PrepareSlackUserLinkAccessRequest = z.object({
+  linkToken: z.string().min(1).max(2_048),
+});
+export type PrepareSlackUserLinkAccessRequest = z.infer<typeof PrepareSlackUserLinkAccessRequest>;
+
+export const SlackUserLinkAccessMutationRequest = z.object({
+  expectedVersion: z.number().int().positive(),
+  idempotencyKey: z.string().trim().min(1).max(200),
+});
+export type SlackUserLinkAccessMutationRequest = z.infer<typeof SlackUserLinkAccessMutationRequest>;
+
+export const ApproveSlackUserLinkAccessRequest = SlackUserLinkAccessMutationRequest.extend({
+  role: z.string().trim().min(1).max(128).optional(),
+  permissions: z.array(Permission).min(1),
+});
+export type ApproveSlackUserLinkAccessRequest = z.infer<typeof ApproveSlackUserLinkAccessRequest>;
+
+export const ListSlackUserLinkAccessRequestsResponse = z.object({
+  requests: z.array(SlackUserLinkAccessRequest),
+});
+export type ListSlackUserLinkAccessRequestsResponse = z.infer<
+  typeof ListSlackUserLinkAccessRequestsResponse
+>;
+
 export const UsageEventType = z.enum([
   "agent_run.created",
   "agent_run.completed",
@@ -2219,9 +2699,9 @@ export type InsightsModelUsageRow = z.infer<typeof InsightsModelUsageRow>;
 
 export const InsightsSeriesPoint = z.object({
   label: z.string().min(1),
-  /** Day-bucketed sum of usage_events.model.cost (workspace-wide) or filtered facts when provider/model set. */
+  /** UTC hour/day-bucketed sum of usage_events.model.cost (workspace-wide) or filtered facts when provider/model set. */
   modelCostUsd: z.number().nonnegative(),
-  /** Day-bucketed hypothetical provider-rate USD for calls with captured pricing. */
+  /** UTC hour/day-bucketed hypothetical provider-rate USD for calls with captured pricing. */
   estimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
   warmSeconds: z.number().nonnegative(),
@@ -2527,7 +3007,7 @@ export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryR
 //     `loadVariableSetForRun` (today decrypted with
 //     `environmentsEncryptionKeyBytes(settings)`).
 //   - MCP credentials: request-time transport headers for connection-backed
-//     servers, shared by normal model tools and Toolspace/Code Mode.
+//     servers, shared by normal model tools and Codemode/Code Mode.
 //
 // In embedded/separate topologies the HOST owns these external connections
 // (its GitHub App, its secret vault + encryption key). When a host binds this
@@ -2810,7 +3290,7 @@ export const McpPersonalConnectionDelegation = z
     ownerSubjectId: z.string().min(1).max(512),
     providerDomain: z.string().min(1).max(2048),
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
-    connectionType: z.enum(["mcp", "social"]).optional(),
+    connectionType: z.enum(["mcp", "social", "atlassian"]).optional(),
   })
   .strict();
 export type McpPersonalConnectionDelegation = z.infer<typeof McpPersonalConnectionDelegation>;
@@ -2846,7 +3326,7 @@ export type McpPersonalConnectionSummary = z.infer<typeof McpPersonalConnectionS
 export type McpCredentialsRequest = {
   accountId: string;
   workspaceId: string;
-  /** Immediate session whose model or Toolspace call needs the credential. */
+  /** Immediate session whose model or Codemode call needs the credential. */
   sessionId: string;
   /** Workspace-scoped lineage root for host authorization and binding lookup. */
   rootSessionId: string;
@@ -2859,9 +3339,16 @@ export type McpCredentialsRequest = {
   initiatorContext: TurnInitiatorContext;
   /** Immediate technical caller, retained only as non-authoritative audit context. */
   callerSubjectId?: string;
-  surface: "model" | "toolspace";
+  surface: "model" | "codemode";
   /** Canonical MCP destination that will receive the resolved headers. */
   destinationUrl: string;
+  /**
+   * Credential transport requested by the caller. Omitted means the existing
+   * header-only MCP transport. The additive `http_api` target allows embedding
+   * hosts to return query/cookie API-key placements for local API integrations
+   * without making those placements eligible for a remote MCP request.
+   */
+  credentialTarget?: "mcp" | "http_api";
   serverId: string;
   toolName?: string;
   connectionRef: McpServerConnectionRef;
@@ -2874,6 +3361,13 @@ export type McpCredentialAuthNeededReason =
   | "unsupported_auth"
   | "resource_scope_unavailable";
 
+export type ConnectionCredentialPlacement = {
+  carrier: "header" | "query" | "cookie";
+  name: string;
+  value: string;
+  prefix?: string;
+};
+
 export type McpCredentialResolution =
   | {
       status: "ok";
@@ -2882,6 +3376,12 @@ export type McpCredentialResolution =
       workspaceId: string;
       sessionId: string;
       headers: Record<string, string>;
+      /**
+       * Optional normalized HTTP credential placements. When present, header
+       * placements must exactly match `headers`. Query/cookie placements are
+       * accepted only for a request whose credentialTarget is `http_api`.
+       */
+      placements?: ConnectionCredentialPlacement[];
       connectionId: string;
       providerDomain: string;
       provider?: string;
@@ -2922,7 +3422,7 @@ export type ConnectionCredentialsPort = {
    * Resolve rotating MCP transport credentials at request time. Embedded hosts
    * use this to keep their provider connection as the sole credential source;
    * OpenGeni never requires a duplicate connection record. The same resolver is
-   * used by model-visible MCP tools and the additive Toolspace/Code Mode proxy.
+   * used by model-visible MCP tools and the exact-attempt Codemode projection.
    */
   mcpCredentials?(input: McpCredentialsRequest): Promise<McpCredentialResolution>;
 };
@@ -3722,6 +4222,7 @@ export const CreateKnowledgeMemoryRequest = z.object({
   createdBySessionId: z.string().uuid().optional(),
   pinned: z.boolean().optional(),
   replacesId: z.string().min(1).optional(),
+  slackPublication: MemorySlackPublicationDistribution.optional(),
 });
 export type CreateKnowledgeMemoryRequest = z.infer<typeof CreateKnowledgeMemoryRequest>;
 
@@ -4120,6 +4621,86 @@ export type SessionGoalStatus = z.infer<typeof SessionGoalStatus>;
 export const SessionGoalCreatedBy = z.enum(["api", "agent", "scheduled_task"]);
 export type SessionGoalCreatedBy = z.infer<typeof SessionGoalCreatedBy>;
 
+export const SessionGoalMutationPolicy = z.enum([
+  "review_changes",
+  "preserve_intent",
+  "autonomous_adaptation",
+]);
+export type SessionGoalMutationPolicy = z.infer<typeof SessionGoalMutationPolicy>;
+
+export const SessionGoalChangeKind = z.enum(["refinement", "adaptation", "replacement"]);
+export type SessionGoalChangeKind = z.infer<typeof SessionGoalChangeKind>;
+
+export const SESSION_GOAL_TEXT_MAX_BYTES = 8 * 1024;
+export const SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES = 8 * 1024;
+export const SESSION_GOAL_RATIONALE_MAX_BYTES = 2 * 1024;
+export const SESSION_GOAL_PROGRESS_MAX_BYTES = 4 * 1024;
+
+export function sessionGoalUtf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function boundedSessionGoalString(maxBytes: number, field: string) {
+  return z
+    .string()
+    .min(1)
+    .refine((value) => sessionGoalUtf8Bytes(value) <= maxBytes, {
+      message: `${field} exceeds ${maxBytes} UTF-8 bytes`,
+    });
+}
+
+const SessionGoalTextWrite = boundedSessionGoalString(SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
+const SessionGoalSuccessCriteriaWrite = boundedSessionGoalString(
+  SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
+  "goal success criteria",
+);
+const SessionGoalRationaleWrite = boundedSessionGoalString(
+  SESSION_GOAL_RATIONALE_MAX_BYTES,
+  "goal rationale",
+);
+
+export const SessionGoalSnapshot = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("none"), capturedAt: z.string() }),
+  z.object({
+    state: z.enum(["active", "paused", "completed"]),
+    goalId: z.string().uuid(),
+    objectiveRevision: z.number().int().positive(),
+    text: SessionGoalTextWrite,
+    successCriteria: SessionGoalSuccessCriteriaWrite.nullable(),
+    mutationPolicy: SessionGoalMutationPolicy,
+    capturedAt: z.string(),
+  }),
+]);
+export type SessionGoalSnapshot = z.infer<typeof SessionGoalSnapshot>;
+
+export const SessionGoalRevision = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  goalId: z.string().uuid(),
+  disposition: z.enum(["applied", "proposed", "rejected"]),
+  changeKind: SessionGoalChangeKind,
+  baseObjectiveRevision: z.number().int().nonnegative(),
+  resultObjectiveRevision: z.number().int().positive().nullable(),
+  text: z.string().min(1),
+  successCriteria: z.string().nullable(),
+  mutationPolicy: SessionGoalMutationPolicy,
+  rationale: z.string().min(1),
+  actor: z.enum(["agent", "api", "scheduled_task"]),
+  actorTurnId: z.string().uuid().nullable(),
+  actorAttemptId: z.string().uuid().nullable(),
+  proposalId: z.string().uuid().nullable(),
+  createdAt: z.string(),
+});
+export type SessionGoalRevision = z.infer<typeof SessionGoalRevision>;
+
+export const ApplySessionGoalRevisionRequest = z.object({
+  expectedObjectiveRevision: z.number().int().positive(),
+  rationale: SessionGoalRationaleWrite.optional(),
+});
+export type ApplySessionGoalRevisionRequest = z.infer<typeof ApplySessionGoalRevisionRequest>;
+
 export const SessionGoalPausedReason = z.enum([
   "agent",
   "user_pause",
@@ -4178,6 +4759,8 @@ export const SessionGoal = z.object({
   pausedReason: z.string().nullable(),
   createdBy: SessionGoalCreatedBy,
   version: z.number().int().positive(),
+  objectiveRevision: z.number().int().positive(),
+  mutationPolicy: SessionGoalMutationPolicy,
   autoContinuations: z.number().int().nonnegative(),
   noProgressStreak: z.number().int().nonnegative(),
   maxAutoContinuations: z.number().int().positive().nullable(),
@@ -4191,16 +4774,26 @@ export const SessionGoal = z.object({
 export type SessionGoal = z.infer<typeof SessionGoal>;
 
 export const GoalSpec = z.object({
-  text: z.string().min(1),
-  successCriteria: z.string().min(1).optional(),
+  text: SessionGoalTextWrite,
+  successCriteria: SessionGoalSuccessCriteriaWrite.optional(),
   maxAutoContinuations: z.number().int().positive().optional(),
+  mutationPolicy: SessionGoalMutationPolicy.optional(),
 });
 export type GoalSpec = z.infer<typeof GoalSpec>;
 
-export const UpdateSessionGoalRequest = z.object({
-  status: z.enum(["paused", "active"]),
-  rationale: z.string().min(1).optional(),
-});
+export const UpdateSessionGoalRequest = z.union([
+  z.object({
+    status: z.enum(["paused", "active"]),
+    rationale: SessionGoalRationaleWrite.optional(),
+  }),
+  z.object({
+    text: SessionGoalTextWrite,
+    successCriteria: SessionGoalSuccessCriteriaWrite.nullable().optional(),
+    mutationPolicy: SessionGoalMutationPolicy.optional(),
+    rationale: SessionGoalRationaleWrite,
+    expectedObjectiveRevision: z.number().int().positive(),
+  }),
+]);
 export type UpdateSessionGoalRequest = z.infer<typeof UpdateSessionGoalRequest>;
 
 export const UpdateSessionRequest = z.object({
@@ -4336,7 +4929,7 @@ export const SessionAuthorizationSurface = z.enum([
   "core",
   "stream",
   "first_party_mcp",
-  "toolspace",
+  "codemode",
 ]);
 export type SessionAuthorizationSurface = z.infer<typeof SessionAuthorizationSurface>;
 
@@ -4529,6 +5122,7 @@ export type SyncSessionRealtimeLedgerResponse = z.infer<typeof SyncSessionRealti
 
 export const SessionRealtimeModel = z.enum([
   "gpt-live-1-boulder-alpha",
+  "supergrok/grok-voice-think-fast-2.0",
   "opengeni-gateway/openai/gpt-realtime-2.1",
   "opengeni-gateway/openai/gpt-realtime-mini",
   "opengeni-gateway/xai/grok-voice-think-fast-2.0",
@@ -4541,7 +5135,7 @@ export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
 export const WorkspaceRealtimeModelCatalogItem = z.object({
   id: SessionRealtimeModel,
   label: z.string().min(1),
-  provider: z.enum(["OpenGeni", "Connected Codex", "Your Gateway"]),
+  provider: z.enum(["OpenGeni", "Connected Codex", "Connected SuperGrok", "Your Gateway"]),
   description: z.string().min(1),
   available: z.boolean(),
   unavailableReason: z.string().nullable(),
@@ -4625,7 +5219,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.viewer.control",
   "session.first_party_mcp.call",
   "session.secret.read",
-  "session.toolspace.call",
+  "session.codemode.call",
   "session.pin.write",
   "session.codex_account.write",
   "session.realtime.start",
@@ -4635,11 +5229,14 @@ export const SessionAuthorizationOperation = z.enum([
   "session.human_input.read",
   "session.human_input.write",
   "session.title.write",
+  "session.channel.write",
   "session.mcp.approval_policy.write",
   "session.tool_policy.write",
   "session.goal.read",
   "session.goal.write",
   "session.child.create",
+  "session.visibility.write",
+  "session.fork.create",
 ]);
 export type SessionAuthorizationOperation = z.infer<typeof SessionAuthorizationOperation>;
 
@@ -4661,6 +5258,8 @@ export const SessionAuthorizationActor = z.discriminatedUnion("kind", [
     /** Frozen authority that admitted the calling turn. */
     initiator: TurnInitiator,
     initiatorContext: TurnInitiatorContext,
+    /** Durable causal human for delegated/service work; null for pure service work. */
+    initiatingHumanSubjectId: z.string().min(1).max(1024).nullable(),
   }),
 ]);
 export type SessionAuthorizationActor = z.infer<typeof SessionAuthorizationActor>;
@@ -5393,6 +5992,7 @@ export const SessionSystemUpdateKind = z.enum([
   "agent_message",
   "agent_steer_instruction",
   "child_terminal_result",
+  "media_generation_result",
 ]);
 export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
 
@@ -5437,6 +6037,7 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
       status: z.enum(["idle", "failed", "cancelled"]),
     })
     .passthrough(),
+  MediaGenerationResult,
 ]);
 export type SessionSystemUpdatePayload = z.infer<typeof SessionSystemUpdatePayload>;
 
@@ -5689,6 +6290,15 @@ export const RigProviderImage = z
       .string()
       .regex(/^sha256:[0-9a-f]{64}$/u)
       .nullable(),
+    // Added after provider-image v1 shipped. Absence is retained for rolling
+    // compatibility but means runtime must use logical-image + setup fallback
+    // until an explicit verification cold-boots this exact image.
+    coldBootValidation: z
+      .object({
+        version: z.literal(1),
+        checkedAt: z.string().datetime(),
+      })
+      .optional(),
     provenance: z.object({
       kind: z.literal("rig_verification"),
       targetKind: z.enum(["change", "version"]),
@@ -5764,6 +6374,13 @@ export const RigProviderImage = z
         code: "custom",
         path: ["error"],
         message: "ready provider images cannot retain an error",
+      });
+    }
+    if (value.status !== "ready" && value.coldBootValidation !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["coldBootValidation"],
+        message: "only ready provider images may retain cold-boot validation",
       });
     }
   });
@@ -5876,6 +6493,40 @@ export const UpdateRigRequest = z.object({
   description: z.string().max(2000).nullable().optional(),
 });
 export type UpdateRigRequest = z.infer<typeof UpdateRigRequest>;
+
+// Workspace-shared channels organize root sessions ("workstreams") by work
+// type in the rail. Pure organizational metadata: filing a session into a
+// channel never affects execution, authority, memory, or history.
+export const Channel = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  name: z.string(),
+  description: z.string().nullable(),
+  createdBy: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type Channel = z.infer<typeof Channel>;
+
+export const CreateChannelRequest = z.object({
+  name: z.string().trim().min(1).max(80),
+  description: z.string().max(2000).optional(),
+});
+export type CreateChannelRequest = z.infer<typeof CreateChannelRequest>;
+
+export const UpdateChannelRequest = z.object({
+  name: z.string().trim().min(1).max(80).optional(),
+  description: z.string().max(2000).nullable().optional(),
+});
+export type UpdateChannelRequest = z.infer<typeof UpdateChannelRequest>;
+
+// Re-files one session (rail organization only). null moves it back to the
+// unfiled inbox.
+export const UpdateSessionChannelRequest = z.object({
+  channelId: z.string().uuid().nullable(),
+});
+export type UpdateSessionChannelRequest = z.infer<typeof UpdateSessionChannelRequest>;
 
 // setup_append: the exact command that already worked (+ an optional note).
 export const RigSetupAppendPayload = z.object({
@@ -6225,47 +6876,48 @@ export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
 ]);
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
 
-export const UpdateScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
-  name: z.string().min(1).optional(),
-  schedule: ScheduledTaskScheduleSpec.optional(),
-  runMode: ScheduledTaskRunMode.optional(),
-  overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
-  action: ScheduledTaskAction.optional(),
-  targetSessionId: z.string().uuid().nullable().optional(),
-  agentConfig: ScheduledTaskAgentConfig.optional(),
-  status: ScheduledTaskStatus.optional(),
-  variableSetId: z.string().uuid().nullable().optional(),
-  environmentId: z.string().uuid().nullable().optional(),
-  // The rig each run binds to (M3); null clears it. Its active version is
-  // resolved per fire, so an update takes effect on the next dispatch.
-  rigId: z.string().uuid().nullable().optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-}).superRefine((value, context) => {
-  if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
-    context.addIssue({
-      code: "custom",
-      path: ["targetSessionId"],
-      message: "targetSessionId requires runMode=existing_session",
-    });
-  }
-  if (value.runMode === "existing_session" && value.targetSessionId === null) {
-    context.addIssue({
-      code: "custom",
-      path: ["targetSessionId"],
-      message: "targetSessionId cannot be null when runMode=existing_session",
-    });
-  }
-  if (
-    value.agentConfig?.goal &&
-    (value.runMode === "existing_session" || Boolean(value.targetSessionId))
-  ) {
-    context.addIssue({
-      code: "custom",
-      path: ["agentConfig", "goal"],
-      message: "agentConfig.goal cannot be used with an existing-session target",
-    });
-  }
-});
+export const UpdateScheduledTaskRequest =
+  /* @__PURE__ */ withVariableSetIdAlias({
+    name: z.string().min(1).optional(),
+    schedule: ScheduledTaskScheduleSpec.optional(),
+    runMode: ScheduledTaskRunMode.optional(),
+    overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
+    action: ScheduledTaskAction.optional(),
+    targetSessionId: z.string().uuid().nullable().optional(),
+    agentConfig: ScheduledTaskAgentConfig.optional(),
+    status: ScheduledTaskStatus.optional(),
+    variableSetId: z.string().uuid().nullable().optional(),
+    environmentId: z.string().uuid().nullable().optional(),
+    // The rig each run binds to (M3); null clears it. Its active version is
+    // resolved per fire, so an update takes effect on the next dispatch.
+    rigId: z.string().uuid().nullable().optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+  }).superRefine((value, context) => {
+    if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
+      context.addIssue({
+        code: "custom",
+        path: ["targetSessionId"],
+        message: "targetSessionId requires runMode=existing_session",
+      });
+    }
+    if (value.runMode === "existing_session" && value.targetSessionId === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["targetSessionId"],
+        message: "targetSessionId cannot be null when runMode=existing_session",
+      });
+    }
+    if (
+      value.agentConfig?.goal &&
+      (value.runMode === "existing_session" || Boolean(value.targetSessionId))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["agentConfig", "goal"],
+        message: "agentConfig.goal cannot be used with an existing-session target",
+      });
+    }
+  });
 export type UpdateScheduledTaskRequest = z.infer<typeof UpdateScheduledTaskRequest>;
 
 /**
@@ -6416,11 +7068,86 @@ function isSafePackSkillRelativePath(path: string): boolean {
     .every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
 }
 
-const CapabilityPackVariableSet = z.object({
-  description: z.string().min(1),
-  requiredVariables: z.array(VariableSetVariableName).default([]),
-  required: z.boolean().default(false),
-});
+const CapabilityPackVariableSet = z
+  .object({
+    description: z.string().min(1).max(2048),
+    requiredVariables: z.array(VariableSetVariableName).max(256).default([]),
+    required: z.boolean().default(false),
+  })
+  .strict();
+
+const CapabilityPackComponentKey = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
+
+const CapabilityPackInstanceKey = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
+
+/**
+ * Immutable requirements adopted by a Pack installation. The manifest names
+ * portable identities; installation resolves them to exact workspace-local
+ * component rows and records Pack ownership in the shared component ledger.
+ */
+export const CapabilityPackComponentReference = z.discriminatedUnion("kind", [
+  z
+    .object({
+      key: CapabilityPackComponentKey,
+      kind: z.literal("plugin"),
+      pluginKey: z.string().min(1).max(200),
+      version: z.string().min(1).max(128),
+      manifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
+      required: z.boolean().default(true),
+    })
+    .strict(),
+  z
+    .object({
+      key: CapabilityPackComponentKey,
+      kind: z.literal("skill"),
+      capabilityId: z.string().min(1).max(512),
+      contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+      required: z.boolean().default(true),
+    })
+    .strict(),
+  z
+    .object({
+      key: CapabilityPackComponentKey,
+      kind: z.literal("integration"),
+      capabilityId: z.string().min(1).max(512),
+      instanceKey: CapabilityPackInstanceKey,
+      revisionId: z.string().min(1).max(512),
+      contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+      required: z.boolean().default(true),
+    })
+    .strict(),
+  z
+    .object({
+      key: CapabilityPackComponentKey,
+      kind: z.literal("facet"),
+      capabilityId: z.string().min(1).max(512),
+      instanceKey: CapabilityPackInstanceKey,
+      facetKey: z.string().min(1).max(200),
+      bindingKey: CapabilityPackInstanceKey,
+      configDigest: z.string().regex(/^[0-9a-f]{64}$/),
+      required: z.boolean().default(true),
+    })
+    .strict(),
+]);
+export type CapabilityPackComponentReference = z.infer<typeof CapabilityPackComponentReference>;
+
+export const CapabilityPackRigRequirement = z
+  .object({
+    description: z.string().min(1).max(2048).optional(),
+    required: z.boolean().default(true),
+    rigId: z.string().uuid().optional(),
+    requireVerified: z.boolean().default(false),
+  })
+  .strict();
+export type CapabilityPackRigRequirement = z.infer<typeof CapabilityPackRigRequirement>;
 
 export const CapabilityPack = z.preprocess(
   (input) => {
@@ -6450,15 +7177,19 @@ export const CapabilityPack = z.preprocess(
   },
   z
     .object({
-      id: z.string().min(1),
-      name: z.string().min(1),
-      description: z.string().min(1),
-      role: z.string().min(1),
-      category: z.string().min(1),
-      version: z.string().min(1),
-      // Container image ref (digest-pinned recommended) the pack's sessions run
-      // in. At most one enabled pack per workspace may declare one; with none,
-      // sessions use the deployment-wide image settings.
+      id: z
+        .string()
+        .min(1)
+        .max(100)
+        .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/),
+      name: z.string().min(1).max(200),
+      description: z.string().min(1).max(4096),
+      role: z.string().min(1).max(128),
+      category: z.string().min(1).max(128),
+      version: z.string().min(1).max(128),
+      // Legacy manifest compatibility. V2 installation resolves this image to
+      // an explicit Rig requirement; the Pack no longer changes workspace
+      // runtime settings directly.
       sandboxImage: z.string().trim().min(1).max(512).optional(),
       // Optional provider-native immutable identities for the exact logical
       // sandboxImage above. These avoid re-importing a private registry image on
@@ -6478,7 +7209,8 @@ export const CapabilityPack = z.preprocess(
         })
         .strict()
         .optional(),
-      // Skills delivered into the sandbox skill index when the pack is enabled.
+      // Legacy inline Skills are migrated into immutable Skill components by
+      // the V2 Pack installer. They are not loaded directly by V2 runtime.
       skills: z
         .array(CapabilityPackSkill)
         .max(32)
@@ -6497,6 +7229,8 @@ export const CapabilityPack = z.preprocess(
           });
         })
         .default([]),
+      components: z.array(CapabilityPackComponentReference).max(128).default([]),
+      rig: CapabilityPackRigRequirement.optional(),
       tools: z.array(ToolRef).default([]),
       connectors: z.array(CapabilityPackConnector).default([]),
       knowledge: z.array(CapabilityPackKnowledge).default([]),
@@ -6505,6 +7239,28 @@ export const CapabilityPack = z.preprocess(
       metadata: z.record(z.string(), z.unknown()).default({}),
     })
     .superRefine((pack, ctx) => {
+      const componentKeys = new Set<string>();
+      pack.components.forEach((component, index) => {
+        if (componentKeys.has(component.key)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `duplicate Pack component key: ${component.key}`,
+            path: ["components", index, "key"],
+          });
+        }
+        componentKeys.add(component.key);
+      });
+      pack.skills.forEach((skill, index) => {
+        const key = `inline-skill/${skill.name.toLowerCase()}`;
+        if (componentKeys.has(key)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `Pack component key conflicts with inline Skill ${skill.name}: ${key}`,
+            path: ["skills", index, "name"],
+          });
+        }
+        componentKeys.add(key);
+      });
       if (!pack.sandboxProviderImages?.modal) {
         return;
       }
@@ -6542,7 +7298,12 @@ export const WorkspaceRegisteredPack = z.object({
 });
 export type WorkspaceRegisteredPack = z.infer<typeof WorkspaceRegisteredPack>;
 
-export const PackInstallationStatus = z.enum(["active", "disabled"]);
+export const PackInstallationStatus = z.enum([
+  "installing",
+  "active",
+  "needs_attention",
+  "disabled",
+]);
 export type PackInstallationStatus = z.infer<typeof PackInstallationStatus>;
 
 export const PackInstallation = z.object({
@@ -6551,6 +7312,14 @@ export const PackInstallation = z.object({
   workspaceId: z.string().uuid(),
   packId: z.string().min(1),
   status: PackInstallationStatus,
+  version: z.number().int().positive(),
+  manifestSnapshot: CapabilityPack.nullable(),
+  manifestDigest: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .nullable(),
+  selectedRigId: z.string().uuid().nullable(),
+  installedBySubjectId: z.string().min(1).max(1024).nullable(),
   metadata: z.record(z.string(), z.unknown()),
   enabledAt: z.string(),
   updatedAt: z.string(),
@@ -6563,6 +7332,116 @@ export const EnablePackRequest = withVariableSetIdAlias({
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
 export type EnablePackRequest = z.infer<typeof EnablePackRequest>;
+
+export const PackComponentResolutionStatus = z.enum(["ready", "missing", "mismatch"]);
+export type PackComponentResolutionStatus = z.infer<typeof PackComponentResolutionStatus>;
+
+export const PackComponentResolution = z
+  .object({
+    key: CapabilityPackComponentKey,
+    kind: z.enum(["plugin", "skill", "integration", "facet", "inline_skill"]),
+    capabilityId: z.string().min(1).max(512),
+    required: z.boolean(),
+    status: PackComponentResolutionStatus,
+    expectedDigest: z.string().regex(/^[0-9a-f]{64}$/),
+    actualDigest: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
+    resolvedId: z.string().min(1).max(512).nullable(),
+    label: z.string().min(1).max(200),
+  })
+  .strict();
+export type PackComponentResolution = z.infer<typeof PackComponentResolution>;
+
+export const PackRigResolution = z
+  .object({
+    required: z.boolean(),
+    status: z.enum(["not_required", "ready", "missing", "mismatch", "unverified"]),
+    requestedRigId: z.string().uuid().nullable(),
+    rigId: z.string().uuid().nullable(),
+    rigVersionId: z.string().uuid().nullable(),
+    name: z.string().min(1).max(200).nullable(),
+    image: z.string().min(1).max(512).nullable(),
+  })
+  .strict();
+export type PackRigResolution = z.infer<typeof PackRigResolution>;
+
+export const PreviewPackInstallationRequest = z
+  .object({
+    rigId: z.string().uuid().optional(),
+    variableSetId: z.string().uuid().optional(),
+  })
+  .strict();
+export type PreviewPackInstallationRequest = z.infer<typeof PreviewPackInstallationRequest>;
+
+export const PackInstallationPreview = z
+  .object({
+    packId: z.string().min(1),
+    packVersion: z.string().min(1),
+    manifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
+    installationVersion: z.number().int().positive().nullable(),
+    action: z.enum(["install", "update", "repair"]),
+    ready: z.boolean(),
+    blockers: z.array(z.string().min(1).max(500)).max(256),
+    components: z.array(PackComponentResolution).max(160),
+    rig: PackRigResolution,
+    variableSetId: z.string().uuid().nullable(),
+    legacyInlineSkillCount: z.number().int().nonnegative().max(32),
+    legacySandboxImage: z.string().min(1).max(512).nullable(),
+  })
+  .strict();
+export type PackInstallationPreview = z.infer<typeof PackInstallationPreview>;
+
+export const InstallPackRequest = z
+  .object({
+    expectedManifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
+    expectedInstallationVersion: z.number().int().positive().optional(),
+    rigId: z.string().uuid().optional(),
+    variableSetId: z.string().uuid().optional(),
+    idempotencyKey: z.string().uuid(),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+  })
+  .strict();
+export type InstallPackRequest = z.infer<typeof InstallPackRequest>;
+
+export const PackUninstallPreview = z
+  .object({
+    packId: z.string().min(1),
+    installed: z.boolean(),
+    installationVersion: z.number().int().positive().nullable(),
+    components: z
+      .array(
+        z
+          .object({
+            key: CapabilityPackComponentKey,
+            kind: z.enum(["plugin", "skill", "integration", "facet", "inline_skill"]),
+            capabilityId: z.string().min(1).max(512),
+            retainedByOtherOwners: z.boolean(),
+          })
+          .strict(),
+      )
+      .max(160),
+  })
+  .strict();
+export type PackUninstallPreview = z.infer<typeof PackUninstallPreview>;
+
+export const UninstallPackRequest = z
+  .object({
+    expectedInstallationVersion: z.number().int().positive(),
+    idempotencyKey: z.string().uuid(),
+  })
+  .strict();
+export type UninstallPackRequest = z.infer<typeof UninstallPackRequest>;
+
+export const UninstallPackResult = z
+  .object({
+    packId: z.string().min(1),
+    status: z.enum(["not_installed", "uninstalled"]),
+    retainedComponents: z.array(z.string().min(1).max(512)).max(160),
+  })
+  .strict();
+export type UninstallPackResult = z.infer<typeof UninstallPackResult>;
 
 export const SocialProvider = z.enum([
   "x",
@@ -6682,6 +7561,48 @@ export const OpenGeniSlackBotConnectionMetadata = z
   .passthrough();
 export type OpenGeniSlackBotConnectionMetadata = z.infer<typeof OpenGeniSlackBotConnectionMetadata>;
 
+export const FIKEN_PROVIDER_DOMAIN = "fiken.no" as const;
+export const FIKEN_CREDENTIAL_ROLE = "fiken_api_token" as const;
+export const FIKEN_CREDENTIAL_LABEL = "Fiken API token" as const;
+
+export const FikenCompanySummary = z.object({
+  slug: z.string().min(1).max(128),
+  name: z.string().min(1).max(256),
+  organizationNumber: z.string().max(64).nullable(),
+});
+export type FikenCompanySummary = z.infer<typeof FikenCompanySummary>;
+
+export const FikenConnectionMetadata = z
+  .object({
+    credentialRole: z.literal(FIKEN_CREDENTIAL_ROLE),
+    credentialLabel: z.literal(FIKEN_CREDENTIAL_LABEL),
+    companies: z.array(FikenCompanySummary).max(100),
+    defaultCompanySlug: z.string().min(1).max(128).nullable(),
+    verifiedAt: z.string().datetime({ offset: true }),
+  })
+  .passthrough();
+export type FikenConnectionMetadata = z.infer<typeof FikenConnectionMetadata>;
+
+export const FikenInstallRequest = z.object({
+  apiToken: z.string().min(16).max(512),
+  defaultCompanySlug: z.string().min(1).max(128).optional(),
+  /** Existing Fiken connection to rewrite in place (reconnect). */
+  connectionId: z.string().uuid().optional(),
+});
+export type FikenInstallRequest = z.infer<typeof FikenInstallRequest>;
+
+export const FikenOAuthStartRequest = z.object({
+  /** Existing Fiken connection to re-authorize in place (reconnect). */
+  connectionId: z.string().uuid().optional(),
+});
+export type FikenOAuthStartRequest = z.infer<typeof FikenOAuthStartRequest>;
+
+export const FikenOAuthStartResponse = z.object({
+  authorizationUrl: z.string().url(),
+  expiresAt: z.string().datetime({ offset: true }),
+});
+export type FikenOAuthStartResponse = z.infer<typeof FikenOAuthStartResponse>;
+
 export const ConnectionMetadata = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -6797,6 +7718,38 @@ export const OpenGeniSlackBotInstallStart = z.object({
 });
 export type OpenGeniSlackBotInstallStart = z.infer<typeof OpenGeniSlackBotInstallStart>;
 
+export const SlackInstallationBindingState = z.enum(["active", "quarantined"]);
+export type SlackInstallationBindingState = z.infer<typeof SlackInstallationBindingState>;
+
+export const SlackInstallationBinding = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  accountName: z.string().min(1),
+  workspaceId: z.string().uuid(),
+  workspaceName: z.string().min(1),
+  connectionId: z.string().uuid(),
+  connectionStatus: ConnectionStatus,
+  connectionVersion: z.number().int().positive(),
+  slackTeamId: z.string().min(1).max(64),
+  slackTeamName: z.string().min(1).max(256),
+  botId: z.string().min(1).max(64),
+  botUserId: z.string().min(1).max(64),
+  botDisplayName: z.literal("OpenGeni"),
+  state: SlackInstallationBindingState,
+  quarantineReason: z.string().min(1).nullable(),
+  version: z.number().int().positive(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type SlackInstallationBinding = z.infer<typeof SlackInstallationBinding>;
+
+export const ListSlackInstallationBindingsResponse = z.object({
+  bindings: z.array(SlackInstallationBinding),
+});
+export type ListSlackInstallationBindingsResponse = z.infer<
+  typeof ListSlackInstallationBindingsResponse
+>;
+
 export const UpdateConnectionRequest = z.object({
   providerDomain: z.string().min(1).optional(),
   subjectId: z.string().min(1).nullable().optional(),
@@ -6897,6 +7850,45 @@ export type CapabilityCatalogAuthKind = z.infer<typeof CapabilityCatalogAuthKind
 export const CapabilityCatalogTier = z.enum(["verified", "community"]);
 export type CapabilityCatalogTier = z.infer<typeof CapabilityCatalogTier>;
 
+/**
+ * User-facing lifecycle truth for the Capabilities control center. This is a
+ * read-model projection only: each action is still executed by the owning
+ * Plugin, Integration, Connection, Skill, or Pack domain.
+ */
+export const CapabilityLifecycleStatus = z.enum([
+  "available",
+  "installed",
+  "connected",
+  "ready",
+  "needs_attention",
+  "unavailable",
+  "managed",
+]);
+export type CapabilityLifecycleStatus = z.infer<typeof CapabilityLifecycleStatus>;
+
+export const CapabilityReadiness = z.enum(["ready", "setup_required", "attention", "unavailable"]);
+export type CapabilityReadiness = z.infer<typeof CapabilityReadiness>;
+
+export const CapabilityAction = z.enum([
+  "install",
+  "connect",
+  "configure",
+  "update",
+  "repair",
+  "disconnect",
+  "uninstall",
+  "inspect",
+]);
+export type CapabilityAction = z.infer<typeof CapabilityAction>;
+
+export const CapabilityLifecycle = z.object({
+  status: CapabilityLifecycleStatus,
+  readiness: CapabilityReadiness,
+  detail: z.string().nullable().default(null),
+  managedBy: z.enum(["deployment", "platform", "workspace"]).nullable().default(null),
+});
+export type CapabilityLifecycle = z.infer<typeof CapabilityLifecycle>;
+
 export const CapabilityRuntime = z.object({
   available: z.boolean().default(false),
   mcpServerId: z.string().min(1).optional(),
@@ -6946,7 +7938,20 @@ export const CapabilityCatalogItem = z.object({
   staleAt: z.string().nullable().default(null),
   tools: z.array(ToolRef).default([]),
   runtime: CapabilityRuntime.default({ available: false, notes: null }),
+  lifecycle: CapabilityLifecycle.default({
+    status: "available",
+    readiness: "setup_required",
+    detail: null,
+    managedBy: null,
+  }),
+  actions: z.array(CapabilityAction).default([]),
+  /**
+   * @deprecated Compatibility projection for existing clients. New surfaces
+   * must use lifecycle and actions rather than treating every type as an
+   * enable/disable toggle.
+   */
   enabled: z.boolean().default(false),
+  /** @deprecated Compatibility explanation paired with enabled. */
   enabledReason: z.string().nullable().default(null),
   // The non-secret connection binding stored with an enabled installation.
   // Workspace refs retain an exact row id. Subject refs deliberately omit it:
@@ -7010,7 +8015,7 @@ export type CapabilityInstallation = z.infer<typeof CapabilityInstallation>;
 
 export const CreateCapabilityCatalogItemRequest = z.object({
   id: z.string().min(1).optional(),
-  kind: CapabilityKind.exclude(["pack"]),
+  kind: z.literal("mcp"),
   source: CapabilitySource.default("manual"),
   name: z.string().min(1),
   description: z.string().min(1).optional(),
@@ -7024,7 +8029,7 @@ export const CreateCapabilityCatalogItemRequest = z.object({
 });
 export type CreateCapabilityCatalogItemRequest = z.infer<typeof CreateCapabilityCatalogItemRequest>;
 
-export const EnableCapabilityRequest = withVariableSetIdAlias({
+export const EnableCapabilityRequest = z.object({
   config: z.record(z.string(), z.unknown()).default({}),
   metadata: z.record(z.string(), z.unknown()).default({}),
   connectionRef: McpServerConnectionRef.optional(),
@@ -7035,14 +8040,6 @@ export const EnableCapabilityRequest = withVariableSetIdAlias({
    * and never returned by the API — responses expose header names only.
    */
   headers: z.record(z.string(), z.string()).default({}),
-  /**
-   * Initial variableSet attachment for kind=pack capabilities. Mirrors the
-   * dedicated POST /packs/:id/enable body: required to enable an
-   * variableSet.required pack through the unified capability-enable path,
-   * optional otherwise. Ignored by non-pack capabilities.
-   */
-  variableSetId: z.string().uuid().optional(),
-  environmentId: z.string().uuid().optional(),
 });
 export type EnableCapabilityRequest = z.infer<typeof EnableCapabilityRequest>;
 
@@ -7058,6 +8055,763 @@ export const DiscoverMcpCapabilitiesResponse = z.object({
   sourceUrl: z.string().url(),
 });
 export type DiscoverMcpCapabilitiesResponse = z.infer<typeof DiscoverMcpCapabilitiesResponse>;
+
+export const SkillImportSource = z.enum(["github", "skills_sh"]);
+export type SkillImportSource = z.infer<typeof SkillImportSource>;
+
+export const SkillInstallationSource = z.enum(["library", "github", "skills_sh", "pack"]);
+export type SkillInstallationSource = z.infer<typeof SkillInstallationSource>;
+
+export const PreviewSkillImportRequest = z.object({
+  url: z.string().url().max(2048),
+});
+export type PreviewSkillImportRequest = z.infer<typeof PreviewSkillImportRequest>;
+
+export const SkillImportFileSummary = z.object({
+  path: z.string().min(1).max(1024),
+  byteSize: z.number().int().nonnegative().max(262144),
+  contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+});
+export type SkillImportFileSummary = z.infer<typeof SkillImportFileSummary>;
+
+export const SkillImportPreview = z.object({
+  source: SkillImportSource,
+  sourceUrl: z.string().url(),
+  repositoryUrl: z.string().url(),
+  owner: z.string().min(1).max(100),
+  repository: z.string().min(1).max(100),
+  sourcePath: z.string().min(1).max(1024),
+  sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+  name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
+  description: z.string().min(1).max(2048),
+  contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  totalBytes: z.number().int().positive().max(1048576),
+  files: z.array(SkillImportFileSummary).min(1).max(128),
+  warnings: z.array(z.string().min(1).max(500)).max(32).default([]),
+  installed: z.boolean().default(false),
+  installationVersion: z.number().int().positive().nullable().default(null),
+});
+export type SkillImportPreview = z.infer<typeof SkillImportPreview>;
+
+export const InstallSkillRequest = z.object({
+  url: z.string().url().max(2048),
+  expectedSourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+  expectedContentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  expectedInstallationVersion: z.number().int().positive().optional(),
+});
+export type InstallSkillRequest = z.infer<typeof InstallSkillRequest>;
+
+export const InstallLibrarySkillRequest = z
+  .object({
+    expectedVersion: z.string().min(1).max(96),
+    expectedContentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    expectedInstallationVersion: z.number().int().positive().optional(),
+  })
+  .strict();
+export type InstallLibrarySkillRequest = z.infer<typeof InstallLibrarySkillRequest>;
+
+export const InstalledSkill = z.object({
+  capabilityId: z.string().min(1),
+  pluginId: z.string().uuid(),
+  pluginVersionId: z.string().uuid(),
+  facetId: z.string().uuid(),
+  pluginInstallationId: z.string().uuid(),
+  facetInstallationId: z.string().uuid(),
+  installationVersion: z.number().int().positive(),
+  source: SkillInstallationSource,
+  version: z.string().min(1).max(96),
+  sourceUrl: z.string().url(),
+  sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+  contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  name: z.string(),
+  status: z.literal("installed"),
+});
+export type InstalledSkill = z.infer<typeof InstalledSkill>;
+
+export const CapabilityComponentOwner = z.object({
+  kind: z.enum(["direct", "plugin", "pack", "migration"]),
+  id: z.string().min(1).max(512),
+  removable: z.boolean(),
+});
+export type CapabilityComponentOwner = z.infer<typeof CapabilityComponentOwner>;
+
+export const InstalledSkillSummary = z
+  .object({
+    capabilityId: z.string().min(1),
+    pluginKey: z.string().min(1).max(200),
+    installationVersion: z.number().int().positive(),
+    name: z.string().min(1).max(200),
+    description: z.string().max(4000),
+    category: z.string().min(1).max(100),
+    tags: z.array(z.string().min(1).max(100)).max(64),
+    provenance: z.string().min(1).max(4000),
+    source: SkillInstallationSource,
+    version: z.string().min(1).max(96),
+    sourceUrl: z.string().url().max(2048),
+    repositoryUrl: z.string().url().max(2048),
+    sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+    sourcePath: z.string().min(1).max(1024),
+    contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    fileCount: z.number().int().positive().max(128),
+    totalBytes: z.number().int().positive().max(1048576),
+    license: z.string().min(1).max(200).nullable(),
+    installedAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
+    owners: z.array(CapabilityComponentOwner).min(1),
+  })
+  .strict();
+export type InstalledSkillSummary = z.infer<typeof InstalledSkillSummary>;
+
+export const ListInstalledSkillsResponse = z
+  .object({ skills: z.array(InstalledSkillSummary).max(1000) })
+  .strict();
+export type ListInstalledSkillsResponse = z.infer<typeof ListInstalledSkillsResponse>;
+
+export const SkillUninstallPreview = z.object({
+  capabilityId: z.string().min(1),
+  installed: z.boolean(),
+  installationVersion: z.number().int().positive().nullable(),
+  directOwner: CapabilityComponentOwner.nullable(),
+  remainingOwners: z.array(CapabilityComponentOwner),
+  removesRuntimeSkill: z.boolean(),
+});
+export type SkillUninstallPreview = z.infer<typeof SkillUninstallPreview>;
+
+export const UninstallSkillRequest = z.object({
+  expectedInstallationVersion: z.number().int().positive(),
+});
+export type UninstallSkillRequest = z.infer<typeof UninstallSkillRequest>;
+
+export const UninstallSkillResult = z.object({
+  capabilityId: z.string().min(1),
+  status: z.enum(["not_installed", "uninstalled", "retained_by_other_owners"]),
+  remainingOwners: z.array(CapabilityComponentOwner),
+});
+export type UninstallSkillResult = z.infer<typeof UninstallSkillResult>;
+
+export const ApiIntegrationProtocol = z.enum(["openapi", "graphql"]);
+export type ApiIntegrationProtocol = z.infer<typeof ApiIntegrationProtocol>;
+
+export const IntegrationDefinitionProvenance = z.enum(["curated", "workspace"]);
+export type IntegrationDefinitionProvenance = z.infer<typeof IntegrationDefinitionProvenance>;
+
+export const IntegrationFacetKey = z
+  .string()
+  .min(1)
+  .max(200)
+  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
+export type IntegrationFacetKey = z.infer<typeof IntegrationFacetKey>;
+
+export const IntegrationFacetKind = z.enum([
+  "tools",
+  "knowledge_source",
+  "inbound_trigger",
+  "delivery_destination",
+  "identity_link",
+]);
+export type IntegrationFacetKind = z.infer<typeof IntegrationFacetKind>;
+
+export const IntegrationFacetStatus = z.enum(["active", "paused", "needs_attention", "disabled"]);
+export type IntegrationFacetStatus = z.infer<typeof IntegrationFacetStatus>;
+
+const IntegrationFacetJsonObject = z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    ctx.addIssue({ code: "custom", message: "must be JSON serializable" });
+    return;
+  }
+  if (new TextEncoder().encode(serialized).byteLength > 131_072) {
+    ctx.addIssue({
+      code: "custom",
+      message: "must not exceed 131072 UTF-8 bytes",
+    });
+  }
+});
+
+export const IntegrationFacetDefinitionSummary = z
+  .object({
+    facetKey: IntegrationFacetKey,
+    kind: IntegrationFacetKind.exclude(["tools"]),
+    configSchema: IntegrationFacetJsonObject,
+    capabilities: IntegrationFacetJsonObject,
+  })
+  .strict();
+export type IntegrationFacetDefinitionSummary = z.infer<typeof IntegrationFacetDefinitionSummary>;
+
+export const IntegrationDefinitionSummary = z
+  .object({
+    id: z.string().min(1).max(128),
+    name: z.string().min(1).max(200),
+    summary: z.string().min(1).max(1000),
+    protocol: z.literal("openapi"),
+    provider: z
+      .object({
+        id: z.enum(["google", "microsoft"]),
+        domain: z.string().min(1).max(253),
+      })
+      .strict(),
+    authentication: z
+      .object({
+        kind: z.literal("oauth2"),
+        scopes: z.array(z.string().min(1).max(1024)).max(256),
+      })
+      .strict(),
+    facets: z.array(IntegrationFacetDefinitionSummary).max(128),
+  })
+  .strict();
+export type IntegrationDefinitionSummary = z.infer<typeof IntegrationDefinitionSummary>;
+
+export const ListIntegrationDefinitionsResponse = z
+  .object({ definitions: z.array(IntegrationDefinitionSummary).max(128) })
+  .strict();
+export type ListIntegrationDefinitionsResponse = z.infer<typeof ListIntegrationDefinitionsResponse>;
+
+export const IntegrationInstanceKey = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
+export type IntegrationInstanceKey = z.infer<typeof IntegrationInstanceKey>;
+
+export const IntegrationFacetBindingSummary = z
+  .object({
+    id: z.string().uuid(),
+    facetKey: IntegrationFacetKey,
+    kind: IntegrationFacetKind.exclude(["tools"]),
+    bindingKey: IntegrationInstanceKey,
+    displayName: z.string().min(1).max(200),
+    connectionId: z.string().uuid().nullable(),
+    status: IntegrationFacetStatus,
+    config: IntegrationFacetJsonObject,
+    version: z.number().int().positive(),
+    hasCursor: z.boolean(),
+    lastSuccessAt: z.string().datetime({ offset: true }).nullable(),
+    lastErrorCode: z.string().min(1).max(120).nullable(),
+    createdAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type IntegrationFacetBindingSummary = z.infer<typeof IntegrationFacetBindingSummary>;
+
+export const IntegrationInstanceFacetsResponse = z
+  .object({
+    capabilityId: z.string().min(1).max(512),
+    instanceKey: IntegrationInstanceKey,
+    providerDomain: z.string().min(1).max(253),
+    connectionId: z.string().uuid().nullable(),
+    facets: z
+      .array(
+        z
+          .object({
+            definition: IntegrationFacetDefinitionSummary,
+            binding: IntegrationFacetBindingSummary.nullable(),
+          })
+          .strict(),
+      )
+      .max(128),
+  })
+  .strict();
+export type IntegrationInstanceFacetsResponse = z.infer<typeof IntegrationInstanceFacetsResponse>;
+
+export const UpsertIntegrationFacetRequest = z
+  .object({
+    displayName: z.string().min(1).max(200),
+    config: IntegrationFacetJsonObject.default({}),
+    expectedVersion: z.number().int().positive().optional(),
+    idempotencyKey: z.string().uuid(),
+  })
+  .strict();
+export type UpsertIntegrationFacetRequest = z.infer<typeof UpsertIntegrationFacetRequest>;
+
+export const MutateIntegrationFacetRequest = z
+  .object({
+    expectedVersion: z.number().int().positive(),
+    idempotencyKey: z.string().uuid(),
+  })
+  .strict();
+export type MutateIntegrationFacetRequest = z.infer<typeof MutateIntegrationFacetRequest>;
+
+export const IntegrationFacetMutationResult = z
+  .object({
+    capabilityId: z.string().min(1).max(512),
+    instanceKey: IntegrationInstanceKey,
+    facetKey: IntegrationFacetKey,
+    status: z.enum(["configured", "paused", "active"]),
+    binding: IntegrationFacetBindingSummary,
+  })
+  .strict();
+export type IntegrationFacetMutationResult = z.infer<typeof IntegrationFacetMutationResult>;
+
+export const IntegrationFacetRemovalResult = z
+  .object({
+    capabilityId: z.string().min(1).max(512),
+    instanceKey: IntegrationInstanceKey,
+    facetKey: IntegrationFacetKey,
+    status: z.enum(["not_configured", "removed", "retained_by_other_owners"]),
+    binding: IntegrationFacetBindingSummary.nullable(),
+    remainingOwners: z.array(CapabilityComponentOwner),
+  })
+  .strict();
+export type IntegrationFacetRemovalResult = z.infer<typeof IntegrationFacetRemovalResult>;
+
+export const IntegrationSource = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("definition"),
+      definitionId: z.string().min(1).max(128),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("openapi"),
+      url: z.string().url().max(2048),
+      baseUrl: z.string().url().max(2048).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("graphql"),
+      endpoint: z.string().url().max(2048),
+      name: z.string().min(1).max(200).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("auto"),
+      url: z.string().url().max(2048),
+      baseUrl: z.string().url().max(2048).optional(),
+    })
+    .strict(),
+]);
+export type IntegrationSource = z.infer<typeof IntegrationSource>;
+
+export const PreviewApiIntegrationRequest = z
+  .object({
+    source: IntegrationSource,
+    connectionId: z.string().uuid().optional(),
+    ownership: ConnectionOwnership.optional(),
+  })
+  .strict();
+export type PreviewApiIntegrationRequest = z.infer<typeof PreviewApiIntegrationRequest>;
+
+export const ApiIntegrationOAuthStartRequest = z
+  .object({
+    definitionId: z.string().min(1).max(128),
+    ownership: ConnectionOwnership.optional(),
+    connectionId: z.string().uuid().optional(),
+    returnPath: z.string().min(1).max(2048).optional(),
+  })
+  .strict();
+export type ApiIntegrationOAuthStartRequest = z.infer<typeof ApiIntegrationOAuthStartRequest>;
+
+export const API_INTEGRATION_OAUTH_CREDENTIAL_ROLE = "api_integration_oauth" as const;
+
+export const ApiIntegrationOAuthConnectionMetadata = z
+  .object({
+    credentialRole: z.literal(API_INTEGRATION_OAUTH_CREDENTIAL_ROLE),
+    providerFamily: z.enum(["google", "microsoft"]),
+    providerPrincipalId: z.string().min(1).max(512),
+    providerEmail: z.string().min(1).max(512).nullable(),
+    providerDisplayName: z.string().min(1).max(512).nullable(),
+    authorizedDefinitionIds: z.array(z.string().min(1).max(128)).min(1).max(32),
+    verifiedAt: z.string().datetime({ offset: true }),
+  })
+  .passthrough();
+export type ApiIntegrationOAuthConnectionMetadata = z.infer<
+  typeof ApiIntegrationOAuthConnectionMetadata
+>;
+
+export const ApiIntegrationAuthPreview = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("none") }).strict(),
+  z
+    .object({
+      kind: z.literal("oauth2"),
+      providerDomain: z.string().min(1).max(253),
+      scopes: z.array(z.string().min(1).max(1024)).max(256),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("api_key"),
+      providerDomain: z.string().min(1).max(253),
+      carrier: z.enum(["header", "query", "cookie"]),
+      name: z.string().min(1).max(256),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("http"),
+      providerDomain: z.string().min(1).max(253),
+      scheme: z.string().min(1).max(64),
+    })
+    .strict(),
+]);
+export type ApiIntegrationAuthPreview = z.infer<typeof ApiIntegrationAuthPreview>;
+
+export const ApiIntegrationToolPreview = z
+  .object({
+    id: z.string().min(1).max(200),
+    operationKey: z.string().min(1).max(512),
+    name: z.string().min(1).max(200),
+    description: z.string().max(4000),
+    safety: z.enum(["read", "write", "destructive"]),
+    approvalMode: z.enum(["never", "ask"]),
+    deprecated: z.boolean(),
+  })
+  .strict();
+export type ApiIntegrationToolPreview = z.infer<typeof ApiIntegrationToolPreview>;
+
+export const ApiIntegrationPreview = z
+  .object({
+    source: IntegrationSource,
+    definitionId: z.string().min(1).max(200),
+    definitionProvenance: IntegrationDefinitionProvenance,
+    protocol: ApiIntegrationProtocol,
+    capabilityId: z.string().min(1).max(512),
+    pluginKey: z.string().min(1).max(200),
+    serverId: SessionMcpServerId,
+    name: z.string().min(1).max(200),
+    description: z.string().max(4000).nullable(),
+    provider: z.string().min(1).max(128).nullable(),
+    providerDomain: z.string().min(1).max(253),
+    baseUrl: z.string().url().max(2048),
+    sourceUrl: z.string().url().max(2048).nullable(),
+    revisionId: z.string().min(1).max(96),
+    contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    auth: ApiIntegrationAuthPreview,
+    connectionId: z.string().uuid().nullable(),
+    connectionOwnership: ConnectionOwnership.nullable(),
+    tools: z.array(ApiIntegrationToolPreview).min(1).max(2000),
+    warnings: z.array(z.string().min(1).max(500)).max(32).default([]),
+  })
+  .strict();
+export type ApiIntegrationPreview = z.infer<typeof ApiIntegrationPreview>;
+
+export const InstallApiIntegrationRequest = z
+  .object({
+    source: IntegrationSource,
+    expectedRevisionId: z.string().min(1).max(96),
+    expectedContentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    connectionId: z.string().uuid().optional(),
+    ownership: ConnectionOwnership.optional(),
+    instanceKey: IntegrationInstanceKey.optional(),
+    displayName: z.string().min(1).max(200).optional(),
+    expectedInstanceVersion: z.number().int().positive().optional(),
+    allowedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
+  })
+  .strict();
+export type InstallApiIntegrationRequest = z.infer<typeof InstallApiIntegrationRequest>;
+
+export const InstalledApiIntegration = z
+  .object({
+    capabilityId: z.string().min(1),
+    pluginId: z.string().uuid(),
+    pluginVersionId: z.string().uuid(),
+    integrationFacetId: z.string().uuid(),
+    apiFacetId: z.string().uuid(),
+    pluginInstallationId: z.string().uuid(),
+    integrationFacetInstallationId: z.string().uuid(),
+    apiFacetInstallationId: z.string().uuid(),
+    installationVersion: z.number().int().positive(),
+    instanceId: z.string().uuid(),
+    instanceKey: IntegrationInstanceKey,
+    displayName: z.string().min(1).max(200),
+    instanceVersion: z.number().int().positive(),
+    revisionId: z.string().min(1),
+    serverId: SessionMcpServerId,
+    status: z.literal("installed"),
+  })
+  .strict();
+export type InstalledApiIntegration = z.infer<typeof InstalledApiIntegration>;
+
+export const ApiIntegrationInstallationSummary = z
+  .object({
+    capabilityId: z.string().min(1),
+    pluginKey: z.string().min(1),
+    installationVersion: z.number().int().positive(),
+    instanceId: z.string().uuid(),
+    instanceKey: IntegrationInstanceKey,
+    displayName: z.string().min(1).max(200),
+    instanceVersion: z.number().int().positive(),
+    serverId: SessionMcpServerId,
+    name: z.string().min(1),
+    description: z.string().nullable(),
+    protocol: ApiIntegrationProtocol,
+    definitionId: z.string().min(1).max(200),
+    definitionProvenance: IntegrationDefinitionProvenance,
+    providerDomain: z.string().min(1),
+    baseUrl: z.string().url(),
+    sourceUrl: z.string().url().nullable(),
+    connected: z.boolean(),
+    requiresConnection: z.boolean(),
+    connectionId: z.string().uuid().nullable(),
+    ownership: z.enum(["workspace", "personal", "none"]),
+    allowedTools: z.array(z.string().min(1).max(200)).max(2000),
+    toolCount: z.number().int().nonnegative(),
+    approvalRequiredToolCount: z.number().int().nonnegative(),
+    revisionId: z.string().min(1),
+    contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  .strict();
+export type ApiIntegrationInstallationSummary = z.infer<typeof ApiIntegrationInstallationSummary>;
+
+export const ListApiIntegrationsResponse = z
+  .object({ integrations: z.array(ApiIntegrationInstallationSummary) })
+  .strict();
+export type ListApiIntegrationsResponse = z.infer<typeof ListApiIntegrationsResponse>;
+
+export const ApiIntegrationUninstallPreview = z
+  .object({
+    capabilityId: z.string().min(1),
+    instanceKey: IntegrationInstanceKey,
+    displayName: z.string().min(1).max(200).nullable(),
+    installed: z.boolean(),
+    installationVersion: z.number().int().positive().nullable(),
+    instanceVersion: z.number().int().positive().nullable(),
+    directOwner: CapabilityComponentOwner.nullable(),
+    remainingOwners: z.array(CapabilityComponentOwner),
+    removesRuntimeIntegration: z.boolean(),
+    removesDefinition: z.boolean(),
+  })
+  .strict();
+export type ApiIntegrationUninstallPreview = z.infer<typeof ApiIntegrationUninstallPreview>;
+
+export const UninstallApiIntegrationRequest = z
+  .object({
+    expectedInstallationVersion: z.number().int().positive(),
+    expectedInstanceVersion: z.number().int().positive(),
+  })
+  .strict();
+export type UninstallApiIntegrationRequest = z.infer<typeof UninstallApiIntegrationRequest>;
+
+export const UninstallApiIntegrationResult = z
+  .object({
+    capabilityId: z.string().min(1),
+    instanceKey: IntegrationInstanceKey,
+    status: z.enum(["not_installed", "uninstalled", "retained_by_other_owners"]),
+    remainingOwners: z.array(CapabilityComponentOwner),
+    definitionStatus: z.enum(["retained", "disabled"]),
+  })
+  .strict();
+export type UninstallApiIntegrationResult = z.infer<typeof UninstallApiIntegrationResult>;
+
+const PluginComponentKey = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
+
+export const PluginManifest = z
+  .object({
+    schemaVersion: z.literal(1),
+    pluginKey: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/),
+    version: z.string().min(1).max(128),
+    name: z.string().min(1).max(200),
+    description: z.string().max(4000).default(""),
+    category: z.string().min(1).max(100).default("plugins"),
+    tags: z.array(z.string().min(1).max(100)).max(64).default([]),
+    components: z
+      .array(
+        z.discriminatedUnion("kind", [
+          z
+            .object({
+              key: PluginComponentKey,
+              kind: z.literal("skill"),
+              url: z.string().url(),
+            })
+            .strict(),
+          z
+            .object({
+              key: PluginComponentKey,
+              kind: z.literal("integration"),
+              source: IntegrationSource,
+            })
+            .strict(),
+          z
+            .object({
+              key: PluginComponentKey,
+              kind: z.literal("mcp"),
+              serverId: SessionMcpServerId,
+            })
+            .strict(),
+        ]),
+      )
+      .min(1)
+      .max(64),
+  })
+  .strict()
+  .superRefine((manifest, context) => {
+    const seen = new Set<string>();
+    for (const [index, component] of manifest.components.entries()) {
+      if (seen.has(component.key)) {
+        context.addIssue({
+          code: "custom",
+          message: "Plugin component keys must be unique",
+          path: ["components", index, "key"],
+        });
+      }
+      seen.add(component.key);
+    }
+  });
+export type PluginManifest = z.infer<typeof PluginManifest>;
+
+export const PluginComponentBinding = z
+  .object({
+    connectionId: z.string().uuid().optional(),
+    instanceKey: IntegrationInstanceKey.optional(),
+    displayName: z.string().min(1).max(200).optional(),
+  })
+  .strict();
+export type PluginComponentBinding = z.infer<typeof PluginComponentBinding>;
+
+export const PreviewPluginRequest = z
+  .object({
+    url: z.string().url().max(2048),
+    bindings: z.record(PluginComponentKey, PluginComponentBinding).default({}),
+  })
+  .strict();
+export type PreviewPluginRequest = z.infer<typeof PreviewPluginRequest>;
+
+export const PluginComponentPreview = z
+  .object({
+    key: PluginComponentKey,
+    kind: z.enum(["skill", "integration", "mcp"]),
+    name: z.string().min(1).max(200),
+    capabilityId: z.string().min(1).max(512),
+    digest: z.string().regex(/^[0-9a-f]{64}$/),
+    connectionRequired: z.boolean(),
+    connectionId: z.string().uuid().nullable(),
+    instanceKey: IntegrationInstanceKey.nullable(),
+    displayName: z.string().min(1).max(200).nullable(),
+    facts: z.record(z.string(), z.unknown()),
+  })
+  .strict();
+export type PluginComponentPreview = z.infer<typeof PluginComponentPreview>;
+
+export const PluginUpdateDiff = z
+  .object({
+    fromVersion: z.string().nullable(),
+    toVersion: z.string().min(1),
+    added: z.array(PluginComponentKey),
+    removed: z.array(PluginComponentKey),
+    changed: z.array(PluginComponentKey),
+    unchanged: z.array(PluginComponentKey),
+  })
+  .strict();
+export type PluginUpdateDiff = z.infer<typeof PluginUpdateDiff>;
+
+export const PluginPreview = z
+  .object({
+    sourceUrl: z.string().url(),
+    manifest: PluginManifest,
+    manifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
+    installed: z.boolean(),
+    installationVersion: z.number().int().positive().nullable(),
+    components: z.array(PluginComponentPreview).min(1).max(64),
+    diff: PluginUpdateDiff,
+  })
+  .strict();
+export type PluginPreview = z.infer<typeof PluginPreview>;
+
+export const InstallPluginRequest = z
+  .object({
+    url: z.string().url().max(2048),
+    expectedManifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
+    expectedComponents: z
+      .array(
+        z
+          .object({
+            key: PluginComponentKey,
+            digest: z.string().regex(/^[0-9a-f]{64}$/),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(64),
+    bindings: z.record(PluginComponentKey, PluginComponentBinding).default({}),
+    idempotencyKey: z.string().uuid(),
+    expectedInstallationVersion: z.number().int().positive().optional(),
+  })
+  .strict();
+export type InstallPluginRequest = z.infer<typeof InstallPluginRequest>;
+
+export const InstalledPlugin = z
+  .object({
+    pluginKey: z.string().min(1),
+    version: z.string().min(1),
+    pluginId: z.string().uuid(),
+    pluginVersionId: z.string().uuid(),
+    pluginInstallationId: z.string().uuid(),
+    installationVersion: z.number().int().positive(),
+    componentCount: z.number().int().positive(),
+    status: z.literal("installed"),
+  })
+  .strict();
+export type InstalledPlugin = z.infer<typeof InstalledPlugin>;
+
+export const PluginInstallationSummary = z
+  .object({
+    pluginKey: z.string().min(1).max(200),
+    version: z.string().min(1).max(128),
+    name: z.string().min(1).max(200),
+    description: z.string().max(4000),
+    category: z.string().min(1).max(100),
+    tags: z.array(z.string().min(1).max(100)).max(64),
+    sourceUrl: z.string().url().max(2048).nullable(),
+    manifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
+    installationVersion: z.number().int().positive(),
+    componentCount: z.number().int().nonnegative().max(64),
+    status: z.enum(["active", "needs_attention"]),
+    installedAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type PluginInstallationSummary = z.infer<typeof PluginInstallationSummary>;
+
+export const ListInstalledPluginsResponse = z
+  .object({ plugins: z.array(PluginInstallationSummary).max(1000) })
+  .strict();
+export type ListInstalledPluginsResponse = z.infer<typeof ListInstalledPluginsResponse>;
+
+export const PluginUninstallPreview = z
+  .object({
+    pluginKey: z.string().min(1),
+    installed: z.boolean(),
+    version: z.string().nullable(),
+    installationVersion: z.number().int().positive().nullable(),
+    components: z.array(
+      z.object({
+        capabilityId: z.string().min(1),
+        kind: z.enum(["skill", "integration", "mcp"]),
+        retainedByOtherOwners: z.boolean(),
+      }),
+    ),
+  })
+  .strict();
+export type PluginUninstallPreview = z.infer<typeof PluginUninstallPreview>;
+
+export const UninstallPluginRequest = z
+  .object({
+    expectedInstallationVersion: z.number().int().positive(),
+    idempotencyKey: z.string().uuid(),
+  })
+  .strict();
+export type UninstallPluginRequest = z.infer<typeof UninstallPluginRequest>;
+
+export const UninstallPluginResult = z
+  .object({
+    pluginKey: z.string().min(1),
+    status: z.enum(["not_installed", "uninstalled"]),
+    retainedComponents: z.array(z.string().min(1)),
+  })
+  .strict();
+export type UninstallPluginResult = z.infer<typeof UninstallPluginResult>;
 
 export const Session = z.object({
   id: z.string().uuid(),
@@ -7086,6 +8840,8 @@ export const Session = z.object({
   // the workspace runtime registry.
   effectiveToolPolicy: SessionEffectiveToolPolicy.optional(),
   metadata: z.record(z.string(), z.unknown()),
+  /** Additive public tenancy projection; omitted by legacy/internal readers. */
+  tenancy: SessionTenancyPublicProjection.optional(),
   /** Frozen creator fact used only for creation attribution/idempotent repair. */
   createdBy: TurnInitiator,
   createdByContext: TurnInitiatorContext,
@@ -7117,6 +8873,9 @@ export const Session = z.object({
   // Both null ⇒ a rig-less session (byte-for-byte today's behavior).
   rigId: z.string().uuid().nullable().default(null),
   rigVersionId: z.string().uuid().nullable().default(null),
+  // Workspace channel this session is filed under (rail organization only;
+  // a session tree is grouped by its ROOT session's channel). Null = unfiled.
+  channelId: z.string().uuid().nullable().default(null),
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
   firstPartyMcpPermissions: z.array(Permission).nullable(),
@@ -7296,6 +9055,7 @@ export type SessionLineageResponse = z.infer<typeof SessionLineageResponse>;
 
 export const SessionEventType = z.enum([
   "session.created",
+  "session.visibility.changed",
   // Defensive read/transport projection for a malformed or historically
   // oversized retained event envelope. The original row stays durable; this
   // explicit synthetic type prevents unbounded free-form envelope fields from
@@ -7346,6 +9106,9 @@ export const SessionEventType = z.enum([
   "artifact.created",
   "goal.set",
   "goal.updated",
+  "goal.progress",
+  "goal.rewrite.proposed",
+  "goal.rewrite.rejected",
   "goal.completed",
   "goal.paused",
   "goal.resumed",
@@ -7549,6 +9312,9 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "user.humanInputResponse",
     "goal.set",
     "goal.updated",
+    "goal.progress",
+    "goal.rewrite.proposed",
+    "goal.rewrite.rejected",
     "goal.completed",
     "goal.paused",
     "goal.resumed",
@@ -8060,6 +9826,9 @@ export type GitStatusRequest = z.infer<typeof GitStatusRequest>;
 export const GitStatusResponse = z.object({
   isRepo: z.boolean(),
   head: z.string().nullable(), // branch name
+  // Exact commit object identity. null for unborn/non-repositories; optional
+  // only so older adapters and serialized captures remain readable.
+  headOid: z.string().nullable().optional(),
   detached: z.boolean().default(false),
   upstream: z.string().nullable(),
   ahead: z.number().int().nonnegative().default(0),
@@ -8185,6 +9954,9 @@ export type WorkspaceCaptureFile = z.infer<typeof WorkspaceCaptureFile>;
 export const WorkspaceCaptureRepo = z.object({
   root: z.string(),
   head: z.string().nullable(),
+  // Exact HEAD commit object identity. null for unborn repositories; optional
+  // for workspace captures written before commit identity was retained.
+  headOid: z.string().nullable().optional(),
   detached: z.boolean().default(false),
   upstream: z.string().nullable(),
   ahead: z.number().int().nonnegative().default(0),
@@ -9516,6 +11288,10 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // null ⇒ explicitly create a rig-less session; UUID ⇒ bind that exact rig.
   // An id that does not name a rig in the workspace is a 422.
   rigId: z.string().uuid().nullable().optional(),
+  // The workspace channel to file this session under (rail organization only).
+  // Omitted/null ⇒ unfiled (inbox). An id that does not name a channel in the
+  // workspace is a 422.
+  channelId: z.string().uuid().nullable().optional(),
   goal: GoalSpec.optional(),
   clientEventId: SessionOperationKey.optional(),
   // Workspace-scoped CREATE idempotency key: collapses concurrent/retried
@@ -9975,7 +11751,7 @@ export const SessionCapabilities = z.object({
     reason: CapabilityUnavailableReason.nullable(),
   }),
   Terminal: z.object({
-    transport: z.enum(["sse-events", "pty-ws"]).nullable(),
+    transport: z.enum(["sse-events", "pty-ws", "relay-pty"]).nullable(),
     ptyCapable: z.boolean(),
     shell: z.string(),
     // The direct-to-provider ttyd PTY-over-websocket URL (pty-ws) resolved on the
@@ -10092,7 +11868,7 @@ export const AttachViewerResponse = /* @__PURE__ */ ViewerHolder.extend({
   terminalUrl: z.string().nullable(),
   terminalToken: z.string().nullable(),
   terminalExpiresAt: z.string().nullable(),
-  terminalTransport: z.literal("pty-ws").nullable(),
+  terminalTransport: z.enum(["pty-ws", "relay-pty"]).nullable(),
 });
 export type AttachViewerResponse = z.infer<typeof AttachViewerResponse>;
 
@@ -10298,10 +12074,23 @@ export const RevokeEnrollmentResponse = z.object({
   lastSeenAt: z.string().datetime({ offset: true }).nullable(),
   revokedAt: z.string().datetime({ offset: true }).nullable(),
   code: z
-    .enum(["active_route", "active_commands", "active_lease", "recovery_pending", "not_selfhosted"])
+    .enum([
+      "active_route",
+      "active_commands",
+      "machine_home",
+      "active_lease",
+      "recovery_pending",
+      "not_selfhosted",
+    ])
     .nullable(),
   message: z.string(),
   action: z.string(),
+  dependentSessions: z.array(
+    z.object({
+      id: z.string().uuid(),
+      title: z.string().nullable(),
+    }),
+  ),
 });
 export type RevokeEnrollmentResponse = z.infer<typeof RevokeEnrollmentResponse>;
 
@@ -10619,7 +12408,7 @@ export const ModelCredentialSourceV1 =
       z
         .object({
           kind: z.literal("connected_subscription"),
-          provider: z.literal("codex"),
+          provider: z.enum(["codex", "xai"]),
         })
         .strict(),
       z
@@ -10830,7 +12619,7 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     provider: z.string(), // provider id
     providerLabel: z.string(),
     api: z.enum(["responses", "chat"]),
-    source: z.enum(["opengeni", "codex", "workspace_gateway"]).optional(),
+    source: z.enum(["opengeni", "codex", "supergrok", "workspace_gateway"]).optional(),
     contextWindowTokens: z.number().int().positive().optional(),
     // Additive normalized definition metadata. Optional so older server payloads
     // remain parseable; current servers project the complete V1 set.
@@ -10963,7 +12752,7 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-workspace-artifacts-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-social-provider-tools-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -10991,6 +12780,15 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         }),
       )
       .default([]),
+    firstPartyMcpTools: z
+      .object({
+        default: z.array(FirstPartyMcpToolName),
+        allowed: z.array(FirstPartyMcpToolName),
+      })
+      .default({
+        default: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+        allowed: [...FIRST_PARTY_MCP_TOOL_NAMES],
+      }),
     fileUploads: z.object({
       enabled: z.boolean(),
       maxSizeBytes: z.number().int().positive(),
@@ -11125,9 +12923,13 @@ export function evaluateWorkspaceModelPolicy(
 }
 
 export * from "./codex-fleet-policy";
+export * from "./xai-provider-account-authority";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
 export * from "./workspace-learning-policy";
 export * from "./workspace-state";
 export * from "./preference-registry";
 export * from "./scoped-knowledge";
+export * from "./knowledge";
+export * from "./task-notes";
+export * from "./canonical-human-identities";

@@ -25,6 +25,26 @@ export type PersistenceFailureDetails = {
 
 const SQLSTATE_KEYS = ["sqlState", "sqlstate", "code"] as const;
 const NESTED_ERROR_KEYS = ["cause", "original", "driverError", "error", "errors"] as const;
+const RETRYABLE_DATABASE_TRANSPORT_CODES = new Set([
+  // postgres.js connection lifecycle failures.
+  "CONNECTION_CLOSED",
+  "CONNECTION_DESTROYED",
+  "CONNECTION_ENDED",
+  "CONNECT_TIMEOUT",
+  // Node socket/DNS failures surfaced unchanged by postgres.js.
+  "EAI_AGAIN",
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTDOWN",
+  "EHOSTUNREACH",
+  "ENETDOWN",
+  "ENETRESET",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "ETIMEDOUT",
+]);
 const DATABASE_ERROR_NAMES = new Set(["DatabaseError", "DrizzleQueryError", "PostgresError"]);
 const DATABASE_DIAGNOSTIC_KEYS = [
   "severity",
@@ -72,6 +92,9 @@ export function nestedPostgresSqlState(error: unknown): string | null {
       const value = current[key];
       if (typeof value !== "string" || !/^[0-9A-Z]{5}$/i.test(value)) continue;
       const normalized = value.toUpperCase();
+      // Node transport codes such as EPIPE happen to be five characters but
+      // are not PostgreSQL SQLSTATEs.
+      if (RETRYABLE_DATABASE_TRANSPORT_CODES.has(normalized)) continue;
       if (normalized === "40P01" || normalized === "40001") return normalized;
       fallback ??= normalized;
     }
@@ -95,12 +118,48 @@ export function isRetryablePersistenceSqlState(sqlState: string | null): boolean
 }
 
 /**
+ * Recognize only explicit postgres.js/Node transport codes, including nested
+ * driver causes. These failures can arrive as plain Errors with no SQLSTATE or
+ * database diagnostic fields when the connection dies before PostgreSQL can
+ * answer. Messages are intentionally ignored: they are unstable and may
+ * contain connection detail.
+ */
+export function isRetryableDatabaseTransportFailure(error: unknown): boolean {
+  const queue: unknown[] = [error];
+  const seen = new Set<unknown>();
+  while (queue.length > 0 && seen.size < 64) {
+    const current = queue.shift();
+    if (!isRecord(current) || seen.has(current)) continue;
+    seen.add(current);
+
+    for (const key of ["code", "errno"] as const) {
+      const value = current[key];
+      if (
+        typeof value === "string" &&
+        RETRYABLE_DATABASE_TRANSPORT_CODES.has(value.toUpperCase())
+      ) {
+        return true;
+      }
+    }
+
+    for (const key of NESTED_ERROR_KEYS) {
+      const nested = current[key];
+      if (Array.isArray(nested)) queue.push(...nested);
+      else if (nested !== undefined) queue.push(nested);
+    }
+  }
+  return false;
+}
+
+/**
  * Distinguish database/ORM failures from expected domain exceptions when a
  * driver omitted SQLSTATE. This checks shape only; callers retain the original
  * failure independently as canonical error evidence.
  */
 export function isDatabasePersistenceFailure(error: unknown): boolean {
-  if (nestedPostgresSqlState(error) !== null) return true;
+  if (isRetryableDatabaseTransportFailure(error) || nestedPostgresSqlState(error) !== null) {
+    return true;
+  }
 
   const queue: unknown[] = [error];
   const seen = new Set<unknown>();
@@ -156,12 +215,12 @@ export function safeDatabaseErrorFacts(error: unknown): SafeDatabaseErrorFacts {
 
 /**
  * Typed persistence classification that retains the exact original failure as
- * `cause`. Classification metadata supplements the cause; it never replaces or
- * rewrites source error content.
+ * `cause` for internal diagnostics. The ordinary Error message is deliberately
+ * stable and source-free so a generic presentation path can never disclose SQL,
+ * parameters, or driver detail by rendering `.message`.
  */
 export class SessionEventPersistenceError extends Error {
   readonly name = "SessionEventPersistenceError";
-  readonly cause: unknown;
 
   constructor(
     readonly details: PersistenceFailureDetails,
@@ -174,10 +233,7 @@ export class SessionEventPersistenceError extends Error {
           ? "Database serialization failure"
           : "Database failure";
     const operation = `${label} while persisting ${details.eventTypes.join(", ") || "session events"}`;
-    const sourceMessage =
-      cause === undefined ? null : cause instanceof Error ? cause.message : String(cause);
-    super(sourceMessage ? `${operation}: ${sourceMessage}` : operation);
-    this.cause = cause;
+    super(operation, cause === undefined ? undefined : { cause });
   }
 
   get code(): DatabaseFailureCode {

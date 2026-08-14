@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
@@ -14,6 +14,21 @@ async function workflow(name: string): Promise<string> {
 
 async function action(name: string): Promise<string> {
   return readFile(resolve(root, ".github/actions", name, "action.yml"), "utf8");
+}
+
+async function workspaceManifestPaths(): Promise<Map<string, string>> {
+  const manifests = new Map<string, string>();
+  for (const scope of ["apps", "examples", "packages"] as const) {
+    for (const entry of await readdir(resolve(root, scope), { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const manifestPath = `${scope}/${entry.name}/package.json`;
+      const manifest = JSON.parse(await readFile(resolve(root, manifestPath), "utf8")) as {
+        name?: string;
+      };
+      if (manifest.name) manifests.set(manifest.name, manifestPath);
+    }
+  }
+  return manifests;
 }
 
 const sandboxArtifactRuntimeCopy =
@@ -99,6 +114,48 @@ describe("release image workflow contract", () => {
 
     expect(patchCopy).toBeGreaterThan(-1);
     expect(frozenInstall).toBeGreaterThan(patchCopy);
+  });
+
+  test("stages every workspace manifest and its dependency closure before frozen install", async () => {
+    const dockerfile = await readFile(resolve(root, "docker/opengeni.Dockerfile"), "utf8");
+    const installPrefix = dockerfile.slice(
+      0,
+      dockerfile.indexOf("RUN bun install --frozen-lockfile"),
+    );
+    const stagedPaths = new Set([
+      "package.json",
+      ...Array.from(
+        installPrefix.matchAll(/^COPY (\S+\/package\.json) \S+\/package\.json$/gmu),
+        (match) => match[1]!,
+      ),
+    ]);
+    const workspaces = await workspaceManifestPaths();
+
+    expect([...stagedPaths].sort()).toEqual(["package.json", ...workspaces.values()].sort());
+
+    for (const manifestPath of stagedPaths) {
+      const manifest = JSON.parse(await readFile(resolve(root, manifestPath), "utf8")) as {
+        dependencies?: Record<string, string>;
+        devDependencies?: Record<string, string>;
+        optionalDependencies?: Record<string, string>;
+      };
+      const dependencies = {
+        ...manifest.dependencies,
+        ...manifest.devDependencies,
+        ...manifest.optionalDependencies,
+      };
+      for (const [name, range] of Object.entries(dependencies)) {
+        if (!range.startsWith("workspace:")) continue;
+        const dependencyManifest = workspaces.get(name);
+        expect(
+          dependencyManifest,
+          `${manifestPath} references unknown workspace ${name}`,
+        ).toBeDefined();
+        expect(stagedPaths, `${manifestPath} requires unstaged ${dependencyManifest}`).toContain(
+          dependencyManifest!,
+        );
+      }
+    }
   });
 
   test("keeps stable sandbox tools cacheable across exact runtime revisions", async () => {
@@ -191,7 +248,9 @@ describe("release image workflow contract", () => {
     expect(ci).toContain(
       "github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number)",
     );
-    expect(ci).toContain("cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}");
+    expect(ci).toContain(
+      "cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}",
+    );
     expect(ci).not.toContain(
       "format('ci-automation-{0}-{1}', inputs.automation_pr_number, inputs.automation_head_sha)",
     );
@@ -217,16 +276,58 @@ describe("release image workflow contract", () => {
       (command) => command.includes("/actions/artifacts/") && command.includes("/zip"),
     );
 
-    expect(artifactDownloads).toHaveLength(6);
+    expect(artifactDownloads).toHaveLength(7);
     for (const command of artifactDownloads) {
       expect(command).toMatch(/\/zip["']?\s*\\?\s*(?:\n\s*)?>\s*[^\s]+/);
     }
   });
 
-  test("candidate builds every physical image and freezes a full-SHA receipt", async () => {
-    const candidate = await workflow("release-candidate.yml");
+  test("candidate builds every image under a fresh attempt tag and freezes a full-SHA receipt", async () => {
+    const [candidate, admissionWorkflow] = await Promise.all([
+      workflow("release-candidate.yml"),
+      workflow("release-source-admission.yml"),
+    ]);
+    const parsed = Bun.YAML.parse(candidate) as {
+      on: {
+        workflow_dispatch: {
+          inputs: Record<string, { required?: boolean }>;
+        };
+      };
+      jobs: Record<
+        string,
+        {
+          needs?: string | string[];
+          permissions?: Record<string, string>;
+          uses?: string;
+          with?: Record<string, unknown>;
+          steps?: Array<{
+            name?: string;
+            run?: string;
+            uses?: string;
+            with?: Record<string, unknown>;
+          }>;
+        }
+      >;
+    };
+    const admissionParsed = Bun.YAML.parse(admissionWorkflow) as {
+      permissions: Record<string, string>;
+      jobs: Record<
+        string,
+        {
+          permissions?: Record<string, string>;
+          steps?: Array<{
+            name?: string;
+            run?: string;
+            uses?: string;
+            with?: Record<string, unknown>;
+          }>;
+        }
+      >;
+    };
 
     expect(candidate).not.toContain("expected_packages:");
+    const dockerignore = await readFile(resolve(root, ".dockerignore"), "utf8");
+    expect(dockerignore.split(/\r?\n/u)).toContain(".release/controller");
     expect(candidate).not.toContain("OPENGENI_EXPECTED_PACKAGES");
     expect(candidate).toContain('OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED: "true"');
     for (const identity of [
@@ -242,7 +343,9 @@ describe("release image workflow contract", () => {
     }
     expect(candidate).toContain("docker/setup-qemu-action@");
     expect(candidate.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(7);
-    expect(candidate).toContain("candidate-$SOURCE_SHA");
+    expect(candidate).toContain(
+      "candidate-${SOURCE_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}",
+    );
     expect(candidate).toContain("opengeni-candidate-${SOURCE_SHA}");
     expect(candidate).toContain("evidence/release-candidate.json");
     expect(candidate).toContain("cmp evidence/release-candidate.json");
@@ -256,8 +359,24 @@ describe("release image workflow contract", () => {
     expect(candidate.slice(anonymousGate, receiptWrite)).toContain(
       "docker buildx imagetools inspect",
     );
+    const occupiedTagGate = candidate.indexOf("Refuse occupied run-scoped candidate tags");
+    const firstSourceExecution = candidate.indexOf("Install the Rust toolchain");
+    const controllerRestore = candidate.indexOf(
+      "Restore the exact controller after source execution",
+    );
+    const chartPackaging = candidate.indexOf(
+      "Package the deterministic immutable Helm chart candidate",
+    );
+    expect(occupiedTagGate).toBeGreaterThan(-1);
+    expect(occupiedTagGate).toBeLessThan(firstSourceExecution);
+    expect(candidate).not.toContain("exists=false");
+    expect(candidate).not.toContain("if: steps.existing-");
+    expect(controllerRestore).toBeGreaterThan(anonymousGate);
+    expect(controllerRestore).toBeLessThan(chartPackaging);
     expect(candidate).toContain("bun scripts/package-release-chart.ts");
-    expect(candidate).toContain("bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml");
+    expect(candidate).toContain(
+      'bun scripts/release-version.ts "$GITHUB_WORKSPACE/deploy/helm/opengeni/Chart.yaml"',
+    );
     expect(candidate).not.toContain('map(select(.name == "@opengeni/sdk"))');
     expect(candidate).toContain("Refuse an occupied product release version");
     expect(candidate.match(/bun scripts\/package-release-chart\.ts/g)).toHaveLength(2);
@@ -268,6 +387,42 @@ describe("release image workflow contract", () => {
     expect(candidate).toContain("bun scripts/resolve-github-release-state.ts");
     expect(candidate).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/main');
     expect(candidate).not.toContain('[ "$(git rev-parse origin/main)" = "$SOURCE_SHA" ]');
+    expect(parsed.on.workflow_dispatch.inputs.controller_sha?.required).toBe(true);
+    expect(parsed.jobs.admission?.uses).toBe("./.github/workflows/release-source-admission.yml");
+    expect(parsed.jobs.admission?.with).toEqual({
+      source_sha: "${{ inputs.source_sha }}",
+      controller_sha: "${{ inputs.controller_sha }}",
+    });
+    expect(parsed.jobs["artifact-runtime"]?.needs).toBe("admission");
+    expect(parsed.jobs.candidate?.needs).toEqual(["admission", "artifact-runtime"]);
+    expect(parsed.jobs.admission?.permissions).toEqual({
+      checks: "read",
+      contents: "read",
+      "pull-requests": "read",
+    });
+    expect(admissionParsed.permissions).toEqual({ contents: "read" });
+    expect(admissionParsed.jobs.verify?.permissions).toEqual({
+      checks: "read",
+      contents: "read",
+      "pull-requests": "read",
+    });
+    const controllerCheckout = admissionParsed.jobs.verify?.steps?.find(
+      (step) => step.name === "Check out exact retained release controller",
+    );
+    expect(controllerCheckout?.with?.ref).toBe("${{ github.sha }}");
+    expect(
+      admissionParsed.jobs.verify?.steps?.find(
+        (step) => step.name === "Verify controller identity and exact reviewed merge provenance",
+      )?.run,
+    ).toBe("node scripts/check-release-pr-automation.mjs verify-approved-merge");
+    expect(admissionWorkflow).not.toContain("ref: ${{ inputs.source_sha }}");
+    expect(candidate).toContain("uses: ./.release/controller/.github/actions/public-oci-login");
+    expect(parsed.jobs.candidate?.permissions).toEqual({
+      contents: "write",
+      packages: "write",
+      attestations: "write",
+      "id-token": "write",
+    });
     expect(candidate).not.toContain('gh release view "$tag"');
     expect(candidate).not.toContain('existing_tag_sha="$(gh api');
   });
@@ -418,8 +573,22 @@ describe("release image workflow contract", () => {
 
   test("final release promotes accepted manifests and has no image build boundary", async () => {
     const release = await workflow("release.yml");
+    const publicationAdmission = await workflow("release-publication-admission.yml");
     const finalJob = release.slice(release.indexOf("\n  images:\n"));
 
+    expect(release).toContain("uses: ./.github/workflows/release-publication-admission.yml");
+    expect(release).toContain("candidate_run_id: ${{ inputs.candidate_run_id }}");
+    expect(release).toContain("acceptance_run_id: ${{ inputs.acceptance_run_id }}");
+    expect(publicationAdmission).toContain(
+      'expected_ref="refs/tags/opengeni-release-head-$CONTROLLER_SHA"',
+    );
+    expect(publicationAdmission).toContain(
+      'git -C .release/source merge-base --is-ancestor "$SOURCE_SHA" origin/main',
+    );
+    expect(publicationAdmission).toContain("--kind candidate");
+    expect(publicationAdmission).toContain("--kind acceptance");
+    expect(publicationAdmission).toContain('--controller-sha "$CONTROLLER_SHA"');
+    expect(publicationAdmission).not.toContain("verify-approved-merge");
     expect(release).not.toContain("inputs.expected_packages");
     expect(release).toContain("steps.acceptance-bundle.outputs.expected_packages");
     expect(release).toContain('map(.name + "@" + .version)');
@@ -429,9 +598,11 @@ describe("release image workflow contract", () => {
     expect(finalJob).toContain("--prefer-index=false");
     expect(finalJob).toContain("evidence/release-candidate.json");
     expect(finalJob).toContain("bun scripts/release-bom.ts");
+    expect(finalJob).toContain('export OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA"');
+    expect(finalJob).not.toMatch(/OPENGENI_RELEASE_BOM_CHART=.*\\\n\s*\(cd /);
     expect(finalJob).toContain("release_version=\"$(jq -er '.releaseVersion'");
     expect(finalJob).toContain(
-      'source_release_version="$(bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml)"',
+      'source_release_version="$(cd .release/controller && bun scripts/release-version.ts "$GITHUB_WORKSPACE/deploy/helm/opengeni/Chart.yaml")"',
     );
     expect(finalJob).not.toContain("PUBLISHED_PACKAGES:");
     expect(finalJob).toContain("Reconcile existing product image aliases before mutation");
@@ -462,7 +633,7 @@ describe("release image workflow contract", () => {
     expect(finalJob).toContain('--arg reference "$chart_pull_oci"');
     expect(finalJob).toContain("for attempt in $(seq 1 10)");
     expect(finalJob).toContain(
-      'resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"',
+      'resolved_manifest="$(cd .release/controller && bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"',
     );
     expect(finalJob).toContain("name: production-release");
     expect(finalJob.indexOf("Compare existing immutable BOM before aliases")).toBeLessThan(
@@ -472,6 +643,11 @@ describe("release image workflow contract", () => {
     expect(finalJob).not.toContain('gh release view "$tag"');
     expect(finalJob).not.toContain('existing_tag_sha="$(gh api');
     expect(release).toContain("candidate_run_id:");
+    expect(release).toContain("controller_sha:");
+    expect(release).toContain('--controller-sha "$CONTROLLER_SHA"');
+    expect(
+      release.match(/bun scripts\/verify-release-provenance\.ts/gu)?.length,
+    ).toBeGreaterThanOrEqual(2);
     expect(release).toContain("acceptance_run_id:");
     for (const forbidden of [
       "candidate_receipt_url:",
@@ -490,6 +666,15 @@ describe("release image workflow contract", () => {
     expect(acceptance).toContain(".github/workflows/release-acceptance.yml");
     expect(acceptance).toContain("name: production-acceptance");
     expect(acceptance).toContain("operator_run_id:");
+    expect(acceptance).toContain("controller_sha:");
+    expect(acceptance).toContain('--controller-sha "$CONTROLLER_SHA"');
+    expect(acceptance).toContain("ref: ${{ inputs.controller_sha }}");
+    expect(acceptance).toContain('expected_ref="refs/tags/opengeni-release-head-$CONTROLLER_SHA"');
+    expect(acceptance).toContain('[ "$GITHUB_WORKFLOW_SHA" = "$CONTROLLER_SHA" ]');
+    expect(acceptance).toContain("bun scripts/verify-release-provenance.ts");
+    expect(acceptance).toContain("bun scripts/verify-operator-acceptance-provenance.ts");
+    expect(acceptance).toContain("bun scripts/assemble-release-acceptance.ts");
+    expect(acceptance).toContain("cd .release/controller");
     expect(acceptance).toContain("RELEASE_ACCEPTANCE_OPERATOR_REPOSITORY");
     expect(acceptance).toContain("RELEASE_ACCEPTANCE_OPERATOR_WORKFLOW_PATH");
     expect(acceptance).toContain("RELEASE_ACCEPTANCE_OPERATOR_TOKEN");
@@ -512,6 +697,18 @@ describe("release image workflow contract", () => {
 
   test("embedded release publishes only a verified candidate without hosted acceptance claims", async () => {
     const release = await workflow("release-embedded.yml");
+    const candidateAdmission = release.indexOf("Admit the candidate before source execution");
+    const candidateReceipt = release.indexOf(
+      "Download and validate the admitted candidate receipt",
+    );
+    const sourceInstall = release.indexOf("Install admitted source dependencies");
+    const sourceControllerRestore = release.indexOf(
+      "Restore the controller after source verification",
+    );
+    const packagePreparation = release.indexOf("Prepare admitted package bytes for publication");
+    const packageControllerRestore = release.indexOf(
+      "Restore the controller after package preparation",
+    );
     const registryReconcile = release.indexOf("Reconcile npm package identity");
     const existingReleasePreflight = release.indexOf(
       "Compare an existing immutable distribution before image mutation",
@@ -521,9 +718,19 @@ describe("release image workflow contract", () => {
     const packagePublication = release.indexOf("Publish source-bound packages");
 
     expect(release).toContain("candidate_run_id:");
+    expect(release).toContain("controller_sha:");
+    expect(release).toContain("ref: ${{ inputs.controller_sha }}");
+    expect(release).toContain('--controller-sha "$CONTROLLER_SHA"');
     expect(release).toContain("package_source_sha:");
     expect(release).toContain("package_run_id:");
-    expect(release).toContain("bun .release/controller/scripts/verify-release-provenance.ts");
+    expect(release).toContain("bun scripts/verify-release-provenance.ts");
+    expect(release).toContain("cd .release/controller");
+    expect(release).toContain("needs: source-verification");
+    expect(candidateAdmission).toBeGreaterThan(-1);
+    expect(candidateReceipt).toBeGreaterThan(candidateAdmission);
+    expect(sourceInstall).toBeGreaterThan(candidateReceipt);
+    expect(sourceControllerRestore).toBeGreaterThan(sourceInstall);
+    expect(packageControllerRestore).toBeGreaterThan(packagePreparation);
     expect(release).toContain("--kind package");
     expect(release).toContain("CANDIDATE_ARTIFACT_ID:");
     expect(release).toContain("CANDIDATE_ARTIFACT_DIGEST:");
@@ -535,12 +742,18 @@ describe("release image workflow contract", () => {
     expect(release).toContain("OPENGENI_RELEASE_PACKAGE_BOM_RECEIPT:");
     expect(release).toContain("OPENGENI_RELEASE_PACKAGE_BOM_SOURCE_SHA:");
     expect(release).toContain("OPENGENI_RELEASE_PACKAGE_CLOSURE_ROOT:");
-    expect(release).toContain("bun .release/controller/scripts/verify-release-packages.ts");
+    expect(release).toContain("bun scripts/verify-release-packages.ts");
     expect(release).toContain("bun scripts/release-candidate.ts");
     expect(release).toContain('if [ -n "$EXPECTED_PACKAGES" ]; then');
     expect(release).toContain('candidate_verify_args+=(--expected-packages "$EXPECTED_PACKAGES")');
     expect(release).toContain('bun scripts/release-candidate.ts "${candidate_verify_args[@]}"');
-    expect(release).toContain("bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml");
+    expect(
+      release.match(/--verify "\$GITHUB_WORKSPACE\/evidence\/release-candidate\.json"/g),
+    ).toHaveLength(2);
+    expect(release).not.toContain("--verify evidence/release-candidate.json");
+    expect(release).toContain(
+      'bun scripts/release-version.ts "$GITHUB_WORKSPACE/deploy/helm/opengeni/Chart.yaml"',
+    );
     expect(release).not.toContain('map(select(.name == "@opengeni/sdk"))');
     expect(release).toContain("bun run test:runtime-embedding-consumer");
     expect(release).toContain("bun run test:publish-consumer");
@@ -548,7 +761,7 @@ describe("release image workflow contract", () => {
     expect(release).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: verify");
     expect(release).not.toContain("OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED");
     expect(release).toContain("Publish or reconcile the exact candidate chart");
-    expect(release).toContain('[ "$GITHUB_REF" = "refs/heads/main" ]');
+    expect(release).toContain('expected_ref="refs/tags/opengeni-release-head-$CONTROLLER_SHA"');
     expect(release).not.toContain('[ "$GITHUB_SHA" = "$SOURCE_SHA" ]');
     expect(release).toContain(
       'chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"',
@@ -562,12 +775,14 @@ describe("release image workflow contract", () => {
     expect(release).toContain('--arg reference "$chart_pull_oci"');
     expect(release).toContain("for attempt in $(seq 1 10)");
     expect(release).toContain(
-      'resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"',
+      'resolved_manifest="$(cd .release/controller && bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"',
     );
     expect(release).toContain('OPENGENI_RELEASE_BOM_CHART="$RELEASE_CHART"');
     expect(release).toContain("bun scripts/resolve-github-release-state.ts");
     expect(release).not.toContain('gh release view "$tag"');
     expect(release).toContain("bun scripts/release-bom.ts");
+    expect(release).toContain('export OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA"');
+    expect(release).not.toMatch(/OPENGENI_RELEASE_BOM_CHART=.*\\\n\s*\(cd /);
     expect(release).toContain("evidence/release-bom.json");
     expect(release).toContain('docker logout "$REGISTRY"');
     expect(registryReconcile).toBeGreaterThan(-1);
@@ -644,8 +859,10 @@ describe("release image workflow contract", () => {
       runs?: { using?: unknown; steps?: unknown };
     };
 
+    expect(candidate).toContain("uses: ./.release/controller/.github/actions/public-oci-login");
+    expect(release).toContain("uses: ./.release/controller/.github/actions/public-oci-login");
+    expect(embedded).toContain("uses: ./.release/controller/.github/actions/public-oci-login");
     for (const source of [candidate, release, embedded]) {
-      expect(source).toContain("uses: ./.github/actions/public-oci-login");
       expect(source).toContain("OPENGENI_RELEASE_OCI_PREFIX");
       expect(source).toContain("OPENGENI_RELEASE_REGISTRY_AUTH");
       expect(source).toContain("id-token: write");
@@ -653,6 +870,10 @@ describe("release image workflow contract", () => {
     expect(loginManifest.name).toBe("Public OCI registry login");
     expect(loginManifest.runs?.using).toBe("composite");
     expect(Array.isArray(loginManifest.runs?.steps)).toBe(true);
+    expect(login).toContain('controller_root="$(cd "$GITHUB_ACTION_PATH/../../.." && pwd)"');
+    expect(login).toContain(
+      'identity="$(cd "$controller_root" && bun scripts/release-registry.ts)"',
+    );
     expect(login).toContain("azure-oidc");
     expect(login).toContain("github");
     expect(login).toContain("azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43");

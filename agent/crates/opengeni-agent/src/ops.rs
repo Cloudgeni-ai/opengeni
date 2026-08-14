@@ -72,10 +72,11 @@ pub async fn serve_op_start_scoped<P: Platform>(
     request_id: String,
     start: v1::OpStart,
 ) -> ControlResponse {
-    let exec = match extract_exec(&request_id, start.op) {
+    let mut exec = match extract_exec(&request_id, start.op) {
         Ok(exec) => exec,
         Err(reply) => return *reply,
     };
+    crate::codemode::expose_native_client(&mut exec);
 
     // The op id is interpolated into the frame subject
     // (`agent.<ws>.<id>.op.<op_id>`): a NATS-illegal token (empty,

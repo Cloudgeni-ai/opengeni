@@ -57,7 +57,7 @@ import {
 export type RealtimeModelOption = {
   id: SessionRealtimeModel;
   label: string;
-  provider: "OpenGeni" | "Connected Codex" | "Your Gateway";
+  provider: "OpenGeni" | "Connected Codex" | "Connected SuperGrok" | "Your Gateway";
   description: string;
   available: boolean;
   unavailableReason: string | null;
@@ -74,7 +74,12 @@ const CODEX_LIVE_MODEL: RealtimeModelOption = {
   recommended: false,
 };
 
-const REALTIME_MODEL_PROVIDERS = ["OpenGeni", "Connected Codex", "Your Gateway"] as const;
+const REALTIME_MODEL_PROVIDERS = [
+  "OpenGeni",
+  "Connected Codex",
+  "Connected SuperGrok",
+  "Your Gateway",
+] as const;
 type RealtimeModelProvider = (typeof REALTIME_MODEL_PROVIDERS)[number];
 
 const REALTIME_PROVIDER_META: Record<
@@ -85,6 +90,10 @@ const REALTIME_PROVIDER_META: Record<
   "Connected Codex": {
     billingClass: "codex_subscription",
     hint: "ChatGPT / Codex plan",
+  },
+  "Connected SuperGrok": {
+    billingClass: "supergrok_subscription",
+    hint: "SuperGrok / xAI plan",
   },
   "Your Gateway": { billingClass: "byok", hint: "Billed to your AI Gateway" },
 };
@@ -141,7 +150,11 @@ export function useSessionRealtime(options: {
   const controllerRef = useRef<SessionRealtimeController | null>(null);
   const controllerModelRef = useRef<SessionRealtimeModel | null>(null);
   const [snapshot, setSnapshot] = useState<SessionRealtimeControllerSnapshot>(() => ({
-    status: hasStoredSessionRealtimeOwnerProof({ workspaceId, sessionId: options.sessionId, model })
+    status: hasStoredSessionRealtimeOwnerProof({
+      workspaceId,
+      sessionId: options.sessionId,
+      model,
+    })
       ? "recovering"
       : "idle",
     realtimeId: null,
@@ -684,7 +697,13 @@ export function RealtimeVoiceControl(props: {
                 opacity: 1,
                 transition: reduceMotion
                   ? { duration: 0 }
-                  : { delay: 0.32, type: "spring", stiffness: 320, damping: 30, mass: 0.8 },
+                  : {
+                      delay: 0.32,
+                      type: "spring",
+                      stiffness: 320,
+                      damping: 30,
+                      mass: 0.8,
+                    },
               }}
               {...(reduceMotion
                 ? {}
@@ -1160,7 +1179,11 @@ function statusContent(
         };
       }
       if (!canStart && admissionBlocker) {
-        return { phase: "unavailable", label: "Voice unavailable", detail: admissionBlocker };
+        return {
+          phase: "unavailable",
+          label: "Voice unavailable",
+          detail: admissionBlocker,
+        };
       }
       return {
         phase: "idle",
@@ -1268,7 +1291,11 @@ function RealtimeStatusDot(props: { phase: RealtimeVisualPhase; reduceMotion: bo
         <motion.span
           className="absolute inset-0 rounded-full bg-og-status-running"
           animate={{ opacity: [0.45, 0], scale: [1, 2.2] }}
-          transition={{ duration: 1.4, ease: "easeOut", repeat: Number.POSITIVE_INFINITY }}
+          transition={{
+            duration: 1.4,
+            ease: "easeOut",
+            repeat: Number.POSITIVE_INFINITY,
+          }}
         />
       ) : null}
       <span
@@ -1343,6 +1370,7 @@ function isRealtimeModel(value: string | null): value is SessionRealtimeModel {
     value === "opengeni-gateway/openai/gpt-realtime-2.1" ||
     value === "opengeni-gateway/openai/gpt-realtime-mini" ||
     value === "opengeni-gateway/xai/grok-voice-think-fast-2.0" ||
+    value === "supergrok/grok-voice-think-fast-2.0" ||
     value === "workspace-gateway/openai/gpt-realtime-2.1" ||
     value === "workspace-gateway/openai/gpt-realtime-mini" ||
     value === "workspace-gateway/xai/grok-voice-think-fast-2.0"

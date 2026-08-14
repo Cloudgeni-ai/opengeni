@@ -210,7 +210,7 @@ describe("0155 connector action policy migration contract", () => {
       subjectId: "policy-owner",
       connectionId: `connection-${crypto.randomUUID()}`,
       serverId: "google-drive-publishing",
-      toolName: "publish_editable_artifact",
+      toolName: "google_drive_publish_file",
       actionName: "create",
     };
     const installed = await Promise.all([

@@ -13,7 +13,7 @@
 // the gating change.
 import {
   CAPABILITY_DESCRIPTORS,
-  FIRST_PARTY_MCP_TOOL_NAMES,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   mergeResourceRefs,
   Permission,
   stableJson,
@@ -78,7 +78,9 @@ export type SessionDraft = {
   firstPartyMcpTools: Set<FirstPartyMcpToolName>;
 };
 
-export function emptySessionDraft(): SessionDraft {
+export function emptySessionDraft(
+  defaultFirstPartyMcpTools: readonly FirstPartyMcpToolName[] = DEFAULT_FIRST_PARTY_MCP_TOOLS,
+): SessionDraft {
   return {
     compute: { kind: "sandbox", backend: "" },
     variableSetId: "",
@@ -87,17 +89,20 @@ export function emptySessionDraft(): SessionDraft {
     goalSuccessCriteria: "",
     goalMaxAutoContinuations: "",
     customMcpPermissions: false,
-    mcpPermissions: new Set(sessionMcpPermissionGroups.flatMap((group) => group.permissions)),
-    firstPartyMcpTools: new Set(FIRST_PARTY_MCP_TOOL_NAMES),
+    mcpPermissions: new Set(sessionMcpPermissionGroups().flatMap((group) => group.permissions)),
+    firstPartyMcpTools: new Set(defaultFirstPartyMcpTools),
   };
 }
 
-function explicitFirstPartyTools(draft: SessionDraft): {
+function explicitFirstPartyTools(
+  draft: SessionDraft,
+  defaultFirstPartyMcpTools: readonly FirstPartyMcpToolName[],
+): {
   firstPartyMcpTools?: FirstPartyMcpToolName[];
 } {
   const selected = [...draft.firstPartyMcpTools];
-  return selected.length === FIRST_PARTY_MCP_TOOL_NAMES.length &&
-    FIRST_PARTY_MCP_TOOL_NAMES.every((tool) => draft.firstPartyMcpTools.has(tool))
+  return selected.length === defaultFirstPartyMcpTools.length &&
+    defaultFirstPartyMcpTools.every((tool) => draft.firstPartyMcpTools.has(tool))
     ? {}
     : { firstPartyMcpTools: selected };
 }
@@ -253,12 +258,15 @@ export function prepareCreateSessionAttempt(input: {
 
 /** The single submit mapper: turns a `SessionDraft` into the create payload,
  *  branching on the compute kind (the one discriminant). */
-export function submissionFromSessionDraft(draft: SessionDraft): SessionDraftSubmission {
+export function submissionFromSessionDraft(
+  draft: SessionDraft,
+  defaultFirstPartyMcpTools: readonly FirstPartyMcpToolName[] = DEFAULT_FIRST_PARTY_MCP_TOOLS,
+): SessionDraftSubmission {
   const goal = goalFromDraft(draft);
   const mcp = draft.customMcpPermissions
     ? { firstPartyMcpPermissions: [...draft.mcpPermissions] }
     : {};
-  const visibleTools = explicitFirstPartyTools(draft);
+  const visibleTools = explicitFirstPartyTools(draft, defaultFirstPartyMcpTools);
 
   if (draft.compute.kind === "machine") {
     return {
@@ -298,6 +306,7 @@ export function submissionFromSessionDraft(draft: SessionDraft): SessionDraftSub
  */
 export function newSessionDraftOptionsFromSessionDraft(
   draft: SessionDraft,
+  defaultFirstPartyMcpTools: readonly FirstPartyMcpToolName[] = DEFAULT_FIRST_PARTY_MCP_TOOLS,
 ): NewSessionDraftOptions {
   const goal = goalFromDraft(draft);
   const permissions = draft.customMcpPermissions
@@ -307,7 +316,7 @@ export function newSessionDraftOptionsFromSessionDraft(
         ),
       }
     : {};
-  const visibleTools = explicitFirstPartyTools(draft);
+  const visibleTools = explicitFirstPartyTools(draft, defaultFirstPartyMcpTools);
 
   if (draft.compute.kind === "machine") {
     const workingDir = workingDirFromFolder(draft.compute.folder);
@@ -333,8 +342,9 @@ export function newSessionDraftOptionsFromSessionDraft(
 /** Restore server-authoritative create options into the single UI draft form. */
 export function sessionDraftFromNewSessionDraftOptions(
   options: NewSessionDraftOptions,
+  defaultFirstPartyMcpTools: readonly FirstPartyMcpToolName[] = DEFAULT_FIRST_PARTY_MCP_TOOLS,
 ): SessionDraft {
-  const base = emptySessionDraft();
+  const base = emptySessionDraft(defaultFirstPartyMcpTools);
   const machine = Boolean(
     options.targetSandboxId || options.workingDir || options.sandboxBackend === "selfhosted",
   );

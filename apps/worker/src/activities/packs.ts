@@ -1,16 +1,16 @@
-import { CapabilityPack } from "@opengeni/contracts";
+import { CapabilityPack, type PackInstallation } from "@opengeni/contracts";
 import {
   getWorkspace,
   getWorkspacePack,
-  listCapabilityInstallations,
+  listInstalledPortableSkills,
   listPackInstallations,
   type Database,
 } from "@opengeni/db";
 import {
-  isSkillLibraryEntryId,
-  loadSkillLibrarySkill,
-  type EffectiveSkillSelection,
-  type PackSkill,
+  buildPortableSkillArtifact,
+  type InstalledSkillActivation,
+  type PackSkillActivation,
+  type RuntimeSkillArtifact,
 } from "@opengeni/runtime";
 export {
   resolveRigProviderImageSelection,
@@ -21,41 +21,31 @@ export {
 } from "./sandbox-images";
 
 /**
- * The pack-scoped runtime for a workspace: the sandbox image its sessions run
- * in (when an enabled pack declares one) and the pack skills that join the
- * sandbox skill index.
+ * Legacy pack-scoped runtime compatibility. V2 Pack installations own ordinary
+ * Skill components and select an explicit Rig; they contribute nothing here.
  */
 export type WorkspacePackRuntime = {
   sandboxImage: string | null;
   sandboxProviderImages: CapabilityPack["sandboxProviderImages"] | null;
-  skills: PackSkill[];
+  skillActivations: PackSkillActivation[];
 };
 
 const emptyPackRuntime: WorkspacePackRuntime = {
   sandboxImage: null,
   sandboxProviderImages: null,
-  skills: [],
+  skillActivations: [],
 };
 
-export type WorkspaceSkillLibraryRuntime = {
-  skillLibrarySkills: PackSkill[];
-  skillLibrarySelections: EffectiveSkillSelection[];
-};
-
-type SkillLibraryInstallationMetadata = {
-  libraryId: string;
-  libraryVersion: string;
-  contentSha256: string;
-  sourceCommit: string;
-  provenance: string;
+export type WorkspaceInstalledSkillRuntime = {
+  activations: InstalledSkillActivation[];
 };
 
 /**
- * Resolves the pack-scoped runtime from the workspace's active pack
- * installations. Only registered (manifest-backed) packs can contribute a
- * sandbox image or skills; built-in packs never declare either (enforced by a
- * test on the built-in catalog), so their installations are skipped here
- * without consulting the API's built-in pack list.
+ * Resolves only pre-V2 active Pack installations. A frozen manifest/digest is
+ * the protocol marker for V2: inline Skills were migrated into the ordinary
+ * Skill ledger and sandboxImage was resolved to selectedRigId during install,
+ * so reading either field directly here would duplicate ownership and silently
+ * override session compute.
  */
 export async function resolveWorkspacePackRuntime(
   db: Database,
@@ -68,6 +58,9 @@ export async function resolveWorkspacePackRuntime(
   }
   const packs: CapabilityPack[] = [];
   for (const installation of active) {
+    if (!packInstallationUsesLegacyRuntime(installation)) {
+      continue;
+    }
     const registration = await getWorkspacePack(db, workspaceId, installation.packId);
     if (!registration) {
       continue;
@@ -80,100 +73,59 @@ export async function resolveWorkspacePackRuntime(
   return workspacePackRuntimeFromPacks(packs);
 }
 
+export function packInstallationUsesLegacyRuntime(
+  installation: Pick<PackInstallation, "manifestSnapshot" | "manifestDigest">,
+): boolean {
+  return installation.manifestSnapshot === null && installation.manifestDigest === null;
+}
+
 /**
- * Resolves active immutable curated skills separately from pack skills. The
- * capability installation is the workspace selection boundary; it carries
- * only secret-free exact identity metadata, and the runtime loader verifies
- * the pinned artifact hash before any content is materialized.
+ * Resolves every active immutable Skill through the normalized Plugin/Skill-
+ * Facet ledger. The data layer has already filtered ineffective owner edges;
+ * this boundary independently verifies exact files before runtime activation.
  */
-export async function resolveWorkspaceSkillLibraryRuntime(
+export async function resolveWorkspaceInstalledSkillRuntime(
   db: Database,
   workspaceId: string,
-): Promise<WorkspaceSkillLibraryRuntime> {
-  const installations = await listCapabilityInstallations(db, workspaceId);
-  const activeSkills = installations
-    .filter(
-      (installation) =>
-        installation.status === "active" &&
-        installation.kind === "skill" &&
-        installation.capabilityId.startsWith("skill:") &&
-        isSkillLibraryEntryId(installation.capabilityId.slice("skill:".length)),
-    )
-    .sort((a, b) => a.capabilityId.localeCompare(b.capabilityId));
-  const skillLibrarySkills: PackSkill[] = [];
-  const skillLibrarySelections: EffectiveSkillSelection[] = [];
-  for (const installation of activeSkills) {
-    const metadata = parseSkillLibraryInstallationMetadata(
-      installation.metadata,
-      installation.capabilityId,
-    );
-    if (installation.capabilityId !== `skill:${metadata.libraryId}`) {
-      throw new Error(
-        `Skill installation id does not match its library entry: ${installation.capabilityId} -> ${metadata.libraryId}`,
-      );
-    }
-    const loaded = loadSkillLibrarySkill(metadata.libraryId, metadata.libraryVersion);
-    if (installation.config.version !== metadata.libraryVersion) {
-      throw new Error(
-        `Skill installation version mismatch for ${metadata.libraryId}@${metadata.libraryVersion}: config has ${String(installation.config.version)}`,
-      );
-    }
-    if (loaded.entry.contentSha256 !== metadata.contentSha256) {
-      throw new Error(
-        `Skill installation hash mismatch for ${metadata.libraryId}@${metadata.libraryVersion}: expected ${metadata.contentSha256}, catalog has ${loaded.entry.contentSha256}`,
-      );
-    }
+): Promise<WorkspaceInstalledSkillRuntime> {
+  const installedSkills = await listInstalledPortableSkills(db, workspaceId);
+  const activations: InstalledSkillActivation[] = [];
+  for (const installed of installedSkills) {
+    const artifact = buildPortableSkillArtifact(installed.files);
     if (
-      loaded.entry.sourceCommit !== metadata.sourceCommit ||
-      loaded.entry.provenance !== metadata.provenance
+      artifact.name !== installed.name ||
+      artifact.description !== installed.description ||
+      artifact.contentSha256 !== installed.contentSha256
     ) {
       throw new Error(
-        `Skill installation provenance mismatch for ${metadata.libraryId}@${metadata.libraryVersion}; re-enable the skill from the current catalog`,
+        `Installed Skill artifact verification failed for ${installed.capabilityId}; reinstall it from the pinned source`,
       );
     }
-    skillLibrarySkills.push({
-      name: loaded.skill.name,
-      description: loaded.skill.description,
-      files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
-    });
-    skillLibrarySelections.push({
-      id: loaded.entry.id,
-      name: loaded.entry.name,
-      source: "library",
-      version: loaded.entry.version,
-      contentSha256: loaded.entry.contentSha256,
-      reason: "enabled workspace capability installation",
+    activations.push({
+      source: "installation",
+      id: installed.capabilityId,
+      artifact: {
+        name: artifact.name,
+        description: artifact.description,
+        files: artifact.files.map((file) => ({ path: file.path, content: file.content })),
+      },
+      version: installed.version,
+      contentSha256: artifact.contentSha256,
+      reason:
+        installed.source === "library"
+          ? "installed from the curated Skill library"
+          : installed.source === "pack"
+            ? "installed as a Pack-owned Skill"
+            : `installed from ${installed.sourceUrl}`,
     });
   }
-  return { skillLibrarySkills, skillLibrarySelections };
-}
-
-function parseSkillLibraryInstallationMetadata(
-  metadata: Record<string, unknown>,
-  capabilityId: string,
-): SkillLibraryInstallationMetadata {
-  const libraryId = stringMetadata(metadata.libraryId);
-  const libraryVersion = stringMetadata(metadata.libraryVersion);
-  const contentSha256 = stringMetadata(metadata.contentSha256);
-  const sourceCommit = stringMetadata(metadata.sourceCommit);
-  const provenance = stringMetadata(metadata.provenance);
-  if (!libraryId || !libraryVersion || !contentSha256 || !sourceCommit || !provenance) {
-    throw new Error(
-      `Skill installation ${capabilityId} is missing immutable library metadata; re-enable the skill from the current catalog`,
-    );
-  }
-  return { libraryId, libraryVersion, contentSha256, sourceCommit, provenance };
-}
-
-function stringMetadata(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+  return { activations };
 }
 
 /**
- * Pure composition rule for enabled pack manifests. v1 keeps this small by
- * design: at most one enabled pack may declare a sandbox image (no image
- * layering or composition), and skill names must be unique across enabled
- * packs. Violations fail the turn with a plain error instead of guessing.
+ * Pure pre-V2 compatibility rule for enabled Pack manifests. At most one
+ * legacy Pack may declare a sandbox image, and legacy Skill names must be
+ * unique. V2 rows never reach this function through runtime resolution.
  */
 export function workspacePackRuntimeFromPacks(packs: CapabilityPack[]): WorkspacePackRuntime {
   const imagePacks = packs.filter(
@@ -188,7 +140,7 @@ export function workspacePackRuntimeFromPacks(packs: CapabilityPack[]): Workspac
       `Multiple enabled packs declare a sandbox image (${ids}). Only one enabled pack per workspace may declare sandboxImage; disable the others and retry.`,
     );
   }
-  const skills: PackSkill[] = [];
+  const skillActivations: PackSkillActivation[] = [];
   // Keyed case-insensitively to match the per-pack uniqueness rule in the
   // CapabilityPack contract (and case-insensitive filesystems).
   const skillOwners = new Map<string, string>();
@@ -202,17 +154,23 @@ export function workspacePackRuntimeFromPacks(packs: CapabilityPack[]): Workspac
         );
       }
       skillOwners.set(key, pack.id);
-      skills.push({
+      const artifact: RuntimeSkillArtifact = {
         name: skill.name,
         description: skill.description ?? null,
         files: skill.files.map((file) => ({ path: file.path, content: file.content })),
+      };
+      skillActivations.push({
+        source: "pack",
+        id: `pack:${pack.id}:${skill.name}`,
+        artifact,
+        reason: `active legacy Pack ${pack.id}`,
       });
     }
   }
   return {
     sandboxImage: imagePacks[0]?.sandboxImage?.trim() ?? null,
     sandboxProviderImages: imagePacks[0]?.sandboxProviderImages ?? null,
-    skills,
+    skillActivations,
   };
 }
 

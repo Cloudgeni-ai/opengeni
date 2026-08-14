@@ -19,8 +19,8 @@ import {
   settleSessionAttemptInterruptions,
   steerAgentSessionInTransaction,
   submitHumanPromptInTransaction,
-  withWorkspaceRls,
-  withWorkspaceSubjectRls,
+  withWorkspaceSessionActivityRls as withWorkspaceRls,
+  withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
   type SessionCommandActor,
 } from "../src/index";
 import * as schema from "../src/schema";
@@ -79,7 +79,7 @@ async function submit(
 ) {
   return await withWorkspaceSubjectRls(client.db, grant.workspaceId!, grant.subjectId, (db) =>
     db.transaction((tx) =>
-      submitHumanPromptInTransaction(tx as typeof db, {
+      submitHumanPromptInTransaction(tx as unknown as typeof db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
         sessionId,
@@ -157,11 +157,11 @@ describe("attempt-fenced Agent session commands", () => {
     ];
     const caller = await activeAgent(grant, null, delegations);
 
-    const messageTarget = await makeSession(grant);
+    const messageTarget = await makeSession(grant, caller.session.id);
     const messageOperationKey = crypto.randomUUID();
     const message = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        sendAgentMessageInTransaction(tx as typeof db, {
+        sendAgentMessageInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           targetSessionId: messageTarget.id,
@@ -173,7 +173,7 @@ describe("attempt-fenced Agent session commands", () => {
     );
     const messageReplay = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        sendAgentMessageInTransaction(tx as typeof db, {
+        sendAgentMessageInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           targetSessionId: messageTarget.id,
@@ -185,11 +185,11 @@ describe("attempt-fenced Agent session commands", () => {
     );
     expect(messageReplay).toMatchObject({ replay: true, updateId: message.updateId });
 
-    const steerTarget = await makeSession(grant);
+    const steerTarget = await makeSession(grant, caller.session.id);
     const steerOperationKey = crypto.randomUUID();
     const steer = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        steerAgentSessionInTransaction(tx as typeof db, {
+        steerAgentSessionInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           targetSessionId: steerTarget.id,
@@ -201,7 +201,7 @@ describe("attempt-fenced Agent session commands", () => {
     );
     const steerReplay = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        steerAgentSessionInTransaction(tx as typeof db, {
+        steerAgentSessionInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           targetSessionId: steerTarget.id,
@@ -361,7 +361,7 @@ describe("attempt-fenced Agent session commands", () => {
       grant.subjectId,
       (db) =>
         db.transaction((tx) =>
-          submitHumanPromptInTransaction(tx as typeof db, {
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
             accountId: grant.accountId,
             workspaceId: grant.workspaceId!,
             sessionId: session.id,
@@ -404,7 +404,7 @@ describe("attempt-fenced Agent session commands", () => {
     expect(event?.payload).not.toHaveProperty("turnInstructions");
   });
 
-  test("Agent Pause rejects self and every ancestor workstream with zero writes", async () => {
+  test("Agent Pause rejects self and its direct parent with zero writes", async () => {
     const grant = await fixture();
     const parent = await makeSession(grant);
     const caller = await activeAgent(grant, parent.id);
@@ -413,7 +413,7 @@ describe("attempt-fenced Agent session commands", () => {
       await expect(
         withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
           db.transaction((tx) =>
-            mutateSessionControlInTransaction(tx as typeof db, {
+            mutateSessionControlInTransaction(tx as unknown as typeof db, {
               accountId: grant.accountId,
               workspaceId: grant.workspaceId!,
               sessionId: targetSessionId,
@@ -424,7 +424,7 @@ describe("attempt-fenced Agent session commands", () => {
           ),
         ),
       ).rejects.toMatchObject({
-        code: "SELF_OR_ANCESTOR_PAUSE",
+        code: "TARGET_NOT_VERTICAL",
       } satisfies Partial<AgentCommandAuthorityError>);
     }
     const rows = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
@@ -436,13 +436,95 @@ describe("attempt-fenced Agent session commands", () => {
     expect(rows).toHaveLength(0);
   });
 
+  test("transactional Agent commands reject lateral and skipped-generation targets", async () => {
+    const grant = await fixture();
+    const parent = await makeSession(grant);
+    const caller = await activeAgent(grant, parent.id);
+    const sibling = await makeSession(grant, parent.id);
+    const child = await makeSession(grant, caller.session.id);
+    const grandchild = await makeSession(grant, child.id);
+
+    const upstream = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        sendAgentMessageInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          targetSessionId: parent.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          text: "direct parent update",
+        }),
+      ),
+    );
+    expect(upstream).toMatchObject({ replay: false });
+
+    await expect(
+      withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db.transaction((tx) =>
+          sendAgentMessageInTransaction(tx as unknown as typeof db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            targetSessionId: sibling.id,
+            actor: caller.actor,
+            operationKey: crypto.randomUUID(),
+            text: "lateral update",
+          }),
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "TARGET_NOT_VERTICAL" });
+
+    await expect(
+      withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db.transaction((tx) =>
+          sendAgentMessageInTransaction(tx as unknown as typeof db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            targetSessionId: grandchild.id,
+            actor: caller.actor,
+            operationKey: crypto.randomUUID(),
+            text: "skipped generation update",
+          }),
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "TARGET_NOT_VERTICAL" });
+
+    const controlled = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: child.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+      ),
+    );
+    expect(controlled.control.state).toBe("paused");
+
+    await expect(
+      withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as unknown as typeof db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sessionId: parent.id,
+            actor: caller.actor,
+            operationKey: crypto.randomUUID(),
+            action: "pause",
+          }),
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "TARGET_NOT_VERTICAL" });
+  });
+
   test("Agent message stays pending under Pause and never becomes human queue work", async () => {
     const grant = await fixture();
     const caller = await activeAgent(grant);
-    const target = await makeSession(grant);
+    const target = await makeSession(grant, caller.session.id);
     await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as typeof db, {
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           sessionId: target.id,
@@ -454,7 +536,7 @@ describe("attempt-fenced Agent session commands", () => {
     );
     const delivered = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        sendAgentMessageInTransaction(tx as typeof db, {
+        sendAgentMessageInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           targetSessionId: target.id,
@@ -485,10 +567,10 @@ describe("attempt-fenced Agent session commands", () => {
   test("an interrupted caller cannot publish or counter-control another session", async () => {
     const grant = await fixture();
     const caller = await activeAgent(grant);
-    const target = await makeSession(grant);
+    const target = await makeSession(grant, caller.session.id);
     await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as typeof db, {
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           sessionId: caller.session.id,
@@ -501,7 +583,7 @@ describe("attempt-fenced Agent session commands", () => {
     await expect(
       withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
         db.transaction((tx) =>
-          mutateSessionControlInTransaction(tx as typeof db, {
+          mutateSessionControlInTransaction(tx as unknown as typeof db, {
             accountId: grant.accountId,
             workspaceId: grant.workspaceId!,
             sessionId: target.id,
@@ -516,7 +598,7 @@ describe("attempt-fenced Agent session commands", () => {
     await expect(
       withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
         db.transaction((tx) =>
-          sendAgentMessageInTransaction(tx as typeof db, {
+          sendAgentMessageInTransaction(tx as unknown as typeof db, {
             accountId: grant.accountId,
             workspaceId: grant.workspaceId!,
             targetSessionId: target.id,
@@ -540,11 +622,11 @@ describe("attempt-fenced Agent session commands", () => {
   test("Agent Steer reports cancellation cleanup with no visible human queue", async () => {
     const grant = await fixture();
     const caller = await activeAgent(grant);
-    const target = await activeAgent(grant);
+    const target = await activeAgent(grant, caller.session.id);
 
     const steered = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        steerAgentSessionInTransaction(tx as typeof db, {
+        steerAgentSessionInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           targetSessionId: target.session.id,
@@ -564,12 +646,12 @@ describe("attempt-fenced Agent session commands", () => {
   test("a committed Agent command replays after caller interruption while a new command is rejected", async () => {
     const grant = await fixture();
     const caller = await activeAgent(grant);
-    const target = await makeSession(grant);
+    const target = await makeSession(grant, caller.session.id);
     const operationKey = crypto.randomUUID();
     const invoke = (key: string, text: string) =>
       withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
         db.transaction((tx) =>
-          sendAgentMessageInTransaction(tx as typeof db, {
+          sendAgentMessageInTransaction(tx as unknown as typeof db, {
             accountId: grant.accountId,
             workspaceId: grant.workspaceId!,
             targetSessionId: target.id,
@@ -583,7 +665,7 @@ describe("attempt-fenced Agent session commands", () => {
     const original = await invoke(operationKey, "durable result");
     await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as typeof db, {
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           sessionId: caller.session.id,
@@ -612,11 +694,11 @@ describe("attempt-fenced Agent session commands", () => {
   test("idle repeated Agent Steer keeps stale wake acknowledgements outstanding until one newest-direction claim", async () => {
     const grant = await fixture();
     const caller = await activeAgent(grant);
-    const target = await makeSession(grant);
+    const target = await makeSession(grant, caller.session.id);
     const steer = (instruction: string) =>
       withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
         db.transaction((tx) =>
-          steerAgentSessionInTransaction(tx as typeof db, {
+          steerAgentSessionInTransaction(tx as unknown as typeof db, {
             accountId: grant.accountId,
             workspaceId: grant.workspaceId!,
             targetSessionId: target.id,
@@ -740,10 +822,10 @@ describe("attempt-fenced Agent session commands", () => {
   test("Pause may acknowledge an Agent Steer wake only because Resume commits a fresh admission revision", async () => {
     const grant = await fixture();
     const caller = await activeAgent(grant);
-    const target = await makeSession(grant);
+    const target = await makeSession(grant, caller.session.id);
     const steered = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        steerAgentSessionInTransaction(tx as typeof db, {
+        steerAgentSessionInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           targetSessionId: target.id,
@@ -757,7 +839,7 @@ describe("attempt-fenced Agent session commands", () => {
     if (steeredWakeRevision === null) throw new Error("Agent Steer did not register a wake");
     const paused = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as typeof db, {
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           sessionId: target.id,
@@ -780,7 +862,7 @@ describe("attempt-fenced Agent session commands", () => {
 
     const resumed = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as typeof db, {
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           sessionId: target.id,
@@ -843,7 +925,7 @@ describe("attempt-fenced Agent session commands", () => {
   test("Agent Steer waits for the old owner to quiesce then runs before an unchanged human queue", async () => {
     const grant = await fixture();
     const caller = await activeAgent(grant);
-    const target = await makeSession(grant);
+    const target = await makeSession(grant, caller.session.id);
     const first = await submit(grant, target.id, "currently running");
     const queued = await submit(grant, target.id, "human prompt must stay first in its queue");
     const targetAttemptId = crypto.randomUUID();
@@ -873,7 +955,7 @@ describe("attempt-fenced Agent session commands", () => {
 
     const steered = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        steerAgentSessionInTransaction(tx as typeof db, {
+        steerAgentSessionInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           targetSessionId: target.id,
@@ -1044,7 +1126,7 @@ describe("attempt-fenced Agent session commands", () => {
   test("a human Steer claims ahead of an older pending Agent Steer and carries it as context", async () => {
     const grant = await fixture();
     const caller = await activeAgent(grant);
-    const target = await makeSession(grant);
+    const target = await makeSession(grant, caller.session.id);
     await submit(grant, target.id, "currently running");
     const targetAttemptId = crypto.randomUUID();
     const targetClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
@@ -1059,7 +1141,7 @@ describe("attempt-fenced Agent session commands", () => {
 
     const agentSteer = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        steerAgentSessionInTransaction(tx as typeof db, {
+        steerAgentSessionInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           targetSessionId: target.id,

@@ -22,7 +22,7 @@
 //! * [`supervisor`] — dial → serve → reconnect, forever, with heartbeats + the
 //!   clean going-offline.
 //! * [`cli`] — the `run` / `connect` / `connections` / `disconnect` / `service` /
-//!   `update` / `uninstall` surface.
+//!   `update` / `uninstall` surface plus native exact-attempt Codemode calls.
 //! * [`service`] — the ordinary background-service lifecycle glue.
 //! * [`update`] — the `update` subcommand wiring the self-update crate.
 //! * [`uninstall`] — the `uninstall` subcommand (remove binary/creds/enrollment).
@@ -35,8 +35,11 @@
 #![doc(html_root_url = "https://docs.rs/opengeni-agent")]
 
 mod backoff;
+mod browser_bridge;
+mod browser_sidecar;
 mod capacity;
 mod cli;
+mod codemode;
 mod config;
 mod dispatch;
 mod engine;
@@ -52,7 +55,7 @@ mod supervisor;
 mod uninstall;
 mod update;
 
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use clap::{CommandFactory as _, Parser as _};
 use opengeni_agent_platform::{NativePlatform, Platform};
@@ -60,6 +63,8 @@ use opengeni_agent_stream::{RelayHub, RelayHubConfig};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+use browser_bridge::BrowserBridgeServer;
+use browser_sidecar::BrowserSidecarManager;
 use cli::{Cli, Command, DisconnectArgs, EnrollArgs, RunArgs};
 use config::{StoredConnection, StoredCredentials};
 use enrollment::{EnrollmentOffer, EnrollmentRequest, InstallIdentity};
@@ -76,6 +81,16 @@ const CONNECTION_RELOAD_INTERVAL: std::time::Duration = std::time::Duration::fro
 /// Process entry point. Parses the CLI, initializes tracing, and dispatches to
 /// the selected subcommand. Returns a non-zero exit code on a fatal error.
 fn main() -> std::process::ExitCode {
+    if browser_bridge::is_native_host_invocation() {
+        init_tracing();
+        return match browser_bridge::run_native_host() {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                error!(%error, "browser native host exited with an error");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
     let cli = Cli::parse();
     init_tracing();
 
@@ -149,7 +164,14 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
                 .map_err(to_boxed)?
                 .map_err(string_err)
         }
+        Command::Codemode(args) => codemode::run(args).await.map_err(to_boxed),
         Command::Uninstall(args) => uninstall::run(&args).map_err(string_err),
+        Command::BrowserNativeHost(_) => {
+            tokio::task::spawn_blocking(browser_bridge::run_native_host)
+                .await
+                .map_err(to_boxed)?
+                .map_err(to_boxed)
+        }
     }
 }
 
@@ -322,16 +344,26 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     if let Some(cgroups) = op_cgroups {
         platform = platform.with_oom_isolation(cgroups);
     }
+    let config_dir = config::config_dir().ok();
+    let (next_platform, browser_sidecars) =
+        attach_browser_controller(platform, config_dir.as_deref());
+    platform = next_platform;
+    // Clone connection platforms only after browser control is attached. Existing
+    // links and links added by the watcher must expose the identical controller.
     let links = supervisor_links(&connections, &platform);
     let (updates_tx, updates_rx) = tokio::sync::watch::channel(links.clone());
+    let browser_bridge = start_browser_bridge(config_dir.as_deref()).await;
 
     // The engine's disk spool lives under the config dir — a real filesystem
     // (a tmpfs temp dir would spool "to disk" in RAM and defeat the budgets).
-    let supervisor = match config::config_dir() {
-        Ok(dir) => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION"))
+    let mut supervisor = match &config_dir {
+        Some(dir) => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION"))
             .with_spool_root(dir.join("spool")),
-        Err(_) => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION")),
+        None => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION")),
     };
+    if let Some(bridge) = &browser_bridge {
+        supervisor = supervisor.with_browser_bridge(bridge.inventory());
+    }
     let shutdown = supervisor.shutdown_handle();
 
     // Wire SIGINT/SIGTERM to a clean shutdown so the lease flips offline
@@ -368,13 +400,52 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     });
 
     info!("agent online — press Ctrl-C to stop (the machine goes offline cleanly)");
-    supervisor
-        .run_with_updates(updates_rx)
-        .await
-        .map_err(to_boxed)?;
+    let supervisor_result = supervisor.run_with_updates(updates_rx).await;
     watcher.abort();
+    if let Some(bridge) = browser_bridge {
+        if let Err(error) = bridge.shutdown().await {
+            warn!(%error, "attached browser bridge did not shut down cleanly");
+        }
+    }
+    if let Some(sidecars) = browser_sidecars {
+        sidecars.shutdown().await;
+    }
+    supervisor_result.map_err(to_boxed)?;
     info!("agent stopped");
     Ok(())
+}
+
+fn attach_browser_controller(
+    platform: NativePlatform,
+    config_dir: Option<&Path>,
+) -> (NativePlatform, Option<Arc<BrowserSidecarManager>>) {
+    let Some(directory) = config_dir else {
+        return (platform, None);
+    };
+    match BrowserSidecarManager::discover(directory) {
+        Ok(manager) => {
+            let manager = Arc::new(manager);
+            (
+                platform.with_browser_control(manager.clone()),
+                Some(manager),
+            )
+        }
+        Err(error) => {
+            warn!(%error, "browser controller sidecar unavailable; browser-native control is disabled");
+            (platform, None)
+        }
+    }
+}
+
+async fn start_browser_bridge(config_dir: Option<&Path>) -> Option<BrowserBridgeServer> {
+    let directory = config_dir?;
+    match BrowserBridgeServer::start(directory).await {
+        Ok(bridge) => Some(bridge),
+        Err(error) => {
+            warn!(%error, "attached browser bridge unavailable; continuing without it");
+            None
+        }
+    }
 }
 
 fn supervisor_links(
@@ -393,7 +464,13 @@ fn supervisor_links(
                 allow_screen_control: credentials.consented_screen_control,
             });
             let link_platform = Arc::new(platform.clone().with_stream_registry(Arc::new(hub)));
-            SupervisorLink::new(connection.connection_id.clone(), link_platform, credentials)
+            let link =
+                SupervisorLink::new(connection.connection_id.clone(), link_platform, credentials);
+            if connection.legacy_origin {
+                link
+            } else {
+                link.with_api_url(connection.api_url.clone())
+            }
         })
         .collect()
 }
@@ -482,12 +559,12 @@ fn ensure_macos_desktop_grants() {
         warn!(
             screen_recording = grants.screen_recording,
             accessibility = grants.accessibility,
+            input_monitoring = grants.input_monitoring,
             "this Mac needs OS permission to expose its display to OpenGeni — requesting \
-             Screen Recording + Accessibility. Approve the system prompt(s), or open \
-             System Settings > Privacy & Security and enable BOTH 'Screen Recording' and \
-             'Accessibility' for opengeni-agent, then let it reconnect. Until then the \
-             machine runs headless (exec/fs/git still work); the display appears once both \
-             grants are in place."
+             Screen Recording + Accessibility + Input Monitoring. Approve the system prompt(s), \
+             or open System Settings > Privacy & Security and enable all three for \
+             opengeni-agent, then let it reconnect. Capture and input capabilities appear as \
+             their grants become available; exec/fs/git remain available."
         );
         opengeni_agent_platform::request_desktop_grants();
     });
@@ -496,7 +573,8 @@ fn ensure_macos_desktop_grants() {
         info!(
             screen_recording = after.screen_recording,
             accessibility = after.accessibility,
-            "macOS desktop grants still pending; display stays unavailable until both are \
+            input_monitoring = after.input_monitoring,
+            "macOS desktop grants still pending; capture/input stay capability-gated until \
              enabled in System Settings (does not block exec/fs/git or enroll)"
         );
     }

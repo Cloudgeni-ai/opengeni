@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,8 +31,10 @@ const execFileAsync = promisify(execFile);
 // filesystem lock, and each test FILE gets its own freshly-created DATABASE
 // inside that container. Per-database isolation preserves the previous
 // per-container data isolation (separate schema + rows) while collapsing the
-// concurrent-container count from ~15 to 1. A lock-guarded refcount file tracks
-// how many files are using the container; the last one out removes it.
+// concurrent-container count from ~15 to 1. A lock-guarded holder set tracks
+// exact acquisitions against the current container id. The container stays up
+// for the test command (and can be reused by the next command); removing and
+// immediately rebinding its fixed port is racy on Docker Desktop/OrbStack.
 //
 // Tests connect as the NON-superuser `opengeni_app` login role (so FORCE RLS is
 // genuinely enforced, exactly as before), with a separate superuser `admin`
@@ -108,7 +110,23 @@ async function templateDbName(): Promise<string> {
 
 const STATE_DIR = join(tmpdir(), `opengeni-shared-pg-${PORT}`);
 const LOCK_DIR = join(STATE_DIR, "lock");
-const REFCOUNT_FILE = join(STATE_DIR, "refcount");
+const LOCK_OWNER_FILE = join(LOCK_DIR, "owner.json");
+const CONTAINER_STATE_FILE = join(STATE_DIR, "container.json");
+
+type LockOwner = {
+  pid: number;
+  token: string;
+};
+
+type ContainerHandle = {
+  generation: string;
+  token: string;
+};
+
+type ContainerState = {
+  generation: string;
+  holders: Record<string, { pid: number }>;
+};
 
 export type SharedTestDatabase = {
   /** Superuser connection scoped to this file's own database (bypasses RLS). */
@@ -117,7 +135,7 @@ export type SharedTestDatabase = {
   adminUrl: string;
   /** opengeni_app (non-superuser) URL for createDb() — FORCE RLS applies. */
   appUrl: string;
-  /** Release this file's handle: closes admin + decrements the shared refcount. */
+  /** Release this file's exact holder and close its admin pool. */
   release: () => Promise<void>;
 };
 
@@ -141,62 +159,166 @@ async function dockerOk(args: string[]): Promise<boolean> {
   }
 }
 
-/** A cooperative cross-process lock via atomic mkdir, with stale-lock breaking. */
+async function readLockOwner(): Promise<LockOwner | null> {
+  try {
+    const parsed = JSON.parse(await readFile(LOCK_OWNER_FILE, "utf8")) as Partial<LockOwner>;
+    return typeof parsed.pid === "number" &&
+      Number.isSafeInteger(parsed.pid) &&
+      parsed.pid > 0 &&
+      typeof parsed.token === "string"
+      ? { pid: parsed.pid, token: parsed.token }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+/**
+ * Cooperative cross-process lock via atomic mkdir.
+ *
+ * A migration-template build can legitimately take minutes on a loaded CI host.
+ * Lock age therefore cannot prove abandonment: only a missing/dead owner may be
+ * reclaimed. The token also prevents an old holder from deleting a successor's
+ * lock during cleanup.
+ */
 async function withLock<T>(fn: () => Promise<T>): Promise<T> {
   await mkdir(STATE_DIR, { recursive: true });
-  const deadline = Date.now() + 120_000;
+  const deadline = Date.now() + 600_000;
+  const token = crypto.randomUUID();
   for (;;) {
+    let acquired = false;
     try {
       await mkdir(LOCK_DIR); // atomic: fails if another holder exists
-      break;
+      acquired = true;
     } catch {
-      // Break a stale lock left by a crashed process (older than 60s).
+      // Reclaim only a lock whose owner is provably gone. A holder can remain
+      // healthy past any wall-clock threshold while it builds the template.
       try {
         const stat = await import("node:fs/promises").then((m) => m.stat(LOCK_DIR));
-        if (Date.now() - stat.mtimeMs > 60_000) {
+        const owner = await readLockOwner();
+        const ownerGone = owner ? !processIsAlive(owner.pid) : Date.now() - stat.mtimeMs > 30_000;
+        if (ownerGone) {
           await rm(LOCK_DIR, { recursive: true, force: true });
           continue;
         }
       } catch {
         // lock vanished between checks — retry the mkdir
       }
-      if (Date.now() > deadline) {
-        throw new Error("shared-pg: timed out acquiring the container lock");
-      }
-      await Bun.sleep(50 + Math.random() * 100);
     }
+    if (acquired) {
+      try {
+        await writeFile(LOCK_OWNER_FILE, JSON.stringify({ pid: process.pid, token }), "utf8");
+      } catch (error) {
+        await rm(LOCK_DIR, { recursive: true, force: true }).catch(() => undefined);
+        throw error;
+      }
+      break;
+    }
+    if (Date.now() > deadline) {
+      throw new Error("shared-pg: timed out acquiring the container lock");
+    }
+    await Bun.sleep(50 + Math.random() * 100);
   }
   try {
     return await fn();
   } finally {
-    await rm(LOCK_DIR, { recursive: true, force: true }).catch(() => undefined);
+    const owner = await readLockOwner();
+    if (owner?.token === token) {
+      await rm(LOCK_DIR, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
 }
 
-async function readRefcount(): Promise<number> {
+async function readContainerState(): Promise<ContainerState | null> {
+  let source: string;
   try {
-    return Number.parseInt(await readFile(REFCOUNT_FILE, "utf8"), 10) || 0;
-  } catch {
-    return 0;
+    source = await readFile(CONTAINER_STATE_FILE, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+  let parsed: Partial<ContainerState>;
+  try {
+    parsed = JSON.parse(source) as Partial<ContainerState>;
+  } catch (error) {
+    throw new Error("shared-pg: container holder state is malformed", { cause: error });
+  }
+  if (
+    typeof parsed.generation !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(parsed.generation) ||
+    !parsed.holders ||
+    typeof parsed.holders !== "object" ||
+    Array.isArray(parsed.holders)
+  ) {
+    throw new Error("shared-pg: container holder state has an invalid shape");
+  }
+  const holders: ContainerState["holders"] = {};
+  for (const [token, holder] of Object.entries(parsed.holders)) {
+    if (
+      !/^[0-9a-f-]{36}$/iu.test(token) ||
+      !holder ||
+      typeof holder !== "object" ||
+      typeof (holder as { pid?: unknown }).pid !== "number" ||
+      !Number.isSafeInteger((holder as { pid: number }).pid) ||
+      (holder as { pid: number }).pid <= 0
+    ) {
+      throw new Error("shared-pg: container holder state has an invalid holder");
+    }
+    holders[token] = { pid: (holder as { pid: number }).pid };
+  }
+  return { generation: parsed.generation, holders };
+}
+
+async function writeContainerState(state: ContainerState): Promise<void> {
+  const temporaryPath = join(STATE_DIR, `.container-${process.pid}-${crypto.randomUUID()}.tmp`);
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(state)}\n`, "utf8");
+    await rename(temporaryPath, CONTAINER_STATE_FILE);
+  } finally {
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
   }
 }
 
-async function writeRefcount(n: number): Promise<void> {
-  await writeFile(REFCOUNT_FILE, String(n), "utf8");
-}
+type ContainerProbe =
+  | { available: true; id: string | null; status: string | null }
+  | { available: false };
 
-async function containerRunning(): Promise<boolean> {
-  const { stdout } = await docker([
-    "ps",
-    "--filter",
-    `name=^${CONTAINER}$`,
-    "--format",
-    "{{.Names}}",
-  ]).catch(() => ({ stdout: "" }));
-  return stdout
-    .split("\n")
-    .map((l) => l.trim())
-    .includes(CONTAINER);
+async function probeContainer(): Promise<ContainerProbe> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      const result = await docker([
+        "inspect",
+        "--type",
+        "container",
+        "--format",
+        "{{.Id}}\t{{.State.Status}}",
+        CONTAINER,
+      ]);
+      const [id, status, ...extra] = result.stdout.trim().split("\t");
+      if (extra.length > 0 || !id || !/^[a-f0-9]{64}$/u.test(id) || !status) {
+        throw new Error("shared-pg: Docker returned an invalid container inspection");
+      }
+      return { available: true, id, status };
+    } catch (error) {
+      const stderr = String((error as { stderr?: unknown })?.stderr ?? "");
+      if (/no such (object|container)/iu.test(stderr)) {
+        return { available: true, id: null, status: null };
+      }
+    }
+    await Bun.sleep(100 * (attempt + 1));
+  }
+  return { available: false };
 }
 
 async function waitForReady(url: string): Promise<void> {
@@ -287,23 +409,43 @@ async function ensureTemplateBuilt(): Promise<void> {
 
 /**
  * Ensure the single shared container is up and the cluster-global opengeni_app
- * role exists, then bump the refcount. Lock-guarded so exactly one parallel
- * worker starts it. Returns false (and does NOT bump the refcount) if docker is
+ * role exists, then register one exact holder. Lock-guarded so exactly one
+ * parallel worker starts it. Returns null (and registers no holder) if Docker is
  * unavailable, so callers can skip gracefully — mirroring the old per-file
  * `available = false` behaviour.
  */
-async function ensureContainerAndAcquire(): Promise<boolean> {
+async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
   return withLock(async () => {
-    const startedContainer = !(await containerRunning());
-    if (startedContainer) {
-      // Clear any stale refcount left over from a previous crashed run.
-      await writeRefcount(0);
-      // Remove a stopped leftover of the same name, then start fresh. NOT --rm:
-      // the container must survive across the many test-file processes that
-      // share it; the last file out removes it explicitly.
+    const priorState = await readContainerState();
+    // A warm fixture's data plane is the authoritative fast path. Docker
+    // Desktop/OrbStack's control API can briefly stop answering under a heavily
+    // parallel suite even while PostgreSQL remains completely healthy. The
+    // fingerprinted immutable template proves this is our exact fixture, so a
+    // transient `docker inspect` outage must not turn into skipped DB tests.
+    let generation = priorState && (await templateReady()) ? priorState.generation : null;
+    if (!generation) {
+      const probe = await probeContainer();
+      if (!probe.available) {
+        return null;
+      }
+      generation = probe.id;
+      if (generation && probe.status !== "running" && probe.status !== "restarting") {
+        const resumed =
+          probe.status === "paused"
+            ? await dockerOk(["unpause", generation])
+            : await dockerOk(["start", generation]);
+        if (!resumed) {
+          await dockerOk(["rm", "-f", "-v", generation]);
+          generation = null;
+        }
+      }
+    }
+    if (!generation) {
+      // Remove only an inspect-confirmed stopped leftover, then start fresh.
+      // NOT --rm: the container must survive across test-file waves and later
+      // commands so the fixed port is never rebound while its proxy tears down.
       // The postgres image declares an anonymous data volume. Remove it with
-      // the container or every test-file lifecycle leaks a full migrated
-      // cluster into the shared Docker filesystem.
+      // an unusable leftover so failed generations do not leak full clusters.
       await dockerOk(["rm", "-f", "-v", CONTAINER]);
       // ONE container is shared by every DB/API/worker integration test FILE in
       // the parallel `bun test` run. Each file opens its own connection pool (the
@@ -314,7 +456,7 @@ async function ensureContainerAndAcquire(): Promise<boolean> {
       // visible) rather than a clean error. Give the throwaway test server a
       // generous ceiling so the whole suite fits. `MAX_CONNECTIONS` keeps the
       // per-file pools small as a second line of defence.
-      const started = await dockerOk([
+      const started = await docker([
         "run",
         "-d",
         "-e",
@@ -328,21 +470,24 @@ async function ensureContainerAndAcquire(): Promise<boolean> {
         "max_connections=1000",
         "-c",
         "shared_buffers=256MB",
-      ]);
-      if (!started) {
-        return false; // docker unavailable
+      ]).catch(() => null);
+      generation = started?.stdout.trim() ?? null;
+      if (!generation || !/^[a-f0-9]{64}$/u.test(generation)) {
+        return null; // Docker unavailable or unable to start the fixture.
       }
     }
+    if (!generation) {
+      throw new Error("shared-pg: running container has no generation id");
+    }
+    await waitForReady(`${ADMIN_BASE_URL}/postgres`);
+    // A killed test process can leave Docker's independently-running container
+    // alive after `docker run` but before cluster bootstrap. Repair the
+    // cluster-global role on EVERY acquisition, not only the fresh-start branch;
+    // otherwise the running container looks healthy while every FORCE-RLS clone
+    // fails with `role opengeni_app does not exist`.
+    const admin = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
     try {
-      await waitForReady(`${ADMIN_BASE_URL}/postgres`);
-      // A killed test process can leave Docker's independently-running
-      // container alive after `docker run` but before cluster bootstrap. Repair
-      // the cluster-global role on EVERY acquisition, not only the fresh-start
-      // branch; otherwise the running container looks healthy while every
-      // FORCE-RLS clone fails with `role opengeni_app does not exist`.
-      const admin = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
-      try {
-        await admin.unsafe(`
+      await admin.unsafe(`
           DO $$ BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN
               CREATE ROLE opengeni_app WITH LOGIN NOSUPERUSER NOBYPASSRLS
@@ -352,32 +497,40 @@ async function ensureContainerAndAcquire(): Promise<boolean> {
                 NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT PASSWORD '${APP_PASSWORD}';
             END IF;
           END $$;`);
-      } finally {
-        await admin.end().catch(() => undefined);
-      }
-    } catch (err) {
-      if (startedContainer) await dockerOk(["rm", "-f", "-v", CONTAINER]);
-      throw err;
+    } finally {
+      await admin.end().catch(() => undefined);
     }
     // Build the once-per-container migrated template (idempotent; self-heals a
     // crashed partial). Inside the lock so exactly one process pays the
     // migration; every acquire after that just clones from it.
     await ensureTemplateBuilt();
-    await writeRefcount((await readRefcount()) + 1);
-    return true;
+    const latestState = await readContainerState();
+    const holders = latestState?.generation === generation ? latestState.holders : {};
+    for (const [token, holder] of Object.entries(holders)) {
+      if (!processIsAlive(holder.pid)) {
+        delete holders[token];
+      }
+    }
+    const token = crypto.randomUUID();
+    holders[token] = { pid: process.pid };
+    await writeContainerState({ generation, holders });
+    return { generation, token };
   });
 }
 
-async function releaseContainer(): Promise<void> {
+async function releaseContainer(handle: ContainerHandle): Promise<void> {
   await withLock(async () => {
-    const next = (await readRefcount()) - 1;
-    if (next <= 0) {
-      await writeRefcount(0);
-      await dockerOk(["rm", "-f", "-v", CONTAINER]);
-      await rm(STATE_DIR, { recursive: true, force: true }).catch(() => undefined);
-    } else {
-      await writeRefcount(next);
+    const state = await readContainerState();
+    if (state?.generation !== handle.generation || !state.holders[handle.token]) {
+      return;
     }
+    delete state.holders[handle.token];
+    // Keep the exact generation warm even when the holder set becomes empty.
+    // A later file/command can safely reuse its immutable fingerprinted
+    // template. Eager removal made the next `docker run -p 61440:5432` race the
+    // desktop runtime's asynchronous port-proxy teardown, causing every later
+    // PostgreSQL test to report the database unavailable.
+    await writeContainerState(state);
   });
 }
 
@@ -424,12 +577,12 @@ async function cloneFromTemplate(dbName: string): Promise<void> {
   }
 }
 
-/** Best-effort DROP of this file's database, then decrement the shared refcount. */
-async function dropDatabaseAndRelease(dbName: string): Promise<void> {
+/** Best-effort DROP of this file's database, then release its exact holder. */
+async function dropDatabaseAndRelease(dbName: string, handle: ContainerHandle): Promise<void> {
   const dropper = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
   await dropper.unsafe(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`).catch(() => undefined);
   await dropper.end().catch(() => undefined);
-  await releaseContainer();
+  await releaseContainer(handle);
 }
 
 function uniqueDbName(label: string): string {
@@ -479,11 +632,11 @@ export async function acquireSharedTestDatabase(
         }
         released = true;
         await admin.end().catch(() => undefined);
-        await dropDatabaseAndRelease(dbName);
+        await dropDatabaseAndRelease(dbName, acquired);
       },
     };
   } catch (err) {
-    await releaseContainer().catch(() => undefined);
+    await releaseContainer(acquired).catch(() => undefined);
     throw err;
   }
 }
@@ -514,11 +667,11 @@ export async function acquireBlankTestDatabase(label = "blank"): Promise<BlankTe
           return;
         }
         released = true;
-        await dropDatabaseAndRelease(dbName);
+        await dropDatabaseAndRelease(dbName, acquired);
       },
     };
   } catch (err) {
-    await releaseContainer().catch(() => undefined);
+    await releaseContainer(acquired).catch(() => undefined);
     throw err;
   }
 }

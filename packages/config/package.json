@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/config",
-  "version": "0.12.10",
+  "version": "0.16.2",
   "description": "OpenGeni runtime configuration: settings resolution, deployment knobs, and config validation shared across the server packages.",
   "license": "Apache-2.0",
   "repository": {
@@ -35,6 +35,7 @@
   "dependencies": {
     "@opengeni/codex": "workspace:*",
     "@opengeni/contracts": "workspace:*",
+    "@opengeni/xai-subscription": "workspace:*",
     "zod": "^4.2.1"
   },
   "devDependencies": {

@@ -25,8 +25,14 @@ const FORBIDDEN_SPECIFIERS = new Set([
 ]);
 
 const ALLOWED_RUNTIME_SUBPATHS = new Set([
+  // Bounded first-party Gmail transport adapter. Its only Agents dependency is
+  // an erased MCPServer type import; it does not import or execute the loop.
+  "@opengeni/runtime/gmail-rest-mcp",
   "@opengeni/runtime/mcp-network",
   "@opengeni/runtime/sandbox",
+  // Immutable curated Skill metadata/artifact reader. This leaf imports only
+  // Node filesystem/crypto utilities and does not import the agent loop.
+  "@opengeni/runtime/skill-library",
 ]);
 
 function importSpecifiersOf(source: string): string[] {

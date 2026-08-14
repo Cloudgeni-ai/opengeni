@@ -1,4 +1,11 @@
-import { ExternalLinkIcon, Loader2Icon, PlugIcon, RefreshCwIcon, TrashIcon } from "lucide-react";
+import {
+  ExternalLinkIcon,
+  Loader2Icon,
+  PlugIcon,
+  RefreshCwIcon,
+  SparklesIcon,
+  TrashIcon,
+} from "lucide-react";
 import {
   useEffect,
   useLayoutEffect,
@@ -24,11 +31,12 @@ import {
 } from "@/components/ui/sheet";
 import {
   capabilityConnectPlan,
-  capabilityKindLabel,
+  capabilityItemKindLabel,
   capabilityReconnectPlan,
+  capabilityRequiresPersonalConnection,
   capabilitySourceLabel,
   curatedSkillProvenance,
-  preferredSocialConnection,
+  socialConnectionsForOwnership,
   GENERIC_API_KEY_FIELD,
   type ConnectionHealth,
 } from "@/lib/capabilities";
@@ -38,14 +46,44 @@ import type { CapabilityCatalogItem, ConnectionOwnership, SocialConnection } fro
 
 export type ConnectAction =
   | { type: "enable"; item: CapabilityCatalogItem }
+  | { type: "install_skill"; item: CapabilityCatalogItem }
+  | { type: "remove_skill"; item: CapabilityCatalogItem }
   | {
       type: "social_oauth";
       item: CapabilityCatalogItem;
       provider: "x" | "reddit";
       ownership: ConnectionOwnership;
     }
-  | { type: "disconnect_social"; item: CapabilityCatalogItem; connectionId: string }
-  | { type: "oauth"; item: CapabilityCatalogItem; ownership: ConnectionOwnership }
+  | {
+      type: "disconnect_social";
+      item: CapabilityCatalogItem;
+      connectionId: string;
+    }
+  // connectionId is the existing Fiken row to rewrite in place (reconnect /
+  // replace token), or null for a first connect.
+  | {
+      type: "fiken_api_token";
+      item: CapabilityCatalogItem;
+      apiToken: string;
+      connectionId: string | null;
+    }
+  | {
+      type: "fiken_disconnect";
+      item: CapabilityCatalogItem;
+      connectionId: string;
+    }
+  // OAuth against the registered Fiken app; connectionId re-authorizes an
+  // existing row in place.
+  | {
+      type: "fiken_oauth";
+      item: CapabilityCatalogItem;
+      connectionId: string | null;
+    }
+  | {
+      type: "oauth";
+      item: CapabilityCatalogItem;
+      ownership: ConnectionOwnership;
+    }
   | {
       type: "api_key";
       item: CapabilityCatalogItem;
@@ -67,7 +105,7 @@ export type ConnectAction =
       ownership: ConnectionOwnership;
       headers: Record<string, string>;
     }
-  | { type: "disable"; item: CapabilityCatalogItem };
+  | { type: "disconnect"; item: CapabilityCatalogItem };
 
 export const DEFAULT_CONNECTION_OWNERSHIP: ConnectionOwnership = "workspace";
 
@@ -83,6 +121,7 @@ export function CapabilityDetailSheet({
   errorMessage,
   socialConnections,
   canManageSocial = false,
+  canManageSkills = false,
   onAction,
 }: {
   item: CapabilityCatalogItem | null;
@@ -96,6 +135,7 @@ export function CapabilityDetailSheet({
   errorMessage: string | null;
   socialConnections?: SocialConnection[];
   canManageSocial?: boolean;
+  canManageSkills?: boolean;
   onAction: (action: ConnectAction) => void;
 }) {
   const localRestoreFocusRef = useRef<HTMLElement | null>(null);
@@ -161,6 +201,7 @@ export function CapabilityDetailSheet({
             errorMessage={errorMessage}
             socialConnections={socialConnections}
             canManageSocial={canManageSocial}
+            canManageSkills={canManageSkills}
             onAction={onAction}
           />
         ) : null}
@@ -169,7 +210,7 @@ export function CapabilityDetailSheet({
   );
 }
 
-function DetailBody({
+export function DetailBody({
   item,
   health,
   logoSrc,
@@ -177,6 +218,7 @@ function DetailBody({
   errorMessage,
   socialConnections,
   canManageSocial,
+  canManageSkills = false,
   onAction,
 }: {
   item: CapabilityCatalogItem;
@@ -186,18 +228,23 @@ function DetailBody({
   errorMessage: string | null;
   socialConnections?: SocialConnection[];
   canManageSocial: boolean;
+  canManageSkills?: boolean;
   onAction: (action: ConnectAction) => void;
 }) {
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
+  const personalOnly = capabilityRequiresPersonalConnection(item);
   // API-key reconnect reveals the credential form in place of the button.
   const [reconnecting, setReconnecting] = useState(false);
   useEffect(() => setReconnecting(false), [item.id]);
   const [connectionOwnership, setConnectionOwnership] = useState<ConnectionOwnership>(
-    DEFAULT_CONNECTION_OWNERSHIP,
+    personalOnly ? "personal" : DEFAULT_CONNECTION_OWNERSHIP,
   );
-  useEffect(() => setConnectionOwnership(DEFAULT_CONNECTION_OWNERSHIP), [item.id]);
+  useEffect(
+    () => setConnectionOwnership(personalOnly ? "personal" : DEFAULT_CONNECTION_OWNERSHIP),
+    [item.id, personalOnly],
+  );
 
-  const canDisable = item.enabled && item.source !== "built_in" && item.source !== "configured";
+  const canDisconnect = item.enabled && item.kind === "mcp" && item.actions.includes("disconnect");
   const keyPageUrl = item.installUrl ?? item.homepageUrl;
   // Repair is driven by the installation's OWN connectionRef.kind, not the catalog
   // plan — on catalog/registry drift an enabled item can carry a live connectionRef
@@ -218,7 +265,7 @@ function DetailBody({
           <div className="min-w-0 flex-1">
             <SheetTitle className="truncate text-base">{item.name}</SheetTitle>
             <SheetDescription className="mt-0.5 text-xs text-fg-subtle">
-              {capabilityKindLabel(item.kind)}
+              {capabilityItemKindLabel(item)}
               {item.category && item.category !== "custom" ? ` · ${item.category}` : ""}
             </SheetDescription>
           </div>
@@ -285,6 +332,13 @@ function DetailBody({
                   : "This surface cannot be enabled from the capability catalog; its authorization is managed by the workspace Codex subscription."}
               </p>
             </div>
+          ) : item.kind === "skill" ? (
+            <SkillControls
+              item={item}
+              busy={busy}
+              canManage={canManageSkills}
+              onAction={onAction}
+            />
           ) : plan.mode === "social_oauth" ? (
             <SocialConnectorControls
               item={item}
@@ -294,6 +348,14 @@ function DetailBody({
               onOwnershipChange={setConnectionOwnership}
               busy={busy}
               canManage={canManageSocial}
+              onAction={onAction}
+            />
+          ) : plan.mode === "fiken_api_token" ? (
+            <FikenConnectorControls
+              item={item}
+              health={health}
+              keyPageUrl={keyPageUrl}
+              busy={busy}
               onAction={onAction}
             />
           ) : item.enabled ? (
@@ -349,24 +411,30 @@ function DetailBody({
                   </Button>
                 )
               ) : null}
-              {canDisable ? (
+              {canDisconnect ? (
                 <Button
                   type="button"
                   variant="outline"
                   className="w-full text-status-failed hover:bg-status-failed/10 hover:text-status-failed pointer-coarse:min-h-11"
                   disabled={busy}
-                  onClick={() => onAction({ type: "disable", item })}
+                  onClick={() => onAction({ type: "disconnect", item })}
                 >
                   {busy && !reconnect ? <Loader2Icon className="animate-spin" /> : <TrashIcon />}
-                  Disable
+                  Disconnect
                 </Button>
               ) : (
-                <p className="text-center text-xs text-fg-subtle">Built in — always available.</p>
+                <p className="text-center text-xs text-fg-subtle">
+                  Manage this capability from its dedicated controls.
+                </p>
               )}
             </div>
           ) : plan.mode === "api_key" ? (
             <div className="space-y-3">
-              <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
+              {personalOnly ? (
+                <PersonalOnlyConnectionNotice />
+              ) : (
+                <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
+              )}
               <CredentialForm
                 fields={plan.fields}
                 itemName={item.name}
@@ -390,12 +458,22 @@ function DetailBody({
             </div>
           ) : plan.mode === "oauth" ? (
             <div className="space-y-3">
-              <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
+              {personalOnly ? (
+                <PersonalOnlyConnectionNotice />
+              ) : (
+                <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
+              )}
               <Button
                 type="button"
                 className="w-full"
                 disabled={busy}
-                onClick={() => onAction({ type: "oauth", item, ownership: connectionOwnership })}
+                onClick={() =>
+                  onAction({
+                    type: "oauth",
+                    item,
+                    ownership: connectionOwnership,
+                  })
+                }
               >
                 {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
                 {connectionOwnership === "workspace"
@@ -408,7 +486,7 @@ function DetailBody({
                   : `You'll authorize ${item.name} for your personal use, then return here.`}
               </p>
             </div>
-          ) : (
+          ) : item.kind === "mcp" ? (
             <Button
               type="button"
               className="w-full"
@@ -423,10 +501,80 @@ function DetailBody({
               {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
               Enable
             </Button>
+          ) : (
+            <p className="text-center text-xs text-fg-subtle">
+              Install or connect this capability from its dedicated controls.
+            </p>
           )}
         </div>
       </div>
     </div>
+  );
+}
+
+function SkillControls({
+  item,
+  busy,
+  canManage,
+  onAction,
+}: {
+  item: CapabilityCatalogItem;
+  busy: boolean;
+  canManage: boolean;
+  onAction: (action: ConnectAction) => void;
+}) {
+  const updateAvailable = item.metadata.updateAvailable === true;
+  return (
+    <div className="space-y-3">
+      {item.enabled ? (
+        <div className="flex items-center gap-2 text-sm text-status-idle">
+          <span className="size-2 rounded-full bg-status-idle" />
+          {updateAvailable ? "Installed · update available" : "Installed"}
+        </div>
+      ) : null}
+      {!item.enabled || updateAvailable ? (
+        <Button
+          type="button"
+          className="w-full"
+          disabled={busy || !canManage || !item.runtime.available}
+          onClick={() => onAction({ type: "install_skill", item })}
+        >
+          {busy ? <Loader2Icon className="animate-spin" /> : <SparklesIcon />}
+          {item.enabled ? "Update Skill" : "Install Skill"}
+        </Button>
+      ) : null}
+      {item.enabled ? (
+        <Button
+          type="button"
+          variant="outline"
+          className="w-full text-status-failed hover:bg-status-failed/10 hover:text-status-failed pointer-coarse:min-h-11"
+          disabled={busy || !canManage}
+          onClick={() => onAction({ type: "remove_skill", item })}
+        >
+          {busy ? <Loader2Icon className="animate-spin" /> : <TrashIcon />}
+          Remove Skill
+        </Button>
+      ) : null}
+      {!canManage ? (
+        <p className="text-center text-xs text-fg-muted">
+          Workspace administrator permission is required to install, update, or remove Skills.
+        </p>
+      ) : null}
+      <p className="text-center text-xs text-fg-subtle">
+        Skills add reviewed instructions only. They never grant credentials or connect provider
+        accounts.
+      </p>
+    </div>
+  );
+}
+
+function PersonalOnlyConnectionNotice() {
+  return (
+    <Notice tone="info">
+      <span className="font-medium">Personal connection.</span> Other workspace members cannot
+      discover or use this account. Each member connects their own. Gmail content added to a session
+      follows that session's visibility.
+    </Notice>
   );
 }
 
@@ -449,24 +597,69 @@ export function SocialConnectorControls({
   canManage: boolean;
   onAction: (action: ConnectAction) => void;
 }) {
-  const connection = preferredSocialConnection(
-    connections.filter((candidate) => candidate.ownership === ownership),
-    provider,
+  const visibleConnections = socialConnectionsForOwnership(
+    connections.filter((candidate) => candidate.provider === provider),
+    ownership,
   );
+  const connected = visibleConnections.filter((connection) => connection.status === "connected");
+  const needsReauth = visibleConnections.filter(
+    (connection) => connection.status === "needs_reauth",
+  );
+  const hasUsableAccount = connected.length + needsReauth.length > 0;
   const canConnect = ownership === "personal" || canManage;
   return (
     <div className="space-y-3">
       <OwnershipSelector value={ownership} onChange={onOwnershipChange} />
-      {connection ? (
-        <Notice tone={connection.status === "connected" ? "success" : "waiting"}>
-          <span className="font-medium">
-            {connection.status === "connected"
-              ? `Connected as @${connection.accountHandle}`
-              : connection.status === "needs_reauth"
-                ? `@${connection.accountHandle} needs to reconnect`
-                : `@${connection.accountHandle} is disconnected`}
-          </span>
-        </Notice>
+      {visibleConnections.length > 0 ? (
+        <div className="divide-y divide-border rounded-lg border border-border" role="list">
+          {visibleConnections.map((connection) => (
+            <div
+              key={connection.id}
+              className="flex min-h-14 items-center gap-3 px-3 py-2.5"
+              role="listitem"
+            >
+              <span
+                className={cn(
+                  "size-2 shrink-0 rounded-full",
+                  connection.status === "connected"
+                    ? "bg-status-idle"
+                    : connection.status === "needs_reauth"
+                      ? "bg-status-waiting"
+                      : "bg-status-cancelled",
+                )}
+                aria-hidden
+              />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-xs font-medium text-fg">
+                  {connection.accountName || `@${connection.accountHandle}`}
+                </p>
+                <p className="truncate text-2xs text-fg-subtle">
+                  @{connection.accountHandle} · {socialConnectionStatusLabel(connection.status)}
+                </p>
+              </div>
+              {connection.status !== "disabled" ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="shrink-0 text-status-failed hover:bg-status-failed/10 hover:text-status-failed pointer-coarse:min-h-11"
+                  disabled={busy || !canConnect}
+                  aria-label={`Disconnect @${connection.accountHandle}`}
+                  onClick={() =>
+                    onAction({
+                      type: "disconnect_social",
+                      item,
+                      connectionId: connection.id,
+                    })
+                  }
+                >
+                  <TrashIcon />
+                  Disconnect
+                </Button>
+              ) : null}
+            </div>
+          ))}
+        </div>
       ) : null}
       <Button
         type="button"
@@ -475,29 +668,19 @@ export function SocialConnectorControls({
         onClick={() => onAction({ type: "social_oauth", item, provider, ownership })}
       >
         {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-        {connection && connection.status !== "disabled"
-          ? `Reconnect ${item.name}`
-          : ownership === "workspace"
-            ? `Connect ${item.name} for workspace`
-            : `Connect ${item.name} only for me`}
+        {needsReauth.length > 0
+          ? `Reconnect or add ${item.name} account`
+          : hasUsableAccount
+            ? `Add another ${item.name} account`
+            : ownership === "workspace"
+              ? `Connect ${item.name} for workspace`
+              : `Connect ${item.name} only for me`}
       </Button>
       <p className="text-center text-xs text-fg-subtle">
         {ownership === "workspace"
           ? "Workspace shared. Agents and scheduled automations can use the connected account; connect a brand account rather than a personal one."
           : "Personal. Used only by work carrying your explicit connection authority, including tasks you create from that authority."}
       </p>
-      {connection?.status === "connected" ? (
-        <Button
-          type="button"
-          variant="outline"
-          className="w-full"
-          disabled={busy || !canConnect}
-          onClick={() => onAction({ type: "disconnect_social", item, connectionId: connection.id })}
-        >
-          <TrashIcon />
-          Disconnect
-        </Button>
-      ) : null}
       {ownership === "workspace" && !canManage ? (
         <p className="text-center text-xs text-fg-subtle">
           Workspace admin permission is required to manage this connection.
@@ -505,6 +688,166 @@ export function SocialConnectorControls({
       ) : null}
     </div>
   );
+}
+
+const FIKEN_TOKEN_FIELD = { name: "apiToken", label: "Personal API token" };
+
+/**
+ * Connect / reconnect / disconnect controls for the first-party Fiken
+ * connector. Phase 1 is workspace-owned only, so there is no ownership
+ * selector; the token is verified against Fiken before it is stored.
+ */
+export function FikenConnectorControls({
+  item,
+  health,
+  keyPageUrl,
+  busy,
+  onAction,
+}: {
+  item: CapabilityCatalogItem;
+  health: ConnectionHealth;
+  keyPageUrl: string | null;
+  busy: boolean;
+  onAction: (action: ConnectAction) => void;
+}) {
+  const [replacing, setReplacing] = useState(false);
+  const [usingToken, setUsingToken] = useState(false);
+  useEffect(() => {
+    setReplacing(false);
+    setUsingToken(false);
+  }, [item.id]);
+  const connection =
+    health.state === "connected" || health.state === "attention" ? health.connection : null;
+
+  const tokenForm = (submitLabel: string, submitIcon: ReactNode) => (
+    <CredentialForm
+      fields={[FIKEN_TOKEN_FIELD]}
+      itemName={item.name}
+      keyPageUrl={keyPageUrl}
+      submitLabel={submitLabel}
+      submitIcon={submitIcon}
+      busy={busy}
+      onSubmit={(next) =>
+        onAction({
+          type: "fiken_api_token",
+          item,
+          apiToken: next[FIKEN_TOKEN_FIELD.name] ?? "",
+          connectionId: connection?.id ?? null,
+        })
+      }
+    />
+  );
+
+  const oauthButton = (label: string, icon: ReactNode) => (
+    <Button
+      type="button"
+      className="w-full"
+      disabled={busy}
+      onClick={() =>
+        onAction({
+          type: "fiken_oauth",
+          item,
+          connectionId: connection?.id ?? null,
+        })
+      }
+    >
+      {busy ? <Loader2Icon className="animate-spin" /> : icon}
+      {label}
+    </Button>
+  );
+
+  const tokenFallbackToggle = (
+    <button
+      type="button"
+      className="mx-auto block text-xs font-medium text-brand hover:underline"
+      onClick={() => setUsingToken(true)}
+    >
+      Use a personal API token instead
+    </button>
+  );
+
+  if (health.state === "connected" && connection) {
+    return (
+      <div className="space-y-3">
+        <ConnectionStatus item={item} health={health} />
+        {replacing ? (
+          <div className="space-y-3">
+            {oauthButton("Re-authorize with Fiken", <RefreshCwIcon />)}
+            {tokenForm("Replace API token", <RefreshCwIcon />)}
+          </div>
+        ) : (
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full"
+            disabled={busy}
+            onClick={() => setReplacing(true)}
+          >
+            <RefreshCwIcon />
+            Replace credential
+          </Button>
+        )}
+        <Button
+          type="button"
+          variant="outline"
+          className="w-full text-status-failed hover:bg-status-failed/10 hover:text-status-failed pointer-coarse:min-h-11"
+          disabled={busy}
+          onClick={() =>
+            onAction({
+              type: "fiken_disconnect",
+              item,
+              connectionId: connection.id,
+            })
+          }
+        >
+          {busy ? <Loader2Icon className="animate-spin" /> : <TrashIcon />}
+          Disconnect
+        </Button>
+        <p className="text-center text-xs text-fg-subtle">
+          Credentials are stored encrypted and used only for this workspace's Fiken tools.
+        </p>
+      </div>
+    );
+  }
+
+  if (health.state === "attention") {
+    return (
+      <div className="space-y-3">
+        <ConnectionStatus item={item} health={health} />
+        {oauthButton(`Reconnect ${item.name}`, <RefreshCwIcon />)}
+        {usingToken
+          ? tokenForm("Reconnect with API token", <RefreshCwIcon />)
+          : tokenFallbackToggle}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {oauthButton("Connect with Fiken", <PlugIcon />)}
+      <p className="text-center text-xs text-fg-subtle">
+        You'll sign in at Fiken and approve access once for this workspace. Everyone in the
+        workspace can then use the Fiken tools through this connection.
+      </p>
+      {usingToken ? (
+        <div className="space-y-3">
+          {tokenForm("Connect for workspace", <PlugIcon />)}
+          <p className="text-center text-xs text-fg-subtle">
+            Create a personal API token in Fiken under Rediger konto → API. Fiken's terms allow
+            personal tokens only for integrating your own company.
+          </p>
+        </div>
+      ) : (
+        tokenFallbackToggle
+      )}
+    </div>
+  );
+}
+
+function socialConnectionStatusLabel(status: SocialConnection["status"]): string {
+  if (status === "connected") return "Connected";
+  if (status === "needs_reauth") return "Needs reconnection";
+  return "Disconnected";
 }
 
 export function OwnershipSelector({
@@ -680,7 +1023,10 @@ function CredentialForm({
             autoComplete="off"
             value={headers[field.name] ?? ""}
             onChange={(event) =>
-              setHeaders((current) => ({ ...current, [field.name]: event.target.value }))
+              setHeaders((current) => ({
+                ...current,
+                [field.name]: event.target.value,
+              }))
             }
             placeholder={`Paste your ${field.label}`}
           />

@@ -143,12 +143,21 @@ pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
          ExecStart={exec}\n\
          Restart=always\n\
          RestartSec=5\n\
+         # Keep the tiny control supervisor behind ordinary host work in the\n\
+         # kernel's global OOM victim order. An unprivileged user manager may\n\
+         # clamp this to its own inherited floor; startup reports the effective\n\
+         # /proc value instead of assuming the request took effect.\n\
+         OOMScoreAdjust=-100\n\
+         # An OOM-killed command child must not make systemd stop the surviving\n\
+         # supervisor. If the main process is killed, Restart=always recovers it.\n\
+         OOMPolicy=continue\n\
          # A clean stop sends SIGTERM so the agent emits its going-offline message.\n\
          KillSignal=SIGTERM\n\
          TimeoutStopSec=15\n\
-         # OOM fate isolation (issue #345). Delegate a cgroup subtree so the agent can\n\
-         # place each host exec in its own memory sub-cgroup (see cgroup.rs), keeping a\n\
-         # runaway command from making the heartbeat/control supervisor the OOM victim.\n\
+         # OOM containment (issue #345). Delegate a cgroup subtree so the agent can\n\
+         # place each host exec in its own memory sub-cgroup (see cgroup.rs). This\n\
+         # separates accounting/systemd-oomd domains; global kernel OOM selection is\n\
+         # governed separately by the supervisor/child OOMScoreAdjust values above.\n\
          # ManagedOOMPreference=avoid biases systemd-oomd away from selecting this unit\n\
          # for a whole-unit kill. MemoryAccounting enables the delegated memory\n\
          # controller without imposing a unit-wide throttle: commands retain the\n\
@@ -320,6 +329,8 @@ mod tests {
         assert!(unit.contains("ExecStart=/home/u/.local/bin/opengeni-agent run"));
         assert!(unit.contains("Environment=\"PATH=/home/u/.local/bin:/usr/bin:/bin\""));
         assert!(unit.contains("Restart=always"));
+        assert!(unit.contains("OOMScoreAdjust=-100"));
+        assert!(unit.contains("OOMPolicy=continue"));
         assert!(unit.contains("WantedBy=default.target"));
         assert!(
             unit.contains("KillSignal=SIGTERM"),
@@ -357,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn systemd_unit_carries_oom_fate_isolation_directives_in_both_scopes() {
+    fn systemd_unit_carries_oom_containment_directives_in_both_scopes() {
         // Issue #345: both the user and the system unit must delegate a cgroup
         // subtree, bias systemd-oomd away from a whole-unit kill, and enable memory
         // accounting without installing a unit-wide memory throttle.

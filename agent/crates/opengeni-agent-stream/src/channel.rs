@@ -1,4 +1,4 @@
-//! A relay stream channel: keyed by `{workspaceId, agentId, port}`, authorized by
+//! A relay stream channel: keyed by `{workspaceId, agentId, port, channelId}`, authorized by
 //! a scoped `ogs_` token, auto-reconnecting + resuming on a relay blip.
 //!
 //! A [`RelayChannel`] is the agent's end of one logical stream (a PTY or a desktop
@@ -26,7 +26,7 @@ use crate::codec::RelayMessage;
 use crate::error::{StreamError, StreamResult};
 use crate::transport::{self, RelayTransport};
 
-/// The routing key for a relay channel: `{workspaceId, agentId, port}`. The relay
+/// The routing key for a relay channel: `{workspaceId, agentId, port, channelId}`. The relay
 /// routes a viewer's attach to the agent registration carrying the same key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChannelKey {
@@ -36,17 +36,20 @@ pub struct ChannelKey {
     pub agent_id: String,
     /// The logical port the channel maps to (so `resolveExposedPort` addresses it).
     pub port: u32,
+    /// The logical stream instance. Multiple PTYs/desktops may share one machine
+    /// and logical port without replacing each other.
+    pub channel_id: String,
 }
 
 impl ChannelKey {
     /// The channel-key query the relay routes by, appended to the relay dial URL
-    /// (`ws=<workspace>&agent=<agent>&port=<port>`). M8b's relay parses this to
+    /// (`ws=<workspace>&agent=<agent>&port=<port>&channel=<channel>`). The relay parses this to
     /// pair an agent registration with a viewer attach.
     #[must_use]
     pub fn query(&self) -> String {
         format!(
-            "ws={}&agent={}&port={}",
-            self.workspace_id, self.agent_id, self.port
+            "ws={}&agent={}&port={}&channel={}",
+            self.workspace_id, self.agent_id, self.port, self.channel_id
         )
     }
 }
@@ -72,6 +75,7 @@ impl ChannelConfig {
             workspace_id: self.channel.workspace_id.clone(),
             agent_id: self.channel.agent_id.clone(),
             port: self.channel.port,
+            channel_id: self.channel.channel_id.clone(),
         }
     }
 
@@ -93,8 +97,13 @@ impl ChannelConfig {
 pub struct RelayChannel {
     config: ChannelConfig,
     transport: Box<dyn RelayTransport>,
-    /// The next per-direction sequence the agent will send (its resume cursor).
-    next_seq: u64,
+    /// The next sequence the agent will stamp on an outbound frame.
+    send_next_seq: u64,
+    /// The next peer frame sequence the agent has not processed yet. This is the
+    /// cursor presented on reconnect so the relay replays the opposite direction.
+    recv_next_seq: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    reconnect_transports: std::collections::VecDeque<Box<dyn RelayTransport>>,
 }
 
 impl std::fmt::Debug for RelayChannel {
@@ -105,7 +114,8 @@ impl std::fmt::Debug for RelayChannel {
             .field("channel_id", &self.config.channel.channel_id)
             .field("key", &self.config.key())
             .field("kind", &self.config.channel.kind())
-            .field("next_seq", &self.next_seq)
+            .field("send_next_seq", &self.send_next_seq)
+            .field("recv_next_seq", &self.recv_next_seq)
             .finish_non_exhaustive()
     }
 }
@@ -153,7 +163,10 @@ impl RelayChannel {
             Some(RelayMessage::OpenAck(ack)) if ack.accepted => Ok(Self {
                 config,
                 transport,
-                next_seq: ack.resume_from_seq.max(resume_from_seq),
+                send_next_seq: 0,
+                recv_next_seq: ack.resume_from_seq.max(resume_from_seq),
+                #[cfg(any(test, feature = "test-support"))]
+                reconnect_transports: std::collections::VecDeque::new(),
             }),
             Some(RelayMessage::OpenAck(ack)) => Err(StreamError::OpenRejected(
                 ack.error
@@ -186,8 +199,9 @@ impl RelayChannel {
         Self::open_on(transport, config, resume_from_seq).await
     }
 
-    /// Re-establishes the channel after a transport drop, resuming from the current
-    /// send cursor. Applies a full-jitter backoff delay BEFORE redialing so a relay
+    /// Re-establishes the channel after a transport drop, asking the relay to replay
+    /// peer frames from the current receive cursor. The independent outbound cursor
+    /// is preserved locally. Applies a full-jitter backoff delay BEFORE redialing so a relay
     /// blip never triggers a reconnect storm (§10.6/§19).
     ///
     /// # Errors
@@ -196,11 +210,35 @@ impl RelayChannel {
     /// caller loops), a rejected open is terminal.
     pub async fn reconnect(&mut self, backoff_delay: Duration) -> StreamResult<()> {
         tokio::time::sleep(backoff_delay).await;
-        let resumed = Self::register_from(self.config.clone(), self.next_seq).await?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(transport) = self.reconnect_transports.pop_front() {
+            return self.reconnect_on(transport).await;
+        }
+        let resumed = Self::register_from(self.config.clone(), self.recv_next_seq).await?;
         self.transport = resumed.transport;
-        // Adopt the relay's resume point but never rewind below what we have sent.
-        self.next_seq = resumed.next_seq.max(self.next_seq);
+        // The ack is the peer replay cursor, never the agent's outbound sequence.
+        self.recv_next_seq = resumed.recv_next_seq.max(self.recv_next_seq);
         Ok(())
+    }
+
+    /// Test seam for the same reconnect/adoption logic over an injected transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed registration, protocol, or transport error produced by
+    /// opening the replacement channel.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn reconnect_on(&mut self, transport: Box<dyn RelayTransport>) -> StreamResult<()> {
+        let resumed = Self::open_on(transport, self.config.clone(), self.recv_next_seq).await?;
+        self.transport = resumed.transport;
+        self.recv_next_seq = resumed.recv_next_seq.max(self.recv_next_seq);
+        Ok(())
+    }
+
+    /// Queues an injected transport for the next reconnect (test-only).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn queue_reconnect_transport(&mut self, transport: Box<dyn RelayTransport>) {
+        self.reconnect_transports.push_back(transport);
     }
 
     /// The channel descriptor.
@@ -221,11 +259,16 @@ impl RelayChannel {
         self.config.channel.kind()
     }
 
-    /// The next per-direction sequence the agent will send — its resume cursor. A
-    /// reconnect presents this as `resume_from_seq` so the relay replays from here.
+    /// The next sequence the agent will stamp on an outbound frame.
     #[must_use]
     pub fn next_seq(&self) -> u64 {
-        self.next_seq
+        self.send_next_seq
+    }
+
+    /// The next peer sequence not yet processed. This is the reconnect replay cursor.
+    #[must_use]
+    pub fn resume_from_seq(&self) -> u64 {
+        self.recv_next_seq
     }
 
     /// Sends a data frame, stamping the next sequence + a produced-at time. Advances
@@ -235,7 +278,7 @@ impl RelayChannel {
     ///
     /// [`StreamError::Transport`] on a send failure (the caller reconnects).
     pub async fn send_frame(&mut self, data: bytes::Bytes) -> StreamResult<u64> {
-        let seq = self.next_seq;
+        let seq = self.send_next_seq;
         let frame = RelayMessage::Frame(v1::StreamFrame {
             channel_id: self.config.channel.channel_id.clone(),
             seq,
@@ -244,7 +287,7 @@ impl RelayChannel {
             produced_at_ms: now_ms(),
         });
         self.transport.send(&frame).await?;
-        self.next_seq = self.next_seq.wrapping_add(1);
+        self.send_next_seq = self.send_next_seq.wrapping_add(1);
         Ok(seq)
     }
 
@@ -256,7 +299,20 @@ impl RelayChannel {
     /// [`StreamError::Transport`] on a drop, [`StreamError::Protocol`] on a bad
     /// datagram.
     pub async fn recv(&mut self) -> StreamResult<Option<RelayMessage>> {
-        self.transport.recv().await
+        loop {
+            let message = self.transport.recv().await?;
+            match message {
+                Some(RelayMessage::Frame(frame)) if frame.seq < self.recv_next_seq => {
+                    // A reconnect replay can overlap the last delivered frame. Never
+                    // execute duplicate PTY input merely because transport recovered.
+                }
+                Some(RelayMessage::Frame(frame)) => {
+                    self.recv_next_seq = frame.seq.wrapping_add(1);
+                    return Ok(Some(RelayMessage::Frame(frame)));
+                }
+                other => return Ok(other),
+            }
+        }
     }
 
     /// Sends a [`StreamClose`] then closes the transport (a clean channel teardown).
@@ -278,7 +334,9 @@ impl RelayChannel {
         Self {
             config,
             transport,
-            next_seq: 0,
+            send_next_seq: 0,
+            recv_next_seq: 0,
+            reconnect_transports: std::collections::VecDeque::new(),
         }
     }
 }
@@ -311,7 +369,7 @@ mod tests {
     #[test]
     fn channel_key_query_is_routable() {
         let key = config().key();
-        assert_eq!(key.query(), "ws=ws-1&agent=ag-1&port=7681");
+        assert_eq!(key.query(), "ws=ws-1&agent=ag-1&port=7681&channel=ch-1");
         assert_eq!(key.workspace_id, "ws-1");
         assert_eq!(key.port, 7681);
     }
@@ -320,14 +378,14 @@ mod tests {
     fn dial_url_appends_the_routing_query() {
         assert_eq!(
             config().dial_url(),
-            "wss://relay.example/stream?ws=ws-1&agent=ag-1&port=7681"
+            "wss://relay.example/stream?ws=ws-1&agent=ag-1&port=7681&channel=ch-1"
         );
         // A relay_url that already has a query gets an `&` separator.
         let mut c = config();
         c.relay_url = "wss://relay.example/stream?x=1".to_string();
         assert_eq!(
             c.dial_url(),
-            "wss://relay.example/stream?x=1&ws=ws-1&agent=ag-1&port=7681"
+            "wss://relay.example/stream?x=1&ws=ws-1&agent=ag-1&port=7681&channel=ch-1"
         );
     }
 
@@ -423,11 +481,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn frames_advance_the_resume_cursor_and_reconnect_resumes_from_it() {
-        // Register, send two frames (seq 0,1), then simulate a relay blip by
-        // re-registering on a fresh transport presenting the resume cursor. The
-        // relay double sees the resume_from_seq the agent had reached — proving the
-        // resume-from-seq contract (§10.6).
+    async fn directional_cursors_survive_reconnect_without_duplicate_input() {
+        // Outbound PTY output and inbound PTY keystrokes have independent sequence
+        // spaces. A reconnect must preserve the former while presenting the latter
+        // as the relay replay cursor.
         let (agent_side, relay_side) = MockTransport::pair();
         let relay = tokio::spawn(relay_double(relay_side, true));
         let mut channel = RelayChannel::register_on(Box::new(agent_side), config(), 0)
@@ -463,20 +520,54 @@ mod tests {
             Ok(Some(RelayMessage::Frame(f))) if f.seq == 1
         ));
 
-        // Simulate a relay blip: re-register on a NEW transport. The relay double on
-        // the new link must observe resume_from_seq == 2 (the next seq to send).
+        let inbound = |seq, data: &'static [u8]| {
+            RelayMessage::Frame(v1::StreamFrame {
+                channel_id: "ch-1".to_string(),
+                seq,
+                data: bytes::Bytes::from_static(data),
+                produced_at_ms: 0,
+            })
+        };
+        first.relay_side.send(&inbound(0, b"x")).await.unwrap();
+        assert!(matches!(
+            channel.recv().await,
+            Ok(Some(RelayMessage::Frame(f))) if f.seq == 0 && f.data == bytes::Bytes::from_static(b"x")
+        ));
+        // An overlapping replay is discarded; the next unseen input is delivered.
+        first
+            .relay_side
+            .send(&inbound(0, b"duplicate"))
+            .await
+            .unwrap();
+        first.relay_side.send(&inbound(1, b"y")).await.unwrap();
+        assert!(matches!(
+            channel.recv().await,
+            Ok(Some(RelayMessage::Frame(f))) if f.seq == 1 && f.data == bytes::Bytes::from_static(b"y")
+        ));
+        assert_eq!(channel.resume_from_seq(), 2);
+
+        // Simulate a relay blip on a NEW transport. The new open presents the
+        // inbound cursor (2), while outbound output also independently remains 2.
         let (new_agent, new_relay) = MockTransport::pair();
         let relay2 = tokio::spawn(relay_double(new_relay, true));
-        let resumed = RelayChannel::register_on(Box::new(new_agent), config(), channel.next_seq())
+        channel
+            .reconnect_on(Box::new(new_agent))
             .await
             .expect("resume register");
         let second = relay2.await.expect("relay2").expect("open");
         assert_eq!(
             second.resume_from_seq, 2,
-            "reconnect must resume from the send cursor"
+            "reconnect must resume peer input from the receive cursor"
         );
-        // The resumed channel continues from the cursor, not from 0.
-        assert_eq!(resumed.next_seq(), 2);
+        assert_eq!(channel.next_seq(), 2);
+        assert_eq!(
+            channel
+                .send_frame(bytes::Bytes::from_static(b"c"))
+                .await
+                .unwrap(),
+            2,
+            "outbound cursor must not rewind during inbound replay negotiation"
+        );
         // Keep both relay ends alive to end-of-test (explicit, documents intent).
         drop(first.relay_side);
         drop(second.relay_side);

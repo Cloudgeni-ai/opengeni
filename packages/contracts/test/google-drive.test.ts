@@ -2,16 +2,47 @@ import { describe, expect, test } from "bun:test";
 import {
   GOOGLE_DRIVE_FILE_SCOPE,
   GOOGLE_DRIVE_FULL_SCOPE,
+  GOOGLE_DRIVE_CREDENTIAL_LABEL,
+  GOOGLE_DRIVE_CREDENTIAL_ROLE,
+  GOOGLE_DRIVE_LEGACY_CREDENTIAL_LABEL,
   GOOGLE_DRIVE_METADATA_READONLY_SCOPE,
   GOOGLE_DRIVE_READONLY_SCOPE,
+  GoogleDriveConnectionMetadata,
   GoogleDriveConnectionLifecycle,
   GoogleDriveDisconnectRequest,
   GoogleDriveLifecycleActionRequest,
+  SaveGoogleDriveIntegrationSourceRequest,
+  SaveGoogleDriveSourceRequest,
   googleDriveOAuthScopeDecision,
   googleDriveScopesAllowCapability,
 } from "../src/google-drive";
 
 describe("Google Drive OAuth scope capabilities", () => {
+  test("uses truthful labels for new connections while accepting legacy metadata", () => {
+    const metadata = {
+      credentialRole: GOOGLE_DRIVE_CREDENTIAL_ROLE,
+      googlePermissionId: "permission-a",
+      googleEmail: "drive@example.com",
+      googleDisplayName: "Drive User",
+      verifiedAt: "2026-08-10T14:00:00.000Z",
+      accessMode: "readonly",
+    } as const;
+
+    expect(GOOGLE_DRIVE_CREDENTIAL_LABEL).toBe("Google Drive read-only source sync");
+    expect(
+      GoogleDriveConnectionMetadata.parse({
+        ...metadata,
+        credentialLabel: GOOGLE_DRIVE_CREDENTIAL_LABEL,
+      }).credentialLabel,
+    ).toBe(GOOGLE_DRIVE_CREDENTIAL_LABEL);
+    expect(
+      GoogleDriveConnectionMetadata.parse({
+        ...metadata,
+        credentialLabel: GOOGLE_DRIVE_LEGACY_CREDENTIAL_LABEL,
+      }).credentialLabel,
+    ).toBe(GOOGLE_DRIVE_LEGACY_CREDENTIAL_LABEL);
+  });
+
   test("maps read-only and stronger full-Drive grants to recursive source access", () => {
     for (const scope of [GOOGLE_DRIVE_READONLY_SCOPE, GOOGLE_DRIVE_FULL_SCOPE]) {
       expect(googleDriveOAuthScopeDecision([scope])).toEqual({
@@ -121,5 +152,49 @@ describe("Google Drive OAuth scope capabilities", () => {
         observedAt: "2026-08-03T10:00:00.000Z",
       }),
     ).toMatchObject({ state: "disconnected", recoverable: true });
+  });
+});
+
+describe("Google Drive source selection contracts", () => {
+  const source = {
+    id: "folder-1",
+    name: "Product",
+    mimeType: "application/vnd.google-apps.folder",
+    driveId: null,
+  };
+  const request = {
+    sources: [source],
+    destination: { authorityKind: "workspace" as const, collectionId: null },
+    syncCadence: "hourly" as const,
+    readPolicy: "allow" as const,
+    idempotencyKey: "00000000-0000-4000-8000-000000000000",
+  };
+
+  test("requires one to 100 unique sources before provider verification", () => {
+    expect(SaveGoogleDriveIntegrationSourceRequest.safeParse(request).success).toBeTrue();
+    expect(
+      SaveGoogleDriveIntegrationSourceRequest.safeParse({ ...request, sources: [] }).success,
+    ).toBeFalse();
+    expect(
+      SaveGoogleDriveIntegrationSourceRequest.safeParse({
+        ...request,
+        sources: Array.from({ length: 101 }, (_, index) => ({
+          ...source,
+          id: `folder-${index}`,
+        })),
+      }).success,
+    ).toBeFalse();
+    expect(
+      SaveGoogleDriveIntegrationSourceRequest.safeParse({
+        ...request,
+        sources: [source, source],
+      }).success,
+    ).toBeFalse();
+    expect(
+      SaveGoogleDriveSourceRequest.safeParse({
+        sources: [],
+        targetScope: "workspace",
+      }).success,
+    ).toBeTrue();
   });
 });

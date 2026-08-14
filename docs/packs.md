@@ -1,66 +1,211 @@
 # Capability Packs
 
-Capability packs are role-oriented bundles that expand into existing OpenGeni runtime primitives:
+Capability Packs are role-oriented bundles that compose existing OpenGeni primitives rather than creating a second runtime. A Pack may describe:
 
-- MCP tool selections
-- bundled skills
-- connector requirements
-- optional document-base knowledge
-- scheduled-task templates
-- task metadata
+- exact Plugin, Skill, Integration-instance, and Integration-Facet components;
+- legacy inline Skills that the v2 installer migrates into ordinary immutable Skill components;
+- an explicit Rig requirement, including compatibility with a legacy `sandboxImage` declaration;
+- MCP tool selections, connector requirements, and optional knowledge;
+- a Variable Set requirement;
+- scheduled-task templates and task metadata.
 
-The first pack is `marketing-social-daily-analysis`. It enables a workspace to connect social accounts, attach marketing knowledge bases, and schedule a daily agent run that analyzes recent media performance.
+The built-in `marketing-social-daily-analysis` Pack connects social accounts, attaches marketing knowledge, and creates an ordinary scheduled agent run. It has no component or Rig plan, so it remains compatible with the dedicated simple Pack enable route.
 
-## Architecture
+## Product model
 
-OpenGeni keeps pack execution on the normal session and scheduled-task path. A pack does not create a second runtime. Instead, enabling a pack stores a `pack_installations` row and pack-specific flows create ordinary scheduled tasks with:
+The user-facing model is intentionally simpler than the storage model:
 
-- `agentConfig.tools`: first-party MCP servers such as `opengeni` and `docs`; portable packs may mark deployment-specific MCP refs with `optional: true` so unconfigured servers are skipped and configured-but-unavailable servers degrade best-effort at runtime
-- `agentConfig.resources`: files or repositories when needed
-- `agentConfig.metadata`: pack ID, template ID, connector IDs, and knowledge IDs
-- `agentConfig.prompt`: role-specific instructions compiled from the pack template
+- **Pack — what:** a reviewed solution recipe that adds or references Skills, Integrations, templates, policies, and automations.
+- **Connection — whose account:** one authenticated Gmail, Linear, Slack, or other provider account. Provider credentials never move into a Pack or Variable Set.
+- **Compute environment — where:** the normal OpenGeni compute choice, or a compatible versioned Rig only when the Pack genuinely requires special tooling.
+- **Configuration & secrets — extra runtime values:** an existing encrypted Variable Set selected only when the Pack declares required variable names.
 
-Connectors are durable account records, not secret records. `social_connections.credential_ref` points at an external credential broker or secret store. Raw OAuth tokens should not be stored in Postgres. Provider-specific OAuth brokers and sync workers can populate the same connector and post tables later.
+Most Packs require neither special compute nor extra configuration, so those choices stay hidden. A Pack never changes the workspace's default compute, embeds account credentials, or owns secret values. Pack-created scheduled work may inherit the selected Rig and Variable Set; unrelated workspace sessions do not.
 
-CloudGeni used a similar split: a general integration record, provider-specific detail, and credential services that fetch/refresh secrets behind a provider abstraction. OpenGeni keeps the MVP simpler but preserves the same boundary through `credentialRef`.
+The portable Pack manifest is the **blueprint**. Installation preview resolves it into an exact workspace-local **installation plan**: pinned component versions, named Integration instances, and any selected Rig or Variable Set. Users review the plan; they do not manually author database UUIDs or content digests in the ordinary product flow.
 
-Packs may also declare a `variable set` block (`description`, `requiredVariables`, `required`). Enabling such a pack accepts a `variableSetId` pointing at a workspace variable set (see `docs/variable-sets.md`); the required variable **names** are validated at enable time and scheduled tasks created from the pack's templates inherit the attachment. Variable sets store encrypted `NAME=value` material in Postgres under an operator key — a deliberate, documented contrast with the `credentialRef` rule above.
+## Invariants
 
-## Pack-Scoped Runtime
+1. **A Pack is composition, not a parallel runtime.** Pack-created work still uses ordinary sessions, Skills, Integration adapters, Rigs, Connections, Variable Sets, and scheduled tasks.
+2. **Review precedes mutation.** Component resolution, the exact manifest digest, Rig compatibility, and required Variable Set names are returned by installation preview. Install rejects source drift and unresolved required components.
+3. **Ownership is shared and reversible.** Pack ownership uses the same normalized component ledgers as direct installs and Plugins. Uninstall removes only the Pack's owner edges; exact components retained by another direct, Plugin, Pack, or migration owner remain active.
+4. **Only active owners affect runtime.** An `installing`, `needs_attention`, or `disabled` Pack owner does not make an otherwise unowned component executable. A partially completed Pack therefore cannot leak a half-installed runtime.
+5. **V2 runtime comes from components plus a Rig.** A v2 installation is identified by its frozen `manifestSnapshot` and `manifestDigest`. The worker does not directly load that manifest's inline Skills or `sandboxImage`; the installer already migrated those Skills and selected a Rig.
+6. **Connections remain independent.** A Pack may adopt an exact named Integration instance or Facet binding, but uninstalling the Pack never deletes the underlying Connection.
+7. **Tenant boundaries are enforced twice.** Pack installation, selected Rig, component ledger, and operation rows are workspace/account scoped under FORCE RLS, and database triggers reject cross-tenant Rig or ledger references.
 
-A registered pack manifest may declare the runtime its sessions compose into:
+## Manifest composition
 
-- `sandboxImage` (optional string): a container image ref — digest-pinned recommended — that the workspace's sessions run in. With one enabled image-declaring pack, the worker derives run settings with `dockerImage`/`modalImageRef` replaced by the pack image. With none, sessions keep the deployment-wide `OPENGENI_DOCKER_IMAGE` / `OPENGENI_MODAL_IMAGE_REF` behavior exactly. If **more than one** enabled pack declares an image, enabling the second pack fails with `409`, and a session start that still finds two (for example after a manifest re-registration) fails the turn with a plain error. There is deliberately no image composition or layering in v1.
-- `sandboxProviderImages` (optional object): provider-native immutable identities for that exact logical `sandboxImage`. The current `modal.imageId` binding requires `sandboxImage` to end in an OCI `@sha256:<64 hex>` digest. On Modal, the worker keeps the logical digest as the lease/conflict identity while `ModalImageSelector.fromId` starts the exact provider image and the serialized Modal session state records that actual ID. A higher-precedence rig image clears a pack/deployment Modal ID rather than silently running the lower-precedence artifact.
+`components` contains uniquely keyed immutable references:
 
-A pack `sandboxImage` in a **private** registry (a cloud-hosted ACR/ECR/GCR digest) can use either of two Modal paths:
+| Kind | Exact identity checked during preview |
+|---|---|
+| `plugin` | `pluginKey`, version, and manifest SHA-256 |
+| `skill` | capability ID and whole-artifact content SHA-256 |
+| `integration` | capability ID, named `instanceKey`, immutable revision ID, and content SHA-256 |
+| `facet` | capability ID, named `instanceKey`, Facet key, binding key, and exact configuration SHA-256 |
 
-1. Prefer a provider-native `sandboxProviderImages.modal.imageId` built from the same source recipe. This bypasses registry import and keeps the OCI digest plus Modal image ID as distinct, truthful identities.
-2. Without a provider-native ID, configure `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET` (see the Modal section in [`../.env.example`](../.env.example)); the worker warms that pack-specific ref at turn time after pack settings resolve. The Modal registry Secret is resolved with the configured `OPENGENI_MODAL_TOKEN_ID`/`OPENGENI_MODAL_TOKEN_SECRET` client, so embedded hosts do not also need standard `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` env or `~/.modal.toml`. Without a registry secret the image is pulled unauthenticated and must be public.
-- `skills` (optional array): skills delivered into the sandbox skill index. Each skill is `{ name, description?, files: [{ path, content }] }` where `files` must include a top-level `SKILL.md` and paths are safe relative POSIX paths (`references/...`, `scripts/...`). Skill content travels inline in the manifest and is stored with it (the `workspace_packs` JSONB row); no image baking or extra storage is involved. At run time the worker feeds enabled packs' skills into the OpenAI Agents SDK Skills capability alongside the bundled skills, so they appear in the same `.agents/` skill index, are lazily materialized via `load_skill`, and `skills/<name>` references resolve. A pack skill with the same directory name as a bundled skill shadows it; two enabled packs declaring the same skill name fail the turn plainly.
+Each reference is required by default. A missing or mismatched optional reference is reported in preview but does not block installation; a required one does.
 
-Built-in packs never declare `sandboxImage` or `skills`; only registered (manifest-backed) packs participate in pack-scoped runtime composition.
+### Inline Skill migration
 
-`sandboxImage` predates [rigs](rigs.md) and is superseded by them for new configuration: a rig's own `image`, when its version sets one, is the top of image precedence (**rig > pack > deployment default**) and overrides a pack's `sandboxImage` outright — a workspace with both a rig image and a pack image runs the rig's. `sandboxImage` still works unchanged for a workspace with no bound rig or a rig version with no image set.
+The manifest `skills` field is retained for compatibility, but v2 installation converts each inline Skill into the ordinary immutable Skill persistence model:
+
+- its complete normalized file artifact receives one SHA-256;
+- its canonical identity is based on case-insensitive Skill name plus exact content hash, not Pack ID;
+- two Packs declaring the same name and exact content share one Skill installation with two Pack owners;
+- an effective Skill with the same case-insensitive name but different content is a preview-time mismatch;
+- uninstalling one Pack retains the Skill while another effective owner remains;
+- uninstalling the final owner removes the Skill from later turns.
+
+The Pack manifest and component ledger retain the Pack provenance even when the underlying Skill artifact is shared.
+
+### Rig requirements and legacy images
+
+New Pack definitions should use `rig`:
+
+- `required` defaults to `true`;
+- `rigId` pins the Pack to one workspace Rig and cannot be overridden by the caller;
+- `requireVerified` requires the selected Rig's active version health to be passing;
+- `description` explains the compute requirement in review UI.
+
+Legacy `sandboxImage` also makes Rig selection required. Preview accepts only a Rig whose active version has that exact logical image. The installer stores `selectedRigId`; Pack-created scheduled tasks inherit it, and each resulting session freezes the Rig version that is active when that session is created.
+
+`sandboxProviderImages` is retained as legacy manifest provenance. V2 installation does not copy or execute that Pack field directly. Provider-native acceleration belongs to the selected Rig's verified active version; see [`rigs.md`](rigs.md).
+
+## Installation lifecycle
+
+### Register
+
+Workspace administrators register or replace a manifest at:
+
+```text
+POST /v1/workspaces/:workspaceId/packs
+```
+
+Registration stores the manifest but does not install its components.
+
+### Preview
+
+```text
+POST /v1/workspaces/:workspaceId/packs/:packId/installation-preview
+```
+
+The optional body contains `rigId` and `variableSetId`. The response includes:
+
+- the exact manifest SHA-256 and Pack version;
+- the current installation version, if any;
+- action: `install`, `update`, or `repair`;
+- every component's `ready`, `missing`, or `mismatch` result;
+- the selected Rig and its `ready`, `missing`, `mismatch`, or `unverified` result;
+- required Variable Set validation;
+- explicit blockers and a top-level `ready` decision;
+- legacy inline-Skill count and legacy image provenance for migration review.
+
+Preview is read-only. A manifest replacement after preview changes the digest and fences the subsequent install.
+
+### Install, update, or repair
+
+```text
+POST /v1/workspaces/:workspaceId/packs/:packId/install
+```
+
+The request supplies:
+
+- `expectedManifestDigest` from preview;
+- the reviewed `rigId` and `variableSetId`, when applicable;
+- a UUID `idempotencyKey`;
+- `expectedInstallationVersion` for update or repair;
+- optional metadata.
+
+The durable operation journal and workspace-local advisory locks make retries resumable and component identity deterministic. Admission row-locks a workspace-registered manifest and rechecks its canonical digest, so concurrent register/replace/unregister cannot freeze a source that was already stale when the operation linearized. Reusing the same idempotency key for a different request is rejected, and a second request cannot re-enter an operation that is still running. A failed `pending` operation may resume with the same key; after a browser reload, a newly previewed request with the current installation version may safely supersede it under the same Pack lock. A database-time heartbeat keeps live work fresh. An abandoned `running` claim becomes recoverable after 15 minutes: the same key may reclaim it, or a newly previewed key may take over only when the frozen manifest, Rig, and metadata intent are identical. Every heartbeat/finalize/defer presents the admitted operation version, so an older handler cannot overwrite the recovered result. A stale installation version or changed manifest returns `409` without superseding a recovery path.
+
+The installer migrates inline Skills, adopts exact referenced components, records the Pack component ledger, removes stale owner edges only after the replacement plan completes, and finally activates the Pack. A failed operation leaves the Pack `needs_attention`; retry the same request with the same idempotency key, or review the current plan again to start an OCC-fenced replacement operation.
+
+Installation status is one of:
+
+- `installing` — the reviewed operation is in progress;
+- `active` — the complete frozen plan owns its resolved components;
+- `needs_attention` — an interrupted or failed plan is resumable but not an effective owner;
+- `disabled` — no Pack-owned component is effective.
+
+### Uninstall
+
+First inspect ownership effects:
+
+```text
+GET /v1/workspaces/:workspaceId/packs/:packId/uninstall-preview
+```
+
+Each component reports `retainedByOtherOwners`. Then uninstall with the previewed version:
+
+```text
+DELETE /v1/workspaces/:workspaceId/packs/:packId/installation
+```
+
+The body contains `expectedInstallationVersion` and a UUID `idempotencyKey`. Uninstall removes only Pack owner edges, cleans up truly orphaned component installations and Facet bindings, deletes the Pack's component ledger rows, and marks the installation disabled. An active v2 Pack cannot be disabled through the generic capability route or unregistered until this lifecycle completes.
+
+### Simple Pack compatibility
+
+`POST /packs/:packId/enable` remains available only for simple Packs that have
+no `components`, inline `skills`, `rig`, `sandboxImage`, or
+`sandboxProviderImages`. Generic capability Enable no longer handles Packs;
+all Pack lifecycle state belongs to `pack_installations`. This preserves
+existing built-in and metadata/task-template Packs without allowing composed
+Packs to bypass review.
+
+Pre-v2 active installation rows have no `manifestSnapshot` and no `manifestDigest`. The worker retains their old direct Pack Skill/image behavior for rollback compatibility. Any v2 install/update freezes the manifest and moves the Pack to component/Rig runtime; the two models are never combined for one installation.
+
+## Variable Sets, Connections, and scheduled tasks
+
+A Pack may declare a `variableSet` block (`description`, `requiredVariables`, `required`). Preview and install accept a workspace `variableSetId` and validate required variable **names**. Values remain encrypted under the Variable Set authority described in [`variable-sets.md`](variable-sets.md).
+
+Connector records are identity/authorization authorities, not Pack-owned secrets. For social connectors, `social_connections.credential_ref` points at an external broker or secret store; raw provider tokens must not be placed in Pack metadata. Protocol-neutral Integration instances use ordinary encrypted Connection records and their token broker.
+
+Pack template creation produces ordinary scheduled tasks with:
+
+- `agentConfig.tools`, resources, prompt, and Pack/template metadata;
+- the Pack installation's selected Variable Set, when present;
+- the Pack installation's selected Rig, when present.
+
+The scheduled task and its sessions then follow the normal Temporal, authorization, Connection, Rig, and runtime paths.
+
+## HTTP example
+
+Preview a registered image Pack against a chosen Rig:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/packs/$PACK_ID/installation-preview" \
+  -H 'content-type: application/json' \
+  -d "{\"rigId\":\"$RIG_ID\",\"variableSetId\":\"$VARIABLE_SET_ID\"}"
+```
+
+After reviewing the response, install the exact plan:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/packs/$PACK_ID/install" \
+  -H 'content-type: application/json' \
+  -d "{
+    \"expectedManifestDigest\": \"$MANIFEST_SHA256\",
+    \"rigId\": \"$RIG_ID\",
+    \"variableSetId\": \"$VARIABLE_SET_ID\",
+    \"idempotencyKey\": \"$IDEMPOTENCY_KEY\"
+  }"
+```
+
+For an update or repair, include the previewed `expectedInstallationVersion`.
 
 ## Marketing Social Pack
 
-The pack exposes:
+The built-in Pack exposes:
 
-- Pack catalog and installation routes under `/v1/workspaces/:workspaceId/packs`
-- Social connector routes under `/v1/workspaces/:workspaceId/social`
-- OpenGeni MCP tools:
-  - `social_connections_list`
-  - `social_posts_recent`
-  - `social_daily_analysis_context`
-- Bundled skill: `social-media-marketing`
-- Optional document knowledge through existing document-base routes and the `docs` MCP server
+- Pack catalog and installation records under `/v1/workspaces/:workspaceId/packs`;
+- social connector routes under `/v1/workspaces/:workspaceId/social`;
+- provider-scoped X/Reddit live tools (`x_*` and `reddit_*`) bound to exact accounts, plus aggregate Pack tools such as `social_connections_list`, `social_posts_recent`, and `social_daily_analysis_context`;
+- optional document knowledge through the docs MCP server;
+- a daily analysis scheduled-task template.
 
-Provider OAuth and API access vary by platform. The pack manifest records official reference URLs for X OAuth 2.0 with PKCE, LinkedIn Community Management APIs, Instagram Graph API, TikTok APIs, and YouTube APIs. Use provider docs as the source of truth for scopes, approval, rate limits, and app review.
-
-## Setup Flow
-
-Enable the pack:
+Because it currently declares no component or Rig plan, it may still be enabled with the simple compatibility route:
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/packs/marketing-social-daily-analysis/enable" \
@@ -68,76 +213,26 @@ curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/packs/marketing-
   -d '{"metadata":{"enabledBy":"operator"}}'
 ```
 
-Register a connected social account. `credentialRef` should reference a secret-manager entry or OAuth broker record:
+Registering provider accounts and creating its scheduled task continue through the ordinary social and scheduled-task APIs.
 
-```bash
-curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/social/connections" \
-  -H 'content-type: application/json' \
-  -d '{
-    "provider": "linkedin",
-    "accountHandle": "example-company",
-    "accountName": "Example Company",
-    "externalAccountId": "urn:li:organization:123",
-    "scopes": ["r_organization_social"],
-    "credentialRef": "secret://marketing/linkedin/example-company"
-  }'
-```
+## Client surfaces
 
-Import or sync posts into OpenGeni:
+The SDK exposes:
 
-```bash
-curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/social/posts" \
-  -H 'content-type: application/json' \
-  -d '{
-    "connectionId": "00000000-0000-0000-0000-000000000000",
-    "externalPostId": "post-123",
-    "url": "https://www.linkedin.com/feed/update/urn:li:activity:123/",
-    "authorHandle": "example-company",
-    "text": "Launch announcement",
-    "publishedAt": "2026-06-06T09:00:00Z",
-    "metrics": { "impressions": 1200, "likes": 48, "comments": 6 }
-  }'
-```
+- `previewPackInstallation`
+- `installPack`
+- `previewPackUninstall`
+- `uninstallPack`
 
-Create the daily scheduled analysis task:
+`@opengeni/react` mirrors the lifecycle through `usePacks`. The web Capabilities page is review-first: it selects a Rig and Variable Set, displays exact component status and migration facts, supports install/update/repair, and previews shared-owner retention before uninstall.
 
-```bash
-curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/packs/marketing-social-daily-analysis/scheduled-tasks" \
-  -H 'content-type: application/json' \
-  -d '{
-    "connectionIds": ["00000000-0000-0000-0000-000000000000"],
-    "documentBaseIds": [],
-    "timeZone": "Europe/Oslo",
-    "hour": 9,
-    "minute": 0,
-    "promptInstructions": "Prioritize launch campaign learnings and concrete next actions."
-  }'
-```
+## Canonical implementation
 
-The scheduled task runs through Temporal like any other OpenGeni scheduled task. During execution, the agent calls `opengeni__social_daily_analysis_context`, optionally searches document bases through the docs MCP server, and writes a daily report in the session timeline.
-
-## Extension Points
-
-Add new packs by adding a pack manifest with:
-
-- stable `id`, `role`, `category`, and `version`
-- required MCP tools
-- bundled skill name
-- connector definitions and scope metadata
-- knowledge requirements
-- scheduled task templates
-
-Add new connector providers by writing an OAuth/API broker that:
-
-- completes provider auth and stores raw tokens in a secret store
-- creates or updates `social_connections` with a `credentialRef`
-- syncs provider data into `social_posts`
-- exposes richer MCP tools only when the provider needs live calls
-
-Official references used for the first pack:
-
-- X API OAuth 2.0 with PKCE: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
-- LinkedIn Community Management APIs: https://learn.microsoft.com/en-us/linkedin/marketing/community-management/community-management-overview
-- Instagram Graph API: https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/
-- TikTok API v2: https://developers.tiktok.com/doc/tiktok-api-v2-introduction/
-- Model Context Protocol transports: https://modelcontextprotocol.io/specification/draft/basic/transports
+- contracts: `packages/contracts/src/index.ts`
+- domain preview and legacy migration: `packages/core/src/domain/packs.ts`
+- HTTP lifecycle: `apps/api/src/routes/packs.ts`
+- operation/installation persistence: `packages/db/src/pack-installations.ts`
+- component resolution/ownership: `packages/db/src/pack-components.ts`
+- schema and rolling migration: `packages/db/src/schema.ts`, `packages/db/drizzle/0216_pack_component_ownership.sql`
+- legacy worker compatibility: `apps/worker/src/activities/packs.ts`
+- web review UI: `apps/web/src/components/capabilities/packs-section.tsx`

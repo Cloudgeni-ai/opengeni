@@ -432,6 +432,87 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(events).toEqual(["resolved", "admitted", "provider", "settled"]);
   });
 
+  test("placement-private staging is narrow control work, not a workspace mutation", async () => {
+    const calls: string[] = [];
+    const backend: RoutableBackendSession = {
+      async writeFile(args) {
+        calls.push(`write:${(args as { path: string }).path}`);
+        return 7;
+      },
+      async exec(args) {
+        calls.push(`exec:${(args as { cmd: string }).cmd}`);
+        return { exitCode: 0 };
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 2 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async ({ op }) => {
+        calls.push(`admitted:${op}`);
+      },
+      afterMutation: async ({ outcome }) => {
+        calls.push(`settled:${outcome}`);
+      },
+    });
+
+    expect(
+      await proxy.writePlacementPrivate({
+        path: "/tmp/opengeni-private/workspace-imports/grant",
+        content: "secret",
+        createParents: true,
+      }),
+    ).toBe(7);
+    await proxy.deletePlacementPrivate("/tmp/opengeni-private/workspace-imports/grant");
+    expect(calls).toEqual([
+      "write:/tmp/opengeni-private/workspace-imports/grant",
+      "exec:rm -f '/tmp/opengeni-private/workspace-imports/grant'",
+    ]);
+    await expect(
+      proxy.writePlacementPrivate({ path: "/workspace/not-private", content: "x" }),
+    ).rejects.toThrow(/placement-private path/);
+    expect(calls).toHaveLength(2);
+  });
+
+  test("streams placement-private bytes to the exact routed backend when it has no file API", async () => {
+    const calls: Array<{ kind: string; value: unknown }> = [];
+    const backend: RoutableBackendSession = {
+      async exec(args) {
+        calls.push({ kind: "exec", value: args });
+        return { sessionId: 41 };
+      },
+      async writeStdin(args) {
+        calls.push({ kind: "stdin", value: args });
+        return "Process exited with code 0\n\nOutput:\n__OPENGENI_PLACEMENT_PRIVATE_WRITE_OK__";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 2 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "docker" }),
+      beforeMutation: async () => {
+        throw new Error("private staging must not request workspace mutation admission");
+      },
+      afterMutation: async () => {
+        throw new Error("private staging must not settle a workspace mutation");
+      },
+    });
+
+    await proxy.writePlacementPrivate({
+      path: "/tmp/opengeni-private/workspace-imports/grant",
+      content: "signed-url-is-private",
+      createParents: true,
+    });
+    expect(calls).toHaveLength(2);
+    const firstCall = calls[0];
+    if (!firstCall) throw new Error("expected placement-private exec call");
+    const command = (firstCall.value as { cmd: string }).cmd;
+    expect(command).not.toContain("signed-url-is-private");
+    expect(command).not.toContain(Buffer.from("signed-url-is-private").toString("base64"));
+    expect(calls[1]?.value).toMatchObject({
+      sessionId: 41,
+      chars: Buffer.from("signed-url-is-private").toString("base64"),
+    });
+  });
+
   test("a rejected provider promise physically settles before its original error propagates", async () => {
     const events: string[] = [];
     const rejected = new Error("provider rejected");
@@ -1377,6 +1458,37 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     ).state.manifest;
     expect(await manifest.resolveEnvironment()).toEqual(env);
     expect(manifest.root).toBe("/workspace");
+  });
+
+  test("the resolver threads renewed transient values only into selfhosted exec", async () => {
+    const mock = new MockAgentResponder();
+    let token = "first";
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: new FakeBackend("group-modal"),
+      defaultKind: "modal",
+      getSandbox: async (id) => sandboxes[id] ?? null,
+      controlRpcFactory: () => mock,
+      relay: RELAY,
+      transientExecEnvironment: () => ({ OPENGENI_CODEMODE_TOKEN: token }),
+    });
+    const resolved = await resolve({ activeSandboxId: "sbx-self", activeEpoch: 7 });
+    const session = resolved.session as {
+      exec(args: { cmd: string }): Promise<unknown>;
+      serializeSessionState(): Promise<unknown>;
+    };
+    await session.exec({ cmd: "first" });
+    token = "second";
+    await session.exec({ cmd: "second" });
+
+    const first = mock.requests[0]?.req.op;
+    const second = mock.requests[1]?.req.op;
+    if (first?.$case !== "exec" || second?.$case !== "exec") {
+      throw new Error("expected exec requests");
+    }
+    expect(first.exec.env).toEqual({ OPENGENI_CODEMODE_TOKEN: "first" });
+    expect(second.exec.env).toEqual({ OPENGENI_CODEMODE_TOKEN: "second" });
+    expect(JSON.stringify(await session.serializeSessionState())).not.toContain("second");
   });
 
   test("pinnedSelfhosted (Stage D machine-primary): the machine pointer returns the SAME pinned instance; an epoch move builds fresh", async () => {

@@ -1,0 +1,29 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "@opengeni/sandbox-anydoc-runtime",
+      "dependencies": {
+        "@firecrawl/anydoc": "0.1.8",
+      },
+    },
+  },
+  "packages": {
+    "@firecrawl/anydoc": ["@firecrawl/anydoc@0.1.8", "", { "optionalDependencies": { "@firecrawl/anydoc-darwin-arm64": "0.1.8", "@firecrawl/anydoc-darwin-x64": "0.1.8", "@firecrawl/anydoc-linux-arm64-gnu": "0.1.8", "@firecrawl/anydoc-linux-arm64-musl": "0.1.8", "@firecrawl/anydoc-linux-x64-gnu": "0.1.8", "@firecrawl/anydoc-linux-x64-musl": "0.1.8", "@firecrawl/anydoc-win32-x64-msvc": "0.1.8" }, "bin": { "anydoc": "cli.js" } }, "sha512-DJXcCdEL1CcIyRRO/2C6SAcvn/SgM0nnpeGLOyZxJwCZJlx9s0HBUnsNtvQd5UHFUY/vZOURMOUf/h4I3HLjvQ=="],
+
+    "@firecrawl/anydoc-darwin-arm64": ["@firecrawl/anydoc-darwin-arm64@0.1.8", "", { "os": "darwin", "cpu": "arm64" }, "sha512-B+30kDFGW8RUt1S6nOwdRT3ZTf8pDztid1ws8XL95UuAkz2d49ktg00hfEIW0xCgM1HByUTfQkQtcJsfF2O35g=="],
+
+    "@firecrawl/anydoc-darwin-x64": ["@firecrawl/anydoc-darwin-x64@0.1.8", "", { "os": "darwin", "cpu": "x64" }, "sha512-PqUQFRv7I86ou2sZ0qE6bQFASi2Ja5yfpsU1vhngnqTsC31q2iSLDE5MWWGGRMoNZrWDh5ICTN7yQBoepkSokw=="],
+
+    "@firecrawl/anydoc-linux-arm64-gnu": ["@firecrawl/anydoc-linux-arm64-gnu@0.1.8", "", { "os": "linux", "cpu": "arm64" }, "sha512-lFuS2GdkKexYCCfBGb47si3vE4jA8Y+w9F377JJPeQc1/HQilqi+RjOhQrEgHiGlNygeOJwL6bKOQr+R+CWL9Q=="],
+
+    "@firecrawl/anydoc-linux-arm64-musl": ["@firecrawl/anydoc-linux-arm64-musl@0.1.8", "", { "os": "linux", "cpu": "arm64" }, "sha512-MT+24XbTQ5Jh+SDmbQz5F46sbz/gE2SeWf/5RyFriuOJHtiYSb0rym1AOa7HZH12AJvnfPcU6xTqyj1gKxRF0g=="],
+
+    "@firecrawl/anydoc-linux-x64-gnu": ["@firecrawl/anydoc-linux-x64-gnu@0.1.8", "", { "os": "linux", "cpu": "x64" }, "sha512-Row1/D9/3Zf5fFKaIyZqlMbz/Bxzl9FULFH7Zxlx/h4HTZT3S4Yl5d5A5Gl6T1Rps3qwrsJerXfL+9nLrj4s3Q=="],
+
+    "@firecrawl/anydoc-linux-x64-musl": ["@firecrawl/anydoc-linux-x64-musl@0.1.8", "", { "os": "linux", "cpu": "x64" }, "sha512-PovgyJR229FbxYsPGFhHFio1B+zBn2WKgNMmon/aPZanSG5a+xGkv+ywdrYJnZtBF1+LHgfbiQPljv5BqdbUMg=="],
+
+    "@firecrawl/anydoc-win32-x64-msvc": ["@firecrawl/anydoc-win32-x64-msvc@0.1.8", "", { "os": "win32", "cpu": "x64" }, "sha512-WwCy76FKeNLMFpfQkegaGZh6Oh05XMTQkGCVizh5IDZXTtYfn2j+KqOQbx8XT1y+dewBYQIvq/8OJFpeHuckKA=="],
+  }
+}

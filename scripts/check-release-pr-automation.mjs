@@ -5,6 +5,19 @@ import {
   verifySourceAdmission,
 } from "./check-source-admission.mjs";
 
+const releaseApprovers = Object.freeze([
+  Object.freeze({
+    login: "jorgensandhaug",
+    id: 55702375,
+    type: "User",
+  }),
+  Object.freeze({
+    login: "davletd",
+    id: 2204825,
+    type: "User",
+  }),
+]);
+
 export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
   apiUrl: "https://api.github.com",
   serverUrl: "https://github.com",
@@ -24,11 +37,10 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
     id: 41898282,
     type: "Bot",
   }),
-  releaseApprover: Object.freeze({
-    login: "jorgensandhaug",
-    id: 55702375,
-    type: "User",
-  }),
+  releaseApprovers,
+  // Retained for fixture and downstream compatibility; authorization uses
+  // releaseApprovers and never assumes this primary entry is the only one.
+  releaseApprover: releaseApprovers[0],
   githubActionsApp: Object.freeze({
     slug: "github-actions",
     id: 15368,
@@ -129,6 +141,8 @@ function githubClient(fetchImpl, token) {
     },
     patch: async (path, body) => (await request("PATCH", path, body)).value,
     post: async (path, body) => (await request("POST", path, body)).value,
+    postAllowing: async (path, body, allowedStatuses) =>
+      request("POST", path, body, allowedStatuses),
   };
 }
 
@@ -150,13 +164,17 @@ function assertRepository(value) {
 }
 
 function assertMainRef(value, expectedSha, label = "default branch") {
+  const actualSha = directMainRefSha(value, label);
+  invariant(actualSha === expectedSha, `${label} differs from the admitted base SHA`);
+}
+
+function directMainRefSha(value, label = "default branch") {
   invariant(
     value?.ref === `refs/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`,
     `${label} ref changed`,
   );
   invariant(value?.object?.type === "commit", `${label} is not a direct commit ref`);
-  const actualSha = assertSha(value.object.sha, `${label} SHA`);
-  invariant(actualSha === expectedSha, `${label} differs from the admitted base SHA`);
+  return assertSha(value.object.sha, `${label} SHA`);
 }
 
 function releaseHeadTagName(headSha) {
@@ -197,10 +215,14 @@ async function ensureReleaseHeadRef(api, headSha) {
 async function createReleaseHeadRef(api, headSha) {
   const tag = releaseHeadTagName(headSha);
   const path = repositoryPath(`/git/ref/tags/${tag}`);
-  await api.post(repositoryPath("/git/refs"), {
-    ref: `refs/tags/${tag}`,
-    sha: headSha,
-  });
+  await api.postAllowing(
+    repositoryPath("/git/refs"),
+    {
+      ref: `refs/tags/${tag}`,
+      sha: headSha,
+    },
+    [409, 422],
+  );
   const terminal = await api.get(path);
   assertReleaseHeadRef(terminal, headSha);
   return { name: tag, ref: `refs/tags/${tag}`, sha: headSha };
@@ -268,16 +290,20 @@ async function ensureReleaseHeadRelease(api, headSha) {
 async function createReleaseHeadRelease(api, headSha) {
   const tagName = releaseHeadTagName(headSha);
   const path = repositoryPath(`/releases/tags/${tagName}`);
-  await api.post(repositoryPath("/releases"), {
-    tag_name: tagName,
-    name: releaseHeadReleaseName(headSha),
-    body:
-      `Provider-retained exact release-source head ${headSha}. ` +
-      "This prerelease exists only as immutable source-retention evidence.",
-    draft: false,
-    prerelease: true,
-    make_latest: "false",
-  });
+  await api.postAllowing(
+    repositoryPath("/releases"),
+    {
+      tag_name: tagName,
+      name: releaseHeadReleaseName(headSha),
+      body:
+        `Provider-retained exact release-source head ${headSha}. ` +
+        "This prerelease exists only as immutable source-retention evidence.",
+      draft: false,
+      prerelease: true,
+      make_latest: "false",
+    },
+    [409, 422],
+  );
   return assertReleaseHeadRelease(await api.get(path), headSha);
 }
 
@@ -846,19 +872,35 @@ function assertRecoveryReleasePull(pull, context, expected) {
   return { ...identity, headRef, headRepository };
 }
 
-async function assertSourceAncestorOfCurrentMain(api, sourceSha, currentMainSha) {
+async function assertSourceAncestorOfCurrentMain(
+  api,
+  sourceSha,
+  currentMainSha,
+  label = "current main",
+  sourceLabel = "merged source",
+) {
   if (sourceSha === currentMainSha) return;
   const comparison = await api.get(repositoryPath(`/compare/${sourceSha}...${currentMainSha}`));
-  invariant(comparison?.status === "ahead", "current main is not ahead of the merged source");
+  invariant(comparison?.status === "ahead", `${label} is not ahead of the ${sourceLabel}`);
   invariant(
     comparison?.base_commit?.sha === sourceSha && comparison?.merge_base_commit?.sha === sourceSha,
-    "current main does not retain the merged source as its exact ancestor",
+    `${label} does not retain the ${sourceLabel} as its exact ancestor`,
   );
-  invariant(comparison?.behind_by === 0, "current main is behind the merged source");
+  invariant(comparison?.behind_by === 0, `${label} is behind the ${sourceLabel}`);
   invariant(
     Number.isSafeInteger(comparison?.ahead_by) && comparison.ahead_by > 0,
-    "current main ancestry distance is invalid",
+    `${label} ancestry distance is invalid`,
   );
+  invariant(
+    comparison?.total_commits === comparison.ahead_by,
+    `${label} ancestry comparison is incomplete`,
+  );
+}
+
+async function assertReleaseMainRef(api, value, sourceSha, label) {
+  const currentMainSha = directMainRefSha(value, label);
+  await assertSourceAncestorOfCurrentMain(api, sourceSha, currentMainSha, label, "admitted source");
+  return currentMainSha;
 }
 
 async function readOptionalReleaseHeadEvidence(api, headSha) {
@@ -1326,8 +1368,15 @@ export async function beginVersionPrChecks(options = {}) {
   const context = automationCiContext(env, options.inputs);
   const api = githubClient(options.fetchImpl ?? globalThis.fetch, context.token);
   await terminalVersionIdentity(api, context);
-  const releaseHead = await ensureReleaseHeadRef(api, context.headSha);
-  const releaseHeadRelease = await ensureReleaseHeadRelease(api, context.headSha);
+  const retain = async (sha) => {
+    const ref = await ensureReleaseHeadRef(api, sha);
+    const release = await ensureReleaseHeadRelease(api, sha);
+    return { ref, release };
+  };
+  const retainedHead = await retain(context.headSha);
+  const retainedController = await retain(context.baseSha);
+  const releaseHead = retainedHead.ref;
+  const releaseHeadRelease = retainedHead.release;
   await terminalVersionIdentity(api, context);
   const now = options.now ?? (() => new Date());
   await upsertCheckRun(
@@ -1366,7 +1415,13 @@ export async function beginVersionPrChecks(options = {}) {
     },
     now,
   );
-  return { ...context, releaseHead, releaseHeadRelease };
+  return {
+    ...context,
+    releaseHead,
+    releaseHeadRelease,
+    releaseController: retainedController.ref,
+    releaseControllerRelease: retainedController.release,
+  };
 }
 
 export async function completeVersionPrChecks(options = {}) {
@@ -1457,6 +1512,149 @@ function assertSuccessfulCheck(checks, name, sha) {
     name,
     appSlug: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug,
     appId: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+  });
+}
+
+function actionsJobIdentity(check, name, sha) {
+  invariant(check?.head_sha === sha, `${name} is bound to another commit`);
+  assertGitHubActionsApp(check?.app, name);
+  const checkId = assertPositiveInteger(check?.id, `${name} check-run ID`);
+  const checkSuiteId = assertPositiveInteger(check?.check_suite?.id, `${name} check-suite ID`);
+  const detailsUrl = assertString(check?.details_url, `${name} details URL`);
+  const parsedDetailsUrl = new URL(detailsUrl);
+  invariant(
+    parsedDetailsUrl.origin === RELEASE_AUTOMATION_CONTRACT.serverUrl &&
+      parsedDetailsUrl.search === "" &&
+      parsedDetailsUrl.hash === "",
+    `${name} details URL is not an exact GitHub Actions job URL`,
+  );
+  const match = parsedDetailsUrl.pathname.match(
+    new RegExp(
+      `^/${RELEASE_AUTOMATION_CONTRACT.repository}/actions/runs/` +
+        `([1-9][0-9]*)/job/([1-9][0-9]*)$`,
+    ),
+  );
+  invariant(match !== null, `${name} details URL is not an exact GitHub Actions job URL`);
+  const runId = assertPositiveInteger(match[1], `${name} workflow run ID`);
+  const jobId = assertPositiveInteger(match[2], `${name} workflow job ID`);
+  invariant(checkId === jobId, `${name} check-run ID differs from its workflow job URL`);
+  return { check, checkId, checkSuiteId, detailsUrl, jobId, runId };
+}
+
+async function paginatedWorkflowAttemptJobs(api, runId, runAttempt) {
+  const rows = [];
+  for (let page = 1; page <= maximumPages; page += 1) {
+    const value = await api.get(
+      repositoryPath(
+        `/actions/runs/${runId}/attempts/${runAttempt}/jobs?per_page=${recordsPerPage}&page=${page}`,
+      ),
+    );
+    invariant(Array.isArray(value?.jobs), "workflow-attempt job listing is invalid");
+    rows.push(...value.jobs);
+    if (value.jobs.length < recordsPerPage) return rows;
+  }
+  throw new Error(`workflow-attempt job listing exceeded ${maximumPages * recordsPerPage} records`);
+}
+
+async function verifySuccessfulSourceChecks(api, checks, names, sha) {
+  // GitHub failed-job reruns retain historical check runs under one workflow
+  // run/check suite. Bind to that provider-owned run, then require its latest
+  // attempt and exact aggregate jobs to be successful instead of trusting a
+  // timestamp-selected check or rejecting legitimate retry history outright.
+  const identitiesByName = new Map();
+  const allIdentities = [];
+  for (const name of names) {
+    const selected = checks.filter((check) => check?.name === name);
+    invariant(selected.length > 0, `${name} check run is missing on ${sha}`);
+    const identities = selected.map((check) => actionsJobIdentity(check, name, sha));
+    identitiesByName.set(name, identities);
+    allIdentities.push(...identities);
+  }
+
+  const runIds = new Set(allIdentities.map((identity) => identity.runId));
+  invariant(runIds.size === 1, "required source checks do not share one workflow run");
+  const checkSuiteIds = new Set(allIdentities.map((identity) => identity.checkSuiteId));
+  invariant(checkSuiteIds.size === 1, "required source checks do not share one check suite");
+  const runId = allIdentities[0].runId;
+  const checkSuiteId = allIdentities[0].checkSuiteId;
+  const run = record(
+    await api.get(repositoryPath(`/actions/runs/${runId}`)),
+    "required source workflow run",
+  );
+  invariant(run.id === runId, "required source workflow run ID changed");
+  invariant(
+    run.check_suite_id === checkSuiteId,
+    "required source workflow run check-suite identity changed",
+  );
+  invariant(run.event === "push", "required source workflow run was not triggered by a push");
+  invariant(
+    run.path === RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath,
+    "required source checks did not execute the CI workflow",
+  );
+  invariant(
+    run.head_branch === RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+    "required source workflow branch changed",
+  );
+  invariant(run.head_sha === sha, "required source workflow run is bound to another commit");
+  invariant(
+    run.repository?.full_name === RELEASE_AUTOMATION_CONTRACT.repository &&
+      run.head_repository?.full_name === RELEASE_AUTOMATION_CONTRACT.repository,
+    "required source workflow repository changed",
+  );
+  invariant(
+    run.html_url ===
+      `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+        `/actions/runs/${runId}`,
+    "required source workflow URL changed",
+  );
+  const runAttempt = assertPositiveInteger(run.run_attempt, "required source workflow attempt");
+  invariant(
+    run.status === "completed" && run.conclusion === "success",
+    "required source workflow did not complete successfully",
+  );
+
+  const jobs = await paginatedWorkflowAttemptJobs(api, runId, runAttempt);
+  return names.map((name) => {
+    const selectedJobs = jobs.filter((job) => job?.name === name);
+    invariant(
+      selectedJobs.length === 1,
+      `${name} is not represented by exactly one job in the authoritative workflow attempt`,
+    );
+    const job = selectedJobs[0];
+    const jobId = assertPositiveInteger(job?.id, `${name} authoritative workflow job ID`);
+    invariant(
+      job.status === "completed" && job.conclusion === "success",
+      `${name} did not complete successfully in the authoritative workflow attempt`,
+    );
+    invariant(
+      job.html_url ===
+        `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+          `/actions/runs/${runId}/job/${jobId}`,
+      `${name} authoritative workflow job URL changed`,
+    );
+    invariant(
+      job.check_run_url ===
+        `${RELEASE_AUTOMATION_CONTRACT.apiUrl}/repos/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+          `/check-runs/${jobId}`,
+      `${name} authoritative workflow job check-run URL changed`,
+    );
+    const latest = identitiesByName.get(name).filter((identity) => identity.jobId === jobId);
+    invariant(
+      latest.length === 1,
+      `${name} authoritative workflow job is not represented by exactly one check run`,
+    );
+    invariant(
+      latest[0].check.status === "completed" && latest[0].check.conclusion === "success",
+      `${name} authoritative check run did not complete successfully`,
+    );
+    return Object.freeze({
+      name,
+      appSlug: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug,
+      appId: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+      workflowRunId: runId,
+      workflowRunAttempt: runAttempt,
+      workflowJobId: jobId,
+    });
   });
 }
 
@@ -1642,14 +1840,14 @@ function assertProviderMergeEvent(events, sourceSha, pullIdentity) {
   );
 }
 
-function exactHeadReviewArtifact(baseSha, headSha) {
+function exactHeadReviewArtifact(baseSha, headSha, releaseApprover) {
   return {
     version: 3,
     kind: "opengeni-exact-head-release-review",
     repository: RELEASE_AUTOMATION_CONTRACT.repository,
     reviewedBaseSha: baseSha,
     reviewedHeadSha: headSha,
-    reviewerLogin: RELEASE_AUTOMATION_CONTRACT.releaseApprover.login,
+    reviewerLogin: releaseApprover.login,
     reviewProfile: "exact-head-maintainer-v1",
     verdict: "PASS",
   };
@@ -1759,10 +1957,13 @@ function releaseApprovalContext(env, suppliedSourceSha) {
   requiredEnvironment(env, [
     "GITHUB_API_URL",
     "GITHUB_EVENT_NAME",
+    "GITHUB_REF",
     "GITHUB_REPOSITORY",
     "GITHUB_SERVER_URL",
     "GITHUB_SHA",
     "GITHUB_TOKEN",
+    "GITHUB_WORKFLOW_SHA",
+    "RELEASE_CONTROLLER_SHA",
   ]);
   invariant(
     env.GITHUB_API_URL === RELEASE_AUTOMATION_CONTRACT.apiUrl,
@@ -1778,11 +1979,21 @@ function releaseApprovalContext(env, suppliedSourceSha) {
   );
   invariant(env.GITHUB_EVENT_NAME === "workflow_dispatch", "unexpected workflow event");
   const sourceSha = assertSha(suppliedSourceSha ?? env.SOURCE_SHA, "release source SHA");
+  const controllerSha = assertSha(env.RELEASE_CONTROLLER_SHA, "release controller SHA");
   invariant(
-    assertSha(env.GITHUB_SHA, "GITHUB_SHA") === sourceSha,
-    "dispatch ref differs from source SHA",
+    assertSha(env.GITHUB_SHA, "GITHUB_SHA") === controllerSha,
+    "dispatch ref differs from release controller SHA",
   );
-  return { sourceSha, token: env.GITHUB_TOKEN };
+  invariant(
+    assertSha(env.GITHUB_WORKFLOW_SHA, "GITHUB_WORKFLOW_SHA") === controllerSha,
+    "workflow definition differs from release controller SHA",
+  );
+  invariant(
+    env.GITHUB_REF === `refs/tags/${releaseHeadTagName(controllerSha)}`,
+    "release workflow is not running from the retained controller ref",
+  );
+  invariant(controllerSha !== sourceSha, "release controller must differ from release source");
+  return { controllerSha, sourceSha, token: env.GITHUB_TOKEN };
 }
 
 export async function verifyApprovedMerge(options = {}) {
@@ -1790,8 +2001,26 @@ export async function verifyApprovedMerge(options = {}) {
   const logger = options.logger ?? console;
   const context = releaseApprovalContext(env, options.sourceSha);
   const api = githubClient(options.fetchImpl ?? globalThis.fetch, context.token);
-  const initialMain = await api.get(repositoryPath("/git/ref/heads/main"));
-  assertMainRef(initialMain, context.sourceSha, "initial release main");
+  const controllerTag = releaseHeadTagName(context.controllerSha);
+  const [initialMain, controllerValue, controllerRef, controllerReleaseValue] = await Promise.all([
+    api.get(repositoryPath("/git/ref/heads/main")),
+    api.get(repositoryPath(`/git/commits/${context.controllerSha}`)),
+    api.get(repositoryPath(`/git/ref/tags/${controllerTag}`)),
+    api.get(repositoryPath(`/releases/tags/${controllerTag}`)),
+  ]);
+  const initialMainSha = await assertReleaseMainRef(
+    api,
+    initialMain,
+    context.sourceSha,
+    "initial release main",
+  );
+  const controller = assertCommit(
+    controllerValue,
+    context.controllerSha,
+    "release controller commit",
+  );
+  assertReleaseHeadRef(controllerRef, context.controllerSha);
+  const controllerRelease = assertReleaseHeadRelease(controllerReleaseValue, context.controllerSha);
   const source = assertCommit(
     await api.get(repositoryPath(`/git/commits/${context.sourceSha}`)),
     context.sourceSha,
@@ -1826,6 +2055,23 @@ export async function verifyApprovedMerge(options = {}) {
     "pull-request timeline",
   );
   assertProviderMergeEvent(timeline, context.sourceSha, pullIdentity);
+  const controllerIsReviewedBase = context.controllerSha === pullIdentity.baseSha;
+  if (!controllerIsReviewedBase) {
+    await assertSourceAncestorOfCurrentMain(
+      api,
+      context.sourceSha,
+      context.controllerSha,
+      "release controller",
+      "admitted source",
+    );
+    await assertSourceAncestorOfCurrentMain(
+      api,
+      context.controllerSha,
+      initialMainSha,
+      "initial release main",
+      "release controller",
+    );
+  }
   const [base, head] = await Promise.all([
     api
       .get(repositoryPath(`/git/commits/${pullIdentity.baseSha}`))
@@ -1834,6 +2080,12 @@ export async function verifyApprovedMerge(options = {}) {
       .get(repositoryPath(`/git/commits/${pullIdentity.headSha}`))
       .then((value) => assertCommit(value, pullIdentity.headSha, "reviewed head commit")),
   ]);
+  if (controllerIsReviewedBase) {
+    invariant(
+      controller.treeSha === base.treeSha,
+      "release controller tree differs from the exact reviewed base tree",
+    );
+  }
   invariant(
     source.treeSha === head.treeSha,
     "release source tree differs from the exact reviewed head",
@@ -1846,19 +2098,30 @@ export async function verifyApprovedMerge(options = {}) {
     "pull-request reviews",
   );
   const decisions = reviews
-    .filter(
-      (review) =>
-        hasStableIdentity(review?.user, RELEASE_AUTOMATION_CONTRACT.releaseApprover) &&
-        review.commit_id === pullIdentity.headSha &&
-        (decisiveReviewStates.has(review.state) ||
-          (review.state === "COMMENTED" &&
-            review.body?.startsWith("<!-- opengeni-exact-head-release-review:v3 -->"))),
-    )
-    .map((review) => ({
-      id: assertPositiveInteger(review.id, "trusted review ID"),
-      review,
-      submittedAt: assertTimestamp(review.submitted_at, "trusted review timestamp"),
-    }))
+    .flatMap((review) => {
+      const releaseApprover = RELEASE_AUTOMATION_CONTRACT.releaseApprovers.find((candidate) =>
+        hasStableIdentity(review?.user, candidate),
+      );
+      if (
+        releaseApprover === undefined ||
+        review.commit_id !== pullIdentity.headSha ||
+        (!decisiveReviewStates.has(review.state) &&
+          !(
+            review.state === "COMMENTED" &&
+            review.body?.startsWith("<!-- opengeni-exact-head-release-review:v3 -->")
+          ))
+      ) {
+        return [];
+      }
+      return [
+        {
+          id: assertPositiveInteger(review.id, "trusted review ID"),
+          releaseApprover,
+          review,
+          submittedAt: assertTimestamp(review.submitted_at, "trusted review timestamp"),
+        },
+      ];
+    })
     .sort((left, right) => left.submittedAt - right.submittedAt || left.id - right.id);
   invariant(decisions.length > 0, "trusted reviewer did not review the exact PR head");
   const decision = decisions.at(-1);
@@ -1866,11 +2129,7 @@ export async function verifyApprovedMerge(options = {}) {
     decision.submittedAt <= pullIdentity.mergedAt,
     "trusted approval was not submitted before merge",
   );
-  assertIdentity(
-    decision.review.user,
-    RELEASE_AUTOMATION_CONTRACT.releaseApprover,
-    "trusted reviewer",
-  );
+  assertIdentity(decision.review.user, decision.releaseApprover, "trusted reviewer");
   const reviewUrl =
     `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
     `/pull/${pullNumber}#pullrequestreview-${decision.id}`;
@@ -1883,7 +2142,7 @@ export async function verifyApprovedMerge(options = {}) {
   );
   invariant(
     !pull.requested_reviewers.some((candidate) =>
-      hasStableIdentity(candidate, RELEASE_AUTOMATION_CONTRACT.releaseApprover),
+      hasStableIdentity(candidate, decision.releaseApprover),
     ),
     "trusted review is no longer effective because review was re-requested",
   );
@@ -1892,7 +2151,7 @@ export async function verifyApprovedMerge(options = {}) {
   let reviewEvidenceSha256;
   if (decision.review.state === "APPROVED") {
     invariant(
-      pullIdentity.author.id !== RELEASE_AUTOMATION_CONTRACT.releaseApprover.id,
+      pullIdentity.author.id !== decision.releaseApprover.id,
       "trusted reviewer authored the independently approved pull request",
     );
     reviewType = "independent-approval";
@@ -1902,15 +2161,15 @@ export async function verifyApprovedMerge(options = {}) {
       pullRequestNumber: pullNumber,
       reviewedBaseSha: pullIdentity.baseSha,
       reviewedHeadSha: pullIdentity.headSha,
-      reviewerLogin: RELEASE_AUTOMATION_CONTRACT.releaseApprover.login,
+      reviewerLogin: decision.releaseApprover.login,
       reviewId: decision.id,
       verdict: "APPROVED",
     });
   } else {
     invariant(
       decision.review.state === "COMMENTED" &&
-        pullIdentity.author.id === RELEASE_AUTOMATION_CONTRACT.releaseApprover.id &&
-        pullIdentity.merger.id === RELEASE_AUTOMATION_CONTRACT.releaseApprover.id &&
+        pullIdentity.author.id === decision.releaseApprover.id &&
+        pullIdentity.merger.id === decision.releaseApprover.id &&
         pullIdentity.author.type === "User" &&
         pullIdentity.merger.type === "User",
       "trusted review is neither independent approval nor a provider-bound single-maintainer admin PASS",
@@ -1918,7 +2177,7 @@ export async function verifyApprovedMerge(options = {}) {
     reviewType = "single-maintainer-admin-pass";
     reviewEvidenceSha256 = verifyAdminPassBody(
       decision.review.body ?? "",
-      exactHeadReviewArtifact(pullIdentity.baseSha, pullIdentity.headSha),
+      exactHeadReviewArtifact(pullIdentity.baseSha, pullIdentity.headSha, decision.releaseApprover),
     );
   }
 
@@ -1945,11 +2204,28 @@ export async function verifyApprovedMerge(options = {}) {
     fetchImpl: options.fetchImpl ?? globalThis.fetch,
     logger,
   });
-  const requiredSourceChecks = RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name) =>
-    assertSuccessfulCheck(sourceChecks, name, context.sourceSha),
+  const requiredSourceChecks = await verifySuccessfulSourceChecks(
+    api,
+    sourceChecks,
+    RELEASE_AUTOMATION_CONTRACT.checks.requiredSource,
+    context.sourceSha,
   );
   const terminalMain = await api.get(repositoryPath("/git/ref/heads/main"));
-  assertMainRef(terminalMain, context.sourceSha, "terminal release main");
+  const terminalMainSha = await assertReleaseMainRef(
+    api,
+    terminalMain,
+    context.sourceSha,
+    "terminal release main",
+  );
+  if (!controllerIsReviewedBase) {
+    await assertSourceAncestorOfCurrentMain(
+      api,
+      context.controllerSha,
+      terminalMainSha,
+      "terminal release main",
+      "release controller",
+    );
+  }
 
   const provenance = {
     version: 2,
@@ -1957,6 +2233,11 @@ export async function verifyApprovedMerge(options = {}) {
     sourceSha: context.sourceSha,
     sourceTreeSha: source.treeSha,
     sourceParents: source.parents,
+    controller: {
+      sha: context.controllerSha,
+      treeSha: controller.treeSha,
+      release: controllerRelease,
+    },
     pullRequestNumber: pullNumber,
     mergeMethod,
     providerPullCommitCount: pullIdentity.commitCount,

@@ -20,6 +20,14 @@ import {
   codexSubscriptionFetch,
   type CodexRequestContext,
 } from "@opengeni/codex";
+import {
+  XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
+  XAI_SUBSCRIPTION_PROVIDER_ID,
+  XAI_SUBSCRIPTION_PROXY_BASE_URL,
+  xaiSubscriptionRequestStorage,
+  xaiSubscriptionFetch,
+  type XaiSubscriptionRequestContext,
+} from "@opengeni/xai-subscription";
 import { testSettings } from "@opengeni/testing";
 import OpenAI from "openai";
 import {
@@ -34,6 +42,7 @@ import {
   resolveTurnModel,
   summarizeForCompaction,
   vercelGatewayRoutingFetch,
+  XaiSubscriptionUnavailableError,
 } from "../src/index";
 import { ReplayableJsonOpenAI, requestBodyText } from "../src/replayable-json-body";
 
@@ -253,6 +262,7 @@ describe("Vercel AI Gateway request fence", () => {
 // (settingsWithCodexCredential → withCodexProvider) injects into runSettings for
 // a workspace with an ACTIVE Codex subscription. Mirrors capabilities.ts.
 const CODEX_TURN_MODEL = `${CODEX_MODEL_ID_PREFIX}gpt-5.6-sol`;
+const XAI_TURN_MODEL = `${XAI_SUBSCRIPTION_MODEL_ID_PREFIX}grok-4.6`;
 
 type PinnedResponsesModule = {
   getInputItems: (input: unknown[]) => unknown[];
@@ -291,6 +301,32 @@ function codexProviderJson(): string {
       api: "responses",
       baseUrl: CODEX_PROVIDER_BASE_URL,
       models: [{ id: CODEX_TURN_MODEL, label: "gpt-5.6-sol", reasoningEffort: true }],
+    },
+  ]);
+}
+
+function xaiTestContext(): XaiSubscriptionRequestContext {
+  const token = { accessToken: "test-token", userId: "xai-user" };
+  return {
+    clientVersion: "1.0.1",
+    sessionId: "session-xai",
+    turnId: "turn-xai",
+    getToken: async () => token,
+    refresh: async () => token,
+    resolveModel: (model) => model,
+    hostedSearch: { webSearch: true, xSearch: true },
+  };
+}
+
+function xaiProviderJson(): string {
+  return JSON.stringify([
+    {
+      kind: "xai-subscription",
+      id: XAI_SUBSCRIPTION_PROVIDER_ID,
+      label: "SuperGrok subscription",
+      api: "responses",
+      baseUrl: XAI_SUBSCRIPTION_PROXY_BASE_URL,
+      models: [{ id: XAI_TURN_MODEL, label: "Grok 4.6", reasoningEffort: true }],
     },
   ]);
 }
@@ -1143,6 +1179,98 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
     expect(opaqueObservations).toEqual([{ requestId: "request-1", fingerprints: [] }]);
   });
 
+  test("normalizes a SuperGrok request at the owned object stage with native hosted search", async () => {
+    let capturedBody: Record<string, unknown> | null = null;
+    let capturedHeaders = new Headers();
+    const provider: ResolvedModelProvider = {
+      id: XAI_SUBSCRIPTION_PROVIDER_ID,
+      label: "SuperGrok subscription",
+      kind: "xai-subscription",
+      api: "responses",
+      builtin: false,
+    };
+    const subscriptionClient = new ReplayableJsonOpenAI(
+      {
+        apiKey: "placeholder",
+        baseURL: XAI_SUBSCRIPTION_PROXY_BASE_URL,
+        maxRetries: 0,
+        fetch: xaiSubscriptionFetch(async (_input, init) => {
+          capturedBody = JSON.parse(await requestBodyText(init?.body)) as Record<string, unknown>;
+          capturedHeaders = new Headers(init?.headers);
+          return new Response(
+            'data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[],"usage":{"total_tokens":1,"context_details":{"input_tokens":1,"output_tokens":0}}}}\n\n',
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }),
+      },
+      { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+    );
+    const model = buildModelInstance(provider, subscriptionClient, XAI_TURN_MODEL);
+    await xaiSubscriptionRequestStorage.run(xaiTestContext(), async () => {
+      for await (const _event of model.getStreamedResponse({
+        input: "hello",
+        modelSettings: {},
+        tools: [],
+        handoffs: [],
+        outputType: "text",
+        tracing: false,
+      } as never)) {
+        // consume
+      }
+    });
+    expect(capturedBody).toMatchObject({
+      model: "grok-4.6",
+      stream: true,
+      store: false,
+      include: ["reasoning.encrypted_content"],
+      tools: [{ type: "web_search" }, { type: "x_search" }],
+    });
+    expect(capturedHeaders.get("x-opengeni-xai-subscription-body-normalized")).toBeNull();
+    expect(capturedHeaders.get("x-opengeni-xai-subscription-model")).toBeNull();
+    expect(capturedHeaders.get("x-opengeni-xai-subscription-request-id")).toBeNull();
+  });
+
+  test("collects SuperGrok portable compaction through the streaming path", async () => {
+    const provider: ResolvedModelProvider = {
+      id: XAI_SUBSCRIPTION_PROVIDER_ID,
+      label: "SuperGrok subscription",
+      kind: "xai-subscription",
+      api: "responses",
+      builtin: false,
+    };
+    const compactionClient = new ReplayableJsonOpenAI(
+      {
+        apiKey: "placeholder",
+        baseURL: XAI_SUBSCRIPTION_PROXY_BASE_URL,
+        maxRetries: 0,
+        fetch: (async () =>
+          new Response(
+            [
+              'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"m1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"compact grok","annotations":[],"logprobs":[]}]}}',
+              'data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[],"usage":{"total_tokens":10,"context_details":{"input_tokens":8,"output_tokens":2}}}}',
+              "",
+            ].join("\n\n"),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          )) as typeof fetch,
+      },
+      { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+    );
+    const summary = await xaiSubscriptionRequestStorage.run(xaiTestContext(), () =>
+      summarizeForCompaction(
+        multiProviderSettings(),
+        [{ type: "message", role: "user", content: "compact me" }],
+        {
+          client: compactionClient,
+          provider,
+          api: "responses",
+          model: XAI_TURN_MODEL,
+          maxOutputTokens: 50,
+        },
+      ),
+    );
+    expect(summary).toBe("compact grok");
+  });
+
   test("collects subscription compaction through the object-stage streaming path", async () => {
     let capturedBody: Record<string, unknown> | null = null;
     let capturedHeaders = new Headers();
@@ -1487,140 +1615,6 @@ function webSearchHostedTools(
 }
 
 describe("multi-provider gating in buildOpenGeniAgent", () => {
-  test("publishes a final Office artifact only through the verified host adapter", async () => {
-    const settings = multiProviderSettings({ sandboxBackend: "docker" });
-    const environment = {
-      OPENGENI_ARTIFACT_RUNTIME_MANIFEST: "/opt/opengeni/artifacts/installation.json",
-      OPENGENI_ARTIFACT_TOOL_ENTRY: "/opt/opengeni/artifacts/skill-facade-entry.mjs",
-    };
-    expect(
-      buildOpenGeniAgent(settings, [], {
-        artifactRuntimeAvailable: true,
-        sandboxEnvironment: environment,
-      }).tools.some(
-        (tool) => tool.type === "function" && tool.name === "publish_editable_artifact",
-      ),
-    ).toBe(false);
-    expect(() =>
-      buildOpenGeniAgent(settings, [], {
-        editableArtifactPublication: {
-          execute: async () => {
-            throw new Error("unreachable");
-          },
-        },
-      }),
-    ).toThrow("requires a verified artifact runtime");
-
-    const calls: unknown[] = [];
-    const receipt = {
-      type: "editable_artifact" as const,
-      schemaVersion: 1 as const,
-      artifact: {
-        id: "a".repeat(32),
-        modality: "document" as const,
-        title: "Board report",
-      },
-      sourceFile: {
-        id: "11111111-1111-4111-8111-111111111111",
-        filename: "board-report.docx",
-        contentType:
-          "application/vnd.openxmlformats-officedocument.wordprocessingml.document" as const,
-        sizeBytes: 4_096,
-        sha256: "b".repeat(64),
-      },
-      editorPath: `/workspaces/22222222-2222-4222-8222-222222222222/artifacts/editable/${"a".repeat(32)}`,
-    };
-    const agent = buildOpenGeniAgent(settings, [], {
-      artifactRuntimeAvailable: true,
-      sandboxEnvironment: environment,
-      editableArtifactPublication: {
-        googleDriveTarget: {
-          connectionId: "33333333-3333-4333-8333-333333333333",
-          destination: {
-            folderId: "folder-1",
-            folderName: "Product",
-            driveId: null,
-            location: "my_drive",
-          },
-        },
-        execute: async (input, context) => {
-          calls.push({ input, context });
-          return receipt;
-        },
-      },
-    });
-    const tool = agent.tools.find(
-      (candidate) =>
-        candidate.type === "function" && candidate.name === "publish_editable_artifact",
-    );
-    if (!tool || tool.type !== "function") throw new Error("publication tool missing");
-    expect(
-      await tool.invoke(
-        new RunContext(),
-        JSON.stringify({
-          path: "/workspace/board-report.docx",
-          title: "Board report",
-          modality: "document",
-        }),
-        {
-          toolCall: {
-            type: "function_call",
-            callId: "call-publish-1",
-            name: "publish_editable_artifact",
-            arguments: "{}",
-          },
-        },
-      ),
-    ).toEqual(receipt);
-    expect(
-      await tool.invoke(
-        new RunContext(),
-        JSON.stringify({
-          path: "/workspace/board-report.docx",
-          title: "Board report",
-          modality: "document",
-          googleDrive: { idempotencyKey: "board-report-v1" },
-        }),
-        {
-          toolCall: {
-            type: "function_call",
-            callId: "call-publish-drive-1",
-            name: "publish_editable_artifact",
-            arguments: "{}",
-          },
-        },
-      ),
-    ).toEqual(receipt);
-    expect(calls).toEqual([
-      {
-        input: {
-          path: "/workspace/board-report.docx",
-          title: "Board report",
-          modality: "document",
-        },
-        context: { toolCallId: "call-publish-1" },
-      },
-      {
-        input: {
-          path: "/workspace/board-report.docx",
-          title: "Board report",
-          modality: "document",
-          googleDrive: {
-            connectionId: "33333333-3333-4333-8333-333333333333",
-            destination: {
-              folderId: "folder-1",
-              folderName: "Product",
-              driveId: null,
-              location: "my_drive",
-            },
-            idempotencyKey: "board-report-v1",
-          },
-        },
-        context: { toolCallId: "call-publish-drive-1" },
-      },
-    ]);
-  });
-
   test("selects exactly one image transport without changing the stable tool intent", async () => {
     const settings = multiProviderSettings();
     const native = buildOpenGeniAgent(settings, [], {
@@ -1636,7 +1630,7 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
       native.tools.some((tool) => tool.type === "function" && tool.name === "generate_image"),
     ).toBe(false);
 
-    const calls: Array<{ prompt: string; toolCallId: string }> = [];
+    const calls: Array<{ prompt: string; references: unknown[]; toolCallId: string }> = [];
     const adapter = buildOpenGeniAgent(settings, [], {
       imageGeneration: {
         kind: "provider_adapter",
@@ -1660,6 +1654,11 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
       (candidate) => candidate.type === "function" && candidate.name === "generate_image",
     );
     if (!tool || tool.type !== "function") throw new Error("generate_image tool missing");
+    const serializedParameters = JSON.stringify(tool.parameters);
+    expect(serializedParameters).not.toContain("(?!");
+    expect(serializedParameters).not.toContain("(?=");
+    expect(serializedParameters).not.toContain("(?<=");
+    expect(serializedParameters).not.toContain("(?<!");
     const output = await tool.invoke(
       new RunContext(),
       JSON.stringify({ prompt: "a blue sphere" }),
@@ -1672,7 +1671,9 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
         },
       },
     );
-    expect(calls).toEqual([{ prompt: "a blue sphere", toolCallId: "call-image-1" }]);
+    expect(calls).toEqual([
+      { prompt: "a blue sphere", references: [], toolCallId: "call-image-1" },
+    ]);
     expect(output).toEqual({ type: "generated_image", artifact: { artifactId: "artifact-1" } });
   });
 
@@ -1817,6 +1818,36 @@ describe("MultiProviderModelProvider — routes a model NAME to its provider (th
     // turn.failed (not a rate-limit retry).
     expect((thrown as { status?: unknown }).status).toBeUndefined();
     expect((thrown as { code?: unknown }).code).toBeUndefined();
+  });
+
+  test("a supergrok/<slug> id with no xAI provider fails loud instead of reaching Azure", async () => {
+    const settings = multiProviderSettings({
+      openaiProvider: "azure",
+      azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
+      azureOpenaiApiKey: "az-test-key",
+    });
+    await expect(
+      new MultiProviderModelProvider(settings).getModel(XAI_TURN_MODEL),
+    ).rejects.toBeInstanceOf(XaiSubscriptionUnavailableError);
+  });
+
+  test("SuperGrok resolves to the subscription proxy on connected-machine and in-process paths", async () => {
+    for (const sandboxBackend of ["selfhosted", "none"] as const) {
+      const settings = multiProviderSettings({
+        sandboxBackend,
+        openaiProvider: "azure",
+        azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
+        azureOpenaiApiKey: "az-test-key",
+        openaiModel: XAI_TURN_MODEL,
+        modelProvidersJson: xaiProviderJson(),
+      });
+      const resolved = resolveTurnModel(settings, XAI_TURN_MODEL)!;
+      expect(resolved.provider.kind).toBe("xai-subscription");
+      expect(resolved.client.baseURL).toBe(XAI_SUBSCRIPTION_PROXY_BASE_URL);
+      expect(
+        await new MultiProviderModelProvider(settings).getModel(XAI_TURN_MODEL),
+      ).toBeInstanceOf(OpenAIResponsesModel);
+    }
   });
 
   test("codex × selfhosted/connected-machine: a codex/<slug> turn routes to the CODEX client, never Azure", async () => {

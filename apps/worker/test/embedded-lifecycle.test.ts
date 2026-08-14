@@ -5,7 +5,11 @@ import { join, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
-import type { Database } from "@opengeni/db";
+import {
+  RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+  RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
+  type Database,
+} from "@opengeni/db";
 import {
   createOpenGeniWorker,
   resolveOpenGeniWorkflowDefinition,
@@ -359,7 +363,56 @@ describe("embedded worker lifecycle contract", () => {
       ],
       [],
       [],
-      [],
+      [
+        ...["knowledge_sources", "knowledge_source_objects"].map((name) => ({
+          name,
+          owner: "opengeni_migrator",
+          rls_enabled: false,
+          rls_forced: false,
+          rls_active: false,
+          policy_count: 0,
+          artifact_outbox_dispatcher_policy: false,
+          artifact_materializer_policy: false,
+          can_select: false,
+          can_insert: false,
+          can_update: false,
+          can_delete: false,
+          can_truncate: false,
+          can_references: false,
+          can_trigger: false,
+        })),
+        ...[
+          "canonical_human_identities",
+          "canonical_human_identity_subjects",
+          "canonical_human_login_bindings",
+          "canonical_human_identity_operations",
+        ].map((name) => ({
+          name,
+          owner: "opengeni_migrator",
+          rls_enabled: true,
+          rls_forced: true,
+          rls_active: true,
+          policy_count: 1,
+          artifact_outbox_dispatcher_policy: false,
+          artifact_materializer_policy: false,
+          can_select: false,
+          can_insert: false,
+          can_update: false,
+          can_delete: false,
+          can_truncate: false,
+          can_references: false,
+          can_trigger: false,
+        })),
+      ],
+      RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        can_execute: true,
+        public_execute: false,
+        security_definer: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+          name,
+        ),
+      })),
       [
         {
           name: "workspace_rls_visible(uuid, uuid)",
@@ -389,10 +442,23 @@ describe("embedded worker lifecycle contract", () => {
       rlsStrategy: "force",
       expectedRole: "opengeni_app",
       targetSchema: "public",
-      protectedTables: [],
+      protectedTables: [
+        "canonical_human_identities",
+        "canonical_human_identity_subjects",
+        "canonical_human_login_bindings",
+        "canonical_human_identity_operations",
+      ],
       tablePrivileges: {},
-      protectedNoDirectDmlTables: [],
+      protectedNoDirectDmlTables: [
+        "canonical_human_identities",
+        "canonical_human_identity_subjects",
+        "canonical_human_login_bindings",
+        "canonical_human_identity_operations",
+      ],
     })();
+    expect((catalogResults[6] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
+      ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+    ]);
     expect(catalogQueries).toBe(catalogResults.length);
     expect(directExecutions).toBe(0);
 

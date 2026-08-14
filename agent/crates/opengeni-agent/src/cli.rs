@@ -11,6 +11,8 @@
 //!   always-on background service. `run` remains the explicit foreground mode.
 //! * [`Command::Update`] — check for and apply a signed self-update (minisign +
 //!   sha256 verify, atomic swap, rollback on a failed health gate).
+//! * [`Command::Codemode`] — call the exact attempt-scoped programmatic tool
+//!   catalog already exposed to the model, without requiring a JS runtime.
 //! * [`Command::Uninstall`] — stop any service, remove the binary, and (with
 //!   `--purge`) delete credentials + deactivate the enrollment.
 
@@ -58,9 +60,17 @@ pub enum Command {
     Service(ServiceArgs),
     /// Check for and apply a signed self-update for this channel + target.
     Update(UpdateArgs),
+    /// Call the active attempt's programmatic tool catalog. This is a native,
+    /// dependency-free fallback for Connected Machine commands; it uses the
+    /// same public Codemode API and execution journal as `@opengeni/codemode`.
+    Codemode(CodemodeArgs),
     /// Remove the agent: stop any service, delete the binary, and (with `--purge`)
     /// remove credentials + deactivate the enrollment.
     Uninstall(UninstallArgs),
+    /// Chrome Native Messaging stdio proxy. Installed and invoked by Chrome;
+    /// not an operator command.
+    #[command(hide = true)]
+    BrowserNativeHost(BrowserNativeHostArgs),
 }
 
 impl Default for Command {
@@ -223,6 +233,37 @@ pub struct UpdateArgs {
     pub channel: Option<String>,
 }
 
+/// Arguments for the native Codemode client.
+#[derive(Debug, clap::Args)]
+pub struct CodemodeArgs {
+    /// The Codemode operation to perform.
+    #[command(subcommand)]
+    pub action: CodemodeAction,
+}
+
+/// Native Codemode client operations.
+#[derive(Debug, Subcommand)]
+pub enum CodemodeAction {
+    /// List the exact frozen tool catalog for this execution attempt.
+    List,
+    /// Call one tool by generated path, model name, or `server.tool` identity.
+    Call(CodemodeCallArgs),
+    /// Report whether the attempt-scoped client environment is usable. Secret
+    /// values are never printed.
+    Doctor,
+}
+
+/// Arguments for `codemode call`.
+#[derive(Debug, clap::Args)]
+pub struct CodemodeCallArgs {
+    /// Generated path, model name, or `server.tool` identity from `codemode list`.
+    pub tool: String,
+
+    /// Tool arguments as one JSON object. Defaults to `{}`.
+    #[arg(default_value = "{}")]
+    pub arguments: String,
+}
+
 /// Arguments for the `uninstall` subcommand.
 #[derive(Debug, Default, clap::Args)]
 pub struct UninstallArgs {
@@ -231,6 +272,16 @@ pub struct UninstallArgs {
     /// the credentials are kept so a re-install reconnects.
     #[arg(long)]
     pub purge: bool,
+}
+
+/// Browser-supplied Native Messaging arguments (origin and, on Windows, parent
+/// window handle). The pinned native-host manifest is the origin allowlist.
+#[derive(Debug, Default, clap::Args)]
+#[command(trailing_var_arg = true)]
+pub struct BrowserNativeHostArgs {
+    /// Opaque arguments appended by Chrome.
+    #[arg(allow_hyphen_values = true)]
+    pub browser_arguments: Vec<String>,
 }
 
 impl ServiceAction {
@@ -403,6 +454,34 @@ mod tests {
     }
 
     #[test]
+    fn codemode_commands_parse() {
+        let list = Cli::parse_from(["opengeni-agent", "codemode", "list"]);
+        assert!(matches!(
+            list.command,
+            Some(Command::Codemode(CodemodeArgs {
+                action: CodemodeAction::List
+            }))
+        ));
+
+        let call = Cli::parse_from([
+            "opengeni-agent",
+            "codemode",
+            "call",
+            "interaction.browser.observe",
+            r#"{"browserSessionId":"browser-1"}"#,
+        ]);
+        match call.command {
+            Some(Command::Codemode(CodemodeArgs {
+                action: CodemodeAction::Call(args),
+            })) => {
+                assert_eq!(args.tool, "interaction.browser.observe");
+                assert!(args.arguments.contains("browserSessionId"));
+            }
+            other => panic!("expected codemode call, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn uninstall_parses_purge() {
         let cli = Cli::parse_from(["opengeni-agent", "uninstall", "--purge"]);
         match cli.command {
@@ -447,6 +526,20 @@ mod tests {
                 assert_eq!(args.virtual_display, ":99");
             }
             other => panic!("expected run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn browser_native_host_accepts_chrome_supplied_arguments() {
+        let cli = Cli::parse_from([
+            "opengeni-agent",
+            "browser-native-host",
+            "chrome-extension://imdmcebcclhibdfolbokjbiibpcnpbel/",
+            "--parent-window=42",
+        ]);
+        match cli.command {
+            Some(Command::BrowserNativeHost(args)) => assert_eq!(args.browser_arguments.len(), 2),
+            other => panic!("expected browser native host, got {other:?}"),
         }
     }
 }

@@ -8,10 +8,13 @@ import {
 import {
   escapedMcpTimeoutRecoveryDetail,
   isTurnActivityFenceCancellation,
+  preClaimFailureDisposition,
 } from "../src/workflows/session";
 import {
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
+  PRE_CLAIM_FAILURE_MESSAGE,
+  PRE_CLAIM_FAILURE_TYPE,
 } from "../src/activities/types";
 
 function activityFailure(cause: Error): ActivityFailure {
@@ -71,6 +74,51 @@ describe("turn activity fence-cancellation arbitration", () => {
         activityFailure(new Error("wrapper", { cause: new CancelledFailure("hidden") })),
       ),
     ).toBe(false);
+  });
+});
+
+describe("pre-claim admission failure wire classification", () => {
+  test("accepts only the exact upgraded-worker contract", () => {
+    for (const disposition of ["retryable", "permanent"] as const) {
+      const failure = ApplicationFailure.create({
+        message: PRE_CLAIM_FAILURE_MESSAGE,
+        type: PRE_CLAIM_FAILURE_TYPE,
+        nonRetryable: true,
+        details: [
+          {
+            disposition,
+            code: disposition === "retryable" ? "db_deadlock" : "claim_invariant",
+          },
+        ],
+      });
+      expect(preClaimFailureDisposition(activityFailure(failure))).toBe(disposition);
+    }
+  });
+
+  test("keeps legacy, malformed, and unrelated activity results unknown", () => {
+    expect(preClaimFailureDisposition(new Error("legacy worker"))).toBeUndefined();
+    expect(
+      preClaimFailureDisposition(
+        activityFailure(
+          ApplicationFailure.create({
+            message: PRE_CLAIM_FAILURE_MESSAGE,
+            type: PRE_CLAIM_FAILURE_TYPE,
+            details: [{ disposition: "invalid" }],
+          }),
+        ),
+      ),
+    ).toBeUndefined();
+    expect(
+      preClaimFailureDisposition(
+        activityFailure(
+          ApplicationFailure.create({
+            message: PRE_CLAIM_FAILURE_MESSAGE,
+            type: PRE_CLAIM_FAILURE_TYPE,
+            details: [{ disposition: "permanent", code: "invented" }],
+          }),
+        ),
+      ),
+    ).toBeUndefined();
   });
 });
 

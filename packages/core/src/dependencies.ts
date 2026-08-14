@@ -18,7 +18,11 @@ import type { ManagedAuth } from "./managed-auth-type";
 import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
 import type { TranscriptionSegmenter, TranscriptionService } from "./transcription";
 import type { EditableArtifactApplicationPort } from "./editable-artifact-live";
-import type { EditableArtifactDurableExportService } from "./editable-artifacts";
+import type {
+  EditableArtifactAgentApplication,
+  EditableArtifactDurableExportService,
+  EditableArtifactOfficeImportPort,
+} from "./editable-artifacts";
 
 export type SessionWorkflowClient = {
   signalUserMessage: (input: {
@@ -62,7 +66,10 @@ export type SessionWorkflowClient = {
     agentRunUsageIdempotencyKey: string;
     triggerWorkflowId: string;
     initiator: TurnInitiator;
-    triggerType?: Extract<ScheduledTaskTriggerType, "manual" | "initial" | "retry" | "repair">;
+    triggerType?: Extract<
+      ScheduledTaskTriggerType,
+      "manual" | "initial" | "provider_event" | "retry" | "repair"
+    >;
   }) => Promise<void>;
   startRigVerification: (input: {
     workspaceId: string;
@@ -95,8 +102,14 @@ export type AppDependencies = {
   editableArtifacts?: EditableArtifactApplicationPort;
   /** Durable immutable version/materialization API paired with editableArtifacts. */
   editableArtifactExports?: EditableArtifactDurableExportService;
+  /** Canonical agent-facing artifact use cases shared by MCP and Codemode. */
+  editableArtifactAgent?: EditableArtifactAgentApplication;
+  /** Trusted Office-file to canonical sequence-zero import boundary. */
+  editableArtifactOfficeImports?: EditableArtifactOfficeImportPort;
   bus: EventBus;
   workflowClient: SessionWorkflowClient;
+  /** Injectable structural seam for replayable prompt fanout and wake work. */
+  schedulePromptPostCommit?: (task: () => Promise<void>) => void;
   /** Optional provider override for deterministic API/object-storage tests. */
   objectStorage?: ObjectStorageDependency;
   documentIndexer?: DocumentIndexClient;
@@ -112,7 +125,7 @@ export type AppDependencies = {
   githubAppApi?: GitHubAppApiPort;
   /**
    * Optional host-owned connection credential seam. API-side consumers use
-   * the MCP leg for Toolspace/Code Mode; worker consumers bind the same port
+   * the MCP leg for Codemode/Code Mode; worker consumers bind the same port
    * for model MCP, Git, and sandbox-secret resolution.
    */
   connectionCredentials?: ConnectionCredentialsPort | null;
@@ -125,10 +138,17 @@ export type AppDependencies = {
   managedAuth?: ManagedAuth | null;
   /** Injectable Codex HTTP transport for deterministic API/provider tests. */
   codexFetch?: typeof fetch;
+  /** Injectable xAI OAuth/subscription transport for deterministic API/provider tests. */
+  xaiFetch?: typeof fetch;
   /** Injectable Slack Web API transport for deterministic bot-connection tests. */
   slackFetch?: typeof fetch;
   /** Injectable Google OAuth/Drive transport for deterministic connector tests. */
   googleDriveFetch?: typeof fetch;
+  /** Injectable Fiken API transport for deterministic connector tests. */
+  fikenFetch?: typeof fetch;
+  /** Injectable Integration Definition OAuth/API transport for deterministic tests. */
+  apiIntegrationOAuthFetch?: typeof fetch;
+  atlassianFetch?: typeof fetch;
   /** Injectable MCP OAuth setup deadline for deterministic stalled-provider tests. */
   oauthStartDeadlineMs?: number;
   /** Injectable MCP OAuth callback deadline for deterministic stalled-provider tests. */
@@ -175,7 +195,7 @@ export type ApiRouteDeps = AppDependencies & {
  */
 export type AcceptSessionUserMessageDependencies = Pick<
   AppDependencies,
-  "settings" | "db" | "bus" | "sessionAuthorization"
+  "settings" | "db" | "bus" | "sessionAuthorization" | "schedulePromptPostCommit"
 > & {
   workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
   objectStorage: ObjectStorageDependency;

@@ -10,6 +10,7 @@
     "**/*.gen.ts",
     "**/*.gen.tsx",
     "**/*.gen.json",
+    "packages/agent-proto/src/gen/**",
     "packages/db/drizzle/**",
     "**/test/golden/**",
     "**/fixtures/**",

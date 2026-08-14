@@ -12,6 +12,10 @@ import {
   type CodexRequestContext,
 } from "@opengeni/codex";
 import {
+  XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER,
+  XaiSubscriptionReloginRequired,
+} from "@opengeni/xai-subscription";
+import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
   interruptedToolCallResult,
@@ -42,6 +46,7 @@ import {
   assertPhysicalToolQuiescenceForCancellation,
   assertSessionAttemptQuiescenceRecoveryDurable,
   classifyContextWindowOverflowError,
+  classifyXaiCredentialFailure,
   credentialSubjectIdForTurnInitiator,
   classifyMcpTransportTimeoutError,
   clearAttemptCredentialsWithSettledFence,
@@ -58,6 +63,7 @@ import {
   escapedMcpTimeoutRecoveryFailure,
   filterUnmaterializedSandboxFileDownloads,
   finalizeDurableTurnOpStreams,
+  connectedSubscriptionImageGenerationAuthority,
   historyRowsToAppend,
   hostedWebSearchForTurn,
   isLazySandboxProvisionRetryable,
@@ -77,6 +83,7 @@ import {
   processCompactionModelUsageEvent,
   processModelResponseTerminalEvent,
   persistOrSignalSessionAttemptQuiescence,
+  preClaimAdmissionFailure,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryCountFromMetadata,
   providerRetryAfterMs,
@@ -84,9 +91,12 @@ import {
   requiresSignedFileResourceDownloads,
   resolveActiveSandboxBackend,
   runMandatoryHistoryPersistenceStep,
+  sandboxEstablishPolicyDecision,
+  sandboxFileMaterializationOutcome,
   safeErrorDiagnostic,
   sandboxArtifactRuntimeAdmission,
   sandboxDeadlineRotationRecoveryDelayMs,
+  shouldEstablishSandboxForTurn,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
@@ -103,7 +113,10 @@ import {
   TurnOperationCancelledError,
   WorkspaceHumanInputDisabledError,
 } from "../src/activities/agent-turn";
-import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
+import {
+  SandboxExecReadinessTimeoutError,
+  sandboxLeaseHolderIdForAttempt,
+} from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
 
@@ -685,6 +698,7 @@ describe("accepted turn execution identity", () => {
     expect(turnExecutionPolicyBillingIdentity(base)).toEqual({
       externallyBilled: true,
       codexSubscription: false,
+      xaiSubscription: false,
     });
     expect(
       turnExecutionPolicyBillingIdentity({
@@ -695,14 +709,36 @@ describe("accepted turn execution identity", () => {
         credentialSource: { kind: "connected_subscription", provider: "codex" },
         billing: { upstreamPayer: "connected_subscription", metering: "external" },
       }),
-    ).toEqual({ externallyBilled: true, codexSubscription: true });
+    ).toEqual({
+      externallyBilled: true,
+      codexSubscription: true,
+      xaiSubscription: false,
+    });
+    expect(
+      turnExecutionPolicyBillingIdentity({
+        ...base,
+        productModelId: "supergrok/grok-4.6",
+        providerId: "supergrok-subscription",
+        upstreamModelId: "grok-4.6",
+        credentialSource: { kind: "connected_subscription", provider: "xai" },
+        billing: { upstreamPayer: "connected_subscription", metering: "external" },
+      }),
+    ).toEqual({
+      externallyBilled: true,
+      codexSubscription: false,
+      xaiSubscription: true,
+    });
     expect(
       turnExecutionPolicyBillingIdentity({
         ...base,
         credentialSource: { kind: "deployment", mechanism: "api_key" },
         billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
       }),
-    ).toEqual({ externallyBilled: false, codexSubscription: false });
+    ).toEqual({
+      externallyBilled: false,
+      codexSubscription: false,
+      xaiSubscription: false,
+    });
   });
 
   test("classifies only legacy user/API turns as explicit policy requests", () => {
@@ -2278,6 +2314,11 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
 });
 
 describe("machine-primary sandbox ownership isolation", () => {
+  test("establishes an attached Connected Machine even when the session has no home sandbox", () => {
+    expect(shouldEstablishSandboxForTurn(true, "none", true)).toBe(true);
+    expect(shouldEstablishSandboxForTurn(true, "none", false)).toBe(false);
+  });
+
   test("does not acquire the managed-home lease for a Connected Machine turn", () => {
     expect(managedSandboxOwnershipForTurn(true, "attempt-1", "cloud-home-group")).toBeNull();
   });
@@ -2513,6 +2554,59 @@ describe("on-turn recording gate (selfhosted machines have no in-box capture plu
 });
 
 describe("lazy sandbox provisioner single-flight", () => {
+  test("file materialization metrics fail when any download fails softly", () => {
+    expect(sandboxFileMaterializationOutcome([])).toBe("completed");
+    expect(
+      sandboxFileMaterializationOutcome([
+        {
+          fileId: "file-1",
+          filename: "input.pdf",
+          path: "/workspace/input.pdf",
+          reason: "provider returned unavailable",
+        },
+      ]),
+    ).toBe("failed");
+  });
+
+  test("establish policy reports the first bounded eager reason", () => {
+    const base = {
+      lazyEnabled: true,
+      machinePrimary: false,
+      sandboxBackend: "docker" as const,
+      hasInitialRunCredentialMaterial: false,
+      generatedVideoFileCount: 0,
+      hasSignedFileResources: false,
+    };
+
+    expect(sandboxEstablishPolicyDecision(base)).toEqual({
+      policy: "on-demand",
+      reason: "eligible",
+    });
+    expect(sandboxEstablishPolicyDecision({ ...base, lazyEnabled: false })).toEqual({
+      policy: "eager",
+      reason: "lazy_disabled",
+    });
+    expect(sandboxEstablishPolicyDecision({ ...base, machinePrimary: true })).toEqual({
+      policy: "eager",
+      reason: "machine_primary",
+    });
+    expect(sandboxEstablishPolicyDecision({ ...base, sandboxBackend: "none" })).toEqual({
+      policy: "eager",
+      reason: "backend_none",
+    });
+    expect(
+      sandboxEstablishPolicyDecision({ ...base, hasInitialRunCredentialMaterial: true }),
+    ).toEqual({ policy: "eager", reason: "initial_run_credentials" });
+    expect(sandboxEstablishPolicyDecision({ ...base, generatedVideoFileCount: 1 })).toEqual({
+      policy: "eager",
+      reason: "generated_video_files",
+    });
+    expect(sandboxEstablishPolicyDecision({ ...base, hasSignedFileResources: true })).toEqual({
+      policy: "eager",
+      reason: "signed_file_resources",
+    });
+  });
+
   test("deadline rotation uses only short anti-churn pacing", () => {
     expect(
       sandboxDeadlineRotationRecoveryDelayMs({
@@ -2600,6 +2694,33 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(establishes).toBe(2);
   });
 
+  test("command-readiness timeout creates at most one sandbox for the turn", async () => {
+    let establishes = 0;
+    let failures = 0;
+    const timeout = new SandboxExecReadinessTimeoutError("modal", 60_000, {
+      sandboxGroupId: "group-1",
+      instanceId: "sb-1",
+    });
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        establishes += 1;
+        throw timeout;
+      },
+      {
+        onFailed: () => {
+          failures += 1;
+        },
+      },
+    );
+
+    const first = await Promise.allSettled(Array.from({ length: 5 }, () => provisioner.get()));
+    expect(first.every((result) => result.status === "rejected")).toBe(true);
+    await expect(provisioner.get()).rejects.toBe(timeout);
+    expect(establishes).toBe(1);
+    expect(failures).toBe(1);
+    expect(isLazySandboxProvisionRetryable(timeout)).toBe(false);
+  });
+
   test("image conflict is actionable and not retried", async () => {
     expect(
       isLazySandboxProvisionRetryable(new SandboxImageConflictError("group-1", "old", "new")),
@@ -2646,6 +2767,9 @@ describe("lazy sandbox provisioner single-flight", () => {
         ),
       ),
     ).toBe(false);
+    expect(isLazySandboxProvisionRetryable(new Error("ECONNRESET during sandbox create"))).toBe(
+      false,
+    );
   });
 
   test("Steer/Pause cancels a pending provision immediately and disposes its late lease", async () => {
@@ -2822,7 +2946,7 @@ describe("worker shutdown preemption", () => {
     const steps: string[] = [];
     let releaseTools!: () => void;
     let releaseGitWrite!: () => void;
-    let releaseToolspaceWrite!: () => void;
+    let releaseCodemodeWrite!: () => void;
     let releaseRunCredentialWrite!: () => void;
     const toolsDrained = new Promise<void>((resolve) => {
       releaseTools = resolve;
@@ -2830,8 +2954,8 @@ describe("worker shutdown preemption", () => {
     const gitWriteDrained = new Promise<void>((resolve) => {
       releaseGitWrite = resolve;
     });
-    const toolspaceWriteDrained = new Promise<void>((resolve) => {
-      releaseToolspaceWrite = resolve;
+    const codemodeWriteDrained = new Promise<void>((resolve) => {
+      releaseCodemodeWrite = resolve;
     });
     const runCredentialWriteDrained = new Promise<void>((resolve) => {
       releaseRunCredentialWrite = resolve;
@@ -2863,11 +2987,11 @@ describe("worker shutdown preemption", () => {
       },
       cancellationReason: new Error("STEER"),
       gitCredentialRenewals: [gitRenewal],
-      toolspaceTokenRenewal: {
+      codemodeTokenRenewal: {
         stop: async () => {
-          steps.push("toolspace-draining");
-          await toolspaceWriteDrained;
-          steps.push("toolspace-drained");
+          steps.push("codemode-draining");
+          await codemodeWriteDrained;
+          steps.push("codemode-drained");
         },
       },
       runCredentialRenewal: {
@@ -2898,10 +3022,10 @@ describe("worker shutdown preemption", () => {
 
     releaseGitWrite();
     await Bun.sleep(0);
-    expect(steps.at(-1)).toBe("toolspace-draining");
+    expect(steps.at(-1)).toBe("codemode-draining");
     expect(receipts).toBe(0);
 
-    releaseToolspaceWrite();
+    releaseCodemodeWrite();
     await Bun.sleep(0);
     expect(steps.at(-1)).toBe("run-credentials-draining");
     expect(receipts).toBe(0);
@@ -3701,7 +3825,77 @@ describe("transient provider error classifier", () => {
     expect(agentRunFailurePayload(mandatory).retryable).toBeUndefined();
   });
 
-  test("preserves an exact non-SQLSTATE persistence failure in the session payload", async () => {
+  test("exports only retry-safe admission truth to Temporal history", () => {
+    const deadlock = new SessionEventPersistenceError({
+      code: "db_deadlock",
+      sqlState: "40P01",
+      stage: "session_attempts.claim",
+      eventTypes: ["session.turn.attempt_claimed"],
+      correlationId: "corr-preclaim",
+      attempts: 3,
+      retryOutcome: "exhausted",
+      database: { table: "session_turn_attempts" },
+    });
+    expect(preClaimAdmissionFailure(deadlock)).toMatchObject({
+      type: "OpenGeniPreClaimFailure",
+      nonRetryable: true,
+      details: [{ disposition: "retryable", code: "db_deadlock" }],
+    });
+    const connectionLoss = new SessionEventPersistenceError({
+      code: "db_failure",
+      sqlState: "08006",
+      stage: "session_attempts.claim",
+      eventTypes: ["session.turn.attempt_claimed"],
+      correlationId: "corr-connection-loss",
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      database: {},
+    });
+    expect(preClaimAdmissionFailure(connectionLoss)).toMatchObject({
+      details: [{ disposition: "retryable", code: "db_failure" }],
+    });
+    const rawConnectionLoss = Object.assign(new Error("SECRET socket detail"), {
+      code: "CONNECTION_CLOSED",
+      errno: "CONNECTION_CLOSED",
+    });
+    expect(preClaimAdmissionFailure(rawConnectionLoss)).toMatchObject({
+      details: [{ disposition: "retryable", code: "db_failure" }],
+    });
+    expect(JSON.stringify(preClaimAdmissionFailure(rawConnectionLoss))).not.toContain("SECRET");
+    expect(
+      preClaimAdmissionFailure(
+        Object.assign(new Error("SECRET nested socket detail"), {
+          cause: { code: "ECONNRESET" },
+        }),
+      ),
+    ).toMatchObject({
+      details: [{ disposition: "retryable", code: "db_failure" }],
+    });
+    const constraint = new SessionEventPersistenceError({
+      code: "db_failure",
+      sqlState: "23505",
+      stage: "session_attempts.claim",
+      eventTypes: ["session.turn.attempt_claimed"],
+      correlationId: "corr-constraint",
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      database: { constraint: "session_turn_attempts_pkey" },
+    });
+    expect(preClaimAdmissionFailure(constraint)).toMatchObject({
+      details: [{ disposition: "permanent", code: "db_failure" }],
+    });
+    expect(preClaimAdmissionFailure(new Error("SECRET malformed metadata"))).toMatchObject({
+      type: "OpenGeniPreClaimFailure",
+      nonRetryable: true,
+      message: "Agent turn admission failed before attempt claim.",
+      details: [{ disposition: "permanent", code: "claim_invariant" }],
+    });
+    expect(
+      JSON.stringify(preClaimAdmissionFailure(new Error("SECRET malformed metadata"))),
+    ).not.toContain("SECRET");
+  });
+
+  test("retains an exact database cause internally but sanitizes the session payload", async () => {
     const syntheticValue = ["synthetic", "worker", "db", "123456"].join("-");
     const source = Object.assign(new Error(`Failed query containing ${syntheticValue}`), {
       query: "insert into session_events values ($1)",
@@ -3726,7 +3920,7 @@ describe("transient provider error classifier", () => {
     expect((error as SessionEventPersistenceError).cause).toBe(source);
     const payload = agentRunFailurePayload(error);
     expect(payload).toEqual({
-      error: `Database failure while persisting agent.model.usage: Failed query containing ${syntheticValue}`,
+      error: "Database failure while persisting agent.model.usage",
       code: "db_failure",
       detail: "The database rejected the idempotent persistence transaction.",
       correlationId: "corr-unknown-exact",
@@ -3736,7 +3930,9 @@ describe("transient provider error classifier", () => {
       retryOutcome: "not_retryable",
       database: { table: "session_events" },
     });
-    expect(JSON.stringify(payload)).toContain(syntheticValue);
+    expect(JSON.stringify(payload)).not.toContain(syntheticValue);
+    expect(JSON.stringify(payload)).not.toContain(source.query);
+    expect((error as SessionEventPersistenceError).cause).toBe(source);
   });
 
   test("classifies 5xx status codes as transient (status is authoritative)", () => {
@@ -3992,6 +4188,37 @@ describe("transient provider error classifier", () => {
     expect(providerRecoveryCountFromMetadata({ providerRecoveryCount: -1 })).toBe(0);
   });
 
+  test("classifies only definitive marked SuperGrok account refusals for rotation", () => {
+    const marked = (status: number, headers: HeadersInit = {}) =>
+      Object.assign(new Error(`xAI request failed (${status})`), {
+        status,
+        headers: new Headers({
+          ...Object.fromEntries(new Headers(headers).entries()),
+          [XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER]: "1",
+        }),
+      });
+    expect(classifyXaiCredentialFailure(new XaiSubscriptionReloginRequired())).toEqual({
+      kind: "auth",
+      cooldownMs: null,
+    });
+    expect(classifyXaiCredentialFailure(marked(401))).toEqual({
+      kind: "auth",
+      cooldownMs: null,
+    });
+    expect(classifyXaiCredentialFailure(marked(403))).toEqual({
+      kind: "forbidden",
+      cooldownMs: null,
+    });
+    expect(classifyXaiCredentialFailure(marked(429, { "retry-after": "12" }))).toEqual({
+      kind: "rate_limit",
+      cooldownMs: 12_000,
+    });
+    expect(classifyXaiCredentialFailure(marked(503))).toBeNull();
+    expect(
+      classifyXaiCredentialFailure(Object.assign(new Error("unrelated 401"), { status: 401 })),
+    ).toBeNull();
+  });
+
   test("recognizes SDK statusCode when status is not present", () => {
     const transient = Object.assign(new Error("provider unavailable"), { statusCode: 503 });
     expect(isTransientProviderError(transient)).toBe(true);
@@ -4072,8 +4299,9 @@ describe("structuredToolTransportForTurn", () => {
   const resolved = (kind: RegistryProviderKind) =>
     ({ provider: { kind } }) as Parameters<typeof structuredToolTransportForTurn>[0];
 
-  test("keeps hosted tool types off Codex and both Gateway credential paths", () => {
+  test("keeps OpenAI-hosted tool types off connected subscriptions and Gateway paths", () => {
     expect(structuredToolTransportForTurn(resolved("codex-subscription"))).toBe(false);
+    expect(structuredToolTransportForTurn(resolved("xai-subscription"))).toBe(false);
     expect(structuredToolTransportForTurn(resolved("vercel-gateway-managed"))).toBe(false);
     expect(structuredToolTransportForTurn(resolved("vercel-gateway-workspace"))).toBe(false);
   });
@@ -4135,6 +4363,9 @@ describe("lazyToolTransportForTurn", () => {
   });
 
   test("contains Gateway and other providers behind generic dispatch", () => {
+    expect(lazyToolTransportForTurn(resolved("xai-subscription", "responses"))).toBe(
+      "generic_dispatch",
+    );
     expect(lazyToolTransportForTurn(resolved("vercel-gateway-managed", "responses"))).toBe(
       "generic_dispatch",
     );
@@ -4160,6 +4391,21 @@ describe("hostedWebSearchForTurn (provider support)", () => {
   test("applies the deployment capability gate to the legacy built-in path", () => {
     expect(hostedWebSearchForTurn(null, true)).toBe(true);
     expect(hostedWebSearchForTurn(null, false)).toBe(false);
+  });
+});
+
+describe("connectedSubscriptionImageGenerationAuthority", () => {
+  test("omits the optional tool when delegated model authority has no connected credential", () => {
+    expect(connectedSubscriptionImageGenerationAuthority({}, null)).toBeNull();
+    expect(connectedSubscriptionImageGenerationAuthority(null, "credential-id")).toBeNull();
+  });
+
+  test("exposes the optional tool only with both execution context and credential identity", () => {
+    const context = { getToken: true };
+    expect(connectedSubscriptionImageGenerationAuthority(context, "credential-id")).toEqual({
+      credentialContext: context,
+      credentialId: "credential-id",
+    });
   });
 });
 

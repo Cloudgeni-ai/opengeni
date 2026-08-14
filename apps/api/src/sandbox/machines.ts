@@ -156,8 +156,8 @@ function machineStateFor(
 
 /**
  * Build the Machines dashboard response for a workspace. When `sessionId` is
- * supplied (an in-session view) the session's synthetic Modal group box is
- * prepended (`isSessionGroup:true`) and the active-sandbox pointer is echoed;
+ * supplied (an in-session view) the session's synthetic home group box is
+ * prepended when one exists (`isSessionGroup:true`) and the active-sandbox pointer is echoed;
  * without it (the pure workspace dashboard) `activeSandboxId` is null and only
  * the enrolled machines are listed.
  */
@@ -184,9 +184,9 @@ export async function listMachines(
 
   const machines: MachineView[] = [];
 
-  // The session's own Modal group box (synthetic): the default/home sandbox a
-  // null active pointer routes to. Only present in an in-session view.
-  if (session) {
+  // The session's own group box (synthetic): the default/home sandbox a null
+  // active pointer routes to. A backend:none session has no home box.
+  if (session && session.sandboxBackend !== "none") {
     const groupActive = activeSandboxId === null;
     const groupLease = await readLease(db, workspaceId, session.sandboxGroupId);
     machines.push(

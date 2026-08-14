@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "0.18.39",
+  "version": "0.23.1",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -32,6 +32,10 @@
     "./mcp-network": {
       "types": "./src/mcp-network.ts",
       "default": "./src/mcp-network.ts"
+    },
+    "./gmail-rest-mcp": {
+      "types": "./src/gmail-rest-mcp.ts",
+      "default": "./src/gmail-rest-mcp.ts"
     }
   },
   "publishConfig": {
@@ -50,18 +54,21 @@
     "@openai/agents-core": "0.14.3",
     "@openai/agents-extensions": "0.14.3",
     "@opengeni/agent-proto": "workspace:*",
+    "@opengeni/codemode": "workspace:*",
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "@opengeni/network": "workspace:*",
+    "@opengeni/sdk": "workspace:*",
+    "@opengeni/xai-subscription": "workspace:*",
     "debug": "4.4.3",
     "modal": "0.9.0",
     "openai": "6.47.0",
-    "ws": "8.21.1"
+    "ws": "8.21.1",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "tsup": "^8.5.0",
-    "typescript": "7.0.2",
-    "zod": "4.4.3"
+    "typescript": "7.0.2"
   }
 }

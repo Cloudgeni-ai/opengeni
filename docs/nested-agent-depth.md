@@ -4,6 +4,13 @@ OpenGeni enforces an inclusive maximum depth for session trees at the
 PostgreSQL session-creation boundary. The policy limits new descendants without
 changing the lifecycle or control state of sessions that already exist.
 
+Depth admission is separate from runtime communication authority. Once a child
+exists, a live agent may address only itself, its immediate parent, and its
+immediate children; see [`agent-session-authority.md`](agent-session-authority.md).
+Siblings, skipped generations, other branches, and unrelated roots are not
+agent authority even when workspace permissions or an embedding-host policy are
+broader.
+
 ## Depth and precedence
 
 - A root session has depth `0` and its `rootSessionId` is its own id.
@@ -22,6 +29,14 @@ An explicit session policy is inherited by future descendants until an authorize
 descendant supplies another override. Lineage and policy snapshots are immutable
 after creation.
 
+The absolute override remains part of the public REST/SDK create contract for
+advanced callers. It is intentionally absent from the model-facing
+`session_create` schema: `maxNestedAgentDepth: 0` means “the root-relative limit
+is zero,” not “create one child that cannot delegate,” so a non-root manager
+would deny the child it is trying to create. A manager creates a non-delegating
+leaf by narrowing the child's `firstPartyMcpTools` so it omits
+`session_create` (and narrowing permissions when appropriate).
+
 ## Authoritative boundary and denials
 
 All production session creation paths converge on `createSession` or
@@ -38,6 +53,14 @@ structured envelope as an `isError` tool result. The durable
 key. A denied create creates no session, turn, event, workflow wake, sandbox,
 usage, billing, or scheduled-run artifact. Reusing a non-null create idempotency
 key replays the same denial id, even if the request or mutable policy changes.
+
+At turn preparation, the worker signs the session's current and effective
+maximum depths into its delegated first-party token. When both trusted facts
+show that the current depth is already exhausted, the API omits
+`session_create` from that attempt's model-visible catalog. The claims are
+optional for rolling compatibility, and PostgreSQL admission remains the
+authoritative fallback for an older worker, stale catalog, or concurrent policy
+change.
 
 ## Workspace and scheduled-task policy
 

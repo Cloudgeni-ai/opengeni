@@ -458,6 +458,57 @@ export function visibleForestRows(
   return visibleTreeRows(forestRoots(forest), expanded);
 }
 
+/* --------------------------------------------------------------------------
+   Channel sections. When the workspace has channels, the rail groups ordinary
+   roots by their ROOT session's channel instead of recency buckets; a
+   workspace without channels keeps the recency rail unchanged.
+   -------------------------------------------------------------------------- */
+
+export type ChannelRailSection = {
+  /** Stable render key: the channel id, or "inbox" for unfiled roots. */
+  key: string;
+  channelId: string | null;
+  /** Display name without the "#" prefix; the rail renders the hash. */
+  name: string;
+  sessions: SessionTreeNode[];
+};
+
+/**
+ * Group an ordinary rail forest's roots by channel. Channels render in the
+ * given (server name-sorted) order — including empty ones, so a just-created
+ * channel is immediately visible — with one trailing "Inbox" section for
+ * unfiled roots (only when it has members). Within a section, active roots
+ * keep floating above recency-ordered idle ones because the incoming forest
+ * is flattened in that order. A root whose channel no longer exists folds
+ * into the inbox rather than disappearing.
+ */
+export function channelRailSections(
+  forest: SessionForest,
+  channels: readonly { id: string; name: string }[],
+): ChannelRailSection[] {
+  const roots = [...forest.running, ...forest.grouped.flatMap((bucket) => bucket.sessions)];
+  const byChannel = new Map<string | null, SessionTreeNode[]>();
+  for (const node of roots) {
+    const channelId = node.session.channelId ?? null;
+    const known = channelId !== null && channels.some((channel) => channel.id === channelId);
+    const key = known ? channelId : null;
+    const list = byChannel.get(key) ?? [];
+    list.push(node);
+    byChannel.set(key, list);
+  }
+  const sections: ChannelRailSection[] = channels.map((channel) => ({
+    key: channel.id,
+    channelId: channel.id,
+    name: channel.name,
+    sessions: byChannel.get(channel.id) ?? [],
+  }));
+  const inbox = byChannel.get(null) ?? [];
+  if (inbox.length > 0) {
+    sections.push({ key: "inbox", channelId: null, name: "inbox", sessions: inbox });
+  }
+  return sections;
+}
+
 /** Compact relative-time label, e.g. "now", "5m", "3h", "2d", "Mar 4". */
 export function relativeTimeLabel(value: string, now: Date = new Date()): string {
   const timestamp = Date.parse(value);

@@ -34,6 +34,27 @@ defaults:
     working-directory: agent
 
 jobs:
+  # The workspace publishes Rust 1.82 as its minimum. Resolve from the committed
+  # lock and compile every target/feature on that exact toolchain so a transitive
+  # edition/MSRV bump cannot hide behind the stable-toolchain matrix.
+  msrv:
+    name: Rust 1.82 compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust 1.82
+        uses: dtolnay/rust-toolchain@1.82.0
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+
+      - name: Compile the locked workspace
+        run: cargo check --locked --workspace --all-targets --all-features
+
   # fmt + clippy run once on ubuntu (they are platform-independent); -D warnings
   # makes every lint a hard failure, as required for idiomatic Rust.
   lint:

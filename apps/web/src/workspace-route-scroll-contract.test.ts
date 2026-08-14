@@ -17,6 +17,7 @@ const workspaceRouteContracts = {
   workspaceRigDetailRoute: { kind: "page", source: "routes/rig-detail.tsx" },
   workspaceMachinesRoute: { kind: "page", source: "routes/machines.tsx" },
   workspaceInsightsRoute: { kind: "page", source: "routes/insights.tsx" },
+  workspacePriorityRoute: { kind: "self-managed", source: "routes/priority.tsx" },
   workspacePacksRoute: { kind: "redirect" },
   workspaceCapabilitiesRoute: { kind: "self-managed", source: "routes/capabilities.tsx" },
   workspaceSchedulesRoute: { kind: "page", source: "routes/schedules.tsx" },

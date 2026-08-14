@@ -9,6 +9,7 @@ import {
   EditableArtifactNotFoundError,
   EditableArtifactRequestHashMismatchError,
   EditableArtifactRetryableConflictError,
+  EditableArtifactStaleBaseError,
 } from "../../src/domain/editable-artifacts/errors";
 import type { EditableArtifactSnapshotUnitOfWorkPort } from "../../src/domain/editable-artifacts/ports";
 import { EDITABLE_ARTIFACT_MAX_OPERATION_BYTES_PER_TRANSACTION } from "../../src/domain/editable-artifacts/service";
@@ -407,6 +408,48 @@ describe("authoritative editable artifact transactions", () => {
     expect(firstKernelCalls[0]!.state.artifact.headSequence).toBe(0);
     expect(firstKernelCalls[1]!.state.artifact.headSequence).toBe(1);
     expect((await store.getArtifact(scope, artifactId))!.headSequence).toBe(2);
+  });
+
+  test("an exact-head client never rebases across a concurrent spreadsheet commit", async () => {
+    const { service, store, kernel } = await artifactFixture();
+    let releaseFirstKernel!: () => void;
+    kernel.wait = new Promise<void>((resolve) => {
+      releaseFirstKernel = resolve;
+    });
+    const authored = await transactionRequest(service, {
+      clientTransactionId: editableArtifactClientTransactionId("client-exact-head-loser"),
+    });
+    const exact = service.applyTransaction({
+      scope,
+      artifactId,
+      actor: humanActor,
+      request: {
+        ...authored,
+        expectedHead: { sequence: 0, stateHash: initialStateHash },
+      },
+    });
+    await waitUntil(() => kernel.calls.length === 1);
+
+    kernel.wait = null;
+    const competingRequest = await transactionRequest(service, {
+      actor: otherHumanActor,
+      clientTransactionId: editableArtifactClientTransactionId("client-exact-head-winner"),
+    });
+    await service.applyTransaction({
+      scope,
+      artifactId,
+      actor: otherHumanActor,
+      request: competingRequest,
+    });
+    releaseFirstKernel();
+
+    await expect(exact).rejects.toBeInstanceOf(EditableArtifactStaleBaseError);
+    expect(
+      kernel.calls.filter(
+        (call) => call.intent.clientTransactionId === authored.clientTransactionId,
+      ),
+    ).toHaveLength(1);
+    expect((await store.getArtifact(scope, artifactId))!.headSequence).toBe(1);
   });
 
   test("rejects a same-replica stale loser instead of renumbering its authored transaction", async () => {

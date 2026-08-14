@@ -62,6 +62,12 @@ export type SessionClientLike = Pick<
   | "deleteEnvironment"
   | "setEnvironmentVariable"
   | "deleteEnvironmentVariable"
+  // Channels (rail organization)
+  | "listChannels"
+  | "createChannel"
+  | "updateChannel"
+  | "deleteChannel"
+  | "updateSessionChannel"
   // Rigs
   | "listRigs"
   | "createRig"
@@ -80,6 +86,10 @@ export type SessionClientLike = Pick<
   | "listPacks"
   | "registerPack"
   | "enablePack"
+  | "previewPackInstallation"
+  | "installPack"
+  | "previewPackUninstall"
+  | "uninstallPack"
   | "deletePack"
   // Workspaces + billing
   | "listWorkspaces"
@@ -90,6 +100,7 @@ export type SessionClientLike = Pick<
   | "getWorkspaceModelCatalog"
   | "listWorkspaceControlEvents"
   | "streamWorkspaceControlEvents"
+  | "streamWorkspaceInteractionRevisions"
   | "getBillingUsage"
   // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle
   | "getClientConfig"
@@ -98,6 +109,64 @@ export type SessionClientLike = Pick<
   | "attachViewer"
   | "heartbeatViewer"
   | "detachViewer"
+  // Browser/Computer interaction resources
+  | "listNetworkRoutes"
+  | "getNetworkRoute"
+  | "createNetworkRoute"
+  | "updateNetworkRoute"
+  | "listSiteAuthConnections"
+  | "getSiteAuthConnection"
+  | "createSiteAuthConnection"
+  | "updateSiteAuthConnection"
+  | "listAuthRuns"
+  | "getAuthRun"
+  | "startBrowserAuthRun"
+  | "reportBrowserAuthRun"
+  | "protectedBrowserAuthFill"
+  | "verifyBrowserAuthRun"
+  | "listInteractionInterventions"
+  | "getInteractionIntervention"
+  | "createInteractionIntervention"
+  | "resolveInteractionIntervention"
+  | "listAttachedBrowsers"
+  | "getAttachedBrowser"
+  | "listBrowserIdentities"
+  | "getBrowserIdentity"
+  | "createBrowserIdentity"
+  | "updateBrowserIdentity"
+  | "listBrowserRevisions"
+  | "listBrowserSessions"
+  | "getBrowserSession"
+  | "readBrowserClipboard"
+  | "listBrowserDownloads"
+  | "getBrowserDownload"
+  | "saveBrowserDownload"
+  | "createBrowserSession"
+  | "listBrowserTargets"
+  | "openBrowserTarget"
+  | "selectBrowserTarget"
+  | "closeBrowserTarget"
+  | "observeBrowserTarget"
+  | "actInBrowser"
+  | "getBrowserActionReceipt"
+  | "listBrowserDiagnostics"
+  | "attachBrowserSession"
+  | "heartbeatBrowserSession"
+  | "publishBrowserRevision"
+  | "suspendBrowserSession"
+  | "resumeBrowserSession"
+  | "endBrowserSession"
+  | "listComputerSessions"
+  | "getComputerSession"
+  | "readComputerClipboard"
+  | "createComputerSession"
+  | "listComputerTargets"
+  | "observeComputerTarget"
+  | "actInComputer"
+  | "getComputerActionReceipt"
+  | "attachComputerSession"
+  | "heartbeatComputerSession"
+  | "endComputerSession"
   // Channel-A structured services (terminal-as-events feed via fs/git/terminal)
   | "fsList"
   | "fsListBatch"
@@ -117,7 +186,8 @@ export type SessionClientLike = Pick<
   | "terminalPtyWrite"
   | "terminalPtyResize"
   | "terminalPtyClose"
->;
+> &
+  Partial<Pick<OpenGeniClient, "createVideoArtifactPlaybackSource" | "streamWorkspaceLiveEvents">>;
 
 /**
  * Tenant-safe client surface required by the session-only React entry.
@@ -183,7 +253,93 @@ export type EmbeddedRealtimeSessionClientLike = Pick<
   | "heartbeatSessionRealtime"
   | "negotiateCodexRealtimeWebrtc"
   | "negotiateGatewayRealtime"
+  | "negotiateXaiSubscriptionRealtime"
   | "activateCodexRealtimeConnection"
   | "syncSessionRealtimeLedger"
   | "endSessionRealtime"
 >;
+
+/** Exact public SDK surface required by cross-surface human interventions. */
+export type EmbeddedInterventionClientLike = Pick<
+  OpenGeniClient,
+  | "streamWorkspaceInteractionRevisions"
+  | "listInteractionInterventions"
+  | "getInteractionIntervention"
+  | "createInteractionIntervention"
+  | "resolveInteractionIntervention"
+>;
+
+/** Exact public SDK surface required by BrowserSession hooks and components. */
+export type EmbeddedBrowserInteractionClientLike = Pick<
+  OpenGeniClient,
+  | "streamWorkspaceInteractionRevisions"
+  | "listNetworkRoutes"
+  | "getNetworkRoute"
+  | "createNetworkRoute"
+  | "updateNetworkRoute"
+  | "listSiteAuthConnections"
+  | "getSiteAuthConnection"
+  | "createSiteAuthConnection"
+  | "updateSiteAuthConnection"
+  | "listAuthRuns"
+  | "getAuthRun"
+  | "startBrowserAuthRun"
+  | "reportBrowserAuthRun"
+  | "protectedBrowserAuthFill"
+  | "verifyBrowserAuthRun"
+  | "listInteractionInterventions"
+  | "getInteractionIntervention"
+  | "createInteractionIntervention"
+  | "resolveInteractionIntervention"
+  | "listAttachedBrowsers"
+  | "getAttachedBrowser"
+  | "listBrowserIdentities"
+  | "getBrowserIdentity"
+  | "createBrowserIdentity"
+  | "updateBrowserIdentity"
+  | "listBrowserRevisions"
+  | "listBrowserSessions"
+  | "getBrowserSession"
+  | "readBrowserClipboard"
+  | "listBrowserDownloads"
+  | "getBrowserDownload"
+  | "saveBrowserDownload"
+  | "createBrowserSession"
+  | "listBrowserTargets"
+  | "openBrowserTarget"
+  | "selectBrowserTarget"
+  | "closeBrowserTarget"
+  | "observeBrowserTarget"
+  | "actInBrowser"
+  | "getBrowserActionReceipt"
+  | "listBrowserDiagnostics"
+  | "attachBrowserSession"
+  | "heartbeatBrowserSession"
+  | "publishBrowserRevision"
+  | "suspendBrowserSession"
+  | "resumeBrowserSession"
+  | "endBrowserSession"
+> &
+  EmbeddedInterventionClientLike;
+
+/** Exact public SDK surface required by ComputerSession hooks and components. */
+export type EmbeddedComputerInteractionClientLike = Pick<
+  OpenGeniClient,
+  | "streamWorkspaceInteractionRevisions"
+  | "listComputerSessions"
+  | "getComputerSession"
+  | "readComputerClipboard"
+  | "createComputerSession"
+  | "listComputerTargets"
+  | "observeComputerTarget"
+  | "actInComputer"
+  | "getComputerActionReceipt"
+  | "attachComputerSession"
+  | "heartbeatComputerSession"
+  | "endComputerSession"
+> &
+  EmbeddedInterventionClientLike;
+
+/** Complete public Browser + Computer interaction surface. */
+export type EmbeddedInteractionClientLike = EmbeddedBrowserInteractionClientLike &
+  EmbeddedComputerInteractionClientLike;

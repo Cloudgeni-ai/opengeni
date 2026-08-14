@@ -71,6 +71,8 @@ export interface RoutableBackendSession {
   cancelPendingExecCommand?(): Promise<void>;
   readFile?(args: unknown): Promise<string | Uint8Array>;
   writeFile?(args: unknown): Promise<unknown>;
+  writePlacementPrivate?(args: unknown): Promise<unknown>;
+  deletePlacementPrivate?(path: string, runAs?: string): Promise<void>;
   createEditor?(runAs?: string): unknown;
   listDir?(args: unknown): Promise<unknown>;
   pathExists?(path: string, runAs?: string): Promise<boolean>;
@@ -1364,6 +1366,54 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     });
   }
 
+  /** Stage one bounded controller-owned file outside /workspace without
+   * pretending that control-plane bookkeeping mutated the workspace. */
+  async writePlacementPrivate(args: unknown): Promise<unknown> {
+    const input = placementPrivateWrite(args);
+    return this.dispatch("writePlacementPrivate", false, async (session, backend) => {
+      if (session.writePlacementPrivate) return await session.writePlacementPrivate(input);
+      if (session.writeFile) return await session.writeFile(input);
+      return await streamPlacementPrivateFile(session, input, backend.kind);
+    });
+  }
+
+  /** Delete only an OpenGeni placement-private staging file. This narrow
+   * control operation cannot be repurposed into a generic mutation bypass. */
+  async deletePlacementPrivate(path: string, runAs?: string): Promise<void> {
+    const privatePath = placementPrivatePath(path);
+    await this.dispatch("deletePlacementPrivate", false, async (session) => {
+      if (session.deletePlacementPrivate) {
+        await session.deletePlacementPrivate(privatePath, runAs);
+        return;
+      }
+      const args = {
+        cmd: `rm -f ${shellSingleQuote(privatePath)}`,
+        ...(runAs ? { runAs } : {}),
+      };
+      if (session.exec) {
+        const result = await session.exec(args);
+        if (
+          result &&
+          typeof result === "object" &&
+          typeof (result as { exitCode?: unknown }).exitCode === "number" &&
+          (result as { exitCode: number }).exitCode !== 0
+        ) {
+          throw new Error("placement-private cleanup failed");
+        }
+        return;
+      }
+      if (session.execCommand) {
+        const result = await session.execCommand(args);
+        const exitCode = parseExecBannerExitCode(result);
+        if (exitCode !== null && exitCode !== 0) {
+          throw new Error("placement-private cleanup failed");
+        }
+        return;
+      }
+      throw new RoutingUnsupportedError("deletePlacementPrivate", this.cached?.kind ?? "unknown");
+    });
+  }
+
   async listDir(args: unknown): Promise<unknown> {
     return this.dispatch("listDir", false, async (s) => {
       if (!s.listDir) {
@@ -1554,4 +1604,126 @@ function providerManifestRoot(session: RoutableBackendSession): string | null {
 
 function shellSingleQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function placementPrivatePath(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length < "/tmp/opengeni-private/x".length ||
+    value.length > 4_096 ||
+    !value.startsWith("/tmp/opengeni-private/") ||
+    /[\u0000-\u001f\u007f]/u.test(value) ||
+    value.split("/").some((segment) => segment === "." || segment === "..")
+  ) {
+    throw new TypeError("placement-private path is invalid");
+  }
+  return value;
+}
+
+function placementPrivateWrite(value: unknown): {
+  path: string;
+  content: string | Uint8Array;
+  createParents: boolean;
+  runAs?: string;
+} {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("placement-private write is invalid");
+  }
+  const input = value as {
+    path?: unknown;
+    content?: unknown;
+    createParents?: unknown;
+    runAs?: unknown;
+  };
+  const content = input.content;
+  if (
+    (typeof content !== "string" && !(content instanceof Uint8Array)) ||
+    (typeof content === "string" ? Buffer.byteLength(content) : content.byteLength) > 128 * 1_024
+  ) {
+    throw new TypeError("placement-private content is invalid");
+  }
+  if (input.createParents !== undefined && typeof input.createParents !== "boolean") {
+    throw new TypeError("placement-private createParents is invalid");
+  }
+  if (
+    input.runAs !== undefined &&
+    (typeof input.runAs !== "string" || input.runAs.length < 1 || input.runAs.length > 256)
+  ) {
+    throw new TypeError("placement-private runAs is invalid");
+  }
+  return {
+    path: placementPrivatePath(input.path),
+    content,
+    createParents: input.createParents ?? false,
+    ...(typeof input.runAs === "string" ? { runAs: input.runAs } : {}),
+  };
+}
+
+async function streamPlacementPrivateFile(
+  session: RoutableBackendSession,
+  input: ReturnType<typeof placementPrivateWrite>,
+  backendKind: string,
+): Promise<void> {
+  if (!session.exec || !session.writeStdin) {
+    throw new RoutingUnsupportedError("writePlacementPrivate", backendKind);
+  }
+  const bytes = typeof input.content === "string" ? Buffer.from(input.content) : input.content;
+  const parent = input.path.slice(0, input.path.lastIndexOf("/")) || "/";
+  const marker = "__OPENGENI_PLACEMENT_PRIVATE_WRITE_OK__";
+  const prelude = [
+    "umask 077",
+    ...(input.createParents ? [`install -d -m 0700 -- ${shellSingleQuote(parent)}`] : []),
+  ];
+  if (bytes.byteLength === 0) {
+    const result = await session.exec({
+      cmd: [
+        ...prelude,
+        `: > ${shellSingleQuote(input.path)}`,
+        `chmod 0600 -- ${shellSingleQuote(input.path)}`,
+        `printf %s ${shellSingleQuote(marker)}`,
+      ].join("; "),
+      ...(input.runAs ? { runAs: input.runAs } : {}),
+      yieldTimeMs: 30_000,
+      maxOutputTokens: 1_000,
+    });
+    if (!formatExecResult(result).includes(marker)) {
+      throw new Error("placement-private empty-file transfer failed");
+    }
+    return;
+  }
+
+  const payload = Buffer.from(bytes).toString("base64");
+  const command = [
+    ...prelude,
+    "if base64 --help 2>&1 | grep -q -- '--decode'; then decode_flag=--decode",
+    "elif printf '' | base64 -d >/dev/null 2>&1; then decode_flag=-d",
+    "elif printf '' | base64 -D >/dev/null 2>&1; then decode_flag=-D",
+    "else exit 69; fi",
+    `dd bs=1 count=${payload.length} 2>/dev/null | base64 "$decode_flag" > ${shellSingleQuote(input.path)}`,
+    `chmod 0600 -- ${shellSingleQuote(input.path)}`,
+    `printf %s ${shellSingleQuote(marker)}`,
+  ].join("; ");
+  const started = await session.exec({
+    cmd: command,
+    ...(input.runAs ? { runAs: input.runAs } : {}),
+    yieldTimeMs: 250,
+    maxOutputTokens: 1_000,
+  });
+  const sessionId = providerSessionIdFromResult(started);
+  if (sessionId === null) {
+    throw new Error("placement-private transfer did not yield an input session");
+  }
+  const settled = await session.writeStdin({
+    sessionId,
+    chars: payload,
+    yieldTimeMs: 30_000,
+    maxOutputTokens: 1_000,
+  });
+  if (!settled.includes(marker) || parseExecBannerSessionId(settled) !== null) {
+    throw new Error("placement-private transfer did not settle successfully");
+  }
+  const exitCode = parseExecBannerExitCode(settled);
+  if (exitCode !== null && exitCode !== 0) {
+    throw new Error("placement-private transfer exited unsuccessfully");
+  }
 }

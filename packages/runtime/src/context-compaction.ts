@@ -12,7 +12,10 @@ import {
   TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE,
   sanitizeHistoryItemsForModel,
 } from "./history-sanitizer";
-import { boundModelToolOutputItem } from "@opengeni/codex";
+import {
+  MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
+  boundModelToolOutputItem,
+} from "@opengeni/codex";
 import { createHash } from "node:crypto";
 import { isProxy } from "node:util/types";
 
@@ -60,6 +63,9 @@ export const SUMMARY_PREFIX =
 
 export const USER_MESSAGE_TRUNCATION_MARKER =
   "\n[... middle truncated for context compaction ...]\n";
+
+export const REMOTE_COMPACTION_TOOL_RESULT_OMISSION =
+  "[OpenGeni omitted tool result body for context compaction retry]";
 
 const RESULT_TYPE_BY_CALL_TYPE = TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE;
 const RESULT_TYPES = new Set(Object.values(RESULT_TYPE_BY_CALL_TYPE));
@@ -1320,6 +1326,108 @@ export type PreparedCompactionPromptInput = {
   rewrittenToolOutputs: number;
   droppedHistoryItems: number;
 };
+
+export type RemoteCompactionOverflowRetryInput = {
+  input: CompactionItem[];
+  rewrittenToolOutputs: number;
+};
+
+/**
+ * Build the one permitted remote-v2 overflow retry without changing durable
+ * history or any conversation structure. Messages, reasoning, calls, result
+ * identities, statuses, checkpoints, and ordering stay byte-identical; only
+ * replaceable result bodies are reduced, and only when the replacement is
+ * strictly smaller. The copy is allocated lazily at the first useful rewrite.
+ */
+export function projectRemoteCompactionOverflowRetryInput(
+  items: CompactionItem[],
+): RemoteCompactionOverflowRetryInput {
+  let input: CompactionItem[] | null = null;
+  let rewrittenToolOutputs = 0;
+
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]!;
+    const candidate = minimalRemoteCompactionToolResult(item);
+    const replacement =
+      candidate !== item && estimateItemTokens(candidate) < estimateItemTokens(item)
+        ? candidate
+        : item;
+    if (replacement !== item) {
+      input ??= items.slice(0, index);
+      rewrittenToolOutputs += 1;
+    }
+    input?.push(replacement);
+  }
+
+  return {
+    input: input ?? items,
+    rewrittenToolOutputs,
+  };
+}
+
+function minimalRemoteCompactionToolResult(item: CompactionItem): CompactionItem {
+  const type = itemType(item);
+  switch (type) {
+    case "function_call_result":
+    case "function_call_output":
+    case "custom_tool_call_output":
+    case "program_output":
+    case "apply_patch_call_output":
+      return item.output === REMOTE_COMPACTION_TOOL_RESULT_OMISSION
+        ? item
+        : { ...item, output: REMOTE_COMPACTION_TOOL_RESULT_OMISSION };
+    case "computer_call_result": {
+      const output = item.output as Record<string, unknown> | undefined;
+      if (
+        output?.type === "computer_screenshot" &&
+        output.data === MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL &&
+        Object.keys(output).length === 2
+      ) {
+        return item;
+      }
+      return {
+        ...item,
+        output: {
+          type: "computer_screenshot",
+          data: MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
+        },
+      };
+    }
+    case "shell_call_output": {
+      const output = [
+        {
+          stdout: "",
+          stderr: REMOTE_COMPACTION_TOOL_RESULT_OMISSION,
+          outcome: { type: "exit", exitCode: null },
+        },
+      ];
+      return remoteCompactionShellOutputIsMinimal(item.output) ? item : { ...item, output };
+    }
+    case "tool_search_output":
+      return Array.isArray(item.tools) && item.tools.length === 0 ? item : { ...item, tools: [] };
+    default:
+      return item;
+  }
+}
+
+function remoteCompactionShellOutputIsMinimal(output: unknown): boolean {
+  if (!Array.isArray(output) || output.length !== 1) return false;
+  const result = output[0];
+  if (!result || typeof result !== "object" || Array.isArray(result)) return false;
+  const record = result as Record<string, unknown>;
+  const outcome = record.outcome;
+  return (
+    record.stdout === "" &&
+    record.stderr === REMOTE_COMPACTION_TOOL_RESULT_OMISSION &&
+    outcome !== null &&
+    typeof outcome === "object" &&
+    !Array.isArray(outcome) &&
+    (outcome as Record<string, unknown>).type === "exit" &&
+    (outcome as Record<string, unknown>).exitCode === null &&
+    Object.keys(record).length === 3 &&
+    Object.keys(outcome).length === 2
+  );
+}
 
 /**
  * Fit the explicit checkpoint request without mutating canonical history.

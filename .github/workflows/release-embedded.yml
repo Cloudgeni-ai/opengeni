@@ -31,6 +31,10 @@ on:
         description: Completed run ID of the canonical release-candidate workflow for source_sha.
         required: true
         type: string
+      controller_sha:
+        description: Exact retained controller SHA that admitted the candidate run.
+        required: true
+        type: string
       confirm_distribution:
         description: Confirm this exact candidate is ready for public embedded/self-hosted use.
         required: true
@@ -41,12 +45,139 @@ concurrency:
   group: release-embedded-${{ inputs.source_sha }}
   cancel-in-progress: false
 
+env:
+  OPENGENI_RELEASE_SOURCE_ROOT: ${{ github.workspace }}
+
 permissions:
   contents: read
 
 jobs:
+  source-verification:
+    name: Verify admitted source without publication authority
+    runs-on: ubuntu-latest
+    if: ${{ vars.RELEASE_ENABLED == 'true' && inputs.confirm_distribution }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out evidence-bound source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out exact release controller
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.controller_sha }}
+          path: .release/controller
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Admit the candidate before source execution
+        id: candidate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CONTROLLER_SHA: ${{ inputs.controller_sha }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CONTROLLER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]
+          [ "$(git -C .release/controller rev-parse HEAD)" = "$CONTROLLER_SHA" ]
+          expected_ref="refs/tags/opengeni-release-head-$CONTROLLER_SHA"
+          [ "$GITHUB_REF" = "$expected_ref" ]
+          [ "$GITHUB_SHA" = "$CONTROLLER_SHA" ]
+          mkdir -p evidence
+          (
+            cd .release/controller
+            bun scripts/verify-release-provenance.ts \
+              --kind candidate \
+              --source-sha "$SOURCE_SHA" \
+              --controller-sha "$CONTROLLER_SHA" \
+              --run-id "$CANDIDATE_RUN_ID" \
+              --output "$GITHUB_WORKSPACE/evidence/candidate-provenance.json" \
+              --output-prefix candidate
+          )
+
+      - name: Download and validate the admitted candidate receipt
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          CANDIDATE_ARTIFACT_ID: ${{ steps.candidate.outputs.candidate_artifact_id }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ steps.candidate.outputs.candidate_artifact_digest }}
+          CANDIDATE_SOURCE_TREE_SHA: ${{ steps.candidate.outputs.candidate_source_tree_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p .release/candidate-verification
+          zip=.release/candidate-verification/artifact.zip
+          gh api \
+            --header 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANDIDATE_ARTIFACT_ID}/zip" \
+            > "$zip"
+          printf '%s  %s\n' "${CANDIDATE_ARTIFACT_DIGEST#sha256:}" "$zip" \
+            | sha256sum --check --strict -
+          mapfile -t receipts < <(unzip -Z1 "$zip" | grep -E '(^|/)release-candidate\.json$')
+          mapfile -t sidecars < <(unzip -Z1 "$zip" | grep -E '(^|/)release-candidate\.sha256$')
+          test "${#receipts[@]}" -eq 1 -a "${#sidecars[@]}" -eq 1
+          unzip -p "$zip" "${receipts[0]}" > evidence/release-candidate.json
+          unzip -p "$zip" "${sidecars[0]}" > evidence/release-candidate.sha256
+          receipt_sha="$(sha256sum evidence/release-candidate.json | awk '{print $1}')"
+          test "$receipt_sha" = "$(awk 'NF { print $1; exit }' evidence/release-candidate.sha256)"
+          jq -e \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg sourceTreeSha "$CANDIDATE_SOURCE_TREE_SHA" \
+            --slurpfile producer evidence/candidate-provenance.json \
+            '.sourceSha == $sourceSha and .sourceTreeSha == $sourceTreeSha and .producer == $producer[0].producer' \
+            evidence/release-candidate.json >/dev/null
+          args=(
+            --verify "$GITHUB_WORKSPACE/evidence/release-candidate.json"
+            --source-sha "$SOURCE_SHA"
+          )
+          if [ -n "$EXPECTED_PACKAGES" ]; then
+            args+=(--expected-packages "$EXPECTED_PACKAGES")
+          fi
+          (cd .release/controller && bun scripts/release-candidate.ts "${args[@]}")
+          release_version="$(jq -er .releaseVersion evidence/release-candidate.json)"
+          source_version="$(cd .release/controller && bun scripts/release-version.ts "$GITHUB_WORKSPACE/deploy/helm/opengeni/Chart.yaml")"
+          [ "$release_version" = "$source_version" ]
+
+      - name: Install admitted source dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run source package gates
+        run: |
+          set -euo pipefail
+          bun run typecheck
+          bun run build:packages
+          (cd packages/sdk && bun test test/contract-parity.test.ts)
+          bun run test:runtime-embedding-consumer
+          bun run test:publish-consumer
+
+      - name: Restore the controller after source verification
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.controller_sha }}
+          path: .release/controller
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Verify publish closure from the restored controller
+        run: cd .release/controller && bun scripts/publish-closure-guard.ts
+
   release:
     name: Publish exact packages, chart, images, and BOM
+    needs: source-verification
     runs-on: ubuntu-latest
     environment: embedded-release
     if: ${{ vars.RELEASE_ENABLED == 'true' && inputs.confirm_distribution }}
@@ -69,7 +200,7 @@ jobs:
       - name: Check out exact release controller
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.controller_sha }}
           path: .release/controller
           fetch-depth: 1
           persist-credentials: false
@@ -77,6 +208,7 @@ jobs:
       - name: Validate exact released source
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
+          CONTROLLER_SHA: ${{ inputs.controller_sha }}
           CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
           EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
           PACKAGE_SOURCE_SHA: ${{ inputs.package_source_sha }}
@@ -89,6 +221,14 @@ jobs:
           }
           [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]] || {
             echo "candidate_run_id must be a positive workflow run ID" >&2
+            exit 1
+          }
+          [[ "$CONTROLLER_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "controller_sha must be a 40-character lowercase git SHA" >&2
+            exit 1
+          }
+          [ "$(git -C .release/controller rev-parse HEAD)" = "$CONTROLLER_SHA" ] || {
+            echo "release controller checkout differs from controller_sha" >&2
             exit 1
           }
           if [ -z "$EXPECTED_PACKAGES" ]; then
@@ -108,8 +248,21 @@ jobs:
             echo "checked-out source does not match source_sha" >&2
             exit 1
           }
-          [ "$GITHUB_REF" = "refs/heads/main" ] || {
-            echo "embedded releases must be dispatched from main" >&2
+          expected_ref="refs/tags/opengeni-release-head-$CONTROLLER_SHA"
+          [ "$GITHUB_REF" = "$expected_ref" ] || {
+            echo "embedded release is not running from the retained controller ref" >&2
+            exit 1
+          }
+          [ "$GITHUB_SHA" = "$CONTROLLER_SHA" ] || {
+            echo "embedded release dispatch ref differs from controller_sha" >&2
+            exit 1
+          }
+          [ "$GITHUB_WORKFLOW_SHA" = "$CONTROLLER_SHA" ] || {
+            echo "embedded release workflow graph differs from controller_sha" >&2
+            exit 1
+          }
+          [ "$GITHUB_WORKFLOW_REF" = "$GITHUB_REPOSITORY/.github/workflows/release-embedded.yml@$expected_ref" ] || {
+            echo "unexpected embedded release workflow identity: $GITHUB_WORKFLOW_REF" >&2
             exit 1
           }
           git fetch --no-tags origin main
@@ -133,24 +286,26 @@ jobs:
         with:
           bun-version: 1.3.14
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
       - name: Resolve trusted candidate provenance
         id: candidate
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ inputs.source_sha }}
+          CONTROLLER_SHA: ${{ inputs.controller_sha }}
           CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
         run: |
           set -euo pipefail
           mkdir -p evidence
-          bun .release/controller/scripts/verify-release-provenance.ts \
-            --kind candidate \
-            --source-sha "$SOURCE_SHA" \
-            --run-id "$CANDIDATE_RUN_ID" \
-            --output evidence/candidate-provenance.json \
-            --output-prefix candidate
+          (
+            cd .release/controller
+            bun scripts/verify-release-provenance.ts \
+              --kind candidate \
+              --source-sha "$SOURCE_SHA" \
+              --controller-sha "$CONTROLLER_SHA" \
+              --run-id "$CANDIDATE_RUN_ID" \
+              --output ../../evidence/candidate-provenance.json \
+              --output-prefix candidate
+          )
 
       - name: Resolve trusted package publication provenance
         if: ${{ inputs.expected_packages == '' }}
@@ -161,12 +316,15 @@ jobs:
           PACKAGE_RUN_ID: ${{ inputs.package_run_id }}
         run: |
           set -euo pipefail
-          bun .release/controller/scripts/verify-release-provenance.ts \
-            --kind package \
-            --source-sha "$PACKAGE_SOURCE_SHA" \
-            --run-id "$PACKAGE_RUN_ID" \
-            --output evidence/package-provenance.json \
-            --output-prefix package
+          (
+            cd .release/controller
+            bun scripts/verify-release-provenance.ts \
+              --kind package \
+              --source-sha "$PACKAGE_SOURCE_SHA" \
+              --run-id "$PACKAGE_RUN_ID" \
+              --output ../../evidence/package-provenance.json \
+              --output-prefix package
+          )
 
       - name: Download immutable package publication evidence
         if: ${{ inputs.expected_packages == '' }}
@@ -234,35 +392,40 @@ jobs:
             '.sourceSha == $sourceSha and .sourceTreeSha == $sourceTreeSha and .producer == $producer[0].producer' \
             evidence/release-candidate.json >/dev/null
           candidate_verify_args=(
-            --verify evidence/release-candidate.json
+            --verify "$GITHUB_WORKSPACE/evidence/release-candidate.json"
             --source-sha "$SOURCE_SHA"
           )
           if [ -n "$EXPECTED_PACKAGES" ]; then
             candidate_verify_args+=(--expected-packages "$EXPECTED_PACKAGES")
           fi
-          bun scripts/release-candidate.ts "${candidate_verify_args[@]}"
+          (cd .release/controller && bun scripts/release-candidate.ts "${candidate_verify_args[@]}")
           release_version="$(jq -er '.releaseVersion' evidence/release-candidate.json)"
-          [ "$release_version" = "$(bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml)" ] || {
+          [ "$release_version" = "$(cd .release/controller && bun scripts/release-version.ts "$GITHUB_WORKSPACE/deploy/helm/opengeni/Chart.yaml")" ] || {
             echo "candidate release version differs from the source-controlled chart version" >&2
             exit 1
           }
 
-      - name: Re-run public package gates
+      - name: Prepare admitted package bytes for publication
         run: |
           set -euo pipefail
-          bun run typecheck
+          bun install --frozen-lockfile
           bun run build:packages
-          (cd packages/sdk && bun test test/contract-parity.test.ts)
-          bun scripts/publish-closure-guard.ts
-          bun run test:runtime-embedding-consumer
-          bun run test:publish-consumer
+
+      - name: Restore the controller after package preparation
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.controller_sha }}
+          path: .release/controller
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
 
       - name: Resolve distribution version
         id: meta
         run: |
           set -euo pipefail
           version="$(jq -er .releaseVersion evidence/release-candidate.json)"
-          [ "$version" = "$(bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml)" ] || {
+          [ "$version" = "$(cd .release/controller && bun scripts/release-version.ts "$GITHUB_WORKSPACE/deploy/helm/opengeni/Chart.yaml")" ] || {
             echo "candidate release version differs from the source-controlled chart version" >&2
             exit 1
           }
@@ -276,7 +439,7 @@ jobs:
 
       - name: Log in to the public OCI registry
         id: registry-auth
-        uses: ./.github/actions/public-oci-login
+        uses: ./.release/controller/.github/actions/public-oci-login
         with:
           oci-prefix: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}
           auth: ${{ env.OPENGENI_RELEASE_REGISTRY_AUTH }}
@@ -296,7 +459,7 @@ jobs:
             name="$(jq -er --arg role "$role" '.images[$role].name' evidence/release-candidate.json)"
             expected="$(jq -er --arg role "$role" '.images[$role].digest' evidence/release-candidate.json)"
             for tag in "$RELEASE_VERSION" "sha-${SOURCE_SHA}"; do
-              resolved="$(bun scripts/resolve-optional-oci-manifest.ts "${name}:${tag}")"
+              resolved="$(cd .release/controller && bun scripts/resolve-optional-oci-manifest.ts "${name}:${tag}")"
               if [ -n "$resolved" ] && [ "$resolved" != "$expected" ]; then
                 echo "${name}:${tag} resolves to ${resolved}, not accepted ${expected}" >&2
                 exit 1
@@ -313,7 +476,7 @@ jobs:
           chart_oci="oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni"
           chart_pull_oci="${chart_oci}/opengeni"
           chart_path=".release/opengeni-${RELEASE_VERSION}.tgz"
-          resolved="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
+          resolved="$(cd .release/controller && bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
           if [ -n "$resolved" ]; then
             mkdir -p .release/chart-preflight
             helm pull "$chart_pull_oci" \
@@ -335,7 +498,7 @@ jobs:
           OPENGENI_RELEASE_PACKAGE_BOM_SOURCE_SHA: ${{ inputs.package_source_sha }}
           OPENGENI_RELEASE_PACKAGE_PHASE: plan
           OPENGENI_RELEASE_PACKAGE_RECEIPT: ${{ github.workspace }}/evidence/release-packages-plan.json
-        run: bun .release/controller/scripts/verify-release-packages.ts
+        run: cd .release/controller && bun scripts/verify-release-packages.ts
 
       - name: Set up Node for npm provenance
         if: steps.package-plan.outputs.needs_publish == 'true'
@@ -354,6 +517,15 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
 
+      - name: Restore the controller after source publication
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.controller_sha }}
+          path: .release/controller
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
       - name: Reconcile npm package identity
         id: registry
         env:
@@ -364,7 +536,7 @@ jobs:
           OPENGENI_RELEASE_PACKAGE_BOM_SOURCE_SHA: ${{ inputs.package_source_sha }}
           OPENGENI_RELEASE_PACKAGE_PHASE: verify
           OPENGENI_RELEASE_PACKAGE_RECEIPT: ${{ github.workspace }}/evidence/release-packages-verified.json
-        run: bun .release/controller/scripts/verify-release-packages.ts
+        run: cd .release/controller && bun scripts/verify-release-packages.ts
 
       - name: Verify complete package evidence
         env:
@@ -389,7 +561,7 @@ jobs:
           chart_path=".release/opengeni-${RELEASE_VERSION}.tgz"
           expected_bytes="$(jq -er .chart.bytesSha256 evidence/release-candidate.json)"
           printf '%s  %s\n' "$expected_bytes" "$chart_path" | sha256sum --check --strict -
-          resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
+          resolved_manifest="$(cd .release/controller && bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
           if [ -n "$resolved_manifest" ]; then
             mkdir -p .release/chart-reconcile
             helm pull "$chart_pull_oci" \
@@ -400,7 +572,7 @@ jobs:
             helm push "$chart_path" "$chart_oci"
             resolved_manifest=""
             for attempt in $(seq 1 10); do
-              resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
+              resolved_manifest="$(cd .release/controller && bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
               if [[ "$resolved_manifest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
                 break
               fi
@@ -437,12 +609,15 @@ jobs:
         run: |
           set -euo pipefail
           images="$(jq -c '[.images | to_entries[] | .value]' evidence/release-candidate.json)"
-          OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA" \
-          OPENGENI_RELEASE_BOM_VERSION="$RELEASE_VERSION" \
-          OPENGENI_RELEASE_BOM_PACKAGES="$BOM_PACKAGES" \
-          OPENGENI_RELEASE_BOM_IMAGES="$images" \
-          OPENGENI_RELEASE_BOM_CHART="$RELEASE_CHART" \
-          bun scripts/release-bom.ts
+          (
+            export OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA"
+            export OPENGENI_RELEASE_BOM_VERSION="$RELEASE_VERSION"
+            export OPENGENI_RELEASE_BOM_PACKAGES="$BOM_PACKAGES"
+            export OPENGENI_RELEASE_BOM_IMAGES="$images"
+            export OPENGENI_RELEASE_BOM_CHART="$RELEASE_CHART"
+            cd .release/controller
+            bun scripts/release-bom.ts
+          )
           printf '%s  %s\n' \
             "$(sha256sum evidence/release-bom.json | awk '{print $1}')" \
             evidence/release-bom.json \
@@ -457,7 +632,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="opengeni-embedded-release-${SOURCE_SHA}"
-          state="$(bun scripts/resolve-github-release-state.ts "$tag")"
+          state="$(cd .release/controller && bun scripts/resolve-github-release-state.ts "$tag")"
           release_exists="$(jq -er '.releaseExists | if type == "boolean" then tostring else error("releaseExists must be boolean") end' <<<"$state")"
           tag_sha="$(jq -r '.tagSha // ""' <<<"$state")"
           [ -z "$tag_sha" ] || [ "$tag_sha" = "$SOURCE_SHA" ] || {
@@ -539,7 +714,7 @@ jobs:
             --destination .release/anonymous-chart
           cmp ".release/opengeni-${RELEASE_VERSION}.tgz" \
             ".release/anonymous-chart/opengeni-${RELEASE_VERSION}.tgz"
-          [ "$(bun scripts/resolve-optional-oci-manifest.ts \
+          [ "$(cd .release/controller && bun scripts/resolve-optional-oci-manifest.ts \
             "${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}")" \
             = "$CHART_MANIFEST_DIGEST" ]
 

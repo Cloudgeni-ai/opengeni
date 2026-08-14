@@ -22,6 +22,9 @@ export default defineConfig({
   },
   build: {
     outDir: process.env.OPENGENI_REACT_DEMO_OUT_DIR ?? "../demo-dist",
+    // Production embeds this output and then runs the one canonical bundle
+    // budget/precompression pass. Skip Vite's duplicate all-asset gzip work.
+    reportCompressedSize: false,
     // The harness deliberately exposes the full lazy language/theme catalog.
     // Keep the warning boundary aligned with the production app's enforced
     // 800 kB raw lazy-chunk budget; the largest generated chunk remains below
@@ -45,6 +48,8 @@ export default defineConfig({
         transcription: resolve(__dirname, "transcription.html"),
         realtime: resolve(__dirname, "realtime.html"),
         editableArtifacts: resolve(__dirname, "editable-artifacts.html"),
+        browser: resolve(__dirname, "browser.html"),
+        computer: resolve(__dirname, "computer.html"),
         composerResponsive: resolve(__dirname, "composer-responsive.html"),
       },
     },

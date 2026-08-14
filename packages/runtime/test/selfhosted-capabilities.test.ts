@@ -134,7 +134,7 @@ describe("negotiateSelfhostedCapabilities — every cell decided correctly", () 
     expect(caps.FileSystem.available).toBe(true);
     expect(caps.FileSystem.reason).toBeNull();
     expect(caps.Git.available).toBe(true);
-    expect(caps.Terminal.transport).toBe("pty-ws");
+    expect(caps.Terminal.transport).toBe("relay-pty");
     // Selfhosted desktop is the RELAY framebuffer (PNG-per-frame), rendered by the
     // "frames" canvas client — never noVNC (that's Modal's x11vnc path).
     expect(caps.DesktopStream.transport).toBe("relay-frames");
@@ -199,7 +199,7 @@ describe("negotiateSelfhostedCapabilities — every cell decided correctly", () 
     });
     // The machine is reachable: FS/Terminal/Git stay available.
     expect(caps.FileSystem.available).toBe(true);
-    expect(caps.Terminal.transport).toBe("pty-ws");
+    expect(caps.Terminal.transport).toBe("relay-pty");
     expect(caps.Git.available).toBe(true);
     // VIEW decouples from CONTROL: with a display alone the screen can be VIEWED
     // (read-only stream) + RECORDED — the agent already has whole-machine exec, so
@@ -223,7 +223,7 @@ describe("negotiateSelfhostedCapabilities — every cell decided correctly", () 
       now: NOW,
     });
     expect(caps.FileSystem.available).toBe(true);
-    expect(caps.Terminal.transport).toBe("pty-ws");
+    expect(caps.Terminal.transport).toBe("relay-pty");
     expect(caps.DesktopStream.transport).toBeNull();
     expect(caps.DesktopStream.reason).toBe("display_unavailable");
     expect(caps.ComputerUse.available).toBe(false);

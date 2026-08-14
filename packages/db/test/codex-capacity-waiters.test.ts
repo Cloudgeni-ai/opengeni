@@ -5,7 +5,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import * as schema from "../src/schema";
 import {
   armCodexCapacityWait,
@@ -21,17 +21,19 @@ import {
   reconcileCodexCapacityWait,
   recordCodexAccountUsageWithWakeTargets,
   registerPendingSessionToolCall,
-  setSessionCodexPin,
+  setSessionCodexPinInTransaction,
   submitHumanPromptInTransaction,
   updateCodexRotationSettings,
   upsertCodexSubscriptionCredential,
-  withRlsContext,
+  withSessionActivityRlsContext,
   withCodexCapacityMutation,
+  withSessionCodexCapacityMutation,
   type CodexCapacityAvailabilityDecision,
   type CodexCapacitySelectionContext,
   type CodexLeaseAccountStatus,
   type Database,
   type DbClient,
+  type SessionActivityDatabase,
 } from "../src/index";
 
 let available = true;
@@ -129,17 +131,21 @@ async function seedScenario(
   const attemptId = crypto.randomUUID();
   const goalId = crypto.randomUUID();
   const workflowId = `session-${sessionId}`;
-  await admin`
-    insert into sessions (
-      id, account_id, workspace_id, initial_message, model,
-      sandbox_backend, sandbox_group_id, status, temporal_workflow_id, tool_policy
-    ) values (
-      ${sessionId}, ${ws.accountId}, ${ws.workspaceId}, 'capacity test',
-      'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running', ${workflowId},
-      jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-    )`;
-  await admin.begin(async (tx) => {
-    await tx`
+  await withSessionActivityRlsContext(
+    dbA,
+    { accountId: ws.accountId, workspaceId: ws.workspaceId },
+    async (tx) => {
+      await tx.execute(sql`
+        insert into sessions (
+          id, account_id, workspace_id, initial_message, model,
+          sandbox_backend, sandbox_group_id, status, temporal_workflow_id, tool_policy
+        ) values (
+          ${sessionId}, ${ws.accountId}, ${ws.workspaceId}, 'capacity test',
+          'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running', ${workflowId},
+          jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+        )
+      `);
+      await tx.execute(sql`
       insert into session_turns (
         id, account_id, workspace_id, session_id, trigger_event_id,
         temporal_workflow_id, status, position, prompt, model,
@@ -150,20 +156,23 @@ async function seedScenario(
         ${workflowId}, 'running', 1, 'capacity test', 'codex/gpt-5.6-sol',
         'xhigh', 'modal', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
         1, ${attemptId}
-      )`;
-    await tx`
-      insert into session_turn_attempts (
-        id, account_id, workspace_id, session_id, turn_id,
-        execution_generation, state, temporal_workflow_id,
-        temporal_workflow_run_id, temporal_activity_id, verified_control_revision,
-        mcp_approval_policies
-      ) values (
-        ${attemptId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${turnId},
-        1, 'running', ${workflowId}, ${`run-${attemptId}`}, ${`capacity-${attemptId}`}, 0,
-        '{}'::jsonb
-      )`;
-    await tx`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`;
-  });
+      )
+      `);
+      await tx.execute(sql`
+        insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id,
+          execution_generation, state, temporal_workflow_id,
+          temporal_workflow_run_id, temporal_activity_id, verified_control_revision,
+          mcp_approval_policies
+        ) values (
+          ${attemptId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${turnId},
+          1, 'running', ${workflowId}, ${`run-${attemptId}`}, ${`capacity-${attemptId}`}, 0,
+          '{}'::jsonb
+        )
+      `);
+      await tx.execute(sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`);
+    },
+  );
   if (options.withGoal !== false) {
     await admin`
       insert into session_goals (
@@ -412,20 +421,26 @@ describe("durable Codex capacity waits", () => {
     const ws = await freshWorkspace();
     const scenario = await seedScenario(ws);
     const updateId = crypto.randomUUID();
-    await admin.begin(async (tx) => {
-      await tx`
+    await withSessionActivityRlsContext(
+      dbA,
+      { accountId: scenario.accountId, workspaceId: scenario.workspaceId },
+      async (tx) => {
+        await tx.execute(sql`
         update session_turn_attempts
         set state = 'closed', outcome = 'completed', closed_at = now(), updated_at = now()
-        where workspace_id = ${scenario.workspaceId} and id = ${scenario.attemptId}`;
-      await tx`
+        where workspace_id = ${scenario.workspaceId} and id = ${scenario.attemptId}
+        `);
+        await tx.execute(sql`
         update session_turns
         set status = 'completed', active_attempt_id = null, finished_at = now(), updated_at = now()
-        where workspace_id = ${scenario.workspaceId} and id = ${scenario.turnId}`;
-      await tx`
+        where workspace_id = ${scenario.workspaceId} and id = ${scenario.turnId}
+        `);
+        await tx.execute(sql`
         update sessions
         set status = 'queued', active_turn_id = null, updated_at = now()
-        where workspace_id = ${scenario.workspaceId} and id = ${scenario.sessionId}`;
-      await tx`
+        where workspace_id = ${scenario.workspaceId} and id = ${scenario.sessionId}
+        `);
+        await tx.execute(sql`
         insert into session_system_updates (
           id, account_id, workspace_id, session_id, kind, classification,
           source_id, dedupe_key, summary, payload, lineage, state
@@ -433,14 +448,16 @@ describe("durable Codex capacity waits", () => {
           ${updateId}, ${scenario.accountId}, ${scenario.workspaceId}, ${scenario.sessionId},
           'agent_steer_instruction', 'action_required', ${scenario.sessionId},
           ${`capacity-lock-detector:${updateId}`}, 'lock-order detector',
-          ${tx.json({
+          ${JSON.stringify({
             type: "agent_steer_instruction",
             instruction: "verify canonical claim lock order",
             operationId: updateId,
-          })},
+          })}::jsonb,
           '{}'::jsonb, 'pending'
-        )`;
-    });
+        )
+        `);
+      },
+    );
 
     let claim: ReturnType<typeof claimTestTurn> | null = null;
     await admin.begin(async (lockTx) => {
@@ -777,11 +794,11 @@ describe("durable Codex capacity waits", () => {
     const armed = await arm(scenario);
     if (armed.action !== "waiting") throw new Error("expected waiter");
 
-    const mutation = await withCodexCapacityMutation(
+    const mutation = await withSessionCodexCapacityMutation(
       dbA,
       { workspaceId: ws.workspaceId, reason: "codex_policy_pin_changed" },
       async (tx) => {
-        const changed = await setSessionCodexPin(
+        const changed = await setSessionCodexPinInTransaction(
           tx,
           ws.workspaceId,
           scenario.sessionId,
@@ -985,13 +1002,13 @@ describe("durable Codex capacity waits", () => {
       type: "human" as const,
       subjectId: "capacity-test-operator",
     };
-    const pausedControl = await withRlsContext(
+    const pausedControl = await withSessionActivityRlsContext(
       dbA,
       { accountId: scenario.accountId, workspaceId: scenario.workspaceId },
       async (scoped) =>
         await scoped.transaction(
           async (tx) =>
-            await mutateSessionControlInTransaction(tx as unknown as Database, {
+            await mutateSessionControlInTransaction(tx as unknown as SessionActivityDatabase, {
               accountId: scenario.accountId,
               workspaceId: scenario.workspaceId,
               sessionId: scenario.sessionId,
@@ -1038,13 +1055,13 @@ describe("durable Codex capacity waits", () => {
       active_turn_id: scenario.turnId,
     });
 
-    const resumedControl = await withRlsContext(
+    const resumedControl = await withSessionActivityRlsContext(
       dbA,
       { accountId: scenario.accountId, workspaceId: scenario.workspaceId },
       async (scoped) =>
         await scoped.transaction(
           async (tx) =>
-            await mutateSessionControlInTransaction(tx as unknown as Database, {
+            await mutateSessionControlInTransaction(tx as unknown as SessionActivityDatabase, {
               accountId: scenario.accountId,
               workspaceId: scenario.workspaceId,
               sessionId: scenario.sessionId,
@@ -1095,13 +1112,13 @@ describe("durable Codex capacity waits", () => {
     const armed = await arm(scenario);
     if (armed.action !== "waiting") throw new Error("expected waiter");
 
-    const steered = await withRlsContext(
+    const steered = await withSessionActivityRlsContext(
       dbA,
       { accountId: scenario.accountId, workspaceId: scenario.workspaceId },
       async (scoped) =>
         await scoped.transaction(
           async (tx) =>
-            await submitHumanPromptInTransaction(tx as unknown as Database, {
+            await submitHumanPromptInTransaction(tx as unknown as SessionActivityDatabase, {
               accountId: scenario.accountId,
               workspaceId: scenario.workspaceId,
               sessionId: scenario.sessionId,

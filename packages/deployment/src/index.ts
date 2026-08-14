@@ -152,7 +152,19 @@ export const SANDBOX_LIFECYCLE_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS",
   "OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS",
   "OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS",
+  "OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS",
   "OPENGENI_SANDBOX_WARMING_TIMEOUT_MS",
+];
+
+/** Optional remote-browser authorities and launch policy. These remain API
+ * runtime secrets/settings; browserd receives only a per-session private
+ * transport envelope over its placement-local control channel. */
+export const EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_BROWSERBASE_API_KEY",
+  "OPENGENI_KERNEL_API_KEY",
+  "OPENGENI_KERNEL_ENDPOINT",
+  "OPENGENI_KERNEL_BROWSER_TIMEOUT_SECONDS",
+  "OPENGENI_KERNEL_BROWSER_STEALTH",
 ];
 
 /** Control-plane secrets needed for a complete Connected Machine deployment.
@@ -1428,8 +1440,14 @@ export function requiredRuntimeEnvVars(
       "OPENGENI_GITHUB_APP_PRIVATE_KEY",
       "OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET",
     );
-  } else if (contract.product.accessMode === "configured") {
+  } else if (contract.product.accessMode === "configured" && contract.access.mode !== "sharedKey") {
     vars.push("OPENGENI_DELEGATION_SECRET");
+  }
+  if (env.OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS) {
+    vars.push("OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS");
+  }
+  if (env.OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS) {
+    vars.push("OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS");
   }
   if (contract.product.billingMode === "stripe") {
     vars.push(
@@ -2045,9 +2063,12 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_ANALYTICS_POSTHOG_HOST", env.OPENGENI_ANALYTICS_POSTHOG_HOST),
     valueEnv("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID", env.OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID),
     ...(publicBaseUrl ? [valueEnv("OPENGENI_PUBLIC_BASE_URL", publicBaseUrl)] : []),
-    ...(contract.product.accessMode === "managed" || contract.product.accessMode === "configured"
+    ...(contract.product.accessMode === "managed" ||
+    (contract.product.accessMode === "configured" && contract.access.mode !== "sharedKey")
       ? [requiredEnv("OPENGENI_DELEGATION_SECRET", env.OPENGENI_DELEGATION_SECRET)]
       : []),
+    valueEnv("OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS", env.OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS),
+    valueEnv("OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS", env.OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS),
     ...(contract.product.accessMode === "managed"
       ? [
           requiredEnv("OPENGENI_BETTER_AUTH_SECRET", env.OPENGENI_BETTER_AUTH_SECRET),
@@ -2313,6 +2334,9 @@ function runtimeEnvValues(
   for (const key of SANDBOX_LIFECYCLE_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
+  for (const key of EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
 
   return dedupeRuntimeEnv(entries);
 }
@@ -2478,6 +2502,8 @@ function addRuntimeConfigHelmValues(
     "OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY",
     "OPENGENI_ANALYTICS_POSTHOG_HOST",
     "OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID",
+    "OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS",
+    "OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS",
   ] as const) {
     const value = env[key];
     if (value) {

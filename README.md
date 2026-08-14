@@ -56,7 +56,7 @@ There are three product access modes:
 - `configured`: self-hosted or embedded deployments using configured deployment keys or delegated bearer tokens from a parent product.
 - `managed`: OpenGeni owns email/password sign-up through Better Auth, workspaces, OpenGeni API keys, prepaid Stripe credits, usage, and limits.
 
-The optional deployment shared-key boundary is still available for infra smoke tests and simple self-hosting. It uses `x-opengeni-access-key`, not `Authorization`. Product API keys and delegated tokens use `Authorization: Bearer ...`.
+The optional deployment shared-key boundary is still available for infra smoke tests and simple self-hosting. Ordinary clients send it as `x-opengeni-access-key`; product API keys and delegated tokens use `Authorization: Bearer ...`. Valid first-party delegated bearers can enter the `/v1` API without copying the static deployment key, then remain constrained by normal route authorization.
 
 Do not expose a production deployment without a deliberate access mode, RLS-tested database role posture, rate limits, real model/sandbox credentials, and reviewed sandbox preparation policy. Sandbox preparation profiles and env allowlists can make host credentials available to agent sandboxes, so review `.env` before running live sessions.
 
@@ -225,9 +225,10 @@ AWS S3 uses `OPENGENI_OBJECT_STORAGE_BACKEND=aws-s3` plus `OPENGENI_OBJECT_STORA
 
 For Modal runs, configure the Modal sandbox variables in `.env.example`. Private
 registry images use `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET`; the global
-`OPENGENI_MODAL_IMAGE_REF` is warmed at worker boot, and pack-scoped
-`sandboxImage` refs are warmed at turn time after pack settings resolve. The
-registry Secret lookup uses the configured `OPENGENI_MODAL_TOKEN_ID` /
+`OPENGENI_MODAL_IMAGE_REF` is warmed at worker boot, while v2 capability Packs
+select an explicit Rig whose active version owns its logical/provider image
+truth. Pre-v2 Pack rows retain their historical turn-time image warmup only for
+rollback compatibility. The registry Secret lookup uses the configured `OPENGENI_MODAL_TOKEN_ID` /
 `OPENGENI_MODAL_TOKEN_SECRET` client, so embedded hosts do not need to also set
 standard `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` env vars or provide a
 `~/.modal.toml` profile.
@@ -372,6 +373,7 @@ Core endpoints:
 - `GET /healthz`
 - `GET /v1/config/client`
 - `GET /v1/access/me`
+- `GET /v1/organization-memberships` (managed-human self membership and personal-workspace identity)
 - `GET /v1/workspaces`
 - `POST /v1/workspaces`
 - `POST /v1/workspaces/:workspaceId/sessions`
@@ -460,7 +462,7 @@ Before publishing:
 - Run a secret scan against the export, for example `gitleaks detect --no-git --source <export-dir>` and optionally `trufflehog filesystem <export-dir>`.
 - Rotate any credential that ever appeared in the old private history, even if the new public export is clean.
 
-The project license is Apache-2.0. Bundled HashiCorp Terraform-oriented agent skills include their own license at `packages/runtime/src/bundled_hashicorp_terraform_skills/LICENSE`.
+The project license is Apache-2.0. Optional curated Skills under `packages/runtime/src/curated_skill_library` retain per-entry provenance and license metadata; HashiCorp-derived Terraform guidance is MPL-2.0 and is never mounted by default.
 
 ## Roadmap
 

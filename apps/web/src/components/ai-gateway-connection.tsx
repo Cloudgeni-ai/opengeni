@@ -34,7 +34,11 @@ function isGatewayConnection(connection: ConnectionMetadata): boolean {
   );
 }
 
-export function AiGatewayConnectionCard(props: { workspaceId: string; canManage: boolean }) {
+export function AiGatewayConnectionCard(props: {
+  workspaceId: string;
+  canManage: boolean;
+  onConnectionChange?: (() => void) | undefined;
+}) {
   const client = useAppContext().client;
   const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -96,6 +100,7 @@ export function AiGatewayConnectionCard(props: { workspaceId: string; canManage:
       setConnections((current) => [saved, ...current.filter((item) => item.id !== saved.id)]);
       setApiKey("");
       setOpen(false);
+      props.onConnectionChange?.();
       toast.success("Vercel AI Gateway connected");
     } catch (caught) {
       toast.error("Couldn't save Vercel AI Gateway key", {
@@ -113,6 +118,7 @@ export function AiGatewayConnectionCard(props: { workspaceId: string; canManage:
       const revoked = await client.deleteConnection(props.workspaceId, connection.id);
       setConnections((current) => current.map((item) => (item.id === revoked.id ? revoked : item)));
       setOpen(false);
+      props.onConnectionChange?.();
       toast.success("Vercel AI Gateway disconnected");
     } catch (caught) {
       toast.error("Couldn't disconnect Vercel AI Gateway", {

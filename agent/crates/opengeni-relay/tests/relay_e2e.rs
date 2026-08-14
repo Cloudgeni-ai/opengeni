@@ -132,13 +132,14 @@ impl Viewer {
         epoch: u64,
         resume_from_seq: u64,
     ) -> Result<(Self, v1::StreamOpenAck), String> {
-        let url = format!("{base}?ws={WORKSPACE}&agent={AGENT}&port={port}");
+        let channel_id = format!("ch-{port}");
+        let url = format!("{base}?ws={WORKSPACE}&agent={AGENT}&port={port}&channel={channel_id}");
         let (mut socket, _resp) = tokio_tungstenite::connect_async(&url)
             .await
             .map_err(|e| format!("dial: {e}"))?;
         let open = RelayMessage::Open(v1::StreamOpen {
             channel: Some(v1::StreamChannel {
-                channel_id: format!("ch-{port}"),
+                channel_id,
                 workspace_id: WORKSPACE.to_string(),
                 agent_id: AGENT.to_string(),
                 kind: v1::StreamKind::Pty as i32,

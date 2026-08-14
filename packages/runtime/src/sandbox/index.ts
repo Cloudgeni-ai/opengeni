@@ -21,6 +21,7 @@
 import type { Settings } from "@opengeni/config";
 import { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
 import {
+  BROWSER_CONTROL_PORT,
   DESKTOP_STREAM_PORT,
   OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD,
   TERMINAL_STREAM_PORT,
@@ -233,6 +234,43 @@ export {
   type EnsureTerminalServerResult,
 } from "./terminal-server";
 
+export {
+  BROWSER_CONTROL_PORT,
+  BROWSER_CONTROL_SERVER_TIMEOUT_MS,
+  BrowserControlServerError,
+  BrowserControlServerUnsupportedError,
+  buildBrowserControlServerScript,
+  ensureBrowserControlServer,
+  tearDownBrowserControlServer,
+  type EnsureBrowserControlServerOptions,
+  type EnsureBrowserControlServerResult,
+} from "./browser-control-server";
+
+export {
+  BROWSER_CONTROL_ADMIN_TOKEN_FILE,
+  BrowserControlClient,
+  BrowserControlProtocolError,
+  BrowserControlRequestError,
+  BrowserControlSessionClient,
+  BrowserControlTransportError,
+  BrowserControlUnsupportedError,
+  provisionBrowserControlClient,
+  type BrowserControlPlacementSession,
+  type BrowserStateDownloadGrant,
+  type BrowserStateUploadGrant,
+  type BrowserViewGrant,
+  type CapturePlacementBrowserStateInput,
+  type CreatePlacementBrowserSessionInput,
+  type PlacementBrowserSession,
+  type PlacementBrowserSessionReference,
+  type PlacementBrowserNetworkRoute,
+  type PlacementBrowserTransport,
+  type PlacementBrowserStateCaptureReceipt,
+  type ProvisionBrowserControlClientInput,
+  type ProvisionBrowserControlClientResult,
+  type RestorePlacementBrowserStateInput,
+} from "./browser-control-client";
+
 // Host-owned rotating run credentials. Material lives outside the persisted
 // workspace/manifest and is activated atomically per session generation.
 export {
@@ -254,17 +292,17 @@ export {
   type MaterializeRunCredentialsOptions,
 } from "./run-credentials";
 
-// Session-specific Toolspace token routing. The manifest retains one stable
+// Session-specific Codemode token routing. The manifest retains one stable
 // legacy pointer for warm-box env parity; every session command selects its own
 // hashed token file off-manifest.
 export {
-  ToolspaceTokenPathError,
-  toolspaceTokenFileForSession,
-  toolspaceTokenFileFromEnvironment,
-  withToolspaceTokenEnvironment,
-  withToolspaceTokenSession,
-  withToolspaceTokenClient,
-} from "./toolspace-token";
+  CodemodeTokenPathError,
+  codemodeTokenFileForSession,
+  codemodeTokenFileFromEnvironment,
+  withCodemodeTokenEnvironment,
+  withCodemodeTokenSession,
+  withCodemodeTokenClient,
+} from "./codemode-token";
 
 // The Channel-B pixel DATA PLANE (P4.2). Resolves the provider's scoped tunnel
 // for port 6080 (client → provider-tunnel direct), assembles the WS URL, and
@@ -272,6 +310,7 @@ export {
 export {
   exposeStreamPort,
   buildStreamUrl,
+  exposedPortEndpointFromUrl,
   StreamPortUnavailableError,
   type ExposedPortEndpoint,
   type ExposeStreamPortInput,
@@ -542,6 +581,15 @@ export function createSandboxClientForBackend(
     !exposedPorts.includes(TERMINAL_STREAM_PORT)
   ) {
     exposedPorts.push(TERMINAL_STREAM_PORT);
+  }
+  // The browser controller is a placement service baked into both canonical
+  // images. Providers that require port declaration must receive its fixed
+  // port when the box is created; on-demand providers resolve it lazily.
+  if (
+    !registration.descriptor.portExposure.supportsOnDemandPorts &&
+    !exposedPorts.includes(BROWSER_CONTROL_PORT)
+  ) {
+    exposedPorts.push(BROWSER_CONTROL_PORT);
   }
 
   const raw = withProviderExactResumeContract(
@@ -1032,15 +1080,17 @@ export class SandboxExecReadinessError extends Error {
     public readonly code: "exec_probe_unavailable" | "exec_probe_timeout" | "exec_probe_failed",
     public readonly timeoutMs: number,
     public readonly exitCode: number | null = null,
+    public readonly instanceId: string | null = null,
   ) {
+    const target = instanceId ? `${backend} sandbox ${instanceId}` : `${backend} sandbox`;
     super(
       code === "exec_probe_timeout"
-        ? `sandbox creation timed out waiting for ${backend} command readiness after ${timeoutMs}ms`
+        ? `${target} timed out waiting for command readiness after ${timeoutMs}ms`
         : code === "exec_probe_unavailable"
-          ? `${backend} sandbox session does not expose an exec readiness probe`
+          ? `${target} session does not expose an exec readiness probe`
           : exitCode === null
-            ? `${backend} sandbox exec readiness probe did not return a command exit code`
-            : `${backend} sandbox exec readiness probe failed with exit code ${exitCode}`,
+            ? `${target} exec readiness probe did not return a command exit code`
+            : `${target} exec readiness probe failed with exit code ${exitCode}`,
     );
   }
 }
@@ -1097,7 +1147,13 @@ export async function verifySandboxExecReadiness(
   };
   const run = session.exec ?? session.execCommand;
   if (!run) {
-    throw new SandboxExecReadinessError(established.backendId, "exec_probe_unavailable", timeoutMs);
+    throw new SandboxExecReadinessError(
+      established.backendId,
+      "exec_probe_unavailable",
+      timeoutMs,
+      null,
+      established.instanceId,
+    );
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -1111,7 +1167,13 @@ export async function verifySandboxExecReadiness(
         timer = setTimeout(
           () =>
             reject(
-              new SandboxExecReadinessError(established.backendId, "exec_probe_timeout", timeoutMs),
+              new SandboxExecReadinessError(
+                established.backendId,
+                "exec_probe_timeout",
+                timeoutMs,
+                null,
+                established.instanceId,
+              ),
             ),
           timeoutMs,
         );
@@ -1125,6 +1187,7 @@ export async function verifySandboxExecReadiness(
         "exec_probe_failed",
         timeoutMs,
         exitCode,
+        established.instanceId,
       );
     }
   } finally {
@@ -1437,7 +1500,10 @@ export function withoutSandboxProviderIdentity(
     return providerIndependentEnvelope;
   }
   const { providerState: _providerState, ...providerIndependentState } = sessionState;
-  return { ...providerIndependentEnvelope, sessionState: providerIndependentState };
+  return {
+    ...providerIndependentEnvelope,
+    sessionState: providerIndependentState,
+  };
 }
 
 function readInstanceId(backend: SandboxBackend | string, session: unknown): string {
@@ -1454,6 +1520,47 @@ async function terminateCreatedSandbox(
   } catch {
     /* best-effort */
   }
+}
+
+type ModalNativeWorkspacePersistence = "snapshot_filesystem" | "snapshot_directory";
+
+function modalWorkspacePersistenceForRestore(
+  archive: VerifiedWorkspaceArchive | null,
+): ModalNativeWorkspacePersistence | null {
+  if (archive?.kind !== "provider_snapshot") return null;
+  const snapshot = archive.nativeSnapshot;
+  if (!snapshot) {
+    throw new WorkspaceArchiveIntegrityError(
+      "native_snapshot_reference_invalid",
+      `selected native snapshot archive revision ${archive.descriptor.revision} has no decoded provider receipt`,
+    );
+  }
+  const expected =
+    snapshot.provider === "modal_snapshot_filesystem"
+      ? "snapshot_filesystem"
+      : snapshot.provider === "modal_snapshot_directory"
+        ? "snapshot_directory"
+        : null;
+  if (!expected) return null;
+  if (snapshot.workspacePersistence !== undefined && snapshot.workspacePersistence !== expected) {
+    throw new WorkspaceArchiveIntegrityError(
+      "native_snapshot_reference_invalid",
+      `selected Modal snapshot archive revision ${archive.descriptor.revision} has inconsistent persistence metadata`,
+    );
+  }
+  return expected;
+}
+
+function settingsForWorkspaceArchiveRestore(
+  backend: SandboxBackend,
+  settings: Settings,
+  archive: VerifiedWorkspaceArchive | null,
+): Settings {
+  if (backend !== "modal") return settings;
+  const workspacePersistence = modalWorkspacePersistenceForRestore(archive);
+  return workspacePersistence && settings.modalWorkspacePersistence !== workspacePersistence
+    ? { ...settings, modalWorkspacePersistence: workspacePersistence }
+    : settings;
 }
 
 /**
@@ -1504,6 +1611,13 @@ export async function establishSandboxSessionFromEnvelope(
   const createImageSource =
     backend === "modal" && settings.modalImageId ? "provider_immutable" : "logical";
   const environment = opts.environment ?? collectSandboxEnvironment(settings);
+  // Every fresh-create caller crosses this one async boundary, including API
+  // interaction endpoints that do not run inside the turn worker. Resolve a
+  // private registry image before the synchronous client factory reads its
+  // selector. Worker-start prewarming remains only a latency optimization.
+  if (backend === "modal" && opts.recovery === "create-or-restore" && !opts.clientFactory) {
+    await ensureModalRegistryImage(settings);
+  }
   const client = (opts.clientFactory ?? createSandboxClientForBackend)(
     backend,
     settings,
@@ -1575,14 +1689,32 @@ export async function establishSandboxSessionFromEnvelope(
       workspaceArchiveBase64,
       workspaceArchiveMetadata,
     );
-    let createdClient = client;
+    // The selected native artifact is the durable authority for its restore
+    // protocol. The process setting governs new sandboxes only: a mode rollout
+    // must not make an older, verified Modal snapshot impossible to hydrate.
+    const restoreSettings = settingsForWorkspaceArchiveRestore(backend, settings, workspaceArchive);
+    const restoreClient =
+      restoreSettings === settings
+        ? client
+        : ((opts.clientFactory ?? createSandboxClientForBackend)(
+            backend,
+            restoreSettings,
+            environment,
+          ) as ResumeCapableClient | undefined);
+    if (!restoreClient?.create) {
+      throw new SandboxConfigError(
+        backend,
+        `Sandbox backend "${backend}" does not support fresh archive restoration`,
+      );
+    }
+    let createdClient = restoreClient;
     const createStarted = Date.now();
-    let restored: Awaited<ReturnType<NonNullable<typeof client.create>>>;
+    let restored: Awaited<ReturnType<NonNullable<typeof restoreClient.create>>>;
     try {
-      restored = await client.create!({ manifest: createManifest });
+      restored = await restoreClient.create({ manifest: createManifest });
       recordSandboxCreateMetric(
         opts.metrics,
-        client.backendId,
+        restoreClient.backendId,
         createImageSource,
         "completed",
         createStarted,
@@ -1590,7 +1722,7 @@ export async function establishSandboxSessionFromEnvelope(
     } catch (error) {
       recordSandboxCreateMetric(
         opts.metrics,
-        client.backendId,
+        restoreClient.backendId,
         createImageSource,
         "failed",
         createStarted,
@@ -1598,19 +1730,24 @@ export async function establishSandboxSessionFromEnvelope(
       if (
         createImageSource !== "provider_immutable" ||
         backend !== "modal" ||
-        !isProviderSandboxNotFoundError(client.backendId, error)
+        !isProviderSandboxNotFoundError(restoreClient.backendId, error)
       ) {
         throw error;
       }
-      const fallbackSettings =
+      const fallbackBaseSettings =
         opts.logicalFallbackSettings ??
         (settings.modalImageRef ? { ...settings, modalImageId: undefined } : null);
-      if (!fallbackSettings) {
+      if (!fallbackBaseSettings) {
         // An ID-only logical base is supported. Without the exact pre-selection
         // settings, clearing the optimized ID would silently boot Modal's
         // default image, so fail closed instead of changing the rig base.
         throw error;
       }
+      const fallbackSettings = settingsForWorkspaceArchiveRestore(
+        backend,
+        fallbackBaseSettings,
+        workspaceArchive,
+      );
       await ensureModalRegistryImage(fallbackSettings);
       const fallbackClient = (opts.clientFactory ?? createSandboxClientForBackend)(
         backend,
@@ -1693,7 +1830,7 @@ export async function establishSandboxSessionFromEnvelope(
         throw new WorkspaceArchiveIntegrityError(
           "archive_hydration_failed",
           `failed to hydrate selected workspace archive revision ${workspaceArchive.descriptor.revision}`,
-          { retryable: true },
+          { retryable: true, cause: error },
         );
       }
       // hydrateWorkspace may replace the provider box (Modal's native snapshot

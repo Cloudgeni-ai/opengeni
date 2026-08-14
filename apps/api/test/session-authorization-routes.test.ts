@@ -15,10 +15,15 @@ import {
   initializeSessionStartAtomically,
   listSessionEvents,
   mutateSessionControlInTransaction,
-  withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
-import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
+import {
+  requireSessionAuthorization,
+  requireSessionAuthorizationListScope,
+  type ApiRouteDeps,
+  type SessionWorkflowClient,
+} from "@opengeni/core";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -582,18 +587,16 @@ describe("embedding host session authorization routes", () => {
     expect(lineage.status).toBe(200);
     expect(await lineage.json()).toEqual({ ancestors: [], children: [], truncated: false });
 
-    await withWorkspaceRls(client.db, value.grant.workspaceId, (scoped) =>
-      scoped.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as typeof client.db, {
-          accountId: value.grant.accountId,
-          workspaceId: value.grant.workspaceId,
-          sessionId: value.root.id,
-          actor: { type: "human", subjectId: value.grant.subjectId },
-          operationKey: crypto.randomUUID(),
-          action: "pause",
-          reason: "private parent reason",
-        }),
-      ),
+    await withWorkspaceSessionActivityRls(client.db, value.grant.workspaceId, (scoped) =>
+      mutateSessionControlInTransaction(scoped, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId,
+        sessionId: value.root.id,
+        actor: { type: "human", subjectId: value.grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        action: "pause",
+        reason: "private parent reason",
+      }),
     );
     const queue = await app.request(`${base}/queue`, { headers });
     expect(queue.status).toBe(200);
@@ -804,13 +807,13 @@ describe("embedding host session authorization routes", () => {
     ]);
   });
 
-  test("authorizes first-party MCP Pause, Resume, and Agent Steer exactly once", async () => {
+  test("authorizes first-party MCP parent-to-child Pause, Resume, and Agent Steer exactly once", async () => {
     if (!available) return;
     const value = await fixture();
     const started = await initializeSessionStartAtomically(client.db, {
       accountId: value.grant.accountId,
       workspaceId: value.grant.workspaceId,
-      sessionId: value.child.id,
+      sessionId: value.root.id,
       reasoningEffortFallback: "low",
       createdEventPayload: {},
       goal: null,
@@ -818,27 +821,20 @@ describe("embedding host session authorization routes", () => {
     if (!started.turn) throw new Error("test caller did not create an initial turn");
     const attemptId = crypto.randomUUID();
     const claimed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId, {
-      sessionId: value.child.id,
-      workflowId: `session-${value.child.id}`,
+      sessionId: value.root.id,
+      workflowId: `session-${value.root.id}`,
       workflowRunId: crypto.randomUUID(),
       attemptId,
       dispatchId: crypto.randomUUID(),
       trigger: { kind: "next" },
     });
     if (claimed.action !== "claimed") throw new Error(`test caller was not claimed`);
-    const target = await createSession(client.db, {
-      accountId: value.grant.accountId,
-      workspaceId: value.grant.workspaceId,
-      parentSessionId: value.root.id,
-      initialMessage: "control target",
-      resources: [],
-      metadata: {},
-      model: "test-model",
-      sandboxBackend: "modal",
-      createdBy: { kind: "subject", subjectId: value.grant.subjectId, label: "Test owner" },
-      createdByContext: {},
-    });
-    const decisions: Array<{ operation: string; surface: string; sessionId: string }> = [];
+    const target = value.child;
+    const decisions: Array<{
+      operation: string;
+      surface: string;
+      sessionId: string;
+    }> = [];
     const port = {
       authorizeSession: async ({ operation, surface, target: authorizationTarget }) => {
         decisions.push({
@@ -872,7 +868,7 @@ describe("embedding host session authorization routes", () => {
       ...value.grant,
       permissions: ["workspace:read", "sessions:read", "sessions:control"],
       metadata: {
-        sessionId: value.child.id,
+        sessionId: value.root.id,
         turnId: claimed.turn.id,
         attemptId,
         executionGeneration: claimed.turn.executionGeneration,
@@ -901,32 +897,177 @@ describe("embedding host session authorization routes", () => {
       ...value.grant,
       permissions: ["workspace:read", "sessions:read", "sessions:control"],
     });
-    const operatorPaused = await callMcpTool<{ effectiveControl: { state: string } }>(
-      operatorServer,
-      "session_pause",
-      {
-        sessionId: target.id,
-        idempotencyKey: crypto.randomUUID(),
-      },
-    );
+    const operatorPaused = await callMcpTool<{
+      effectiveControl: { state: string };
+    }>(operatorServer, "session_pause", {
+      sessionId: target.id,
+      idempotencyKey: crypto.randomUUID(),
+    });
     expect(operatorPaused.effectiveControl.state).toBe("paused");
-    const operatorResumed = await callMcpTool<{ effectiveControl: { state: string } }>(
-      operatorServer,
-      "session_resume",
-      {
-        sessionId: target.id,
-        idempotencyKey: crypto.randomUUID(),
-      },
-    );
+    const operatorResumed = await callMcpTool<{
+      effectiveControl: { state: string };
+    }>(operatorServer, "session_resume", {
+      sessionId: target.id,
+      idempotencyKey: crypto.randomUUID(),
+    });
     expect(operatorResumed.effectiveControl.state).toBe("active");
 
     expect(decisions).toEqual([
-      { operation: "session.control", surface: "first_party_mcp", sessionId: target.id },
-      { operation: "session.control", surface: "first_party_mcp", sessionId: target.id },
-      { operation: "session.steer", surface: "first_party_mcp", sessionId: target.id },
-      { operation: "session.control", surface: "first_party_mcp", sessionId: target.id },
-      { operation: "session.control", surface: "first_party_mcp", sessionId: target.id },
+      {
+        operation: "session.control",
+        surface: "first_party_mcp",
+        sessionId: target.id,
+      },
+      {
+        operation: "session.control",
+        surface: "first_party_mcp",
+        sessionId: target.id,
+      },
+      {
+        operation: "session.steer",
+        surface: "first_party_mcp",
+        sessionId: target.id,
+      },
+      {
+        operation: "session.control",
+        surface: "first_party_mcp",
+        sessionId: target.id,
+      },
+      {
+        operation: "session.control",
+        surface: "first_party_mcp",
+        sessionId: target.id,
+      },
     ]);
+  });
+
+  test("enforces vertical agent authority before an optional host policy can widen it", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const sibling = await createSession(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      parentSessionId: value.root.id,
+      initialMessage: "caller sibling",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      sandboxBackend: "modal",
+      createdBy: {
+        kind: "subject",
+        subjectId: value.grant.subjectId,
+        label: "Test owner",
+      },
+      createdByContext: {},
+    });
+    const grandchild = await createSession(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      parentSessionId: value.child.id,
+      initialMessage: "caller's direct child",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      sandboxBackend: "modal",
+      createdBy: {
+        kind: "subject",
+        subjectId: value.grant.subjectId,
+        label: "Test owner",
+      },
+      createdByContext: {},
+    });
+
+    const claimGrant = async (sessionId: string) => {
+      const started = await initializeSessionStartAtomically(client.db, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId,
+        sessionId,
+        reasoningEffortFallback: "low",
+        createdEventPayload: {},
+        goal: null,
+      });
+      if (!started.turn) throw new Error("test caller did not create an initial turn");
+      const attemptId = crypto.randomUUID();
+      const claimed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId, {
+        sessionId,
+        workflowId: `session-${sessionId}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (claimed.action !== "claimed") throw new Error("test caller was not claimed");
+      return {
+        ...value.grant,
+        principalKind: "agent_attempt" as const,
+        metadata: {
+          sessionId,
+          turnId: claimed.turn.id,
+          attemptId,
+          executionGeneration: claimed.turn.executionGeneration,
+        },
+      };
+    };
+
+    const callerGrant = await claimGrant(value.child.id);
+    const authorize = (
+      sessionId: string,
+      operation: Parameters<typeof requireSessionAuthorization>[2]["operation"],
+      sessionAuthorization?: SessionAuthorizationPort,
+    ) =>
+      requireSessionAuthorization(
+        {
+          db: client.db,
+          ...(sessionAuthorization ? { sessionAuthorization } : {}),
+        },
+        callerGrant,
+        { sessionId, operation, surface: "first_party_mcp" },
+      );
+
+    await expect(authorize(value.child.id, "session.read")).resolves.toMatchObject({
+      relatedSessionAccess: "root",
+    });
+    await expect(authorize(value.root.id, "session.append")).resolves.toMatchObject({
+      relatedSessionAccess: "target",
+    });
+    await expect(authorize(value.root.id, "session.events.read")).resolves.toMatchObject({
+      relatedSessionAccess: "target",
+    });
+    await expect(authorize(grandchild.id, "session.control")).resolves.toMatchObject({
+      relatedSessionAccess: "target",
+    });
+
+    await expect(authorize(value.root.id, "session.control")).rejects.toMatchObject({
+      reason: "forbidden",
+    });
+    await expect(authorize(sibling.id, "session.read")).rejects.toMatchObject({
+      reason: "forbidden",
+    });
+    await expect(authorize(value.hidden.id, "session.append")).rejects.toMatchObject({
+      reason: "forbidden",
+    });
+
+    let hostCalls = 0;
+    const allowEverything: SessionAuthorizationPort = {
+      authorizeSession: async () => {
+        hostCalls += 1;
+        return { allowed: true, relatedSessionAccess: "root" };
+      },
+      resolveListScope: async () => ({ kind: "all" }),
+    };
+    await expect(authorize(sibling.id, "session.append", allowEverything)).rejects.toMatchObject({
+      reason: "forbidden",
+    });
+    expect(hostCalls).toBe(0);
+
+    const grandchildGrant = await claimGrant(grandchild.id);
+    await expect(
+      requireSessionAuthorization({ db: client.db }, grandchildGrant, {
+        sessionId: value.root.id,
+        operation: "session.append",
+        surface: "first_party_mcp",
+      }),
+    ).rejects.toMatchObject({ reason: "forbidden" });
   });
 
   test("reconstructs live agent-attempt authority and rejects the same token after settlement", async () => {
@@ -988,6 +1129,7 @@ describe("embedding host session authorization routes", () => {
         label: "Test owner",
       },
       initiatorContext: { label: "Test owner" },
+      initiatingHumanSubjectId: value.grant.subjectId,
     });
 
     const admin = postgres(shared.adminUrl, { max: 1 });
@@ -1003,6 +1145,22 @@ describe("embedding host session authorization routes", () => {
     const callCount = actors.length;
     expect((await app.request(path, { headers })).status).toBe(404);
     expect(actors).toHaveLength(callCount);
+    await expect(
+      requireSessionAuthorizationListScope(
+        { db: client.db },
+        {
+          ...value.grant,
+          principalKind: "agent_attempt",
+          metadata: {
+            sessionId: value.child.id,
+            turnId: claimed.turn.id,
+            attemptId,
+            executionGeneration: claimed.turn.executionGeneration,
+          },
+        },
+        "first_party_mcp",
+      ),
+    ).rejects.toMatchObject({ reason: "caller_stale" });
   });
 
   test("fails closed for unavailable policy and unclassified future surfaces", async () => {

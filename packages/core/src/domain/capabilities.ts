@@ -1,5 +1,3 @@
-import { existsSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -7,12 +5,17 @@ import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config"
 import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
+  FIKEN_PROVIDER_DOMAIN,
+  FIRST_PARTY_MCP_TOOL_NAMES,
   type AccessGrant,
+  type CapabilityAction,
   type CapabilityCatalogResponse,
   type CapabilityInstallation,
+  type ConnectionMetadata,
   type CreateCapabilityCatalogItemRequest,
   type EnableCapabilityRequest,
   type McpServerConnectionRef,
+  type McpPersonalConnectionDelegation,
   type SocialConnection,
 } from "@opengeni/contracts";
 import {
@@ -26,42 +29,33 @@ import {
   decryptedCapabilityHeaders,
   disableCapabilityInstallation,
   enableCapabilityInstallation,
-  enablePackInstallation,
   encryptVariableSetValue,
   getCapabilityCatalogItem,
   getCapabilityInstallation,
   getConnectionMetadata,
   getCodexAppsCredentialAuthorizationForRun,
   getWorkspaceGrant,
-  getPackInstallation,
   getStoredCapabilityHeaderCiphertext,
-  getVariableSet,
   listCapabilityCatalogItems,
   listCapabilityInstallations,
   listConnectionsMetadata,
   listEnabledMcpCapabilityServers,
+  listInstalledApiIntegrations,
+  listInstalledSkills,
   listPackInstallations,
   listSocialConnections,
   mcpServerIdForCapability,
-  updatePackInstallationStatus,
   upsertCapabilityCatalogItem,
   type Database,
+  type ApiIntegrationRuntime,
   type EnabledMcpCapabilityServer,
+  type InstalledSkillSummary,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { hasPermission } from "../access";
-import {
-  getSkillLibraryEntry,
-  listSkillLibraryEntries,
-  type SkillLibraryEntry,
-} from "@opengeni/runtime/skill-library";
-import { validateVariableSetAttachment } from "./environments";
-import {
-  assertPackSandboxImageCompatible,
-  listCapabilityPacks,
-  listWorkspaceCapabilityPacks,
-  resolveCapabilityPack,
-} from "./packs";
+import { isFikenConnection, preferredFikenConnection } from "./fiken";
+import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
+import { listCapabilityPacks, listWorkspaceCapabilityPacks } from "./packs";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
@@ -70,6 +64,7 @@ const mcpRegistryMaxPages = 3;
 const mcpCapabilityProbeTimeoutMs = 15000;
 const maxMcpCredentialHeaders = 16;
 const maxMcpCredentialHeaderValueLength = 4096;
+const officialGmailMcpUrl = "https://gmailmcp.googleapis.com/mcp/v1";
 // RFC 9110 field-name token characters.
 const mcpCredentialHeaderName = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
 
@@ -85,8 +80,9 @@ export async function buildCapabilityCatalog(input: {
     packInstallations,
     workspacePacks,
     socialConnections,
-    bundledSkills,
+    workspaceConnections,
     curatedLibrarySkills,
+    installedSkills,
     codexAppsCredentialId,
   ] = await Promise.all([
     listCapabilityCatalogItems(input.db, input.workspaceId),
@@ -94,14 +90,23 @@ export async function buildCapabilityCatalog(input: {
     listPackInstallations(input.db, input.workspaceId),
     listWorkspaceCapabilityPacks(input.db, input.workspaceId),
     listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
-    discoverBundledSkills(),
+    listConnectionsMetadata(input.db, input.workspaceId, null),
     discoverCuratedSkillLibraryItems(),
+    listInstalledSkills(input.db, input.workspaceId),
     input.settings.codexConnectedAppsEnabled
       ? resolveCodexAppsCredentialIdForRun(input.db, input.workspaceId)
       : Promise.resolve(null),
   ]);
+  const catalogInstallations = capabilityInstallations.filter(
+    (installation) => installation.kind === "mcp",
+  );
   const capabilityInstallationById = new Map(
-    capabilityInstallations.map((installation) => [installation.capabilityId, installation]),
+    catalogInstallations.map((installation) => [installation.capabilityId, installation]),
+  );
+  const installedSkillById = new Map(
+    installedSkills
+      .filter((skill) => skill.owners.some((owner) => owner.kind === "direct"))
+      .map((skill) => [skill.capabilityId, skill]),
   );
   const activePackIds = new Set(
     packInstallations
@@ -114,27 +119,43 @@ export async function buildCapabilityCatalog(input: {
       packCatalogItem(pack, builtInPackIds.has(pack.id) ? "built_in" : "manual"),
     ),
     ...configuredMcpCatalogItems(input.settings),
-    ...platformApiCatalogItems(socialConnections),
-    ...bundledSkills,
+    ...providerIntegrationCatalogItems(socialConnections),
+    fikenCatalogItem(workspaceConnections.filter(isFikenConnection)),
     ...curatedLibrarySkills,
+    ...installedSkills
+      .filter(
+        (skill) =>
+          skill.source !== "library" && skill.owners.some((owner) => owner.kind === "direct"),
+      )
+      .map(installedSkillCatalogItem),
   ];
   const codexApps = input.settings.codexConnectedAppsEnabled
     ? codexAppsCatalogItem(codexAppsCredentialId !== null)
     : null;
   const items = dedupeCatalogItems([
     ...builtIns,
-    ...persistedItems.filter((item) => !isReservedCodexAppsCatalogItem(item)),
+    ...persistedItems.filter(
+      (item) =>
+        item.kind !== "skill" &&
+        item.kind !== "api" &&
+        item.kind !== "plugin" &&
+        !isReservedCodexAppsCatalogItem(item),
+    ),
     // Keep the reserved, server-derived item authoritative over any stale
     // legacy catalog row with the same id.
     ...(codexApps ? [codexApps] : []),
   ])
-    .map((item) =>
-      applyCapabilityEnablement(item, capabilityInstallationById.get(item.id), activePackIds),
-    )
+    .map((item) => {
+      const projected =
+        item.kind === "skill"
+          ? applyInstalledSkillEnablement(item, installedSkillById.get(item.id))
+          : applyCapabilityEnablement(item, capabilityInstallationById.get(item.id), activePackIds);
+      return applyCapabilityLifecycle(projected);
+    })
     .sort(compareCatalogItems);
   return {
     items,
-    installations: capabilityInstallations,
+    installations: catalogInstallations,
   };
 }
 
@@ -152,7 +173,17 @@ export async function createCatalogItem(input: {
   }
   if (id.startsWith("skill:")) {
     throw new HTTPException(422, {
-      message: "skill ids are managed by the OpenGeni skill library or runtime adapters",
+      message: "Skills are installed through the Skill library or source import flow",
+    });
+  }
+  if (id.startsWith("api:")) {
+    throw new HTTPException(422, {
+      message: "API Integrations are installed from typed Integration Definitions",
+    });
+  }
+  if (id.startsWith("plugin:")) {
+    throw new HTTPException(422, {
+      message: "Plugins are installed through the Plugin Package flow",
     });
   }
   if (
@@ -214,6 +245,26 @@ export async function enableCapability(input: {
     input.settings,
     input.capabilityId,
   );
+  if (item.kind === "skill") {
+    throw new HTTPException(409, {
+      message: "Install Skills through the Skill library or source import flow",
+    });
+  }
+  if (item.kind === "api") {
+    throw new HTTPException(409, {
+      message: "Install API Integrations through the Integration Definitions flow",
+    });
+  }
+  if (item.kind === "plugin") {
+    throw new HTTPException(409, {
+      message: "Install Plugins through the Plugin Package flow",
+    });
+  }
+  if (item.kind === "pack") {
+    throw new HTTPException(409, {
+      message: "Install Packs through the Pack installation preview flow",
+    });
+  }
   if (item.kind === "mcp" && !item.runtime.available) {
     throw new HTTPException(422, {
       message: "MCP capabilities need a remote streamable HTTP endpoint before they can be enabled",
@@ -228,44 +279,6 @@ export async function enableCapability(input: {
   delete installationConfig.headersEncrypted;
   delete installationConfig.headerNames;
   delete installationConfig.connectionRef;
-  if (item.kind === "skill" && item.source === "library") {
-    const libraryId = stringMetadata(item.metadata.libraryId);
-    const catalogVersion = stringMetadata(item.metadata.version);
-    if (!libraryId || !catalogVersion) {
-      throw new HTTPException(422, {
-        message: `skill library metadata is incomplete for ${item.id}`,
-      });
-    }
-    const requestedVersion = input.payload.config.version;
-    if (requestedVersion !== undefined && typeof requestedVersion !== "string") {
-      throw new HTTPException(422, {
-        message: "skill activation config.version must be a string",
-      });
-    }
-    const normalizedVersion = requestedVersion?.trim() || catalogVersion;
-    if (normalizedVersion !== catalogVersion) {
-      throw new HTTPException(422, {
-        message: `skill ${libraryId} only supports immutable version ${catalogVersion}`,
-      });
-    }
-    const entry = getSkillLibraryEntry(libraryId, normalizedVersion);
-    if (!entry) {
-      throw new HTTPException(422, {
-        message: `skill library entry is unavailable: ${libraryId}@${normalizedVersion}`,
-      });
-    }
-    // Skill activation has a deliberately narrow config surface. In
-    // particular, no variable-set, connection, credential-header, MCP, or
-    // provider-routing input is persisted or consulted for a library skill.
-    installationConfig = { version: entry.version };
-    installationMetadata = {
-      libraryId: entry.id,
-      libraryVersion: entry.version,
-      contentSha256: entry.contentSha256,
-      sourceCommit: entry.sourceCommit,
-      provenance: entry.provenance,
-    };
-  }
   if (item.kind === "mcp") {
     const headers = await resolveMcpCredentialHeaders(input, item);
     const connectionRef = input.payload.connectionRef
@@ -287,81 +300,6 @@ export async function enableCapability(input: {
         Object.entries(headers).map(([name, value]) => [name, encryptVariableSetValue(key, value)]),
       );
     }
-  }
-  if (item.kind === "pack") {
-    const packId = packIdFromCapabilityId(item.id);
-    const pack = await resolveCapabilityPack(input.db, input.workspaceId, packId);
-    if (!pack) {
-      throw new HTTPException(404, { message: "pack not found" });
-    }
-    await assertPackSandboxImageCompatible(input.db, input.workspaceId, pack);
-    // The unified capability-enable path accepts an initial variableSet
-    // attachment (`payload.variableSetId`), mirroring POST /packs/:id/enable:
-    // a request-supplied id is validated as a fresh attachment, otherwise the
-    // attachment stored by a previous enable is preserved and re-validated.
-    const existing = await getPackInstallation(input.db, input.workspaceId, packId);
-    const storedVariableSetId =
-      typeof existing?.metadata.variableSetId === "string"
-        ? existing.metadata.variableSetId
-        : typeof existing?.metadata.environmentId === "string"
-          ? existing.metadata.environmentId
-          : undefined;
-    const requestedVariableSetId = input.payload.variableSetId;
-    const variableSetId = requestedVariableSetId ?? storedVariableSetId;
-    if (pack.variableSet?.required && !variableSetId) {
-      throw new HTTPException(422, {
-        message: `pack ${packId} requires an variableSet attachment; pass variableSetId`,
-      });
-    }
-    if (variableSetId) {
-      if (requestedVariableSetId) {
-        // A fresh attachment: validate it like the packs enable endpoint does.
-        // The grant holds workspace:admin here, which implies variable-sets:use,
-        // so the attachment authorization succeeds for this caller.
-        const variableSet = await validateVariableSetAttachment(
-          { settings: input.settings, db: input.db },
-          input.grant,
-          input.workspaceId,
-          requestedVariableSetId,
-        );
-        const missing = (pack.variableSet?.requiredVariables ?? []).filter(
-          (name) => !variableSet.variables.some((variable) => variable.name === name),
-        );
-        if (missing.length > 0) {
-          throw new HTTPException(422, {
-            message: `variable set is missing required variable(s): ${missing.join(", ")}`,
-          });
-        }
-      } else {
-        // The stored attachment was authorized at pack-enable time, but the
-        // variableSet may have been deleted or its variables changed since;
-        // re-validate it like the packs enable endpoint does.
-        const variableSet = await getVariableSet(input.db, input.workspaceId, variableSetId);
-        if (!variableSet) {
-          throw new HTTPException(422, {
-            message: `the stored variableSet attachment for pack ${packId} no longer exists; re-enable it with variableSetId`,
-          });
-        }
-        const missing = (pack.variableSet?.requiredVariables ?? []).filter(
-          (name) => !variableSet.variables.some((variable) => variable.name === name),
-        );
-        if (missing.length > 0) {
-          throw new HTTPException(422, {
-            message: `variable set is missing required variable(s): ${missing.join(", ")}`,
-          });
-        }
-      }
-    }
-    await enablePackInstallation(input.db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      packId,
-      metadata: {
-        ...input.payload.metadata,
-        packVersion: pack.version,
-        ...(variableSetId ? { variableSetId } : {}),
-      },
-    });
   }
   return await enableCapabilityInstallation(input.db, {
     accountId: input.accountId,
@@ -435,11 +373,15 @@ function normalizedMcpCredentialHeaders(
   const seen = new Set<string>();
   for (const [name, value] of entries) {
     if (!mcpCredentialHeaderName.test(name)) {
-      throw new HTTPException(422, { message: `invalid credential header name: ${name}` });
+      throw new HTTPException(422, {
+        message: `invalid credential header name: ${name}`,
+      });
     }
     const lower = name.toLowerCase();
     if (seen.has(lower)) {
-      throw new HTTPException(422, { message: `duplicate credential header name: ${name}` });
+      throw new HTTPException(422, {
+        message: `duplicate credential header name: ${name}`,
+      });
     }
     seen.add(lower);
     if (value.length === 0 || value.length > maxMcpCredentialHeaderValueLength) {
@@ -465,6 +407,15 @@ async function validateMcpCapabilityConnectionRef(
   ref: McpServerConnectionRef,
 ): Promise<McpServerConnectionRef> {
   const subjectScope = ref.subjectScope ?? "workspace";
+  const personalOnly =
+    item.metadata.connectionOwnership === "personal_only" ||
+    item.endpointUrl?.replace(/\/+$/, "") === officialGmailMcpUrl;
+  if (personalOnly && subjectScope !== "subject") {
+    throw new HTTPException(422, {
+      message:
+        "this capability requires a personal connection; each workspace member must connect their own account",
+    });
+  }
   const normalized: McpServerConnectionRef = {
     providerDomain: ref.providerDomain.trim(),
     subjectScope,
@@ -474,11 +425,17 @@ async function validateMcpCapabilityConnectionRef(
     ...(ref.scopes ? { scopes: uniqueStrings(ref.scopes) } : {}),
     ...(ref.resource ? { resource: ref.resource } : {}),
     ...(ref.selectedResources
-      ? { selectedResources: ref.selectedResources.map((resource) => ({ ...resource })) }
+      ? {
+          selectedResources: ref.selectedResources.map((resource) => ({
+            ...resource,
+          })),
+        }
       : {}),
   };
   if (!normalized.providerDomain) {
-    throw new HTTPException(422, { message: "connectionRef.providerDomain is required" });
+    throw new HTTPException(422, {
+      message: "connectionRef.providerDomain is required",
+    });
   }
   if (!item.endpointUrl || !item.runtime.mcpServerId) {
     throw new HTTPException(422, {
@@ -715,31 +672,36 @@ export async function disableCapability(input: {
     input.settings,
     input.capabilityId,
   );
-  if ((item.source === "built_in" || item.source === "configured") && item.kind !== "pack") {
+  if (item.kind === "skill") {
+    throw new HTTPException(409, {
+      message: "Uninstall Skills through the Skill uninstall preview flow",
+    });
+  }
+  if (item.kind === "api") {
+    throw new HTTPException(409, {
+      message: "Remove API Integrations through the Integration instance flow",
+    });
+  }
+  if (item.kind === "plugin") {
+    throw new HTTPException(409, {
+      message: "Remove Plugins through the Plugin Package flow",
+    });
+  }
+  if (item.kind === "pack") {
+    throw new HTTPException(409, {
+      message: "Uninstall Packs through the Pack uninstall preview flow",
+    });
+  }
+  if (item.source === "built_in" || item.source === "configured") {
     throw new HTTPException(409, {
       message:
         "built-in and configured capabilities are always available; remove them from configuration to disable them",
     });
   }
-  if (item.kind === "pack") {
-    await updatePackInstallationStatus(
-      input.db,
-      input.workspaceId,
-      packIdFromCapabilityId(item.id),
-      "disabled",
-    ).catch(() => undefined);
-    if (!(await getCapabilityInstallation(input.db, input.workspaceId, item.id))) {
-      await enableCapabilityInstallation(input.db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        capabilityId: item.id,
-        kind: "pack",
-        metadata: {},
-        config: {},
-      });
-    }
-  } else if (!(await getCapabilityInstallation(input.db, input.workspaceId, item.id))) {
-    throw new HTTPException(409, { message: "capability is not currently enabled" });
+  if (!(await getCapabilityInstallation(input.db, input.workspaceId, item.id))) {
+    throw new HTTPException(409, {
+      message: "capability is not currently enabled",
+    });
   }
   return await disableCapabilityInstallation(input.db, input.workspaceId, item.id);
 }
@@ -748,15 +710,107 @@ export async function settingsWithEnabledCapabilityMcpServers(
   db: Database,
   workspaceId: string,
   settings: Settings,
+  options?: {
+    subjectId?: string;
+    personalConnectionDelegations?: readonly McpPersonalConnectionDelegation[];
+    onResolvedApiIntegrations?: (integrations: readonly ApiIntegrationRuntime[]) => void;
+  },
 ): Promise<Settings> {
-  const [enabled, codexAppsCredentialId] = await Promise.all([
+  const apiIntegrationsPromise = options?.subjectId
+    ? listInstalledApiIntegrations(db, workspaceId, options.subjectId)
+    : listInstalledApiIntegrationsForDelegations(
+        db,
+        workspaceId,
+        options?.personalConnectionDelegations ?? [],
+      );
+  const [enabled, apiIntegrations, codexAppsCredentialId] = await Promise.all([
     listEnabledMcpCapabilityServers(db, workspaceId),
+    apiIntegrationsPromise,
     resolveCodexAppsCredentialIdForRun(db, workspaceId),
   ]);
+  options?.onResolvedApiIntegrations?.(apiIntegrations);
   return settingsWithCodexAppsMcpServer(
-    settingsWithMcpCapabilityServers(settings, enabled),
+    settingsWithApiIntegrationServers(
+      settingsWithMcpCapabilityServers(settings, enabled),
+      apiIntegrations,
+    ),
     codexAppsCredentialId !== null,
   );
+}
+
+export function apiIntegrationsMatchingDelegations(
+  integrations: readonly ApiIntegrationRuntime[],
+  delegations: readonly McpPersonalConnectionDelegation[],
+): ApiIntegrationRuntime[] {
+  const exact = new Set(
+    delegations.map((delegation) =>
+      [
+        delegation.serverId,
+        delegation.connectionId,
+        delegation.providerDomain.toLowerCase(),
+        delegation.kind ?? "",
+      ].join("\u0000"),
+    ),
+  );
+  return integrations.filter((integration) => {
+    const ref = integration.connectionRef;
+    if (!ref || ref.subjectScope !== "subject" || !ref.connectionId) return false;
+    return exact.has(
+      [
+        integration.serverId,
+        ref.connectionId,
+        ref.providerDomain.toLowerCase(),
+        ref.kind ?? "",
+      ].join("\u0000"),
+    );
+  });
+}
+
+async function listInstalledApiIntegrationsForDelegations(
+  db: Database,
+  workspaceId: string,
+  delegations: readonly McpPersonalConnectionDelegation[],
+): Promise<ApiIntegrationRuntime[]> {
+  const workspace = await listInstalledApiIntegrations(db, workspaceId);
+  if (delegations.length === 0) return workspace;
+  const owners = [...new Set(delegations.map((delegation) => delegation.ownerSubjectId))];
+  const delegatedByOwner = await Promise.all(
+    owners.map(async (subjectId) =>
+      apiIntegrationsMatchingDelegations(
+        await listInstalledApiIntegrations(db, workspaceId, subjectId),
+        delegations.filter((delegation) => delegation.ownerSubjectId === subjectId),
+      ),
+    ),
+  );
+  const byServerId = new Map(workspace.map((integration) => [integration.serverId, integration]));
+  for (const integration of delegatedByOwner.flat())
+    byServerId.set(integration.serverId, integration);
+  return [...byServerId.values()];
+}
+
+export function settingsWithApiIntegrationServers(
+  settings: Settings,
+  integrations: readonly ApiIntegrationRuntime[],
+): Settings {
+  if (integrations.length === 0) return settings;
+  const existingIds = new Set(settings.mcpServers.map((server) => server.id));
+  const dynamicServers = integrations
+    .filter((integration) => !existingIds.has(integration.serverId))
+    .map((integration) => ({
+      id: integration.serverId,
+      name: integration.name,
+      // Local adapters never send MCP traffic to this URL. Keeping the exact
+      // provider base URL in Settings preserves destination identity for policy,
+      // diagnostics, and the stable session-MCP approval fallback.
+      url: integration.baseUrl,
+      allowedTools: [...integration.allowedTools],
+      cacheToolsList: true,
+      requireApproval: integration.requireApproval,
+      ...(integration.connectionRef ? { connectionRef: integration.connectionRef } : {}),
+    }));
+  return dynamicServers.length
+    ? { ...settings, mcpServers: [...settings.mcpServers, ...dynamicServers] }
+    : settings;
 }
 
 /**
@@ -848,6 +902,9 @@ export function settingsWithMcpCapabilityServers(
           ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
           ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
           cacheToolsList: server.cacheToolsList ?? false,
+          ...(server.requireApproval !== undefined
+            ? { requireApproval: server.requireApproval }
+            : {}),
           ...(headers && headers !== "unavailable" ? { headers } : {}),
           ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
         },
@@ -933,7 +990,9 @@ async function fetchMcpRegistryPage(
   try {
     const response = await fetchImpl(url, { signal: controller.signal });
     if (!response.ok) {
-      throw new HTTPException(502, { message: `MCP registry returned ${response.status}` });
+      throw new HTTPException(502, {
+        message: `MCP registry returned ${response.status}`,
+      });
     }
     return (await response.json()) as McpRegistryPage;
   } catch (error) {
@@ -941,7 +1000,9 @@ async function fetchMcpRegistryPage(
       throw error;
     }
     if (error instanceof Error && error.name === "AbortError") {
-      throw new HTTPException(504, { message: "MCP registry request timed out" });
+      throw new HTTPException(504, {
+        message: "MCP registry request timed out",
+      });
     }
     throw new HTTPException(502, {
       message: `MCP registry request failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -1014,34 +1075,40 @@ function packCatalogItem(
 }
 
 function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] {
-  return settings.mcpServers
-    .filter((server) => server.id !== CODEX_APPS_MCP_SERVER_ID)
-    .map((server) =>
-      CapabilityCatalogItem.parse({
-        id: `mcp:${server.id}`,
-        kind: "mcp",
-        source: firstPartyMcpServerIds.has(server.id) ? "built_in" : "configured",
-        name: server.name ?? server.id,
-        description: firstPartyMcpDescription(server.id),
-        category: firstPartyMcpServerIds.has(server.id) ? "platform" : "configured",
-        tags: ["mcp", ...(server.allowedTools?.length ? ["limited-tools"] : [])],
-        endpointUrl: server.url,
-        tools: [{ kind: "mcp", id: server.id }],
-        runtime: {
-          available: true,
-          mcpServerId: server.id,
-          transport: "streamable-http",
-          notes: firstPartyMcpServerIds.has(server.id)
-            ? "Available from OpenGeni runtime configuration."
-            : "Configured through OPENGENI_MCP_SERVERS.",
-        },
-        metadata: {
-          mcpServerId: server.id,
-          allowedTools: server.allowedTools ?? [],
-          cacheToolsList: server.cacheToolsList,
-        },
-      }),
-    );
+  return (
+    settings.mcpServers
+      // OpenGeni, Files, and Document Search are native runtime surfaces. They
+      // remain available to sessions through configuration, but are not things a
+      // user installs, connects, or enables in the Capabilities control center.
+      .filter(
+        (server) =>
+          server.id !== CODEX_APPS_MCP_SERVER_ID && !firstPartyMcpServerIds.has(server.id),
+      )
+      .map((server) =>
+        CapabilityCatalogItem.parse({
+          id: `mcp:${server.id}`,
+          kind: "mcp",
+          source: "configured",
+          name: server.name ?? server.id,
+          description: null,
+          category: "configured",
+          tags: ["mcp", ...(server.allowedTools?.length ? ["limited-tools"] : [])],
+          endpointUrl: server.url,
+          tools: [{ kind: "mcp", id: server.id }],
+          runtime: {
+            available: true,
+            mcpServerId: server.id,
+            transport: "streamable-http",
+            notes: "Managed by this OpenGeni deployment through OPENGENI_MCP_SERVERS.",
+          },
+          metadata: {
+            mcpServerId: server.id,
+            allowedTools: server.allowedTools ?? [],
+            cacheToolsList: server.cacheToolsList,
+          },
+        }),
+      )
+  );
 }
 
 function isReservedCodexAppsCatalogItem(item: CapabilityCatalogItem): boolean {
@@ -1092,194 +1159,212 @@ export function codexAppsCatalogItem(available: boolean): CapabilityCatalogItem 
   });
 }
 
-function platformApiCatalogItems(socialConnections: SocialConnection[]): CapabilityCatalogItem[] {
-  const xConnection = preferredSocialConnection(socialConnections, "x");
-  const xEnabled = xConnection?.status === "connected" || xConnection?.status === "needs_reauth";
-  const x = CapabilityCatalogItem.parse({
-    id: "api:x",
-    kind: "api",
-    source: "built_in",
+type SocialProviderIntegrationDefinition = {
+  provider: "x" | "reddit";
+  name: string;
+  description: string;
+  providerDomain: string;
+  homepageUrl: string;
+  tags: string[];
+};
+
+const SOCIAL_PROVIDER_INTEGRATIONS: readonly SocialProviderIntegrationDefinition[] = [
+  {
+    provider: "x",
     name: "X",
     description:
-      "Connect an X account for live search, mentions, thread context, post sync, and permission-controlled replies.",
-    category: "social-media",
-    tags: ["api", "x", "twitter", "social", "marketing"],
-    homepageUrl: "https://x.com",
-    authModel: "oauth2_authorization_code_pkce",
+      "Connect one or more X accounts for live search, mentions, thread context, post sync, and permission-controlled replies.",
     providerDomain: "x.com",
-    surfaceType: "first_party_social",
-    authKind: "oauth2",
+    homepageUrl: "https://x.com",
+    tags: ["api", "x", "twitter", "social", "marketing"],
+  },
+  {
+    provider: "reddit",
+    name: "Reddit",
+    description:
+      "Connect one or more Reddit accounts for search, mentions, thread context, account sync, and permission-controlled replies.",
+    providerDomain: "reddit.com",
+    homepageUrl: "https://www.reddit.com",
+    tags: ["api", "reddit", "social", "community", "marketing"],
+  },
+];
+
+const SOCIAL_PROVIDER_TOOL_NAMES = {
+  x: [
+    "x_accounts_list",
+    "x_search_live",
+    "x_mentions_live",
+    "x_thread_fetch",
+    "x_posts_sync",
+    "x_post_reply",
+  ],
+  reddit: [
+    "reddit_accounts_list",
+    "reddit_search_live",
+    "reddit_mentions_live",
+    "reddit_thread_fetch",
+    "reddit_posts_sync",
+    "reddit_post_reply",
+  ],
+} as const;
+
+/**
+ * The first-party Fiken accounting connector tile. Enablement is derived from
+ * the workspace-shared verified Fiken connection (either lane), mirroring how
+ * the social provider tiles derive theirs from social connections.
+ */
+function fikenCatalogItem(fikenConnections: ConnectionMetadata[]): CapabilityCatalogItem {
+  const fikenConnection = preferredFikenConnection(fikenConnections);
+  const fikenEnabled =
+    fikenConnection?.status === "active" || fikenConnection?.status === "needs_reauth";
+  return CapabilityCatalogItem.parse({
+    id: "api:fiken",
+    kind: "api",
+    source: "built_in",
+    name: "Fiken",
+    description:
+      "Connect Fiken accounting for contacts, products, invoices, invoice drafts, purchases, sales, and bank accounts.",
+    category: "finance",
+    tags: ["api", "fiken", "accounting", "invoicing", "norway"],
+    homepageUrl: "https://fiken.no",
+    authModel: "personal_api_token",
+    providerDomain: FIKEN_PROVIDER_DOMAIN,
+    surfaceType: "first_party_fiken",
+    authKind: "api_key",
     tools: [{ kind: "mcp", id: "opengeni" }],
     runtime: {
       available: true,
       mcpServerId: "opengeni",
-      notes: "Account access is provided through OpenGeni's first-party social tools.",
+      notes: "Fiken access is provided through OpenGeni's first-party fiken tools.",
     },
-    enabled: xEnabled,
-    enabledReason: xEnabled
-      ? xConnection.status === "connected"
-        ? `${xConnection.ownership} social account connected`
-        : `${xConnection.ownership} social account needs reconnection`
+    enabled: fikenEnabled,
+    enabledReason: fikenEnabled
+      ? fikenConnection.status === "active"
+        ? "workspace Fiken connection active"
+        : "workspace Fiken connection needs reconnection"
       : null,
     metadata: {
-      connectorMode: "first_party_social",
-      provider: "x",
-      ownership: xConnection?.ownership ?? "workspace",
-      firstPartyMcpTools: [
-        "social_connections_list",
-        "social_posts_recent",
-        "social_daily_analysis_context",
-        "social_search_live",
-        "social_mentions_live",
-        "social_thread_fetch",
-        "social_posts_sync",
-        "social_post_reply",
-      ],
+      connectorMode: "first_party_fiken",
+      ownership: "workspace",
+      // Derived from the contracts catalog so a new fiken_* tool cannot be
+      // registered without also appearing on the capability tile.
+      firstPartyMcpTools: FIRST_PARTY_MCP_TOOL_NAMES.filter((name) => name.startsWith("fiken_")),
     },
   });
-  const platformApiDefinitions: Array<{
-    id: string;
-    name: string;
-    description: string;
-    category: string;
-    tags: string[];
-    endpointPath: string;
-    homepageUrl?: string;
-    providerDomain?: string;
-    authModel?: string;
-    authKind?: "oauth2" | "api_key" | "none" | "unknown";
-    surfaceType?: string;
-    firstPartyMcpTools?: string[];
-  }> = [
-    {
+}
+
+function providerIntegrationCatalogItems(
+  socialConnections: SocialConnection[],
+): CapabilityCatalogItem[] {
+  return SOCIAL_PROVIDER_INTEGRATIONS.map((definition) => {
+    const counts = socialConnectionCounts(socialConnections, definition.provider);
+    const enabled = counts.connected + counts.needsReauth > 0;
+    return CapabilityCatalogItem.parse({
+      id: `api:${definition.provider}`,
+      kind: "api",
+      source: "built_in",
+      name: definition.name,
+      description: definition.description,
+      category: "social-media",
+      tags: definition.tags,
+      homepageUrl: definition.homepageUrl,
+      authModel: "oauth2_authorization_code_pkce",
+      providerDomain: definition.providerDomain,
+      surfaceType: "provider_integration",
+      authKind: "oauth2",
+      tools: [{ kind: "mcp", id: "opengeni" }],
+      runtime: {
+        available: true,
+        mcpServerId: "opengeni",
+        notes:
+          "OpenGeni's social provider adapter routes every call through an exact visible account Connection.",
+      },
+      enabled,
+      enabledReason: socialConnectionSummary(counts),
+      provenance: "OpenGeni provider adapter",
+      metadata: {
+        providerAdapter: "social",
+        provider: definition.provider,
+        connectionCounts: counts,
+        runtimeNamespace: "social",
+        firstPartyMcpTools: SOCIAL_PROVIDER_TOOL_NAMES[definition.provider],
+      },
+    });
+  });
+}
+
+/**
+ * Native product connection recommendations are intentionally separate from
+ * the installable catalog returned to the Capabilities UI. Agents may still
+ * recommend the owning product flow without manufacturing an enabled catalog
+ * row for GitHub resources, Documents, schedules, or other platform features.
+ */
+export function nativeConnectionCapabilityRecommendations(): CapabilityCatalogItem[] {
+  return [
+    CapabilityCatalogItem.parse({
       id: "api:github-app",
+      kind: "api",
+      source: "built_in",
       name: "GitHub App",
-      description: "Repository discovery, scoped clone tokens, pushes, and pull requests.",
+      description: "Connect repositories through OpenGeni's GitHub resource picker.",
       category: "source-control",
-      tags: ["api", "github", "repositories"],
-      endpointPath: "/v1/workspaces/{workspaceId}/github/app",
+      tags: ["github", "repositories", "source-control"],
       homepageUrl: "https://github.com",
       providerDomain: "github.com",
       authModel: "github_app_owner_consent",
-      authKind: "oauth2" as const,
+      authKind: "oauth2",
       surfaceType: "first_party_github",
-      firstPartyMcpTools: ["github_connect_link", "github_repositories_list"],
-    },
-    {
-      id: "api:documents",
-      name: "Document Knowledge Base",
-      description: "Upload, index, search, and attach knowledge bases to agents.",
-      category: "knowledge",
-      tags: ["api", "documents", "knowledge"],
-      endpointPath: "/v1/workspaces/{workspaceId}/document-bases",
-    },
-    {
-      id: "api:social",
-      name: "Social Accounts",
-      description: "Connect social accounts and ingest posts for marketing agents.",
-      category: "marketing",
-      tags: ["api", "social", "marketing"],
-      endpointPath: "/v1/workspaces/{workspaceId}/social/connections",
-    },
-    {
-      id: "api:scheduled-tasks",
-      name: "Scheduled Tasks",
-      description: "Run agents once, on intervals, or on calendar schedules.",
-      category: "automation",
-      tags: ["api", "schedules", "agents"],
-      endpointPath: "/v1/workspaces/{workspaceId}/scheduled-tasks",
-    },
-  ];
-  const platformApis = platformApiDefinitions.map((item) =>
-    CapabilityCatalogItem.parse({
-      id: item.id,
-      name: item.name,
-      description: item.description,
-      category: item.category,
-      tags: item.tags,
-      kind: "api",
-      source: "built_in",
-      ...(item.homepageUrl ? { homepageUrl: item.homepageUrl } : {}),
-      ...(item.providerDomain ? { providerDomain: item.providerDomain } : {}),
-      ...(item.authModel ? { authModel: item.authModel } : {}),
-      ...(item.authKind ? { authKind: item.authKind } : {}),
-      ...(item.surfaceType ? { surfaceType: item.surfaceType } : {}),
-      ...(item.firstPartyMcpTools ? { tools: [{ kind: "mcp", id: "opengeni" }] } : {}),
+      tools: [{ kind: "mcp", id: "opengeni" }],
       runtime: {
         available: true,
         notes:
-          item.surfaceType === "first_party_github"
-            ? "GitHub credentials stay host-owned; a workspace owner must approve repository access."
-            : "Available through the OpenGeni API.",
+          "GitHub credentials stay host-owned; a workspace owner must approve repository access.",
       },
+      lifecycle: {
+        status: "available",
+        readiness: "setup_required",
+        detail: "Connect GitHub from the repository resource flow.",
+        managedBy: "platform",
+      },
+      actions: ["connect", "inspect"],
       metadata: {
-        endpointPath: item.endpointPath,
-        ...(item.firstPartyMcpTools ? { firstPartyMcpTools: item.firstPartyMcpTools } : {}),
+        endpointPath: "/v1/workspaces/{workspaceId}/github/app",
+        firstPartyMcpTools: ["github_connect_link", "github_repositories_list"],
+        recommendationOnly: true,
       },
     }),
-  );
-  return [x, ...platformApis];
+  ];
 }
 
-function preferredSocialConnection(
+function socialConnectionCounts(
   connections: SocialConnection[],
   provider: "x" | "reddit",
-): SocialConnection | null {
-  const statusRank = (status: SocialConnection["status"]): number =>
-    status === "connected" ? 0 : status === "needs_reauth" ? 1 : 2;
-  return (
-    connections
-      .filter((connection) => connection.provider === provider)
-      .sort(
-        (left, right) =>
-          statusRank(left.status) - statusRank(right.status) ||
-          right.updatedAt.localeCompare(left.updatedAt) ||
-          left.id.localeCompare(right.id),
-      )[0] ?? null
-  );
+): { connected: number; needsReauth: number; disabled: number; total: number } {
+  const matching = connections.filter((connection) => connection.provider === provider);
+  return {
+    connected: matching.filter((connection) => connection.status === "connected").length,
+    needsReauth: matching.filter((connection) => connection.status === "needs_reauth").length,
+    disabled: matching.filter((connection) => connection.status === "disabled").length,
+    total: matching.length,
+  };
 }
 
-async function discoverBundledSkills(): Promise<CapabilityCatalogItem[]> {
-  const skillsDir = [
-    new URL("./assets/runtime/bundled_hashicorp_terraform_skills/", import.meta.url),
-    new URL(
-      "../../../../packages/runtime/src/bundled_hashicorp_terraform_skills/",
-      import.meta.url,
-    ),
-  ].find((candidate) => existsSync(candidate));
-  if (!skillsDir) return [];
-  try {
-    const entries = await readdir(skillsDir, { withFileTypes: true });
-    const skills = await Promise.all(
-      entries
-        .filter((entry) => entry.isDirectory())
-        .map(async (entry) => {
-          const skill = await readSkillMetadata(
-            new URL(`${entry.name}/SKILL.md`, skillsDir),
-            entry.name,
-          );
-          return CapabilityCatalogItem.parse({
-            id: `skill:${entry.name}`,
-            kind: "skill",
-            source: "built_in",
-            name: skill.name,
-            description: skill.description,
-            category: skill.category,
-            tags: ["skill", skill.category],
-            runtime: {
-              available: true,
-              notes: "Bundled into the sandbox skill library.",
-            },
-            metadata: {
-              path: `packages/runtime/src/bundled_hashicorp_terraform_skills/${entry.name}/SKILL.md`,
-            },
-          });
-        }),
-    );
-    return skills;
-  } catch {
-    return [];
+function socialConnectionSummary(counts: ReturnType<typeof socialConnectionCounts>): string | null {
+  const parts: string[] = [];
+  if (counts.connected > 0) {
+    parts.push(`${counts.connected} connected account${counts.connected === 1 ? "" : "s"}`);
   }
+  if (counts.needsReauth > 0) {
+    parts.push(
+      `${counts.needsReauth} account${counts.needsReauth === 1 ? "" : "s"} need${
+        counts.needsReauth === 1 ? "s" : ""
+      } reconnection`,
+    );
+  }
+  if (counts.disabled > 0) {
+    parts.push(`${counts.disabled} disconnected account${counts.disabled === 1 ? "" : "s"}`);
+  }
+  return parts.length > 0 ? parts.join("; ") : null;
 }
 
 /**
@@ -1324,35 +1409,86 @@ function curatedSkillCatalogItem(entry: SkillLibraryEntry): CapabilityCatalogIte
   });
 }
 
+function installedSkillCatalogItem(skill: InstalledSkillSummary): CapabilityCatalogItem {
+  return CapabilityCatalogItem.parse({
+    id: skill.capabilityId,
+    kind: "skill",
+    source: skill.source === "library" ? "library" : "manual",
+    name: skill.name,
+    description: skill.description,
+    category: skill.category,
+    tags: skill.tags,
+    homepageUrl: skill.repositoryUrl,
+    installUrl: skill.sourceUrl,
+    provenance: skill.provenance,
+    tier: skill.source === "library" ? "verified" : "community",
+    runtime: {
+      available: true,
+      notes: "Available from an immutable Skill installation.",
+    },
+    metadata: {
+      version: skill.version,
+      contentSha256: skill.contentSha256,
+      sourceCommit: skill.sourceCommit,
+      sourcePath: skill.sourcePath,
+      sourceUrl: skill.sourceUrl,
+      repositoryUrl: skill.repositoryUrl,
+      provenance: skill.provenance,
+      license: skill.license,
+      installedSkill: installedSkillMetadata(skill),
+    },
+  });
+}
+
+function installedSkillMetadata(skill: InstalledSkillSummary): Record<string, unknown> {
+  return {
+    pluginKey: skill.pluginKey,
+    installationVersion: skill.installationVersion,
+    source: skill.source,
+    version: skill.version,
+    sourceCommit: skill.sourceCommit,
+    contentSha256: skill.contentSha256,
+    fileCount: skill.fileCount,
+    totalBytes: skill.totalBytes,
+    installedAt: skill.installedAt,
+    updatedAt: skill.updatedAt,
+    owners: skill.owners.map((owner) => ({ ...owner })),
+  };
+}
+
 function stringMetadata(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
-async function readSkillMetadata(
-  url: URL,
-  fallbackName: string,
-): Promise<{ name: string; description: string | null; category: string }> {
-  const content = await readFile(url, "utf8");
-  const frontMatter = content.match(/^---\n([\s\S]*?)\n---/);
-  const frontMatterBody = frontMatter?.[1] ?? "";
-  const name = frontMatterBody.match(/^name:\s*(.+)$/m)?.[1]?.trim() || fallbackName;
-  const blockDescription = frontMatterBody
-    .match(/^description:\s*>-\s*\n([\s\S]*?)(?:\n[a-zA-Z_-]+:|\n?$)/m)?.[1]
-    ?.split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .join(" ");
-  const inlineDescription = frontMatterBody.match(/^description:\s*(?!>-\s*$)(.+)$/m)?.[1]?.trim();
-  const description =
-    blockDescription || inlineDescription || content.match(/^#\s+(.+)$/m)?.[1]?.trim() || null;
-  const lower = `${fallbackName} ${name} ${description ?? ""}`.toLowerCase();
-  const category =
-    lower.includes("social") || lower.includes("marketing")
-      ? "marketing"
-      : lower.includes("checkov") || lower.includes("terraform") || lower.includes("azure")
-        ? "infrastructure"
-        : "general";
-  return { name, description, category };
+function isSocialProviderIntegration(item: CapabilityCatalogItem): boolean {
+  return (
+    item.surfaceType === "first_party_social" ||
+    (item.surfaceType === "provider_integration" && item.metadata.providerAdapter === "social")
+  );
+}
+
+function socialProviderConnectionCounts(item: CapabilityCatalogItem): {
+  connected: number;
+  needsReauth: number;
+} {
+  const value = item.metadata.connectionCounts;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {
+      connected: item.enabled && !item.enabledReason?.includes("reconnection") ? 1 : 0,
+      needsReauth: item.enabledReason?.includes("reconnection") ? 1 : 0,
+    };
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    connected:
+      typeof record.connected === "number" && Number.isInteger(record.connected)
+        ? Math.max(0, record.connected)
+        : 0,
+    needsReauth:
+      typeof record.needsReauth === "number" && Number.isInteger(record.needsReauth)
+        ? Math.max(0, record.needsReauth)
+        : 0,
+  };
 }
 
 export function applyCapabilityEnablement(
@@ -1360,21 +1496,27 @@ export function applyCapabilityEnablement(
   installation: CapabilityInstallation | undefined,
   activePackIds: Set<string>,
 ): CapabilityCatalogItem {
+  if (item.kind === "skill" || item.kind === "api" || item.kind === "plugin") {
+    return { ...item, enabled: false, enabledReason: null, connectionRef: null };
+  }
   if (item.kind === "pack") {
-    // Pack enablement lives in pack_installations regardless of whether the
-    // pack is built in or registered from a workspace manifest.
-    const enabled =
-      activePackIds.has(packIdFromCapabilityId(item.id)) || installation?.status === "active";
+    const enabled = activePackIds.has(packIdFromCapabilityId(item.id));
     return {
       ...item,
       enabled,
       enabledReason: enabled ? "enabled" : null,
     };
   }
-  if (item.surfaceType === "first_party_social") {
-    // Social connector state is derived from the authoritative workspace
-    // connection row while the catalog is built. Being built in means the
-    // connector is browseable, not that an account is already connected.
+  if (isSocialProviderIntegration(item)) {
+    // Provider-integration state is derived from every authoritative visible
+    // social Connection while the catalog is built. The catalog summary never
+    // publishes a personal connection UUID or collapses many accounts to one.
+    return { ...item, connectionRef: null };
+  }
+  if (item.surfaceType === "first_party_fiken") {
+    // Fiken connector state is derived from the authoritative workspace
+    // connection row while the catalog is built; browseable never means an
+    // account is already connected.
     return { ...item, connectionRef: null };
   }
   if (item.surfaceType === "codex_apps") {
@@ -1383,22 +1525,19 @@ export function applyCapabilityEnablement(
     // generic source-based "built in" enablement rule.
     return { ...item, connectionRef: null };
   }
-  if (item.source === "built_in" || item.source === "configured") {
+  if (item.source === "configured") {
     return {
       ...item,
       enabled: true,
-      enabledReason: item.source === "configured" ? "configured" : "built in",
-    };
-  }
-  if (item.source === "library") {
-    const enabled =
-      installation?.status === "active" && skillLibraryInstallationRuntimeReady(item, installation);
-    return {
-      ...item,
-      enabled,
-      enabledReason: enabled ? "explicitly selected" : null,
+      enabledReason: "managed by deployment",
       connectionRef: null,
     };
+  }
+  if (item.source === "built_in") {
+    // "Built in" describes provenance, not lifecycle. Native product
+    // surfaces and first-party connectors must project their authoritative
+    // state explicitly above rather than becoming enabled by taxonomy.
+    return { ...item, connectionRef: null };
   }
   const activeInstallation = installation?.status === "active";
   const enabled = !!activeInstallation && capabilityInstallationRuntimeReady(item, installation);
@@ -1410,40 +1549,116 @@ export function applyCapabilityEnablement(
   };
 }
 
-function skillLibraryInstallationRuntimeReady(
+function applyCapabilityLifecycle(item: CapabilityCatalogItem): CapabilityCatalogItem {
+  if (item.source === "configured") {
+    return {
+      ...item,
+      lifecycle: {
+        status: "managed",
+        readiness: item.runtime.available ? "ready" : "unavailable",
+        detail: item.runtime.notes,
+        managedBy: "deployment",
+      },
+      actions: ["inspect"],
+    };
+  }
+
+  if (!item.runtime.available) {
+    return {
+      ...item,
+      lifecycle: {
+        status: "unavailable",
+        readiness: "unavailable",
+        detail: item.runtime.notes,
+        managedBy: item.source === "built_in" ? "platform" : null,
+      },
+      actions: ["inspect"],
+    };
+  }
+
+  if (isSocialProviderIntegration(item)) {
+    const counts = socialProviderConnectionCounts(item);
+    const needsAttention = counts.needsReauth > 0;
+    const connected = counts.connected > 0;
+    return {
+      ...item,
+      lifecycle: {
+        status: needsAttention ? "needs_attention" : connected ? "connected" : "available",
+        readiness: needsAttention ? "attention" : connected ? "ready" : "setup_required",
+        detail: item.enabledReason,
+        managedBy: null,
+      },
+      actions: needsAttention
+        ? ["repair", "connect", "disconnect", "inspect"]
+        : connected
+          ? ["connect", "configure", "disconnect", "inspect"]
+          : ["connect", "inspect"],
+    };
+  }
+
+  if (item.surfaceType === "codex_apps") {
+    return {
+      ...item,
+      lifecycle: {
+        status: item.enabled ? "connected" : "available",
+        readiness: item.enabled ? "ready" : "setup_required",
+        detail: item.enabledReason,
+        managedBy: "platform",
+      },
+      actions: item.enabled ? ["configure", "disconnect", "inspect"] : ["connect", "inspect"],
+    };
+  }
+
+  const installed = item.enabled;
+  const actions: CapabilityAction[] = installed
+    ? item.kind === "pack" || item.kind === "skill" || item.kind === "plugin"
+      ? ["configure", "update", "uninstall", "inspect"]
+      : ["configure", "disconnect", "inspect"]
+    : item.kind === "mcp" || item.kind === "api"
+      ? ["connect", "inspect"]
+      : ["install", "inspect"];
+  return {
+    ...item,
+    lifecycle: {
+      status: installed
+        ? item.kind === "mcp" || item.kind === "api"
+          ? "ready"
+          : "installed"
+        : "available",
+      readiness: installed ? "ready" : "setup_required",
+      detail: item.enabledReason,
+      managedBy: item.source === "built_in" ? "platform" : "workspace",
+    },
+    actions,
+  };
+}
+
+function applyInstalledSkillEnablement(
   item: CapabilityCatalogItem,
-  installation: CapabilityInstallation,
-): boolean {
-  if (item.kind !== "skill" || item.source !== "library" || installation.kind !== "skill") {
-    return false;
+  installation: InstalledSkillSummary | undefined,
+): CapabilityCatalogItem {
+  if (!installation) {
+    return { ...item, enabled: false, enabledReason: null, connectionRef: null };
   }
-  const libraryId = stringMetadata(item.metadata.libraryId);
-  const version = stringMetadata(item.metadata.version);
-  const contentSha256 = stringMetadata(item.metadata.contentSha256);
-  const sourceCommit = stringMetadata(item.metadata.sourceCommit);
-  const provenance = stringMetadata(item.metadata.provenance);
-  if (!libraryId || !version || !contentSha256 || !sourceCommit || !provenance) {
-    return false;
-  }
-  const entry = getSkillLibraryEntry(libraryId, version);
-  if (
-    !entry ||
-    item.id !== `skill:${entry.id}` ||
-    installation.capabilityId !== `skill:${entry.id}` ||
-    contentSha256 !== entry.contentSha256 ||
-    sourceCommit !== entry.sourceCommit ||
-    provenance !== entry.provenance
-  ) {
-    return false;
-  }
-  return (
-    installation.config.version === entry.version &&
-    stringMetadata(installation.metadata.libraryId) === entry.id &&
-    stringMetadata(installation.metadata.libraryVersion) === entry.version &&
-    stringMetadata(installation.metadata.contentSha256) === entry.contentSha256 &&
-    stringMetadata(installation.metadata.sourceCommit) === entry.sourceCommit &&
-    stringMetadata(installation.metadata.provenance) === entry.provenance
-  );
+  const catalogVersion = stringMetadata(item.metadata.version);
+  const current =
+    catalogVersion === null ||
+    (catalogVersion === installation.version &&
+      stringMetadata(item.metadata.contentSha256) === installation.contentSha256 &&
+      stringMetadata(item.metadata.sourceCommit) === installation.sourceCommit);
+  return {
+    ...item,
+    enabled: true,
+    enabledReason: current
+      ? "explicitly installed"
+      : `version ${installation.version} installed; update available`,
+    connectionRef: null,
+    metadata: {
+      ...item.metadata,
+      installedSkill: installedSkillMetadata(installation),
+      updateAvailable: !current,
+    },
+  };
 }
 
 /**
@@ -1577,19 +1792,6 @@ function normalizeCapabilitySearchText(value: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
-}
-
-function firstPartyMcpDescription(id: string): string | null {
-  if (id === "opengeni") {
-    return "First-party OpenGeni MCP tools for files, documents, schedules, and social analysis.";
-  }
-  if (id === "docs") {
-    return "Document-base search tools for indexed knowledge.";
-  }
-  if (id === "files") {
-    return "File download URL tools for sandbox-mounted file resources.";
-  }
-  return null;
 }
 
 function generatedCapabilityId(payload: CreateCapabilityCatalogItemRequest): string {
