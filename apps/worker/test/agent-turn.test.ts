@@ -2608,7 +2608,7 @@ describe("lazy sandbox provisioner single-flight", () => {
       lazyEnabled: true,
       machinePrimary: false,
       sandboxBackend: "docker" as const,
-      hasInitialRunCredentialMaterial: false,
+      hasRunCredentialResolver: false,
       generatedVideoFileCount: 0,
       hasSignedFileResources: false,
     };
@@ -2629,9 +2629,10 @@ describe("lazy sandbox provisioner single-flight", () => {
       policy: "eager",
       reason: "backend_none",
     });
-    expect(
-      sandboxEstablishPolicyDecision({ ...base, hasInitialRunCredentialMaterial: true }),
-    ).toEqual({ policy: "eager", reason: "initial_run_credentials" });
+    expect(sandboxEstablishPolicyDecision({ ...base, hasRunCredentialResolver: true })).toEqual({
+      policy: "on-demand",
+      reason: "initial_run_credentials_deferred",
+    });
     expect(sandboxEstablishPolicyDecision({ ...base, generatedVideoFileCount: 1 })).toEqual({
       policy: "eager",
       reason: "generated_video_files",
@@ -2640,6 +2641,88 @@ describe("lazy sandbox provisioner single-flight", () => {
       policy: "eager",
       reason: "signed_file_resources",
     });
+    expect(
+      sandboxEstablishPolicyDecision({
+        ...base,
+        hasRunCredentialResolver: true,
+        generatedVideoFileCount: 1,
+      }),
+    ).toEqual({ policy: "eager", reason: "generated_video_files" });
+    expect(
+      sandboxEstablishPolicyDecision({
+        ...base,
+        hasRunCredentialResolver: true,
+        hasSignedFileResources: true,
+      }),
+    ).toEqual({ policy: "eager", reason: "signed_file_resources" });
+  });
+
+  test("credential-bearing lazy turns resolve context once and materialize at the first shared operation", async () => {
+    const steps: string[] = [];
+    let resolves = 0;
+    let materializations = 0;
+    const initialMaterial = await (async () => {
+      resolves += 1;
+      steps.push("credential-resolved");
+      return { available: true };
+    })();
+    const provisioner = createTurnSandboxProvisioner(async () => {
+      await Bun.sleep(5);
+      if (initialMaterial.available) {
+        materializations += 1;
+        steps.push("credential-materialized");
+      }
+      return {
+        exec: async () => {
+          steps.push("provider-operation");
+        },
+      };
+    });
+
+    // Model preparation resolves the exact attempt once so auth-needed state
+    // can be model-visible, but a model-only turn still owns no sandbox write,
+    // renewal loop, lease, box, or exact-generation cleanup.
+    expect(resolves).toBe(1);
+    expect(materializations).toBe(0);
+    expect(steps).toEqual(["credential-resolved"]);
+
+    const boxes = await Promise.all(Array.from({ length: 8 }, () => provisioner.get()));
+    await boxes[0]!.exec();
+
+    expect(resolves).toBe(1);
+    expect(materializations).toBe(1);
+    expect(steps).toEqual(["credential-resolved", "credential-materialized", "provider-operation"]);
+  });
+
+  test("activity prepares credential model context before turn input and reuses it lazily", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    const resolutionAt = source.indexOf(
+      "const initialRunCredentialMaterial = runCredentialResolver",
+    );
+    const modelNoteAt = source.indexOf(
+      "const runCredentialsNote = initialRunCredentialMaterial",
+      resolutionAt,
+    );
+    const turnInputAt = source.indexOf("const prepared = await turnInput(", modelNoteAt);
+    const provisionerAt = source.indexOf(
+      "turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
+      modelNoteAt,
+    );
+    const lazyCredentialAttachAt = source.indexOf(
+      "await attachRunCredentialRenewal(",
+      provisionerAt,
+    );
+    const lazyProvisionerPrefix = source.slice(provisionerAt, lazyCredentialAttachAt + 500);
+
+    expect(resolutionAt).toBeGreaterThan(-1);
+    expect(modelNoteAt).toBeGreaterThan(resolutionAt);
+    expect(turnInputAt).toBeGreaterThan(modelNoteAt);
+    expect(provisionerAt).toBeGreaterThan(modelNoteAt);
+    expect(lazyCredentialAttachAt).toBeGreaterThan(provisionerAt);
+    expect(lazyProvisionerPrefix).not.toContain("runCredentialResolver.resolve(");
+    expect(lazyProvisionerPrefix).toContain("initialRunCredentialMaterial");
   });
 
   test("deadline rotation uses only short anti-churn pacing", () => {

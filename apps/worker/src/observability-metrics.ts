@@ -1053,6 +1053,7 @@ export type TurnSandboxEstablishReason =
   | "machine_primary"
   | "backend_none"
   | "initial_run_credentials"
+  | "initial_run_credentials_deferred"
   | "generated_video_files"
   | "signed_file_resources";
 export type SandboxLogicalProvisionCategory =

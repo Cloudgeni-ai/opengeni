@@ -2104,16 +2104,13 @@ export function sandboxEstablishPolicyDecision(input: {
   lazyEnabled: boolean;
   machinePrimary: boolean;
   sandboxBackend: Settings["sandboxBackend"];
-  hasInitialRunCredentialMaterial: boolean;
+  hasRunCredentialResolver: boolean;
   generatedVideoFileCount: number;
   hasSignedFileResources: boolean;
 }): { policy: "eager" | "on-demand"; reason: TurnSandboxEstablishReason } {
   if (!input.lazyEnabled) return { policy: "eager", reason: "lazy_disabled" };
   if (input.machinePrimary) return { policy: "eager", reason: "machine_primary" };
   if (input.sandboxBackend === "none") return { policy: "eager", reason: "backend_none" };
-  if (input.hasInitialRunCredentialMaterial) {
-    return { policy: "eager", reason: "initial_run_credentials" };
-  }
   if (input.generatedVideoFileCount > 0) {
     return { policy: "eager", reason: "generated_video_files" };
   }
@@ -2123,6 +2120,14 @@ export function sandboxEstablishPolicyDecision(input: {
   // path whose materialization outcome is not known yet.
   if (input.hasSignedFileResources) {
     return { policy: "eager", reason: "signed_file_resources" };
+  }
+  // Merely having a host run-credential resolver is not proof that this turn
+  // will use the sandbox. Resolve its attempt-bound material before model input
+  // so auth-needed context remains deterministic, but defer every sandbox
+  // write, lease, renewal, and cleanup action to the first-operation
+  // provisioner. The eager file paths above remain unchanged.
+  if (input.hasRunCredentialResolver) {
+    return { policy: "on-demand", reason: "initial_run_credentials_deferred" };
   }
   return { policy: "on-demand", reason: "eligible" };
 }
@@ -6733,6 +6738,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               cancellationSignal,
               undefined,
             );
+      const establishDecision = sandboxEstablishPolicyDecision({
+        lazyEnabled: lazyProvisionEnabled(settings),
+        machinePrimary,
+        sandboxBackend: runSettings.sandboxBackend,
+        hasRunCredentialResolver: runCredentialResolver !== null,
+        generatedVideoFileCount: requiredGeneratedVideoFiles.length,
+        hasSignedFileResources:
+          requiresSignedFileResourceDownloads(
+            runSettings,
+            activeSandboxBackend ?? groupBoxBackend,
+          ) && turnResources.some((resource) => resource.kind === "file"),
+      });
+      const establishPolicy = establishDecision.policy;
+      recordTurnSandboxEstablishPolicy(observability, {
+        policy: establishDecision.policy,
+        reason: establishDecision.reason,
+        backend: machinePrimary ? "selfhosted" : groupBoxBackend,
+      });
+      // Resolve once before model preparation so partial/auth-needed host state
+      // is available as bounded model context and reconnect UI even when an
+      // on-demand turn never provisions a box. Resolution alone performs no
+      // sandbox write or renewal; both paths reuse this exact material and the
+      // lazy path materializes it only inside its first-operation single-flight.
       const initialRunCredentialMaterial = runCredentialResolver
         ? await waitForTurnOperation(
             runCredentialResolver.resolve({
@@ -6758,27 +6786,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         cancellationSignal,
         undefined,
       );
-      const establishDecision = sandboxEstablishPolicyDecision({
-        lazyEnabled: lazyProvisionEnabled(settings),
-        machinePrimary,
-        sandboxBackend: runSettings.sandboxBackend,
-        // Resolved run credentials must be written to one exact leased sandbox
-        // before agent execution. A warm active pointer can bypass the lazy
-        // provisioner entirely, which previously skipped materialization.
-        hasInitialRunCredentialMaterial: initialRunCredentialMaterial !== null,
-        generatedVideoFileCount: requiredGeneratedVideoFiles.length,
-        hasSignedFileResources:
-          requiresSignedFileResourceDownloads(
-            runSettings,
-            activeSandboxBackend ?? groupBoxBackend,
-          ) && turnResources.some((resource) => resource.kind === "file"),
-      });
-      const establishPolicy = establishDecision.policy;
-      recordTurnSandboxEstablishPolicy(observability, {
-        policy: establishDecision.policy,
-        reason: establishDecision.reason,
-        backend: machinePrimary ? "selfhosted" : groupBoxBackend,
-      });
       // Computed exactly ONCE per turn and reused for BOTH the box manifest
       // (resumeBoxForTurn -> establishSandboxSessionFromEnvelope, below) AND the
       // agent (runtime.buildAgent, below). sandboxEnvironmentForRun mints a FRESH
@@ -7115,6 +7122,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
 
       const attachRunCredentialRenewal = async (
         credentialSession: RunCredentialCommandSession,
+        initialMaterial: NormalizedRunCredentialMaterial | null,
         initialSandbox?: ResumedTurnSandbox,
       ): Promise<void> => {
         if (!runCredentialResolver) return;
@@ -7132,7 +7140,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           return targetSandbox;
         };
 
-        if (!initialRunCredentialMaterial) {
+        if (!initialMaterial) {
           await runWorkspaceMutationForSandbox(
             requireTargetSandbox(),
             "runCredentialClear",
@@ -7200,14 +7208,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
         };
 
-        const initialExpiryMs = initialRunCredentialMaterial.expiresAt?.getTime() ?? null;
+        const initialExpiryMs = initialMaterial.expiresAt?.getTime() ?? null;
         const seed =
           initialExpiryMs !== null && initialExpiryMs <= Date.now() + RUN_CREDENTIAL_EXPIRY_LEAD_MS
             ? await runCredentialResolver.resolve({
                 purpose: "provision",
                 forceRefresh: true,
               })
-            : initialRunCredentialMaterial;
+            : initialMaterial;
         await write(seed, true);
         if (runCredentialRenewalClosed) return;
         const controller = startRunCredentialRenewalLoop({
@@ -8510,6 +8518,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             await publishSandboxLifecycleEvents(provisioned);
             await attachRunCredentialRenewal(
               provisioned.established.session as RunCredentialCommandSession,
+              initialRunCredentialMaterial,
               provisioned,
             );
             const provisionedSetupSession = initialRunCredentialMaterial
@@ -9354,6 +9363,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               // decorate setup commands so they source the active generation.
               await attachRunCredentialRenewal(
                 eagerSetupSession as RunCredentialCommandSession,
+                initialRunCredentialMaterial,
                 resolvedSandbox,
               );
               const eagerCredentialSetupSession = initialRunCredentialMaterial
@@ -9493,7 +9503,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                             const pinnedCredentialSession = setupBoxSession
                               ? (setupBoxSession as RunCredentialCommandSession)
                               : credentialSession;
-                            await attachRunCredentialRenewal(pinnedCredentialSession);
+                            await attachRunCredentialRenewal(
+                              pinnedCredentialSession,
+                              initialRunCredentialMaterial,
+                            );
                           },
                         }
                       : {}),
