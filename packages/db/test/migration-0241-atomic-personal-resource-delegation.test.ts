@@ -281,37 +281,39 @@ describe("migration 0241 atomic personal-resource delegation", () => {
   for (const order of ["migrate-then-provision", "provision-then-migrate"] as const) {
     test(`converges helper ACLs after ${order} without breaking ordinary app-role RLS`, async () => {
       const appPassword = "apppw";
+      let admin: postgres.Sql | undefined;
+      let app: postgres.Sql | undefined;
       const blank = await acquireMigrationTestDatabase(`migration-0241-capability-${order}`);
       if (!blank) return;
 
-      if (order === "migrate-then-provision") {
-        await migrate(blank.databaseUrl);
-        await provisionRoles(blank.databaseUrl, {
-          appPassword,
-          rlsStrategy: "force",
-        });
-      } else {
-        await provisionRoles(blank.databaseUrl, {
-          appPassword,
-          rlsStrategy: "force",
-        });
-        await migrate(blank.databaseUrl);
-      }
-
-      const admin = postgres(blank.databaseUrl, {
-        max: 4,
-        prepare: false,
-        onnotice: () => undefined,
-      });
-      const appUrl = new URL(blank.databaseUrl);
-      appUrl.username = "opengeni_app";
-      appUrl.password = appPassword;
-      const app = postgres(appUrl.toString(), {
-        max: 1,
-        prepare: false,
-        onnotice: () => undefined,
-      });
       try {
+        if (order === "migrate-then-provision") {
+          await migrate(blank.databaseUrl);
+          await provisionRoles(blank.databaseUrl, {
+            appPassword,
+            rlsStrategy: "force",
+          });
+        } else {
+          await provisionRoles(blank.databaseUrl, {
+            appPassword,
+            rlsStrategy: "force",
+          });
+          await migrate(blank.databaseUrl);
+        }
+
+        admin = postgres(blank.databaseUrl, {
+          max: 4,
+          prepare: false,
+          onnotice: () => undefined,
+        });
+        const appUrl = new URL(blank.databaseUrl);
+        appUrl.username = "opengeni_app";
+        appUrl.password = appPassword;
+        app = postgres(appUrl.toString(), {
+          max: 1,
+          prepare: false,
+          onnotice: () => undefined,
+        });
         const [posture] = await admin<
           Array<{
             sameOwner: boolean;
@@ -416,25 +418,27 @@ describe("migration 0241 atomic personal-resource delegation", () => {
             `,
         ).toHaveLength(1);
       } finally {
-        await app.end({ timeout: 5 });
-        await admin.end({ timeout: 5 });
+        await app?.end({ timeout: 5 }).catch(() => undefined);
+        await admin?.end({ timeout: 5 }).catch(() => undefined);
         await blank.release();
       }
     }, 180_000);
   }
 
   test("admits an ordinary attempt with no selected personal resources or personal authority", async () => {
+    let sql: postgres.Sql | undefined;
+    let client: ReturnType<typeof createDb> | undefined;
     const blank = await acquireMigrationTestDatabase("migration-0241-empty-personal-selection");
     if (!blank) return;
 
-    await migrate(blank.databaseUrl);
-    const sql = postgres(blank.databaseUrl, {
-      max: 4,
-      prepare: false,
-      onnotice: () => undefined,
-    });
-    const client = createDb(blank.databaseUrl, { max: 1 });
     try {
+      await migrate(blank.databaseUrl);
+      sql = postgres(blank.databaseUrl, {
+        max: 4,
+        prepare: false,
+        onnotice: () => undefined,
+      });
+      client = createDb(blank.databaseUrl, { max: 1 });
       const [account] = await sql<Array<{ id: string }>>`
         insert into managed_accounts (name)
         values ('empty personal selection account')
@@ -523,36 +527,38 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         expect(row?.count).toBe(0);
       }
     } finally {
-      await client.close();
-      await sql.end({ timeout: 5 });
+      await client?.close().catch(() => undefined);
+      await sql?.end({ timeout: 5 }).catch(() => undefined);
       await blank.release();
     }
   }, 180_000);
 
   test("rejects cross-workspace rig versions at admission and resolution", async () => {
+    let admin: postgres.Sql | undefined;
+    let app: postgres.Sql | undefined;
     const blank = await acquireMigrationTestDatabase("migration-0241-rig-version-workspace-fence");
     if (!blank) return;
 
     const appPassword = "apppw";
-    await migrate(blank.databaseUrl);
-    await provisionRoles(blank.databaseUrl, {
-      appPassword,
-      rlsStrategy: "force",
-    });
-    const admin = postgres(blank.databaseUrl, {
-      max: 4,
-      prepare: false,
-      onnotice: () => undefined,
-    });
-    const appUrl = new URL(blank.databaseUrl);
-    appUrl.username = "opengeni_app";
-    appUrl.password = appPassword;
-    const app = postgres(appUrl.toString(), {
-      max: 1,
-      prepare: false,
-      onnotice: () => undefined,
-    });
     try {
+      await migrate(blank.databaseUrl);
+      await provisionRoles(blank.databaseUrl, {
+        appPassword,
+        rlsStrategy: "force",
+      });
+      admin = postgres(blank.databaseUrl, {
+        max: 4,
+        prepare: false,
+        onnotice: () => undefined,
+      });
+      const appUrl = new URL(blank.databaseUrl);
+      appUrl.username = "opengeni_app";
+      appUrl.password = appPassword;
+      app = postgres(appUrl.toString(), {
+        max: 1,
+        prepare: false,
+        onnotice: () => undefined,
+      });
       const ids = await createFixture(admin, blank.databaseUrl, "session");
       await setRuntimeScope(app, ids);
       await admin`
@@ -624,19 +630,20 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         ),
       ).rejects.toThrow("personal-resource authority snapshot is no longer live");
     } finally {
-      await app.end({ timeout: 5 });
-      await admin.end({ timeout: 5 });
+      await app?.end({ timeout: 5 }).catch(() => undefined);
+      await admin?.end({ timeout: 5 }).catch(() => undefined);
       await blank.release();
     }
   }, 180_000);
 
   test("atomically snapshots direct/transitive selections and replays one once receipt", async () => {
+    let sql: postgres.Sql | undefined;
     const blank = await acquireMigrationTestDatabase("migration-0241-personal-resource-replay");
     if (!blank) return;
 
-    const sql = postgres(blank.databaseUrl, { max: 4, onnotice: () => undefined });
     try {
       await migrate(blank.databaseUrl);
+      sql = postgres(blank.databaseUrl, { max: 4, onnotice: () => undefined });
       const ids = await createFixture(sql, blank.databaseUrl, "once");
 
       await insertAttempt(sql, ids, ids.attemptA, "workflow-a", "run-a", "activity-a");
@@ -722,22 +729,25 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       `;
       expect(resolved).toHaveLength(3);
     } finally {
-      await sql.end({ timeout: 5 });
+      await sql?.end({ timeout: 5 }).catch(() => undefined);
       await blank.release();
     }
   });
 
   test("serializes concurrent once use and fails closed after live authority drift", async () => {
+    let admin: postgres.Sql | undefined;
+    let scoped: postgres.Sql | undefined;
+    let client: ReturnType<typeof createDb> | undefined;
     const blank = await acquireMigrationTestDatabase(
       "migration-0241-personal-resource-concurrency",
     );
     if (!blank) return;
 
-    const admin = postgres(blank.databaseUrl, { max: 6, onnotice: () => undefined });
-    const scoped = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
-    const client = createDb(blank.databaseUrl, { max: 1 });
     try {
       await migrate(blank.databaseUrl);
+      admin = postgres(blank.databaseUrl, { max: 6, onnotice: () => undefined });
+      scoped = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
+      client = createDb(blank.databaseUrl, { max: 1 });
       const ids = await createFixture(admin, blank.databaseUrl, "once", {
         directOnly: true,
       });
@@ -799,8 +809,9 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       );
 
       await setRuntimeScope(scoped, drift);
+      const resolveSql = scoped;
       const resolve = async () =>
-        await scoped`
+        await resolveSql`
           select * from resolve_session_attempt_personal_resources(
             ${drift.account}, ${drift.targetWorkspace}, ${drift.attemptA}
           )
@@ -873,20 +884,21 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         "personal-resource resolve requires the exact current uninterrupted attempt",
       );
     } finally {
-      await client.close();
-      await scoped.end({ timeout: 5 });
-      await admin.end({ timeout: 5 });
+      await client?.close().catch(() => undefined);
+      await scoped?.end({ timeout: 5 }).catch(() => undefined);
+      await admin?.end({ timeout: 5 }).catch(() => undefined);
       await blank.release();
     }
   });
 
   test("requires the exact current uninterrupted attempt at admission and resolution", async () => {
+    let sql: postgres.Sql | undefined;
     const blank = await acquireMigrationTestDatabase("migration-0241-current-attempt-fences");
     if (!blank) return;
 
-    const sql = postgres(blank.databaseUrl, { max: 4, onnotice: () => undefined });
     try {
       await migrate(blank.databaseUrl);
+      sql = postgres(blank.databaseUrl, { max: 4, onnotice: () => undefined });
       const ids = await createFixture(sql, blank.databaseUrl, "once", {
         directOnly: true,
       });
@@ -942,8 +954,9 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         "activity-current",
       );
       await setRuntimeScope(sql, ids);
+      const resolveSql = sql;
       const resolve = async () =>
-        await sql`
+        await resolveSql`
           select * from resolve_session_attempt_personal_resources(
             ${ids.account}, ${ids.targetWorkspace}, ${ids.attemptA}
           )
@@ -1024,18 +1037,19 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       await interruptionInsert;
       await expect(resolve()).rejects.toThrow(resolveAttemptError);
     } finally {
-      await sql.end({ timeout: 5 });
+      await sql?.end({ timeout: 5 }).catch(() => undefined);
       await blank.release();
     }
   }, 180_000);
 
   test("admits exact session and always grant fences", async () => {
+    let sql: postgres.Sql | undefined;
     const blank = await acquireMigrationTestDatabase("migration-0241-personal-resource-fences");
     if (!blank) return;
 
-    const sql = postgres(blank.databaseUrl, { max: 4, onnotice: () => undefined });
     try {
       await migrate(blank.databaseUrl);
+      sql = postgres(blank.databaseUrl, { max: 4, onnotice: () => undefined });
       for (const mode of ["session", "always"] as const) {
         const ids = await createFixture(sql, blank.databaseUrl, mode, {
           directOnly: true,
@@ -1073,7 +1087,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         ).toHaveLength(1);
       }
     } finally {
-      await sql.end({ timeout: 5 });
+      await sql?.end({ timeout: 5 }).catch(() => undefined);
       await blank.release();
     }
   });
