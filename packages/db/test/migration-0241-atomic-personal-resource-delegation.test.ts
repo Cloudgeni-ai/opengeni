@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { acquireBlankTestDatabase } from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
+import { createDb, createSession } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
@@ -314,7 +315,9 @@ describe("migration 0241 atomic personal-resource delegation", () => {
           appTableAccess: false,
         });
 
-        const ids = await createFixture(admin, "once", { directOnly: true });
+        const ids = await createFixture(admin, blank.databaseUrl, "once", {
+          directOnly: true,
+        });
         await admin`
             insert into workspace_variable_sets (account_id, workspace_id, name)
             values (${ids.account}, ${ids.targetWorkspace}, ${`target-${order}`})
@@ -385,6 +388,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       prepare: false,
       onnotice: () => undefined,
     });
+    const client = createDb(blank.databaseUrl, { max: 1 });
     try {
       const [account] = await sql<Array<{ id: string }>>`
         insert into managed_accounts (name)
@@ -404,16 +408,16 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       const turnId = crypto.randomUUID();
       const attemptId = crypto.randomUUID();
 
-      await sql`
-        insert into sessions (
-          id, account_id, workspace_id, initial_message, model,
-          sandbox_backend, sandbox_group_id, status, tool_policy
-        ) values (
-          ${sessionId}, ${account!.id}, ${workspace!.id}, 'ordinary attempt',
-          'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running',
-          jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-        )
-      `;
+      await createSession(client.db, {
+        requestedSessionId: sessionId,
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        initialMessage: "ordinary attempt",
+        resources: [],
+        metadata: {},
+        model: "codex/gpt-5.6-sol",
+        sandboxBackend: "modal",
+      });
       await sql`
         insert into session_turns (
           id, account_id, workspace_id, session_id, trigger_event_id,
@@ -469,6 +473,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         expect(row?.count).toBe(0);
       }
     } finally {
+      await client.close();
       await sql.end({ timeout: 5 });
     }
   }, 180_000);
@@ -497,7 +502,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       onnotice: () => undefined,
     });
     try {
-      const ids = await createFixture(admin, "session");
+      const ids = await createFixture(admin, blank.databaseUrl, "session");
       await setRuntimeScope(app, ids);
       const [mismatchedVersion] = await app<Array<{ id: string }>>`
         insert into rig_versions (
@@ -563,7 +568,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
     const sql = postgres(blank.databaseUrl, { max: 4, onnotice: () => undefined });
     try {
       await migrate(blank.databaseUrl);
-      const ids = await createFixture(sql, "once");
+      const ids = await createFixture(sql, blank.databaseUrl, "once");
 
       await insertAttempt(sql, ids, ids.attemptA, "workflow-a", "run-a", "activity-a");
       await sql`
@@ -659,7 +664,9 @@ describe("migration 0241 atomic personal-resource delegation", () => {
     const admin = postgres(blank.databaseUrl, { max: 6, onnotice: () => undefined });
     try {
       await migrate(blank.databaseUrl);
-      const ids = await createFixture(admin, "once", { directOnly: true });
+      const ids = await createFixture(admin, blank.databaseUrl, "once", {
+        directOnly: true,
+      });
 
       const attemptA = insertAttempt(
         admin,
@@ -705,7 +712,9 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         insertAttempt(admin, ids, ids.attemptB, "workflow-b", "run-b", "activity-b"),
       ).rejects.toThrow("matching personal-resource grant required");
 
-      const drift = await createFixture(admin, "once", { directOnly: true });
+      const drift = await createFixture(admin, blank.databaseUrl, "once", {
+        directOnly: true,
+      });
       await insertAttempt(
         admin,
         drift,
@@ -792,7 +801,9 @@ describe("migration 0241 atomic personal-resource delegation", () => {
     try {
       await migrate(blank.databaseUrl);
       for (const mode of ["session", "always"] as const) {
-        const ids = await createFixture(sql, mode, { directOnly: true });
+        const ids = await createFixture(sql, blank.databaseUrl, mode, {
+          directOnly: true,
+        });
         await insertAttempt(
           sql,
           ids,
@@ -851,6 +862,7 @@ type FixtureIds = {
 
 async function createFixture(
   sql: postgres.Sql,
+  databaseUrl: string,
   mode: "once" | "session" | "always",
   options: { directOnly?: boolean } = {},
 ): Promise<FixtureIds> {
@@ -949,21 +961,29 @@ async function createFixture(
     `;
   }
 
-  const session = crypto.randomUUID();
-  await sql`
-    insert into sessions (
-      id, account_id, workspace_id, initial_message, model, sandbox_backend,
-      sandbox_group_id, first_party_mcp_tools, tool_policy, variable_set_id,
-      rig_id, rig_version_id, owner_organization_membership_id, owner_subject_id,
-      visibility, authority_epoch
-    ) values (
-      ${session}, ${account!.id}, ${targetWorkspace!.id}, 'test', 'test-model',
-      'modal', ${session}, '[]'::jsonb,
-      '{"mode":"default","version":1}'::jsonb, ${directVariableSet!.id},
-      ${options.directOnly ? null : rig!.id}, ${options.directOnly ? null : rigVersion!.id},
-      ${membership!.id}, ${subject}, 'workspace_shared', 1
-    )
-  `;
+  const requestedSessionId = crypto.randomUUID();
+  const client = createDb(databaseUrl, { max: 1 });
+  let session: string;
+  try {
+    const created = await createSession(client.db, {
+      requestedSessionId,
+      accountId: account!.id,
+      workspaceId: targetWorkspace!.id,
+      initialMessage: "test",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: subject },
+      model: "test-model",
+      sandboxBackend: "modal",
+      variableSetId: directVariableSet!.id,
+      rigId: options.directOnly ? null : rig!.id,
+      rigVersionId: options.directOnly ? null : rigVersion!.id,
+      firstPartyMcpTools: [],
+    });
+    session = created.id;
+  } finally {
+    await client.close();
+  }
   const [turn] = await sql<Array<{ id: string }>>`
     insert into session_turns (
       account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
