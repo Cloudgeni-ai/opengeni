@@ -245,6 +245,32 @@ pub enum NativeFrameFormat {
     Png,
 }
 
+/// Fit one native frame inside a bounded viewer profile with exact integer
+/// arithmetic. Integer cross-products avoid platform-dependent float rounding;
+/// every product fits in `u64` because each input is a `u32`.
+pub(crate) fn fit_frame_dimensions(
+    width: u32,
+    height: u32,
+    max_width: u32,
+    max_height: u32,
+) -> Option<(u32, u32)> {
+    if width == 0 || height == 0 || max_width == 0 || max_height == 0 {
+        return None;
+    }
+    if width <= max_width && height <= max_height {
+        return Some((width, height));
+    }
+    let width_limited =
+        u64::from(max_width) * u64::from(height) <= u64::from(max_height) * u64::from(width);
+    if width_limited {
+        let scaled_height = (u64::from(height) * u64::from(max_width) / u64::from(width)).max(1);
+        Some((max_width, u32::try_from(scaled_height).ok()?))
+    } else {
+        let scaled_width = (u64::from(width) * u64::from(max_height) / u64::from(height)).max(1);
+        Some((u32::try_from(scaled_width).ok()?, max_height))
+    }
+}
+
 /// Provider-neutral native locator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -460,7 +486,7 @@ pub struct NativeActionCommand {
 mod tests {
     use serde_json::json;
 
-    use super::{NativeAction, NativeActionCommand};
+    use super::{fit_frame_dimensions, NativeAction, NativeActionCommand};
 
     fn command(action: &serde_json::Value) -> serde_json::Value {
         json!({
@@ -534,5 +560,15 @@ mod tests {
             value,
             json!({"type": "launch", "applicationId": "com.apple.TextEdit"})
         );
+    }
+
+    #[test]
+    fn frame_dimensions_fit_both_limiting_axes_without_float_rounding() {
+        assert_eq!(fit_frame_dimensions(1_280, 800, 720, 720), Some((720, 450)));
+        assert_eq!(fit_frame_dimensions(800, 1_280, 720, 720), Some((450, 720)));
+        assert_eq!(fit_frame_dimensions(640, 360, 720, 720), Some((640, 360)));
+        assert_eq!(fit_frame_dimensions(1, u32::MAX, 1, 1), Some((1, 1)));
+        assert_eq!(fit_frame_dimensions(0, 360, 720, 720), None);
+        assert_eq!(fit_frame_dimensions(640, 360, 0, 720), None);
     }
 }

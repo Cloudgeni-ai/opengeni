@@ -269,9 +269,8 @@ function makeStockMacCommandSurface(root: string): { bin: string; log: string } 
   const realStat = Bun.which("stat");
   const realReadlink = Bun.which("readlink");
   const realShasum = Bun.which("shasum");
-  const realLsof = Bun.which("lsof") ?? (existsSync("/usr/sbin/lsof") ? "/usr/sbin/lsof" : null);
-  if (!realStat || !realReadlink || !realShasum || !realLsof) {
-    throw new Error("stock-macOS simulation requires host stat, readlink, shasum, and lsof");
+  if (!realStat || !realReadlink || !realShasum) {
+    throw new Error("stock-macOS simulation requires host stat, readlink, and shasum");
   }
   const writeCommand = (name: string, body: string): void => {
     const path = join(bin, name);
@@ -309,20 +308,6 @@ function makeStockMacCommandSurface(root: string): { bin: string; log: string } 
       `  %Lp) exec ${JSON.stringify(realStat)} -L -c '%a' "$3" ;;`,
       "  *) exit 64 ;;",
       "esac",
-    ].join("\n"),
-  );
-  writeCommand(
-    "lsof",
-    [
-      'printf \'lsof %s\\n\' "$*" >> "$OPENGENI_STOCK_MAC_LOG"',
-      "pid= fd=",
-      'while [ "$#" -gt 0 ]; do case "$1" in -p) pid="$2"; shift 2 ;; -d) fd="$2"; shift 2 ;; *) shift ;; esac; done',
-      '[ -n "$pid" ] && [ -n "$fd" ] || exit 64',
-      // Linux lsof inserts an extra newline before its n<path> field; stock
-      // macOS does not. Normalize the host output so this fixture genuinely
-      // exercises the macOS parser on every CI host.
-      "set -o pipefail",
-      `${JSON.stringify(realLsof)} -a -p "$pid" -d "$fd" -Fn0 | tr -d '\\n'`,
     ].join("\n"),
   );
   return { bin, log };
@@ -1800,7 +1785,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     const commands = await Bun.file(surface.log).text();
     expect(commands).toContain("sha256sum");
     expect(commands).toContain("shasum");
-    expect(commands).toContain("lsof");
+    expect(commands).not.toContain("lsof");
     expect(commands).toContain("stat -f %i");
     expect([...enteredProducers].sort()).toEqual(["numstat", "patch", "untracked"]);
     expect(victimInitializations).toBe(1);

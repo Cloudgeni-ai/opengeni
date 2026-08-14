@@ -3,11 +3,13 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import {
   clearEnrollmentWentOffline,
+  claimEnrollmentConnection,
   createDb,
   createEnrollment,
   createSandbox,
   createSession,
   getEnrollment,
+  getLiveEnrollmentConnection,
   getSandbox,
   getSession,
   ingestMachineMetricsSample,
@@ -18,6 +20,8 @@ import {
   readMachineMetricsLatest,
   readMachineMetricsLatestForWorkspace,
   readMachineMetricsSeries,
+  releaseEnrollmentConnection,
+  renewEnrollmentConnection,
   revokeEnrollment,
   revokeEnrollmentByGeneration,
   sessionsWithActiveOpOnEnrollment,
@@ -124,6 +128,9 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     expect(created.allowScreenControl).toBe(false);
     expect(created.lastSeenAt).toBeNull();
     expect(created.revokedAt).toBeNull();
+    expect(created.connectionInstanceId).toBeNull();
+    expect(created.connectionGeneration).toBe(0);
+    expect(created.connectionLeaseExpiresAt).toBeNull();
 
     const fetched = await getEnrollment(db, workspaceId, created.id);
     expect(fetched?.id).toBe(created.id);
@@ -141,6 +148,7 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     });
     expect(reEnrolled.id).toBe(created.id);
     expect(reEnrolled.credentialGeneration).toBe(2);
+    expect(reEnrolled.connectionInstanceId).toBeNull();
     expect(reEnrolled.hasDisplay).toBe(false);
     expect(reEnrolled.allowScreenControl).toBe(true);
 
@@ -174,6 +182,122 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     expect(reactivated.status).toBe("active");
     expect(reactivated.revokedAt).toBeNull();
     expect(reactivated.credentialGeneration).toBe(3);
+  }, 60_000);
+
+  test("one enrollment has one generation-fenced live runner authority", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: "ed25519:CONNECTION-AUTHORITY",
+    });
+    const firstInstance = crypto.randomUUID();
+    const secondInstance = crypto.randomUUID();
+
+    const first = await claimEnrollmentConnection(db, {
+      workspaceId,
+      enrollmentId: enrollment.id,
+      credentialGeneration: enrollment.credentialGeneration,
+      connectionInstanceId: firstInstance,
+      leaseMs: 60_000,
+    });
+    expect(first).toMatchObject({
+      claimed: true,
+      connectionInstanceId: firstInstance,
+      connectionGeneration: 1,
+    });
+    expect(
+      (await getLiveEnrollmentConnection(db, workspaceId, enrollment.id))?.connectionInstanceId,
+    ).toBe(firstInstance);
+
+    // A second process with the same durable credential cannot receive operations
+    // while the first process owns a live lease.
+    const duplicate = await claimEnrollmentConnection(db, {
+      workspaceId,
+      enrollmentId: enrollment.id,
+      credentialGeneration: enrollment.credentialGeneration,
+      connectionInstanceId: secondInstance,
+      leaseMs: 60_000,
+    });
+    expect(duplicate).toMatchObject({
+      claimed: false,
+      connectionInstanceId: firstInstance,
+      connectionGeneration: 1,
+    });
+    const afterDuplicate = await getEnrollment(db, workspaceId, enrollment.id);
+    expect(afterDuplicate?.connectionDuplicateDeniedCount).toBe(1);
+    expect(afterDuplicate?.connectionDuplicateDeniedAt).not.toBeNull();
+
+    // The same process may open/renew both NATS lanes without advancing authority.
+    const sameProcess = await claimEnrollmentConnection(db, {
+      workspaceId,
+      enrollmentId: enrollment.id,
+      credentialGeneration: enrollment.credentialGeneration,
+      connectionInstanceId: firstInstance,
+      leaseMs: 60_000,
+    });
+    expect(sameProcess).toMatchObject({ claimed: true, connectionGeneration: 1 });
+
+    // Expire the lease deterministically; a successor then advances generation and
+    // owns a different subject. Late traffic from the old process cannot renew or
+    // release the successor.
+    await admin`
+      update enrollments
+      set connection_lease_expires_at = now() - interval '1 second'
+      where id = ${enrollment.id}`;
+    expect(await getLiveEnrollmentConnection(db, workspaceId, enrollment.id)).toBeNull();
+    const successor = await claimEnrollmentConnection(db, {
+      workspaceId,
+      enrollmentId: enrollment.id,
+      credentialGeneration: enrollment.credentialGeneration,
+      connectionInstanceId: secondInstance,
+      leaseMs: 60_000,
+    });
+    expect(successor).toMatchObject({
+      claimed: true,
+      connectionInstanceId: secondInstance,
+      connectionGeneration: 2,
+    });
+    expect(
+      (await getLiveEnrollmentConnection(db, workspaceId, enrollment.id))?.connectionInstanceId,
+    ).toBe(secondInstance);
+    expect(
+      await renewEnrollmentConnection(db, {
+        accountId,
+        workspaceId,
+        enrollmentId: enrollment.id,
+        connectionInstanceId: firstInstance,
+        leaseMs: 60_000,
+      }),
+    ).toEqual({ renewed: false });
+    expect(
+      await releaseEnrollmentConnection(db, {
+        accountId,
+        workspaceId,
+        enrollmentId: enrollment.id,
+        connectionInstanceId: firstInstance,
+        reason: "STALE_GOODBYE",
+      }),
+    ).toEqual({ released: false });
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.connectionInstanceId).toBe(
+      secondInstance,
+    );
+
+    expect(
+      await releaseEnrollmentConnection(db, {
+        accountId,
+        workspaceId,
+        enrollmentId: enrollment.id,
+        connectionInstanceId: secondInstance,
+        reason: "GOING_OFFLINE_REASON_USER_STOP",
+      }),
+    ).toEqual({ released: true });
+    const offline = await getEnrollment(db, workspaceId, enrollment.id);
+    expect(offline?.connectionInstanceId).toBeNull();
+    expect(offline?.connectionLeaseExpiresAt).toBeNull();
+    expect(offline?.wentOfflineReason).toBe("GOING_OFFLINE_REASON_USER_STOP");
+    expect(await getLiveEnrollmentConnection(db, workspaceId, enrollment.id)).toBeNull();
   }, 60_000);
 
   test("generation-fenced self-revoke is retry-safe, stale-proof, and tenant-isolated", async () => {

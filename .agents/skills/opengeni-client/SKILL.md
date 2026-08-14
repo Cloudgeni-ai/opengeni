@@ -6,7 +6,7 @@ description: >-
   standalone OpenGeni deployment through @opengeni/sdk or @opengeni/react.
   Covers choosing between a stock-UI handoff, a headless product integration,
   embedded React session surfaces, or the optional workbench; tenant-safe proxy
-  boundaries; workspace/session/turn instructions; events, uploads, tools,
+  boundaries; workspace/session instructions and per-message context; events, uploads, tools,
   realtime, compute targets, and schedules. Not for editing OpenGeni internals
   or mounting the OpenGeni runtime in the customer's process.
 ---
@@ -77,17 +77,19 @@ other.
 
 ## Prompt And Context Contract
 
-Keep visible user text separate from system-level agent context:
+Use each prompt surface for its exact authority and lifetime:
 
-- Workspace `agentInstructions`: stable workspace-wide persona and behavior.
-- Session `instructions`: durable agent-type refinement for one session.
-- Turn `turnInstructions`: one exact submit-time context snapshot, such as the
-  current product route, selected entity, or viewport state.
-- `initialMessage` and later message text: user-visible timeline content.
+- Workspace `agentInstructions`: stable workspace-wide system persona and behavior.
+- Session `instructions`: durable system-level agent refinement for one session.
+- `modelContext`: ordinary model-visible content attached to one exact user
+  message as a separate history part; standard timeline rendering omits it.
+- `initialMessage` and later message text: the visible part of that user message.
 
-Do not hide business facts in a prompt when the agent should inspect them with
-an authorized product MCP tool. Prefer concise turn context plus canonical tool
-access. Never put secrets in any instruction scope.
+`modelContext` is not secret, private, or privileged; full event/audit reads may
+return it. Do not hide business facts in a snapshot when the agent should inspect
+them with an authorized product MCP tool. Prefer concise message context plus
+canonical tool access. Changing `modelContext` must not change the persistent
+agent instruction prefix.
 
 ## Client Workflow
 
@@ -98,7 +100,7 @@ access. Never put secrets in any instruction scope.
 4. Attach only canonical resources, skills, and tool selections the user may use.
 5. Stream/replay session events through the SDK; tolerate unknown additive event
    types.
-6. Send visible text separately from `turnInstructions`.
+6. Send visible text separately from `modelContext`.
 7. Use the SDK upload helper; it owns begin, signed storage PUT, and completion.
 8. Surface approvals, human-input requests, queue state, errors, credit limits,
    and reconnect state as product state rather than generic chat text.

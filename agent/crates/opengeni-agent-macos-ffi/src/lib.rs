@@ -833,17 +833,18 @@ pub fn launch_application(application_id: &str) -> Result<(), MacFfiError> {
 pub fn run_background_application(
     application_bundle: &std::path::Path,
     arguments: &[String],
+    pid_file: Option<&std::path::Path>,
 ) -> Result<(), MacFfiError> {
     #[cfg(target_os = "macos")]
     {
         let bundle = application_bundle.to_str().ok_or_else(|| {
             MacFfiError::Invalid("application bundle path is not valid UTF-8".to_string())
         })?;
-        ffi::run_background_application(bundle, arguments)
+        ffi::run_background_application(bundle, arguments, pid_file)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (application_bundle, arguments);
+        let _ = (application_bundle, arguments, pid_file);
         Err(MacFfiError::Unsupported(
             "background application launch is only available on macOS".to_string(),
         ))

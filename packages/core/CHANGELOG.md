@@ -1,5 +1,56 @@
 # @opengeni/core
 
+## 1.0.1
+
+### Patch Changes
+
+- 448117d: Enforce fresh per-object Google Drive ACL authorization across Knowledge
+  retrieval and every file-byte consumer, and project only reauthorized,
+  principal-free provider citations.
+- Updated dependencies [448117d]
+  - @opengeni/contracts@1.0.1
+  - @opengeni/db@1.0.1
+  - @opengeni/documents@0.5.41
+  - @opengeni/runtime@1.0.1
+  - @opengeni/config@0.16.4
+  - @opengeni/events@0.3.112
+  - @opengeni/observability@0.7.7
+  - @opengeni/storage@0.2.96
+
+## 1.0.0
+
+### Major Changes
+
+- 083387e: Replace the removed per-turn `turnInstructions` system-prefix contract with generic per-message `modelContext` content. This is a breaking release-train cutover: old mutating clients are rejected after migration 0240. Context now enters canonical user history without standard timeline rendering, preserves the persistent prompt-cache prefix, and works across initial, queued, steer, realtime delegation, and transcript handoff paths.
+
+### Patch Changes
+
+- 11913b7: Add separately consented Google Drive editable-artifact publishing with an explicit writable destination, connector-action approval policy, Google-native conversion, and retry-safe provider reconciliation.
+- Updated dependencies [083387e]
+- Updated dependencies [11913b7]
+  - @opengeni/contracts@1.0.0
+  - @opengeni/db@1.0.0
+  - @opengeni/runtime@1.0.0
+  - @opengeni/config@0.16.3
+  - @opengeni/documents@0.5.40
+  - @opengeni/events@0.3.111
+  - @opengeni/observability@0.7.6
+  - @opengeni/storage@0.2.95
+
+## 0.28.1
+
+### Patch Changes
+
+- Updated dependencies [944be7f]
+- Updated dependencies [499c70c]
+  - @opengeni/codex@0.2.17
+  - @opengeni/runtime@0.23.1
+  - @opengeni/db@0.36.1
+  - @opengeni/config@0.16.2
+  - @opengeni/documents@0.5.39
+  - @opengeni/events@0.3.110
+  - @opengeni/storage@0.2.94
+
 ## 0.28.0
 
 ### Minor Changes

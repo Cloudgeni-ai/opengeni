@@ -1,5 +1,11 @@
 # @opengeni/codex
 
+## 0.2.17
+
+### Patch Changes
+
+- 944be7f: Reduce and attribute turn startup latency with lazy sandbox defaults for local development, bounded validator reuse, parallel durable input reads, exact stale-Docker recovery, and low-cardinality worker, runtime, credential, and provider preparation diagnostics.
+
 ## 0.2.16
 
 ### Patch Changes

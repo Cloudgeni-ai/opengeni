@@ -1,5 +1,20 @@
 # @opengeni/interaction
 
+## 0.4.3
+
+### Patch Changes
+
+- Updated dependencies [448117d]
+  - @opengeni/contracts@1.0.1
+
+## 0.4.2
+
+### Patch Changes
+
+- Updated dependencies [083387e]
+- Updated dependencies [11913b7]
+  - @opengeni/contracts@1.0.0
+
 ## 0.4.1
 
 ### Patch Changes

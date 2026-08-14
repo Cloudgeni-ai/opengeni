@@ -533,14 +533,15 @@ fn spawn_desktop_pump(
 /// a dead URL:
 ///
 /// * the sender is DROPPED before firing (the pump died — e.g. a relay drop or a
-///   non-retryable first-capture failure — before serving a byte) ⇒ `Os`,
+///   non-retryable first-capture failure — before serving a byte) ⇒ `Stream`,
 /// * the timeout elapses (the pump is wedged) ⇒ `Timeout`.
 async fn await_pump_ready(ready_rx: oneshot::Receiver<()>, kind: &str) -> PlatformResult<()> {
     match tokio::time::timeout(PUMP_READY_TIMEOUT, ready_rx).await {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(_recv)) => Err(PlatformError::os(format!(
-            "{kind} stream pump ended before it became ready"
-        ))),
+        Ok(Err(_recv)) => Err(PlatformError::stream(
+            format!("{kind} stream pump ended before it became ready"),
+            false,
+        )),
         Err(_elapsed) => Err(PlatformError::Timeout(format!(
             "{kind} stream pump did not become ready within {}s",
             PUMP_READY_TIMEOUT.as_secs()
@@ -589,11 +590,15 @@ fn release_browser_port(ports: &Arc<Mutex<HashSet<u32>>>, port: u32) {
 }
 
 /// Maps a stream error to a platform error so the dispatch path surfaces a typed
-/// `AgentError`. A relay open failure is a `STREAM`-class condition.
+/// `AgentError`. Never flatten a relay/source failure into `OS`: callers need the
+/// stable `STREAM` discriminant and the stream layer's retryability ruling.
 fn stream_to_platform(e: crate::error::StreamError) -> PlatformError {
     match e {
         crate::error::StreamError::Platform(p) => p,
-        other => PlatformError::os(format!("relay stream: {other}")),
+        other => {
+            let retryable = other.retryable();
+            PlatformError::stream(other.to_string(), retryable)
+        }
     }
 }
 
@@ -623,6 +628,20 @@ mod tests {
         assert_eq!(d.agent_id, "ag");
         assert_eq!(d.port, PTY_STREAM_PORT);
         assert_eq!(d.kind(), v1::StreamKind::Pty);
+    }
+
+    #[test]
+    fn stream_mapping_preserves_typed_code_and_retryability() {
+        let transport = stream_to_platform(crate::error::StreamError::Transport(
+            "connection reset".to_string(),
+        ));
+        let protocol = stream_to_platform(crate::error::StreamError::Protocol(
+            "source closed before first frame".to_string(),
+        ));
+        assert_eq!(transport.code(), v1::ErrorCode::Stream);
+        assert!(transport.retryable());
+        assert_eq!(protocol.code(), v1::ErrorCode::Stream);
+        assert!(!protocol.retryable());
     }
 
     #[tokio::test]
@@ -656,13 +675,13 @@ mod tests {
     #[tokio::test]
     async fn await_pump_ready_reports_a_pump_that_died_before_becoming_ready() {
         // A pump that drops its sender (it died — a relay drop / non-retryable first
-        // capture — before serving a byte) must surface a typed Os error, not a hang.
+        // capture — before serving a byte) must surface a typed stream error, not a hang.
         let (tx, rx) = oneshot::channel();
         drop(tx); // the pump ended without firing readiness.
         let err = await_pump_ready(rx, "pty")
             .await
             .expect_err("a dropped sender must error");
-        assert!(matches!(err, PlatformError::Os { .. }), "got {err:?}");
+        assert!(matches!(err, PlatformError::Stream { .. }), "got {err:?}");
     }
 
     #[tokio::test]

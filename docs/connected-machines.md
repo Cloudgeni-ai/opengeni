@@ -43,6 +43,26 @@ so `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list|call` works even without
 Bun/Node/`ogtool`. It reaches the same journal/executor as model MCP; the machine
 still owns every ordinary credential and ambient environment.
 
+This authority follows the session's **active** execution path. The fleet
+`run_on` tool is a separate API-side, one-off route to a non-active machine; it
+does not impersonate the worker's exact turn/attempt and therefore does not
+inject Codemode credentials. Swap the session to that machine, or create the
+session there, before running Codemode on it.
+
+For source development, build or run the complete host-native runtime with:
+
+```sh
+bun run agent:local-runtime
+bun run agent:local-runtime:run
+```
+
+The command builds browserd, the pinned agent-browser driver, and
+computer-native first, hashes them into one development generation, then embeds
+that exact closure in the Rust agent. On macOS it also enables the same real
+ScreenCaptureKit/CGEvent desktop feature as the release build. This is the supported local path: copying
+an agent binary next to arbitrary helpers can create a protocol-skewed runtime
+that production installation and managed updates deliberately forbid.
+
 Machine availability is also not a turn-admission dependency. A text-only turn
 can start while the selected machine is offline. If the model invokes a machine
 operation, the typed offline/timeout result returns to the model in-band so it

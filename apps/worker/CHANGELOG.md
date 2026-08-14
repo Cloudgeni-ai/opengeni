@@ -1,5 +1,69 @@
 # @opengeni/worker-bundle
 
+## 0.20.3
+
+### Patch Changes
+
+- Updated dependencies [448117d]
+  - @opengeni/contracts@1.0.1
+  - @opengeni/core@1.0.1
+  - @opengeni/db@1.0.1
+  - @opengeni/documents@0.5.41
+  - @opengeni/runtime@1.0.1
+  - @opengeni/codemode@0.4.4
+  - @opengeni/config@0.16.4
+  - @opengeni/events@0.3.112
+  - @opengeni/github@0.4.59
+  - @opengeni/observability@0.7.7
+  - @opengeni/storage@0.2.96
+
+## 0.20.2
+
+### Patch Changes
+
+- 11913b7: Add separately consented Google Drive editable-artifact publishing with an explicit writable destination, connector-action approval policy, Google-native conversion, and retry-safe provider reconciliation.
+- Updated dependencies [083387e]
+- Updated dependencies [11913b7]
+  - @opengeni/contracts@1.0.0
+  - @opengeni/core@1.0.0
+  - @opengeni/db@1.0.0
+  - @opengeni/runtime@1.0.0
+  - @opengeni/codemode@0.4.3
+  - @opengeni/config@0.16.3
+  - @opengeni/documents@0.5.40
+  - @opengeni/events@0.3.111
+  - @opengeni/github@0.4.58
+  - @opengeni/observability@0.7.6
+  - @opengeni/storage@0.2.95
+
+## 0.20.1
+
+### Patch Changes
+
+- 944be7f: Reduce and attribute turn startup latency with lazy sandbox defaults for local development, bounded validator reuse, parallel durable input reads, exact stale-Docker recovery, and low-cardinality worker, runtime, credential, and provider preparation diagnostics.
+- 499c70c: Retry transient pre-inference attempt claims atomically, durably re-wake a
+  logical turn when its activity failed before creating an attempt, and preserve
+  the requested backoff deadline once older workflow-wake revisions are delivered.
+  Still-open legacy workflow histories and every effectively active durable work
+  shape whose prior wake was delivered now retain the same recovery obligation:
+  queued/recovering turns, accepted approval responses, released capacity waits,
+  manual compaction, and pending internal updates. Held, paused, live-attempt, and
+  already-pending wake states remain untouched.
+  Terminal failure retries also close the workflow without synthesizing an
+  active-goal continuation.
+- Updated dependencies [944be7f]
+- Updated dependencies [499c70c]
+  - @opengeni/codemode@0.4.2
+  - @opengeni/codex@0.2.17
+  - @opengeni/runtime@0.23.1
+  - @opengeni/db@0.36.1
+  - @opengeni/config@0.16.2
+  - @opengeni/core@0.28.1
+  - @opengeni/documents@0.5.39
+  - @opengeni/events@0.3.110
+  - @opengeni/github@0.4.57
+  - @opengeni/storage@0.2.94
+
 ## 0.20.0
 
 ### Minor Changes

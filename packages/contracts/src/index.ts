@@ -10,6 +10,7 @@ import { MemorySlackPublicationDistribution } from "./memory-slack-delivery";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 import { MediaGenerationResult } from "./video-generation";
+import { KnowledgeProviderCitation } from "./knowledge";
 
 export * from "./slack-bot-scopes";
 export * from "./slack-task-policy";
@@ -4025,6 +4026,7 @@ export const DocumentSearchResult = z.object({
   authorityKind: DocumentAuthorityKind,
   authorityWorkspaceId: z.string().uuid().nullable(),
   authoritySubjectId: z.string().nullable(),
+  citation: KnowledgeProviderCitation.nullable().optional(),
 });
 export type DocumentSearchResult = z.infer<typeof DocumentSearchResult>;
 
@@ -4054,6 +4056,7 @@ export const IndexedDocumentProvenance = z.object({
   authoritySubjectId: z.string().nullable(),
   createdBy: z.string().nullable(),
   createdAt: z.string(),
+  citation: KnowledgeProviderCitation.nullable().optional(),
 });
 export type IndexedDocumentProvenance = z.infer<typeof IndexedDocumentProvenance>;
 
@@ -5089,8 +5092,26 @@ export const SessionRealtimeInboundEntry = z
     delegationItemId: z.string().max(1024).nullable().optional(),
     text: z.string().max(131_072).nullable().optional(),
     payload: z.record(z.string(), z.unknown()).optional(),
+    // Application context attached to the exact delegation/transcript message.
+    // It is ordinary model-visible user-message content when materialized, not
+    // a secret or instruction-authority boundary.
+    modelContext: z.string().trim().min(1).max(32768).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((entry, context) => {
+    if (
+      entry.modelContext !== undefined &&
+      entry.kind !== "delegation_call" &&
+      entry.kind !== "user_transcript" &&
+      entry.kind !== "assistant_transcript"
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["modelContext"],
+        message: "modelContext requires a delegation or finalized transcript entry",
+      });
+    }
+  });
 export type SessionRealtimeInboundEntry = z.infer<typeof SessionRealtimeInboundEntry>;
 
 export const SyncSessionRealtimeLedgerRequest = SessionRealtimeOwnerProof.extend({
@@ -5557,6 +5578,28 @@ export function renderTimelineAnnotationsForModel(
       index > 0 && line.startsWith("Annotation ") ? ["", line] : [line],
     ),
   ].join("\n");
+}
+
+export const MODEL_CONTEXT_LABEL = "[Application context attached to this user message]" as const;
+
+/**
+ * Build one canonical user-role message body. `modelContext` is ordinary
+ * message content: it is model-visible in the same chronological position as
+ * the visible text, but presentation layers may omit it. It is not a secret or
+ * an instruction-authority boundary.
+ */
+export function renderUserMessageContentForModel(
+  text: string,
+  annotations: readonly TimelineAnnotation[],
+  modelContext?: string | null,
+): string | Array<{ type: "input_text"; text: string }> {
+  const visibleContent = renderTimelineAnnotationsForModel(text, annotations);
+  const context = modelContext?.trim();
+  if (!context) return visibleContent;
+  return [
+    { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\n${context}` },
+    { type: "input_text", text: visibleContent },
+  ];
 }
 
 export const SessionTurn = z
@@ -6168,12 +6211,16 @@ export const VariableSetVariableName = z
   .max(128);
 export type VariableSetVariableName = z.infer<typeof VariableSetVariableName>;
 
-function withVariableSetIdAlias<T extends z.ZodRawShape>(shape: T) {
+function withVariableSetIdAlias<T extends z.ZodRawShape>(
+  shape: T,
+  options: { rejectKeys?: readonly string[] } = {},
+) {
   return z.preprocess((input) => {
     if (!input || typeof input !== "object" || Array.isArray(input)) {
       return input;
     }
     const record = input as Record<string, unknown>;
+    if (options.rejectKeys?.some((key) => Object.hasOwn(record, key))) return null;
     if (record.variableSetId !== undefined || record.environmentId === undefined) {
       return record;
     }
@@ -11221,134 +11268,138 @@ export const SessionControlResponse = z.object({
 });
 export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
-export const CreateSessionRequest = withVariableSetIdAlias({
-  /**
-   * Optional UUID preallocated by an embedding host. This lets the host durably
-   * link its own projection before OpenGeni admits the initial turn. Replays
-   * must pair it with the same idempotency key; OpenGeni never derives host
-   * identity or authorization from the UUID.
-   */
-  requestedSessionId: z.string().uuid().optional(),
-  initialMessage: z.string().min(1).optional(),
-  // Creates the durable session shell without fabricating a user message or
-  // starting an underlying agent turn. Realtime can then become the first
-  // interaction and use the ordinary Send/Steer path when it delegates.
-  startMode: z.literal("realtime").optional(),
-  // System-level host context for the initial turn only. Unlike `instructions`,
-  // this does not persist into later turns and is never emitted as a user event.
-  turnInstructions: z.string().trim().min(1).max(32768).optional(),
-  // Per-session agent persona/system instructions (org-visible metadata, NOT a
-  // secret). Rides the SAME system-level instructions channel the per-workspace
-  // agentInstructions rides, composed AFTER the workspace persona so it refines
-  // it for this one session — how a host delivers per-agent-type prompts without
-  // leaking them into the user-visible timeline (it is NEVER emitted as an
-  // event, unlike goal/initialMessage). Trimmed, non-empty. The 32768-char cap
-  // matches the codebase's largest free-form string convention (workspace
-  // variable set variable values). Absent ⇒ byte-identical to today.
-  instructions: z.string().trim().min(1).max(32768).optional(),
-  // Immutable prompt-policy role binding for matching one activated role
-  // policy. This never derives from or grants a human workspace membership
-  // role. Existing callers may continue to use normalized metadata.role as a
-  // compatibility fallback by omitting this field.
-  policyRole: WorkspaceInstructionPolicyRoleKeyInput.optional(),
-  // For an agent-created child, omission inherits the trusted immediate
-  // parent's repository/file context. An explicit array, including [], is
-  // authoritative. Top-level omission remains []. Presence is resolved from
-  // the raw request because this Zod default erases absent-vs-empty.
-  resources: z.array(ResourceRef).default([]),
-  // Inline skills are fixed onto the session. Child omission inherits the
-  // trusted parent's selection; an explicit array, including [], wins.
-  skills: SessionSkills.default([]),
-  // The same child omission rule applies to selected MCP tool refs. Top-level
-  // omission still applies workspace-default capability MCP tools; explicit []
-  // suppresses those defaults (the first-party OpenGeni server remains added).
-  tools: z.array(ToolRef).default([]),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-  model: z.string().min(1).optional(),
-  reasoningEffort: ReasoningEffort.optional(),
-  latencyMode: LatencyMode.optional(),
-  sandboxBackend: SandboxBackend.optional(),
-  // The enrolled machine (a sandbox id) to run this session on; seeds the
-  // active-sandbox pointer at creation so the FIRST turn routes to the chosen
-  // machine (race-free: the pointer is committed before the worker turn
-  // workflow can read it). An invalid/unowned/offline target fails the create.
-  targetSandboxId: z.string().uuid().optional(),
-  // The working directory the targeted machine runs the session under — the
-  // path/cwd base for its agent exec, terminal, and file dock. Free-form pass-
-  // through: a launch-workspace_root-relative subdir or an absolute machine path
-  // (the agent's resolve_cwd handles both). Only valid WITH targetSandboxId
-  // (workingDir alone is a 422); omitted ⇒ the machine's default workspace_root.
-  workingDir: z.string().min(1).optional(),
-  // Variable set attachment is fixed at session creation; follow-up
-  // user.message events cannot switch or add one.
-  variableSetId: z.string().uuid().optional(),
-  environmentId: z.string().uuid().optional(),
-  // The rig to bind this session to (M3). Its ACTIVE version is resolved and
-  // FROZEN onto the session at create. Omitted ⇒ inherit the workspace default;
-  // null ⇒ explicitly create a rig-less session; UUID ⇒ bind that exact rig.
-  // An id that does not name a rig in the workspace is a 422.
-  rigId: z.string().uuid().nullable().optional(),
-  // The workspace channel to file this session under (rail organization only).
-  // Omitted/null ⇒ unfiled (inbox). An id that does not name a channel in the
-  // workspace is a 422.
-  channelId: z.string().uuid().nullable().optional(),
-  goal: GoalSpec.optional(),
-  clientEventId: SessionOperationKey.optional(),
-  // Workspace-scoped CREATE idempotency key: collapses concurrent/retried
-  // create calls carrying the same key to a single session (partial unique
-  // index on (workspace_id, create_idempotency_key)). Distinct from
-  // clientEventId, whose uniqueness is per-session and so cannot dedup the
-  // creation of a brand-new session. Absent means no create-dedup (each call
-  // is an independent create).
-  idempotencyKey: z.string().min(1).max(200).optional(),
-  // The exact actor-private pre-session draft revision represented by this
-  // create. The durable initializer consumes only this revision. A newer draft
-  // written by a sibling tab survives, while every failed pre-initialization
-  // create leaves the submitted draft intact.
-  expectedNewSessionDraftRevision: z.number().int().nonnegative().optional(),
-  // A child may lower its inherited limit freely; an increase requires
-  // workspace:admin and is checked again at the DB transaction boundary.
-  maxNestedAgentDepth: NestedAgentDepthValue.optional(),
-  // Permissions the session's first-party MCP token should carry. A top-level
-  // omission uses the deployment's worker default; a child omission inherits
-  // the creating session's effective grant. An explicit set is capped at
-  // creation: every requested permission must be held by the creating grant.
-  // A goal-bearing session whose explicit/effective set omits goals:manage is
-  // rejected; creation never silently expands a child beyond that set.
-  firstPartyMcpPermissions: z.array(Permission).optional(),
-  // Exact model-visible selection from the broad first-party OpenGeni MCP
-  // catalog. Omission selects the safe non-connector default; [] intentionally
-  // exposes none.
-  // This does not grant authority: every registered tool is permission-gated.
-  firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
-  // Third-party MCP servers attached only to this session. For an agent-created
-  // child, omission snapshots its trusted immediate parent's server definitions,
-  // policies, connection refs, and encrypted credentials. Explicit arrays,
-  // including [], are authoritative; non-empty explicit arrays require attach
-  // permission. Credential headers are write-only: create responses and events
-  // expose only SessionMcpServerMetadata.
-  mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
-  // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
-  // today's behavior (a context-dependent default resolved server-side: from
-  // inside a session → "shared" with the creator's box, top-level → "new").
-  //   - "shared":  join the CREATOR's box. Requires a parent session (inferred
-  //                from the worker-signed sessionId claim, never caller-supplied);
-  //                top-level "shared" is a 422.
-  //   - "new":     mint a fresh singleton box (group ≡ the new session's id).
-  //   - {groupId}: join a SPECIFIC sibling group in THIS workspace (manager
-  //                fan-out). Validated workspace-scoped (cross-workspace → 404).
-  // A shared spawn inherits the box's (backend, os) — it is literally the same
-  // box; the child cannot pick its own backend. Cross-workspace sharing is
-  // forbidden by construction (the parent/group reads are RLS-workspace-scoped).
-  // ENV-AWARE: the box's variable set is fixed at creation, so a share requires
-  // the SAME variableSetId as the creator's box. On a mismatch the inherited
-  // default silently falls back to an own box; an explicit "shared"/{groupId}
-  // request 422s at create (instead of the first turn dying on the SDK's
-  // manifest-env guard).
-  sandbox: z
-    .union([z.literal("shared"), z.literal("new"), z.object({ groupId: z.string().uuid() })])
-    .optional(),
-}).superRefine((value, context) => {
+export const CreateSessionRequest = withVariableSetIdAlias(
+  {
+    /**
+     * Optional UUID preallocated by an embedding host. This lets the host durably
+     * link its own projection before OpenGeni admits the initial turn. Replays
+     * must pair it with the same idempotency key; OpenGeni never derives host
+     * identity or authorization from the UUID.
+     */
+    requestedSessionId: z.string().uuid().optional(),
+    initialMessage: z.string().min(1).optional(),
+    // Creates the durable session shell without fabricating a user message or
+    // starting an underlying agent turn. Realtime can then become the first
+    // interaction and use the ordinary Send/Steer path when it delegates.
+    startMode: z.literal("realtime").optional(),
+    // Model-visible application context attached to the initial user message.
+    // Standard timeline rendering omits it, while full event/audit reads retain
+    // it. This is ordinary user-role content, not secret or privileged input.
+    modelContext: z.string().trim().min(1).max(32768).optional(),
+    // Per-session agent persona/system instructions (org-visible metadata, NOT a
+    // secret). Rides the SAME system-level instructions channel the per-workspace
+    // agentInstructions rides, composed AFTER the workspace persona so it refines
+    // it for this one session — how a host delivers per-agent-type prompts without
+    // leaking them into the user-visible timeline (it is NEVER emitted as an
+    // event, unlike goal/initialMessage). Trimmed, non-empty. The 32768-char cap
+    // matches the codebase's largest free-form string convention (workspace
+    // variable set variable values). Absent ⇒ byte-identical to today.
+    instructions: z.string().trim().min(1).max(32768).optional(),
+    // Immutable prompt-policy role binding for matching one activated role
+    // policy. This never derives from or grants a human workspace membership
+    // role. Existing callers may continue to use normalized metadata.role as a
+    // compatibility fallback by omitting this field.
+    policyRole: WorkspaceInstructionPolicyRoleKeyInput.optional(),
+    // For an agent-created child, omission inherits the trusted immediate
+    // parent's repository/file context. An explicit array, including [], is
+    // authoritative. Top-level omission remains []. Presence is resolved from
+    // the raw request because this Zod default erases absent-vs-empty.
+    resources: z.array(ResourceRef).default([]),
+    // Inline skills are fixed onto the session. Child omission inherits the
+    // trusted parent's selection; an explicit array, including [], wins.
+    skills: SessionSkills.default([]),
+    // The same child omission rule applies to selected MCP tool refs. Top-level
+    // omission still applies workspace-default capability MCP tools; explicit []
+    // suppresses those defaults (the first-party OpenGeni server remains added).
+    tools: z.array(ToolRef).default([]),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+    model: z.string().min(1).optional(),
+    reasoningEffort: ReasoningEffort.optional(),
+    latencyMode: LatencyMode.optional(),
+    sandboxBackend: SandboxBackend.optional(),
+    // The enrolled machine (a sandbox id) to run this session on; seeds the
+    // active-sandbox pointer at creation so the FIRST turn routes to the chosen
+    // machine (race-free: the pointer is committed before the worker turn
+    // workflow can read it). An invalid/unowned/offline target fails the create.
+    targetSandboxId: z.string().uuid().optional(),
+    // The working directory the targeted machine runs the session under — the
+    // path/cwd base for its agent exec, terminal, and file dock. Free-form pass-
+    // through: a launch-workspace_root-relative subdir or an absolute machine path
+    // (the agent's resolve_cwd handles both). Only valid WITH targetSandboxId
+    // (workingDir alone is a 422); omitted ⇒ the machine's default workspace_root.
+    workingDir: z.string().min(1).optional(),
+    // Variable set attachment is fixed at session creation; follow-up
+    // user.message events cannot switch or add one.
+    variableSetId: z.string().uuid().optional(),
+    environmentId: z.string().uuid().optional(),
+    // The rig to bind this session to (M3). Its ACTIVE version is resolved and
+    // FROZEN onto the session at create. Omitted ⇒ inherit the workspace default;
+    // null ⇒ explicitly create a rig-less session; UUID ⇒ bind that exact rig.
+    // An id that does not name a rig in the workspace is a 422.
+    rigId: z.string().uuid().nullable().optional(),
+    // The workspace channel to file this session under (rail organization only).
+    // Omitted/null ⇒ unfiled (inbox). An id that does not name a channel in the
+    // workspace is a 422.
+    channelId: z.string().uuid().nullable().optional(),
+    goal: GoalSpec.optional(),
+    clientEventId: SessionOperationKey.optional(),
+    // Workspace-scoped CREATE idempotency key: collapses concurrent/retried
+    // create calls carrying the same key to a single session (partial unique
+    // index on (workspace_id, create_idempotency_key)). Distinct from
+    // clientEventId, whose uniqueness is per-session and so cannot dedup the
+    // creation of a brand-new session. Absent means no create-dedup (each call
+    // is an independent create).
+    idempotencyKey: z.string().min(1).max(200).optional(),
+    // The exact actor-private pre-session draft revision represented by this
+    // create. The durable initializer consumes only this revision. A newer draft
+    // written by a sibling tab survives, while every failed pre-initialization
+    // create leaves the submitted draft intact.
+    expectedNewSessionDraftRevision: z.number().int().nonnegative().optional(),
+    // A child may lower its inherited limit freely; an increase requires
+    // workspace:admin and is checked again at the DB transaction boundary.
+    maxNestedAgentDepth: NestedAgentDepthValue.optional(),
+    // Permissions the session's first-party MCP token should carry. A top-level
+    // omission uses the deployment's worker default; a child omission inherits
+    // the creating session's effective grant. An explicit set is capped at
+    // creation: every requested permission must be held by the creating grant.
+    // A goal-bearing session whose explicit/effective set omits goals:manage is
+    // rejected; creation never silently expands a child beyond that set.
+    firstPartyMcpPermissions: z.array(Permission).optional(),
+    // Exact model-visible selection from the broad first-party OpenGeni MCP
+    // catalog. Omission selects the safe non-connector default; [] intentionally
+    // exposes none.
+    // This does not grant authority: every registered tool is permission-gated.
+    firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+    // Third-party MCP servers attached only to this session. For an agent-created
+    // child, omission snapshots its trusted immediate parent's server definitions,
+    // policies, connection refs, and encrypted credentials. Explicit arrays,
+    // including [], are authoritative; non-empty explicit arrays require attach
+    // permission. Credential headers are write-only: create responses and events
+    // expose only SessionMcpServerMetadata.
+    mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
+    // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
+    // today's behavior (a context-dependent default resolved server-side: from
+    // inside a session → "shared" with the creator's box, top-level → "new").
+    //   - "shared":  join the CREATOR's box. Requires a parent session (inferred
+    //                from the worker-signed sessionId claim, never caller-supplied);
+    //                top-level "shared" is a 422.
+    //   - "new":     mint a fresh singleton box (group ≡ the new session's id).
+    //   - {groupId}: join a SPECIFIC sibling group in THIS workspace (manager
+    //                fan-out). Validated workspace-scoped (cross-workspace → 404).
+    // A shared spawn inherits the box's (backend, os) — it is literally the same
+    // box; the child cannot pick its own backend. Cross-workspace sharing is
+    // forbidden by construction (the parent/group reads are RLS-workspace-scoped).
+    // ENV-AWARE: the box's variable set is fixed at creation, so a share requires
+    // the SAME variableSetId as the creator's box. On a mismatch the inherited
+    // default silently falls back to an own box; an explicit "shared"/{groupId}
+    // request 422s at create (instead of the first turn dying on the SDK's
+    // manifest-env guard).
+    sandbox: z
+      .union([z.literal("shared"), z.literal("new"), z.object({ groupId: z.string().uuid() })])
+      .optional(),
+  },
+  { rejectKeys: ["turnInstructions"] },
+).superRefine((value, context) => {
   if (value.startMode !== "realtime" && value.initialMessage === undefined) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -11361,6 +11412,13 @@ export const CreateSessionRequest = withVariableSetIdAlias({
       code: z.ZodIssueCode.custom,
       path: ["initialMessage"],
       message: "initialMessage must be omitted when startMode is realtime",
+    });
+  }
+  if (value.startMode === "realtime" && value.modelContext !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["modelContext"],
+      message: "modelContext requires an initialMessage; attach it to a realtime entry instead",
     });
   }
 });
@@ -11549,9 +11607,9 @@ export const SessionUserMessagePayload = z
   .object({
     text: z.string().default(""),
     annotations: SubmittedTimelineAnnotations.default([]),
-    // System-level host context for this exact turn only. Persisted on the
-    // turn for retry/recovery, never copied into the visible user message.
-    turnInstructions: z.string().trim().min(1).max(32768).optional(),
+    // Model-visible application context attached to this exact user message.
+    // It is retained in full event/history data but omitted by standard UI.
+    modelContext: z.string().trim().min(1).max(32768).optional(),
     resources: z.array(ResourceRef).default([]),
     model: z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
@@ -11596,8 +11654,8 @@ export const SteerSessionMessageRequest = z
   .object({
     text: z.string().default(""),
     annotations: SubmittedTimelineAnnotations.default([]),
-    // Same per-turn system-level context as a queued user.message.
-    turnInstructions: z.string().trim().min(1).max(32768).optional(),
+    // Same model-visible message context as a queued user.message.
+    modelContext: z.string().trim().min(1).max(32768).optional(),
     resources: z.array(ResourceRef).default([]),
     model: z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
@@ -12242,6 +12300,82 @@ export type MachineState = z.infer<typeof MachineState>;
 export const MachineKind = z.enum(["modal", "selfhosted"]);
 export type MachineKind = z.infer<typeof MachineKind>;
 
+/** Diagnostic projection of the single live Connected-Machine runner authority.
+ * It contains no bearer or NATS subject material. `supersededCount` is derived
+ * from the monotonic generation; duplicate-denial evidence records valid
+ * competing processes that were prevented from receiving work. */
+export const MachineConnectionAuthority = z.object({
+  state: z.enum(["not_applicable", "unclaimed", "active", "expired"]),
+  generation: z.number().int().nonnegative(),
+  supersededCount: z.number().int().nonnegative(),
+  leaseExpiresAt: z.string().nullable(),
+  duplicateRunnerDeniedCount: z.number().int().nonnegative(),
+  duplicateRunnerDeniedAt: z.string().nullable(),
+});
+export type MachineConnectionAuthority = z.infer<typeof MachineConnectionAuthority>;
+
+export const MachineRuntimeCapabilities = z.object({
+  exec: z.boolean(),
+  filesystem: z.boolean(),
+  git: z.boolean(),
+  pty: z.boolean(),
+  desktop: z.boolean(),
+  opStream: z.boolean(),
+  browserBridge: z.boolean(),
+});
+export type MachineRuntimeCapabilities = z.infer<typeof MachineRuntimeCapabilities>;
+
+export const MachineUpdateStatus = z.enum([
+  "requested",
+  "accepted",
+  "waiting_for_idle",
+  "downloading",
+  "verifying",
+  "applying",
+  "restarting",
+  "succeeded",
+  "failed",
+]);
+export type MachineUpdateStatus = z.infer<typeof MachineUpdateStatus>;
+
+export const MachineUpdateState = z.object({
+  operationId: z.string().uuid(),
+  status: MachineUpdateStatus,
+  targetVersion: z.string(),
+  expectedBinarySha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .nullable(),
+  errorCode: z.string().nullable(),
+  retryable: z.boolean(),
+  rolledBack: z.boolean(),
+  requestedAt: z.string(),
+  updatedAt: z.string(),
+  completedAt: z.string().nullable(),
+});
+export type MachineUpdateState = z.infer<typeof MachineUpdateState>;
+
+export const MachineRuntime = z.object({
+  installedVersion: z.string().nullable(),
+  binarySha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .nullable(),
+  updateChannel: z.enum(["stable", "beta"]).nullable(),
+  desiredVersion: z.string().nullable(),
+  versionState: z.enum(["unknown", "current", "outdated", "ahead", "updating", "update_failed"]),
+  capabilities: MachineRuntimeCapabilities,
+  update: MachineUpdateState.nullable(),
+});
+export type MachineRuntime = z.infer<typeof MachineRuntime>;
+
+export const UpdateMachineAgentResponse = z.object({
+  operationId: z.string().uuid(),
+  accepted: z.boolean(),
+  targetVersion: z.string(),
+});
+export type UpdateMachineAgentResponse = z.infer<typeof UpdateMachineAgentResponse>;
+
 /**
  * A machine as the Machines dashboard renders it. The workspace's enrolled
  * selfhosted machines PLUS the session's synthetic Modal group box
@@ -12271,6 +12405,10 @@ export const MachineView = z.object({
   allowScreenControl: z.boolean(),
   sharedSessionCount: z.number().int(),
   lastSeenAt: z.string().nullable(),
+  connectionAuthority: MachineConnectionAuthority,
+  // Exact connected-agent build/capabilities and current update operation. Null
+  // for managed/session sandboxes and pre-runtime-reporting synthetic rows.
+  runtime: MachineRuntime.nullable().default(null),
   metrics: MetricSample.nullable(),
 });
 export type MachineView = z.infer<typeof MachineView>;
@@ -12752,7 +12890,7 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-social-provider-tools-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-model-context-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;

@@ -79,6 +79,7 @@ import {
   clearSessionContext,
   getOpenPtySession,
   getEnrollment,
+  getLiveEnrollmentConnection,
   getRetainedProcess,
   getSandbox,
   getSession,
@@ -2257,7 +2258,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
       text: payload.text,
       annotations: payload.annotations,
-      turnInstructions: payload.turnInstructions ?? null,
+      modelContext: payload.modelContext ?? null,
       resources: payload.resources,
       model: payload.model ?? null,
       reasoningEffort: payload.reasoningEffort ?? null,
@@ -2300,7 +2301,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const { accepted } = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
         text: event.payload.text,
         annotations: event.payload.annotations,
-        turnInstructions: event.payload.turnInstructions ?? null,
+        modelContext: event.payload.modelContext ?? null,
         resources: event.payload.resources ?? [],
         model: event.payload.model ?? null,
         reasoningEffort: event.payload.reasoningEffort ?? null,
@@ -2529,12 +2530,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
     let capabilities;
     if (selfhostedActive && activeSandbox.enrollmentId) {
-      const enrollment = await getEnrollment(db, workspaceId, activeSandbox.enrollmentId);
+      const [enrollment, liveConnection] = await Promise.all([
+        getEnrollment(db, workspaceId, activeSandbox.enrollmentId),
+        getLiveEnrollmentConnection(db, workspaceId, activeSandbox.enrollmentId),
+      ]);
       let probeResponded = false;
-      if (enrollment?.status === "active") {
+      if (liveConnection?.connectionInstanceId) {
         const machine = new SelfhostedSession({
           workspaceId,
-          agentId: enrollment.id,
+          agentId: liveConnection.id,
+          connectionInstanceId: liveConnection.connectionInstanceId,
           controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
           relay: relayConfigFromSettings(settings),
           epoch: session.activeEpoch,

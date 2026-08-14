@@ -134,12 +134,16 @@ describe("public editable-artifact browser composition", () => {
         `${demoBaseUrl}/editable-artifacts.html?workspaceId=${encodeURIComponent(workspaceId)}`,
       );
       const documentArtifact = await createArtifact(page, "Document", "E2E product brief");
+      const emptyDocumentSequence = await artifactSequence(documentArtifact);
       await page.getByRole("button", { name: "Start writing" }).click();
       const paragraph = page.getByRole("textbox", { name: "Paragraph" });
       await paragraph.waitFor();
-      await waitForEditorIdle(page, "document");
+      const paragraphSequence = await waitForArtifactAdvance(
+        documentArtifact,
+        emptyDocumentSequence,
+      );
       await paragraph.fill("Durable document text from the real browser session.");
-      await waitForEditorIdle(page, "document");
+      await waitForArtifactAdvance(documentArtifact, paragraphSequence);
       await assertReloadedText(page, "Durable document text from the real browser session.");
       await assertServerAdvanced(documentArtifact);
       await capture(page, "editable-artifact-document-dark.png");
@@ -207,15 +211,29 @@ describe("public editable-artifact browser composition", () => {
       await page.getByRole("button", { name: "Add text box" }).click();
       await waitForEditorIdle(page, "presentation");
       const slideEditor = page.getByRole("application", { name: "Slide 1 editor" });
+      const selectedObjectStatus = page.locator('[role="status"][id$="-presentation-selection"]');
+      await selectedObjectStatus.waitFor({ state: "attached" });
+      expect(await selectedObjectStatus.textContent()).toContain(". Position ");
+      await slideEditor.focus();
+      expect(await slideEditor.evaluate((element) => document.activeElement === element)).toBe(
+        true,
+      );
       await slideEditor.press("Enter");
       const textBox = page.getByRole("textbox", { name: "Edit Text box" });
+      await textBox.waitFor();
       await textBox.fill("A real Worker/WASM slide");
       await textBox.press("Control+Enter");
       await waitForEditorIdle(page, "presentation");
       await page.reload();
       await page.getByRole("option", { name: /^Slide 1/u }).waitFor({ timeout: 30_000 });
       const reloadedSlideEditor = page.getByRole("application", { name: "Slide 1 editor" });
+      await reloadedSlideEditor.focus();
+      expect(
+        await reloadedSlideEditor.evaluate((element) => document.activeElement === element),
+      ).toBe(true);
       await reloadedSlideEditor.press("]");
+      await selectedObjectStatus.waitFor({ state: "attached" });
+      expect(await selectedObjectStatus.textContent()).toContain(". Position ");
       await reloadedSlideEditor.press("Enter");
       expect(await page.getByRole("textbox", { name: "Edit Text box" }).inputValue()).toBe(
         "A real Worker/WASM slide",
@@ -251,9 +269,13 @@ describe("public editable-artifact browser composition", () => {
         `${demoBaseUrl}/editable-artifacts.html?workspaceId=${encodeURIComponent(workspaceId)}`,
       );
       const artifact = await createArtifact(firstPage, "Document", "Live replica proof");
+      const emptyDocumentSequence = await artifactSequence(artifact);
       await firstPage.getByRole("button", { name: "Start writing" }).click();
-      await firstPage.getByRole("textbox", { name: "Paragraph" }).fill("Replica one");
-      await waitForEditorIdle(firstPage, "document");
+      const firstParagraph = firstPage.getByRole("textbox", { name: "Paragraph" });
+      await firstParagraph.waitFor();
+      const paragraphSequence = await waitForArtifactAdvance(artifact, emptyDocumentSequence);
+      await firstParagraph.fill("Replica one");
+      const replicaOneSequence = await waitForArtifactAdvance(artifact, paragraphSequence);
 
       secondPage = await first.newPage();
       secondObserved = observeBrowser(secondPage);
@@ -265,9 +287,12 @@ describe("public editable-artifact browser composition", () => {
         describe: () => secondObserved!.diagnostics.join("\n"),
       });
 
+      // The document editor deliberately leaves the focused contentEditable
+      // under browser/IME ownership. Surrender that local editing lease before
+      // asserting that a remote projection replaces its DOM.
+      await firstParagraph.blur();
       await secondParagraph.fill("Replica two, converged live");
-      await waitForEditorIdle(secondPage, "document");
-      const firstParagraph = firstPage.getByRole("textbox", { name: "Paragraph" });
+      await waitForArtifactAdvance(artifact, replicaOneSequence);
       await waitFor(
         async () => (await firstParagraph.textContent()) === "Replica two, converged live",
         {
@@ -301,6 +326,34 @@ describe("public editable-artifact browser composition", () => {
     });
     expect(resource.headSequence).toBeGreaterThan(0);
     expect(resource.stateHash).toMatch(/^sha256:[0-9a-f]{64}$/u);
+  }
+
+  async function artifactSequence(artifact: Readonly<{ id: string }>): Promise<number> {
+    const resource = await client.getEditableArtifact(workspaceId, artifact.id, {
+      replicaId: createEditableArtifactReplicaId(),
+    });
+    return resource.headSequence;
+  }
+
+  async function waitForArtifactAdvance(
+    artifact: Readonly<{ id: string }>,
+    afterSequence: number,
+  ): Promise<number> {
+    const replicaId = createEditableArtifactReplicaId();
+    let observedSequence = afterSequence;
+    await waitFor(
+      async () => {
+        const resource = await client.getEditableArtifact(workspaceId, artifact.id, { replicaId });
+        observedSequence = resource.headSequence;
+        return observedSequence > afterSequence;
+      },
+      {
+        timeoutMs: 30_000,
+        describe: () =>
+          `artifact ${artifact.id} did not advance beyond ${afterSequence}; observed ${observedSequence}`,
+      },
+    );
+    return observedSequence;
   }
 });
 

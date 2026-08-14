@@ -1,6 +1,7 @@
 import { afterAll, expect, mock, test } from "bun:test";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
+import { readFile } from "node:fs/promises";
 
 const ACCOUNT_ID = "11111111-1111-4111-8111-111111111111";
 const WORKSPACE_ID = "22222222-2222-4222-8222-222222222222";
@@ -35,6 +36,17 @@ const { createApp } = await import("../src/app");
 
 afterAll(() => {
   mock.restore();
+});
+
+test("uses the metadata-only document fence before subject-bound indexing", async () => {
+  const source = await readFile(new URL("../src/app.ts", import.meta.url), "utf8");
+  const start = source.indexOf("const documentIndexer = deps.documentIndexer");
+  const indexer = source.slice(start, source.indexOf("// The API process's own", start));
+  expect(indexer).toContain("getDocumentForIndexing(deps.db, workspaceId, documentId)");
+  expect(indexer).not.toContain("getDocument(deps.db");
+  expect(indexer.indexOf("getDocumentForIndexing")).toBeLessThan(
+    indexer.indexOf("const document = await indexDocumentNow"),
+  );
 });
 
 test("listing document collections provisions Default with a search-only grant", async () => {

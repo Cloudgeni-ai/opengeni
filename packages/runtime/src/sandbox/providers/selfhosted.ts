@@ -1,7 +1,8 @@
 // Bring-your-own-compute: the user's own machine, enrolled via the Rust agent,
-// is reached over the NATS request/reply control plane (the agent subscribes to
-// `agent.<workspace>.<agentId>.rpc`; the subject IS the registry). There is NO
-// provider SDK and NO per-box credential — "the agent is the box".
+// is reached over the NATS request/reply control plane. Postgres resolves the
+// exact claimed runner instance and NATS addresses
+// `agent.<workspace>.<agentId>.connection.<instanceId>.rpc`. There is NO provider
+// SDK and NO per-box credential — "the agent is the box".
 //
 // M3 ships the REAL `SelfhostedSandboxClient`: its `create()`/`resume()` return a
 // `SelfhostedSession` presenting the structural surface (`exec`/`readFile`/

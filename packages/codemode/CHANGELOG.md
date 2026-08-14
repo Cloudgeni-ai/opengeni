@@ -1,5 +1,26 @@
 # @opengeni/codemode
 
+## 0.4.4
+
+### Patch Changes
+
+- Updated dependencies [448117d]
+  - @opengeni/contracts@1.0.1
+
+## 0.4.3
+
+### Patch Changes
+
+- Updated dependencies [083387e]
+- Updated dependencies [11913b7]
+  - @opengeni/contracts@1.0.0
+
+## 0.4.2
+
+### Patch Changes
+
+- 944be7f: Reduce and attribute turn startup latency with lazy sandbox defaults for local development, bounded validator reuse, parallel durable input reads, exact stale-Docker recovery, and low-cardinality worker, runtime, credential, and provider preparation diagnostics.
+
 ## 0.4.1
 
 ### Patch Changes

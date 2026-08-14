@@ -50,6 +50,10 @@ const workerDeathTestTimeoutMs = 360_000;
 // ceiling that covers that scheduling variance without changing any runtime
 // timeout, retry contract, or behavioral assertion.
 const temporalWorkflowTestTimeoutMs = 60_000;
+// This proof spans initial activity admission, cancellation-wait observation,
+// and replacement admission. Each phase gets the same loaded-runner allowance
+// above; the outer ceiling leaves enough room for two delayed polls plus drain.
+const quiescenceReceiptTestTimeoutMs = 120_000;
 const workflowDefinitionsPath = new URL("../../apps/worker/src/workflows.ts", import.meta.url)
   .pathname;
 const legacySandboxReaperWorkflowPath = new URL(
@@ -939,14 +943,23 @@ describe("Temporal workflow integration", () => {
           args: [{ ...scope, sessionId, initialEventId: first.triggerEventId }],
         });
         wakeWorkflow = async () => await handle.signal("queueChanged");
-        await waitFor(() => runs.length === 1);
+        await waitFor(() => runs.length === 1, {
+          timeoutMs: temporalWorkflowTestTimeoutMs,
+          describe: () => "initial turn activity was not admitted",
+        });
         queuedTurns.push(second);
         await handle.signal("userMessage", second.triggerEventId);
         await handle.signal("sessionControl", "control-event");
-        await waitFor(() => cancellationWaitPeeks > 0);
+        await waitFor(() => cancellationWaitPeeks > 0, {
+          timeoutMs: temporalWorkflowTestTimeoutMs,
+          describe: () => "workflow did not observe the durable cancellation-wait boundary",
+        });
         expect(runs).toHaveLength(1);
         allowFirstRunToFinish = true;
-        await waitFor(() => runs.length === 2);
+        await waitFor(() => runs.length === 2, {
+          timeoutMs: temporalWorkflowTestTimeoutMs,
+          describe: () => "replacement turn was not admitted after the quiescence receipt",
+        });
         expect(controls).toEqual([
           { ...scope, sessionId, attemptId: expect.any(String), workflowId },
         ]);
@@ -959,7 +972,7 @@ describe("Temporal workflow integration", () => {
         await run;
       }
     },
-    temporalWorkflowTestTimeoutMs,
+    quiescenceReceiptTestTimeoutMs,
   );
 
   test(

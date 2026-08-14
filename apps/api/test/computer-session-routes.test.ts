@@ -90,7 +90,8 @@ describe("ComputerSession route discipline", () => {
     );
     expect(placement).toContain('expectedPlacement?.kind === "attached_device"');
     expect(placement).toContain("getAttachedBrowserDevice(deps.db");
-    expect(placement).toContain("getEnrollment(");
+    expect(placement).toContain("getLiveEnrollmentConnection(");
+    expect(placement).toContain("enrollment.connectionInstanceId");
     expect(placement).toContain("buildSelfhostedBackendSession({");
     expect(placement).toContain("new NatsControlRpc(");
     expect(placement).toContain(

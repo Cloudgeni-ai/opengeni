@@ -17,11 +17,23 @@ import { opaqueProviderArtifactFingerprints } from "./opaque-artifact";
 import {
   codexRequestStorage,
   type CodexModelRequestEvent,
+  type CodexRequestPreparationPhase,
   type CodexRequestContext,
   type CodexResponseTimeoutPolicy,
   type CodexTokenSnapshot,
   type CodexUsageHeaderSnapshot,
 } from "./request-context";
+
+function emitRequestPreparationDiagnostic(
+  ctx: CodexRequestContext,
+  phase: CodexRequestPreparationPhase,
+): void {
+  try {
+    ctx.onRequestPreparationDiagnostic?.(phase);
+  } catch {
+    // Diagnostic observers are non-blocking and cannot affect transport.
+  }
+}
 import {
   CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
   CodexResponseTimeoutError,
@@ -614,6 +626,7 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
     if (!ctx) {
       return base(input, init); // not a codex turn — passthrough, untouched
     }
+    emitRequestPreparationDiagnostic(ctx, "transport_entry");
 
     const rawUrl =
       typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -700,7 +713,10 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         throw new Error("Model request could not be prepared");
       }
       if (!bodyAlreadyNormalized) {
-        ctx.onRequestOpaqueArtifacts?.({ requestId, fingerprints: requestOpaqueArtifacts });
+        ctx.onRequestOpaqueArtifacts?.({
+          requestId,
+          fingerprints: requestOpaqueArtifacts,
+        });
       }
       headers.set(
         "Idempotency-Key",
@@ -726,6 +742,7 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         policy,
         terminalOutcome: null,
       };
+      emitRequestPreparationDiagnostic(ctx, "wire_request_ready");
       await emitRequestEvent(audit, {
         phase: "started",
         responseObserved: false,
@@ -827,7 +844,9 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
     };
 
     try {
-      let res = await attempt(await ctx.getToken(), 0);
+      const token = await ctx.getToken();
+      emitRequestPreparationDiagnostic(ctx, "credential_ready");
+      let res = await attempt(token, 0);
       if (res.status === 401) {
         res = await attempt(await ctx.refresh(), 1); // single refresh-on-401 retry (spec §1.9)
       }

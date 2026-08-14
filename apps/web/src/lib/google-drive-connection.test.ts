@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import type { ConnectionMetadata, GoogleDriveConnectionMetadata } from "@/types";
 import {
   googleDriveAccountState,
+  googleDriveCanPublish,
+  googleDriveCanReadSources,
   googleDriveConnections,
   googleDriveDisconnectAttempt,
   localConnectedGoogleDrivePreview,
@@ -161,5 +163,19 @@ describe("Google Drive connection lifecycle projection", () => {
         true,
       ),
     ).toMatchObject({ state: "reconsent_required" });
+  });
+
+  test("accepts a publishing-only grant without widening it into source-read authority", () => {
+    const metadata = {
+      ...(connection().metadata as GoogleDriveConnectionMetadata),
+      accessMode: "file_only" as const,
+    };
+    const publishing = connection({
+      grantedScopes: ["https://www.googleapis.com/auth/drive.file"],
+      metadata,
+    });
+    expect(googleDriveAccountState(publishing, true)).toMatchObject({ state: "connected" });
+    expect(googleDriveCanPublish(publishing)).toBe(true);
+    expect(googleDriveCanReadSources(metadata)).toBe(false);
   });
 });

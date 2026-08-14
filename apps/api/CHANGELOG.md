@@ -1,5 +1,60 @@
 # @opengeni/api-router
 
+## 0.30.3
+
+### Patch Changes
+
+- Updated dependencies [448117d]
+  - @opengeni/contracts@1.0.1
+  - @opengeni/core@1.0.1
+  - @opengeni/db@1.0.1
+  - @opengeni/documents@0.5.41
+  - @opengeni/runtime@1.0.1
+  - @opengeni/artifact-tool@0.2.10
+  - @opengeni/codemode@0.4.4
+  - @opengeni/config@0.16.4
+  - @opengeni/events@0.3.112
+  - @opengeni/github@0.4.59
+  - @opengeni/observability@0.7.7
+  - @opengeni/storage@0.2.96
+
+## 0.30.2
+
+### Patch Changes
+
+- 11913b7: Add separately consented Google Drive editable-artifact publishing with an explicit writable destination, connector-action approval policy, Google-native conversion, and retry-safe provider reconciliation.
+- Updated dependencies [083387e]
+- Updated dependencies [11913b7]
+  - @opengeni/contracts@1.0.0
+  - @opengeni/core@1.0.0
+  - @opengeni/db@1.0.0
+  - @opengeni/runtime@1.0.0
+  - @opengeni/artifact-tool@0.2.9
+  - @opengeni/codemode@0.4.3
+  - @opengeni/config@0.16.3
+  - @opengeni/documents@0.5.40
+  - @opengeni/events@0.3.111
+  - @opengeni/github@0.4.58
+  - @opengeni/observability@0.7.6
+  - @opengeni/storage@0.2.95
+
+## 0.30.1
+
+### Patch Changes
+
+- Updated dependencies [944be7f]
+- Updated dependencies [499c70c]
+  - @opengeni/codemode@0.4.2
+  - @opengeni/codex@0.2.17
+  - @opengeni/runtime@0.23.1
+  - @opengeni/db@0.36.1
+  - @opengeni/config@0.16.2
+  - @opengeni/core@0.28.1
+  - @opengeni/documents@0.5.39
+  - @opengeni/events@0.3.110
+  - @opengeni/github@0.4.57
+  - @opengeni/storage@0.2.94
+
 ## 0.30.0
 
 ### Minor Changes

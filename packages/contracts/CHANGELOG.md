@@ -1,5 +1,23 @@
 # @opengeni/contracts
 
+## 1.0.1
+
+### Patch Changes
+
+- 448117d: Enforce fresh per-object Google Drive ACL authorization across Knowledge
+  retrieval and every file-byte consumer, and project only reauthorized,
+  principal-free provider citations.
+
+## 1.0.0
+
+### Major Changes
+
+- 083387e: Replace the removed per-turn `turnInstructions` system-prefix contract with generic per-message `modelContext` content. This is a breaking release-train cutover: old mutating clients are rejected after migration 0240. Context now enters canonical user history without standard timeline rendering, preserves the persistent prompt-cache prefix, and works across initial, queued, steer, realtime delegation, and transcript handoff paths.
+
+### Patch Changes
+
+- 11913b7: Add separately consented Google Drive editable-artifact publishing with an explicit writable destination, connector-action approval policy, Google-native conversion, and retry-safe provider reconciliation.
+
 ## 0.50.0
 
 ### Minor Changes

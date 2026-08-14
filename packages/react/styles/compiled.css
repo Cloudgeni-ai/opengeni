@@ -2127,6 +2127,12 @@
       background-color: color-mix(in oklab, var(--og-color-surface-1) 70%, transparent);
     }
   }
+:where(.og-root).bg-og-surface-1\/75,:where(.og-root) .bg-og-surface-1\/75 {
+    background-color: var(--og-color-surface-1);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--og-color-surface-1) 75%, transparent);
+    }
+  }
 :where(.og-root).bg-og-surface-1\/85,:where(.og-root) .bg-og-surface-1\/85 {
     background-color: var(--og-color-surface-1);
     @supports (color: color-mix(in lab, red, red)) {
@@ -2141,6 +2147,12 @@
   }
 :where(.og-root).bg-og-surface-2,:where(.og-root) .bg-og-surface-2 {
     background-color: var(--og-color-surface-2);
+  }
+:where(.og-root).bg-og-surface-2\/35,:where(.og-root) .bg-og-surface-2\/35 {
+    background-color: var(--og-color-surface-2);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--og-color-surface-2) 35%, transparent);
+    }
   }
 :where(.og-root).bg-og-surface-2\/40,:where(.og-root) .bg-og-surface-2\/40 {
     background-color: var(--og-color-surface-2);

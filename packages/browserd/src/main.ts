@@ -13,6 +13,11 @@ import { ComputerSupervisor } from "./computer-supervisor";
 import { BrowserControlServer } from "./server";
 import { BrowserSupervisor } from "./supervisor";
 
+/** Exact release identity baked into compiled sidecars. Development builds share
+ * one explicit marker with the Rust agent. Missing/mismatched identities fail
+ * closed instead of silently running an old helper with a new controller. */
+export const INTERACTION_RUNTIME_BUILD_ID = process.env.OPENGENI_RUNTIME_BUILD_ID ?? "development";
+
 export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env): Promise<void> {
   const config = await browserdConfig(environment);
   const agentBrowserBinary = config.agentBrowserBinaryPath
@@ -74,6 +79,7 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
       service: "opengeni-browserd",
       status: "ready",
       protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
+      runtimeBuildId: INTERACTION_RUNTIME_BUILD_ID,
       computer: computerSupervisor !== undefined,
       hostname: server.hostname,
       port: server.port,

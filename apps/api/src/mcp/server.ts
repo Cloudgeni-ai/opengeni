@@ -106,7 +106,7 @@ import {
   appendAndPublishTurnEventsFenced,
   publishDurableSessionEvents,
 } from "@opengeni/events";
-import { allowedFirstPartyMcpToolsForSession } from "@opengeni/config";
+import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
 import {
   createSignedState,
   GitHubAppConfigurationError,
@@ -233,6 +233,7 @@ import {
 } from "../integrations/atlassian";
 import { AtlassianConnectionMetadata } from "@opengeni/contracts/atlassian";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
+import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -3369,6 +3370,27 @@ function registerFleetTools(
       sessionId,
     });
 
+  const oneOffCodemodeEnvironment = async (
+    op: RunOnOp,
+  ): Promise<Readonly<Record<string, string>> | undefined> => {
+    if (op.kind !== "exec") return undefined;
+    const claims = exactAgentAttemptClaims(grant);
+    if (!claims || claims.sessionId !== sessionId) return undefined;
+    const material = await mintSandboxCodemodeToken(
+      deps.settings,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId },
+      claims,
+    );
+    if (!material) return undefined;
+    return {
+      OPENGENI_CODEMODE_URL: codemodeWorkspaceUrl(deps.settings, grant.workspaceId),
+      OPENGENI_CODEMODE_TOKEN: material.token,
+      ...(deps.settings.ogtoolPackageSpec
+        ? { OPENGENI_OGTOOL_PACKAGE_SPEC: deps.settings.ogtoolPackageSpec }
+        : {}),
+    };
+  };
+
   server.registerTool(
     "sandboxes_list",
     {
@@ -3421,8 +3443,15 @@ function registerFleetTools(
         ]),
       },
     },
-    async ({ target, op }) =>
-      json(await runOnSandbox(services, await fleetContext(), target, op as RunOnOp)),
+    async ({ target, op }) => {
+      const typedOp = op as RunOnOp;
+      const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
+      return json(
+        await runOnSandbox(services, await fleetContext(), target, typedOp, {
+          ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
+        }),
+      );
+    },
   );
 
   server.registerTool(
@@ -3460,7 +3489,7 @@ function registerConnectedMachineTools(
     "connected_machine_remove",
     {
       description:
-        "Remove one enrolled self-hosted machine while it is offline. Access is revoked, future heartbeat/reconnect credentials are rejected, session/route/lease/archive history is retained, and a fresh human-approved device-flow enrollment is required to reconnect. Pass the enrollmentId from the Machines surface, never a Modal sandbox id. Blocked outcomes include every dependent session and the action needed before retrying. Move each dependent session through the canonical sandbox_swap target=default path before retrying removal; the removal authority never rewrites routes directly.",
+        "Remove one enrolled self-hosted machine while it is offline. Access is revoked, future heartbeat/reconnect credentials are rejected, and session, route, lease, archive, and audit history is retained. Idle dependent sessions are detached atomically; machine-home sessions become compute-less (backend none) until another sandbox is selected. Active turns, live leases, and recovery work remain fail-closed blockers whose typed outcome explains what must settle before retrying. Pass the enrollmentId from the Machines surface, never a Modal sandbox id. Reconnecting later requires a fresh human-approved device-flow enrollment.",
       inputSchema: {
         enrollmentId: z4.string().uuid(),
         expectedUpdatedAt: z4.string().datetime({ offset: true }).optional(),

@@ -757,6 +757,42 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    -- Migration 0243 adds the exact Google Drive object authorization and
+    -- safe-citation projections. Re-converge both capabilities for the same
+    -- supported migrate-then-provision order without granting direct mutation
+    -- of their append-only ACL evidence tables.
+    IF to_regprocedure(
+      format(
+        '%I.google_drive_file_authorized(uuid,uuid,text,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.google_drive_file_authorized(uuid, uuid, text, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.google_drive_file_authorized(uuid, uuid, text, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.google_drive_document_citation(uuid,uuid,text,uuid,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.google_drive_document_citation(uuid, uuid, text, uuid, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.google_drive_document_citation(uuid, uuid, text, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
     IF to_regprocedure(
       format(
         '%I.ensure_managed_human_personal_workspace(uuid,text,uuid)',

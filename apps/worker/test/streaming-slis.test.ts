@@ -9,7 +9,11 @@ import {
   recordModelRequestPhase,
   recordSessionEventAppendLatency,
   recordSessionEventPublishLatency,
+  recordTurnSandboxEstablishPolicy,
+  recordTurnStartupPhase,
+  recordTurnWorkerPreparationTotal,
   StreamTimingMetrics,
+  turnStartupCountBucket,
 } from "../src/observability-metrics";
 
 // Streaming SLIs: pin that each new metric hook fires with the right series, the
@@ -24,7 +28,10 @@ describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
   test("first content delta records TTFT from the response (re)start anchor", async () => {
     const observability = worker();
     let now = 1_000;
-    const timing = new StreamTimingMetrics(observability, { provider: "openai", now: () => now });
+    const timing = new StreamTimingMetrics(observability, {
+      provider: "openai",
+      now: () => now,
+    });
 
     now = 2_000; // 1.0s after construction (≈ runStream start)
     timing.onEvent("agent.message.delta");
@@ -39,7 +46,10 @@ describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
   test("re-arms TTFT after a non-content event (a post-tool response measures model restart)", async () => {
     const observability = worker();
     let now = 1_000;
-    const timing = new StreamTimingMetrics(observability, { provider: "openai", now: () => now });
+    const timing = new StreamTimingMetrics(observability, {
+      provider: "openai",
+      now: () => now,
+    });
 
     now = 2_000;
     timing.onEvent("agent.message.delta"); // TTFT #1 = 1.0
@@ -59,7 +69,10 @@ describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
   test("inter-delta gaps are measured per class and reset across a boundary", async () => {
     const observability = worker();
     let now = 1_000;
-    const timing = new StreamTimingMetrics(observability, { provider: "azure", now: () => now });
+    const timing = new StreamTimingMetrics(observability, {
+      provider: "azure",
+      now: () => now,
+    });
 
     timing.onEvent("agent.message.delta"); // first — no gap
     now = 1_500;
@@ -84,7 +97,10 @@ describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
   test("reasoning and message deltas carry distinct class labels", async () => {
     const observability = worker();
     let now = 0;
-    const timing = new StreamTimingMetrics(observability, { provider: "openai", now: () => now });
+    const timing = new StreamTimingMetrics(observability, {
+      provider: "openai",
+      now: () => now,
+    });
 
     timing.onEvent("agent.reasoning.delta");
     now = 100;
@@ -128,6 +144,132 @@ describe("provider request lifecycle diagnostics", () => {
       /opengeni_model_request_phase_duration_seconds_count\{[^}]*phase="first_byte"[^}]*provider="codex-subscription"[^}]*\} 1\b/,
     );
     expect(metrics).not.toContain("requestId");
+  });
+});
+
+describe("turn startup phase diagnostics", () => {
+  test("records one bounded phase series without request identity", async () => {
+    const observability = worker();
+    recordTurnStartupPhase(observability, {
+      phase: "file_materialization",
+      provider: "codex-subscription",
+      backend: "selfhosted",
+      outcome: "completed",
+      durationSeconds: 0.42,
+      count: 5,
+      cache: "disabled",
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_turn_startup_phase_duration_seconds_sum\{[^}]*backend="selfhosted"[^}]*cache="disabled"[^}]*count_bucket="2-5"[^}]*outcome="completed"[^}]*phase="file_materialization"[^}]*provider="codex-subscription"[^}]*\} 0\.42\b/,
+    );
+    expect(metrics).not.toContain("sessionId");
+    expect(metrics).not.toContain("turnId");
+    expect(metrics).not.toContain("credentialId");
+  });
+
+  test("separates lazy request preparation from the durable request-start audit", async () => {
+    const observability = worker();
+    recordTurnStartupPhase(observability, {
+      phase: "model_request_preparation",
+      provider: "codex-subscription",
+      backend: "docker",
+      outcome: "completed",
+      durationSeconds: 0.21,
+    });
+    recordTurnStartupPhase(observability, {
+      phase: "model_request_audit",
+      provider: "codex-subscription",
+      backend: "docker",
+      outcome: "completed",
+      durationSeconds: 0.08,
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_turn_startup_phase_duration_seconds_sum\{[^}]*phase="model_request_preparation"[^}]*\} 0\.21\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_turn_startup_phase_duration_seconds_sum\{[^}]*phase="model_request_audit"[^}]*\} 0\.08\b/,
+    );
+  });
+
+  test("records bounded tool-preparation subphases", async () => {
+    const observability = worker();
+    for (const phase of [
+      "tool_server_construction",
+      "tool_required_connect",
+      "tool_optional_connect",
+      "tool_attempt_catalog_build",
+      "tool_attempt_catalog_persist",
+    ] as const) {
+      recordTurnStartupPhase(observability, {
+        phase,
+        provider: "codex-subscription",
+        backend: "docker",
+        outcome: "completed",
+        durationSeconds: 0.01,
+        count: 1,
+      });
+    }
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_turn_startup_phase_duration_seconds_count\{[^}]*phase="tool_server_construction"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_turn_startup_phase_duration_seconds_count\{[^}]*phase="tool_attempt_catalog_persist"[^}]*\} 1\b/,
+    );
+  });
+
+  test("records worker preparation separately from lazy request phases", async () => {
+    const observability = worker();
+    recordTurnWorkerPreparationTotal(observability, {
+      provider: "codex-subscription",
+      backend: "docker",
+      outcome: "completed",
+      durationSeconds: 1.4,
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_turn_worker_preparation_duration_seconds_sum\{[^}]*backend="docker"[^}]*outcome="completed"[^}]*provider="codex-subscription"[^}]*\} 1\.4\b/,
+    );
+  });
+
+  test("records only bounded sandbox establish-policy labels", async () => {
+    const observability = worker();
+    recordTurnSandboxEstablishPolicy(observability, {
+      policy: "on-demand",
+      reason: "eligible",
+      backend: "docker",
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_turn_sandbox_establish_policy_total\{[^}]*backend="docker"[^}]*policy="on-demand"[^}]*reason="eligible"[^}]*\} 1\b/,
+    );
+    expect(metrics).not.toContain("sessionId");
+    expect(metrics).not.toContain("sandboxId");
+    expect(metrics).not.toContain("credentialId");
+  });
+
+  test("buckets setup cardinality without exposing raw counts", () => {
+    expect([-1, Number.NaN, Number.POSITIVE_INFINITY].map(turnStartupCountBucket)).toEqual([
+      "unknown",
+      "unknown",
+      "unknown",
+    ]);
+    expect([0, 1, 2, 5, 6, 20, 21].map(turnStartupCountBucket)).toEqual([
+      "0",
+      "1",
+      "2-5",
+      "2-5",
+      "6-20",
+      "6-20",
+      "21+",
+    ]);
   });
 });
 

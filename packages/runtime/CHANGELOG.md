@@ -1,5 +1,43 @@
 # @opengeni/runtime
 
+## 1.0.1
+
+### Patch Changes
+
+- Updated dependencies [8bb860b]
+- Updated dependencies [448117d]
+  - @opengeni/sdk@1.0.1
+  - @opengeni/contracts@1.0.1
+  - @opengeni/codemode@0.4.4
+  - @opengeni/config@0.16.4
+
+## 1.0.0
+
+### Major Changes
+
+- 083387e: Replace the removed per-turn `turnInstructions` system-prefix contract with generic per-message `modelContext` content. This is a breaking release-train cutover: old mutating clients are rejected after migration 0240. Context now enters canonical user history without standard timeline rendering, preserves the persistent prompt-cache prefix, and works across initial, queued, steer, realtime delegation, and transcript handoff paths.
+
+### Patch Changes
+
+- 11913b7: Add separately consented Google Drive editable-artifact publishing with an explicit writable destination, connector-action approval policy, Google-native conversion, and retry-safe provider reconciliation.
+- Updated dependencies [083387e]
+- Updated dependencies [11913b7]
+  - @opengeni/contracts@1.0.0
+  - @opengeni/sdk@1.0.0
+  - @opengeni/codemode@0.4.3
+  - @opengeni/config@0.16.3
+
+## 0.23.1
+
+### Patch Changes
+
+- 944be7f: Reduce and attribute turn startup latency with lazy sandbox defaults for local development, bounded validator reuse, parallel durable input reads, exact stale-Docker recovery, and low-cardinality worker, runtime, credential, and provider preparation diagnostics.
+- Updated dependencies [944be7f]
+  - @opengeni/codemode@0.4.2
+  - @opengeni/codex@0.2.17
+  - @opengeni/config@0.16.2
+  - @opengeni/sdk@0.57.0
+
 ## 0.23.0
 
 ### Minor Changes

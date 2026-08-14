@@ -2464,10 +2464,10 @@ export const sessions = pgTable(
     status: text("status").notNull().default("queued"),
     initialMessage: losslessText("initial_message").notNull(),
     initialMessageCodecVersion: losslessCodecVersion("initial_message_codec_version"),
-    // Invisible host context frozen with the winning session create. The
-    // initial turn copies this value so an idempotent repair can never adopt a
-    // retrying caller's different instructions.
-    initialTurnInstructions: text("initial_turn_instructions"),
+    // Model-visible application context frozen with the winning create. The
+    // initial turn copies it into the canonical user message so an idempotent
+    // repair cannot adopt a retrying caller's different message context.
+    initialModelContext: text("initial_model_context"),
     title: text("title"),
     titleSource: text("title_source"),
     // Per-session agent persona/system instructions supplied at create (the
@@ -2761,6 +2761,11 @@ export const sessions = pgTable(
       table.workspaceId,
       table.rootSessionId,
       table.nestedAgentDepth,
+    ),
+    initialModelContextValid: check(
+      "sessions_initial_model_context_check",
+      sql`${table.initialModelContext} is null
+        or opengeni_private.model_context_value_valid(${table.initialModelContext})`,
     ),
   }),
 );
@@ -3115,6 +3120,9 @@ export const sessionRealtimeEntries = pgTable(
     textCodecVersion: losslessCodecVersion("text_codec_version"),
     payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
+    // Application context for an exact provider-in delegation or finalized
+    // transcript. It is materialized as ordinary user-role message content.
+    modelContext: text("model_context"),
     clientAckedAt: timestamp("client_acked_at", { withTimezone: true }),
     providerAckedAt: timestamp("provider_acked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3189,6 +3197,15 @@ export const sessionRealtimeEntries = pgTable(
       sql`(${table.kind} = 'user_transcript' and ${table.role} = 'user' and ${table.text} is not null)
         or (${table.kind} = 'assistant_transcript' and ${table.role} = 'assistant' and ${table.text} is not null)
         or (${table.kind} not in ('user_transcript', 'assistant_transcript') and ${table.role} is null)`,
+    ),
+    modelContextValid: check(
+      "session_realtime_entries_model_context_check",
+      sql`${table.modelContext} is null
+        or (
+          ${table.direction} = 'provider_in'
+          and ${table.kind} in ('delegation_call', 'user_transcript', 'assistant_transcript')
+          and opengeni_private.model_context_value_valid(${table.modelContext})
+        )`,
     ),
   }),
 );
@@ -4497,9 +4514,10 @@ export const sessionTurns = pgTable(
     prompt: losslessText("prompt").notNull(),
     promptCodecVersion: losslessCodecVersion("prompt_codec_version"),
     annotations: jsonb("annotations").$type<TimelineAnnotation[]>().notNull().default([]),
-    // Host context for this exact turn. System-level at runtime and deliberately
-    // separate from the visible prompt/event payload.
-    turnInstructions: text("turn_instructions"),
+    // Application context for this exact user message. It is copied into the
+    // canonical user-role history item at claim and omitted from public queue
+    // projections; full event/audit data retains it.
+    modelContext: text("model_context"),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
     // false = inherit the durable session policy; true = this turn explicitly
@@ -4578,6 +4596,11 @@ export const sessionTurns = pgTable(
     latencyModeValid: check(
       "session_turns_latency_mode_check",
       sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
+    ),
+    modelContextValid: check(
+      "session_turns_model_context_check",
+      sql`${table.modelContext} is null
+        or opengeni_private.model_context_value_valid(${table.modelContext})`,
     ),
   }),
 );
@@ -7331,6 +7354,17 @@ export const enrollmentExposureValues = ["whole-machine"] as const;
 export const enrollmentStatusValues = ["active", "revoked"] as const;
 export const enrollmentOsValues = ["linux", "macos", "windows"] as const;
 export const sandboxKindValues = ["modal", "selfhosted"] as const;
+export const agentUpdateStatusValues = [
+  "requested",
+  "accepted",
+  "waiting_for_idle",
+  "downloading",
+  "verifying",
+  "applying",
+  "restarting",
+  "succeeded",
+  "failed",
+] as const;
 
 // One row per registered machine. The agent's ed25519 PUBLIC key IS the machine
 // identity (the NATS control-plane subject the agent subscribes to maps to it).
@@ -7371,6 +7405,21 @@ export const enrollments = pgTable(
     // 1; every successful re-enrollment increments this atomically before a new
     // bearer is signed. Auth and self-revoke require an exact row/claim match.
     credentialGeneration: integer("credential_generation").notNull().default(1),
+    // One live runner instance owns this enrollment's data-plane address at a
+    // time. Auth-callout claims/renews the lease before NATS grants a connection;
+    // every operational subject includes the instance id, so an older still-open
+    // socket cannot receive work after a successor claims authority.
+    connectionInstanceId: text("connection_instance_id"),
+    connectionGeneration: integer("connection_generation").notNull().default(0),
+    connectionLeaseExpiresAt: timestamp("connection_lease_expires_at", { withTimezone: true }),
+    // Durable diagnostics for valid cloned credentials / duplicate daemons that
+    // were blocked while another process held the live authority lease.
+    connectionDuplicateDeniedCount: integer("connection_duplicate_denied_count")
+      .notNull()
+      .default(0),
+    connectionDuplicateDeniedAt: timestamp("connection_duplicate_denied_at", {
+      withTimezone: true,
+    }),
     os: text("os", { enum: enrollmentOsValues }).notNull().default("linux"),
     arch: text("arch").notNull().default("x86_64"),
     // Heartbeat liveness cursor. Null until the first connect.
@@ -7383,6 +7432,29 @@ export const enrollments = pgTable(
     // (the default) ⇒ no goodbye pending — today's last_seen-aging behavior.
     wentOfflineAt: timestamp("went_offline_at", { withTimezone: true }),
     wentOfflineReason: text("went_offline_reason"),
+    // Exact running build + negotiated capability truth, refreshed from the
+    // authoritative process Hello. Null means an older agent has not reported it.
+    agentVersion: text("agent_version"),
+    agentBinarySha256: text("agent_binary_sha256"),
+    agentUpdateChannel: text("agent_update_channel", { enum: ["stable", "beta"] as const }),
+    agentCapabilities: jsonb("agent_capabilities")
+      .$type<Record<string, boolean>>()
+      .notNull()
+      .default({}),
+    // One current/most-recent self-update. The accepting connection coordinates
+    // fence every progress write; a successor Hello is the only success signal.
+    agentUpdateOperationId: uuid("agent_update_operation_id"),
+    agentUpdateStatus: text("agent_update_status", { enum: agentUpdateStatusValues }),
+    agentUpdateTargetVersion: text("agent_update_target_version"),
+    agentUpdateExpectedBinarySha256: text("agent_update_expected_binary_sha256"),
+    agentUpdateErrorCode: text("agent_update_error_code"),
+    agentUpdateRetryable: boolean("agent_update_retryable").notNull().default(false),
+    agentUpdateRolledBack: boolean("agent_update_rolled_back").notNull().default(false),
+    agentUpdateConnectionInstanceId: text("agent_update_connection_instance_id"),
+    agentUpdateConnectionGeneration: integer("agent_update_connection_generation"),
+    agentUpdateRequestedAt: timestamp("agent_update_requested_at", { withTimezone: true }),
+    agentUpdateUpdatedAt: timestamp("agent_update_updated_at", { withTimezone: true }),
+    agentUpdateCompletedAt: timestamp("agent_update_completed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -7395,6 +7467,57 @@ export const enrollments = pgTable(
     ),
     // List a workspace's ACTIVE machines without scanning revoked rows.
     workspaceStatus: index("enrollments_workspace_status_idx").on(table.workspaceId, table.status),
+    connectionAuthorityShape: check(
+      "enrollments_connection_authority_shape_chk",
+      sql`(${table.connectionInstanceId} is null and ${table.connectionLeaseExpiresAt} is null)
+        or (${table.connectionInstanceId} is not null
+          and length(${table.connectionInstanceId}) between 1 and 128
+          and ${table.connectionLeaseExpiresAt} is not null)`,
+    ),
+    connectionGenerationNonnegative: check(
+      "enrollments_connection_generation_chk",
+      sql`${table.connectionGeneration} >= 0`,
+    ),
+    agentBinarySha256Shape: check(
+      "enrollments_agent_binary_sha256_chk",
+      sql`${table.agentBinarySha256} is null or ${table.agentBinarySha256} ~ '^[0-9a-f]{64}$'`,
+    ),
+    agentUpdateChannelShape: check(
+      "enrollments_agent_update_channel_chk",
+      sql`${table.agentUpdateChannel} is null or ${table.agentUpdateChannel} in ('stable', 'beta')`,
+    ),
+    agentUpdateExpectedBinarySha256Shape: check(
+      "enrollments_agent_update_expected_binary_sha256_chk",
+      sql`${table.agentUpdateExpectedBinarySha256} is null or ${table.agentUpdateExpectedBinarySha256} ~ '^[0-9a-f]{64}$'`,
+    ),
+    agentUpdateStateShape: check(
+      "enrollments_agent_update_state_shape_chk",
+      sql`(
+        (${table.agentUpdateOperationId} is null
+          and ${table.agentUpdateStatus} is null
+          and ${table.agentUpdateTargetVersion} is null
+          and ${table.agentUpdateConnectionInstanceId} is null
+          and ${table.agentUpdateConnectionGeneration} is null
+          and ${table.agentUpdateRequestedAt} is null
+          and ${table.agentUpdateUpdatedAt} is null)
+        or
+        (${table.agentUpdateOperationId} is not null
+          and ${table.agentUpdateStatus} in (
+            'requested', 'accepted', 'waiting_for_idle', 'downloading', 'verifying',
+            'applying', 'restarting', 'succeeded', 'failed'
+          )
+          and ${table.agentUpdateTargetVersion} is not null
+          and ${table.agentUpdateConnectionInstanceId} is not null
+          and ${table.agentUpdateConnectionGeneration} is not null
+          and ${table.agentUpdateConnectionGeneration} >= 0
+          and ${table.agentUpdateRequestedAt} is not null
+          and ${table.agentUpdateUpdatedAt} is not null)
+      )`,
+    ),
+    connectionDuplicateDeniedCountNonnegative: check(
+      "enrollments_connection_duplicate_denied_count_chk",
+      sql`${table.connectionDuplicateDeniedCount} >= 0`,
+    ),
   }),
 );
 

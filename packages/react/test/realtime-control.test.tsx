@@ -175,6 +175,62 @@ describe("ordinary session Codex realtime control", () => {
     }
   });
 
+  test("keeps one controller while exposing the latest host model-context callback", async () => {
+    let factoryCalls = 0;
+    let capturedContext: (() => string | undefined) | undefined;
+    const factory: SessionRealtimeControllerFactory = (options) => {
+      factoryCalls += 1;
+      capturedContext = options.getModelContext;
+      return {
+        snapshot: () => idle,
+        subscribe(listener) {
+          listener(idle);
+          return () => undefined;
+        },
+        start: async () => undefined,
+        observeLifecycle: async () => undefined,
+        heartbeat: async () => undefined,
+        flush: async () => undefined,
+        ingestProviderEvent: async () => undefined,
+        retry: async () => undefined,
+        retryAudibleOutput: async () => true,
+        setInputMuted: () => undefined,
+        setOutputMuted: () => undefined,
+        stop: async () => undefined,
+        close: () => undefined,
+      };
+    };
+    const client = {} as OpenGeniClient;
+
+    function Harness({ context }: { context: string }) {
+      useSessionRealtime({
+        client,
+        workspaceId: "11111111-1111-4111-8111-111111111111",
+        sessionId: "22222222-2222-4222-8222-222222222222",
+        sessionStatus: "idle",
+        effectiveControl,
+        events: [],
+        eventsReady: true,
+        codexConnected: true,
+        getModelContext: () => context,
+        controllerFactory: factory,
+      });
+      return null;
+    }
+
+    await act(async () => root.render(<Harness context="first" />));
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (factoryCalls > 0) break;
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    }
+    expect(factoryCalls).toBe(1);
+    expect(capturedContext?.()).toBe("first");
+
+    await act(async () => root.render(<Harness context="second" />));
+    expect(factoryCalls).toBe(1);
+    expect(capturedContext?.()).toBe("second");
+  });
+
   test("renders the compact accessible voice action and switches from start to end", async () => {
     const calls: string[] = [];
     await act(async () => {
@@ -496,6 +552,146 @@ describe("ordinary session Codex realtime control", () => {
     expect(
       localStorage.getItem("opengeni:realtime-model:11111111-1111-4111-8111-111111111111"),
     ).toBe("supergrok/grok-voice-think-fast-2.0");
+  });
+
+  test("deduplicates catalog loads and reuses the settled catalog across remounts", async () => {
+    const workspaceId = "66666666-6666-4666-8666-666666666666";
+    let requests = 0;
+    const now = spyOn(Date, "now").mockReturnValue(1_000_000);
+    const client = {
+      getWorkspaceRealtimeModelCatalog: async () => {
+        requests += 1;
+        return {
+          models: [
+            {
+              id: "supergrok/grok-voice-think-fast-2.0" as const,
+              label: "Grok Voice",
+              provider: "Connected SuperGrok" as const,
+              description: "Fast native Grok speech-to-speech",
+              available: true,
+              unavailableReason: null,
+              recommended: true,
+            },
+          ],
+        };
+      },
+    } as unknown as OpenGeniClient;
+
+    function Selection() {
+      const selection = useRealtimeModelSelection({ client, workspaceId, codexConnected: false });
+      return <output>{selection.selectedModel.label}</output>;
+    }
+
+    try {
+      for (let episode = 0; episode < 25; episode += 1) {
+        await act(async () => root.render(<Selection key={episode} />));
+        await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+        expect(container.querySelector("output")?.textContent).toBe("Grok Voice");
+      }
+      expect(requests).toBe(1);
+
+      now.mockReturnValue(1_060_001);
+      await act(async () => root.render(<Selection key="expired" />));
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(requests).toBe(2);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  test("shares an in-flight catalog load between concurrent controls", async () => {
+    const workspaceId = "77777777-7777-4777-8777-777777777777";
+    let requests = 0;
+    let resolveCatalog!: (value: {
+      models: Array<{
+        id: "gpt-live-1-boulder-alpha";
+        label: string;
+        provider: "Connected Codex";
+        description: string;
+        available: boolean;
+        unavailableReason: null;
+        recommended: boolean;
+      }>;
+    }) => void;
+    const response = new Promise<Parameters<typeof resolveCatalog>[0]>((resolve) => {
+      resolveCatalog = resolve;
+    });
+    const client = {
+      getWorkspaceRealtimeModelCatalog: async () => {
+        requests += 1;
+        return await response;
+      },
+    } as unknown as OpenGeniClient;
+
+    function Selection() {
+      const selection = useRealtimeModelSelection({ client, workspaceId, codexConnected: true });
+      return <output>{selection.selectedModel.label}</output>;
+    }
+
+    await act(async () =>
+      root.render(
+        <>
+          <Selection />
+          <Selection />
+        </>,
+      ),
+    );
+    expect(requests).toBe(1);
+    await act(async () => {
+      resolveCatalog({
+        models: [
+          {
+            id: "gpt-live-1-boulder-alpha",
+            label: "Codex Live",
+            provider: "Connected Codex",
+            description: "Deep session integration",
+            available: true,
+            unavailableReason: null,
+            recommended: false,
+          },
+        ],
+      });
+      await response;
+    });
+    expect(container.querySelectorAll("output")).toHaveLength(2);
+    expect(requests).toBe(1);
+  });
+
+  test("does not cache a failed catalog load", async () => {
+    const workspaceId = "88888888-8888-4888-8888-888888888888";
+    let requests = 0;
+    const client = {
+      getWorkspaceRealtimeModelCatalog: async () => {
+        requests += 1;
+        if (requests === 1) throw new Error("catalog temporarily unavailable");
+        return {
+          models: [
+            {
+              id: "gpt-live-1-boulder-alpha" as const,
+              label: "Codex Live",
+              provider: "Connected Codex" as const,
+              description: "Deep session integration",
+              available: true,
+              unavailableReason: null,
+              recommended: false,
+            },
+          ],
+        };
+      },
+    } as unknown as OpenGeniClient;
+
+    function Selection() {
+      const selection = useRealtimeModelSelection({ client, workspaceId, codexConnected: true });
+      return <output>{selection.selectedModel.label}</output>;
+    }
+
+    await act(async () => root.render(<Selection key="failed" />));
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(requests).toBe(1);
+    await act(async () => root.render(<Selection key="retry" />));
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(requests).toBe(2);
+    expect(container.querySelector("output")?.textContent).toBe("Codex Live");
   });
 
   test("configures the voice model picker below the new-session composer", async () => {

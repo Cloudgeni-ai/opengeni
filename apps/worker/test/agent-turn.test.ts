@@ -91,6 +91,8 @@ import {
   requiresSignedFileResourceDownloads,
   resolveActiveSandboxBackend,
   runMandatoryHistoryPersistenceStep,
+  sandboxEstablishPolicyDecision,
+  sandboxFileMaterializationOutcome,
   safeErrorDiagnostic,
   sandboxArtifactRuntimeAdmission,
   sandboxDeadlineRotationRecoveryDelayMs,
@@ -104,7 +106,7 @@ import {
   lazyToolTransportForTurn,
   turnExecutionPolicyBillingIdentity,
   turnOperationCancellationFailure,
-  unavailableMcpTurnInstructions,
+  unavailableMcpOperationalContext,
   waitForTurnOperation,
   waitForTurnFinalizerStep,
   waitForTurnStreamCleanup,
@@ -195,10 +197,10 @@ describe("Connected Machine durable stream finalization", () => {
   });
 });
 
-describe("disconnected MCP turn instructions", () => {
+describe("disconnected MCP operational context", () => {
   test("warns the model without exposing an unbounded unavailable registry", () => {
     expect(
-      unavailableMcpTurnInstructions({
+      unavailableMcpOperationalContext({
         droppedIds: ["cap-linear", "cap-slack"],
         droppedCount: 4,
       }),
@@ -208,11 +210,11 @@ describe("disconnected MCP turn instructions", () => {
   });
 
   test("is absent when no selected server was dropped", () => {
-    expect(unavailableMcpTurnInstructions({ droppedIds: [], droppedCount: 0 })).toBeUndefined();
+    expect(unavailableMcpOperationalContext({ droppedIds: [], droppedCount: 0 })).toBeUndefined();
   });
 
   test("keeps a generic warning when legacy ids cannot be projected safely", () => {
-    expect(unavailableMcpTurnInstructions({ droppedIds: [], droppedCount: 1 })).toContain(
+    expect(unavailableMcpOperationalContext({ droppedIds: [], droppedCount: 1 })).toContain(
       "1 unavailable server(s)",
     );
   });
@@ -2552,6 +2554,59 @@ describe("on-turn recording gate (selfhosted machines have no in-box capture plu
 });
 
 describe("lazy sandbox provisioner single-flight", () => {
+  test("file materialization metrics fail when any download fails softly", () => {
+    expect(sandboxFileMaterializationOutcome([])).toBe("completed");
+    expect(
+      sandboxFileMaterializationOutcome([
+        {
+          fileId: "file-1",
+          filename: "input.pdf",
+          path: "/workspace/input.pdf",
+          reason: "provider returned unavailable",
+        },
+      ]),
+    ).toBe("failed");
+  });
+
+  test("establish policy reports the first bounded eager reason", () => {
+    const base = {
+      lazyEnabled: true,
+      machinePrimary: false,
+      sandboxBackend: "docker" as const,
+      hasInitialRunCredentialMaterial: false,
+      generatedVideoFileCount: 0,
+      hasSignedFileResources: false,
+    };
+
+    expect(sandboxEstablishPolicyDecision(base)).toEqual({
+      policy: "on-demand",
+      reason: "eligible",
+    });
+    expect(sandboxEstablishPolicyDecision({ ...base, lazyEnabled: false })).toEqual({
+      policy: "eager",
+      reason: "lazy_disabled",
+    });
+    expect(sandboxEstablishPolicyDecision({ ...base, machinePrimary: true })).toEqual({
+      policy: "eager",
+      reason: "machine_primary",
+    });
+    expect(sandboxEstablishPolicyDecision({ ...base, sandboxBackend: "none" })).toEqual({
+      policy: "eager",
+      reason: "backend_none",
+    });
+    expect(
+      sandboxEstablishPolicyDecision({ ...base, hasInitialRunCredentialMaterial: true }),
+    ).toEqual({ policy: "eager", reason: "initial_run_credentials" });
+    expect(sandboxEstablishPolicyDecision({ ...base, generatedVideoFileCount: 1 })).toEqual({
+      policy: "eager",
+      reason: "generated_video_files",
+    });
+    expect(sandboxEstablishPolicyDecision({ ...base, hasSignedFileResources: true })).toEqual({
+      policy: "eager",
+      reason: "signed_file_resources",
+    });
+  });
+
   test("deadline rotation uses only short anti-churn pacing", () => {
     expect(
       sandboxDeadlineRotationRecoveryDelayMs({

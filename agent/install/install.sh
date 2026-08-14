@@ -54,16 +54,11 @@
 #                              via clap ($OPENGENI_WORKSPACE_ID); the one-liner
 #                              from the Machines page sets it so no UUID is typed.
 #                              Not used on the OPENGENI_ENROLL_TOKEN path.
-#   OPENGENI_INSTALL_REPLACE_APP=1  macOS only. Force-replace an EXISTING
-#                              Developer-ID/Apple-Development-signed
-#                              "OpenGeni Agent.app" bundle. Off by default: a
-#                              non-ad-hoc bundle holds the user's Screen
-#                              Recording / Accessibility (TCC) grants, and any
-#                              binary swap breaks them, so the installer preserves
-#                              it and only re-points the CLI symlink unless this is
-#                              set. (An ad-hoc bundle — our own prior install — is
-#                              always replaced in place: its grants break on any
-#                              update regardless.)
+#   OPENGENI_INSTALL_REPLACE_APP=1  macOS local-build fallback only. Force-replace
+#                              an existing non-ad-hoc app with a locally assembled
+#                              bundle. A verified prebuilt release app from the
+#                              stable OpenGeni signing identity updates normally;
+#                              retaining it would also retain stale helpers.
 #
 # macOS install shape. On macOS the verified binary is installed INSIDE an app
 # bundle at "$HOME/Applications/OpenGeni Agent.app" (a STABLE CFBundleIdentifier,
@@ -368,6 +363,82 @@ asset_url() {
   fi
 }
 
+# The connected runtime is a coherent unit: the Rust control agent, browserd,
+# the pinned agent-browser driver, and the native computer helper must come from
+# the same immutable release. Legacy releases have no companion assets; a new
+# release may provide either all three or none, never a partially mixed runtime.
+interaction_target_from_agent_asset() {
+  printf '%s' "$1" | sed 's/^opengeni-agent-//; s/\.exe$//'
+}
+
+release_asset_available() {
+  _available_url="$(asset_url "$1").sha256"
+  _available_probe="$TMPDIR_OG/available-$(basename "$1").sha256"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$_available_url" -o "$_available_probe" 2>/dev/null
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q "$_available_url" -O "$_available_probe" 2>/dev/null
+  else
+    return 1
+  fi
+}
+
+download_verified_asset() {
+  _verified_name="$1"
+  _verified_destination="$2"
+  _verified_url="$(asset_url "$_verified_name")"
+  _verified_sha="$TMPDIR_OG/$(basename "$_verified_name").sha256"
+  _verified_sig="$TMPDIR_OG/$(basename "$_verified_name").minisig"
+  fetch "$_verified_url" "$_verified_destination" \
+    || die 3 "failed to download $_verified_url"
+  fetch "$_verified_url.sha256" "$_verified_sha" \
+    || die 3 "failed to download $_verified_url.sha256"
+  fetch "$_verified_url.minisig" "$_verified_sig" \
+    || die 3 "failed to download $_verified_url.minisig"
+  _verified_want="$(cut -d' ' -f1 < "$_verified_sha")"
+  _verified_got="$(sha256_of "$_verified_destination")"
+  [ "$_verified_want" = "$_verified_got" ] \
+    || die 4 "checksum mismatch for $_verified_name: expected $_verified_want got $_verified_got"
+  verify_signature "$_verified_destination" "$_verified_sig"
+  chmod 0755 "$_verified_destination"
+}
+
+stage_interaction_companions() {
+  _companion_target="$(interaction_target_from_agent_asset "$1")"
+  _companion_dir="$TMPDIR_OG/interaction-runtime"
+  _browserd_asset="opengeni-browserd-$_companion_target"
+  _agent_browser_asset="opengeni-agent-browser-$_companion_target"
+  _computer_native_asset="opengeni-computer-native-$_companion_target"
+  # browserd is the single presence marker. Releases before the coherent runtime
+  # have none of these files. Once browserd exists, every companion is required
+  # and verified below; a transient/missing second asset fails closed instead of
+  # being misclassified by three independent availability probes.
+  release_asset_available "$_browserd_asset" || return 1
+  rm -rf "$_companion_dir"
+  mkdir -p "$_companion_dir" || die 2 "cannot stage the interaction runtime"
+  download_verified_asset "$_browserd_asset" "$_companion_dir/opengeni-browserd"
+  download_verified_asset "$_agent_browser_asset" "$_companion_dir/agent-browser"
+  download_verified_asset "$_computer_native_asset" "$_companion_dir/opengeni-computer-native"
+  printf '%s' "$_companion_dir"
+}
+
+install_interaction_companions() {
+  _runtime_source="$1"
+  _runtime_destination="$2"
+  [ -n "$_runtime_source" ] || return 0
+  mkdir -p "$_runtime_destination" \
+    || die 2 "cannot create interaction runtime directory $_runtime_destination"
+  for _runtime_name in opengeni-browserd agent-browser opengeni-computer-native; do
+    _runtime_stage="$_runtime_destination/.$_runtime_name.new.$$"
+    cp "$_runtime_source/$_runtime_name" "$_runtime_stage" \
+      || die 2 "cannot stage $_runtime_name in $_runtime_destination"
+    chmod 0755 "$_runtime_stage"
+    mv -f "$_runtime_stage" "$_runtime_destination/$_runtime_name" \
+      || die 2 "cannot install $_runtime_name in $_runtime_destination"
+  done
+  log "installed the version-coherent browser/computer runtime in $_runtime_destination"
+}
+
 # --- Resolve the per-user install dir (no sudo by default) -------------------
 resolve_install_dir() {
   if [ -n "${OPENGENI_INSTALL_DIR:-}" ]; then
@@ -506,15 +577,37 @@ macos_sign_bundle() {
   if [ -n "$OPENGENI_SIGN_IDENTITY_HASH" ]; then
     # Signing with the user's identity may pop a one-time Keychain consent prompt —
     # that is expected and desirable (it is what makes the TCC grants durable).
-    if codesign --force --sign "$OPENGENI_SIGN_IDENTITY_HASH" \
+    _nested_ok=1
+    if [ -d "$_bundle/Contents/Helpers" ]; then
+      for _nested in "$_bundle/Contents/Helpers/"*; do
+        [ -f "$_nested" ] || continue
+        codesign --force --sign "$OPENGENI_SIGN_IDENTITY_HASH" "$_nested" >/dev/null 2>&1 \
+          || _nested_ok=0
+      done
+    fi
+    if [ "$_nested_ok" = "1" ] && codesign --force --sign "$OPENGENI_SIGN_IDENTITY_HASH" \
         --identifier "$OPENGENI_APP_BUNDLE_ID" "$_bundle" >/dev/null 2>&1; then
       log "signed with Developer ID \"$OPENGENI_SIGN_IDENTITY_NAME\" (approve the Keychain prompt if it appears); grants will survive updates that re-sign with this identity"
     else
       log "warning: Developer ID signing failed; falling back to ad-hoc (grants will NOT survive updates)"
+      if [ -d "$_bundle/Contents/Helpers" ]; then
+        for _nested in "$_bundle/Contents/Helpers/"*; do
+          [ -f "$_nested" ] || continue
+          codesign --force --sign - "$_nested" >/dev/null 2>&1 \
+            || die 2 "could not ad-hoc sign nested helper $(basename "$_nested")"
+        done
+      fi
       codesign --force --sign - --identifier "$OPENGENI_APP_BUNDLE_ID" "$_bundle" >/dev/null 2>&1 \
         || log "warning: ad-hoc codesign failed; the app runs but macOS may re-prompt for permissions"
     fi
   else
+    if [ -d "$_bundle/Contents/Helpers" ]; then
+      for _nested in "$_bundle/Contents/Helpers/"*; do
+        [ -f "$_nested" ] || continue
+        codesign --force --sign - "$_nested" >/dev/null 2>&1 \
+          || die 2 "could not ad-hoc sign nested helper $(basename "$_nested")"
+      done
+    fi
     codesign --force --sign - --identifier "$OPENGENI_APP_BUNDLE_ID" "$_bundle" >/dev/null 2>&1 \
       || log "warning: ad-hoc codesign failed; the app runs but macOS may re-prompt for permissions"
     log "ad-hoc signed (no Developer ID identity found); grants will not survive updates"
@@ -557,7 +650,7 @@ macos_swap_bundle_into_place() {
 # place (see macos_sign_bundle for why). Echoes the CLI path on stdout (logs go to
 # stderr via log()).
 install_macos_local_bundle() {
-  _bin="$1"; _install_dir="$2"
+  _bin="$1"; _install_dir="$2"; _runtime_source="${3:-}"
   _app="$HOME/Applications/$OPENGENI_APP_NAME.app"
   _existing_bin="$_app/Contents/MacOS/opengeni-agent"
 
@@ -584,6 +677,10 @@ install_macos_local_bundle() {
   mkdir -p "$_staged_app/Contents/MacOS" || die 2 "cannot create the staging bundle"
   cp "$_bin" "$_staged_app/Contents/MacOS/opengeni-agent" || die 2 "cannot populate the staging bundle"
   chmod 0755 "$_staged_app/Contents/MacOS/opengeni-agent"
+  if [ -n "$_runtime_source" ]; then
+    mkdir -p "$_staged_app/Contents/Helpers" || die 2 "cannot create the helper directory"
+    install_interaction_companions "$_runtime_source" "$_staged_app/Contents/Helpers"
+  fi
   write_info_plist "$_staged_app/Contents/Info.plist" \
     "$(resolve_app_version "$_staged_app/Contents/MacOS/opengeni-agent")"
 
@@ -638,38 +735,41 @@ install_macos_prebuilt_bundle() {
 
   _apps="$HOME/Applications"
   _app="$_apps/$OPENGENI_APP_NAME.app"
-  if macos_bundle_is_signed_nonadhoc "$_app" && [ "${OPENGENI_INSTALL_REPLACE_APP:-0}" != "1" ]; then
-    log "kept the existing signed \"$OPENGENI_APP_NAME.app\" (its signature holds your macOS grants). Set OPENGENI_INSTALL_REPLACE_APP=1 to replace it."
+  # Extract into a temp staging dir, scrub the download's quarantine xattrs, verify
+  # the complete Developer-ID bundle (including nested helpers), then atomically
+  # replace an older bundle. A same-team/same-bundle-id update preserves the TCC
+  # designated requirement; retaining the old app would retain stale helpers.
+  _stage="$TMPDIR_OG/prebuilt-bundle-stage"
+  rm -rf "$_stage"
+  mkdir -p "$_stage" || die 2 "cannot create the staging dir"
+  if command -v ditto >/dev/null 2>&1; then
+    ditto -x -k "$_zip" "$_stage" || die 3 "failed to extract the app bundle"
   else
-    # Extract into a temp staging dir, scrub the download's quarantine xattrs, verify
-    # the (already Developer-ID + notarized) signature there, then atomically swap it
-    # into ~/Applications. We do NOT re-sign a prebuilt bundle — that would break its
-    # notarization; xattr-scrub + verify + atomic swap is all this path needs.
-    _stage="$TMPDIR_OG/prebuilt-bundle-stage"
-    rm -rf "$_stage"
-    mkdir -p "$_stage" || die 2 "cannot create the staging dir"
-    # ditto/unzip both ship with macOS; the archive's root entry is the .app dir.
-    if command -v ditto >/dev/null 2>&1; then
-      ditto -x -k "$_zip" "$_stage" || die 3 "failed to extract the app bundle"
-    else
-      unzip -oq "$_zip" -d "$_stage" || die 3 "failed to extract the app bundle"
-    fi
-    _staged_app="$_stage/$OPENGENI_APP_NAME.app"
-    [ -d "$_staged_app" ] || die 3 "the archive did not contain \"$OPENGENI_APP_NAME.app\""
-    if command -v xattr >/dev/null 2>&1; then
-      xattr -cr "$_staged_app" 2>/dev/null || true
-    fi
-    if command -v codesign >/dev/null 2>&1; then
-      codesign --verify --strict "$_staged_app" >/dev/null 2>&1 \
-        || die 2 "codesign --verify --strict FAILED for the prebuilt bundle; not installing"
-    fi
-    if should_keep_newer_agent "$_app/Contents/MacOS/opengeni-agent" "$_staged_app/Contents/MacOS/opengeni-agent"; then
-      log "kept the newer installed notarized app bundle"
-    else
-      mkdir -p "$_apps" || die 2 "cannot create $_apps"
-      macos_swap_bundle_into_place "$_staged_app" "$_app"
-      log "installed notarized app bundle at $_app"
-    fi
+    unzip -oq "$_zip" -d "$_stage" || die 3 "failed to extract the app bundle"
+  fi
+  _staged_app="$_stage/$OPENGENI_APP_NAME.app"
+  [ -d "$_staged_app" ] || die 3 "the archive did not contain \"$OPENGENI_APP_NAME.app\""
+  for _required in \
+    "$_staged_app/Contents/MacOS/opengeni-agent" \
+    "$_staged_app/Contents/Helpers/opengeni-browserd" \
+    "$_staged_app/Contents/Helpers/agent-browser" \
+    "$_staged_app/Contents/Helpers/opengeni-computer-native"
+  do
+    [ -x "$_required" ] || die 3 "the app bundle is missing executable $(basename "$_required")"
+  done
+  if command -v xattr >/dev/null 2>&1; then
+    xattr -cr "$_staged_app" 2>/dev/null || true
+  fi
+  if command -v codesign >/dev/null 2>&1; then
+    codesign --verify --deep --strict "$_staged_app" >/dev/null 2>&1 \
+      || die 2 "codesign --verify --deep --strict FAILED for the prebuilt bundle; not installing"
+  fi
+  if should_keep_newer_agent "$_app/Contents/MacOS/opengeni-agent" "$_staged_app/Contents/MacOS/opengeni-agent"; then
+    log "kept the newer installed notarized app bundle"
+  else
+    mkdir -p "$_apps" || die 2 "cannot create $_apps"
+    macos_swap_bundle_into_place "$_staged_app" "$_app"
+    log "installed the complete notarized runtime bundle at $_app"
   fi
   link_macos_cli "$_app" "$_install_dir"
 }
@@ -721,13 +821,23 @@ main() {
   verify_signature "$bin_tmp" "$sig_tmp"
   chmod 0755 "$bin_tmp"
 
+  interaction_runtime=""
+  if interaction_runtime="$(stage_interaction_companions "$asset")"; then
+    log "verified the complete version-coherent browser/computer runtime"
+  else
+    # Compatibility with releases predating the interaction runtime. A future
+    # release that publishes one helper publishes all three or fails above.
+    interaction_runtime=""
+    log "this release predates the packaged browser/computer runtime"
+  fi
+
   install_dir="$(resolve_install_dir)"
   if [ "$os" = "Darwin" ]; then
     # macOS: install the verified binary INSIDE an ad-hoc-signed app bundle and make
     # the CLI a symlink into it, so CLI + background app share ONE code-signing
     # identity (the anchor TCC grants attach to). See install_macos_local_bundle.
     _old_mac_version="$(agent_release_version "$HOME/Applications/$OPENGENI_APP_NAME.app/Contents/MacOS/opengeni-agent" 2>/dev/null || true)"
-    dest="$(install_macos_local_bundle "$bin_tmp" "$install_dir")"
+    dest="$(install_macos_local_bundle "$bin_tmp" "$install_dir" "$interaction_runtime")"
     mark_upgrade_if_changed "$_old_mac_version" "$dest"
   else
     # Linux: atomic install — chmod then rename into place so a re-install never
@@ -744,6 +854,7 @@ main() {
       fi
       mv -f "$bin_tmp" "$dest" || die 2 "cannot install to $dest (try OPENGENI_SYSTEM=1 with sudo, or set OPENGENI_INSTALL_DIR)"
       log "installed verified binary to $dest"
+      install_interaction_companions "$interaction_runtime" "$install_dir"
     fi
   fi
 

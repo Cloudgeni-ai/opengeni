@@ -1,5 +1,26 @@
 # @opengeni/sdk
 
+## 1.0.1
+
+### Patch Changes
+
+- 8bb860b: Keep embedded client configurations synchronized with the exported API contract revision and document the fail-closed host integration boundary.
+- Updated dependencies [448117d]
+  - @opengeni/contracts@1.0.1
+
+## 1.0.0
+
+### Major Changes
+
+- 083387e: Replace the removed per-turn `turnInstructions` system-prefix contract with generic per-message `modelContext` content. This is a breaking release-train cutover: old mutating clients are rejected after migration 0240. Context now enters canonical user history without standard timeline rendering, preserves the persistent prompt-cache prefix, and works across initial, queued, steer, realtime delegation, and transcript handoff paths.
+
+### Patch Changes
+
+- 11913b7: Add separately consented Google Drive editable-artifact publishing with an explicit writable destination, connector-action approval policy, Google-native conversion, and retry-safe provider reconciliation.
+- Updated dependencies [083387e]
+- Updated dependencies [11913b7]
+  - @opengeni/contracts@1.0.0
+
 ## 0.57.0
 
 ### Minor Changes

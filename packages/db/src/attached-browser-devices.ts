@@ -336,8 +336,53 @@ export async function listAttachedBrowserDevices(
           asc(schema.attachedBrowserDevices.name),
           asc(schema.attachedBrowserDevices.id),
         );
+      const inventories = await scopedDb
+        .select({
+          enrollmentId: schema.attachedBrowserInventories.enrollmentId,
+          bridgeGeneration: schema.attachedBrowserInventories.bridgeGeneration,
+          revision: schema.attachedBrowserInventories.revision,
+          observedAt: schema.attachedBrowserInventories.observedAt,
+          enrollmentStatus: schema.enrollments.status,
+          connectionLeaseExpiresAt: schema.enrollments.connectionLeaseExpiresAt,
+          wentOfflineAt: schema.enrollments.wentOfflineAt,
+        })
+        .from(schema.attachedBrowserInventories)
+        .innerJoin(
+          schema.enrollments,
+          and(
+            eq(schema.enrollments.id, schema.attachedBrowserInventories.enrollmentId),
+            eq(schema.enrollments.workspaceId, schema.attachedBrowserInventories.workspaceId),
+          ),
+        )
+        .where(eq(schema.attachedBrowserInventories.workspaceId, input.workspaceId))
+        .orderBy(
+          desc(schema.attachedBrowserInventories.observedAt),
+          asc(schema.attachedBrowserInventories.enrollmentId),
+        );
+      const connectedProfilesByEnrollment = new Map<string, number>();
+      for (const row of rows) {
+        if (row.disconnectedAt !== null) continue;
+        connectedProfilesByEnrollment.set(
+          row.enrollmentId,
+          (connectedProfilesByEnrollment.get(row.enrollmentId) ?? 0) + 1,
+        );
+      }
       return AttachedBrowserDeviceListResponse.parse({
         revision: await readWorkspaceInteractionRevision(scopedDb, input.workspaceId),
+        bridges: inventories.map((inventory) => ({
+          enrollmentId: inventory.enrollmentId,
+          state:
+            inventory.enrollmentStatus === "active" &&
+            inventory.wentOfflineAt === null &&
+            inventory.connectionLeaseExpiresAt !== null &&
+            inventory.connectionLeaseExpiresAt.getTime() > Date.now()
+              ? "online"
+              : "offline",
+          bridgeGeneration: inventory.bridgeGeneration,
+          inventoryRevision: inventory.revision,
+          connectedProfileCount: connectedProfilesByEnrollment.get(inventory.enrollmentId) ?? 0,
+          lastSeenAt: inventory.observedAt.toISOString(),
+        })),
         devices: rows.map(deviceFromRow),
       });
     },

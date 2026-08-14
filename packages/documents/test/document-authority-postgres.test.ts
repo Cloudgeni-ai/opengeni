@@ -210,6 +210,17 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
     ).rejects.toThrow("organization document mutations require exact account authority");
 
     for (const client of [forced, scoped]) {
+      const subjectlessOrganizationResults = await searchDocuments(client.db, {
+        accountId: origin.accountId,
+        workspaceId: origin.workspaceId,
+        query: "organization",
+        mode: "keyword",
+        limit: 50,
+      });
+      expect(subjectlessOrganizationResults.map((result) => result.documentId)).toContain(
+        organization.documentId,
+      );
+
       const originResults = await searchDocuments(client.db, {
         accountId: origin.accountId,
         workspaceId: origin.workspaceId,

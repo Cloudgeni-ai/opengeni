@@ -1,5 +1,38 @@
 # @opengeni/documents
 
+## 0.5.41
+
+### Patch Changes
+
+- 448117d: Enforce fresh per-object Google Drive ACL authorization across Knowledge
+  retrieval and every file-byte consumer, and project only reauthorized,
+  principal-free provider citations.
+- Updated dependencies [448117d]
+  - @opengeni/contracts@1.0.1
+  - @opengeni/db@1.0.1
+  - @opengeni/config@0.16.4
+  - @opengeni/storage@0.2.96
+
+## 0.5.40
+
+### Patch Changes
+
+- Updated dependencies [083387e]
+- Updated dependencies [11913b7]
+  - @opengeni/contracts@1.0.0
+  - @opengeni/db@1.0.0
+  - @opengeni/config@0.16.3
+  - @opengeni/storage@0.2.95
+
+## 0.5.39
+
+### Patch Changes
+
+- Updated dependencies [499c70c]
+  - @opengeni/db@0.36.1
+  - @opengeni/config@0.16.2
+  - @opengeni/storage@0.2.94
+
 ## 0.5.38
 
 ### Patch Changes
