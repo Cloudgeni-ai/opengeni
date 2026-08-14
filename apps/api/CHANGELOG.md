@@ -1,5 +1,20 @@
 # @opengeni/api-router
 
+## 0.30.4
+
+### Patch Changes
+
+- ec00479: Add provider-free Google Drive release-readiness receipts, configurable persisted sync budgets, bounded request retry and timeout handling, and scoped sync health telemetry, dashboards, and alerts.
+- Updated dependencies [ec00479]
+  - @opengeni/config@0.16.5
+  - @opengeni/core@1.0.2
+  - @opengeni/db@1.0.2
+  - @opengeni/documents@0.5.42
+  - @opengeni/github@0.4.60
+  - @opengeni/runtime@1.0.2
+  - @opengeni/storage@0.2.97
+  - @opengeni/events@0.3.113
+
 ## 0.30.3
 
 ### Patch Changes

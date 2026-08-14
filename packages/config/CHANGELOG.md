@@ -1,5 +1,11 @@
 # @opengeni/config
 
+## 0.16.5
+
+### Patch Changes
+
+- ec00479: Add provider-free Google Drive release-readiness receipts, configurable persisted sync budgets, bounded request retry and timeout handling, and scoped sync health telemetry, dashboards, and alerts.
+
 ## 0.16.4
 
 ### Patch Changes
