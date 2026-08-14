@@ -883,6 +883,12 @@ async function main(): Promise<void> {
         );
       }
       let controlObservation = await computer.observe(frameTarget.id);
+      if (controlObservation.frameId === null) {
+        throw new Error(
+          "cold computer observation did not prime an exact frame fence before viewer attachment",
+        );
+      }
+      checks.push("computer.cold-observation-frame-fence");
       checks.push("computer.semantic-observation", "computer.semantic-focus");
 
       started = performance.now();
@@ -918,7 +924,7 @@ async function main(): Promise<void> {
             targetId: controlObservation.target.id,
             expectedTargetGeneration: controlObservation.target.targetGeneration,
             expectedObservationId: controlObservation.observationId,
-            expectedFrameId: null,
+            expectedFrameId: controlObservation.frameId,
             action: { type: "keyboard", action: "type", value: marker },
           }),
         );

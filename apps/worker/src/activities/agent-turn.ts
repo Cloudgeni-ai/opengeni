@@ -272,6 +272,7 @@ import {
 import { mergeResourceRefs } from "./common";
 import {
   fetchXaiSubscriptionQuota,
+  isXaiSubscriptionHostedToolContinuationError,
   isXaiSubscriptionTransportError,
   XaiSubscriptionReloginRequired,
   xaiSubscriptionRequestStorage,
@@ -11899,6 +11900,14 @@ export function agentRunFailurePayload(
     return {
       error: "The Codex response stream ended without a terminal response",
       code: "invalid_sse_terminal",
+      retryable: false,
+    };
+  }
+  if (isXaiSubscriptionHostedToolContinuationError(error)) {
+    return {
+      error:
+        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+      code: "xai_hosted_tool_continuation_stalled",
       retryable: false,
     };
   }

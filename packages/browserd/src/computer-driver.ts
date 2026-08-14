@@ -108,9 +108,34 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   async observe(targetId: string): Promise<ComputerObservationValue> {
     this.assertOpen();
     try {
-      return this.projectObservation(
-        await this.readWithRecovery(async (client) => await client.observe(targetId)),
-      );
+      const observation = await this.readWithRecovery(async (client) => {
+        const observed = await client.observe(targetId);
+        if (observed.frameId !== null || observed.target.kind === "app") return observed;
+        const capturable =
+          observed.target.kind === "screen"
+            ? this.capabilities.screenCapture
+            : this.capabilities.windowCapture;
+        if (!capturable) return observed;
+
+        // Native observations intentionally reference the latest exact capture.
+        // A target that has not yet been viewed therefore has no frame fence,
+        // making its first pointer action impossible. Prime one frame only for
+        // that cold path; an active viewer already keeps frameId populated and
+        // pays no additional capture cost.
+        const frame = await client.capture(targetId);
+        if (
+          frame.targetId !== observed.target.id ||
+          frame.targetGeneration !== observed.target.targetGeneration
+        ) {
+          throw new InteractionControllerError(
+            "target_stale",
+            "computer target changed while establishing its frame fence",
+            true,
+          );
+        }
+        return { ...observed, frameId: frame.frameId };
+      });
+      return this.projectObservation(observation);
     } catch (error) {
       throw predispatchError(error);
     }

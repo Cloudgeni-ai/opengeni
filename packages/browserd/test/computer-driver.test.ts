@@ -107,6 +107,26 @@ describe("NativeComputerDriver", () => {
     }
   });
 
+  test("primes one frame fence for a cold visual target and reuses warm observations", async () => {
+    const transport = new FixtureNativeTransport();
+    transport.observationFrameId = null;
+    const driver = new NativeComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    try {
+      await expect(driver.observe("window-1")).resolves.toMatchObject({ frameId: "frame-2" });
+      expect(transport.captures).toBe(1);
+
+      transport.observationFrameId = "frame-2";
+      await expect(driver.observe("window-1")).resolves.toMatchObject({ frameId: "frame-2" });
+      expect(transport.captures).toBe(1);
+    } finally {
+      await driver.close();
+    }
+  });
+
   test("preserves a typed native diagnosis when dispatch outcome is unknown", async () => {
     const transport = new FixtureNativeTransport();
     transport.dispatchError = new NativeComputerError(
@@ -289,6 +309,8 @@ class FixtureNativeTransport implements ComputerNativeTransport {
   closed = false;
   stoppedCaptures = 0;
   startedCaptureOptions: NativeComputerCaptureOptions[] = [];
+  observationFrameId: string | null = "frame-1";
+  captures = 0;
 
   async capabilities(): Promise<ComputerSessionCapabilities> {
     return this.handshake.capabilities;
@@ -300,10 +322,11 @@ class FixtureNativeTransport implements ComputerNativeTransport {
   }
 
   async observe() {
-    return observation("observation-1");
+    return { ...observation("observation-1"), frameId: this.observationFrameId };
   }
 
   async capture(_targetId: string, options?: NativeComputerCaptureOptions) {
+    this.captures += 1;
     const width = Math.min(20, options?.maxWidth ?? 20);
     const height = Math.min(10, Math.max(1, Math.floor((width / 20) * 10)));
     const jpeg = options?.format === "jpeg";

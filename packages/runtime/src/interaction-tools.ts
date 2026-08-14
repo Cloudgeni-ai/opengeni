@@ -95,6 +95,7 @@ const TOOL_PERMISSION = {
 
 const DiscoveryInput = z
   .object({
+    scope: z.enum(["current_session", "workspace"]).optional(),
     includeTerminal: z.boolean().optional(),
     includeArchivedIdentities: z.boolean().optional(),
     includeDisconnectedDevices: z.boolean().optional(),
@@ -461,7 +462,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "discover"],
     title: "Discover browsers and computers",
     description:
-      "List workspace BrowserSessions, ComputerSessions, reusable browser identities, attached-Chrome-capable machine bridges, and actually connected Chrome profiles. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. For requests about the user's existing/current/personal Chrome, call this before browser_open and use an attachedBrowsers device explicitly. Resources are workspace-visible: inspect and reuse relevant peer/child sessions instead of creating duplicates. Leave includeTerminal=false unless ended history is specifically required because terminal history may be large.",
+      "List BrowserSessions and ComputerSessions associated with this agent session, reusable browser identities, attached-Chrome-capable machine bridges, and actually connected Chrome profiles. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. For requests about the user's existing/current/personal Chrome, call this before browser_open and use an attachedBrowsers device explicitly. Set scope=workspace only when peer/child resources are specifically needed; the workspace inventory can be large. Leave includeTerminal=false unless ended history is specifically required.",
     input: DiscoveryInput,
     output: DiscoveryOutput,
     readOnly: true,
@@ -482,12 +483,18 @@ export function createInteractionAttemptToolDefinitions(
         computerRevision: computers.revision,
         identityRevision: identities.revision,
         attachedBrowserRevision: attached.revision,
-        browsers: value.includeTerminal
-          ? browsers.sessions
-          : browsers.sessions.filter((session) => !TERMINAL_LIFECYCLES.has(session.lifecycle)),
-        computers: value.includeTerminal
-          ? computers.sessions
-          : computers.sessions.filter((session) => !TERMINAL_LIFECYCLES.has(session.lifecycle)),
+        browsers: filterDiscoveredSessions(
+          browsers.sessions,
+          input.sessionId,
+          value.scope ?? "current_session",
+          value.includeTerminal ?? false,
+        ),
+        computers: filterDiscoveredSessions(
+          computers.sessions,
+          input.sessionId,
+          value.scope ?? "current_session",
+          value.includeTerminal ?? false,
+        ),
         identities: identities.identities,
         attachedBrowserBridges: attached.bridges,
         attachedBrowsers: attached.devices,
@@ -1000,6 +1007,25 @@ export function createInteractionAttemptToolDefinitions(
   });
 
   return definitions;
+}
+
+function filterDiscoveredSessions<
+  T extends {
+    lifecycle: string;
+    associations: Array<{ sessionId: string }>;
+  },
+>(
+  sessions: T[],
+  sessionId: string,
+  scope: "current_session" | "workspace",
+  includeTerminal: boolean,
+) {
+  return sessions.filter(
+    (session) =>
+      (includeTerminal || !TERMINAL_LIFECYCLES.has(session.lifecycle)) &&
+      (scope === "workspace" ||
+        session.associations.some((association) => association.sessionId === sessionId)),
+  );
 }
 
 export type CreateFirstPartyInteractionAttemptToolsInput = Omit<

@@ -100,6 +100,7 @@ export type SessionChromeProps = {
 
 type GoalPillState =
   | "pursuing"
+  | "waiting"
   | "scheduled"
   | "blocked"
   | "held"
@@ -114,6 +115,7 @@ type QueuedTurnPresentation = {
 
 const GOAL_LABEL: Record<GoalPillState, string> = {
   pursuing: "Pursuing",
+  waiting: "Waiting",
   scheduled: "Scheduled",
   blocked: "Blocked",
   held: "Held",
@@ -156,7 +158,7 @@ export function sessionChromeGoalPillState(
     return continuation.reason === "goal_turn_running"
       ? "pursuing"
       : continuation.reason === "human_turn_running"
-        ? "blocked"
+        ? "waiting"
         : "invariant_broken";
   }
   if (continuation.state === "scheduled") return "scheduled";
@@ -282,10 +284,7 @@ export function SessionChrome({
   const stopping = stoppingKind !== null;
   const canMutateQueue = !readOnly && composer !== undefined;
 
-  const liveGoal =
-    record?.status === "active" &&
-    record.continuation?.state === "running" &&
-    record.continuation.reason === "goal_turn_running";
+  const liveGoal = record?.status === "active";
   const elapsed = useLiveElapsed(
     record?.createdAt,
     Boolean(liveGoal),
@@ -360,7 +359,11 @@ export function SessionChrome({
       });
     }
     if (record && goalState) {
-      const waiting = goalState === "blocked" || goalState === "held" || goalState === "paused";
+      const waiting =
+        goalState === "waiting" ||
+        goalState === "blocked" ||
+        goalState === "held" ||
+        goalState === "paused";
       rows.push({
         id: "goal",
         label: GOAL_LABEL[goalState],
@@ -373,6 +376,8 @@ export function SessionChrome({
         icon:
           goalState === "blocked" || goalState === "invariant_broken" ? (
             <TriangleAlertIcon className="size-3" />
+          ) : goalState === "waiting" ? (
+            <Loader2Icon className="size-3 animate-og-spin" />
           ) : goalState === "paused" || goalState === "held" ? (
             <PauseIcon className="size-3" />
           ) : (

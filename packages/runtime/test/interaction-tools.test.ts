@@ -1,15 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
+import {
+  BrowserSession as BrowserSessionSchema,
+  ComputerSession as ComputerSessionSchema,
+} from "@opengeni/contracts";
 import type {
   AuthRun,
   BrowserActionRequest,
   BrowserActionReceipt,
   BrowserObservation,
+  BrowserSession,
   BrowserTarget,
   ComputerActionRequest,
   ComputerActionReceipt,
   ComputerObservation,
+  ComputerSession,
   ComputerTarget,
   InteractionIntervention,
 } from "@opengeni/contracts";
@@ -168,6 +174,43 @@ describe("interaction attempt tools", () => {
       annotations: { readOnlyHint: true, idempotentHint: true },
     });
     expect(result.structuredContent).toEqual(clipboard);
+  });
+
+  test("keeps discovery task-local by default and exposes workspace scope explicitly", async () => {
+    const current = discoveredBrowserSession(browserSessionId, sessionId);
+    const peer = discoveredBrowserSession(randomUUID(), randomUUID());
+    const currentComputer = discoveredComputerSession(computerSessionId, sessionId);
+    expect(BrowserSessionSchema.parse(current)).toEqual(current);
+    expect(ComputerSessionSchema.parse(currentComputer)).toEqual(currentComputer);
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: 2, sessions: [current, peer] }),
+        listComputerSessions: async () => ({ revision: 1, sessions: [currentComputer] }),
+        listBrowserIdentities: async () => ({ revision: 0, identities: [] }),
+        listAttachedBrowsers: async () => ({ revision: 0, bridges: [], devices: [] }),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_discover"],
+      permissions: ["sessions:read"],
+    });
+
+    const local = await definitions[0]!.execute(
+      {},
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(local.structuredContent).toMatchObject({
+      browsers: [{ id: current.id }],
+      computers: [{ id: currentComputer.id }],
+    });
+
+    const workspace = await definitions[0]!.execute(
+      { scope: "workspace" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect((workspace.structuredContent as { browsers: BrowserSession[] }).browsers).toHaveLength(
+      2,
+    );
   });
 
   test("keeps model and Codemode Browser actions on the same durable operation and fences", async () => {
@@ -569,6 +612,88 @@ function browserTarget(): BrowserTarget {
     selected: true,
     attached: true,
     createdAt: now,
+  };
+}
+
+function discoveredBrowserSession(id: string, associatedSessionId: string): BrowserSession {
+  return {
+    id,
+    accountId,
+    workspaceId,
+    name: "Browser",
+    lifecycle: "starting",
+    placement: { kind: "sandbox_group", sandboxGroupId: randomUUID() },
+    controller: null,
+    driverId: "chromium",
+    engine: "chromium",
+    engineVersion: "1",
+    headless: false,
+    identityId: null,
+    baseRevisionId: null,
+    networkRouteId: null,
+    linkedComputerSessionId: null,
+    capabilities: {
+      semanticObservation: true,
+      screenshots: true,
+      liveFrames: true,
+      humanInput: true,
+      tabs: true,
+      downloads: true,
+      uploads: true,
+      clipboard: true,
+      permissions: true,
+      diagnostics: true,
+      rawCdp: false,
+      linkedComputer: true,
+      privateCheckpoint: true,
+      identityPublication: true,
+      parallelTargets: true,
+    },
+    associations: [
+      {
+        sessionId: associatedSessionId,
+        turnId: null,
+        attemptId: null,
+        relationship: "created",
+        actorSubjectId: "model:test",
+        lastUsedAt: now,
+      },
+    ],
+    createdBySubjectId: "model:test",
+    createdAt: now,
+    lastUsedAt: now,
+    failureCode: null,
+  };
+}
+
+function discoveredComputerSession(id: string, associatedSessionId: string): ComputerSession {
+  return {
+    id,
+    accountId,
+    workspaceId,
+    name: "Computer",
+    lifecycle: "starting",
+    placement: { kind: "sandbox_group", sandboxGroupId: randomUUID() },
+    controller: null,
+    platform: null,
+    adapter: null,
+    seatId: null,
+    displayId: null,
+    capabilities: null,
+    associations: [
+      {
+        sessionId: associatedSessionId,
+        turnId: null,
+        attemptId: null,
+        relationship: "created",
+        actorSubjectId: "model:test",
+        lastUsedAt: now,
+      },
+    ],
+    createdBySubjectId: "model:test",
+    createdAt: now,
+    lastUsedAt: now,
+    failureCode: null,
   };
 }
 
