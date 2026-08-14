@@ -21,6 +21,7 @@ export {
   buildOpenAIClientFromSettings,
   buildProviderClient,
   configureRuntimeMetricsHooks,
+  recordRuntimeMcpToolCallMetric,
 } from "./model-provider-client";
 export {
   modelRequestPolicyForProvider,

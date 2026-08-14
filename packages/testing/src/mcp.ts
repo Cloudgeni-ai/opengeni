@@ -54,6 +54,10 @@ export function startTestMcpServer(
     toolDescriptionBytes?: number;
     /** Inflate one successful call result to exercise runtime result-size limits. */
     toolResultBytes?: number;
+    /** Return a protocol-successful HTTP response carrying MCP `isError: true`. */
+    toolResultIsError?: boolean;
+    /** Override the search result text with a provider-only regression sentinel. */
+    toolResultText?: string;
     /** Advertise the optional MCP output/effect metadata used by catalog tests. */
     richToolMetadata?: boolean;
   } = {},
@@ -155,6 +159,8 @@ export function startTestMcpServer(
         options.beforeToolCall,
         options.toolDescriptionBytes,
         options.toolResultBytes,
+        options.toolResultIsError,
+        options.toolResultText,
         options.richToolMetadata,
       );
       await mcp.connect(transport);
@@ -217,6 +223,8 @@ function buildServer(
   beforeToolCall?: (call: TestMcpToolCall) => void | Promise<void>,
   toolDescriptionBytes?: number,
   toolResultBytes?: number,
+  toolResultIsError?: boolean,
+  toolResultText?: string,
   richToolMetadata?: boolean,
 ): McpServer {
   const server = new McpServer({
@@ -238,10 +246,13 @@ function buildServer(
       calls.push(call);
       await beforeToolCall?.(call);
       return {
+        ...(toolResultIsError ? { isError: true } : {}),
         content: [
           {
             type: "text",
-            text: toolResultBytes ? "r".repeat(toolResultBytes) : `found document for ${query}`,
+            text:
+              toolResultText ??
+              (toolResultBytes ? "r".repeat(toolResultBytes) : `found document for ${query}`),
           },
         ],
       };
