@@ -22,6 +22,7 @@ import {
   ensureManagedAccessForUserWithOrganizationMemberships,
   listConnectionsMetadata,
   loadConnectionCredentialForBroker,
+  persistProviderOAuthConnection,
   type DbClient,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
@@ -167,6 +168,14 @@ function deferred() {
     resolve = settle;
   });
   return { promise, resolve };
+}
+
+async function waitForCondition(check: () => Promise<boolean>, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await check())) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for database test condition");
+    await Bun.sleep(25);
+  }
 }
 
 function providerFixture(
@@ -448,6 +457,126 @@ describe("API Integration provider OAuth", () => {
         and provider_domain = 'www.googleapis.com'
     `;
     expect(persisted).toEqual([]);
+  }, 60_000);
+
+  test("serializes concurrent account revocation after the persistence authority lock", async () => {
+    if (!available) return;
+    const managed = await freshManagedWorkspace();
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const functionName = `test_drive_authority_lock_${suffix}`;
+    const triggerName = `test_drive_authority_lock_${suffix}`;
+    const credentialSentinel = `drive-authority-lock-${suffix}`;
+    const lockKey = Number.parseInt(suffix.slice(0, 7), 16);
+    const blocker = postgres(shared!.adminUrl, { max: 1 });
+    const revoker = postgres(shared!.adminUrl, { max: 1 });
+    let blockerLocked = false;
+    try {
+      await shared!.admin.unsafe(`
+        CREATE FUNCTION ${functionName}() RETURNS trigger
+        LANGUAGE plpgsql AS $body$
+        BEGIN
+          IF NEW.credential_encrypted = '${credentialSentinel}' THEN
+            PERFORM pg_advisory_xact_lock(${lockKey});
+          END IF;
+          RETURN NEW;
+        END
+        $body$;
+        CREATE TRIGGER ${triggerName}
+        BEFORE INSERT ON connections
+        FOR EACH ROW EXECUTE FUNCTION ${functionName}();
+      `);
+      await blocker`select pg_advisory_lock(${lockKey})`;
+      blockerLocked = true;
+
+      const persistence = persistProviderOAuthConnection(client.db, {
+        accountId: managed.accountId,
+        workspaceId: managed.workspaceId,
+        subjectId: null,
+        visibleToSubjectId: managed.subjectId,
+        providerDomain: "www.googleapis.com",
+        kind: "oauth2",
+        status: "active",
+        credentialEncrypted: credentialSentinel,
+        grantedScopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+        metadata: {
+          credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
+          providerFamily: "google",
+          providerPrincipalId: `google-lock-${suffix}`,
+          authorizedDefinitionIds: [GOOGLE_DRIVE_INTEGRATION_DEFINITION.id],
+        },
+        createdBySubjectId: managed.subjectId,
+        updatedBySubjectId: managed.subjectId,
+        credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
+        providerFamily: "google",
+        providerPrincipalId: `google-lock-${suffix}`,
+        workspaceCredentialAuthority: {
+          kind: "google_drive_account_admin",
+          subjectId: managed.subjectId,
+        },
+      });
+      await waitForCondition(async () => {
+        const [row] = await shared!.admin<Array<{ waiting: number }>>`
+          select count(*)::integer as waiting
+          from pg_locks
+          where locktype = 'advisory'
+            and classid = 0
+            and objid = ${lockKey}
+            and granted = false
+        `;
+        return row?.waiting === 1;
+      });
+
+      const revocation = (async () =>
+        await revoker`
+          /* ope124-concurrent-account-revocation-${suffix} */
+          update organization_memberships
+          set status = 'suspended', authorization_revision = authorization_revision + 1,
+              updated_at = now()
+          where account_id = ${managed.accountId} and subject_id = ${managed.subjectId}
+        `)();
+      await waitForCondition(async () => {
+        const [row] = await shared!.admin<Array<{ wait_event_type: string | null }>>`
+          select wait_event_type
+          from pg_stat_activity
+          where query like ${`%ope124-concurrent-account-revocation-${suffix}%`}
+            and state = 'active'
+        `;
+        return row?.wait_event_type === "Lock";
+      });
+
+      await blocker`select pg_advisory_unlock(${lockKey})`;
+      blockerLocked = false;
+      expect(await persistence).toMatchObject({
+        workspaceId: managed.workspaceId,
+        subjectId: null,
+      });
+      await revocation;
+      const [membership] = await shared!.admin<Array<{ status: string }>>`
+        select status
+        from organization_memberships
+        where account_id = ${managed.accountId} and subject_id = ${managed.subjectId}
+      `;
+      expect(membership?.status).toBe("suspended");
+      const [connection] = await shared!.admin<Array<{ credential_encrypted: string }>>`
+        select credential_encrypted
+        from connections
+        where workspace_id = ${managed.workspaceId}
+          and provider_domain = 'www.googleapis.com'
+          and subject_id is null
+      `;
+      expect(connection?.credential_encrypted).toBe(credentialSentinel);
+    } finally {
+      if (blockerLocked)
+        await blocker`select pg_advisory_unlock(${lockKey})`.catch(() => undefined);
+      await blocker.end().catch(() => undefined);
+      await revoker.end().catch(() => undefined);
+      await shared!.admin
+        .unsafe(`DROP TRIGGER IF EXISTS ${triggerName} ON connections`)
+        .catch(() => undefined);
+      await shared!.admin
+        .unsafe(`DROP FUNCTION IF EXISTS ${functionName}()`)
+        .catch(() => undefined);
+    }
   }, 60_000);
 
   test("rejects workspace Google Drive persistence when connections:write is lost after exchange", async () => {
