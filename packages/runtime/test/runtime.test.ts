@@ -2187,6 +2187,88 @@ describe("runtime event normalization", () => {
       }
     });
 
+    test("attempt-local connector binding applies durable policy by exact model name", async () => {
+      const executions: Record<string, unknown>[] = [];
+      const prepared = await prepareAgentTools(testSettings(), [], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        attemptToolDefinitions: [
+          {
+            identity: { serverId: "drive", toolName: "publish" },
+            modelName: "drive_publish",
+            inputSchema: {
+              type: "object",
+              properties: { title: { type: "string" } },
+              required: ["title"],
+              additionalProperties: false,
+            },
+            source: "mcp",
+            approval: "policy",
+            execute: async (args) => {
+              executions.push(args);
+              return { content: [{ type: "text", text: "published" }] };
+            },
+          },
+        ],
+      });
+      const calls: string[] = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async (call) => {
+          calls.push(`prepare:${call.approvalId}:${String((call.arguments as any).title)}`);
+          return { managed: true, decision: "ask" };
+        },
+        begin: async (call) => {
+          calls.push(`begin:${call.approvalId}:${String((call.arguments as any).title)}`);
+          return { allowed: true, managed: true, requestId: "request-drive" };
+        },
+        complete: async ({ requestId, outcome }) => {
+          calls.push(`complete:${requestId}:${outcome}`);
+        },
+      };
+      const agent = buildOpenGeniAgent(testSettings(), [], {
+        mcpServers: prepared.mcpServers,
+        connectorActionPolicy: hooks,
+        attemptConnectorActionBindings: [
+          {
+            modelName: "drive_publish",
+            call: (approvalId, arguments_) => ({
+              approvalId,
+              connectionId: "connection-drive",
+              serverId: "drive",
+              toolName: "publish",
+              arguments: arguments_,
+            }),
+          },
+        ],
+      });
+      try {
+        const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+          (candidate) => candidate.type === "function" && candidate.name === "drive_publish",
+        );
+        if (!tool || tool.type !== "function") throw new Error("attempt connector tool missing");
+        expect(
+          await tool.needsApproval(new RunContext(), { title: "Quarterly" }, "call-drive"),
+        ).toBe(true);
+        expect(
+          await tool.invoke(new RunContext(), JSON.stringify({ title: "Quarterly" }), {
+            toolCall: { callId: "call-drive" },
+          } as any),
+        ).toBeDefined();
+        expect(executions).toEqual([{ title: "Quarterly" }]);
+        expect(calls).toEqual([
+          "prepare:call-drive:Quarterly",
+          "begin:call-drive:Quarterly",
+          "complete:request-drive:completed",
+        ]);
+      } finally {
+        await prepared.close();
+      }
+    });
+
     test("legacy approved MCP execution is durably admitted once and replay is denied", async () => {
       const mcp = startTestMcpServer();
       const serverConfig = {

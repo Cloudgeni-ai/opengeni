@@ -168,6 +168,7 @@ import {
   type ModelCallUsageInput,
   type ModelCallUsageNormalization,
   type BuildAgentOptions,
+  type AttemptConnectorActionBinding,
   type ConnectorActionPolicyHooks,
   type TurnToolCancellationFence,
   type BackendUnresolvableCode,
@@ -181,6 +182,12 @@ import {
   deleteRecordingArtifacts,
   stopRecording as stopRecordingOnBox,
 } from "@opengeni/runtime";
+import {
+  authorizeGoogleDrivePublicationAttempt,
+  createGoogleDrivePublicationAttemptTool,
+  googleDrivePublicationConnectorCall,
+  resolveGoogleDrivePublicationTarget,
+} from "./google-drive-publication";
 import { connectionTokenResolverForTurn } from "./mcp-credentials";
 import { buildApiIntegrationServersForTurn } from "./api-integrations";
 import {
@@ -7131,6 +7138,37 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         return result;
       };
+      const connectorActionIdentity = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: turn.id,
+        attemptId: input.attemptId,
+        executionGeneration,
+        initiator: {
+          kind: turn.initiator.kind,
+          subjectId: turn.initiator.subjectId,
+        },
+      } as const;
+      const googleDrivePublicationTarget = objectStorage
+        ? await resolveGoogleDrivePublicationTarget(
+            db,
+            input.workspaceId,
+            personalConnectionDelegations,
+          )
+        : null;
+      const googleDrivePublicationTool =
+        objectStorage && googleDrivePublicationTarget
+          ? createGoogleDrivePublicationAttemptTool({
+              db,
+              objectStorage,
+              identity: connectorActionIdentity,
+              subjectId: googleDrivePublicationTarget.ownerSubjectId,
+              target: googleDrivePublicationTarget,
+              resolveCredential,
+              ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
+            })
+          : null;
       const publishToolAuthNeeded = async (payload: ToolAuthNeededPayload): Promise<void> => {
         if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
           return;
@@ -7189,6 +7227,51 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         runSettings,
         session.firstPartyMcpTools,
       );
+      const googleDrivePublicationAllowed =
+        selectedFirstPartyMcpTools.includes("editable_artifact_export") &&
+        selectedFirstPartyMcpTools.includes("editable_artifact_export_status") &&
+        (!session.firstPartyMcpPermissions?.length ||
+          (session.firstPartyMcpPermissions.includes("artifacts:read") &&
+            session.firstPartyMcpPermissions.includes("artifacts:publish")));
+      const googleDriveConnectorBindings: readonly AttemptConnectorActionBinding[] =
+        googleDrivePublicationTool && googleDrivePublicationTarget && googleDrivePublicationAllowed
+          ? [
+              {
+                modelName: googleDrivePublicationTool.modelName,
+                call: (approvalId, arguments_) =>
+                  googleDrivePublicationConnectorCall(
+                    googleDrivePublicationTarget,
+                    arguments_,
+                    approvalId,
+                  ),
+              },
+            ]
+          : [];
+      const attemptToolDefinitions = [
+        ...createFirstPartyInteractionAttemptToolDefinitions({
+          settings: runSettings,
+          scope: {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            attemptId: input.attemptId,
+            executionGeneration,
+          },
+          ...(session.firstPartyMcpPermissions?.length
+            ? { permissions: session.firstPartyMcpPermissions }
+            : {}),
+          selectedTools: selectedFirstPartyMcpTools,
+          subjectId: "worker:first-party-mcp",
+          subjectLabel: "OpenGeni worker",
+          ...(interactionInterventionResume
+            ? { interventionResume: interactionInterventionResume }
+            : {}),
+        }),
+        ...(googleDrivePublicationTool && googleDrivePublicationAllowed
+          ? [googleDrivePublicationTool]
+          : []),
+      ];
       recordTurnStartupPhase(observability, {
         phase: "tool_context_preparation",
         provider: turnExecutionPolicy.providerId,
@@ -7239,26 +7322,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             firstPartyTools: selectedFirstPartyMcpTools,
             nestedAgentDepth: session.nestedAgentDepth,
             effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
-            attemptToolDefinitions: createFirstPartyInteractionAttemptToolDefinitions({
-              settings: runSettings,
-              scope: {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: turn.id,
-                attemptId: input.attemptId,
-                executionGeneration,
-              },
-              ...(session.firstPartyMcpPermissions?.length
-                ? { permissions: session.firstPartyMcpPermissions }
-                : {}),
-              selectedTools: selectedFirstPartyMcpTools,
-              subjectId: "worker:first-party-mcp",
-              subjectLabel: "OpenGeni worker",
-              ...(interactionInterventionResume
-                ? { interventionResume: interactionInterventionResume }
-                : {}),
-            }),
+            attemptToolDefinitions,
+            ...(googleDrivePublicationTarget && googleDrivePublicationAllowed
+              ? {
+                  attemptToolAuthorize: async ({ call }) => {
+                    if (
+                      call.caller.kind !== "codemode" ||
+                      call.identity.serverId !== "google-drive-publishing" ||
+                      call.identity.toolName !== "google_drive_publish_file"
+                    ) {
+                      return;
+                    }
+                    await authorizeGoogleDrivePublicationAttempt({
+                      db,
+                      identity: connectorActionIdentity,
+                      target: googleDrivePublicationTarget,
+                      approvalId: call.operationId,
+                      arguments: call.arguments,
+                    });
+                  },
+                }
+              : {}),
           }),
           cancellationSignal,
           async (latePreparedTools) => await latePreparedTools.close().catch(() => undefined),
@@ -7648,18 +7732,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turnExecutionPolicy.providerId,
         turnExecutionPolicy.latencyMode,
       );
-      const connectorActionIdentity = {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId,
-        attemptId: input.attemptId,
-        executionGeneration,
-        initiator: {
-          kind: turn.initiator.kind,
-          subjectId: turn.initiator.subjectId,
-        },
-      } as const;
       const connectorActionPolicy: ConnectorActionPolicyHooks = {
         prepare: async (call) =>
           await prepareConnectorActionApproval(db, connectorActionIdentity, call),
@@ -7751,6 +7823,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             mcpServers: preparedTools.mcpServers,
             resolvedMcpConnectionIds: preparedTools.resolvedMcpConnectionIds,
             connectorActionPolicy,
+            attemptConnectorActionBindings: googleDriveConnectorBindings,
             // LIVE by-reference connector namespaces (fills during this turn's
             // codex_apps tools/list): the codex tool_search description reads it per
             // model call so the model sees the account's real connected sources.
