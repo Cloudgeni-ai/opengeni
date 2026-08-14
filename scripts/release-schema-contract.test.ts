@@ -557,12 +557,10 @@ describe("release schema contract", () => {
         (migrations.has("0241_enrollment_agent_runtime.sql") ? 1 : 0) +
         (migrations.has("0243_google_drive_object_acl_authority.sql") ? 1 : 0) +
         (migrations.has("0244_slack_app_home_refresh_queue.sql") ? 1 : 0) +
-        (migrations.has("0245_model_context_contribution_facts.sql") ? 1 : 0) +
-        (migrations.has("0246_integration_personal_instance_authority.sql") ? 1 : 0),
+        (migrations.has("0245_model_context_contribution_facts.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
-      "0246_integration_personal_instance_authority.sql",
       "0245_model_context_contribution_facts.sql",
       "0244_slack_app_home_refresh_queue.sql",
       "0243_google_drive_object_acl_authority.sql",
