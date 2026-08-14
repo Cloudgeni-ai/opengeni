@@ -110,6 +110,12 @@ describe("migration 0240 model context user messages", () => {
     expect(source).toContain('ADD CONSTRAINT "sessions_initial_model_context_check"');
     expect(source).toContain('ADD CONSTRAINT "session_turns_model_context_check"');
     expect(source).toContain("opengeni_private.model_context_value_valid");
+    expect(source).toContain(
+      "REVOKE ALL ON FUNCTION opengeni_private.model_context_value_valid(text) FROM PUBLIC",
+    );
+    expect(source).toContain(
+      "GRANT EXECUTE ON FUNCTION opengeni_private.model_context_value_valid(text)",
+    );
     expect(source).toContain('VALIDATE CONSTRAINT "sessions_initial_model_context_check"');
     expect(source).toContain('VALIDATE CONSTRAINT "session_turns_model_context_check"');
     expect(source).toContain("Completed historical turns retain their original conversation truth");
@@ -387,6 +393,26 @@ describe("migration 0240 model context user messages", () => {
         tabOnly: false,
         tabPadded: false,
         astralOverflow: false,
+      });
+      const [validatorAcl] = await sql<
+        Array<{
+          appExecute: boolean;
+          publicExecute: boolean;
+        }>
+      >`
+        select
+          has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "appExecute",
+          exists (
+            select 1
+            from aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+            where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+          ) as "publicExecute"
+        from pg_proc procedure
+        where procedure.oid =
+          'opengeni_private.model_context_value_valid(text)'::regprocedure`;
+      expect(validatorAcl).toEqual({
+        appExecute: true,
+        publicExecute: false,
       });
       const constraints = await sql<Array<{ name: string; validated: boolean }>>`
         select conname as name, convalidated as validated

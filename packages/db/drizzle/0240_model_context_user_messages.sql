@@ -152,6 +152,16 @@ EXCEPTION WHEN others THEN
 END;
 $body$;
 
+REVOKE ALL ON FUNCTION opengeni_private.model_context_value_valid(text) FROM PUBLIC;
+DO $model_context_function_grant$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION opengeni_private.model_context_value_valid(text)
+      TO opengeni_app;
+  END IF;
+END
+$model_context_function_grant$;
+
 ALTER TABLE "sessions"
   ADD CONSTRAINT "sessions_initial_model_context_check"
   CHECK (
