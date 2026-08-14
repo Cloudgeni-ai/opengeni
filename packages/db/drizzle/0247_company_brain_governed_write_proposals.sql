@@ -167,6 +167,11 @@ ALTER TABLE "company_brain_preference_proposal_receipts" FORCE ROW LEVEL SECURIT
 CREATE POLICY workspace_isolation ON "company_brain_preference_proposal_receipts"
   USING (opengeni_private.workspace_rls_visible("account_id", "workspace_id"))
   WITH CHECK (opengeni_private.workspace_rls_visible("account_id", "workspace_id"));
+CREATE POLICY session_visibility_isolation ON "company_brain_preference_proposal_receipts"
+  AS RESTRICTIVE
+  FOR ALL
+  USING (session_reference_visible("account_id", "workspace_id", "session_id"))
+  WITH CHECK (session_reference_visible("account_id", "workspace_id", "session_id"));
 CREATE TRIGGER company_brain_preference_proposal_receipts_immutable
   BEFORE UPDATE OR DELETE ON "company_brain_preference_proposal_receipts"
   FOR EACH ROW EXECUTE FUNCTION preference_registry_reject_history_mutation();

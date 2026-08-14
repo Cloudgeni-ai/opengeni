@@ -214,7 +214,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0247_company_brain_governed_write_proposals.sql",
       ),
     ).toMatchObject({
-      sha256: "aac3a70aa6bc745c052b0a00542d8ffa5100cca99417ffc189c677282f879829",
+      sha256: "f92d328e2a13fa0d06dff5a3563628fc15f02f0f2c4deb3b63289c2e0b638e0d",
       deploymentMode: "rolling",
     });
     const migrations = new Map(
@@ -252,8 +252,8 @@ describe("release schema contract", () => {
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
       if (migrations.has("0247_company_brain_governed_write_proposals.sql")) {
         return includesActivation
-          ? "c5991bfdc24708c58501ea39a97b1bc21677c1fde104aa863ec72312c546e62b"
-          : "fcd0f7448553732211008d9a58387e149f1ffc4acda2f8f6e862729c20c11c98";
+          ? "3a9db0d56a1beb1b69dd279134b8e875e1671b85c0249cef286ad5aca85da6dc"
+          : "8fad48661be9c1347d2f19e2cd4264b58ab36bee721aa5f0d28445d875a2b5f0";
       }
       if (migrations.has("0246_integration_personal_instance_authority.sql")) {
         return includesActivation
@@ -870,7 +870,7 @@ describe("release schema contract", () => {
     }
     if (migrations.has("0247_company_brain_governed_write_proposals.sql")) {
       expect(migrations.get("0247_company_brain_governed_write_proposals.sql")).toMatchObject({
-        sha256: "aac3a70aa6bc745c052b0a00542d8ffa5100cca99417ffc189c677282f879829",
+        sha256: "f92d328e2a13fa0d06dff5a3563628fc15f02f0f2c4deb3b63289c2e0b638e0d",
         deploymentMode: "rolling",
       });
     }

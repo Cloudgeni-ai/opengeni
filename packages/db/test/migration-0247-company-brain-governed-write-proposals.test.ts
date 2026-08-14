@@ -37,6 +37,10 @@ describe("migration 0247 Company Brain governed write proposals", () => {
     expect(sql).toContain("company_brain_preference_proposal_receipts_immutable");
     expect(sql).toContain('ALTER TABLE "company_brain_preference_proposal_receipts"');
     expect(sql).toContain("FORCE ROW LEVEL SECURITY");
+    expect(sql).toContain(
+      'CREATE POLICY session_visibility_isolation ON "company_brain_preference_proposal_receipts"',
+    );
+    expect(sql).toContain('session_reference_visible("account_id", "workspace_id", "session_id")');
     expect(sql).toContain("preference_registry_create_knowledge_proposal_for_attempt");
     expect(sql).toContain("SECURITY DEFINER");
     expect(sql).toContain("session.active_turn_id = p_turn_id");

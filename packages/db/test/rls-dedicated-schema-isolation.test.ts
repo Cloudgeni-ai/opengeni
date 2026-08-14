@@ -669,6 +669,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         insert: boolean;
         update: boolean;
         delete: boolean;
+        sessionVisibility: boolean;
       }>
     >`
       SELECT
@@ -677,7 +678,14 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         has_table_privilege('opengeni_app', relation.oid, 'SELECT') AS select,
         has_table_privilege('opengeni_app', relation.oid, 'INSERT') AS insert,
         has_table_privilege('opengeni_app', relation.oid, 'UPDATE') AS update,
-        has_table_privilege('opengeni_app', relation.oid, 'DELETE') AS delete
+        has_table_privilege('opengeni_app', relation.oid, 'DELETE') AS delete,
+        exists (
+          SELECT 1
+          FROM pg_policy policy
+          WHERE policy.polrelid = relation.oid
+            AND policy.polname = 'session_visibility_isolation'
+            AND policy.polpermissive = false
+        ) AS "sessionVisibility"
       FROM pg_class relation
       JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
       WHERE namespace.nspname = ${SCHEMA}
@@ -689,6 +697,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       insert: false,
       update: false,
       delete: false,
+      sessionVisibility: true,
     });
   });
 

@@ -54,7 +54,8 @@ destination receipt keyed by the top operation UUID and full input hash. Replay
 returns the original preference/revision IDs even if a human later activates,
 rejects, deactivates, supersedes, or changes the scope of the preference. This
 is a write-destination receipt only; it does not select context, freeze a
-logical-turn snapshot, or overlap OPE-223 selection/context receipt ownership.
+logical-turn snapshot, or overlap the permission-first selector's context
+receipt ownership.
 
 Migration `0247_company_brain_governed_write_proposals.sql` broadens the
 historically named onboarding-proposal validator without changing its table. A

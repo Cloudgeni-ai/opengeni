@@ -1,4 +1,4 @@
-# OPE-224 governed write successor
+# Governed Company Brain write successor
 
 Date: August 14, 2026
 
@@ -49,7 +49,7 @@ Rejected or superseded concepts:
 
 - generic `remember` or Memory routing;
 - caller-selected personal/company scopes or active authority;
-- dependency on the stale OPE-183 branch;
+- dependency on a stale predecessor branch;
 - automatic undo or active writes.
 
 ## Implemented bounded successor
@@ -79,11 +79,11 @@ Preference materialization is workspace-only and creates an untrusted inactive
 proposal; its existing human lifecycle remains the only activation authority.
 An immutable workspace-local destination receipt preserves operation/input and
 preference/revision identities across later human lifecycle changes without
-claiming OPE-223 selector or logical-turn context-receipt ownership.
+claiming permission-first selector or logical-turn context-receipt ownership.
 
 ## Explicit exclusions
 
-- OPE-223 selector, accepted-boundary snapshot, recovery reuse, and
+- permission-first selector, accepted-boundary snapshot, recovery reuse, and
   logical-turn context-receipt ownership;
 - Task-note storage or retrieval;
 - generic `memory_save`, generic durable learning, or Memory promotion;
