@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { StreamFrame, StreamOpen, StreamOpenAck } from "@opengeni/agent-proto";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import type {
+  AttachedBrowserBridge,
   AttachedBrowserDevice,
   BrowserActionReceipt,
   BrowserDownload,
@@ -16,6 +17,7 @@ import type {
   BrowserTarget,
   InteractionPlacement,
   InteractionIntervention,
+  SiteAuthConnection,
 } from "@opengeni/sdk/interaction";
 import { act } from "react";
 import { browserKey, normalizeBrowserAddress } from "../src/components/browser-input";
@@ -96,6 +98,17 @@ function attachedBrowserDevice(): AttachedBrowserDevice {
     disconnectedAt: null,
     createdAt: NOW,
     updatedAt: NOW,
+  };
+}
+
+function attachedBrowserBridge(): AttachedBrowserBridge {
+  return {
+    enrollmentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    state: "online",
+    bridgeGeneration: "bridge-generation-1",
+    inventoryRevision: 4,
+    connectedProfileCount: 0,
+    lastSeenAt: NOW,
   };
 }
 
@@ -209,6 +222,41 @@ function browserRevision(identity: BrowserIdentity, session: BrowserSession): Br
     ],
     createdBySubjectId: "user:test",
     createdAt: NOW,
+  };
+}
+
+function siteAuthConnection(
+  identity: BrowserIdentity,
+  overrides: Partial<SiteAuthConnection> = {},
+): SiteAuthConnection {
+  return {
+    id: "12121212-abab-4bab-8bab-121212121212",
+    accountId: ACCOUNT_ID,
+    workspaceId: WORKSPACE_ID,
+    name: "Google",
+    accountLabel: "jorgen@cloudgeni.ai",
+    origins: ["https://accounts.google.com"],
+    loginUrl: "https://accounts.google.com/",
+    verificationUrlPrefixes: ["https://myaccount.google.com/"],
+    authorities: [{ id: "human", kind: "human", label: "Human", fields: [] }],
+    methods: [{ id: "passkey", kind: "passkey", label: "Passkey", authorityIds: ["human"] }],
+    preferredIdentityId: identity.id,
+    preferredPlacement: null,
+    preferredNetworkRouteId: null,
+    healthPolicy: { mode: "on_use", intervalSeconds: null, automaticRepair: false },
+    status: "active",
+    verificationState: "needs_repair",
+    lastVerifiedAt: null,
+    lastVerifiedUrl: null,
+    lastCheckedAt: NOW,
+    nextCheckAt: null,
+    maintenance: null,
+    repairCode: "passkey_required",
+    version: 1,
+    createdBySubjectId: "user:test",
+    createdAt: NOW,
+    updatedAt: NOW,
+    ...overrides,
   };
 }
 
@@ -415,11 +463,12 @@ class FakeBrowserSocket {
 describe("BrowserSession React resources", () => {
   test("discovers connected Chrome profile endpoints through the public client", async () => {
     const device = attachedBrowserDevice();
+    const bridge = attachedBrowserBridge();
     const calls: unknown[] = [];
     const client = fakeClient({
       listAttachedBrowsers: async (_workspaceId, options) => {
         calls.push(options);
-        return { revision: 7, devices: [device] };
+        return { revision: 7, bridges: [bridge], devices: [device] };
       },
     });
     const hook = await renderHook(
@@ -434,6 +483,7 @@ describe("BrowserSession React resources", () => {
     await flush(20);
 
     expect(hook.result.current.revision).toBe(7);
+    expect(hook.result.current.bridges).toEqual([bridge]);
     expect(hook.result.current.devices).toEqual([device]);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ includeDisconnected: false });
@@ -955,6 +1005,53 @@ describe("BrowserViewer", () => {
     expect(normalizeBrowserAddress("opengeni browser platform")).toBe(
       "https://www.google.com/search?q=opengeni%20browser%20platform",
     );
+  });
+
+  test("renders a typed connected-machine startup failure instead of a generic spinner", async () => {
+    const current = browserSession();
+    const currentTarget = target();
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: current.id,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => observation(current.id, currentTarget),
+      attachBrowserSession: async () => {
+        throw new OpenGeniApiError(
+          502,
+          JSON.stringify({
+            error: {
+              status: 502,
+              code: "upstream_unavailable",
+              message: "The connected machine could not open the browser live view stream.",
+              retryable: false,
+              requestId: "outer-browser-request",
+              details: {
+                interactionLayer: "connected_machine",
+                interactionSurface: "browser",
+                controlFailureCode: "stream",
+                controlRequestId: "inner-browser-request",
+              },
+            },
+          }),
+          { mutation: true },
+        );
+      },
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(40);
+
+    expect(rendered.container.textContent).toContain("Live view disconnected");
+    expect(rendered.container.textContent).toContain(
+      "The connected machine could not open the browser live view stream.",
+    );
+    expect(rendered.container.textContent).toContain("Try again");
+    await rendered.unmount();
   });
 
   test("opens actionable runtime and page diagnostics without leaving the browser", async () => {
@@ -1772,6 +1869,79 @@ describe("BrowserViewer", () => {
     await rendered.unmount();
   });
 
+  test("opens one exact saved profile version without changing the future default", async () => {
+    const secondRevisionId = "aaaaaaaa-9999-4999-8999-999999999999";
+    const createdSessionId = "aaaaaaaa-7777-4777-8777-777777777777";
+    const identity: BrowserIdentity = {
+      ...browserIdentity(),
+      version: 3,
+      defaultRevisionId: BROWSER_REVISION_ID,
+      headGeneration: 2,
+      revisionCount: 2,
+    };
+    const current: BrowserSession = {
+      ...browserSession(),
+      identityId: identity.id,
+      baseRevisionId: secondRevisionId,
+      capabilities: {
+        ...browserSession().capabilities,
+        identityPublication: true,
+        liveFrames: false,
+      },
+    };
+    const first = { ...browserRevision(identity, current), ordinal: 1 };
+    const second = { ...first, id: secondRevisionId, ordinal: 2 };
+    const createRequests: unknown[] = [];
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      listBrowserIdentities: async () => ({ revision: 1, identities: [identity] }),
+      listBrowserRevisions: async () => ({ identity, revisions: [first, second] }),
+      createBrowserSession: async (_workspaceId, request) => {
+        createRequests.push(request);
+        return mutation({
+          ...current,
+          id: createdSessionId,
+          baseRevisionId: request.baseRevisionId ?? identity.defaultRevisionId,
+        });
+      },
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: current.id,
+        controllerGeneration: "controller-1",
+        targets: [target()],
+      }),
+      observeBrowserTarget: async () => observation(current.id, target()),
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(30);
+
+    const profileSummary = [...rendered.container.querySelectorAll("summary")].find((summary) =>
+      /Work\s*·\s*v2/u.test(summary.textContent ?? ""),
+    );
+    expect(profileSummary).toBeDefined();
+    await actRun(() => profileSummary!.click());
+    const openFirst = rendered.container.querySelector<HTMLButtonElement>(
+      "button[aria-label='Open Work version 1']",
+    );
+    expect(openFirst).not.toBeNull();
+    await actRun(() => openFirst!.click());
+    await flush(30);
+
+    expect(createRequests).toHaveLength(1);
+    expect(createRequests[0]).toMatchObject({
+      sessionId: SESSION_ID,
+      name: "Work browser",
+      identityId: identity.id,
+      baseRevisionId: first.id,
+      headless: false,
+      initialUrl: "https://www.google.com/",
+    });
+    expect(identity.defaultRevisionId).toBe(BROWSER_REVISION_ID);
+    await rendered.unmount();
+  });
+
   test("selects a future default version and archives a profile without changing the live browser", async () => {
     const secondRevisionId = "aaaaaaaa-9999-4999-8999-999999999999";
     let identity: BrowserIdentity = {
@@ -1799,6 +1969,10 @@ describe("BrowserViewer", () => {
       listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
       listBrowserIdentities: async () => ({ revision: 1, identities: [identity] }),
       listBrowserRevisions: async () => ({ identity, revisions: [first, second] }),
+      listSiteAuthConnections: async () => ({
+        revision: 1,
+        connections: [siteAuthConnection(identity)],
+      }),
       updateBrowserIdentity: async (_workspaceId, identityId, request) => {
         updates.push({ identityId, ...request });
         const defaultChanged =
@@ -1839,11 +2013,16 @@ describe("BrowserViewer", () => {
     );
     expect(profileSummary).toBeDefined();
     await actRun(() => profileSummary!.click());
-    const chooseDefault = [...rendered.container.querySelectorAll("button")].find(
-      (button) =>
-        button.textContent?.includes("Version 2") && button.textContent?.includes("Use by default"),
+    expect(rendered.container.textContent).toContain("Portable browser data");
+    expect(rendered.container.textContent).toContain("Google");
+    expect(rendered.container.textContent).toContain("Sign-in needs attention");
+    expect(rendered.container.textContent).toContain(
+      "Saved browser data can be copied; a website may still expire or re-verify its own session.",
     );
-    expect(chooseDefault).toBeDefined();
+    const chooseDefault = rendered.container.querySelector<HTMLButtonElement>(
+      "button[aria-label='Use Work version 2 by default']",
+    );
+    expect(chooseDefault).not.toBeNull();
     await actRun(() => chooseDefault!.click());
     await flush(20);
 
@@ -2092,7 +2271,7 @@ describe("BrowserViewer", () => {
       placement: InteractionPlacement | undefined;
     }> = [];
     const client = fakeClient({
-      listAttachedBrowsers: async () => ({ revision: 4, devices: [device] }),
+      listAttachedBrowsers: async () => ({ revision: 4, bridges: [], devices: [device] }),
       listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
       listBrowserIdentities: async () => ({ revision: 1, identities: [] }),
       createBrowserSession: async (_workspaceId, request) => {
@@ -2151,6 +2330,39 @@ describe("BrowserViewer", () => {
     ]);
     expect(rendered.container.textContent).toContain("Your browser");
     expect(rendered.container.textContent).toContain("live");
+    await rendered.unmount();
+  });
+
+  test("offers attached-Chrome setup when the machine bridge has no connected profile", async () => {
+    const client = fakeClient({
+      listAttachedBrowsers: async () => ({
+        revision: 4,
+        bridges: [attachedBrowserBridge()],
+        devices: [],
+      }),
+      listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
+      listBrowserIdentities: async () => ({ revision: 1, identities: [] }),
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        browserExtensionSetupUrl="/browser-extension-setup.html"
+      />,
+    );
+    await flush(30);
+
+    const launchSummary = rendered.container.querySelector<HTMLElement>(
+      "summary[aria-label='New browser']",
+    );
+    expect(launchSummary).not.toBeNull();
+    await actRun(() => launchSummary!.click());
+    const setup = [...(launchSummary!.closest("details")?.querySelectorAll("a") ?? [])].find(
+      (link) => link.textContent?.includes("Connect this Chrome profile"),
+    );
+    expect(setup?.getAttribute("href")).toBe("/browser-extension-setup.html");
+    expect(setup?.textContent).toContain("Machine agent ready");
     await rendered.unmount();
   });
 });

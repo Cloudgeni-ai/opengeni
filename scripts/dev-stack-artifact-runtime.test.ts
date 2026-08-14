@@ -22,6 +22,8 @@ describe("local artifact runtime stack contract", () => {
     expect(source).toContain("OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST");
     expect(source).toContain("OPENGENI_ARTIFACT_MATERIALIZER_EXECUTABLE");
     expect(source).not.toMatch(/export OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/u);
+    expect(source).toContain('! (echo >"/dev/tcp/127.0.0.1/$1")');
+    expect(source).not.toContain('lsof -nP -iTCP:"$1"');
   });
 
   test("starts both dedicated artifact roles with isolated ports and credentials", async () => {
@@ -118,7 +120,8 @@ describe("local artifact runtime stack contract", () => {
     expect(netcatCapabilityCheck).toBeGreaterThan(-1);
     expect(netcatProbe).toBeGreaterThan(netcatCapabilityCheck);
     expect(netcatProbe).toBeGreaterThan(-1);
-    expect(lsofFallback).toBeGreaterThan(netcatProbe);
+    expect(source).toContain('! (echo >"/dev/tcp/127.0.0.1/$1")');
+    expect(lsofFallback).toBe(-1);
   });
 
   test("can advertise a remote-reachable development relay while binding it locally", async () => {

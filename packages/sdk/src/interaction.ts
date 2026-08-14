@@ -1,4 +1,5 @@
 import type { OpenGeniRequestOptions } from "./client";
+import { OpenGeniApiError } from "./errors";
 import type { RetainedArtifactReference } from "./types";
 
 /** Public Browser/Computer protocol version. Driver and provider details stay private. */
@@ -27,6 +28,83 @@ export type InteractionJsonValue =
   | boolean
   | InteractionJsonValue[]
   | { [key: string]: InteractionJsonValue };
+
+export type InteractionControlFailureCode =
+  | "unknown"
+  | "unsupported"
+  | "os"
+  | "not_found"
+  | "consent_required"
+  | "timeout"
+  | "draining"
+  | "protocol"
+  | "stream"
+  | "agent_offline"
+  | "fenced"
+  | "payload_too_large";
+
+export type InteractionControlFailure = {
+  layer: "connected_machine";
+  surface: "browser" | "computer";
+  code: InteractionControlFailureCode;
+  retryable: boolean;
+  outcomeUnknown: boolean;
+  requestId: string | undefined;
+  controlRequestId: string | undefined;
+  message: string;
+};
+
+/** Decodes the bounded typed control-failure details emitted by OpenGeni. Raw
+ * provider/OS detail is intentionally absent; both correlation ids are opaque. */
+export function interactionControlFailureFromError(
+  error: unknown,
+): InteractionControlFailure | null {
+  if (!(error instanceof OpenGeniApiError)) return null;
+  const details = error.details;
+  if (!details || details.interactionLayer !== "connected_machine") return null;
+  const surface = details.interactionSurface;
+  const code = details.controlFailureCode;
+  if ((surface !== "browser" && surface !== "computer") || !isControlFailureCode(code)) {
+    return null;
+  }
+  const controlRequestId = boundedOpaqueCorrelation(details.controlRequestId);
+  return {
+    layer: "connected_machine",
+    surface,
+    code,
+    retryable: error.retryable,
+    outcomeUnknown: error.outcomeUnknown,
+    requestId: error.correlationId,
+    controlRequestId,
+    message: error.message,
+  };
+}
+
+function isControlFailureCode(value: unknown): value is InteractionControlFailureCode {
+  return (
+    typeof value === "string" &&
+    [
+      "unknown",
+      "unsupported",
+      "os",
+      "not_found",
+      "consent_required",
+      "timeout",
+      "draining",
+      "protocol",
+      "stream",
+      "agent_offline",
+      "fenced",
+      "payload_too_large",
+    ].includes(value)
+  );
+}
+
+function boundedOpaqueCorrelation(value: unknown): string | undefined {
+  return typeof value === "string" && value.length <= 128 && /^[A-Za-z0-9._:-]+$/u.test(value)
+    ? value
+    : undefined;
+}
 
 export type InteractionPlacement =
   | { kind: "sandbox_group"; sandboxGroupId: string }
@@ -71,8 +149,18 @@ export type AttachedBrowserDevice = {
   updatedAt: string;
 };
 
+export type AttachedBrowserBridge = {
+  enrollmentId: string;
+  state: "online" | "offline";
+  bridgeGeneration: string;
+  inventoryRevision: number;
+  connectedProfileCount: number;
+  lastSeenAt: string;
+};
+
 export type AttachedBrowserDeviceListResponse = {
   revision: number;
+  bridges: AttachedBrowserBridge[];
   devices: AttachedBrowserDevice[];
 };
 

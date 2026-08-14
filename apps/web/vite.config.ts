@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,6 +9,10 @@ import { defineConfig } from "vite";
 import { safeReactHmrPlugin } from "./vite-safe-react-hmr";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
+const browserExtensionArchive = path.resolve(
+  dirname,
+  "../browser-extension/dist/opengeni-browser-extension.tar",
+);
 const allowedHosts = process.env.OPENGENI_WEB_ALLOWED_HOSTS?.split(",")
   .map((host) => host.trim())
   .filter(Boolean);
@@ -99,6 +104,34 @@ export default defineConfig({
     viteReact(),
     tailwindcss(),
     safeReactHmrPlugin(),
+    {
+      name: "opengeni-browser-extension-archive",
+      configureServer(server) {
+        server.middlewares.use("/opengeni-browser-extension.tar", async (_request, response) => {
+          try {
+            const archive = await readFile(browserExtensionArchive);
+            response.statusCode = 200;
+            response.setHeader("content-type", "application/x-tar");
+            response.setHeader(
+              "content-disposition",
+              'attachment; filename="opengeni-browser-extension.tar"',
+            );
+            response.setHeader("cache-control", "no-store");
+            response.end(archive);
+          } catch {
+            response.statusCode = 503;
+            response.end("OpenGeni Browser extension is not built yet.");
+          }
+        });
+      },
+      async generateBundle() {
+        this.emitFile({
+          type: "asset",
+          fileName: "opengeni-browser-extension.tar",
+          source: await readFile(browserExtensionArchive),
+        });
+      },
+    },
     {
       name: "compact-index-html",
       transformIndexHtml: {

@@ -37,7 +37,7 @@ describe("managed browser profile cryptography", () => {
       await writeFile(helperPath, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
       await writeFile(
         binaryPath,
-        `#!/usr/bin/env bun\nconsole.log(JSON.stringify({ success: true, data: { executable: process.env.AGENT_BROWSER_EXECUTABLE_PATH, backgroundExecutable: process.env.OPENGENI_BACKGROUND_BROWSER_EXECUTABLE }, error: null }));\n`,
+        `#!/usr/bin/env bun\nconsole.log(JSON.stringify({ success: true, data: { executable: process.env.AGENT_BROWSER_EXECUTABLE_PATH, backgroundExecutable: process.env.OPENGENI_BACKGROUND_BROWSER_EXECUTABLE, browserPidFile: process.env.OPENGENI_BACKGROUND_BROWSER_PID_FILE }, error: null }));\n`,
         { mode: 0o700 },
       );
       const runner = await AgentBrowserJsonRunner.create({
@@ -58,13 +58,15 @@ describe("managed browser profile cryptography", () => {
         },
       });
       try {
-        const result = await runner.run<{ executable: string; backgroundExecutable: string }>([
-          "open",
-          "about:blank",
-        ]);
+        const result = await runner.run<{
+          executable: string;
+          backgroundExecutable: string;
+          browserPidFile: string;
+        }>(["open", "about:blank"]);
         expect(result).toEqual({
           executable: helperPath,
           backgroundExecutable: browserPath,
+          browserPidFile: join(root, "browser.pid"),
         });
       } finally {
         await rm(root, { recursive: true, force: true });

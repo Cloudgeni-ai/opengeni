@@ -2,7 +2,7 @@
 //! to the person at the machine.
 //!
 //! Every event OpenGeni posts is tagged with this helper process's private
-//! marker. A listen-only Session event tap counts those events separately from
+//! marker. A listen-only Session event tap ignores those events and counts
 //! physical input (and input from any other process). The caller can therefore
 //! reject an operation before dispatch, or report an unknown outcome after
 //! partial dispatch, instead of racing the user.
@@ -29,7 +29,6 @@ const EVENT_TAP_POLL: Duration = Duration::from_millis(25);
 struct MonitorState {
     marker: AtomicI64,
     external_generation: AtomicU64,
-    synthetic_generation: AtomicU64,
     healthy: AtomicBool,
 }
 
@@ -38,7 +37,6 @@ impl MonitorState {
         Self {
             marker: AtomicI64::new(marker),
             external_generation: AtomicU64::new(0),
-            synthetic_generation: AtomicU64::new(0),
             healthy: AtomicBool::new(false),
         }
     }
@@ -94,16 +92,6 @@ impl InputActivityMonitor {
             ));
         }
         Ok(self.state.external_generation.load(Ordering::Acquire))
-    }
-
-    pub(super) fn synthetic_generation(&self) -> Result<u64, MacFfiError> {
-        if !self.state.healthy.load(Ordering::Acquire) {
-            return Err(MacFfiError::Ffi(
-                "physical-input monitor is unavailable after synthetic input was dispatched"
-                    .to_string(),
-            ));
-        }
-        Ok(self.state.synthetic_generation.load(Ordering::Acquire))
     }
 }
 
@@ -248,9 +236,7 @@ unsafe extern "C-unwind" fn event_tap_callback(
     // for the callback duration.
     let event_ref = unsafe { event.as_ref() };
     let marker = CGEvent::integer_value_field(Some(event_ref), CGEventField::EventSourceUserData);
-    if marker == state.marker.load(Ordering::Acquire) {
-        state.synthetic_generation.fetch_add(1, Ordering::AcqRel);
-    } else {
+    if marker != state.marker.load(Ordering::Acquire) {
         state.external_generation.fetch_add(1, Ordering::AcqRel);
     }
     event.as_ptr()

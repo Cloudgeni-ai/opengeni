@@ -42,6 +42,7 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
       }) as never,
     getComposerDraft: async () => emptyDraft,
     listEvents: async () => [],
+    listSiteAuthConnections: async () => ({ revision: 0, connections: [] }),
     saveComposerDraft: async (_workspaceId: string, _sessionId: string, request: any) => ({
       ...emptyDraft,
       ...request,

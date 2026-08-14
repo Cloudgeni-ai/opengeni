@@ -8,6 +8,7 @@ import {
 } from "@opengeni/testing";
 import {
   AgentEvent,
+  AgentUpdateStage,
   ControlRequest,
   ControlResponse,
   GoingOfflineReason,
@@ -15,10 +16,13 @@ import {
 } from "@opengeni/agent-proto";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
+  claimEnrollmentConnection,
+  beginEnrollmentAgentUpdate,
   createDb,
   createEnrollment,
   createSandbox,
   createSession,
+  getEnrollment,
   listSandboxes,
   revokeEnrollment,
   setActiveSandbox,
@@ -55,6 +59,7 @@ const ingestionStoppers: Array<() => void> = [];
 //   - flag OFF → 404; cross-workspace bearer → 403; unknown machine series → 404.
 
 const DELEGATION_SECRET = "m10-delegation-secret";
+const CONNECTION_INSTANCE_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -76,27 +81,57 @@ function busWithAgent(opts: {
   workspaceId: string;
   agentId: string;
   online: boolean;
+  onRequest?: (request: ControlRequest) => void;
 }): MemoryEventBus {
   const bus = new MemoryEventBus();
   if (!opts.online) {
     return bus;
   }
-  bus.subscribeRequests(subjectFor(opts.workspaceId, opts.agentId), (payload) => {
-    const req = ControlRequest.decode(payload);
-    const op = req.op;
-    const res: ControlResponse =
-      op?.$case === "ping"
-        ? {
-            requestId: req.requestId,
-            result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
-          }
-        : {
-            requestId: req.requestId,
-            error: { code: 0, message: "unsupported", retryable: false, detail: {} },
-          };
-    return ControlResponse.encode(res).finish();
-  });
+  bus.subscribeRequests(
+    subjectFor(opts.workspaceId, opts.agentId, CONNECTION_INSTANCE_ID),
+    (payload) => {
+      const req = ControlRequest.decode(payload);
+      opts.onRequest?.(req);
+      const op = req.op;
+      const res: ControlResponse =
+        op?.$case === "ping"
+          ? {
+              requestId: req.requestId,
+              result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
+            }
+          : op?.$case === "agentUpdateApply"
+            ? {
+                requestId: req.requestId,
+                result: {
+                  $case: "agentUpdateApply",
+                  agentUpdateApply: {
+                    accepted: true,
+                    operationId: op.agentUpdateApply.operationId,
+                    currentVersion: op.agentUpdateApply.expectedCurrentVersion,
+                    currentSha256: op.agentUpdateApply.expectedCurrentSha256,
+                    targetVersion: op.agentUpdateApply.targetVersion,
+                  },
+                },
+              }
+            : {
+                requestId: req.requestId,
+                error: { code: 0, message: "unsupported", retryable: false, detail: {} },
+              };
+      return ControlResponse.encode(res).finish();
+    },
+  );
   return bus;
+}
+
+async function claimConnection(workspaceId: string, enrollmentId: string): Promise<void> {
+  const claimed = await claimEnrollmentConnection(db, {
+    workspaceId,
+    enrollmentId,
+    credentialGeneration: 1,
+    connectionInstanceId: CONNECTION_INSTANCE_ID,
+    leaseMs: 20_000,
+  });
+  expect(claimed.claimed).toBe(true);
 }
 
 class SlowProbeBus extends MemoryEventBus {
@@ -143,6 +178,9 @@ async function emitHeartbeat(
   agentId: string,
   cpuPct: number,
 ): Promise<void> {
+  // A reconnect claims authority before publishing its first heartbeat. Repeating
+  // the same instance is a lease renewal; after GoingOffline it is a new claim.
+  await claimConnection(workspaceId, agentId);
   const event = AgentEvent.encode({
     agentId,
     event: {
@@ -168,7 +206,33 @@ async function emitHeartbeat(
       },
     },
   }).finish();
-  await bus.emitAgentEvent(`agent.${workspaceId}.${agentId}.events`, event);
+  await bus.emitAgentEvent(
+    `agent.${workspaceId}.${agentId}.connection.${CONNECTION_INSTANCE_ID}.events`,
+    event,
+  );
+}
+
+async function emitHeartbeatWithoutMetrics(
+  bus: MemoryEventBus,
+  workspaceId: string,
+  agentId: string,
+): Promise<void> {
+  const event = AgentEvent.encode({
+    agentId,
+    event: {
+      $case: "heartbeat",
+      heartbeat: {
+        seq: "2",
+        uptimeMs: "2000",
+        activeSessions: 0,
+        draining: false,
+      },
+    },
+  }).finish();
+  await bus.emitAgentEvent(
+    `agent.${workspaceId}.${agentId}.connection.${CONNECTION_INSTANCE_ID}.events`,
+    event,
+  );
 }
 
 /** Emit a clean GoingOffline AgentEvent, driving the ingestion consumer to stamp
@@ -183,7 +247,10 @@ async function emitGoingOffline(
     agentId,
     event: { $case: "goingOffline", goingOffline: { reason } },
   }).finish();
-  await bus.emitAgentEvent(`agent.${workspaceId}.${agentId}.events`, event);
+  await bus.emitAgentEvent(
+    `agent.${workspaceId}.${agentId}.connection.${CONNECTION_INSTANCE_ID}.events`,
+    event,
+  );
 }
 
 function appFor(bus: MemoryEventBus, overrides: Partial<AppDependencies> = {}) {
@@ -304,6 +371,9 @@ async function seed(opts: SeedOpts = {}) {
     name: "my-laptop",
     enrollmentId: enrollment.id,
   });
+  if (opts.online ?? true) {
+    await claimConnection(workspaceId, enrollment.id);
+  }
   const bus = busWithAgent({ workspaceId, agentId: enrollment.id, online: opts.online ?? true });
   return { accountId, workspaceId, session, enrollment, sandbox, bus };
 }
@@ -340,6 +410,16 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
 
     // Drive a heartbeat → the ingestion consumer upserts the latest metrics row.
     await emitHeartbeat(bus, workspaceId, enrollment.id, 42.5);
+    // A second valid daemon is denied and that safety event remains visible in
+    // the ordinary inventory without exposing either process id.
+    const duplicate = await claimEnrollmentConnection(db, {
+      workspaceId,
+      enrollmentId: enrollment.id,
+      credentialGeneration: enrollment.credentialGeneration,
+      connectionInstanceId: crypto.randomUUID(),
+      leaseMs: 20_000,
+    });
+    expect(duplicate.claimed).toBe(false);
 
     // Workspace dashboard (no session): just the enrolled machine, null active.
     const wsRes = await app.request(`/v1/workspaces/${workspaceId}/machines`, {
@@ -358,6 +438,12 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
         sharedSessionCount: number;
         hasDisplay: boolean;
         allowScreenControl: boolean;
+        connectionAuthority: {
+          state: string;
+          generation: number;
+          supersededCount: number;
+          duplicateRunnerDeniedCount: number;
+        };
       }>;
     };
     expect(wsBody.activeSandboxId).toBeNull();
@@ -370,6 +456,14 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     expect(machine.state).toBe("online"); // consent acked + display present
     expect(machine.hasDisplay).toBe(true);
     expect(machine.allowScreenControl).toBe(true);
+    expect(machine.connectionAuthority).toEqual({
+      state: "active",
+      generation: 1,
+      supersededCount: 0,
+      leaseExpiresAt: expect.any(String),
+      duplicateRunnerDeniedCount: 1,
+      duplicateRunnerDeniedAt: expect.any(String),
+    });
     expect(machine.metrics).not.toBeNull();
     expect(machine.metrics!.cpuPct).toBe(42.5);
 
@@ -431,6 +525,20 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     // 3. A fresh heartbeat clears the marker → ONLINE again (round-trip complete).
     await emitHeartbeat(bus, workspaceId, enrollment.id, 12);
     expect(await stateNow()).toBe("online");
+  }, 90_000);
+
+  test("a heartbeat renews runner authority even when optional metrics are absent", async () => {
+    if (!available) return;
+    const { workspaceId, enrollment, bus } = await seed();
+    appFor(bus);
+    await admin`update enrollments set last_seen_at = null where id = ${enrollment.id}`;
+
+    await emitHeartbeatWithoutMetrics(bus, workspaceId, enrollment.id);
+
+    const after = await getEnrollment(db, workspaceId, enrollment.id);
+    expect(after?.connectionInstanceId).toBe(CONNECTION_INSTANCE_ID);
+    expect(after?.connectionLeaseExpiresAt).not.toBeNull();
+    expect(after?.lastSeenAt).not.toBeNull();
   }, 90_000);
 
   test("state matrix: displayed-but-unconsented is ONLINE (view/control decoupled); offline when no responder", async () => {
@@ -500,6 +608,7 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
         arch: "x86_64",
       });
       enrollments.push(enrollment);
+      await claimConnection(workspaceId, enrollment.id);
       await createSandbox(db, {
         accountId,
         workspaceId,
@@ -564,6 +673,199 @@ describe("M10 GET /machines/:enrollmentId/metrics/series", () => {
       { headers: { authorization: auth } },
     );
     expect(unknown.status).toBe(404);
+  }, 90_000);
+});
+
+describe("Connected Machine signed self-update orchestration", () => {
+  test("dispatches to the exact process and completes only after the matching successor Hello", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment } = await seed();
+    const currentDigest = "ab".repeat(32);
+    const targetDigest = "cd".repeat(32);
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.15",
+          binarySha256: currentDigest,
+          updateChannel: "stable",
+          capabilities: { exec: true, filesystem: true, git: true, pty: true },
+        }),
+      ).finish(),
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.hello`,
+    );
+
+    const requests: ControlRequest[] = [];
+    const bus = busWithAgent({
+      workspaceId,
+      agentId: enrollment.id,
+      online: true,
+      onRequest: (request) => requests.push(request),
+    });
+    const app = appFor(bus, {
+      settings: {
+        ...settings,
+        agentStableVersion: "0.1.16",
+        publicBaseUrl: "https://dev.opengeni.example",
+      },
+    });
+    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}`;
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/update`,
+      { method: "POST", headers: { authorization: auth } },
+    );
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as { operationId: string; targetVersion: string };
+    expect(body.targetVersion).toBe("0.1.16");
+    const updateRequest = requests.find((request) => request.op?.$case === "agentUpdateApply");
+    expect(updateRequest?.epoch).toBe(0);
+    expect(updateRequest?.op).toEqual({
+      $case: "agentUpdateApply",
+      agentUpdateApply: {
+        operationId: body.operationId,
+        targetVersion: "0.1.16",
+        channel: "stable",
+        expectedCurrentVersion: "0.1.15",
+        expectedCurrentSha256: currentDigest,
+        releaseBaseUrl: "https://dev.opengeni.example",
+      },
+    });
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+      "accepted",
+    );
+
+    await bus.emitAgentEvent(
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.events`,
+      AgentEvent.encode({
+        agentId: enrollment.id,
+        event: {
+          $case: "agentUpdateProgress",
+          agentUpdateProgress: {
+            operationId: body.operationId,
+            targetVersion: "0.1.16",
+            expectedBinarySha256: targetDigest,
+            stage: AgentUpdateStage.AGENT_UPDATE_STAGE_RESTARTING,
+            errorCode: "",
+            retryable: false,
+            rolledBack: false,
+          },
+        },
+      }).finish(),
+    );
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+      "restarting",
+    );
+
+    // A reconnect alone is insufficient: the exact signed artifact digest is
+    // part of the success proof.
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.16",
+          binarySha256: "ef".repeat(32),
+          updateChannel: "stable",
+          completedUpdateOperationId: body.operationId,
+          completedUpdateTargetVersion: "0.1.16",
+          completedUpdateBinarySha256: targetDigest,
+        }),
+      ).finish(),
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.hello`,
+    );
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+      "restarting",
+    );
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.16",
+          binarySha256: targetDigest,
+          updateChannel: "stable",
+          completedUpdateOperationId: body.operationId,
+          completedUpdateTargetVersion: "0.1.16",
+          completedUpdateBinarySha256: targetDigest,
+        }),
+      ).finish(),
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.hello`,
+    );
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+      "succeeded",
+    );
+  }, 90_000);
+
+  test("redelivers one unconfirmed operation id instead of reserving a second update", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment } = await seed();
+    const currentDigest = "ab".repeat(32);
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.15",
+          binarySha256: currentDigest,
+          updateChannel: "stable",
+        }),
+      ).finish(),
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.hello`,
+    );
+    const live = await getEnrollment(db, workspaceId, enrollment.id);
+    const operationId = crypto.randomUUID();
+    await beginEnrollmentAgentUpdate(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId: CONNECTION_INSTANCE_ID,
+      connectionGeneration: live!.connectionGeneration,
+      operationId,
+      targetVersion: "0.1.16",
+    });
+    const requests: ControlRequest[] = [];
+    const app = appFor(
+      busWithAgent({
+        workspaceId,
+        agentId: enrollment.id,
+        online: true,
+        onRequest: (request) => requests.push(request),
+      }),
+      {
+        settings: {
+          ...settings,
+          agentStableVersion: "0.1.16",
+          publicBaseUrl: "https://dev.opengeni.example",
+        },
+      },
+    );
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/update`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}`,
+        },
+      },
+    );
+    expect(response.status).toBe(202);
+    expect((await response.json()) as { operationId: string }).toMatchObject({ operationId });
+    expect(requests.find((request) => request.op?.$case === "agentUpdateApply")?.requestId).toBe(
+      operationId,
+    );
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate).toMatchObject({
+      operationId,
+      status: "accepted",
+    });
   }, 90_000);
 });
 
@@ -699,11 +1001,12 @@ describe("machine.link.* fan-out — link-plane session events on going-offline 
     );
 
     // Reconnect: the Hello clears the marker → emits link.restored on the turn.
+    await claimConnection(workspaceId, enrollment.id);
     await handleHelloPayload(
       db,
       undefined,
       helloBytes(enrollment.id, workspaceId),
-      `agent.${workspaceId}.${enrollment.id}.hello`,
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.hello`,
       bus,
     );
     const afterFirst = await machineLinkEvents(session.id);
@@ -717,7 +1020,7 @@ describe("machine.link.* fan-out — link-plane session events on going-offline 
       db,
       undefined,
       helloBytes(enrollment.id, workspaceId),
-      `agent.${workspaceId}.${enrollment.id}.hello`,
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.hello`,
       bus,
     );
     const afterSecond = await machineLinkEvents(session.id);
@@ -807,7 +1110,7 @@ describe("machine.link.* fan-out — link-plane session events on going-offline 
       db,
       observability,
       payload,
-      `agent.${workspaceId}.${enrollment.id}.events`,
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.events`,
       bus,
     );
 

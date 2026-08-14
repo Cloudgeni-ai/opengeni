@@ -91,7 +91,7 @@ import {
   ApprovalRunStateLimitExceededError,
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
-  getEnrollment,
+  getLiveEnrollmentConnection,
   abandonRecordingForTurnAttempt,
   commitSessionAttemptQuiescence,
   getOrCreateCompanyProfileSnapshot,
@@ -6853,11 +6853,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // Whether the machine's latest Hello advertised the op-stream engine
             // (refreshed on every connect). Read only when the server flag is on —
             // one indexed lookup, and the flag off keeps this path byte-identical.
+            const machineEnrollment = await getLiveEnrollmentConnection(
+              db,
+              input.workspaceId,
+              activeSandboxRecord!.enrollmentId!,
+            );
             const machineOpStream =
-              settings.agentOpStreamEnabled === true
-                ? (await getEnrollment(db, input.workspaceId, activeSandboxRecord!.enrollmentId!))
-                    ?.opStream === true
-                : false;
+              settings.agentOpStreamEnabled === true && machineEnrollment?.opStream === true;
             const established = await establishSelfhostedTurnSession(
               {
                 db,
@@ -6870,6 +6872,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               {
                 workspaceId: input.workspaceId,
                 agentId: activeSandboxRecord!.enrollmentId!,
+                // An offline machine must not fail turn admission. Bind an
+                // intentionally unserved token so the model receives the normal
+                // typed agent_offline tool result; a later turn resolves a fresh
+                // claimed process instance.
+                connectionInstanceId: machineEnrollment?.connectionInstanceId ?? "unavailable",
                 opStream: machineOpStream,
                 epoch: activeSandboxPointer!.activeEpoch,
                 environment: sandboxEnvironment,

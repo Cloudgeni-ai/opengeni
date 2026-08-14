@@ -1,4 +1,5 @@
 import {
+  AttachedBrowserBridge,
   AttachedBrowserDevice,
   AuthRun,
   AuthRunListResponse,
@@ -108,6 +109,7 @@ const DiscoveryOutput = z
     browsers: z.array(BrowserSession),
     computers: z.array(ComputerSession),
     identities: z.array(BrowserIdentity),
+    attachedBrowserBridges: z.array(AttachedBrowserBridge),
     attachedBrowsers: z.array(AttachedBrowserDevice),
   })
   .strict();
@@ -487,6 +489,7 @@ export function createInteractionAttemptToolDefinitions(
           ? computers.sessions
           : computers.sessions.filter((session) => !TERMINAL_LIFECYCLES.has(session.lifecycle)),
         identities: identities.identities,
+        attachedBrowserBridges: attached.bridges,
         attachedBrowsers: attached.devices,
       };
     },

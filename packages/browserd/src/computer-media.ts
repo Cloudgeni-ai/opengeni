@@ -63,6 +63,18 @@ export function sameComputerFrameOptions(
   );
 }
 
+export function computerFrameStreamProfileKey(
+  options: NormalizedComputerFrameStreamOptions,
+): string {
+  return [
+    options.format,
+    options.quality,
+    options.maxWidth,
+    options.maxHeight,
+    options.everyNthFrame,
+  ].join(":");
+}
+
 function boundedInteger(value: number, min: number, max: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < min || value > max) {
     throw new Error(`computer ${label} must be a bounded integer`);

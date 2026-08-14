@@ -39,6 +39,8 @@ import { isNativeDesktopSession } from "../src/sandbox-computer";
 
 const WS = "11111111-1111-1111-1111-111111111111";
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
+const connectionInstanceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const resolveSelfhostedConnection = async () => ({ connectionInstanceId, opStream: false });
 
 /** A trivial in-memory backend whose exec echoes its `tag` so a test can assert
  *  which backend an op landed on. Optionally fences a configured epoch. */
@@ -1362,6 +1364,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
       defaultBackend,
       defaultKind: "modal",
       getSandbox: async (id) => sandboxes[id] ?? null,
+      resolveSelfhostedConnection,
       controlRpcFactory: () => new MockAgentResponder(),
       relay: RELAY,
     });
@@ -1388,6 +1391,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
         return { session: replacement, sandboxId: null, kind: "modal" };
       },
       getSandbox: async () => null,
+      resolveSelfhostedConnection,
       controlRpcFactory: () => new MockAgentResponder(),
       relay: RELAY,
     });
@@ -1415,6 +1419,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
       defaultBackend: new FakeBackend("group-modal"),
       defaultKind: "modal",
       getSandbox: async (id) => sandboxes[id] ?? null,
+      resolveSelfhostedConnection,
       controlRpcFactory: () => mock,
       relay: RELAY,
     });
@@ -1428,8 +1433,10 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     expect(exec.stdout.trim()).toBe("the-laptop");
     // The op carried the swap's active_epoch as the fence.
     expect(mock.requests[0]?.req.epoch).toBe(7);
-    // Addressed to agent.<ws>.<enrollmentId>.rpc (the enrollment IS the agent id).
-    expect(mock.requests[0]?.subject).toBe(`agent.${WS}.enroll-1.rpc`);
+    // Addressed to the exact live process (the enrollment IS the agent id).
+    expect(mock.requests[0]?.subject).toBe(
+      `agent.${WS}.enroll-1.connection.${connectionInstanceId}.rpc`,
+    );
   });
 
   test("the resolver threads the run environment into the selfhosted target's manifest (env-parity → no manifest-env delta throw)", async () => {
@@ -1444,6 +1451,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
       defaultBackend: new FakeBackend("group-modal"),
       defaultKind: "modal",
       getSandbox: async (id) => sandboxes[id] ?? null,
+      resolveSelfhostedConnection,
       controlRpcFactory: () => new MockAgentResponder({ hostname: "the-laptop" }),
       relay: RELAY,
       environment: env,
@@ -1468,6 +1476,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
       defaultBackend: new FakeBackend("group-modal"),
       defaultKind: "modal",
       getSandbox: async (id) => sandboxes[id] ?? null,
+      resolveSelfhostedConnection,
       controlRpcFactory: () => mock,
       relay: RELAY,
       transientExecEnvironment: () => ({ OPENGENI_CODEMODE_TOKEN: token }),
@@ -1506,6 +1515,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
         freshBuilds += 1; // a fresh build always goes through getSandbox first
         return sandboxes[id] ?? null;
       },
+      resolveSelfhostedConnection,
       controlRpcFactory: () => new MockAgentResponder({ hostname: "rebuilt" }),
       relay: RELAY,
       pinnedSelfhosted: { sandboxId: "sbx-self", epoch: 7, session: pinnedInstance },
@@ -1541,6 +1551,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
       defaultBackend: new FakeBackend("group-modal"),
       defaultKind: "modal",
       getSandbox: async (id) => sandboxes[id] ?? null,
+      resolveSelfhostedConnection,
       controlRpcFactory: () => new MockAgentResponder(),
       relay: RELAY,
     });
@@ -1555,6 +1566,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
       defaultBackend: new FakeBackend("group-modal"),
       defaultKind: "modal",
       getSandbox: async () => null,
+      resolveSelfhostedConnection,
       controlRpcFactory: () => new MockAgentResponder(),
       relay: RELAY,
     });
@@ -1575,6 +1587,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
         name: "unpaired",
         enrollmentId: null,
       }),
+      resolveSelfhostedConnection,
       controlRpcFactory: () => new MockAgentResponder(),
       relay: RELAY,
     });
@@ -1592,6 +1605,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
       defaultBackend: groupModal,
       defaultKind: "modal",
       getSandbox: async (id) => sandboxes[id] ?? null,
+      resolveSelfhostedConnection,
       controlRpcFactory: () => laptop,
       relay: RELAY,
     });
@@ -1627,6 +1641,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
         id === "sbx-self"
           ? { id, kind: "selfhosted", name: "laptop", enrollmentId: "enroll-1" }
           : null,
+      resolveSelfhostedConnection,
       controlRpcFactory: () => laptop,
       relay: RELAY,
     });
@@ -1667,6 +1682,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
         id === "sbx-self"
           ? { id, kind: "selfhosted", name: "laptop", enrollmentId: "enroll-1" }
           : null,
+      resolveSelfhostedConnection,
       controlRpcFactory: () => offlineLaptop,
       relay: RELAY,
       selfhostedTimeoutMs: 200,
@@ -1832,6 +1848,7 @@ describe("defaultIsHome — a machine-pinned turn's clear-to-null fails typed (i
       defaultBackend: machine,
       defaultKind: "selfhosted",
       getSandbox: async (id) => (id === "sbx-self" ? machineSandbox : null),
+      resolveSelfhostedConnection,
       controlRpcFactory: () => new MockAgentResponder(),
       relay: RELAY,
       pinnedSelfhosted: { sandboxId: "sbx-self", epoch: 3, session: machine },
@@ -1858,6 +1875,7 @@ describe("defaultIsHome — a machine-pinned turn's clear-to-null fails typed (i
       defaultBackend: home,
       defaultKind: "selfhosted",
       getSandbox: async () => null,
+      resolveSelfhostedConnection,
       controlRpcFactory: () => new MockAgentResponder(),
       relay: RELAY,
     });
@@ -1875,6 +1893,7 @@ describe("defaultIsHome — a machine-pinned turn's clear-to-null fails typed (i
       defaultBackend: machine,
       defaultKind: "selfhosted",
       getSandbox: async () => null,
+      resolveSelfhostedConnection,
       controlRpcFactory: () => new MockAgentResponder(),
       relay: RELAY,
       defaultIsHome: true,
@@ -1892,6 +1911,7 @@ describe("defaultIsHome — a machine-pinned turn's clear-to-null fails typed (i
       defaultBackend: machine,
       defaultKind: "selfhosted",
       getSandbox: async (id) => (id === "sbx-self" ? machineSandbox : null),
+      resolveSelfhostedConnection,
       controlRpcFactory: () => new MockAgentResponder(),
       relay: RELAY,
       pinnedSelfhosted: { sandboxId: "sbx-self", epoch: 3, session: machine },

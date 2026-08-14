@@ -288,16 +288,20 @@ describe("BrowserSession route discipline", () => {
     const createStart = source.indexOf('app.post("/v1/workspaces/:workspaceId/browser-sessions"');
     const createEnd = source.indexOf("app.get(", createStart);
     const create = source.slice(createStart, createEnd);
-    expect(create.indexOf("requireLinkedComputerBinding")).toBeGreaterThanOrEqual(0);
-    expect(create.indexOf("requireLinkedComputerBinding")).toBeLessThan(
+    expect(create.indexOf("ensureLinkedComputerController")).toBeGreaterThanOrEqual(0);
+    expect(create.indexOf("ensureLinkedComputerController")).toBeLessThan(
       create.indexOf("client.createSession"),
     );
-    const binding = source.slice(source.indexOf("async function requireLinkedComputerBinding"));
+    const binding = source.slice(source.indexOf("async function ensureLinkedComputerController"));
     expect(binding).toContain("sameInteractionPlacement");
     expect(binding).toContain("record.session.controller.placementInstanceId");
     expect(binding).toContain(
       "controllerGeneration: record.session.controller.controllerGeneration",
     );
+    expect(binding.indexOf("await sessionClient.heartbeat()")).toBeLessThan(
+      binding.indexOf("await client.createComputerSession"),
+    );
+    expect(binding).toContain("isMissingLinkedComputerControllerSession(error)");
   });
 
   test("publishes encrypted profile state only after durable dispatch", async () => {

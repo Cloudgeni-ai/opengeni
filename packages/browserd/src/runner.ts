@@ -1,6 +1,16 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, chmod, lstat, mkdir, readFile, readlink, realpath, rm } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  readlink,
+  realpath,
+  rm,
+} from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { resolvePinnedAgentBrowserBinary, type ResolvedAgentBrowserBinary } from "./binary";
 
@@ -92,10 +102,14 @@ export class AgentBrowserJsonRunner {
   private readonly globalArguments: readonly string[];
   private readonly workingDirectory: string;
   private readonly daemonPidFile: string;
+  private readonly browserPidFile: string;
+  private readonly profileDirectory: string;
+  private readonly managedBrowserExecutable: string | null;
 
   private constructor(binary: ResolvedAgentBrowserBinary, options: AgentBrowserRunnerOptions) {
     this.binary = binary;
     this.workingDirectory = resolve(options.workingDirectory ?? process.cwd());
+    this.profileDirectory = resolve(options.profileDirectory);
     const proxy = options.proxyUrl ? privateProxyAuthority(options.proxyUrl) : null;
     this.environment = isolatedEnvironment(options, proxy);
     this.globalArguments = [
@@ -109,6 +123,9 @@ export class AgentBrowserJsonRunner {
       "run",
       `${options.sessionName}.pid`,
     );
+    this.browserPidFile = join(this.profileDirectory, "..", "browser.pid");
+    this.managedBrowserExecutable =
+      options.environment?.OPENGENI_BACKGROUND_BROWSER_EXECUTABLE ?? null;
   }
 
   static async create(options: AgentBrowserRunnerOptions): Promise<AgentBrowserJsonRunner> {
@@ -125,6 +142,14 @@ export class AgentBrowserJsonRunner {
       await chmod(directory, 0o700);
     }
     const browserLaunch = await managedBrowserLaunch(options);
+    const browserPidFile = join(resolve(options.profileDirectory), "..", "browser.pid");
+    if (browserLaunch?.backgroundBrowserExecutable) {
+      await terminateManagedBrowser({
+        pidFile: browserPidFile,
+        profileDirectory: resolve(options.profileDirectory),
+        executablePath: browserLaunch.backgroundBrowserExecutable,
+      });
+    }
     const binary = options.binary ?? (await resolvePinnedAgentBrowserBinary());
     return new AgentBrowserJsonRunner(binary, {
       ...options,
@@ -137,6 +162,7 @@ export class AgentBrowserJsonRunner {
                 ? {
                     OPENGENI_BACKGROUND_BROWSER_EXECUTABLE:
                       browserLaunch.backgroundBrowserExecutable,
+                    OPENGENI_BACKGROUND_BROWSER_PID_FILE: browserPidFile,
                   }
                 : {}),
             },
@@ -290,6 +316,7 @@ export class AgentBrowserJsonRunner {
     const pid = recordedPid ?? expectedPid ?? null;
     if (pid === null || !(await processRunning(pid))) {
       await rm(this.daemonPidFile, { force: true });
+      await this.terminateManagedBrowser();
       return;
     }
     if (!(await sameExecutable(pid, this.binary.path))) {
@@ -315,6 +342,39 @@ export class AgentBrowserJsonRunner {
       }
     }
     await rm(this.daemonPidFile, { force: true });
+    await this.terminateManagedBrowser();
+  }
+
+  private async terminateManagedBrowser(): Promise<void> {
+    await terminateManagedBrowser({
+      pidFile: this.browserPidFile,
+      profileDirectory: this.profileDirectory,
+      executablePath: this.managedBrowserExecutable,
+    });
+  }
+}
+
+/** Reap only macOS Chrome instances carrying an exact private OpenGeni profile
+ * PID sidecar. A controller restart never adopts an unfenced native process;
+ * active durable sessions are rebuilt on their next causal request. */
+export async function reapManagedBrowserProcesses(rootDirectory: string): Promise<void> {
+  if (process.platform !== "darwin") return;
+  const sessionsDirectory = join(resolve(rootDirectory), "sessions");
+  let entries;
+  try {
+    entries = await readdir(sessionsDirectory, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^[0-9a-f-]{36}$/iu.test(entry.name)) continue;
+    const sessionDirectory = join(sessionsDirectory, entry.name);
+    await terminateManagedBrowser({
+      pidFile: join(sessionDirectory, "browser.pid"),
+      profileDirectory: join(sessionDirectory, "profile"),
+      executablePath: null,
+    });
   }
 }
 
@@ -443,6 +503,95 @@ async function processRunning(pid: number): Promise<boolean> {
     if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
     throw error;
   }
+}
+
+async function terminateManagedBrowser(input: {
+  pidFile: string;
+  profileDirectory: string;
+  executablePath: string | null;
+}): Promise<void> {
+  if (process.platform !== "darwin") return;
+  const pid = await readManagedBrowserPid(input.pidFile);
+  if (pid === null) return;
+  if (!(await processRunning(pid))) {
+    await rm(input.pidFile, { force: true });
+    return;
+  }
+  const command = await boundedProcessOutput("/bin/ps", [
+    "-ww",
+    "-p",
+    String(pid),
+    "-o",
+    "command=",
+  ]);
+  const profileArgument = `--user-data-dir=${resolve(input.profileDirectory)}`;
+  if (!command.includes(profileArgument)) {
+    throw new AgentBrowserCommandError(
+      "process_failed",
+      "managed browser PID does not identify the exact private profile",
+    );
+  }
+  if (input.executablePath && !(await sameExecutable(pid, input.executablePath))) {
+    throw new AgentBrowserCommandError(
+      "process_failed",
+      "managed browser PID does not identify the configured executable",
+    );
+  }
+  if (!input.executablePath && !isRecognizedMacBrowserCommand(command)) {
+    throw new AgentBrowserCommandError(
+      "process_failed",
+      "managed browser PID does not identify a recognized macOS browser",
+    );
+  }
+  signalProcess(pid, "SIGTERM");
+  if (!(await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS))) {
+    const current = await boundedProcessOutput("/bin/ps", [
+      "-ww",
+      "-p",
+      String(pid),
+      "-o",
+      "command=",
+    ]);
+    if (!current.includes(profileArgument)) {
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "managed browser identity changed before forced termination",
+      );
+    }
+    signalProcess(pid, "SIGKILL");
+    if (!(await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS))) {
+      throw new AgentBrowserCommandError("process_failed", "managed browser did not terminate");
+    }
+  }
+  await rm(input.pidFile, { force: true });
+}
+
+async function readManagedBrowserPid(path: string): Promise<number | null> {
+  let metadata;
+  try {
+    metadata = await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 2 || metadata.size > 16) {
+    throw new AgentBrowserCommandError("process_failed", "managed browser PID file is invalid");
+  }
+  const raw = (await readFile(path, "utf8")).trim();
+  if (!/^[1-9][0-9]{0,9}$/u.test(raw)) {
+    throw new AgentBrowserCommandError("process_failed", "managed browser PID is invalid");
+  }
+  const pid = Number(raw);
+  if (!Number.isSafeInteger(pid) || pid < 2 || pid > 2_147_483_647) {
+    throw new AgentBrowserCommandError("process_failed", "managed browser PID is invalid");
+  }
+  return pid;
+}
+
+function isRecognizedMacBrowserCommand(command: string): boolean {
+  return ["Google Chrome.app", "Google Chrome Canary.app", "Chromium.app"].some((bundle) =>
+    command.includes(`/${bundle}/Contents/MacOS/`),
+  );
 }
 
 function signalProcess(pid: number, signal: NodeJS.Signals): void {

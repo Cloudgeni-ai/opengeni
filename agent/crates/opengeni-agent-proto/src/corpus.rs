@@ -108,6 +108,12 @@ pub fn canonical_hello() -> v1::Hello {
         }),
         update_channel: "stable".to_string(),
         resume_token: "resume-token-1".to_string(),
+        // Proto3 defaults preserve the canonical corpus bytes while ensuring
+        // every newly added handshake field remains deliberately initialized.
+        binary_sha256: String::new(),
+        completed_update_operation_id: String::new(),
+        completed_update_target_version: String::new(),
+        completed_update_binary_sha256: String::new(),
     }
 }
 

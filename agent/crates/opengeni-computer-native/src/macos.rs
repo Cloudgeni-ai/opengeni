@@ -6,7 +6,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use image::{
     codecs::{jpeg::JpegEncoder, png::PngEncoder},
-    ExtendedColorType, ImageEncoder as _,
+    imageops::FilterType,
+    ExtendedColorType, ImageEncoder as _, RgbaImage,
 };
 use opengeni_agent_macos_ffi::{
     accessibility_trusted, capture_display_rgba, capture_display_rgba_sized, capture_window_rgba,
@@ -419,7 +420,7 @@ impl AxComputerAdapter {
                 true,
             ));
         }
-        let (bytes, mime_type) =
+        let (bytes, mime_type, width, height) =
             encode_frame(&captured.rgba, captured.width, captured.height, options)?;
         let frame_id = self.next_frame_id();
         self.latest_screen_frames.write().await.insert(
@@ -427,15 +428,15 @@ impl AxComputerAdapter {
             ScreenFrameFence {
                 frame_id: frame_id.clone(),
                 target_generation: record.target.target_generation.clone(),
-                width: captured.width,
-                height: captured.height,
+                width,
+                height,
             },
         );
         Ok(captured_frame(
             frame_id,
             record.target,
-            captured.width,
-            captured.height,
+            width,
+            height,
             mime_type,
             bytes,
         ))
@@ -491,7 +492,7 @@ impl AxComputerAdapter {
                 true,
             ));
         }
-        let (bytes, mime_type) = encode_frame(
+        let (bytes, mime_type, width, height) = encode_frame(
             &captured.frame.rgba,
             captured.frame.width,
             captured.frame.height,
@@ -508,8 +509,8 @@ impl AxComputerAdapter {
                 target_generation: record.target.target_generation.clone(),
                 window_id: captured.window_id,
                 bounds: captured.bounds,
-                width: captured.frame.width,
-                height: captured.frame.height,
+                width,
+                height,
             },
         );
         while frames.len() > MAX_WINDOW_FRAME_FENCES {
@@ -526,8 +527,8 @@ impl AxComputerAdapter {
         Ok(captured_frame(
             frame_id,
             record.target,
-            captured.frame.width,
-            captured.frame.height,
+            width,
+            height,
             mime_type,
             bytes,
         ))
@@ -536,7 +537,6 @@ impl AxComputerAdapter {
     fn live_capture(
         &self,
         target_id: &str,
-        options: NativeCaptureOptions,
         target_generation: &str,
     ) -> NativeAdapterResult<Arc<MacFrameStream>> {
         let captures = self
@@ -546,10 +546,10 @@ impl AxComputerAdapter {
         let capture = captures
             .get(target_id)
             .ok_or_else(|| driver_failure("macOS live capture was not started for this target"))?;
-        if capture.options != options || capture.target_generation != target_generation {
+        if capture.target_generation != target_generation {
             return Err(NativeAdapterError::definite(
                 NativeAdapterErrorCode::FrameStale,
-                "macOS live capture configuration or target generation changed",
+                "macOS live capture target generation changed",
                 true,
             ));
         }
@@ -1068,7 +1068,7 @@ impl ComputerAdapter for AxComputerAdapter {
     ) -> NativeAdapterResult<NativeCapturedFrame> {
         Self::ensure_unlocked()?;
         if let Some(screen) = Self::load_screen(target_id)? {
-            let stream = self.live_capture(target_id, options, &screen.target.target_generation)?;
+            let stream = self.live_capture(target_id, &screen.target.target_generation)?;
             let captured = tokio::task::spawn_blocking(move || stream.next_frame())
                 .await
                 .map_err(|error| {
@@ -1082,8 +1082,7 @@ impl ComputerAdapter for AxComputerAdapter {
         let record = self.load_target(target_id).await?;
         match record.target.kind {
             NativeTargetKind::Window => {
-                let stream =
-                    self.live_capture(target_id, options, &record.target.target_generation)?;
+                let stream = self.live_capture(target_id, &record.target.target_generation)?;
                 let frame = tokio::task::spawn_blocking(move || stream.next_frame())
                     .await
                     .map_err(|error| {
@@ -1553,9 +1552,15 @@ fn encode_frame(
     width: u32,
     height: u32,
     options: Option<NativeCaptureOptions>,
-) -> NativeAdapterResult<(Vec<u8>, String)> {
+) -> NativeAdapterResult<(Vec<u8>, String, u32, u32)> {
+    let (rgba, width, height) = fit_rgba(rgba, width, height, options)?;
     if options.is_none_or(|options| options.format == NativeFrameFormat::Png) {
-        return Ok((encode_png(rgba, width, height)?, "image/png".to_string()));
+        return Ok((
+            encode_png(&rgba, width, height)?,
+            "image/png".to_string(),
+            width,
+            height,
+        ));
     }
     let quality = options.map_or(80, |options| options.quality);
     let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
@@ -1566,7 +1571,31 @@ fn encode_frame(
     JpegEncoder::new_with_quality(&mut jpeg, quality)
         .write_image(&rgb, width, height, ExtendedColorType::Rgb8)
         .map_err(|error| driver_failure(format!("encode macOS live frame: {error}")))?;
-    Ok((jpeg, "image/jpeg".to_string()))
+    Ok((jpeg, "image/jpeg".to_string(), width, height))
+}
+
+fn fit_rgba(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    options: Option<NativeCaptureOptions>,
+) -> NativeAdapterResult<(Vec<u8>, u32, u32)> {
+    let Some(options) = options else {
+        return Ok((rgba.to_vec(), width, height));
+    };
+    let Some((output_width, output_height)) =
+        crate::model::fit_frame_dimensions(width, height, options.max_width, options.max_height)
+    else {
+        return Err(driver_failure("macOS capture dimensions are invalid"));
+    };
+    if (output_width, output_height) == (width, height) {
+        return Ok((rgba.to_vec(), width, height));
+    }
+    let source = RgbaImage::from_raw(width, height, rgba.to_vec())
+        .ok_or_else(|| driver_failure("macOS capture RGBA dimensions are inconsistent"))?;
+    let resized =
+        image::imageops::resize(&source, output_width, output_height, FilterType::Triangle);
+    Ok((resized.into_raw(), output_width, output_height))
 }
 
 fn captured_frame(
@@ -1809,5 +1838,21 @@ mod capability_tests {
                 && !locked.window_capture
                 && !locked.clipboard
         );
+    }
+
+    #[test]
+    fn live_profile_encoding_preserves_aspect_ratio_and_reports_output_geometry() {
+        let rgba = vec![255_u8; 8 * 4 * 4];
+        let options = NativeCaptureOptions {
+            format: NativeFrameFormat::Png,
+            quality: 70,
+            max_width: 4,
+            max_height: 4,
+        };
+        let (bytes, mime_type, width, height) =
+            encode_frame(&rgba, 8, 4, Some(options)).expect("encode compact frame");
+        assert_eq!(mime_type, "image/png");
+        assert_eq!((width, height), (4, 2));
+        assert!(!bytes.is_empty());
     }
 }

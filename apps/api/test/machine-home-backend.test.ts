@@ -27,6 +27,7 @@ import {
   createDb,
   createEnrollment,
   createSandbox,
+  claimEnrollmentConnection,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -41,6 +42,7 @@ let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
+const CONNECTION_INSTANCE_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 // The deployment default is a REAL cloud backend ("modal"), so the "normal create
 // is unchanged" assertion is meaningful (the machine override is the ONLY thing
@@ -65,40 +67,43 @@ const settings = testSettings({
  *  gate passes without a broker. */
 function busWithAgent(opts: { workspaceId: string; agentId: string }): MemoryEventBus {
   const bus = new MemoryEventBus();
-  bus.subscribeRequests(subjectFor(opts.workspaceId, opts.agentId), (payload) => {
-    const req = ControlRequest.decode(payload);
-    const op = req.op;
-    const res: ControlResponse =
-      op?.$case === "ping"
-        ? {
-            requestId: req.requestId,
-            result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
-          }
-        : op?.$case === "exec"
+  bus.subscribeRequests(
+    subjectFor(opts.workspaceId, opts.agentId, CONNECTION_INSTANCE_ID),
+    (payload) => {
+      const req = ControlRequest.decode(payload);
+      const op = req.op;
+      const res: ControlResponse =
+        op?.$case === "ping"
           ? {
               requestId: req.requestId,
-              result: {
-                $case: "exec",
-                exec: {
-                  exitCode: 0,
-                  stdout: new TextEncoder().encode("machine-home-ok\n"),
-                  stderr: new Uint8Array(0),
-                  timedOut: false,
-                  durationMs: "1",
-                },
-              },
+              result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
             }
-          : {
-              requestId: req.requestId,
-              error: {
-                code: ErrorCode.ERROR_CODE_UNSUPPORTED,
-                message: "unsupported",
-                retryable: false,
-                detail: {},
-              },
-            };
-    return ControlResponse.encode(res).finish();
-  });
+          : op?.$case === "exec"
+            ? {
+                requestId: req.requestId,
+                result: {
+                  $case: "exec",
+                  exec: {
+                    exitCode: 0,
+                    stdout: new TextEncoder().encode("machine-home-ok\n"),
+                    stderr: new Uint8Array(0),
+                    timedOut: false,
+                    durationMs: "1",
+                  },
+                },
+              }
+            : {
+                requestId: req.requestId,
+                error: {
+                  code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+                  message: "unsupported",
+                  retryable: false,
+                  detail: {},
+                },
+              };
+      return ControlResponse.encode(res).finish();
+    },
+  );
   return bus;
 }
 
@@ -129,6 +134,14 @@ async function seedMachine(
     os,
     arch: "x86_64",
   });
+  const connection = await claimEnrollmentConnection(db, {
+    workspaceId,
+    enrollmentId: enrollment.id,
+    credentialGeneration: enrollment.credentialGeneration,
+    connectionInstanceId: CONNECTION_INSTANCE_ID,
+    leaseMs: 60_000,
+  });
+  expect(connection.claimed).toBe(true);
   // Recent lastSeenAt so a probe-miss would be "reconnecting"; the online responder
   // makes the probe succeed → "online" (the seed swap's attach gate).
   await admin`update enrollments set last_seen_at = now() where id = ${enrollment.id}`;

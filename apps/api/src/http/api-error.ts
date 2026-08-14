@@ -6,6 +6,7 @@ type ApiHttpErrorOptions = {
   code: ErrorCode;
   message: string;
   retryable?: boolean;
+  outcomeUnknown?: boolean;
   details?: Record<string, unknown>;
 };
 
@@ -13,6 +14,7 @@ type ApiHttpErrorOptions = {
 export class ApiHttpError extends HTTPException {
   readonly code: ErrorCode;
   readonly retryable: boolean | undefined;
+  readonly outcomeUnknown: boolean | undefined;
   readonly details: Record<string, unknown> | undefined;
 
   constructor(status: number, options: ApiHttpErrorOptions) {
@@ -20,6 +22,7 @@ export class ApiHttpError extends HTTPException {
     this.name = "ApiHttpError";
     this.code = options.code;
     this.retryable = options.retryable;
+    this.outcomeUnknown = options.outcomeUnknown;
     this.details = options.details;
   }
 }

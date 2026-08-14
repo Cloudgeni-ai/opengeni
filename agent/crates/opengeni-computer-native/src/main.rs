@@ -4,6 +4,8 @@
 use std::path::{Path, PathBuf};
 
 const BACKGROUND_BROWSER_EXECUTABLE_ENV: &str = "OPENGENI_BACKGROUND_BROWSER_EXECUTABLE";
+#[cfg(target_os = "macos")]
+const BACKGROUND_BROWSER_PID_FILE_ENV: &str = "OPENGENI_BACKGROUND_BROWSER_PID_FILE";
 
 #[tokio::main]
 async fn main() {
@@ -38,7 +40,8 @@ async fn run_background_browser() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     tokio::task::spawn_blocking(move || {
-        opengeni_agent_macos_ffi::run_background_application(&app, &arguments)
+        let pid_file = std::env::var_os(BACKGROUND_BROWSER_PID_FILE_ENV).map(PathBuf::from);
+        opengeni_agent_macos_ffi::run_background_application(&app, &arguments, pid_file.as_deref())
     })
     .await??;
     Ok(())

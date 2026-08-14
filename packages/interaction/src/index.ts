@@ -27,6 +27,7 @@ import {
   InteractionControllerCore,
   InteractionControllerError,
   InteractionDefiniteDriverError,
+  InteractionOutcomeUnknownDriverError,
   recoverInteractionReceipt,
   type InteractionControllerErrorCode,
   type InteractionOperationJournalRecord,
@@ -35,6 +36,7 @@ import {
 export {
   InteractionControllerError,
   InteractionDefiniteDriverError,
+  InteractionOutcomeUnknownDriverError,
   type InteractionControllerErrorCode,
 };
 
