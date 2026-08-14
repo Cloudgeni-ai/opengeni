@@ -12,7 +12,7 @@ import {
   type ConnectorAttachmentTransfer,
 } from "@opengeni/contracts";
 import { assertMcpPayloadWithinBytes } from "./mcp-network";
-import { RoutingMutationOutcomeUnknownError } from "./sandbox/routing/routing-session";
+import { isRoutingMutationOutcomeUnknownError } from "./sandbox/routing/routing-session";
 
 export const CONNECTOR_ATTACHMENT_SANITIZED_RESULT_MAX_BYTES = 128 * 1024;
 export const CONNECTOR_ATTACHMENT_PROVIDER_RESULT_MAX_BYTES = 64 * 1024;
@@ -210,7 +210,7 @@ export async function projectConnectorAttachmentTransfers(
     );
     return projected;
   } catch (error) {
-    if (error instanceof RoutingMutationOutcomeUnknownError) throw error;
+    if (isRoutingMutationOutcomeUnknownError(error)) throw error;
     throw new ConnectorAttachmentTransferError();
   }
 }

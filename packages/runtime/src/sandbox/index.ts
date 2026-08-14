@@ -497,6 +497,7 @@ export {
 // currently-active backend (Modal or selfhosted) — flippable mid-turn, single
 // active at a time, fence-retrying on a swap race.
 export {
+  isRoutingMutationOutcomeUnknownError,
   RoutingBackendRecoveryRequiredError,
   RoutingMutationOutcomeUnknownError,
   RoutingRetainedProcessNotFoundError,

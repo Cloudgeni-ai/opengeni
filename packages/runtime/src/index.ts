@@ -184,9 +184,9 @@ import {
 import {
   createSandboxClient,
   desktopCapableBackend,
+  isRoutingMutationOutcomeUnknownError,
   repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
-  RoutingMutationOutcomeUnknownError,
   setSelfhostedApplyDiff,
   codemodeTokenFileFromEnvironment,
   withCodemodeTokenClient,
@@ -5495,7 +5495,7 @@ export class PrefixedMcpServer implements MCPServer {
       // settlement. Best-effort MCP isolation must not turn that uncertainty
       // into a completed tool result: model execution fails loud, and Codemode
       // durably settles the operation as outcome_unknown.
-      if (error instanceof RoutingMutationOutcomeUnknownError) {
+      if (isRoutingMutationOutcomeUnknownError(error)) {
         recordOutcome("outcome_uncertain");
         throw error;
       }

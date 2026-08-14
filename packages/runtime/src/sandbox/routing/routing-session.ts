@@ -324,6 +324,16 @@ export class RoutingMutationOutcomeUnknownError extends Error {
   }
 }
 
+export function isRoutingMutationOutcomeUnknownError(
+  error: unknown,
+): error is RoutingMutationOutcomeUnknownError {
+  try {
+    return error instanceof RoutingMutationOutcomeUnknownError;
+  } catch {
+    return false;
+  }
+}
+
 /** An explicit process-aware operation named a numeric provider locator that
  * is not retained by this routing session. Callers must never fall back to the
  * current active pointer for such an operation. */
