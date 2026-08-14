@@ -191,7 +191,7 @@ const skillLibraryEntries: readonly SkillLibraryEntry[] = Object.freeze([
     contentSha256: "0a6244ecddf1cce0357db41b41b3b20a1bfa71f331092ebc8bbd15e649733d35",
     sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
     sourceUrl:
-      "https://github.com/hashicorp/agent-skills/tree/de4323afdfbc30d1387f287b55062fa8d82b62e8/terraform/code-generation/skills/terraform-stacks",
+      "https://github.com/hashicorp/agent-skills/tree/de4323afdfbc30d1387f287b55062fa8d82b62e8/terraform/module-generation/skills/terraform-stacks",
     provenance: "Vendored from hashicorp/agent-skills; reviewed immutable opt-in entry.",
     license: "MPL-2.0",
     documentationUrl: "https://developer.hashicorp.com/terraform/language/stacks",

@@ -4,6 +4,8 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import { listSkillLibraryEntries } from "../packages/runtime/src/skill-library";
+
 const root = resolve(import.meta.dir, "..");
 const runtimeRoot = join(root, "packages/runtime");
 const packagedLicensePath = "package/src/curated_skill_library/LICENSE";
@@ -17,6 +19,14 @@ const mplSkillIds = [
   "terraform-style-guide",
   "terraform-test",
 ] as const;
+const mplSkillSourcePaths = {
+  "azure-verified-modules": "terraform/code-generation/skills/azure-verified-modules",
+  "refactor-module": "terraform/module-generation/skills/refactor-module",
+  "terraform-search-import": "terraform/code-generation/skills/terraform-search-import",
+  "terraform-stacks": "terraform/module-generation/skills/terraform-stacks",
+  "terraform-style-guide": "terraform/code-generation/skills/terraform-style-guide",
+  "terraform-test": "terraform/code-generation/skills/terraform-test",
+} as const;
 
 describe("@opengeni/runtime package licensing", () => {
   test("ships the exact MPL-2.0 license and notice for curated Terraform Skills", async () => {
@@ -56,7 +66,13 @@ describe("@opengeni/runtime package licensing", () => {
       const notices = packagedNotices.toString("utf8");
       expect(notices).toContain(pinnedSourceCommit);
       expect(notices).toContain("src/curated_skill_library/LICENSE");
-      for (const skillId of mplSkillIds) expect(notices).toContain(`- ${skillId}`);
+      const entries = new Map(listSkillLibraryEntries().map((entry) => [entry.id, entry]));
+      for (const skillId of mplSkillIds) {
+        expect(notices).toContain(`- ${skillId}`);
+        expect(entries.get(skillId)?.sourceUrl).toBe(
+          `https://github.com/hashicorp/agent-skills/tree/${pinnedSourceCommit}/${mplSkillSourcePaths[skillId]}`,
+        );
+      }
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
