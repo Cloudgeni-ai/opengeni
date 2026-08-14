@@ -1,5 +1,11 @@
 # @opengeni/agent-proto
 
+## 0.5.1
+
+### Patch Changes
+
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+
 ## 0.5.0
 
 ### Minor Changes
