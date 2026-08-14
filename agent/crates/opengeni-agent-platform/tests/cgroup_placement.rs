@@ -124,7 +124,17 @@ mod linux {
         );
 
         assert_fixture_prerequisites();
+        prove_descendant_placement_and_abort(&service_dir, &self_unified, &platform, config).await;
+        prove_spawn_failure_cleanup(&service_dir, &platform).await;
+        prove_cpu_lease_lifecycle(&service_dir, &platform).await;
+    }
 
+    async fn prove_descendant_placement_and_abort(
+        service_dir: &Path,
+        self_unified: &str,
+        platform: &std::sync::Arc<NativePlatform>,
+        config: OpCgroupConfig,
+    ) {
         // Run a real shell exec that forks a descendant into a different session.
         // Both publish their PIDs and stay alive. Process-group kill cannot reach
         // that descendant; task-abort cleanup must use the operation cgroup.
@@ -209,13 +219,18 @@ mod linux {
             !Path::new(&format!("/proc/{detached_pid}")).exists(),
             "session-detached descendant survived operation-cgroup cleanup"
         );
-        assert_controller_neutrality_after_cleanup(&service_dir);
+        assert_controller_neutrality_after_cleanup(service_dir);
+    }
 
+    async fn prove_spawn_failure_cleanup(
+        service_dir: &Path,
+        platform: &std::sync::Arc<NativePlatform>,
+    ) {
         // Fault injection through a real post-fork execve failure: the anchor has
         // already populated the fresh op leaf when the command spawn reports
         // ENOENT. Returning the error must cgroup.kill the anchor and remove the
         // leaf; a process-group-only cleanup would not prove recursive ownership.
-        let prior_leaves = operation_leaves(&service_dir);
+        let prior_leaves = operation_leaves(service_dir);
         let missing = ExecRequest {
             command: vec![format!(
                 "/definitely-missing-opengeni-cgroup-fixture-{}",
@@ -227,24 +242,29 @@ mod linux {
             platform.spawn_exec(&missing).is_err(),
             "missing executable must fail after the anchor spawn"
         );
-        wait_for_operation_leaves(&service_dir, &prior_leaves).await;
-        assert_controller_neutrality_after_cleanup(&service_dir);
+        wait_for_operation_leaves(service_dir, &prior_leaves).await;
+        assert_controller_neutrality_after_cleanup(service_dir);
+    }
 
+    async fn prove_cpu_lease_lifecycle(
+        service_dir: &Path,
+        platform: &std::sync::Arc<NativePlatform>,
+    ) {
         // CPU is an opt-in controller lease, not sticky startup accounting. Prove
         // a populated unlimited sibling remains admitted, two limited leaves hold
         // the shared lease independently, and the final limited cleanup removes
         // +cpu again without waiting for the unlimited operation to exit.
-        let (unlimited_leaf, unlimited_task) = spawn_live_operation(&platform, None).await;
-        assert_controller_neutrality_after_cleanup(&service_dir);
+        let (unlimited_leaf, unlimited_task) = spawn_live_operation(platform, None).await;
+        assert_controller_neutrality_after_cleanup(service_dir);
         let cpu_policy = OperationResourcePolicy {
             cpu_max_millicores: Some(500),
             ..Default::default()
         };
         let (limited_leaf_one, limited_task_one) =
-            spawn_live_operation(&platform, Some(&cpu_policy)).await;
+            spawn_live_operation(platform, Some(&cpu_policy)).await;
         let (limited_leaf_two, limited_task_two) =
-            spawn_live_operation(&platform, Some(&cpu_policy)).await;
-        assert_subtree_controller(&service_dir, "cpu", true);
+            spawn_live_operation(platform, Some(&cpu_policy)).await;
+        assert_subtree_controller(service_dir, "cpu", true);
         assert_exact_cpu_quota(&limited_leaf_one, 500);
         assert_exact_cpu_quota(&limited_leaf_two, 500);
 
@@ -254,7 +274,7 @@ mod linux {
             .expect_err("first limited task must be cancelled")
             .is_cancelled());
         wait_for_removal(&limited_leaf_one).await;
-        assert_subtree_controller(&service_dir, "cpu", true);
+        assert_subtree_controller(service_dir, "cpu", true);
 
         limited_task_two.abort();
         assert!(limited_task_two
@@ -263,7 +283,7 @@ mod linux {
             .is_cancelled());
         wait_for_removal(&limited_leaf_two).await;
         assert!(unlimited_leaf.exists(), "unlimited sibling remains live");
-        assert_controller_neutrality_after_cleanup(&service_dir);
+        assert_controller_neutrality_after_cleanup(service_dir);
 
         unlimited_task.abort();
         assert!(unlimited_task
@@ -379,9 +399,8 @@ mod linux {
             op_leaf.join("memory.current").is_file(),
             "memory accounting file"
         );
-        assert_eq!(
-            op_leaf.join("pids.current").exists(),
-            false,
+        assert!(
+            !op_leaf.join("pids.current").exists(),
             "the unrestricted default must not activate hierarchical PID control"
         );
         let memory_max = std::fs::read_to_string(op_leaf.join("memory.max"))
