@@ -35,6 +35,7 @@ export type TemporalTurnTaskQueueStats = {
 } | null;
 
 const turnTrackers = new WeakMap<Observability, TurnLifecycleMetrics>();
+const modelRequestTrackers = new WeakMap<Observability, ModelRequestLifecycleMetrics>();
 const creditBalanceGaugeAccounts = new WeakMap<Observability, Set<string>>();
 const modelCacheCounterTotals = new WeakMap<Observability, Map<string, number>>();
 
@@ -361,6 +362,111 @@ export class TurnLifecycleMetrics {
     if (!this.timer) {
       return;
     }
+    clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  private now(): number {
+    return this.options.now?.() ?? Date.now();
+  }
+}
+
+export function modelRequestLifecycleMetricsFor(
+  observability: Observability,
+): ModelRequestLifecycleMetrics {
+  const existing = modelRequestTrackers.get(observability);
+  if (existing) return existing;
+  const tracker = new ModelRequestLifecycleMetrics(observability);
+  modelRequestTrackers.set(observability, tracker);
+  return tracker;
+}
+
+export class ModelRequestLifecycleMetrics {
+  private readonly requests = new Map<
+    string,
+    { provider: string; startedAt: number; lastEventAt: number }
+  >();
+  private readonly providers = new Set<string>();
+  private timer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(
+    private readonly observability: Observability,
+    private readonly options: {
+      now?: () => number;
+      refreshIntervalMs?: number;
+    } = {},
+  ) {}
+
+  start(key: string, provider: string): void {
+    const now = this.now();
+    this.providers.add(provider);
+    this.requests.set(key, { provider, startedAt: now, lastEventAt: now });
+    this.ensureTimer();
+    this.refreshGauges();
+  }
+
+  event(key: string, interEventGapMs?: number): void {
+    const request = this.requests.get(key);
+    if (!request) return;
+    request.lastEventAt = this.now();
+    this.observability.incrementCounter({
+      name: "opengeni_model_request_stream_events_total",
+      help: "Complete, valid provider SSE data events by provider.",
+      labels: { provider: request.provider },
+    });
+    if (interEventGapMs !== undefined) {
+      this.observability.observeHistogram({
+        name: "opengeni_model_request_stream_event_gap_seconds",
+        help: "Seconds between complete, valid provider SSE data events.",
+        buckets: MODEL_REQUEST_PHASE_BUCKETS,
+        labels: { provider: request.provider },
+        value: Math.max(0, interEventGapMs / 1000),
+      });
+    }
+  }
+
+  finish(key: string): void {
+    this.requests.delete(key);
+    this.refreshGauges();
+    if (this.requests.size === 0) this.stopTimer();
+  }
+
+  refreshGauges(): void {
+    const now = this.now();
+    for (const provider of this.providers) {
+      const active = [...this.requests.values()].filter((request) => request.provider === provider);
+      this.observability.setGauge({
+        name: "opengeni_model_requests_inflight",
+        help: "Current in-flight provider model requests in this worker process.",
+        labels: { provider },
+        value: active.length,
+      });
+      this.observability.setGauge({
+        name: "opengeni_model_request_oldest_no_event_age_seconds",
+        help: "Seconds since the least recently progressing in-flight provider request received a valid SSE event.",
+        labels: { provider },
+        value:
+          active.length === 0
+            ? 0
+            : Math.max(0, (now - Math.min(...active.map((request) => request.lastEventAt))) / 1000),
+      });
+    }
+  }
+
+  stop(): void {
+    this.requests.clear();
+    this.refreshGauges();
+    this.stopTimer();
+  }
+
+  private ensureTimer(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => this.refreshGauges(), this.options.refreshIntervalMs ?? 15_000);
+    this.timer.unref?.();
+  }
+
+  private stopTimer(): void {
+    if (!this.timer) return;
     clearInterval(this.timer);
     this.timer = null;
   }

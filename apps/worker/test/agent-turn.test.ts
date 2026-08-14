@@ -15,6 +15,7 @@ import {
   XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER,
   XaiSubscriptionHostedToolContinuationError,
   XaiSubscriptionReloginRequired,
+  XaiSubscriptionStreamIdleTimeoutError,
 } from "@opengeni/xai-subscription";
 import {
   ActiveSessionHistoryLimitExceededError,
@@ -4254,6 +4255,30 @@ describe("transient provider error classifier", () => {
         "SuperGrok stopped responding after its hosted search completed. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
       code: "xai_hosted_tool_continuation_stalled",
       retryable: false,
+    });
+  });
+
+  test("surfaces a stalled SuperGrok stream with bounded correlation facts and no replay", () => {
+    expect(
+      agentRunFailurePayload(
+        new XaiSubscriptionStreamIdleTimeoutError(
+          "request-1",
+          true,
+          7,
+          "response.output_text.delta",
+          300_012,
+        ),
+      ),
+    ).toEqual({
+      error:
+        "SuperGrok stopped sending valid response events. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+      code: "xai_response_stream_idle_timeout",
+      retryable: false,
+      responseObserved: true,
+      eventCount: 7,
+      silenceDurationMs: 300_012,
+      requestId: "request-1",
+      lastEventType: "response.output_text.delta",
     });
   });
 

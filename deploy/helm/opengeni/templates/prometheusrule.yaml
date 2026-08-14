@@ -122,6 +122,15 @@ spec:
             severity: critical
           annotations:
             summary: OpenGeni has an agent turn without durable progress for more than 15 minutes
+        - alert: OpenGeniSuperGrokResponseStreamIdleTimeout
+          expr: |
+            sum(increase(opengeni_model_request_phases_total{provider="supergrok-subscription",phase="terminal",outcome="timed_out"}[15m])) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: A SuperGrok response stream stopped producing valid SSE events
+            description: The accepted stream was cancelled after its configured valid-event silence interval and was not replayed. Correlate the durable agent.model.request terminal checkpoint with provider request metadata.
         - alert: OpenGeniSandboxCreateFailureRatio
           expr: |
             (

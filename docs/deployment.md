@@ -185,6 +185,9 @@ SuperGrok/xAI connected-subscription rail. Workspace scope is the default shared
 connection path; private user scope requires the exact managed-browser human.
 The same stable environments encryption key protects its OAuth material. See
 [`supergrok-subscription.md`](supergrok-subscription.md).
+`OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS` optionally overrides the
+five-minute maximum silence between complete, valid SSE response events; it is
+not a total model-call or agent-run deadline.
 
 Bootstrap a new machine in two phases. First install only the persistent
 dependencies and wait until they are healthy:

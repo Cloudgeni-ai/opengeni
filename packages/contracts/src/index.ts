@@ -9197,8 +9197,9 @@ export const SessionEventType = z.enum([
   "agent.reasoning.delta",
   "agent.toolCall.created",
   "agent.toolCall.output",
-  // Attempt-fenced Codex Responses lifecycle metadata (request identity,
-  // deadlines, first-byte/terminal phase, provider request id). Never body/auth.
+  // Attempt-fenced provider Responses lifecycle metadata (request identity,
+  // liveness policy, first-event/terminal phase, provider request id). Never
+  // request body, credentials, or model output.
   "agent.model.request",
   "agent.model.usage",
   "tool.auth_needed",

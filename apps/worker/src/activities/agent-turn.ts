@@ -272,6 +272,7 @@ import {
 import { mergeResourceRefs } from "./common";
 import {
   fetchXaiSubscriptionQuota,
+  classifyXaiSubscriptionStreamIdleTimeoutError,
   isXaiSubscriptionHostedToolContinuationError,
   isXaiSubscriptionTransportError,
   XaiSubscriptionReloginRequired,
@@ -385,6 +386,7 @@ import {
 import { makeTurnOpJournal, type TurnHeartbeatDetails } from "../op-journal";
 import {
   makeMachineOpObserver,
+  modelRequestLifecycleMetricsFor,
   modelCallAccountContext,
   recordBatchFlush,
   recordContextCompaction,
@@ -5837,7 +5839,108 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             webSearch: runSettings.webSearchEnabled,
             xSearch: runSettings.webSearchEnabled,
           },
+          streamIdleTimeoutMs: runSettings.supergrokResponseStreamIdleTimeoutMs,
           nextRequestId: () => `${dispatchId}:xai:${++xaiModelRequestSequence}`,
+          onModelRequestDiagnostic: (event) => {
+            const requestKey = `${event.requestId}:${event.transportAttempt}`;
+            if (event.phase === "started") {
+              modelRequestLifecycleMetricsFor(observability).start(
+                requestKey,
+                "supergrok-subscription",
+              );
+              if (
+                firstModelRequestPreparationStartedAt !== null &&
+                !firstModelRequestPreparationRecorded
+              ) {
+                firstModelRequestPreparationRecorded = true;
+                recordTurnStartupPhase(observability, {
+                  phase: "model_request_preparation",
+                  provider: turnExecutionPolicy.providerId,
+                  backend: activeSandboxBackend ?? groupBoxBackend,
+                  outcome: "completed",
+                  durationSeconds:
+                    (performance.now() - firstModelRequestPreparationStartedAt) / 1_000,
+                  count: turnTools.length,
+                });
+              }
+            }
+            if (event.phase === "first_event" || event.phase === "progress") {
+              modelRequestLifecycleMetricsFor(observability).event(
+                requestKey,
+                event.phase === "progress" ? event.interEventGapMs : undefined,
+              );
+            }
+            const terminal =
+              event.phase === "completed" ||
+              event.phase === "failed" ||
+              event.phase === "timed_out";
+            if (terminal) {
+              modelRequestLifecycleMetricsFor(observability).finish(requestKey);
+            }
+            const phase =
+              event.phase === "headers"
+                ? "headers"
+                : event.phase === "first_event"
+                  ? "first_byte"
+                  : terminal
+                    ? "terminal"
+                    : null;
+            if (!phase) return;
+            recordModelRequestPhase(observability, {
+              provider: "supergrok-subscription",
+              phase,
+              ...(terminal
+                ? {
+                    outcome:
+                      event.phase === "completed"
+                        ? ("completed" as const)
+                        : event.phase === "timed_out"
+                          ? ("timed_out" as const)
+                          : ("failed" as const),
+                  }
+                : {}),
+              durationSeconds: event.durationMs / 1_000,
+            });
+          },
+          onModelRequestEvent: async (event) => {
+            if (!publish || !turnId) {
+              throw new Error("SuperGrok model request started before the turn event producer");
+            }
+            const shouldRecordStartedAudit =
+              event.phase === "started" && !firstModelRequestAuditRecorded;
+            if (shouldRecordStartedAudit) firstModelRequestAuditRecorded = true;
+            const auditStartedAt = shouldRecordStartedAudit ? performance.now() : null;
+            let auditOutcome: "completed" | "failed" = "completed";
+            try {
+              await publish([
+                {
+                  type: "agent.model.request",
+                  payload: {
+                    ...event,
+                    provider: "supergrok-subscription",
+                    turnId,
+                    attemptId: input.attemptId,
+                    dispatchId,
+                    executionGeneration,
+                  },
+                },
+              ]);
+            } catch (error) {
+              auditOutcome = "failed";
+              throw error;
+            } finally {
+              if (auditStartedAt !== null) {
+                recordTurnStartupPhase(observability, {
+                  phase: "model_request_audit",
+                  provider: turnExecutionPolicy.providerId,
+                  backend: activeSandboxBackend ?? groupBoxBackend,
+                  outcome: auditOutcome,
+                  durationSeconds: (performance.now() - auditStartedAt) / 1_000,
+                  count: turnTools.length,
+                });
+              }
+            }
+          },
         });
         xaiRequestContext = authorization.context;
       }
@@ -11894,6 +11997,9 @@ export function agentRunFailurePayload(
   timeoutClass?: string;
   responseObserved?: boolean;
   requestId?: string;
+  eventCount?: number;
+  lastEventType?: string;
+  silenceDurationMs?: number;
   correlationId?: string;
   stage?: string;
   sqlState?: string | null;
@@ -11960,6 +12066,20 @@ export function agentRunFailurePayload(
         "SuperGrok stopped responding after its hosted search completed. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
       code: "xai_hosted_tool_continuation_stalled",
       retryable: false,
+    };
+  }
+  const xaiStreamTimeout = classifyXaiSubscriptionStreamIdleTimeoutError(error);
+  if (xaiStreamTimeout) {
+    return {
+      error:
+        "SuperGrok stopped sending valid response events. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+      code: "xai_response_stream_idle_timeout",
+      retryable: false,
+      responseObserved: xaiStreamTimeout.responseObserved,
+      eventCount: xaiStreamTimeout.eventCount,
+      silenceDurationMs: xaiStreamTimeout.silenceDurationMs,
+      ...(xaiStreamTimeout.requestId ? { requestId: xaiStreamTimeout.requestId } : {}),
+      ...(xaiStreamTimeout.lastEventType ? { lastEventType: xaiStreamTimeout.lastEventType } : {}),
     };
   }
   if (isSessionEventPersistenceError(error)) {
