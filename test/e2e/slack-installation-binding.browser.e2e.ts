@@ -8,6 +8,7 @@ import {
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   type ConnectionStatus,
 } from "@opengeni/contracts";
+import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -15,7 +16,7 @@ const workspaceId = "00000000-0000-4000-8000-000000000231";
 const accountId = "00000000-0000-4000-8000-000000000232";
 const connectionId = "00000000-0000-4000-8000-000000000233";
 const bindingId = "00000000-0000-4000-8000-000000000234";
-const apiContractRevision = "2026-08-model-context-v1";
+const apiContractRevision = OPENGENI_API_CONTRACT_REVISION;
 
 type FixtureState = {
   bindingState: "active" | "quarantined" | null;

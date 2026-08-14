@@ -14,7 +14,9 @@ describe("image generation references", () => {
     const references = await resolveImageGenerationReferences({
       db: {} as never,
       objectStorage: {} as never,
+      accountId: "00000000-0000-4000-8000-000000000000",
       workspaceId: "11111111-1111-4111-8111-111111111111",
+      subjectId: "user:image-reference-authority",
       references: [
         { kind: "sandbox_path", path: "/workspace/first.png" },
         { kind: "sandbox_path", path: "/workspace/second.png" },
@@ -36,7 +38,9 @@ describe("image generation references", () => {
       resolveImageGenerationReferences({
         db: {} as never,
         objectStorage: {} as never,
+        accountId: "00000000-0000-4000-8000-000000000000",
         workspaceId: "11111111-1111-4111-8111-111111111111",
+        subjectId: "user:image-reference-authority",
         references: [{ kind: "sandbox_path", path: "/workspace/not-an-image.txt" }],
         readSandboxFile: async () => new TextEncoder().encode("not an image"),
       }),

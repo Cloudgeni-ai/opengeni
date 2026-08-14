@@ -181,6 +181,11 @@ describe("release schema contract", () => {
     );
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
+      if (migrations.has("0243_google_drive_object_acl_authority.sql")) {
+        return includesActivation
+          ? "6c3f57576f78fc29250bdab384dcffb0b171ebd35c0764ef07c371510d117885"
+          : "2a39ec3cb579dad4f4fc17040cac665b88b39f24871a2462b17286d3925a4378";
+      }
       if (migrations.has("0238_recover_unclaimed_session_turns.sql")) {
         if (migrations.has("0242_google_drive_account_admin_authority.sql")) {
           return includesActivation
@@ -487,7 +492,8 @@ describe("release schema contract", () => {
         (migrations.has("0225_session_visibility_fork_activation.sql") ? 1 : 0) +
         (migrations.has("0236_session_visibility_slack_policy.sql") ? 1 : 0) +
         (migrations.has("0238_recover_unclaimed_session_turns.sql") ? 1 : 0) +
-        (migrations.has("0242_google_drive_account_admin_authority.sql") ? 1 : 0),
+        (migrations.has("0242_google_drive_account_admin_authority.sql") ? 1 : 0) +
+        (migrations.has("0243_google_drive_object_acl_authority.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(sessionVisibilityContractHash(false) ?? currentMainContractHash);
     const previousLatestMigration = migrations.has("0238_recover_unclaimed_session_turns.sql")
@@ -526,9 +532,11 @@ describe("release schema contract", () => {
                                       ? "0218_organization_tenancy_foundation.sql"
                                       : "0217_capability_definition_delete_authority.sql";
     expect(contract.latestMigration).toBe(
-      migrations.has("0242_google_drive_account_admin_authority.sql")
-        ? "0242_google_drive_account_admin_authority.sql"
-        : previousLatestMigration,
+      migrations.has("0243_google_drive_object_acl_authority.sql")
+        ? "0243_google_drive_object_acl_authority.sql"
+        : migrations.has("0242_google_drive_account_admin_authority.sql")
+          ? "0242_google_drive_account_admin_authority.sql"
+          : previousLatestMigration,
     );
     expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
       sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",
@@ -713,6 +721,12 @@ describe("release schema contract", () => {
     if (migrations.has("0238_recover_unclaimed_session_turns.sql")) {
       expect(migrations.get("0238_recover_unclaimed_session_turns.sql")).toMatchObject({
         sha256: "7d63ad62f2dc91f8c5de87b95a35a366d4b23d4fc76f320b5376ef2412a2002d",
+        deploymentMode: "rolling",
+      });
+    }
+    if (migrations.has("0243_google_drive_object_acl_authority.sql")) {
+      expect(migrations.get("0243_google_drive_object_acl_authority.sql")).toMatchObject({
+        sha256: "1cc4b297460ba64d252230ceddc9eaaf4d6ea9b02afcd56518900d5b569bfcfe",
         deploymentMode: "rolling",
       });
     }

@@ -364,7 +364,18 @@ describe("embedded worker lifecycle contract", () => {
       [],
       [],
       [
-        ...["knowledge_sources", "knowledge_source_objects"].map((name) => ({
+        ...[
+          "connections",
+          "files",
+          "google_drive_object_acl_evidence",
+          "google_drive_object_acl_principals",
+          "knowledge_document_versions",
+          "knowledge_providers",
+          "knowledge_source_objects",
+          "knowledge_source_sync_index_obligations",
+          "knowledge_source_sync_states",
+          "knowledge_sources",
+        ].map((name) => ({
           name,
           owner: "opengeni_migrator",
           rls_enabled: false,

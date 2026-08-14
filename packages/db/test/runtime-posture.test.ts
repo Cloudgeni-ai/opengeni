@@ -49,6 +49,35 @@ function knowledgeAuthorityTables(): RuntimeTablePosture[] {
   }));
 }
 
+function googleDriveAuthorityTables(): RuntimeTablePosture[] {
+  return [
+    "connections",
+    "files",
+    "google_drive_object_acl_evidence",
+    "google_drive_object_acl_principals",
+    "knowledge_document_versions",
+    "knowledge_providers",
+    "knowledge_source_sync_index_obligations",
+    "knowledge_source_sync_states",
+  ].map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
+
 function canonicalHumanIdentityAuthorityTables(): RuntimeTablePosture[] {
   return [
     "canonical_human_identities",
@@ -172,6 +201,7 @@ function safePosture(): RuntimeDatabasePosture {
         trigger: false,
       },
       ...knowledgeAuthorityTables(),
+      ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
       ...xaiAuthorityTables(),
       ...googleDriveAccountAuthorityTables(),
@@ -212,15 +242,15 @@ describe("runtime database posture evaluator", () => {
         .sort();
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 236],
+            [FORCE_RLS_TABLES, 238],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 138],
             [RUNTIME_READ_ONLY_TABLES, 17],
             [readUpdateTables, 1],
-            [RUNTIME_READ_INSERT_TABLES, 43],
+            [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 29],
             [PROTECTED_NO_DIRECT_DML_TABLES, 19],
-            [RUNTIME_DML_TABLES, 228],
+            [RUNTIME_DML_TABLES, 230],
           ] as const)
         : ([
             [FORCE_RLS_TABLES, 183],
@@ -240,7 +270,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 247 : 194;
+      const tableCount = hasCurrentMainActivityLedger ? 249 : 194;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount,
       );
@@ -579,6 +609,7 @@ describe("runtime database posture evaluator", () => {
         delete: false,
       },
       ...knowledgeAuthorityTables(),
+      ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
       ...googleDriveAccountAuthorityTables(),
     ];
@@ -729,6 +760,7 @@ describe("runtime database posture evaluator", () => {
         artifactMaterializerPolicy: true,
       })),
       ...knowledgeAuthorityTables(),
+      ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
       ...xaiAuthorityTables(),
       ...googleDriveAccountAuthorityTables(),

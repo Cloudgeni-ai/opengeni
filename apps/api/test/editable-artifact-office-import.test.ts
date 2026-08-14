@@ -27,7 +27,7 @@ describe("editable artifact Office import adapter", () => {
       runtime: runtime(),
       sourceObjects: writer("source-ref", sourceWrites),
       snapshotObjects: writer("snapshot-ref", snapshotWrites),
-      readFile: async () => file(),
+      readFiles: async () => [file()],
       prepareOffice: async (input) => {
         prepareCalls += 1;
         expect(input.bytes).toEqual(sourceBytes);
@@ -72,7 +72,7 @@ describe("editable artifact Office import adapter", () => {
       runtime: runtime(),
       sourceObjects: writer("unused", []),
       snapshotObjects: writer("unused", []),
-      readFile: async () => file(),
+      readFiles: async () => [file()],
       prepareOffice: async () => {
         throw new Error("native import must not run");
       },
@@ -90,7 +90,7 @@ describe("editable artifact Office import adapter", () => {
       runtime: runtime(),
       sourceObjects: writer("unused", []),
       snapshotObjects: writer("unused", []),
-      readFile: async () => file(),
+      readFiles: async () => [file()],
       prepareOffice: async () => {
         throw new ArtifactOfficeSourceUnsupportedError(".xlsx", {
           cause: new Error("unsupported relationship"),
@@ -116,7 +116,7 @@ describe("editable artifact Office import adapter", () => {
       runtime: runtime(),
       sourceObjects: writer("unused", []),
       snapshotObjects: writer("unused", []),
-      readFile: async () => ({ ...file(), filename: "forecast.docx" }),
+      readFiles: async () => [{ ...file(), filename: "forecast.docx" }],
       prepareOffice: async () => {
         throw new Error("native import must not run");
       },
@@ -126,6 +126,67 @@ describe("editable artifact Office import adapter", () => {
       new EditableArtifactOfficeImportError("invalid_source"),
     );
     expect(storageReads).toBe(0);
+  });
+
+  for (const condition of [
+    "denied ACL evidence",
+    "stale or expired ACL evidence",
+    "disconnected Drive authority",
+    "revoked Drive scope",
+    "a denied Drive protector beside an ordinary mapping",
+  ]) {
+    test(`fails before reading Office bytes for ${condition}`, async () => {
+      let storageReads = 0;
+      const objectStorage = storage();
+      objectStorage.headFile = async () => {
+        storageReads += 1;
+        throw new Error("unauthorized bytes must not be read");
+      };
+      const adapter = new EditableArtifactOfficeImportAdapter({
+        db: {} as never,
+        objectStorage,
+        runtime: runtime(),
+        sourceObjects: writer("unused", []),
+        snapshotObjects: writer("unused", []),
+        readFiles: async () => [],
+      });
+
+      await expect(adapter.prepare(request())).rejects.toEqual(
+        new EditableArtifactOfficeImportError("invalid_source"),
+      );
+      expect(storageReads).toBe(0);
+    });
+  }
+
+  test("uses the immutable initiating human for an agent Office import", async () => {
+    let observedSubjectId: string | null | undefined;
+    const adapter = new EditableArtifactOfficeImportAdapter({
+      db: {} as never,
+      objectStorage: storage(),
+      runtime: runtime(),
+      sourceObjects: writer("source-ref", []),
+      snapshotObjects: writer("snapshot-ref", []),
+      resolveFileAuthoritySubjectId: async () => "user:drive-owner",
+      readFiles: async (_db, input) => {
+        observedSubjectId = input.subjectId;
+        return [file()];
+      },
+      prepareOffice: async () => prepared(),
+    });
+
+    await adapter.prepare({
+      ...request(),
+      actor: {
+        kind: "agent",
+        subjectId: "worker:first-party-mcp",
+        replicaId: "1111111111111111",
+        sessionId: "11111111-1111-4111-8111-111111111111",
+        turnId: "22222222-2222-4222-8222-222222222222",
+        attemptId: "33333333-3333-4333-8333-333333333333",
+        generation: 1,
+      } as never,
+    });
+    expect(observedSubjectId).toBe("user:drive-owner");
   });
 });
 

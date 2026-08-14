@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
 import { OpenGeniApiError } from "../src/errors";
 import {
+  OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
   type ConnectionMetadata,
@@ -337,7 +338,7 @@ describe("OpenGeniClient access + workspaces", () => {
   test("getClientConfig fetches the public bootstrap endpoint and returns the provider-grouped models", async () => {
     const config = {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-08-model-context-v1",
+      apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
       models: [

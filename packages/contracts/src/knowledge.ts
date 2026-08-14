@@ -102,6 +102,20 @@ export const KnowledgeSource = z.object({
 });
 export type KnowledgeSource = z.infer<typeof KnowledgeSource>;
 
+export const KnowledgeProviderCitation = z.object({
+  provider: z.literal("google_drive"),
+  externalObjectId: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES),
+  providerRevision: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
+  sourceVersion: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES),
+  driveId: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
+  deepLink: boundedUtf8(KNOWLEDGE_SOURCE_URI_MAX_BYTES).pipe(z.string().min(1)).nullable(),
+  aclRevision: z.string().regex(/^[0-9a-f]{64}$/u),
+  authorizationObservedAt: z.string().datetime({ offset: true }),
+  authorizationExpiresAt: z.string().datetime({ offset: true }),
+  reauthorizedAt: z.string().datetime({ offset: true }),
+});
+export type KnowledgeProviderCitation = z.infer<typeof KnowledgeProviderCitation>;
+
 export const KnowledgeLinkTarget = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("knowledge"),
@@ -144,6 +158,7 @@ export const KnowledgeRecord = z.object({
   provenance: z.object({
     source: KnowledgeSource,
     indexedAt: z.string(),
+    citation: KnowledgeProviderCitation.nullable().optional(),
   }),
   lifecycle: z.object({
     state: z.literal("active"),

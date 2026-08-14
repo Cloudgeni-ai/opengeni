@@ -10,6 +10,7 @@ import { MemorySlackPublicationDistribution } from "./memory-slack-delivery";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 import { MediaGenerationResult } from "./video-generation";
+import { KnowledgeProviderCitation } from "./knowledge";
 
 export * from "./slack-bot-scopes";
 export * from "./slack-task-policy";
@@ -4025,6 +4026,7 @@ export const DocumentSearchResult = z.object({
   authorityKind: DocumentAuthorityKind,
   authorityWorkspaceId: z.string().uuid().nullable(),
   authoritySubjectId: z.string().nullable(),
+  citation: KnowledgeProviderCitation.nullable().optional(),
 });
 export type DocumentSearchResult = z.infer<typeof DocumentSearchResult>;
 
@@ -4054,6 +4056,7 @@ export const IndexedDocumentProvenance = z.object({
   authoritySubjectId: z.string().nullable(),
   createdBy: z.string().nullable(),
   createdAt: z.string(),
+  citation: KnowledgeProviderCitation.nullable().optional(),
 });
 export type IndexedDocumentProvenance = z.infer<typeof IndexedDocumentProvenance>;
 

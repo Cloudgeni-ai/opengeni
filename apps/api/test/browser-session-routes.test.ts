@@ -1,12 +1,45 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import type { FileAsset } from "@opengeni/contracts";
+import { HTTPException } from "hono/http-exception";
 import {
+  browserFileAuthoritySubjectId,
   interactionActorForGrant,
+  requireAuthorizedBrowserUploadFiles,
   validateBrowserRequestOrigin,
 } from "../src/routes/browser-sessions";
 
 const routeUrl = new URL("../src/routes/browser-sessions.ts", import.meta.url);
 const appUrl = new URL("../src/app.ts", import.meta.url);
+
+const FILE_ID = "33333333-3333-4333-8333-333333333333";
+
+function readyFile(id = FILE_ID): FileAsset {
+  return {
+    id,
+    workspaceId: "22222222-2222-4222-8222-222222222222",
+    status: "ready",
+    filename: "drive.txt",
+    safeFilename: "drive.txt",
+    contentType: "text/plain",
+    sizeBytes: 5,
+    sha256: "a".repeat(64),
+    bucket: "test",
+    objectKey: `files/${id}`,
+    createdAt: "2026-08-14T00:00:00.000Z",
+    updatedAt: "2026-08-14T00:00:00.000Z",
+  };
+}
+
+function httpStatus(operation: () => unknown): number | "resolved" {
+  try {
+    operation();
+    return "resolved";
+  } catch (error) {
+    if (error instanceof HTTPException) return error.status;
+    throw error;
+  }
+}
 
 describe("BrowserSession route discipline", () => {
   test("registers the complete lifecycle, semantic control, diagnostics, and frame surface", async () => {
@@ -151,13 +184,74 @@ describe("BrowserSession route discipline", () => {
     );
     const route = source.slice(start, end);
     expect(route).toContain('requireAccessGrant(context, deps, workspaceId, "files:read")');
-    expect(route.indexOf("getFiles(deps.db")).toBeLessThan(
+    expect(route).not.toContain("getFiles(deps.db");
+    expect(route).toContain("getFilesForSubject(deps.db");
+    expect(route).toContain("browserFileAuthoritySubjectId(grant, sourceAuthorization)");
+    expect(route.indexOf("getFilesForSubject(deps.db")).toBeLessThan(
+      route.indexOf("requireAuthorizedBrowserUploadFiles"),
+    );
+    expect(route.indexOf("requireAuthorizedBrowserUploadFiles")).toBeLessThan(
+      route.indexOf("createGetUrl"),
+    );
+    expect(route.indexOf("createGetUrl")).toBeLessThan(
       route.indexOf("sessionClient.stageWorkspaceFiles"),
     );
     expect(route.indexOf("sessionClient.stageWorkspaceFiles")).toBeLessThan(
       route.indexOf("sessionClient.action(command)"),
     );
     expect(route).toContain("sessionClient.receipt(request.operationId)");
+  });
+
+  test("binds agent uploads to the frozen initiating human, not the worker subject", () => {
+    const grant = {
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      subjectId: "worker:first-party-mcp",
+      permissions: [] as const,
+      principalKind: "agent_attempt" as const,
+    };
+    const authorization = {
+      actor: {
+        kind: "agent_attempt" as const,
+        subjectId: "worker:first-party-mcp",
+        callerSessionId: "44444444-4444-4444-8444-444444444444",
+        callerRootSessionId: "44444444-4444-4444-8444-444444444444",
+        turnId: "55555555-5555-4555-8555-555555555555",
+        attemptId: "66666666-6666-4666-8666-666666666666",
+        executionGeneration: 1,
+        initiator: { kind: "subject" as const, subjectId: "user:drive-owner" },
+        initiatorContext: { source: "user" as const },
+        initiatingHumanSubjectId: "user:drive-owner",
+      },
+      target: {
+        sessionId: "44444444-4444-4444-8444-444444444444",
+        rootSessionId: "44444444-4444-4444-8444-444444444444",
+      },
+      relatedSessionAccess: "root" as const,
+      reauthorizeAfterMs: null,
+    };
+    expect(browserFileAuthoritySubjectId(grant, authorization)).toBe("user:drive-owner");
+    expect(browserFileAuthoritySubjectId(grant, null)).toBeNull();
+  });
+
+  for (const condition of [
+    "denied ACL evidence",
+    "stale ACL evidence",
+    "disconnected Drive authority",
+    "revoked Drive scope",
+  ]) {
+    test(`fails the upload closed before signing when authority is omitted for ${condition}`, () => {
+      expect(httpStatus(() => requireAuthorizedBrowserUploadFiles([FILE_ID], []))).toBe(404);
+    });
+  }
+
+  test("fails a mixed ordinary/Drive upload when any requested file is unauthorized", () => {
+    const ordinaryId = "77777777-7777-4777-8777-777777777777";
+    expect(
+      httpStatus(() =>
+        requireAuthorizedBrowserUploadFiles([ordinaryId, FILE_ID], [readyFile(ordinaryId)]),
+      ),
+    ).toBe(404);
   });
 
   test("publishes one exact private download before one fenced workspace import", async () => {

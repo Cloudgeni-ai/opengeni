@@ -815,6 +815,14 @@ the candidate. The merge authority separately performs the fresh latest-main
 conflict, canonical patch-equivalence, protected-path, generated/migration,
 identity/manifest, security, and evidence checks immediately before merge.
 
+Do not enable or leave auto-merge armed on a generated Version PR before the
+exact-head release review is submitted. Release admission compares GitHub's
+provider-recorded review and merge timestamps and requires the decisive review
+to precede the merge. A review added after auto-merge is intentionally not
+release evidence and cannot rehabilitate that source commit; stop that train
+and use a fresh, normally reviewed release-source PR instead of retrying or
+weakening admission.
+
 The exact source must separately have one successful GitHub Actions result for
 each required candidate check:
 `Typecheck and unit tests`, `Deployment artifacts`, and `Workload image

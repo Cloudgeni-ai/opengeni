@@ -17,7 +17,11 @@ import {
   type ResourceRef,
   type ToolRef,
 } from "@opengeni/contracts";
-import { areGitHubRepositoriesAllowedForWorkspace, requireFile, type Database } from "@opengeni/db";
+import {
+  areGitHubRepositoriesAllowedForWorkspace,
+  requireFileForSubject,
+  type Database,
+} from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 
 export function validateToolRefs(tools: ToolRef[], settings: McpSettings): ToolRef[] {
@@ -311,7 +315,9 @@ export function isAuthoritativeGitHubRepositorySelectionError(error: unknown): b
 
 export async function validateFileResources(
   db: Database,
+  accountId: string,
   workspaceId: string,
+  subjectId: string,
   resources: ResourceRef[],
 ): Promise<void> {
   const fileIds = new Set<string>();
@@ -323,7 +329,12 @@ export async function validateFileResources(
       throw new HTTPException(422, { message: `duplicate file resource: ${resource.fileId}` });
     }
     fileIds.add(resource.fileId);
-    const file = await requireFile(db, workspaceId, resource.fileId).catch(() => null);
+    const file = await requireFileForSubject(db, {
+      accountId,
+      workspaceId,
+      subjectId,
+      fileId: resource.fileId,
+    }).catch(() => null);
     if (!file) {
       throw new HTTPException(422, { message: `unknown file resource: ${resource.fileId}` });
     }
