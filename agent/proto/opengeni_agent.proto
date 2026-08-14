@@ -187,6 +187,10 @@ message Capabilities {
   // browser-profile endpoints separately from this machine enrollment because
   // one machine may host multiple Chrome profiles.
   bool browser_bridge = 11;
+  // The runner enforces the optional per-connection operation memory policy on
+  // every contained exec/git child. A control plane must fail closed rather than
+  // send a configured policy to a runner that does not advertise this bit.
+  bool operation_resource_policy = 12;
 }
 
 // Capabilities of one live browser-profile bridge endpoint. This describes the
@@ -339,6 +343,15 @@ message EnrollmentCredentials {
 // =============================================================================
 // Exec
 // =============================================================================
+
+// Optional policy selected for one Connected Machine enrollment. Absence means
+// the control plane requests no limit; there is deliberately no runner-created
+// default quota. Local runner policy and ancestor OS/cgroup policy may tighten
+// these values but never loosen them.
+message OperationResourcePolicy {
+  optional uint64 memory_max_bytes = 1;
+  optional uint64 memory_high_bytes = 2;
+}
 
 message ExecRequest {
   // argv[0] is the program; the agent does NOT shell-interpret unless `shell`.
@@ -1176,6 +1189,10 @@ message OpAck {
 message ControlRequest {
   string request_id = 1;
   uint32 epoch = 2;
+  // Per-connection policy snapshot attached to the operation request. It lives
+  // on the envelope so both legacy exec/git and replayable OpStart share one
+  // contract. Absent means unrestricted by the control plane.
+  OperationResourcePolicy resource_policy = 3;
   oneof op {
     PingRequest ping = 10;
     Hello hello = 11;

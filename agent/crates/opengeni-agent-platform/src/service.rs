@@ -155,18 +155,27 @@ pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
          KillSignal=SIGTERM\n\
          TimeoutStopSec=15\n\
          # OOM containment (issue #345). Delegate a cgroup subtree so the agent can\n\
-         # place each host exec in its own memory sub-cgroup (see cgroup.rs). This\n\
-         # separates accounting/systemd-oomd domains; global kernel OOM selection is\n\
+         # place each host exec in its own resource-accounting sub-cgroup (see\n\
+         # cgroup.rs). This separates accounting/systemd-oomd domains; global kernel\n\
+         # OOM selection is\n\
          # governed separately by the supervisor/child OOMScoreAdjust values above.\n\
          # ManagedOOMPreference=avoid biases systemd-oomd away from selecting this unit\n\
-         # for a whole-unit kill. MemoryAccounting enables the delegated memory\n\
-         # controller without imposing a unit-wide throttle: commands retain the\n\
+         # for a whole-unit kill. Accounting exposes CPU, I/O, memory, and PID\n\
+         # controllers without imposing a unit-wide throttle: commands retain the\n\
          # machine's full available memory unless an operator explicitly configures\n\
          # a per-operation limit. Linux-only directives;\n\
          # they are inert on the macOS/Windows service backends.\n\
          Delegate=yes\n\
+         # Keep the service root empty even across a supervisor crash. cgroup v2\n\
+         # cannot start a replacement process in a root whose controllers are\n\
+         # enabled for operation children; systemd must place every generation\n\
+         # directly in the stable supervisor leaf.\n\
+         DelegateSubgroup=supervisor\n\
          ManagedOOMPreference=avoid\n\
+         CPUAccounting=yes\n\
+         IOAccounting=yes\n\
          MemoryAccounting=yes\n\
+         TasksAccounting=yes\n\
          # The service aggregate is intentionally unrestricted. Optional machine\n\
          # policy is applied to command leaves, never to the control supervisor.\n\
          MemoryHigh=infinity\n\
@@ -370,8 +379,8 @@ mod tests {
     #[test]
     fn systemd_unit_carries_oom_containment_directives_in_both_scopes() {
         // Issue #345: both the user and the system unit must delegate a cgroup
-        // subtree, bias systemd-oomd away from a whole-unit kill, and enable memory
-        // accounting without installing a unit-wide memory throttle.
+        // subtree, bias systemd-oomd away from a whole-unit kill, and enable resource
+        // accounting without installing unit-wide resource limits.
         // These live in [Service], never [Unit] or [Install].
         for scope in [ServiceScope::User, ServiceScope::System] {
             let mut s = spec();
@@ -382,8 +391,12 @@ mod tests {
             let service_section = &unit[service_start..install_start];
             for directive in [
                 "Delegate=yes",
+                "DelegateSubgroup=supervisor",
                 "ManagedOOMPreference=avoid",
+                "CPUAccounting=yes",
+                "IOAccounting=yes",
                 "MemoryAccounting=yes",
+                "TasksAccounting=yes",
             ] {
                 assert!(
                     service_section.contains(directive),

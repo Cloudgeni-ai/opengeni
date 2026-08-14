@@ -792,7 +792,10 @@ impl AtspiComputerAdapter {
                 return Some(NativeNodeValue::Text(value.to_string()));
             }
         }
-        if item.ifaces.contains(Interface::EditableText) {
+        // Read-only labels expose AT-SPI Text without EditableText. Their
+        // content is still part of the semantic observation (and often the
+        // only observable result of invoking a control).
+        if item.ifaces.contains(Interface::Text) {
             let proxy = self.text_proxy(&item.object).await.ok()?;
             let count = timed(proxy.character_count()).await.ok()?.clamp(0, 32_768);
             return timed(proxy.get_text(0, count))

@@ -704,6 +704,7 @@ mod tests {
         ControlRequest {
             request_id: "req-1".to_string(),
             epoch,
+            resource_policy: None,
             op: Some(op),
         }
     }

@@ -600,7 +600,7 @@ function setValueCommand(
     targetId: observation.target.id,
     expectedTargetGeneration: observation.target.targetGeneration,
     expectedObservationId: observation.observationId,
-    expectedFrameId: observation.frameId,
+    expectedFrameId: null,
     actor: { kind: "agent", subjectId: "agent:linux-e2e" },
     action: {
       type: "semantic",

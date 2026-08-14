@@ -332,9 +332,14 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // only host execs land in their own per-op memory leaves. Returns None (a
     // logged, graceful no-op) off a delegated Linux cgroup v2 host — the agent then
     // serves exactly as before, with no per-op isolation.
-    let op_cgroups = opengeni_agent_platform::establish_oom_isolation(
-        opengeni_agent_platform::OpCgroupConfig::from_env(),
-    );
+    let op_cgroup_config = opengeni_agent_platform::OpCgroupConfig::from_env().map_err(to_boxed)?;
+    let requires_operation_policy = op_cgroup_config.has_limits();
+    let op_cgroups = opengeni_agent_platform::establish_oom_isolation(op_cgroup_config);
+    if requires_operation_policy && op_cgroups.is_none() {
+        return Err(to_boxed(std::io::Error::other(
+            "explicit operation memory policy requires a delegated Linux cgroup-v2 memory controller; refusing to run it unenforced",
+        )));
+    }
 
     // Opt-in Xvfb for a headless Linux box (`--virtual-desktop`). Held for the run
     // lifetime; dropping it (on stop) tears the virtual display down. Linux-only.

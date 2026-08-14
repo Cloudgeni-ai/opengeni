@@ -22,6 +22,8 @@ import { deriveHealth, HEALTH_TOKEN, healthPulses } from "./health";
 import { MetricHistoryChart } from "./metric-history-chart";
 import { MetricSparkline } from "./metric-sparkline";
 import { METRICS, METRIC_WINDOWS, pointsFor, WINDOW_LABEL, type MetricWindow } from "./series";
+import { MachineOperationPolicyEditor } from "./machine-operation-policy";
+import type { UpdateMachineOperationPolicyRequest } from "@opengeni/sdk";
 
 export type MachineDetailProps = {
   machine: MachineView;
@@ -33,6 +35,10 @@ export type MachineDetailProps = {
   onBack?: (() => void) | undefined;
   /** Open the workspace-admin removal confirmation for a self-hosted machine. */
   onRemove?: ((machine: MachineView) => void) | undefined;
+  onUpdateOperationPolicy?:
+    | ((machine: MachineView, request: UpdateMachineOperationPolicyRequest) => Promise<unknown>)
+    | undefined;
+  updatingOperationPolicy?: boolean | undefined;
   now?: number | undefined;
   className?: string | undefined;
 };
@@ -51,6 +57,8 @@ export function MachineDetail({
   loadingSeries,
   onBack,
   onRemove,
+  onUpdateOperationPolicy,
+  updatingOperationPolicy,
   now = Date.now(),
   className,
 }: MachineDetailProps) {
@@ -236,6 +244,15 @@ export function MachineDetail({
           </div>
         ) : null}
       </div>
+
+      {onUpdateOperationPolicy && machine.enrollmentId && machine.operationPolicy ? (
+        <MachineOperationPolicyEditor
+          policy={machine.operationPolicy}
+          supported={machine.runtime?.capabilities.operationResourcePolicy === true}
+          saving={updatingOperationPolicy}
+          onSave={(request) => onUpdateOperationPolicy(machine, request)}
+        />
+      ) : null}
 
       {/* ── history charts ──────────────────────────────────────────────── */}
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">

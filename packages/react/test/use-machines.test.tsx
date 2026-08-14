@@ -43,6 +43,7 @@ function machine(overrides: Partial<MachineView> & Pick<MachineView, "sandboxId"
     runtime: null,
     metrics: null,
     ...overrides,
+    operationPolicy: overrides.operationPolicy ?? null,
   };
 }
 
@@ -85,6 +86,41 @@ describe("useMachines", () => {
     expect(calls).toEqual(["enr-sh-1"]);
     expect(lists).toBeGreaterThanOrEqual(2);
     expect(hook.result.current.updatingEnrollmentId).toBeNull();
+    await hook.unmount();
+  });
+
+  test("updates command policy through the revision-fenced client method", async () => {
+    const calls: unknown[] = [];
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => response,
+      updateMachineOperationPolicy: async (_workspaceId, enrollmentId, request) => {
+        calls.push({ enrollmentId, request });
+        return {
+          memoryMaxBytes: request.memoryMaxBytes,
+          memoryHighBytes: request.memoryHighBytes,
+          revision: request.expectedRevision + 1,
+          updatedAt: "2026-08-14T10:00:00.000Z",
+        };
+      },
+    };
+    const hook = await renderHook(
+      () => useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.canUpdateOperationPolicy).toBe(true);
+    const request = {
+      memoryMaxBytes: 1_073_741_824,
+      memoryHighBytes: null,
+      expectedRevision: 2,
+    };
+    const result = await actRun(() =>
+      hook.result.current.updateOperationPolicy("enr-sh-1", request),
+    );
+    await flush();
+    expect(result?.revision).toBe(3);
+    expect(calls).toEqual([{ enrollmentId: "enr-sh-1", request }]);
+    expect(hook.result.current.updatingOperationPolicyEnrollmentId).toBeNull();
     await hook.unmount();
   });
 

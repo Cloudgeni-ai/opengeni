@@ -12526,6 +12526,7 @@ export const MachineRuntimeCapabilities = z.object({
   desktop: z.boolean(),
   opStream: z.boolean(),
   browserBridge: z.boolean(),
+  operationResourcePolicy: z.boolean(),
 });
 export type MachineRuntimeCapabilities = z.infer<typeof MachineRuntimeCapabilities>;
 
@@ -12580,6 +12581,48 @@ export const UpdateMachineAgentResponse = z.object({
 });
 export type UpdateMachineAgentResponse = z.infer<typeof UpdateMachineAgentResponse>;
 
+const OperationMemoryBytes = z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable();
+
+function operationMemoryOrder(
+  value: { memoryMaxBytes: number | null; memoryHighBytes: number | null },
+  ctx: z.RefinementCtx,
+): void {
+  if (
+    value.memoryMaxBytes !== null &&
+    value.memoryHighBytes !== null &&
+    value.memoryHighBytes > value.memoryMaxBytes
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["memoryHighBytes"],
+      message: "memoryHighBytes cannot exceed memoryMaxBytes",
+    });
+  }
+}
+
+/** Optional per-connection command memory policy. Null values are unrestricted;
+ * revision is the optimistic concurrency fence for workspace operators. */
+export const MachineOperationPolicy = z
+  .object({
+    memoryMaxBytes: OperationMemoryBytes,
+    memoryHighBytes: OperationMemoryBytes,
+    revision: z.number().int().nonnegative(),
+    updatedAt: z.string().nullable(),
+  })
+  .superRefine(operationMemoryOrder);
+export type MachineOperationPolicy = z.infer<typeof MachineOperationPolicy>;
+
+export const UpdateMachineOperationPolicyRequest = z
+  .object({
+    memoryMaxBytes: OperationMemoryBytes,
+    memoryHighBytes: OperationMemoryBytes,
+    expectedRevision: z.number().int().nonnegative(),
+  })
+  .superRefine(operationMemoryOrder);
+export type UpdateMachineOperationPolicyRequest = z.infer<
+  typeof UpdateMachineOperationPolicyRequest
+>;
+
 /**
  * A machine as the Machines dashboard renders it. The workspace's enrolled
  * selfhosted machines PLUS the session's synthetic Modal group box
@@ -12613,6 +12656,8 @@ export const MachineView = z.object({
   // Exact connected-agent build/capabilities and current update operation. Null
   // for managed/session sandboxes and pre-runtime-reporting synthetic rows.
   runtime: MachineRuntime.nullable().default(null),
+  // Per-enrollment desired policy. Null for managed/session sandboxes.
+  operationPolicy: MachineOperationPolicy.nullable().default(null),
   metrics: MetricSample.nullable(),
 });
 export type MachineView = z.infer<typeof MachineView>;
@@ -13096,7 +13141,7 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-model-context-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-machine-resource-policy-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;

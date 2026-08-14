@@ -444,6 +444,7 @@ export {
   type SelfhostedSessionState,
   type SelfhostedSessionDeps,
   type SelfhostedSessionBuild,
+  type SelfhostedOperationResourcePolicy,
   type SelfhostedRelayConfig,
   type SelfhostedExecArgs,
   type SelfhostedExecResult,

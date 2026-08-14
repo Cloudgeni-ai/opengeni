@@ -2615,6 +2615,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         epoch: 0,
         timeoutMs: deps.settings.sandboxSelfhostedControlTimeoutMs,
         execTimeoutMs: deps.settings.sandboxSelfhostedExecTimeoutMs,
+        operationResourcePolicy: enrollment.operationPolicy,
+        operationResourcePolicySupported:
+          enrollment.agentCapabilities.operationResourcePolicy === true,
         ...(deps.settings.agentOpStreamEnabled === true &&
         enrollment.opStream === true &&
         deps.bus.getOpStreamConnection

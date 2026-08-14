@@ -201,6 +201,7 @@ function helloPayload(
   opts: {
     desktop?: boolean;
     opStream?: boolean;
+    operationResourcePolicy?: boolean;
     desktopUnavailableReason?: string;
     display?: { id: string; width: number; height: number; virtual: boolean };
     capabilitiesAbsent?: boolean;
@@ -230,6 +231,7 @@ function helloPayload(
             capabilities: {
               desktop: opts.desktop ?? false,
               opStream: opts.opStream ?? false,
+              operationResourcePolicy: opts.operationResourcePolicy ?? false,
               ...(opts.desktopUnavailableReason
                 ? { desktopUnavailableReason: opts.desktopUnavailableReason }
                 : {}),
@@ -504,6 +506,7 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
         updateChannel: "beta",
         desktop: true,
         opStream: true,
+        operationResourcePolicy: true,
       }),
       helloSubject(workspaceId, enrollment.id, connectionInstanceId),
     );
@@ -512,7 +515,11 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
     expect(after?.agentVersion).toBe("0.1.15");
     expect(after?.agentBinarySha256).toBe(digest);
     expect(after?.agentUpdateChannel).toBe("beta");
-    expect(after?.agentCapabilities).toMatchObject({ desktop: true, opStream: true });
+    expect(after?.agentCapabilities).toMatchObject({
+      desktop: true,
+      opStream: true,
+      operationResourcePolicy: true,
+    });
   });
 
   test("restarting is provisional; only exact successor version+digest completes update", async () => {

@@ -134,6 +134,7 @@ describe("release schema contract", () => {
       "0239_supergrok_video_funding.sql",
       "0240_model_context_user_messages.sql",
       "0249_personal_resource_delegation_authority_correction.sql",
+      "0250_connected_machine_operation_policy.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -170,6 +171,14 @@ describe("release schema contract", () => {
     if (modelContextCutover) {
       expect(modelContextCutover).toMatchObject({ deploymentMode: "maintenance" });
     }
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0250_connected_machine_operation_policy.sql",
+      ),
+    ).toMatchObject({
+      sha256: "d3fbbeac0fcb3eceafbfab06010734dac7e1c83ef7f355d0ceeb556795efd87f",
+      deploymentMode: "maintenance",
+    });
     expect(
       completeSourceContract.migrations.find(
         (migration) => migration.path === "0240_enrollment_connection_authority.sql",

@@ -144,6 +144,8 @@ async function resolveSelfhostedConnection(
   return {
     connectionInstanceId: enrollment.connectionInstanceId,
     ...(opStream ? { opStream } : {}),
+    operationResourcePolicy: enrollment.operationPolicy,
+    operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
   };
 }
 

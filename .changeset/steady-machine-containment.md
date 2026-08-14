@@ -1,0 +1,9 @@
+---
+"@opengeni/agent-proto": patch
+"@opengeni/contracts": patch
+"@opengeni/react": patch
+"@opengeni/runtime": patch
+"@opengeni/sdk": patch
+---
+
+Add revision-fenced Connected Machine command-memory policies, exact live runner capability gating, and lifecycle-safe Linux operation accounting without introducing default resource limits.

@@ -676,6 +676,98 @@ describe("M10 GET /machines/:enrollmentId/metrics/series", () => {
   }, 90_000);
 });
 
+describe("Connected Machine command policy", () => {
+  test("updates exact byte limits under a revision fence and projects them in the fleet", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment } = await seed();
+    const app = appFor(new MemoryEventBus());
+    const manageAuth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}`;
+
+    const updated = await app.request(
+      `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/operation-policy`,
+      {
+        method: "PATCH",
+        headers: { authorization: manageAuth, "content-type": "application/json" },
+        body: JSON.stringify({
+          memoryMaxBytes: 1_073_741_824,
+          memoryHighBytes: 805_306_368,
+          expectedRevision: 0,
+        }),
+      },
+    );
+    expect(updated.status).toBe(200);
+    expect(await updated.json()).toMatchObject({
+      memoryMaxBytes: 1_073_741_824,
+      memoryHighBytes: 805_306_368,
+      revision: 1,
+    });
+
+    const stale = await app.request(
+      `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/operation-policy`,
+      {
+        method: "PATCH",
+        headers: { authorization: manageAuth, "content-type": "application/json" },
+        body: JSON.stringify({
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          expectedRevision: 0,
+        }),
+      },
+    );
+    expect(stale.status).toBe(409);
+
+    const readAuth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+    const listed = await app.request(`/v1/workspaces/${workspaceId}/machines`, {
+      headers: { authorization: readAuth },
+    });
+    expect(listed.status).toBe(200);
+    const fleet = (await listed.json()) as {
+      machines: Array<{
+        enrollmentId: string | null;
+        operationPolicy: { memoryMaxBytes: number | null; revision: number } | null;
+      }>;
+    };
+    expect(
+      fleet.machines.find((machine) => machine.enrollmentId === enrollment.id)?.operationPolicy,
+    ).toMatchObject({ memoryMaxBytes: 1_073_741_824, revision: 1 });
+  }, 90_000);
+
+  test("requires manage permission and rejects an impossible throttle order", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment } = await seed();
+    const app = appFor(new MemoryEventBus());
+    const readAuth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+    const denied = await app.request(
+      `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/operation-policy`,
+      {
+        method: "PATCH",
+        headers: { authorization: readAuth, "content-type": "application/json" },
+        body: JSON.stringify({
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          expectedRevision: 0,
+        }),
+      },
+    );
+    expect(denied.status).toBe(403);
+
+    const manageAuth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}`;
+    const invalid = await app.request(
+      `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/operation-policy`,
+      {
+        method: "PATCH",
+        headers: { authorization: manageAuth, "content-type": "application/json" },
+        body: JSON.stringify({
+          memoryMaxBytes: 1024,
+          memoryHighBytes: 2048,
+          expectedRevision: 0,
+        }),
+      },
+    );
+    expect(invalid.status).toBe(400);
+  }, 90_000);
+});
+
 describe("Connected Machine signed self-update orchestration", () => {
   test("dispatches to the exact process and completes only after the matching successor Hello", async () => {
     if (!available) return;

@@ -99,10 +99,18 @@ missed output after re-attachment. Full-jitter backoff is reserved for actual
 transport failures.
 
 On Linux the systemd aggregate is deliberately unlimited and each accepted host
-operation gets a separate cgroup-v2 leaf. The supervisor has its own leaf carrying
-systemd-oomd's avoid marker before it is moved, so memory pressure in a command
-cannot erase the control process's protection. Local opt-in operation limits apply
-only to command leaves; the default remains the machine's available resources.
+operation gets a separate cgroup-v2 CPU/I/O/memory/PID accounting leaf. The
+generated unit uses systemd's `DelegateSubgroup=supervisor`, so the first and every
+replacement control process starts in the same supervisor leaf while the delegated
+root remains empty and restart-safe. Startup verifies this topology and stamps that
+leaf with systemd-oomd's avoid marker. A custom/older unit that cannot provide the
+subgroup is reported as incapable and stays on unrestricted ambient execution;
+an explicit memory policy then fails closed. Optional per-enrollment memory
+limits arrive on exec/Git control requests and compose with stricter local
+`OPENGENI_AGENT_OP_MEMORY_{MAX,HIGH}` or ancestor policy. The runner advertises
+support only after its delegated memory-cgroup manager is active; an explicit
+policy otherwise fails closed. The default remains the machine's available
+resources, and typed PTY/desktop/browser/computer operations are unchanged.
 
 An installation upgraded from the old single-connection file keeps that link
 online immediately. Because the old file did not record its deployment URL,

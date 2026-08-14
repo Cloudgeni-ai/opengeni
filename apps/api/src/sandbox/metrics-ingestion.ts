@@ -584,6 +584,7 @@ function helloRuntimeCapabilities(hello: Hello): Record<string, boolean> {
     desktop: caps.desktop === true,
     opStream: caps.opStream === true,
     browserBridge: caps.browserBridge === true,
+    operationResourcePolicy: caps.operationResourcePolicy === true,
   };
 }
 

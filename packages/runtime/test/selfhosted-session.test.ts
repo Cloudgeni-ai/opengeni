@@ -52,6 +52,84 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(mock.requests[0]?.req.op?.$case).toBe("exec");
   });
 
+  test("configured command policy is carried as exact byte counts", async () => {
+    const mock = new MockAgentResponder();
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      controlRpc: mock,
+      relay: RELAY,
+      operationResourcePolicy: {
+        memoryMaxBytes: 134_217_728,
+        memoryHighBytes: 100_663_296,
+      },
+      operationResourcePolicySupported: true,
+    });
+
+    await session.exec({ cmd: "true" });
+
+    expect(mock.requests[0]?.req.resourcePolicy).toEqual({
+      memoryMaxBytes: "134217728",
+      memoryHighBytes: "100663296",
+    });
+  });
+
+  test("configured policy fails closed before dispatch to an incapable runner", async () => {
+    const mock = new MockAgentResponder();
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      controlRpc: mock,
+      relay: RELAY,
+      operationResourcePolicy: { memoryMaxBytes: 134_217_728 },
+      operationResourcePolicySupported: false,
+    });
+
+    const failure = await session.exec({ cmd: "true" }).catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({
+      name: "SelfhostedControlError",
+      code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+      retryable: false,
+    });
+    expect(String((failure as Error).message)).toContain("cannot enforce");
+    expect(mock.requests).toHaveLength(0);
+  });
+
+  test("configured command policy does not disable typed non-command capabilities", async () => {
+    const mock = new MockAgentResponder();
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      controlRpc: mock,
+      relay: RELAY,
+      operationResourcePolicy: { memoryMaxBytes: 134_217_728 },
+      operationResourcePolicySupported: false,
+    });
+
+    expect(await session.ping()).toBe(true);
+    expect(mock.requests[0]?.req.op?.$case).toBe("ping");
+    expect(mock.requests[0]?.req.resourcePolicy).toBeUndefined();
+
+    await session.writeFile({ path: "/tmp/policy-independent", content: "ok" });
+    expect(mock.requests[1]?.req.op?.$case).toBe("fsWrite");
+    expect(mock.requests[1]?.req.resourcePolicy).toBeUndefined();
+  });
+
+  test("invalid byte policy is rejected when the session is constructed", () => {
+    expect(
+      () =>
+        new SelfhostedSession({
+          workspaceId: WS,
+          agentId: AGENT,
+          controlRpc: new MockAgentResponder(),
+          relay: RELAY,
+          operationResourcePolicy: { memoryMaxBytes: 1_000, memoryHighBytes: 1_001 },
+          operationResourcePolicySupported: true,
+        }),
+    ).toThrow("memoryHighBytes cannot exceed memoryMaxBytes");
+  });
+
   test("exec snapshots renewed transient values without persisting them", async () => {
     const mock = new MockAgentResponder();
     let bearer = "first-attempt-bearer";
@@ -303,7 +381,16 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
 
   test("interaction sidecar and Browser/Computer frame relays use typed control ops", async () => {
     const mock = new MockAgentResponder();
-    const session = sessionWith(mock);
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      controlRpc: mock,
+      relay: RELAY,
+      // A command policy on an incapable runner must not disable or rewrite the
+      // independent typed Browser/Computer planes.
+      operationResourcePolicy: { memoryMaxBytes: 134_217_728 },
+      operationResourcePolicySupported: false,
+    });
     const ensured = await session.ensureBrowserControl({
       scopeId: `${WS}:attached:device-1`,
       scopeGeneration: "connection-1",
@@ -352,6 +439,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(openedComputer.channel).toMatchObject({ kind: 4, port: 20_001 });
     expect(openedComputer.endpoint.query).toContain("port=20001");
     expect(openedComputer.endpoint.query).toContain("channel=mock-computer-window-1");
+    expect(mock.requests.every((request) => request.req.resourcePolicy === undefined)).toBe(true);
   });
 
   test("frame startup failures retain the exact inner control request correlation", async () => {

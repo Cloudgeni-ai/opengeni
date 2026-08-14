@@ -7,7 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Tool } from "@openai/agents";
 import { shell } from "@openai/agents/sandbox";
-import { ErrorCode } from "@opengeni/agent-proto";
+import { ErrorCode, type ControlRequest } from "@opengeni/agent-proto";
 import type { SelfhostedOpObservation } from "../src/sandbox/selfhosted/op-observer";
 import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
 import { SelfhostedSession } from "../src/sandbox/selfhosted/session";
@@ -18,20 +18,37 @@ const WORKSPACE = "ws-1";
 const AGENT = "agent-1";
 
 function buildRig(
-  opts: { journal?: OpStreamJournal; execTimeoutMs?: number; windowBytes?: number } = {},
+  opts: {
+    journal?: OpStreamJournal;
+    execTimeoutMs?: number;
+    windowBytes?: number;
+    memoryMaxBytes?: number;
+  } = {},
 ) {
   const transport = new InMemoryOpStreamTransport();
   const runner = new FakeOpRunner({ transport, workspaceId: WORKSPACE, agentId: AGENT });
   const observations: SelfhostedOpObservation[] = [];
+  const requests: ControlRequest[] = [];
   const session = new SelfhostedSession({
     workspaceId: WORKSPACE,
     agentId: AGENT,
-    controlRpc: runner,
+    controlRpc: {
+      request: async (subject, request, requestOpts) => {
+        requests.push(request);
+        return await runner.request(subject, request, requestOpts);
+      },
+    },
     relay: { host: "relay.test" },
     timeoutMs: 2_000,
     execTimeoutMs: opts.execTimeoutMs ?? 5_000,
     retryClock: { sleep: async () => {}, jitter: () => 0.5 },
     onOp: (observation) => observations.push(observation),
+    ...(opts.memoryMaxBytes !== undefined
+      ? {
+          operationResourcePolicy: { memoryMaxBytes: opts.memoryMaxBytes },
+          operationResourcePolicySupported: true,
+        }
+      : {}),
     opStream: {
       transport,
       ...(opts.journal ? { journal: opts.journal } : {}),
@@ -41,7 +58,7 @@ function buildRig(
       reconnectHoldMs: 600,
     },
   });
-  return { transport, runner, session, observations };
+  return { transport, runner, session, observations, requests };
 }
 
 describe("op-stream exec (fake runner)", () => {
@@ -67,6 +84,23 @@ describe("op-stream exec (fake runner)", () => {
     const ok = observations.find((o) => o.outcome === "ok");
     expect(ok?.op).toBe("exec");
     expect(ok?.replyBytes).toBe("hello world".length + "warn\n".length);
+  });
+
+  test("OpStart carries the configured command policy", async () => {
+    const { runner, session, requests } = buildRig({ memoryMaxBytes: 134_217_728 });
+    runner.script("call_policy:0", { frames: [{ channel: "stdout", bytes: "ok" }] });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+
+    await runWithToolCallCorrelation("call_policy", () => session.exec({ cmd: "true" }));
+
+    const start = requests.find((request) => request.op?.$case === "opStart");
+    expect(start?.resourcePolicy?.memoryMaxBytes).toBe("134217728");
+    expect(start?.resourcePolicy?.memoryHighBytes).toBeUndefined();
+    expect(
+      requests
+        .filter((request) => request.op?.$case !== "opStart")
+        .every((request) => request.resourcePolicy === undefined),
+    ).toBe(true);
   });
 
   test("deadline 0 runs over op-stream with no duration wall", async () => {

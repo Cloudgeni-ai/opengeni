@@ -7344,6 +7344,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 // claimed process instance.
                 connectionInstanceId: machineEnrollment?.connectionInstanceId ?? "unavailable",
                 opStream: machineOpStream,
+                operationResourcePolicy: machineEnrollment?.operationPolicy ?? {
+                  memoryMaxBytes: null,
+                  memoryHighBytes: null,
+                  revision: 0,
+                  updatedAt: null,
+                },
+                operationResourcePolicySupported:
+                  machineEnrollment?.agentCapabilities.operationResourcePolicy === true,
                 epoch: activeSandboxPointer!.activeEpoch,
                 environment: sandboxEnvironment,
                 ...(transientCodemodeEnvironment

@@ -17,7 +17,7 @@ use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use opengeni_agent_proto::v1;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
-use crate::cgroup::OpCgroups;
+use crate::cgroup::{OpCgroupConfig, OpCgroups};
 use crate::desktop::{resolve_desktop, DesktopBackend};
 use crate::error::{PlatformError, PlatformResult};
 use crate::{BrowserControlBackend, HostIdentity, Platform, StreamRegistry};
@@ -117,7 +117,7 @@ impl NativePlatform {
     }
 
     /// Returns a copy of this platform with a per-op OOM cgroup manager wired in, so
-    /// each `exec` child is placed in its own memory sub-cgroup (issue #345). Called
+    /// each `exec` child is placed in its own resource-accounting cgroup (issue #345). Called
     /// by the agent supervisor at startup after [`crate::establish_oom_isolation`]
     /// succeeds on a delegated Linux cgroup v2 host; left unset everywhere else.
     #[must_use]
@@ -194,6 +194,16 @@ fn user_home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn requested_policy(
+    policy: Option<&v1::OperationResourcePolicy>,
+) -> PlatformResult<OpCgroupConfig> {
+    let (memory_max, memory_high) = policy.map_or((None, None), |policy| {
+        (policy.memory_max_bytes, policy.memory_high_bytes)
+    });
+    OpCgroupConfig::from_limits(memory_max, memory_high)
+        .map_err(|error| PlatformError::os(format!("invalid operation resource policy: {error}")))
+}
+
 /// A zero-CPU Unix process-group leader that remains stopped until the group is
 /// killed. If another group member sends `SIGCONT`, the loop immediately stops it
 /// again. Keeping this private child unreaped fences the numeric PGID against reuse.
@@ -230,7 +240,7 @@ struct ExecProcessGroup {
     /// fork-race window (a descendant forked between a cancel's kill scan and
     /// the direct child's exit).
     wait_killed_group: bool,
-    /// The per-op memory leaf this exec's processes were placed in (issue #345),
+    /// The per-op resource-accounting leaf this exec's processes were placed in (issue #345),
     /// or `None` when isolation is unavailable. Torn down once the process tree is
     /// reaped. Always `None` off Linux (no manager is ever wired there).
     op_cgroup: Option<crate::cgroup::OpCgroupHandle>,
@@ -241,7 +251,18 @@ impl ExecProcessGroup {
     fn spawn(
         mut command: tokio::process::Command,
         cgroups: Option<&OpCgroups>,
+        requested_policy: OpCgroupConfig,
     ) -> std::io::Result<Self> {
+        // Create and configure the operation leaf before either child is forked.
+        // Their pre-exec hooks migrate them before user code can create a
+        // session-detached or double-forked descendant.
+        #[cfg(target_os = "linux")]
+        let prepared_op = if let Some(cgroups) = cgroups {
+            cgroups.prepare_op(requested_policy)?
+        } else {
+            None
+        };
+
         let mut anchor_command = tokio::process::Command::new("/bin/sh");
         anchor_command
             .arg("-c")
@@ -253,6 +274,10 @@ impl ExecProcessGroup {
             .stderr(Stdio::null());
         #[cfg(target_os = "linux")]
         crate::cgroup::configure_exec_oom_score_adj_before_exec(&mut anchor_command);
+        #[cfg(target_os = "linux")]
+        if let (Some(cgroups), Some(prepared)) = (cgroups, prepared_op.as_ref()) {
+            cgroups.configure_process_cgroup_before_exec(prepared, &mut anchor_command)?;
+        }
         let mut anchor = anchor_command.spawn()?;
         let pgid = i32::try_from(anchor.id().expect("new anchor must have a pid"))
             .map_err(|_| std::io::Error::other("exec anchor PID exceeds i32"))?;
@@ -260,6 +285,15 @@ impl ExecProcessGroup {
         command.process_group(pgid);
         #[cfg(target_os = "linux")]
         crate::cgroup::configure_exec_oom_score_adj_before_exec(&mut command);
+        #[cfg(target_os = "linux")]
+        if let (Some(cgroups), Some(prepared)) = (cgroups, prepared_op.as_ref()) {
+            if let Err(error) = cgroups.configure_process_cgroup_before_exec(prepared, &mut command)
+            {
+                let _ = terminate_unix_process_group(pgid);
+                let _ = anchor.start_kill();
+                return Err(error);
+            }
+        }
         let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -278,18 +312,16 @@ impl ExecProcessGroup {
             crate::cgroup::raise_exec_oom_score_adj(child_pid);
         }
 
-        // Place the COMPLETE ordinary process group in one per-op memory leaf. A
-        // shell can fork between Command::spawn returning and post-spawn placement;
-        // moving only the direct child would leave that fast descendant billed to
-        // the supervisor. The cgroup manager stops the group, moves its direct
-        // roots, then drains same-group descendants from the supervisor leaf before
-        // resuming. Correctness does not depend on synchronous SIGSTOP delivery.
+        // Verify the COMPLETE ordinary process group in its prepared accounting
+        // leaf. The pre-exec migration is the race-free ownership boundary; this
+        // post-spawn stop/move/drain remains an observable fallback for an
+        // unrestricted request on a host whose pre-exec cgroup write failed.
         // This is a no-op when isolation is unavailable / off Linux.
         #[cfg(target_os = "linux")]
-        let op_cgroup = if let Some(cg) = cgroups {
+        let op_cgroup = if let (Some(cg), Some(prepared)) = (cgroups, prepared_op) {
             let pids: Vec<u32> = [anchor.id(), child.id()].into_iter().flatten().collect();
-            match cg.place_process_group(pgid, &pids) {
-                Ok(handle) => handle,
+            match cg.place_process_group(pgid, &pids, prepared) {
+                Ok(handle) => Some(handle),
                 Err(error) => {
                     let _ = terminate_unix_process_group(pgid);
                     let _ = anchor.start_kill();
@@ -300,10 +332,12 @@ impl ExecProcessGroup {
             None
         };
         #[cfg(not(target_os = "linux"))]
-        let op_cgroup = cgroups.and_then(|cg| {
+        let op_cgroup = if let Some(cg) = cgroups {
             let pids: Vec<u32> = [anchor.id(), child.id()].into_iter().flatten().collect();
-            cg.place_op(&pids)
-        });
+            cg.place_op(&pids, requested_policy)?
+        } else {
+            None
+        };
 
         Ok(Self {
             anchor,
@@ -326,7 +360,19 @@ impl ExecProcessGroup {
     }
 
     fn terminate(&mut self) -> std::io::Result<()> {
-        terminate_unix_process_group(self.pgid)
+        let group_result = terminate_unix_process_group(self.pgid);
+        let cgroup_result = self
+            .op_cgroup
+            .as_ref()
+            .map_or(Ok(()), crate::cgroup::OpCgroupHandle::kill_all);
+        match (group_result, cgroup_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(group_error), Err(cgroup_error)) => Err(std::io::Error::other(format!(
+                "could not terminate process group {} ({group_error}) or its operation cgroup ({cgroup_error})",
+                self.pgid
+            ))),
+        }
     }
 
     /// Waits for the DIRECT command to exit, then tears the group down in the #344
@@ -350,8 +396,9 @@ impl ExecProcessGroup {
         // not signal the now-recyclable numeric PGID.
         let _ = self.anchor.wait().await?;
         self.running = false;
-        // The process tree is reaped, so the op leaf can be removed now (bounded
-        // EBUSY retry). Taking the handle here means Drop below won't touch it.
+        // The complete cgroup-owned tree is now killed. Remove the leaf after the
+        // kernel reports it unpopulated; taking the handle here means Drop below
+        // will not touch it.
         if let Some(handle) = self.op_cgroup.take() {
             handle.teardown().await;
         }
@@ -373,13 +420,12 @@ impl Drop for ExecProcessGroup {
                 }
             }
         }
-        // A cancelled/timed-out exec drops here with its op leaf still present: the
-        // group was just SIGKILL'd but its processes reap asynchronously, so this
-        // best-effort rmdir usually leaves an (eventually empty) leaf that the next
-        // unit stop reclaims. On the normal path the handle was already taken and
-        // torn down in wait(), so this is a no-op there.
+        // A cancelled/timed-out/task-aborted exec drops here with its op leaf still
+        // present. Dropping the handle schedules event-driven removal after the
+        // group becomes unpopulated. On the normal path the handle was already
+        // taken and torn down in wait(), so this is a no-op there.
         if let Some(handle) = self.op_cgroup.take() {
-            handle.teardown_best_effort();
+            drop(handle);
         }
     }
 }
@@ -558,16 +604,28 @@ impl ContainedExec {
 /// Object owns the tree.
 ///
 /// `cgroups` is the per-op OOM-isolation root: when present (Linux with isolation
-/// available), the group's processes are placed into a fresh memory leaf so their
-/// page cache and anon memory share one OOM fate, billed away from the supervisor.
+/// available), the group's processes are placed into a fresh accounting leaf so
+/// CPU, I/O, memory, and PID use are attributable to the operation. Page cache and
+/// anonymous memory share one OOM fate, billed away from the supervisor.
 /// Pass `None` where isolation is unavailable or not wanted (tests, non-Linux).
 ///
 /// # Errors
 ///
 /// Propagates the spawn IO error (e.g. the program is missing or not executable).
 pub fn spawn_contained(
+    command: tokio::process::Command,
+    cgroups: Option<&OpCgroups>,
+) -> std::io::Result<ContainedExec> {
+    spawn_contained_with_policy(command, cgroups, OpCgroupConfig::default())
+}
+
+/// Policy-aware form of [`spawn_contained`]. `requested_policy` is one
+/// connection's explicit snapshot; the cgroup manager composes it with tighter
+/// runner-local and ancestor host policy before the child resumes.
+fn spawn_contained_with_policy(
     mut command: tokio::process::Command,
     cgroups: Option<&OpCgroups>,
+    requested_policy: OpCgroupConfig,
 ) -> std::io::Result<ContainedExec> {
     command
         .kill_on_drop(true)
@@ -575,11 +633,11 @@ pub fn spawn_contained(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
-    let mut group = ExecProcessGroup::spawn(command, cgroups)?;
+    let mut group = ExecProcessGroup::spawn(command, cgroups, requested_policy)?;
     #[cfg(windows)]
     let mut group = {
         // Job Objects give the whole-tree kill; per-op cgroup leaves are Linux-only.
-        let _ = cgroups;
+        let _ = (cgroups, requested_policy);
         ExecProcessGroup::spawn(command)?
     };
     let (stdin, stdout, stderr) = group.take_pipes();
@@ -599,6 +657,10 @@ impl Platform for NativePlatform {
 
     fn workspace_root(&self) -> String {
         self.workspace_root.to_string_lossy().into_owned()
+    }
+
+    fn operation_resource_policy_supported(&self) -> bool {
+        self.cgroups.is_some()
     }
 
     fn desktop(&self) -> Arc<dyn DesktopBackend> {
@@ -634,6 +696,14 @@ impl Platform for NativePlatform {
     /// per-op cgroup leaf (#351) rides inside the group: placed at spawn, torn
     /// down after the anchor reap in `wait()`, best-effort in `Drop`.
     fn spawn_exec(&self, req: &v1::ExecRequest) -> PlatformResult<ContainedExec> {
+        self.spawn_exec_with_policy(req, None)
+    }
+
+    fn spawn_exec_with_policy(
+        &self,
+        req: &v1::ExecRequest,
+        policy: Option<&v1::OperationResourcePolicy>,
+    ) -> PlatformResult<ContainedExec> {
         if req.command.is_empty() {
             return Err(PlatformError::Os {
                 message: "exec: empty command".to_string(),
@@ -654,8 +724,22 @@ impl Platform for NativePlatform {
             cmd.env(k, v);
         }
 
-        spawn_contained(cmd, self.cgroups.as_deref())
-            .map_err(|e| PlatformError::from_io(&format!("spawn {}", req.command[0]), &e))
+        let requested_policy = requested_policy(policy)?;
+        if requested_policy.has_limits() && self.cgroups.is_none() {
+            return Err(PlatformError::Unsupported(
+                "operation resource policy requires delegated Linux cgroup-v2 memory support on the runner"
+                    .to_string(),
+            ));
+        }
+        spawn_contained_with_policy(cmd, self.cgroups.as_deref(), requested_policy).map_err(|e| {
+            PlatformError::from_io(
+                &format!(
+                    "spawn or apply execution containment for {}",
+                    req.command[0]
+                ),
+                &e,
+            )
+        })
     }
 
     async fn exec(&self, req: &v1::ExecRequest) -> PlatformResult<v1::ExecResponse> {
@@ -872,10 +956,25 @@ impl Platform for NativePlatform {
     /// (process group / Job Object) and, on a delegated Linux host, placed in
     /// a per-op OOM cgroup leaf like any exec child.
     fn spawn_git(&self, req: &v1::GitRequest) -> PlatformResult<ContainedExec> {
+        self.spawn_git_with_policy(req, None)
+    }
+
+    fn spawn_git_with_policy(
+        &self,
+        req: &v1::GitRequest,
+        policy: Option<&v1::OperationResourcePolicy>,
+    ) -> PlatformResult<ContainedExec> {
         let mut cmd = tokio::process::Command::new("git");
         cmd.args(git_args(req.op(), &req.args))
             .current_dir(self.resolve_process_cwd(&req.cwd, "git")?);
-        spawn_contained(cmd, self.cgroups.as_deref())
+        let requested_policy = requested_policy(policy)?;
+        if requested_policy.has_limits() && self.cgroups.is_none() {
+            return Err(PlatformError::Unsupported(
+                "operation resource policy requires delegated Linux cgroup-v2 memory support on the runner"
+                    .to_string(),
+            ));
+        }
+        spawn_contained_with_policy(cmd, self.cgroups.as_deref(), requested_policy)
             .map_err(|e| PlatformError::from_io("spawn git", &e))
     }
 

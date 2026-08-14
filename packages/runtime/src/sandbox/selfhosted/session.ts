@@ -28,6 +28,7 @@ import {
   type ComputerFramesOpenRequest,
   type ExecRequest,
   type ExecResponse,
+  type OperationResourcePolicy,
   type StreamChannel,
 } from "@opengeni/agent-proto";
 import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
@@ -219,6 +220,29 @@ const SELFHOSTED_EXEC_REPLY_GRACE_MS = 5_000;
  *  range while also fitting the reply grace. */
 const SELFHOSTED_MAX_EXEC_TIMEOUT_MS = 2_147_483_647 - SELFHOSTED_EXEC_REPLY_GRACE_MS;
 
+function normalizeOperationResourcePolicy(
+  policy: SelfhostedOperationResourcePolicy | undefined,
+): OperationResourcePolicy | undefined {
+  const memoryMaxBytes = policy?.memoryMaxBytes ?? null;
+  const memoryHighBytes = policy?.memoryHighBytes ?? null;
+  for (const [name, value] of [
+    ["memoryMaxBytes", memoryMaxBytes],
+    ["memoryHighBytes", memoryHighBytes],
+  ] as const) {
+    if (value !== null && (!Number.isSafeInteger(value) || value <= 0)) {
+      throw new Error(`${name} must be a positive safe-integer byte count or null`);
+    }
+  }
+  if (memoryMaxBytes !== null && memoryHighBytes !== null && memoryHighBytes > memoryMaxBytes) {
+    throw new Error("memoryHighBytes cannot exceed memoryMaxBytes");
+  }
+  if (memoryMaxBytes === null && memoryHighBytes === null) return undefined;
+  return {
+    ...(memoryMaxBytes !== null ? { memoryMaxBytes: String(memoryMaxBytes) } : {}),
+    ...(memoryHighBytes !== null ? { memoryHighBytes: String(memoryHighBytes) } : {}),
+  };
+}
+
 /** The relay-URL shape config the session needs to build a stream endpoint. M8b
  *  wires the real relay deployment behind THIS seam so `buildStreamUrl` works
  *  unchanged behind `resolveExposedPort`. */
@@ -255,6 +279,11 @@ export interface SelfhostedOpStreamDeps {
   reconnectHoldMs?: number;
 }
 
+export interface SelfhostedOperationResourcePolicy {
+  memoryMaxBytes?: number | null;
+  memoryHighBytes?: number | null;
+}
+
 export interface SelfhostedSessionDeps {
   workspaceId: string;
   agentId: string;
@@ -287,6 +316,11 @@ export interface SelfhostedSessionDeps {
    * field explicitly.
    */
   execTimeoutMs?: number;
+  /** Optional per-connection command memory policy. Missing/null values are
+   * unrestricted. The runner's local and ancestor policy may only tighten it. */
+  operationResourcePolicy?: SelfhostedOperationResourcePolicy;
+  /** Exact live Hello capability paired with this connection snapshot. */
+  operationResourcePolicySupported?: boolean;
   /** The clock the bounded control-op retry loop drives (sleep + jitter). Injected
    *  so tests are deterministic; defaults to a real timer + `Math.random()`. */
   retryClock?: SelfhostedRetryClock;
@@ -382,6 +416,8 @@ export class SelfhostedSession {
    *  (see `toMachinePath`). "" by default ⇒ today's workspace_root behavior. */
   private readonly workingDir: string;
   private readonly transientExecEnvironment: (() => Readonly<Record<string, string>>) | undefined;
+  private readonly resourcePolicy: OperationResourcePolicy | undefined;
+  private readonly resourcePolicySupported: boolean;
 
   /**
    * The structural `state` slice consumers read. `agentId`/`instanceId` serve the
@@ -431,6 +467,8 @@ export class SelfhostedSession {
     this.subject = subjectFor(deps.workspaceId, deps.agentId, deps.connectionInstanceId);
     this.workingDir = deps.workingDir ?? "";
     this.transientExecEnvironment = deps.transientExecEnvironment;
+    this.resourcePolicy = normalizeOperationResourcePolicy(deps.operationResourcePolicy);
+    this.resourcePolicySupported = deps.operationResourcePolicySupported === true;
     this.opStreamClient = deps.opStream
       ? new OpStreamExecClient({
           workspaceId: deps.workspaceId,
@@ -444,6 +482,7 @@ export class SelfhostedSession {
           transport: deps.opStream.transport,
           controlTimeoutMs: this.timeoutMs,
           retryClock: this.retryClock,
+          ...(this.resourcePolicy !== undefined ? { resourcePolicy: this.resourcePolicy } : {}),
           ...(deps.opStream.journal !== undefined ? { journal: deps.opStream.journal } : {}),
           ...(deps.opStream.windowBytes !== undefined
             ? { windowBytes: deps.opStream.windowBytes }
@@ -501,6 +540,17 @@ export class SelfhostedSession {
     }
   }
 
+  private assertResourcePolicySupported(): void {
+    if (this.resourcePolicy === undefined || this.resourcePolicySupported) return;
+    throw new SelfhostedControlError({
+      message:
+        "This Connected Machine has an operation memory policy, but its current runner cannot enforce it. Update or reconfigure the runner before executing commands.",
+      code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+      reason: null,
+      retryable: false,
+    });
+  }
+
   /**
    * Issue a control op, decoding the agent's reply or throwing the mapped
    * `SelfhostedControlError` on an AgentError (incl. a synthesized offline /
@@ -522,14 +572,20 @@ export class SelfhostedSession {
     timeoutMs = this.timeoutMs,
   ): Promise<NonNullable<ControlResponse["result"]>> {
     const opKind = op.$case;
+    if (opKind === "exec" || opKind === "git") {
+      this.assertResourcePolicySupported();
+    }
     const startedAt = Date.now();
     let drainingRetries = 0;
     let timeoutRetries = 0;
     let neverSentRetries = 0;
     for (;;) {
+      const resourcePolicy =
+        opKind === "exec" || opKind === "git" ? this.resourcePolicy : undefined;
       const req: ControlRequest = {
         requestId: crypto.randomUUID(),
         epoch: this.epoch,
+        resourcePolicy,
         op,
       };
       const res = await this.controlRpc.request(this.subject, req, { timeoutMs });
@@ -627,6 +683,7 @@ export class SelfhostedSession {
 
   /** Channel-A `exec`: run a command on the machine and return its output. */
   async exec(args: SelfhostedExecArgs): Promise<SelfhostedExecResult> {
+    this.assertResourcePolicySupported();
     // 0 deliberately means no process deadline. That contract is safe only over
     // op-stream: its liveness probes, replay, and cancellation do not depend on a
     // request/reply timer or a monolithic response.
@@ -1117,6 +1174,7 @@ export class SelfhostedSession {
     const req: ControlRequest = {
       requestId: crypto.randomUUID(),
       epoch: this.epoch,
+      resourcePolicy: undefined,
       op: { $case: "ping", ping: { nonce } },
     };
     const res = await this.controlRpc.request(this.subject, req, { timeoutMs: this.timeoutMs });
@@ -1259,6 +1317,8 @@ export class SelfhostedSandboxClient {
   private readonly environment: Record<string, string> | undefined;
   private readonly transientExecEnvironment: (() => Readonly<Record<string, string>>) | undefined;
   private readonly workingDir: string | undefined;
+  private readonly operationResourcePolicy: SelfhostedOperationResourcePolicy | undefined;
+  private readonly operationResourcePolicySupported: boolean | undefined;
   private readonly onOp: SelfhostedOpObserver | undefined;
   private readonly opStream: SelfhostedOpStreamDeps | undefined;
   private controlRpcMemo: ControlRpc | undefined;
@@ -1282,6 +1342,8 @@ export class SelfhostedSandboxClient {
      *  `timeoutMs`; 0 means no duration deadline, while omission preserves the
      *  legacy control-timeout fallback for older embedding callers). */
     execTimeoutMs?: number;
+    operationResourcePolicy?: SelfhostedOperationResourcePolicy;
+    operationResourcePolicySupported?: boolean;
     /** The run's declared sandbox environment, threaded into every bound session's
      *  `state.manifest.environment` so the SDK's per-turn manifest-env delta is
      *  empty (validateNoEnvironmentDelta). See SelfhostedSessionDeps.environment.
@@ -1308,6 +1370,8 @@ export class SelfhostedSandboxClient {
     this.epoch = opts.epoch;
     this.timeoutMs = opts.timeoutMs;
     this.execTimeoutMs = opts.execTimeoutMs;
+    this.operationResourcePolicy = opts.operationResourcePolicy;
+    this.operationResourcePolicySupported = opts.operationResourcePolicySupported;
     this.environment = opts.environment;
     this.transientExecEnvironment = opts.transientExecEnvironment;
     this.workingDir = opts.workingDir;
@@ -1335,6 +1399,12 @@ export class SelfhostedSandboxClient {
       ...(this.epoch !== undefined ? { epoch: this.epoch } : {}),
       ...(this.timeoutMs !== undefined ? { timeoutMs: this.timeoutMs } : {}),
       ...(this.execTimeoutMs !== undefined ? { execTimeoutMs: this.execTimeoutMs } : {}),
+      ...(this.operationResourcePolicy !== undefined
+        ? { operationResourcePolicy: this.operationResourcePolicy }
+        : {}),
+      ...(this.operationResourcePolicySupported !== undefined
+        ? { operationResourcePolicySupported: this.operationResourcePolicySupported }
+        : {}),
       ...(this.environment !== undefined ? { environment: this.environment } : {}),
       ...(this.transientExecEnvironment !== undefined
         ? { transientExecEnvironment: this.transientExecEnvironment }
@@ -1425,6 +1495,11 @@ export interface SelfhostedSessionBuild {
   /** The exec process deadline, distinct from `timeoutMs`. 0 = none; absence
    *  preserves the control-timeout fallback for older embedding callers. */
   execTimeoutMs?: number;
+  /** Per-enrollment optional command policy resolved from the same database
+   * snapshot as the exact connection identity. */
+  operationResourcePolicy?: SelfhostedOperationResourcePolicy;
+  /** Exact live runner capability paired with that snapshot. */
+  operationResourcePolicySupported?: boolean;
   /** The per-op observer (out-of-band telemetry). Absent ⇒ no-op. */
   onOp?: SelfhostedOpObserver;
   /** The op-stream exec transport (present when the runner advertises it and the
@@ -1461,6 +1536,12 @@ export async function buildSelfhostedBackendSession(
     ...(deps.terminalScopeId !== undefined ? { terminalScopeId: deps.terminalScopeId } : {}),
     ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
     ...(deps.execTimeoutMs !== undefined ? { execTimeoutMs: deps.execTimeoutMs } : {}),
+    ...(deps.operationResourcePolicy !== undefined
+      ? { operationResourcePolicy: deps.operationResourcePolicy }
+      : {}),
+    ...(deps.operationResourcePolicySupported !== undefined
+      ? { operationResourcePolicySupported: deps.operationResourcePolicySupported }
+      : {}),
     ...(deps.onOp !== undefined ? { onOp: deps.onOp } : {}),
     ...(deps.environment !== undefined ? { environment: deps.environment } : {}),
     ...(deps.transientExecEnvironment !== undefined
