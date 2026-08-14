@@ -199,6 +199,47 @@ export function sessionCreatorLabel(session: Session): string {
   return session.createdBy.subjectId;
 }
 
+export type SessionCreatorOption = {
+  value: string;
+  label: string;
+};
+
+/**
+ * Loaded creator choices with identity-specific labels only when frozen display
+ * labels collide. The subject ID remains opaque; it is displayed, not parsed.
+ */
+export function sessionCreatorOptions(sessions: Session[]): SessionCreatorOption[] {
+  const byKey = new Map<
+    string,
+    { label: string; kind: Session["createdBy"]["kind"]; subjectId: string }
+  >();
+  for (const session of sessions) {
+    byKey.set(sessionCreatorKey(session), {
+      label: sessionCreatorLabel(session),
+      kind: session.createdBy.kind,
+      subjectId: session.createdBy.subjectId,
+    });
+  }
+
+  const labelCounts = new Map<string, number>();
+  for (const creator of byKey.values()) {
+    labelCounts.set(creator.label, (labelCounts.get(creator.label) ?? 0) + 1);
+  }
+
+  return [...byKey.entries()]
+    .map(([value, creator]) => ({
+      value,
+      label:
+        labelCounts.get(creator.label) === 1
+          ? creator.label
+          : `${creator.label} · ${creator.kind === "service" ? "Service" : "Subject"} · ${creator.subjectId}`,
+    }))
+    .sort(
+      (left, right) =>
+        left.label.localeCompare(right.label) || left.value.localeCompare(right.value),
+    );
+}
+
 function browseTimestamp(session: Session, field: SessionBrowseDateField): number {
   if (field === "activity") return sessionActivityTime(session);
   const created = Date.parse(session.createdAt);
@@ -279,10 +320,16 @@ export function groupSessionsForBrowse(
     };
   }
 
+  const creatorLabels = new Map(
+    sessionCreatorOptions(sessions).map((creator) => [creator.value, creator.label]),
+  );
   const creators = new Map<string, { label: string; sessions: Session[] }>();
   for (const session of rest) {
     const key = sessionCreatorKey(session);
-    const bucket = creators.get(key) ?? { label: sessionCreatorLabel(session), sessions: [] };
+    const bucket = creators.get(key) ?? {
+      label: creatorLabels.get(key) ?? sessionCreatorLabel(session),
+      sessions: [],
+    };
     bucket.sessions.push(session);
     creators.set(key, bucket);
   }

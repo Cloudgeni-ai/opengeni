@@ -5,6 +5,7 @@ import {
   filterSessionsForBrowse,
   groupSessionsForBrowse,
   sessionCreatorLabel,
+  sessionCreatorOptions,
 } from "./sessions-group";
 
 const NOW = new Date("2026-08-14T12:00:00.000Z");
@@ -86,5 +87,36 @@ describe("session browse projections", () => {
     expect(
       groupSessionsForBrowse([grace, ada], "created", NOW).grouped.map((g) => g.label),
     ).toEqual(["Created today", "Created earlier"]);
+  });
+
+  test("disambiguates duplicate frozen creator labels with opaque identities", () => {
+    const firstAlex = session({
+      id: "first-alex",
+      createdBy: { kind: "subject", subjectId: "tenant-a:alex", label: "Alex" },
+    });
+    const secondAlex = session({
+      id: "second-alex",
+      createdBy: { kind: "subject", subjectId: "tenant-b:alex", label: "Alex" },
+    });
+
+    expect(sessionCreatorOptions([firstAlex, secondAlex])).toEqual([
+      { value: "subject:tenant-a:alex", label: "Alex · Subject · tenant-a:alex" },
+      { value: "subject:tenant-b:alex", label: "Alex · Subject · tenant-b:alex" },
+    ]);
+    expect(
+      groupSessionsForBrowse([firstAlex, secondAlex], "creator", NOW).grouped.map((group) => ({
+        key: group.group,
+        label: group.label,
+      })),
+    ).toEqual([
+      {
+        key: "creator:subject:tenant-a:alex",
+        label: "Alex · Subject · tenant-a:alex",
+      },
+      {
+        key: "creator:subject:tenant-b:alex",
+        label: "Alex · Subject · tenant-b:alex",
+      },
+    ]);
   });
 });

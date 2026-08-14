@@ -63,6 +63,14 @@ describe("session control surface architecture", () => {
     expect(paginationKey).not.toContain("serverSessions");
   });
 
+  test("keeps the loaded creator picker identifiable and reachable", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    expect(list).toContain("sessionCreatorOptions(allSessions)");
+    expect(list).toContain(
+      'className="max-h-(--radix-dropdown-menu-content-available-height) w-52 overflow-x-hidden overflow-y-auto"',
+    );
+  });
+
   test("the retired client-side queue model is gone", async () => {
     expect(await Bun.file(`${import.meta.dir}/lib/queue.ts`).exists()).toBe(false);
   });

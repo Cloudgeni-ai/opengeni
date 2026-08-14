@@ -98,8 +98,7 @@ import {
   groupSessionsForRail,
   mergeSessionForRail,
   relativeTimeLabel,
-  sessionCreatorKey,
-  sessionCreatorLabel,
+  sessionCreatorOptions,
   visibleForestRows,
   visibleTreeRows,
   type SessionTreeNode,
@@ -335,13 +334,7 @@ export function SessionList() {
     return [...source.values()];
   }, [pinOverrides, serverSessions]);
   const creatorOptions = useMemo(() => {
-    const byKey = new Map<string, string>();
-    for (const session of allSessions) {
-      byKey.set(sessionCreatorKey(session), sessionCreatorLabel(session));
-    }
-    return [...byKey.entries()]
-      .map(([value, label]) => ({ value, label }))
-      .sort((left, right) => left.label.localeCompare(right.label));
+    return sessionCreatorOptions(allSessions);
   }, [allSessions]);
   const browseSessions = useMemo(
     () =>
@@ -1181,7 +1174,7 @@ export function SessionList() {
                     : "Anyone"}
                 </span>
               </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent className="w-52">
+              <DropdownMenuSubContent className="max-h-(--radix-dropdown-menu-content-available-height) w-52 overflow-x-hidden overflow-y-auto">
                 <DropdownMenuRadioGroup
                   value={browseCreator ?? "all"}
                   onValueChange={(value) => setBrowseCreator(value === "all" ? null : value)}
