@@ -5,7 +5,7 @@ Date: August 14, 2026
 Requested disposition-audit base:
 `90c0c3e4cc11081df8ce0230d0f2c36b4b883bbb`
 
-Current-main implementation base after unrelated intervening merges:
+Compatibility-rebase base used for this implementation:
 `66a2eabe0796fc7e5aeb13dc8c660df81da22a69`
 
 ## Stale pull-request disposition
