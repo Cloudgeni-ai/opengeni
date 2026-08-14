@@ -7486,6 +7486,15 @@ export async function listEnabledMcpCapabilityServers(
   });
 }
 
+const registryApiKeyContractValidSql = sql<boolean>`coalesce((
+  jsonb_typeof(${schema.capabilityCatalogItems.metadata} -> 'authContract') = 'object'
+  and jsonb_typeof(${schema.capabilityCatalogItems.metadata} -> 'authContract' -> 'headerName') = 'string'
+  and (${schema.capabilityCatalogItems.metadata} -> 'authContract' ->> 'headerName')
+    ~ ${"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$"}
+  and jsonb_typeof(${schema.capabilityCatalogItems.metadata} -> 'authContract' -> 'scheme') = 'string'
+  and length(btrim(${schema.capabilityCatalogItems.metadata} -> 'authContract' ->> 'scheme')) > 0
+), false)`;
+
 /**
  * Metadata-only projection of runnable capability MCP server ids. The query
  * deliberately computes credential-presence booleans in PostgreSQL and never
@@ -7511,12 +7520,7 @@ export async function listEnabledMcpCapabilityServerIds(
           itemMcpProbeStatus: sql<
             string | null
           >`${schema.capabilityCatalogItems.metadata} -> 'mcpProbe' ->> 'status'`,
-          itemAuthContractHeaderName: sql<
-            string | null
-          >`${schema.capabilityCatalogItems.metadata} -> 'authContract' ->> 'headerName'`,
-          itemAuthContractScheme: sql<
-            string | null
-          >`${schema.capabilityCatalogItems.metadata} -> 'authContract' ->> 'scheme'`,
+          itemRegistryApiKeyContractValid: registryApiKeyContractValidSql,
           itemMcpServerId: sql<
             string | null
           >`${schema.capabilityCatalogItems.metadata} ->> 'mcpServerId'`,
@@ -7584,24 +7588,14 @@ export async function listEnabledMcpCapabilityServerIds(
   }
 
   return [...preferredByInstallation.values()].flatMap((row) => {
-    const metadata = {
-      ...(row.itemMcpProbePresent ? { mcpProbe: { status: row.itemMcpProbeStatus } } : {}),
-      ...(row.itemAuthContractHeaderName !== null || row.itemAuthContractScheme !== null
-        ? {
-            authContract: {
-              headerName: row.itemAuthContractHeaderName,
-              scheme: row.itemAuthContractScheme,
-            },
-          }
-        : {}),
-      ...(row.itemMcpServerId !== null ? { mcpServerId: row.itemMcpServerId } : {}),
-    };
-    const trusted = capabilityCatalogItemIsTrustedForExposure({
-      source: row.itemSource as CapabilitySource,
-      stale: false,
-      authKind: row.itemAuthKind as CapabilityCatalogItem["authKind"],
-      metadata,
-    });
+    const metadata = row.itemMcpServerId !== null ? { mcpServerId: row.itemMcpServerId } : {};
+    const trusted =
+      row.itemSource !== registryCapabilitySource ||
+      (row.itemMcpProbePresent &&
+        row.itemMcpProbeStatus === "real" &&
+        row.itemAuthKind !== null &&
+        row.itemAuthKind !== "unknown" &&
+        (row.itemAuthKind !== "api_key" || row.itemRegistryApiKeyContractValid));
     const connectivityOk =
       row.mcpConnectivityStatus === "ok" || row.mcpConnectivityStatus === "auth_deferred";
     const legacyActive =

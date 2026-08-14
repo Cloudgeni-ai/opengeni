@@ -362,6 +362,9 @@ describe("incident telemetry dispatch preflight", () => {
     expect(capabilityProjectionStart).toBeGreaterThan(0);
     expect(capabilityProjectionEnd).toBeGreaterThan(capabilityProjectionStart);
     const capabilityProjection = dbSource.slice(capabilityProjectionStart, capabilityProjectionEnd);
+    expect(capabilityProjection).toContain(
+      "itemRegistryApiKeyContractValid: registryApiKeyContractValidSql",
+    );
     for (const forbidden of [
       "config: schema.capabilityInstallations.config",
       "installationMetadata:",
@@ -369,6 +372,12 @@ describe("incident telemetry dispatch preflight", () => {
       "endpointUrl: schema.capabilityCatalogItems.endpointUrl",
       "headersEncrypted: schema.capabilityInstallations.config",
       "connectionRef: schema.capabilityInstallations.config",
+      "itemAuthContractHeaderName",
+      "itemAuthContractScheme",
+      "headerName",
+      "scheme",
+      "authContract: {",
+      "capabilityCatalogItemIsTrustedForExposure",
     ]) {
       expect(capabilityProjection).not.toContain(forbidden);
     }
