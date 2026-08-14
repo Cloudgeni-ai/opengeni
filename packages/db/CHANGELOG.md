@@ -1,5 +1,30 @@
 # @opengeni/db
 
+## 1.0.2
+
+### Patch Changes
+
+- a551666: Fix local Gmail provider OAuth callbacks, Google scope equivalence, stable
+  Discovery compilation, and installed API integration visibility in session
+  tool selection.
+- 90c0c3e: Persist bounded, content-free Company Brain prompt contribution estimates on authoritative model-call facts and expose their source breakdown and coverage in Workspace Insights.
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+- b2af2df: Bind Integration facet idempotency receipts to the subject that created them so another workspace administrator cannot replay a personal facet result.
+- 3843825: Prevent workspace administrators from rebinding another subject's personal API Integration instance.
+- 234a5e7: Replay exact completed Integration facet configure receipts before mutable instance, Connection, or provider validation while preserving request conflicts and exact-subject isolation.
+- c056063: Project exact Integration Facet ownership so shared or externally managed bindings are read-only and direct removal reports retained owners truthfully.
+- Updated dependencies [79f57b5]
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ec00479]
+- Updated dependencies [79f57b5]
+- Updated dependencies [c056063]
+  - @opengeni/codemode@0.4.5
+  - @opengeni/contracts@1.1.0
+  - @opengeni/config@0.16.5
+
 ## 1.0.1
 
 ### Patch Changes
