@@ -1022,6 +1022,43 @@ describe("BrowserSession frame stream", () => {
 });
 
 describe("BrowserViewer", () => {
+  test("restores the task's last selected BrowserSession", async () => {
+    const current = browserSession();
+    const peer = browserSession(PEER_BROWSER_SESSION_ID, PEER_SESSION_ID, "Peer browser");
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current, peer] }),
+      getBrowserSession: async (_workspaceId, browserSessionId) =>
+        browserSessionId === peer.id ? peer : current,
+      listBrowserTargets: async (_workspaceId, browserSessionId) => ({
+        browserSessionId,
+        controllerGeneration: "controller-1",
+        targets: [],
+      }),
+    });
+    const changes: Array<string | null> = [];
+    const viewer = (enabled: boolean) => (
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        enabled={enabled}
+        initialBrowserSessionId={peer.id}
+        onBrowserSessionIdChange={(browserSessionId) => changes.push(browserSessionId)}
+      />
+    );
+    const rendered = await renderComponent(viewer(true));
+    await flush(40);
+
+    expect(rendered.container.querySelector("summary")?.textContent).toContain("Peer browser");
+    await rendered.rerender(viewer(false));
+    await flush(10);
+    await rendered.rerender(viewer(true));
+    await flush(40);
+    expect(rendered.container.querySelector("summary")?.textContent).toContain("Peer browser");
+    expect(changes).toEqual([]);
+    await rendered.unmount();
+  });
+
   test("ignores standalone modifier keydowns before a browser shortcut", () => {
     const event = (key: string, overrides: Partial<Parameters<typeof browserKey>[0]> = {}) => ({
       altKey: false,

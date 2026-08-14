@@ -7,11 +7,21 @@
 //   1. the sonner-backed notification sink (the package has no toast dependency);
 //   2. app-injected extra tabs (Run / Debug) passed as leading/trailing tabs.
 import { SandboxWorkspace, type WorkspaceNotification, type WorkspaceTab } from "@opengeni/react";
-import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import {
   readSessionDockCollapsed,
+  readSessionDockNavigation,
   sessionDockLayoutStorageId,
+  updateSessionDockNavigation,
   writeSessionDockCollapsed,
 } from "@/lib/session-dock-preferences";
 import type { SessionEvent } from "@/types";
@@ -48,6 +58,29 @@ export function SessionWorkspace(props: {
   mobileLeadingControl?: ReactNode;
 }) {
   const layoutStorageId = sessionDockLayoutStorageId(props.preferenceOwnerId, props.sessionId);
+  const navigation = useMemo(() => readSessionDockNavigation(layoutStorageId), [layoutStorageId]);
+  const initialTab = navigation.activeTab ?? props.initialTab;
+  const rememberNavigation = useCallback(
+    (patch: Parameters<typeof updateSessionDockNavigation>[1]) =>
+      updateSessionDockNavigation(layoutStorageId, patch),
+    [layoutStorageId],
+  );
+  const rememberActiveTab = useCallback(
+    (activeTab: string) => rememberNavigation({ activeTab }),
+    [rememberNavigation],
+  );
+  const rememberFilePath = useCallback(
+    (filePath: string | null) => rememberNavigation({ filePath }),
+    [rememberNavigation],
+  );
+  const rememberBrowserSession = useCallback(
+    (browserSessionId: string | null) => rememberNavigation({ browserSessionId }),
+    [rememberNavigation],
+  );
+  const rememberDesktopSession = useCallback(
+    (desktopSessionId: string | null) => rememberNavigation({ desktopSessionId }),
+    [rememberNavigation],
+  );
   const [restoredStorageId, setRestoredStorageId] = useState<string | null>(null);
   const collapsedRef = useRef(props.collapsed);
   const onCollapsedChangeRef = useRef(props.onCollapsedChange);
@@ -81,7 +114,14 @@ export function SessionWorkspace(props: {
       primary={props.primary}
       {...(props.leadingTabs ? { leadingTabs: props.leadingTabs } : {})}
       {...(props.trailingTabs ? { trailingTabs: props.trailingTabs } : {})}
-      {...(props.initialTab ? { initialTab: props.initialTab } : {})}
+      {...(initialTab ? { initialTab } : {})}
+      onActiveTabChange={rememberActiveTab}
+      initialFilePath={navigation.filePath}
+      onFilePathChange={rememberFilePath}
+      initialBrowserSessionId={navigation.browserSessionId}
+      onBrowserSessionIdChange={rememberBrowserSession}
+      initialComputerSessionId={navigation.desktopSessionId}
+      onComputerSessionIdChange={rememberDesktopSession}
       collapsed={effectiveCollapsed}
       onCollapsedChange={props.onCollapsedChange}
       {...(props.mobileLeadingControl ? { mobileLeadingControl: props.mobileLeadingControl } : {})}

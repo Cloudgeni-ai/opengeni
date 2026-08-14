@@ -307,6 +307,13 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride & {
   requestedFileRequestId?: string | number | null | undefined;
   /** Route a guarded diff into the host's Files tab. */
   onOpenFile?: ((path: string) => void) | undefined;
+  /** Restore and report navigation inside the built-in workbench surfaces. */
+  initialFilePath?: string | null | undefined;
+  onFilePathChange?: ((path: string | null) => void) | undefined;
+  initialBrowserSessionId?: string | null | undefined;
+  onBrowserSessionIdChange?: ((browserSessionId: string | null) => void) | undefined;
+  initialComputerSessionId?: string | null | undefined;
+  onComputerSessionIdChange?: ((computerSessionId: string | null) => void) | undefined;
   /** Navigate the host dock to one exact linked ComputerSession. */
   onOpenComputerSession?: ((computerSessionId: string) => void) | undefined;
   requestedComputerSessionId?: string | null | undefined;
@@ -360,6 +367,12 @@ export function useSandboxWorkspaceTabs(
     requestedFilePath,
     requestedFileRequestId,
     onOpenFile,
+    initialFilePath,
+    onFilePathChange,
+    initialBrowserSessionId,
+    onBrowserSessionIdChange,
+    initialComputerSessionId,
+    onComputerSessionIdChange,
     onOpenComputerSession,
     requestedComputerSessionId,
     requestedComputerRequestId,
@@ -763,6 +776,8 @@ export function useSandboxWorkspaceTabs(
             // Ordinary capture browsing does not warm a box. The first edit — or an
             // explicit guarded-file open from Changes — is deliberate live-file intent.
             onEditIntent={() => requestWarmIntent("warmFiles")}
+            initialSelectedPath={initialFilePath}
+            onSelectedPathChange={onFilePathChange}
             className="h-full"
           />
         ),
@@ -815,6 +830,8 @@ export function useSandboxWorkspaceTabs(
               // user/agent first visits it.
               enabled={workspaceVisible}
               onNotify={onNotify}
+              initialBrowserSessionId={initialBrowserSessionId}
+              onBrowserSessionIdChange={onBrowserSessionIdChange}
               {...(desktopEnabled ? { createLinkedComputer } : {})}
               {...(onOpenComputerSession ? { onOpenComputer: onOpenComputerSession } : {})}
               {...(browserWebSocketFactory ? { webSocketFactory: browserWebSocketFactory } : {})}
@@ -845,6 +862,8 @@ export function useSandboxWorkspaceTabs(
               // second and later Computer opens local-machine fast.
               enabled={workspaceVisible}
               onNotify={onNotify}
+              initialComputerSessionId={initialComputerSessionId}
+              onComputerSessionIdChange={onComputerSessionIdChange}
               requestedComputerSessionId={requestedComputerSessionId}
               requestedComputerRequestId={requestedComputerRequestId}
               {...(computerWebSocketFactory ? { webSocketFactory: computerWebSocketFactory } : {})}
@@ -870,6 +889,12 @@ export function useSandboxWorkspaceTabs(
     requestedFilePath,
     requestedFileRequestId,
     onOpenFile,
+    initialFilePath,
+    onFilePathChange,
+    initialBrowserSessionId,
+    onBrowserSessionIdChange,
+    initialComputerSessionId,
+    onComputerSessionIdChange,
     onOpenComputerSession,
     requestedComputerSessionId,
     requestedComputerRequestId,
@@ -928,6 +953,13 @@ export type SandboxWorkspaceProps = ClientOverride & {
   /** Override the pre-paint default tab (e.g. a host landing tab id). When
    *  omitted the workbench decides from the durable workspace capture. */
   initialTab?: string | undefined;
+  onActiveTabChange?: ((activeTab: string) => void) | undefined;
+  initialFilePath?: string | null | undefined;
+  onFilePathChange?: ((path: string | null) => void) | undefined;
+  initialBrowserSessionId?: string | null | undefined;
+  onBrowserSessionIdChange?: ((browserSessionId: string | null) => void) | undefined;
+  initialComputerSessionId?: string | null | undefined;
+  onComputerSessionIdChange?: ((computerSessionId: string | null) => void) | undefined;
   /** Host-routed notifications (no toast dependency in the package). */
   onNotify?: ((notification: WorkspaceNotification) => void) | undefined;
   /** Alternate Browser frame transport for non-browser runtimes and deterministic tests. */
@@ -966,6 +998,13 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     leadingTabs,
     trailingTabs,
     initialTab,
+    onActiveTabChange,
+    initialFilePath,
+    onFilePathChange,
+    initialBrowserSessionId,
+    onBrowserSessionIdChange,
+    initialComputerSessionId,
+    onComputerSessionIdChange,
     onNotify,
     browserWebSocketFactory,
     computerWebSocketFactory,
@@ -1004,8 +1043,10 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
       nextFileRequestId.current += 1;
       setRequestedFile({ sessionId, path, requestId: nextFileRequestId.current });
       setStoredSelection({ sessionId, tab: WORKBENCH_TAB_FILES });
+      onActiveTabChange?.(WORKBENCH_TAB_FILES);
+      onFilePathChange?.(path);
     },
-    [sessionId],
+    [onActiveTabChange, onFilePathChange, sessionId],
   );
   const openComputer = useCallback(
     (computerSessionId: string) => {
@@ -1016,8 +1057,10 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
         requestId: nextComputerRequestId.current,
       });
       setStoredSelection({ sessionId, tab: WORKBENCH_TAB_DESKTOP });
+      onActiveTabChange?.(WORKBENCH_TAB_DESKTOP);
+      onComputerSessionIdChange?.(computerSessionId);
     },
-    [sessionId],
+    [onActiveTabChange, onComputerSessionIdChange, sessionId],
   );
 
   const {
@@ -1037,6 +1080,12 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     ...(browserWebSocketFactory ? { browserWebSocketFactory } : {}),
     ...(computerWebSocketFactory ? { computerWebSocketFactory } : {}),
     ...(browserExtensionSetupUrl ? { browserExtensionSetupUrl } : {}),
+    initialFilePath,
+    onFilePathChange,
+    initialBrowserSessionId,
+    onBrowserSessionIdChange,
+    initialComputerSessionId,
+    onComputerSessionIdChange,
     requestedFilePath: requestedFile?.sessionId === sessionId ? requestedFile.path : null,
     requestedFileRequestId: requestedFile?.sessionId === sessionId ? requestedFile.requestId : null,
     onOpenFile: openFile,
@@ -1057,8 +1106,11 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
   const activeTab =
     preferredTab && tabs.some((tab) => tab.id === preferredTab) ? preferredTab : tabs[0]?.id;
   const selectTab = useCallback(
-    (tab: string) => setStoredSelection({ sessionId, tab }),
-    [sessionId],
+    (tab: string) => {
+      setStoredSelection({ sessionId, tab });
+      onActiveTabChange?.(tab);
+    },
+    [onActiveTabChange, sessionId],
   );
   useEffect(() => {
     if (selectedTab !== null || defaultTab === null) return;

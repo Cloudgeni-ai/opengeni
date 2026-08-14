@@ -97,6 +97,9 @@ export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride & {
     | undefined;
   /** Navigate to the exact linked ComputerSession; never a lookalike desktop. */
   onOpenComputer?: ((computerSessionId: string) => void) | undefined;
+  /** Restore and report the BrowserSession selected in this task's dock. */
+  initialBrowserSessionId?: string | null | undefined;
+  onBrowserSessionIdChange?: ((browserSessionId: string | null) => void) | undefined;
   /** Host-owned install/setup surface for attaching an existing Chrome profile.
    * The machine bridge remains discoverable even when this URL is omitted. */
   browserExtensionSetupUrl?: string | undefined;
@@ -141,6 +144,8 @@ export function BrowserViewer({
   renderEmpty,
   createLinkedComputer,
   onOpenComputer,
+  initialBrowserSessionId,
+  onBrowserSessionIdChange,
   browserExtensionSetupUrl,
   ...override
 }: BrowserViewerProps) {
@@ -165,7 +170,16 @@ export function BrowserViewer({
     () => registry.relevantSessions.filter((session) => isLiveBrowser(session)),
     [registry.relevantSessions],
   );
-  const [selection, setSelection] = useState<BrowserSelection>(null);
+  const [selection, setSelection] = useState<BrowserSelection>(() =>
+    initialBrowserSessionId ? { sessionId: initialBrowserSessionId, pinned: true } : null,
+  );
+  const selectBrowserSession = useCallback(
+    (next: BrowserSelection) => {
+      setSelection(next);
+      onBrowserSessionIdChange?.(next?.sessionId ?? null);
+    },
+    [onBrowserSessionIdChange],
+  );
   const interventions = useInteractionInterventions({
     ...override,
     enabled,
@@ -200,11 +214,14 @@ export function BrowserViewer({
   useEffect(() => {
     if (previousSessionIdRef.current !== sessionId) {
       previousSessionIdRef.current = sessionId;
-      setSelection(null);
+      setSelection(
+        initialBrowserSessionId ? { sessionId: initialBrowserSessionId, pinned: true } : null,
+      );
     }
-  }, [sessionId]);
+  }, [initialBrowserSessionId, sessionId]);
 
   useEffect(() => {
+    if (!enabled || registry.loading) return;
     const selectedStillLive = liveSessions.some((session) => session.id === selection?.sessionId);
     // A manually selected workspace browser stays selected, but an unrelated
     // browser must never become the implicit browser for this agent. That made
@@ -212,15 +229,15 @@ export function BrowserViewer({
     if (selection?.pinned && selectedStillLive) return;
     const preferred = relevant[0] ?? null;
     if (!preferred) {
-      if (selection) setSelection(null);
+      if (selection) selectBrowserSession(null);
       return;
     }
     if (!selectedStillLive || !selection?.pinned) {
       if (selection?.sessionId !== preferred.id || selection.pinned) {
-        setSelection({ sessionId: preferred.id, pinned: false });
+        selectBrowserSession({ sessionId: preferred.id, pinned: false });
       }
     }
-  }, [liveSessions, relevant, selection]);
+  }, [enabled, liveSessions, registry.loading, relevant, selectBrowserSession, selection]);
 
   const selectedRegistrySession = useMemo(
     () => liveSessions.find((session) => session.id === selection?.sessionId) ?? null,
@@ -551,7 +568,7 @@ export function BrowserViewer({
               }
             : {}),
         });
-        setSelection({ sessionId: response.session.id, pinned: true });
+        selectBrowserSession({ sessionId: response.session.id, pinned: true });
         if (computerViewUnavailable) {
           onNotify?.({
             kind: "info",
@@ -568,6 +585,7 @@ export function BrowserViewer({
       creating,
       notifyError,
       onNotify,
+      selectBrowserSession,
       profiles.identities,
       sessionId,
     ],
@@ -733,10 +751,12 @@ export function BrowserViewer({
         savingProfile={savingProfile}
         refreshing={registry.refreshing || attached.refreshing}
         interventionCounts={interventionCounts}
-        onSelect={(browserSessionId) => setSelection({ sessionId: browserSessionId, pinned: true })}
+        onSelect={(browserSessionId) =>
+          selectBrowserSession({ sessionId: browserSessionId, pinned: true })
+        }
         onFollow={() => {
           const preferred = relevant[0];
-          if (preferred) setSelection({ sessionId: preferred.id, pinned: false });
+          if (preferred) selectBrowserSession({ sessionId: preferred.id, pinned: false });
         }}
         onCreate={createBrowser}
         onSaveProfile={saveProfileVersion}

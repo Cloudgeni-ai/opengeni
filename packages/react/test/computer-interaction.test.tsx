@@ -593,6 +593,43 @@ describe("ComputerSession frame stream", () => {
 });
 
 describe("ComputerViewer", () => {
+  test("restores the task's last selected Desktop session", async () => {
+    const current = computerSession();
+    const peer = computerSession(PEER_COMPUTER_SESSION_ID, PEER_SESSION_ID, "Peer Mac");
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [current, peer] }),
+      getComputerSession: async (_workspaceId, computerSessionId) =>
+        computerSessionId === peer.id ? peer : current,
+      listComputerTargets: async (_workspaceId, computerSessionId) => ({
+        computerSessionId,
+        controllerGeneration: "controller-1",
+        targets: [],
+      }),
+    });
+    const changes: Array<string | null> = [];
+    const viewer = (enabled: boolean) => (
+      <ComputerViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        enabled={enabled}
+        initialComputerSessionId={peer.id}
+        onComputerSessionIdChange={(computerSessionId) => changes.push(computerSessionId)}
+      />
+    );
+    const rendered = await renderComponent(viewer(true));
+    await flush(40);
+
+    expect(rendered.container.querySelector("summary")?.textContent).toContain("Peer Mac");
+    await rendered.rerender(viewer(false));
+    await flush(10);
+    await rendered.rerender(viewer(true));
+    await flush(40);
+    expect(rendered.container.querySelector("summary")?.textContent).toContain("Peer Mac");
+    expect(changes).toEqual([]);
+    await rendered.unmount();
+  });
+
   test("reuses the task desktop when a hidden surface is enabled", async () => {
     let createCalls = 0;
     const current = computerSession();
