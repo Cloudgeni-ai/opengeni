@@ -1,5 +1,13 @@
 # @opengeni/capabilities
 
+## 0.2.1
+
+### Patch Changes
+
+- a551666: Fix local Gmail provider OAuth callbacks, Google scope equivalence, stable
+  Discovery compilation, and installed API integration visibility in session
+  tool selection.
+
 ## 0.2.0
 
 ### Minor Changes
