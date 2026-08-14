@@ -1098,13 +1098,13 @@ mod tests {
             "{ path=/tmp/opengeni-agent ; argv[]=/tmp/opengeni-agent run ; ignore_errors=no ; }\n",
             binary,
         ));
-        let spaced = Path::new("/home/Open Geni/opengeni-agent");
+        let spaced = Path::new("/opt/Open Geni/opengeni-agent");
         assert!(systemd_exec_start_matches(
-            "{ path=/home/Open\\x20Geni/opengeni-agent ; argv[]=/home/Open\\x20Geni/opengeni-agent\\srun ; ignore_errors=no ; }\n",
+            "{ path=/opt/Open\\x20Geni/opengeni-agent ; argv[]=/opt/Open\\x20Geni/opengeni-agent\\srun ; ignore_errors=no ; }\n",
             spaced,
         ));
         assert!(!systemd_exec_start_matches(
-            "{ path=/home/Open\\x2Geni/opengeni-agent ; argv[]=/home/Open\\x20Geni/opengeni-agent\\srun ; ignore_errors=no ; }\n",
+            "{ path=/opt/Open\\x2Geni/opengeni-agent ; argv[]=/opt/Open\\x20Geni/opengeni-agent\\srun ; ignore_errors=no ; }\n",
             spaced,
         ));
         assert!(!systemd_exec_start_matches(
@@ -1139,12 +1139,12 @@ mod tests {
     #[test]
     fn systemd_fragment_path_comparison_decodes_manager_escaping_only() {
         assert!(systemd_show_path_matches(
-            "/home/Open\\x20Geni/opengeni-agent.service\n",
-            Path::new("/home/Open Geni/opengeni-agent.service")
+            "/opt/Open\\x20Geni/opengeni-agent.service\n",
+            Path::new("/opt/Open Geni/opengeni-agent.service")
         ));
         assert!(!systemd_show_path_matches(
-            "/home/Open\\qGeni/opengeni-agent.service\n",
-            Path::new("/home/Open Geni/opengeni-agent.service")
+            "/opt/Open\\qGeni/opengeni-agent.service\n",
+            Path::new("/opt/Open Geni/opengeni-agent.service")
         ));
     }
 
