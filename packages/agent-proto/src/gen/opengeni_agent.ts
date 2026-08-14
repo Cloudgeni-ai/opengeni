@@ -1026,8 +1026,9 @@ export interface Capabilities {
    */
   operationResourcePolicy: boolean;
   /**
-   * The runner enforces cpu_max_millicores in OperationResourcePolicy. Split from
-   * the memory capability so a rolling connection cannot silently ignore CPU.
+   * The runner additionally understands and enforces cpu_max_millicores. This is
+   * separate from the memory-policy bit so a newer control plane never sends a
+   * CPU quota that an older memory-only runner would ignore as an unknown field.
    */
   operationCpuQuota: boolean;
 }
@@ -1188,7 +1189,15 @@ export interface EnrollmentCredentials {
  */
 export interface OperationResourcePolicy {
   memoryMaxBytes?: string | undefined;
-  memoryHighBytes?: string | undefined;
+  memoryHighBytes?:
+    | string
+    | undefined;
+  /**
+   * Exact thousandths of one CPU (1000 = one CPU). Absence is unlimited.
+   * The runner preserves the kernel cpu.max period when it can represent this
+   * ratio exactly, otherwise minimally lengthens it to satisfy cgroup v2's 1 ms
+   * minimum quota/period and 1 s maximum period without rounding the ratio.
+   */
   cpuMaxMillicores?: number | undefined;
 }
 
