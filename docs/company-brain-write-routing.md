@@ -3,14 +3,15 @@
 OpenGeni does not use one generic `memory_save` destination for every reusable
 observation. Destination selects authority, visibility, lifetime, and review
 semantics; content labels do not. This document records the target routing
-model and the first implemented slice: root-task-tree coordination notes.
+model and the implemented workspace-local slices: root-task-tree coordination
+notes plus governed Knowledge and Ways-of-working proposals.
 
 ## Destination matrix
 
 | Destination | Purpose | Authority | Model access | Current status |
 | --- | --- | --- | --- | --- |
-| Knowledge | Sourced company facts and evidence | Documents/scoped-knowledge authority | Permission-first `knowledge_search`/`get`/`browse`; never prompt-injected | Existing workspace-local read surface; governed write routing remains later work |
-| Ways of working | Human-authoritative policy and preferences | Existing instruction-policy and preference-registry heads | Bounded descriptors by default; full bodies on demand | Existing authorities; no new writer in this slice |
+| Knowledge | Sourced company facts and evidence | Documents/scoped-knowledge authority | Permission-first `knowledge_search`/`get`/`browse`; never prompt-injected | Workspace-local claim proposal/correction routing implemented as append-only review/relation evidence |
+| Ways of working | Human-authoritative policy and preferences | Existing instruction-policy and preference-registry heads | Bounded descriptors by default; full bodies on demand | Workspace-local Knowledge-backed inactive proposal adapters implemented; activation remains human-only |
 | Task notes | Short-lived technical coordination inside one root session tree | Exact accepted turn/attempt plus root-session visibility | Explicit `task_notes_list`; never prompt-injected | Implemented by migration 0239 |
 | Durable agent learning | Reusable technical knowledge beyond one task tree | Existing Memory/governed-learning authorities | Existing retrieval rules | Routing/promotion remains later work |
 
@@ -19,6 +20,58 @@ promotion, but it must not convert an agent observation into active company
 policy or a preference. Personal and organization cross-workspace routing stay
 inactive until their tenancy authorities are activated; workspace-local task
 notes do not widen those scopes.
+
+## Governed workspace proposals
+
+`writeCompanyBrainGovernedProposal` accepts one explicit destination operation:
+
+- propose one existing workspace Knowledge claim with exact supporting evidence;
+- propose a correction by linking one replacement claim to a different replaced
+  claim with `supersedes`, then appending a proposed review;
+- materialize an exact Knowledge change proposal as an inactive instruction
+  charter/policy draft against an exact active-head baseline; or
+- materialize an exact Knowledge change proposal as an inactive workspace
+  preference with `knowledge_proposal` provenance and `untrusted_proposal` trust.
+
+The request carries an operation UUID plus the exact account, workspace,
+session, turn, attempt, and execution generation. One transaction locks and
+revalidates that active attempt, its immutable initiating human, and the absence
+of a live interruption. It then requires a workspace-scoped claim and exact
+supporting evidence. Organization, personal, generic Memory, and caller-selected
+active authority are not valid inputs.
+
+Every route first appends one `proposed` Knowledge review using a deterministic
+sub-operation UUID. Its immutable input hash binds the complete request and
+exact attempt through a content-free service actor identity. This common guard
+makes the top-level operation UUID idempotent across all four destinations: an
+exact retry reconstructs the same receipt, while changed destination, content,
+attempt, generation, evidence, or reason conflicts. Corrections add an immutable
+relation; Ways-of-working routes add an immutable Knowledge change proposal and
+the destination's normal inactive proposal/revision records.
+
+The preference adapter additionally records an immutable workspace-local
+destination receipt keyed by the top operation UUID and full input hash. Replay
+returns the original preference/revision IDs even if a human later activates,
+rejects, deactivates, supersedes, or changes the scope of the preference. This
+is a write-destination receipt only; it does not select context, freeze a
+logical-turn snapshot, or overlap OPE-223 selection/context receipt ownership.
+
+Migration `0247_company_brain_governed_write_proposals.sql` broadens the
+historically named onboarding-proposal validator without changing its table. A
+Knowledge-backed instruction draft is admitted only when its provenance source
+ID, workspace scope, target, and content hash match the exact immutable
+`knowledge_change_proposals` row. Existing onboarding validation is unchanged.
+The same migration adds the immutable FORCE-RLS preference destination receipt
+and an exact-attempt security-definer proposal writer.
+
+Receipts expose only operation/input hashes and audit/resource IDs. They report
+`human_review_required`; because the write is proposal-only, immediate rollback
+is `not_applicable_proposal_only` and no authority rollback token exists.
+Rejection/revocation and the existing human-governed destination lifecycle are
+the only later rollback/review mechanisms. No selector snapshot,
+logical-turn context receipt, Task-note write, MCP/API/UI registration,
+workspace-learning-policy integration, or automatic policy/preference
+activation is part of this slice.
 
 ## Root-task-tree notes
 
@@ -81,13 +134,16 @@ learning authority.
 
 Still required for the complete write-router architecture:
 
-- governed Knowledge proposals/writes with source provenance;
-- policy/preference proposal adapters that retain human activation authority;
 - durable agent-learning routing and promotion;
-- destination-choice receipts and learning-policy integration;
+- destination-choice integration with the workspace learning policy;
+- an explicitly reviewed API/tool surface for the governed proposal contract;
 - bounded expiry cleanup and user-facing Advanced/search/export surfaces.
 
 Canonical implementation: `packages/contracts/src/task-notes.ts`,
 `packages/db/src/task-notes-schema.ts`, `packages/db/src/task-notes.ts`,
 `packages/db/drizzle/0239_task_tree_notes.sql`, and
-`apps/api/src/mcp/server.ts`.
+`apps/api/src/mcp/server.ts` for task notes; and
+`packages/contracts/src/company-brain-governed-writes.ts`,
+`packages/db/src/company-brain-governed-writes.ts`,
+`packages/core/src/domain/company-brain-governed-writes.ts`, plus migration
+`0247_company_brain_governed_write_proposals.sql` for governed proposals.

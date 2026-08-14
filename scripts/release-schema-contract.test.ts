@@ -209,6 +209,14 @@ describe("release schema contract", () => {
       sha256: "1717d5cdaa298501f20463eef43822a2b1421984f30cab7cb381c2773c505388",
       deploymentMode: "rolling",
     });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0247_company_brain_governed_write_proposals.sql",
+      ),
+    ).toMatchObject({
+      sha256: "aac3a70aa6bc745c052b0a00542d8ffa5100cca99417ffc189c677282f879829",
+      deploymentMode: "rolling",
+    });
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
@@ -242,6 +250,11 @@ describe("release schema contract", () => {
           : "720613ad79a8956f6cc5372c5441dcfbbec1b4c9dd7a9c7e3d08dae4f736ffab";
       }
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
+      if (migrations.has("0247_company_brain_governed_write_proposals.sql")) {
+        return includesActivation
+          ? "c5991bfdc24708c58501ea39a97b1bc21677c1fde104aa863ec72312c546e62b"
+          : "fcd0f7448553732211008d9a58387e149f1ffc4acda2f8f6e862729c20c11c98";
+      }
       if (migrations.has("0246_integration_personal_instance_authority.sql")) {
         return includesActivation
           ? "b70c095097581527ba8f694f17b1ef8b4607d57dd5535e1c57193fda28970b8f"
@@ -618,10 +631,12 @@ describe("release schema contract", () => {
         (migrations.has("0243_google_drive_object_acl_authority.sql") ? 1 : 0) +
         (migrations.has("0244_slack_app_home_refresh_queue.sql") ? 1 : 0) +
         (migrations.has("0245_model_context_contribution_facts.sql") ? 1 : 0) +
-        (migrations.has("0246_integration_personal_instance_authority.sql") ? 1 : 0),
+        (migrations.has("0246_integration_personal_instance_authority.sql") ? 1 : 0) +
+        (migrations.has("0247_company_brain_governed_write_proposals.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(sessionVisibilityContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
+      "0247_company_brain_governed_write_proposals.sql",
       "0246_integration_personal_instance_authority.sql",
       "0245_model_context_contribution_facts.sql",
       "0244_slack_app_home_refresh_queue.sql",
@@ -850,6 +865,12 @@ describe("release schema contract", () => {
     if (migrations.has("0245_model_context_contribution_facts.sql")) {
       expect(migrations.get("0245_model_context_contribution_facts.sql")).toMatchObject({
         sha256: "437bb07ffe12f9c714bd2a40d0ecd8ed9df1fd9003f4d057fe11101999841f40",
+        deploymentMode: "rolling",
+      });
+    }
+    if (migrations.has("0247_company_brain_governed_write_proposals.sql")) {
+      expect(migrations.get("0247_company_brain_governed_write_proposals.sql")).toMatchObject({
+        sha256: "aac3a70aa6bc745c052b0a00542d8ffa5100cca99417ffc189c677282f879829",
         deploymentMode: "rolling",
       });
     }

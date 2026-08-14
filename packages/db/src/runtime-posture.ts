@@ -66,6 +66,23 @@ const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
 ] as const;
 const MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE =
   "ensure_managed_human_personal_workspace(uuid, text, uuid)";
+const PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE =
+  "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)";
+const PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES = [
+  "company_brain_preference_proposal_receipts",
+  "knowledge_change_proposals",
+  "knowledge_claim_evidence",
+  "knowledge_claim_reviews",
+  "knowledge_claims",
+  "preference_registry_events",
+  "preference_registry_preferences",
+  "preference_registry_revisions",
+  "session_attempt_interruptions",
+  "session_turn_attempts",
+  "session_turns",
+  "sessions",
+  "workspaces",
+] as const;
 const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
   "organization_memberships",
   "organization_user_retention_policies",
@@ -137,6 +154,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
   PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
+  PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE,
   ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
@@ -200,6 +218,7 @@ export const FORCE_RLS_TABLES = [
   "codex_reset_redemption_attempts",
   "codex_rotation_settings",
   "codex_subscription_credentials",
+  "company_brain_preference_proposal_receipts",
   "company_profile_activation_events",
   "company_profile_heads",
   "company_profile_revisions",
@@ -686,6 +705,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "canonical_human_identity_operations",
   "canonical_human_identity_subjects",
   "canonical_human_login_bindings",
+  "company_brain_preference_proposal_receipts",
   "editable_artifact_live_tickets",
   "editable_artifact_scope_authorization_heads",
   "host_export_config",
@@ -1410,6 +1430,32 @@ export function evaluateRuntimeDatabasePosture(
         violations.push(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0].owner}`,
         );
+      }
+    } else if (routine.name === PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE) {
+      if (!tableByName.has("company_brain_preference_proposal_receipts")) {
+        continue;
+      }
+      const missingAuthorityTables = PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
       }
     } else if ((CANONICAL_HUMAN_IDENTITY_ROUTINES as readonly string[]).includes(routine.name)) {
       const authorityTables = CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES.filter((tableName) =>

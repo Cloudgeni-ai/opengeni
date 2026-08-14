@@ -111,10 +111,12 @@ The normalized side records:
 - immutable policy/preference **proposals**.
 
 Facts are identity, not authority. Claims are not directly model-visible. A
-change proposal cannot activate a workspace instruction-policy head, create a
-preference registry head, or write an active `knowledge_memories` row. A later
-authorized human flow may materialize a proposal through the existing policy or
-preference lifecycle, retaining the proposal UUID as provenance.
+change proposal cannot activate a workspace instruction-policy head, create an
+active preference registry head, or write an active `knowledge_memories` row.
+The governed workspace write adapter may materialize it as an **inactive**
+instruction-policy or preference proposal, retaining the proposal UUID as
+provenance. A later separately authorized human flow must review and activate
+the exact immutable destination revision through its existing lifecycle.
 
 Documents, claims, and proposals remain RAG/governance evidence. None is
 automatically composed into a system prompt.
