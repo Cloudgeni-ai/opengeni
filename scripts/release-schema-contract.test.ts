@@ -201,6 +201,15 @@ describe("release schema contract", () => {
       sha256: "437bb07ffe12f9c714bd2a40d0ecd8ed9df1fd9003f4d057fe11101999841f40",
       deploymentMode: "rolling",
     });
+    const personalInstanceAuthority = completeSourceContract.migrations.find(
+      (migration) => migration.path === "0246_integration_personal_instance_authority.sql",
+    );
+    if (personalInstanceAuthority) {
+      expect(personalInstanceAuthority).toMatchObject({
+        sha256: "1717d5cdaa298501f20463eef43822a2b1421984f30cab7cb381c2773c505388",
+        deploymentMode: "rolling",
+      });
+    }
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
@@ -255,6 +264,19 @@ describe("release schema contract", () => {
       return includesActivation
         ? "0a3c326f21e67422bdc84e9409d72b489aac967e18b08fbc7a410aab51cb17af"
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
+    };
+    const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
+      if (migrations.has("0247_terraform_stacks_provenance_repair.sql")) {
+        if (migrations.has("0246_integration_personal_instance_authority.sql")) {
+          return includesActivation
+            ? "4010330f29f41088c8691ae6a210a76407023af21e6e301628ab489c150e51bb"
+            : "365b8417d0c1e119824cd05a1e86abbe8f1ee8538482675186c2a9cbc97baabf";
+        }
+        return includesActivation
+          ? "4d502decbade1f1d07267ada056b156a72167fe2415f3197cecbafa94f5a9acb"
+          : "0da6690847a2949756bfbbe501f13d7901df18a080d91668cc629e3c759c1b0b";
+      }
+      return sessionVisibilityContractHash(includesActivation);
     };
     const currentMainContractHash = migrations.has("0235_canonical_human_login_bindings.sql")
       ? migrations.has("0234_xai_subscription_authority.sql")
@@ -321,7 +343,7 @@ describe("release schema contract", () => {
                                         : "e3048091a81b7e122b3c6d17cf52e5ffccff4c082780f6d2d330031742aef792";
     const activationMigration = migrations.get("0225_session_visibility_fork_activation.sql");
     if (activationMigration) {
-      expect(sourceContract.sha256).toBe(sessionVisibilityContractHash(true));
+      expect(sourceContract.sha256).toBe(releaseSchemaContractHash(true));
       expect(activationMigration).toMatchObject({
         sha256: "43945bc115ddf5e7b4b6e73a757c6bb63dde6929e1b3a89714c9cf330de87a12",
         deploymentMode: "rolling",
@@ -335,19 +357,17 @@ describe("release schema contract", () => {
         ...forwardMigrationPaths,
         "0225_session_visibility_fork_activation.sql",
       ]);
-      expect(contractWithoutActivation.sha256).toBe(sessionVisibilityContractHash(false));
+      expect(contractWithoutActivation.sha256).toBe(releaseSchemaContractHash(false));
       migrations.delete("0225_session_visibility_fork_activation.sql");
       sourceContract.migrations = contractWithoutActivation.migrations;
       sourceContract.fileCount = contractWithoutActivation.fileCount;
       sourceContract.latestMigration = contractWithoutActivation.latestMigration;
       sourceContract.sha256 = contractWithoutActivation.sha256;
     }
-    expect(sourceContract.sha256).toBe(
-      sessionVisibilityContractHash(false) ?? currentMainContractHash,
-    );
+    expect(sourceContract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const contract = {
       ...sourceContract,
-      sha256: sessionVisibilityContractHash(false) ?? currentMainContractHash,
+      sha256: releaseSchemaContractHash(false) ?? currentMainContractHash,
     };
     expect(migrations.get("0065_codex_subscription_overview.sql")).toMatchObject({
       deploymentMode: "maintenance",
@@ -405,6 +425,7 @@ describe("release schema contract", () => {
     );
     expect(contract.fileCount).toBe(
       108 +
+        (migrations.has("0247_terraform_stacks_provenance_repair.sql") ? 1 : 0) +
         (migrations.has("0065_enrollment_credential_generation.sql") ? 1 : 0) +
         (migrations.has(currentMainToolPolicyMigration) ? 1 : 0) +
         (migrations.has("0117_sandbox_recovery_generations.sql") ? 1 : 0) +
@@ -545,10 +566,12 @@ describe("release schema contract", () => {
         (migrations.has("0241_enrollment_agent_runtime.sql") ? 1 : 0) +
         (migrations.has("0243_google_drive_object_acl_authority.sql") ? 1 : 0) +
         (migrations.has("0244_slack_app_home_refresh_queue.sql") ? 1 : 0) +
-        (migrations.has("0245_model_context_contribution_facts.sql") ? 1 : 0),
+        (migrations.has("0245_model_context_contribution_facts.sql") ? 1 : 0) +
+        (migrations.has("0246_integration_personal_instance_authority.sql") ? 1 : 0),
     );
-    expect(contract.sha256).toBe(sessionVisibilityContractHash(false) ?? currentMainContractHash);
+    expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
+      "0246_integration_personal_instance_authority.sql",
       "0245_model_context_contribution_facts.sql",
       "0244_slack_app_home_refresh_queue.sql",
       "0243_google_drive_object_acl_authority.sql",
@@ -573,7 +596,11 @@ describe("release schema contract", () => {
       "0218_organization_tenancy_foundation.sql",
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
-    expect(contract.latestMigration).toBe(latestCompatibleMigration);
+    expect(contract.latestMigration).toBe(
+      migrations.has("0247_terraform_stacks_provenance_repair.sql")
+        ? "0247_terraform_stacks_provenance_repair.sql"
+        : latestCompatibleMigration,
+    );
     expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
       sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",
       deploymentMode: "maintenance",
@@ -730,6 +757,12 @@ describe("release schema contract", () => {
       sha256: "26ed3d2ffcaf572623ad263aaa0103625b4ed1e9d28bcb7b5d35eb972d9762d1",
       deploymentMode: "maintenance",
     });
+    if (migrations.has("0247_terraform_stacks_provenance_repair.sql")) {
+      expect(migrations.get("0247_terraform_stacks_provenance_repair.sql")).toMatchObject({
+        sha256: "8c3e3d9071c175ea253183f080c1be831eab4423eacf5a4ec80594f67cf7b44f",
+        deploymentMode: "maintenance",
+      });
+    }
     if (migrations.has("0223_pending_tool_event_output.sql")) {
       expect(migrations.get("0223_pending_tool_event_output.sql")).toMatchObject({
         sha256: "851cdb5dfe14f1cf6323e6cf59e55269b87d2db4406ea2ad10147553635eb707",
