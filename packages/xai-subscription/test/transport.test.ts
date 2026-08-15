@@ -3,7 +3,8 @@ import { describe, expect, test } from "bun:test";
 import {
   normalizeXaiResponseEventJson,
   normalizeXaiSubscriptionRequestBody,
-  XaiSubscriptionHostedToolContinuationError,
+  type XaiModelRequestEvent,
+  XaiSubscriptionStreamIdleTimeoutError,
   xaiSubscriptionFetch,
   xaiSubscriptionRequestStorage,
 } from "../src";
@@ -156,7 +157,7 @@ describe("SuperGrok subscription fetch", () => {
     expect(calls).toBe(1);
   });
 
-  test("fails a hosted-search stream that stops making progress without replaying it", async () => {
+  test("fails any response stream that stops producing valid events without replaying it", async () => {
     let calls = 0;
     const wrapped = xaiSubscriptionFetch(async () => {
       calls += 1;
@@ -184,7 +185,7 @@ describe("SuperGrok subscription fetch", () => {
         getToken: async () => ({ accessToken: "access", userId: "user-1" }),
         refresh: async () => ({ accessToken: "fresh", userId: "user-1" }),
         resolveModel: (slug) => slug,
-        hostedToolContinuationTimeoutMs: 10,
+        streamIdleTimeoutMs: 10,
       },
       async () =>
         await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
@@ -196,7 +197,7 @@ describe("SuperGrok subscription fetch", () => {
     expect(new TextDecoder().decode((await reader.read()).value)).toContain(
       "response.output_item.done",
     );
-    await expect(reader.read()).rejects.toBeInstanceOf(XaiSubscriptionHostedToolContinuationError);
+    await expect(reader.read()).rejects.toBeInstanceOf(XaiSubscriptionStreamIdleTimeoutError);
     expect(calls).toBe(1);
   });
 
@@ -239,7 +240,7 @@ describe("SuperGrok subscription fetch", () => {
         getToken: async () => ({ accessToken: "access", userId: "user-1" }),
         refresh: async () => ({ accessToken: "fresh", userId: "user-1" }),
         resolveModel: (slug) => slug,
-        hostedToolContinuationTimeoutMs: 50,
+        streamIdleTimeoutMs: 50,
       },
       async () =>
         await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
@@ -249,6 +250,62 @@ describe("SuperGrok subscription fetch", () => {
     );
     const text = await response.text();
     expect(text).toContain("response.output_text.delta");
+    expect(text).toContain("response.completed");
+  });
+
+  test("keeps reading when the first SSE event spans multiple upstream chunks", async () => {
+    const encoder = new TextEncoder();
+    const payload = encoder.encode(
+      `data: ${JSON.stringify({
+        type: "response.created",
+        response: {
+          id: "response-fragmented",
+          status: "in_progress",
+          instructions: "x".repeat(15_000),
+        },
+      })}\n\n` +
+        `data: ${JSON.stringify({
+          type: "response.completed",
+          response: { id: "response-fragmented", output: [], usage: {} },
+        })}\n\n`,
+    );
+    const boundaries = [6_839, 8_186, 12_287, payload.byteLength];
+    const chunks = boundaries.map((end, index) => payload.slice(boundaries[index - 1] ?? 0, end));
+    let index = 0;
+    const wrapped = xaiSubscriptionFetch(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              const chunk = chunks[index++];
+              if (chunk) {
+                controller.enqueue(chunk);
+                return;
+              }
+              controller.close();
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const response = await xaiSubscriptionRequestStorage.run(
+      {
+        clientVersion: "1.0.1",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        getToken: async () => ({ accessToken: "access", userId: "user-1" }),
+        refresh: async () => ({ accessToken: "fresh", userId: "user-1" }),
+        resolveModel: (slug) => slug,
+        streamIdleTimeoutMs: 50,
+      },
+      async () =>
+        await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "supergrok/grok-4.6", input: "hello" }),
+        }),
+    );
+    const text = await response.text();
+    expect(text).toContain("response.created");
     expect(text).toContain("response.completed");
   });
 
@@ -287,5 +344,302 @@ describe("SuperGrok subscription fetch", () => {
         }),
     );
     expect(await response.text()).toContain("response.completed");
+  });
+
+  test("recognizes standard CRLF SSE framing as valid progress and terminal state", async () => {
+    const wrapped = xaiSubscriptionFetch(
+      async () =>
+        new Response(
+          `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}\r\n\r\n` +
+            "data: [DONE]\r\n\r\n",
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const response = await xaiSubscriptionRequestStorage.run(
+      {
+        clientVersion: "1.0.1",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        getToken: async () => ({ accessToken: "access", userId: "user-1" }),
+        refresh: async () => ({ accessToken: "fresh", userId: "user-1" }),
+        resolveModel: (slug) => slug,
+        streamIdleTimeoutMs: 20,
+      },
+      async () =>
+        await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "supergrok/grok-4.6", input: "hello" }),
+        }),
+    );
+    expect(await response.text()).toContain("[DONE]");
+  });
+
+  test("does not let comments, malformed data, or partial bytes reset stream liveness", async () => {
+    const encoder = new TextEncoder();
+    const durable: XaiModelRequestEvent[] = [];
+    const wrapped = xaiSubscriptionFetch(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "a" })}\n\n`,
+                ),
+              );
+              setTimeout(() => controller.enqueue(encoder.encode(": keepalive\n\n")), 4);
+              setTimeout(() => controller.enqueue(encoder.encode("data: not-json\n\n")), 8);
+              setTimeout(() => controller.enqueue(encoder.encode("data: {}\n\n")), 10);
+              setTimeout(
+                () =>
+                  controller.enqueue(encoder.encode('data: {"type":"response.output_text.delta"')),
+                12,
+              );
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const response = await xaiSubscriptionRequestStorage.run(
+      {
+        clientVersion: "1.0.1",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        getToken: async () => ({ accessToken: "access", userId: "user-1" }),
+        refresh: async () => ({ accessToken: "fresh", userId: "user-1" }),
+        resolveModel: (slug) => slug,
+        streamIdleTimeoutMs: 20,
+        nextRequestId: () => "request-idle",
+        onModelRequestEvent: (event) => {
+          durable.push(event);
+        },
+      },
+      async () =>
+        await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "supergrok/grok-4.6", input: "hello" }),
+        }),
+    );
+    const reader = response.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain(
+      "response.output_text.delta",
+    );
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain(": keepalive");
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain("not-json");
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain("data: {}");
+    await expect(reader.read()).rejects.toMatchObject({
+      code: "xai_response_stream_idle_timeout",
+      requestId: "request-idle",
+      responseObserved: true,
+      eventCount: 1,
+      lastEventType: "response.output_text.delta",
+    });
+    expect(durable.map((event) => event.phase)).toEqual([
+      "started",
+      "headers",
+      "first_event",
+      "timed_out",
+    ]);
+    expect(durable.at(-1)).toMatchObject({
+      eventCount: 1,
+      lastEventType: "response.output_text.delta",
+      responseObserved: true,
+    });
+    expect(durable.at(-1)?.silenceDurationMs).toBeGreaterThanOrEqual(15);
+  });
+
+  test("allows a long response when every valid event arrives inside the idle interval", async () => {
+    const encoder = new TextEncoder();
+    const wrapped = xaiSubscriptionFetch(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              for (const [index, delay] of [0, 15, 30, 45].entries()) {
+                setTimeout(
+                  () =>
+                    controller.enqueue(
+                      encoder.encode(
+                        `data: ${JSON.stringify({ type: "response.output_text.delta", delta: String(index) })}\n\n`,
+                      ),
+                    ),
+                  delay,
+                );
+              }
+              setTimeout(
+                () =>
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        type: "response.completed",
+                        response: { output: [], usage: {} },
+                      })}\n\n`,
+                    ),
+                  ),
+                60,
+              );
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const startedAt = performance.now();
+    const response = await xaiSubscriptionRequestStorage.run(
+      {
+        clientVersion: "1.0.1",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        getToken: async () => ({ accessToken: "access", userId: "user-1" }),
+        refresh: async () => ({ accessToken: "fresh", userId: "user-1" }),
+        resolveModel: (slug) => slug,
+        streamIdleTimeoutMs: 35,
+      },
+      async () =>
+        await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "supergrok/grok-4.6", input: "hello" }),
+        }),
+    );
+    expect(await response.text()).toContain("response.completed");
+    expect(performance.now() - startedAt).toBeGreaterThan(50);
+  });
+
+  test("emits retry-aware durable checkpoints and metadata-only diagnostics", async () => {
+    const durable: XaiModelRequestEvent[] = [];
+    const diagnostics: XaiModelRequestEvent[] = [];
+    let calls = 0;
+    const wrapped = xaiSubscriptionFetch(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response("expired", {
+          status: 401,
+          headers: { "x-request-id": "provider-401" },
+        });
+      }
+      return new Response(
+        `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}\n\n` +
+          `data: ${JSON.stringify({
+            type: "response.completed",
+            response: { output: [], usage: {} },
+          })}\n\n`,
+        {
+          headers: {
+            "content-type": "text/event-stream",
+            "x-request-id": "provider-ok",
+          },
+        },
+      );
+    });
+    const response = await xaiSubscriptionRequestStorage.run(
+      {
+        clientVersion: "1.0.1",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        getToken: async () => ({ accessToken: "stale", userId: "user-1" }),
+        refresh: async () => ({ accessToken: "fresh", userId: "user-1" }),
+        resolveModel: (slug) => slug,
+        nextRequestId: () => "request-audit",
+        onModelRequestDiagnostic: (event) => diagnostics.push(event),
+        onModelRequestEvent: (event) => {
+          durable.push(event);
+        },
+      },
+      async () =>
+        await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "supergrok/grok-4.6", input: "secret output" }),
+        }),
+    );
+    await response.text();
+    expect(durable.map(({ transportAttempt, phase }) => `${transportAttempt}:${phase}`)).toEqual([
+      "1:started",
+      "1:headers",
+      "1:failed",
+      "2:started",
+      "2:headers",
+      "2:first_event",
+      "2:completed",
+    ]);
+    expect(durable[2]).toMatchObject({
+      providerRequestId: "provider-401",
+      status: 401,
+      willRetry: true,
+    });
+    expect(durable.at(-1)).toMatchObject({
+      requestId: "request-audit",
+      providerRequestId: "provider-ok",
+      eventCount: 2,
+      lastEventType: "response.completed",
+    });
+    expect(diagnostics.some((event) => event.phase === "progress")).toBe(true);
+    expect(JSON.stringify({ durable, diagnostics })).not.toContain("secret output");
+    expect(JSON.stringify({ durable, diagnostics })).not.toContain("Bearer");
+  });
+
+  test("reports a failed terminal and makes no provider call when the started audit fails", async () => {
+    const diagnostics: XaiModelRequestEvent[] = [];
+    let calls = 0;
+    const wrapped = xaiSubscriptionFetch(async () => {
+      calls += 1;
+      return new Response();
+    });
+
+    await expect(
+      xaiSubscriptionRequestStorage.run(
+        {
+          clientVersion: "1.0.1",
+          sessionId: "session-1",
+          turnId: "turn-1",
+          getToken: async () => ({ accessToken: "access", userId: "user-1" }),
+          refresh: async () => ({ accessToken: "fresh", userId: "user-1" }),
+          resolveModel: (slug) => slug,
+          onModelRequestDiagnostic: (event) => {
+            diagnostics.push(event);
+          },
+          onModelRequestEvent: () => {
+            throw new Error("audit unavailable");
+          },
+        },
+        async () =>
+          await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
+            method: "POST",
+            body: JSON.stringify({ model: "supergrok/grok-4.6", input: "hello" }),
+          }),
+      ),
+    ).rejects.toThrow("audit unavailable");
+    expect(calls).toBe(0);
+    expect(diagnostics.map((event) => event.phase)).toEqual(["started", "failed"]);
+  });
+
+  test("propagates a terminal audit failure instead of leaving the response stream hanging", async () => {
+    const wrapped = xaiSubscriptionFetch(
+      async () =>
+        new Response(
+          `data: ${JSON.stringify({
+            type: "response.completed",
+            response: { output: [], usage: {} },
+          })}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const response = await xaiSubscriptionRequestStorage.run(
+      {
+        clientVersion: "1.0.1",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        getToken: async () => ({ accessToken: "access", userId: "user-1" }),
+        refresh: async () => ({ accessToken: "fresh", userId: "user-1" }),
+        resolveModel: (slug) => slug,
+        onModelRequestEvent: (event) => {
+          if (event.phase === "completed") throw new Error("terminal audit unavailable");
+        },
+      },
+      async () =>
+        await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "supergrok/grok-4.6", input: "hello" }),
+        }),
+    );
+    await expect(response.text()).rejects.toThrow("terminal audit unavailable");
   });
 });

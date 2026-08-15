@@ -172,6 +172,7 @@ import {
   manualScheduledTaskTriggerUsageKey,
   manualScheduledTaskTriggerWorkflowId,
   scheduledTaskForGrant,
+  scheduledTaskAuthorityUpdateForGrant,
   scheduledTaskRunForGrant,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
@@ -1526,6 +1527,7 @@ export function buildOpenGeniMcpServer(
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const task = await updateScheduledTask(deps.db, grant.workspaceId, id, {
           status: "active",
+          ...scheduledTaskAuthorityUpdateForGrant(grant),
         });
         await syncUpdatedScheduledTask({
           db: deps.db,
@@ -2332,7 +2334,7 @@ function registerGoalTools(
     "goal_set",
     {
       description:
-        "Create a goal when this session has none. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an existing goal, use goal_update with its objective revision, a change kind, and rationale.",
+        "Create a goal when this session has none, or replace a completed goal with a new one. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
       inputSchema: {
         text: goalText,
         successCriteria: successCriteriaSchema.optional(),
@@ -2343,9 +2345,9 @@ function registerGoalTools(
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
-      if (existing) {
+      if (existing && existing.status !== "completed") {
         throw new Error(
-          `this session already has a goal at objective revision ${existing.objectiveRevision}; use goal_update to revise it`,
+          `this session's goal is ${existing.status} at objective revision ${existing.objectiveRevision}; use goal_update to revise it`,
         );
       }
       const callerTurnId =
@@ -4470,6 +4472,11 @@ function registerVariableSetTools(
   sessionId: string | null,
   json: JsonResult,
 ): void {
+  const variableSetAccess = {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
+  };
   const registerListTool = (name: string, description: string): void => {
     server.registerTool(
       name,
@@ -4478,7 +4485,7 @@ function registerVariableSetTools(
         inputSchema: {},
       },
       async () => {
-        const variableSets = await listVariableSets(deps.db, grant.workspaceId);
+        const variableSets = await listVariableSets(deps.db, variableSetAccess);
         return json({ variableSets, environments: variableSets });
       },
     );
@@ -4520,14 +4527,14 @@ function registerVariableSetTools(
       let created = false;
       let variableSet =
         targetId !== undefined
-          ? await getVariableSet(deps.db, grant.workspaceId, targetId)
-          : await getVariableSetByName(deps.db, grant.workspaceId, trimmedVariableSetName!);
+          ? await getVariableSet(deps.db, variableSetAccess, targetId)
+          : await getVariableSetByName(deps.db, variableSetAccess, trimmedVariableSetName!);
       if (!variableSet && targetId !== undefined) {
         throw new Error("variable set/environment not found");
       }
       if (!variableSet) {
         if (
-          (await countVariableSets(deps.db, grant.workspaceId)) >= MAX_ENVIRONMENTS_PER_WORKSPACE
+          (await countVariableSets(deps.db, variableSetAccess)) >= MAX_ENVIRONMENTS_PER_WORKSPACE
         ) {
           throw new Error(
             `a workspace supports at most ${MAX_ENVIRONMENTS_PER_WORKSPACE} variable sets`,
@@ -4536,6 +4543,8 @@ function registerVariableSetTools(
         variableSet = await createVariableSet(deps.db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
+          scope: "workspace",
+          subjectId: grant.subjectId,
           name: trimmedVariableSetName!,
         });
         created = true;
@@ -4554,6 +4563,7 @@ function registerVariableSetTools(
       const metadata = await setVariableSetVariable(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
         variableSetId: variableSet.id,
         name: parsedName.data,
         valueEncrypted: encryptVariableSetValue(key, value),
@@ -5011,7 +5021,8 @@ function registerGitHubConnectTool(
 }
 
 // Defense-in-depth for invariant "agents cannot self-attach": the worker's
-// first-party delegated token never carries variable-sets:use, so sandboxed
+// first-party delegated token must carry both exact attachment and use
+// permissions, so a token narrowed to only one cannot attach a variable set.
 // agents calling these MCP tools cannot attach a variable set.
 // Explicit detach (variableSetId: null) is also an attachment change and is
 // blocked the same way.
@@ -5019,7 +5030,11 @@ function requireVariableSetsUseForMcpAttachment(
   grant: AccessGrant,
   variableSetId: string | null | undefined,
 ): void {
-  if (variableSetId !== undefined && !hasPermission(grant.permissions, "variable-sets:use")) {
+  if (variableSetId === undefined) return;
+  if (!hasPermission(grant.permissions, "variable-sets:attach")) {
+    throw new Error("missing permission: variable-sets:attach");
+  }
+  if (variableSetId !== null && !hasPermission(grant.permissions, "variable-sets:use")) {
     throw new Error("missing permission: variable-sets:use");
   }
 }

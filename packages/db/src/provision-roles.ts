@@ -1019,6 +1019,73 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    IF to_regprocedure(format('%I.list_self_user_resource_authorities(uuid)', ${literal(schema)}))
+      IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.list_self_user_resource_authorities(uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_self_user_resource_authorities(uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, boolean) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.revoke_self_user_resource_grant(uuid, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.revoke_self_user_resource_grant(uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+    END IF;
+    IF to_regprocedure(
+      format('%I.create_scoped_variable_set(uuid,uuid,text,text,text,jsonb,boolean)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.create_scoped_variable_set(uuid, uuid, text, text, text, jsonb, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_scoped_variable_sets(uuid, uuid, uuid, text, text) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.count_scoped_variable_sets(uuid, uuid, text) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.mutate_scoped_variable_set(uuid, uuid, uuid, text, text, boolean, text, boolean, text, text, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.read_scoped_variable_set_secret(uuid, uuid, uuid, text, text, text, uuid, uuid, uuid, integer) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.materialize_scoped_variable_set_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.materialize_scoped_variable_set_for_session(uuid, uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.workspace_variable_sets FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.workspace_variable_set_variables FROM %I', ${literal(schema)}, ${literal(role)});
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.freeze_scheduled_task_personal_resources(uuid,uuid,uuid,bigint)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.materialize_scheduled_task_reusable_session_from_run(uuid, uuid, uuid, uuid, uuid, bigint, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.materialize_scheduled_task_reusable_session_from_run(uuid, uuid, uuid, uuid, uuid, bigint, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.scheduled_task_run_personal_resource_authority(uuid, uuid, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.scheduled_task_run_personal_resource_authority(uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
     IF to_regprocedure(
       format(
         '%I.scoped_knowledge_advance_source_acl(uuid,uuid,bigint,bigint,uuid,text,text,text,text,text,text)',
@@ -1084,6 +1151,28 @@ BEGIN
         FROM PUBLIC;
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION opengeni_private.personal_resource_delegation_capability_active(text) TO %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.scheduled_personal_resource_capability_active(text)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION
+        opengeni_private.scheduled_personal_resource_capability_active(text)
+        FROM PUBLIC;
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.scheduled_personal_resource_capability_active(text) TO %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.variable_set_authority_capability_active(text)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION
+        opengeni_private.variable_set_authority_capability_active(text)
+        FROM PUBLIC;
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.variable_set_authority_capability_active(text) TO %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON TABLE opengeni_private.variable_set_authority_capabilities FROM %I',
         ${literal(role)}
       );
     END IF;

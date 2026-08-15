@@ -32,6 +32,7 @@ import {
   getSandboxSessionEnvelope,
   getLiveEnrollmentConnection,
   getSandbox,
+  touchLeaseHolder,
   loadWorkspaceEnvironmentForRun,
   markWarmLeaseInstanceLost,
   readActiveSandbox,
@@ -530,12 +531,12 @@ async function withChannelAOperation<T>(
 
   // The STABLE run-environment used by both a cloud home and a machine home.
   // It also carries the per-session Codemode pointer selected below.
-  const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
-    db,
-    settings,
+  const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, settings, {
+    accountId,
     workspaceId,
-    session.environmentId,
-  );
+    variableSetId: session.environmentId,
+    authority: { kind: "session_attach", sessionId: session.id },
+  });
   const settingsForSession =
     session.sandboxBackend !== settings.sandboxBackend
       ? { ...settings, sandboxBackend: session.sandboxBackend }
@@ -579,7 +580,13 @@ async function withChannelAOperation<T>(
       leaseEpoch: lease?.leaseEpoch ?? session.activeEpoch,
       emit,
     });
-    const result = await fn({ service, lease, homeSession, routingSession, requestId });
+    const result = await fn({
+      service,
+      lease,
+      homeSession,
+      routingSession,
+      requestId,
+    });
     // The direct request has accepted the result in memory. Finalize every
     // Connected Machine backend the routing proxy reached so a mid-request
     // route transition cannot leave completed output retained until TTL.
@@ -644,6 +651,10 @@ async function withChannelAOperation<T>(
         workingDir: pointer.workingDir,
         timeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
         execTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,
+        operationResourcePolicy: enrollment.operationPolicy,
+        operationResourcePolicySupported:
+          enrollment.agentCapabilities.operationResourcePolicy === true,
+        operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
         ...(settings.agentOpStreamEnabled === true &&
         enrollment?.opStream === true &&
         bus.getOpStreamConnection
@@ -775,6 +786,22 @@ async function withChannelAOperation<T>(
     });
     throw mapChannelAError(error, ctx.waitSignal);
   }
+
+  // Keep the exact direct-request owner visible for the full operation. A
+  // yielded command is also tracked by a non-TTL process holder, but the
+  // retained-process reconciler must not poll that provider session while this
+  // request is still its active owner. Stale direct holders remain crash-
+  // recoverable through the ordinary holder TTL reaper.
+  const directHolderHeartbeat = setInterval(() => {
+    void touchLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId,
+      kind: "direct",
+      holderId,
+    }).catch(() => undefined);
+  }, 10_000);
+  directHolderHeartbeat.unref?.();
 
   let established: EstablishedSandboxSession | undefined;
   let leaseSnapshot: LeaseSnapshot = acquired.lease;
@@ -1037,6 +1064,7 @@ async function withChannelAOperation<T>(
     });
     throw mapChannelAError(error, ctx.waitSignal);
   } finally {
+    clearInterval(directHolderHeartbeat);
     await release();
     await dropEstablishedHandle(established);
   }

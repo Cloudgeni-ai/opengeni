@@ -146,8 +146,12 @@ export async function sessionAttachEnvironment(
   const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
     services.db,
     services.settings,
-    workspaceId,
-    session.environmentId,
+    {
+      accountId: session.accountId,
+      workspaceId,
+      variableSetId: session.environmentId,
+      authority: { kind: "session_attach", sessionId: session.id },
+    },
   );
   // Build the env with the SESSION's backend, not the deployment default: the
   // stable base is backend-aware (HOME = the descriptor workspaceRoot, and the
@@ -510,7 +514,12 @@ export async function heartbeatViewer(
  */
 export async function detachViewer(
   services: ViewerServices,
-  input: { accountId: string; workspaceId: string; sandboxGroupId: string; viewerId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    viewerId: string;
+  },
 ): Promise<{ liveness: LeaseSnapshot["liveness"]; refcount: number } | null> {
   return await releaseLeaseHolder(services.db, {
     accountId: input.accountId,
@@ -637,7 +646,11 @@ export function resolveActiveDesktopTransport(
   if (selfhostedActive) {
     return { transport: "relay-frames", client: "frames", mode: "read-only" };
   }
-  return { transport: "vnc-ws", client: "novnc", mode: interactive ? "interactive" : "read-only" };
+  return {
+    transport: "vnc-ws",
+    client: "novnc",
+    mode: interactive ? "interactive" : "read-only",
+  };
 }
 
 /** The minted pixel cell the handshake/attach folds into the DesktopStream
@@ -1020,7 +1033,9 @@ export async function mintTerminalStream(
     // Idempotent ttyd launch (flock-guarded; a no-op when already up). A box that
     // genuinely can't run it degrades to the sse-events firehose, not a throw.
     try {
-      await ensureTerminalServer(established.session, { port: TERMINAL_STREAM_PORT });
+      await ensureTerminalServer(established.session, {
+        port: TERMINAL_STREAM_PORT,
+      });
     } catch (error) {
       if (error instanceof TerminalServerUnsupportedError) {
         return null;

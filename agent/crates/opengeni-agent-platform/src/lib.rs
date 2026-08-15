@@ -54,7 +54,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use opengeni_agent_proto::v1;
 
-pub use cgroup::{establish_oom_isolation, OpCgroupConfig, OpCgroups};
+pub use cgroup::{establish_oom_isolation, OpCgroupConfig, OpCgroupConfigError, OpCgroups};
 pub use desktop::{
     fit_frame_to_budget, resolve_desktop, CapturedFrame, DesktopBackend, FittedFrame, NoDesktop,
 };
@@ -136,6 +136,20 @@ pub trait Platform: Send + Sync {
     /// Defaults to the process's current directory.
     fn workspace_root(&self) -> String;
 
+    /// Whether this running platform can enforce a per-operation resource
+    /// policy. This is a live capability (e.g. delegated cgroup support), not an
+    /// OS-name guess. The default is false for fakes and unsupported platforms.
+    fn operation_resource_policy_supported(&self) -> bool {
+        false
+    }
+
+    /// Whether this exact live platform additionally enforces the CPU quota
+    /// field. Kept separate so memory-capable older runners cannot silently
+    /// ignore an additive protobuf field.
+    fn operation_cpu_quota_supported(&self) -> bool {
+        false
+    }
+
     // --- Channel-A: exec --------------------------------------------------
 
     /// Runs a command and collects its full output. Honors an optional
@@ -165,6 +179,32 @@ pub trait Platform: Send + Sync {
         ))
     }
 
+    /// Policy-aware streaming spawn. The default preserves existing platform
+    /// implementations only for an unrestricted request and fails closed when a
+    /// configured policy would otherwise be ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError::Unsupported`] when a non-empty policy is supplied
+    /// to the default implementation; otherwise forwards [`Platform::spawn_exec`]
+    /// errors.
+    fn spawn_exec_with_policy(
+        &self,
+        req: &v1::ExecRequest,
+        policy: Option<&v1::OperationResourcePolicy>,
+    ) -> PlatformResult<ContainedExec> {
+        if policy.is_some_and(|policy| {
+            policy.memory_max_bytes.is_some()
+                || policy.memory_high_bytes.is_some()
+                || policy.cpu_max_millicores.is_some()
+        }) {
+            return Err(PlatformError::Unsupported(
+                "operation resource policy is not supported by this platform".to_string(),
+            ));
+        }
+        self.spawn_exec(req)
+    }
+
     /// Spawns the git invocation described by a `GitRequest` inside the shared
     /// containment primitive WITHOUT waiting or assembling a reply — the
     /// engine-job path for git. Same argv construction and cwd resolution as
@@ -182,6 +222,31 @@ pub trait Platform: Send + Sync {
         Err(PlatformError::Unsupported(
             "streaming git is not supported by this platform".to_string(),
         ))
+    }
+
+    /// Policy-aware git spawn. As with exec, an explicit policy is never silently
+    /// dropped by a platform implementation that has not opted into enforcement.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError::Unsupported`] when a non-empty policy is supplied
+    /// to the default implementation; otherwise forwards [`Platform::spawn_git`]
+    /// errors.
+    fn spawn_git_with_policy(
+        &self,
+        req: &v1::GitRequest,
+        policy: Option<&v1::OperationResourcePolicy>,
+    ) -> PlatformResult<ContainedExec> {
+        if policy.is_some_and(|policy| {
+            policy.memory_max_bytes.is_some()
+                || policy.memory_high_bytes.is_some()
+                || policy.cpu_max_millicores.is_some()
+        }) {
+            return Err(PlatformError::Unsupported(
+                "operation resource policy is not supported by this platform".to_string(),
+            ));
+        }
+        self.spawn_git(req)
     }
 
     // --- Channel-A: filesystem -------------------------------------------

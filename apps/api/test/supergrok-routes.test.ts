@@ -97,6 +97,12 @@ const xaiFetch: typeof fetch = async (input, init) => {
           contextWindow: 256_000,
           apiBackend: "responses",
         },
+        {
+          id: "grok-4.5",
+          name: "Grok 4.5",
+          contextWindow: 256_000,
+          apiBackend: "responses",
+        },
       ],
     });
   }
@@ -343,7 +349,8 @@ describe("SuperGrok subscription routes", () => {
 
     const status = await request("/supergrok/status");
     expect(status.status).toBe(200);
-    expect(await status.json()).toMatchObject({
+    const statusBody = (await status.json()) as { models: Array<{ id: string }> };
+    expect(statusBody).toMatchObject({
       connected: true,
       valid: true,
       accountCount: 1,
@@ -354,6 +361,7 @@ describe("SuperGrok subscription routes", () => {
       },
       models: [{ id: "supergrok/grok-4.6", provider: "supergrok" }],
     });
+    expect(statusBody.models.map((model) => model.id)).toEqual(["supergrok/grok-4.6"]);
 
     const renamed = await request(`/supergrok/accounts/${connected.accountId}`, {
       method: "PATCH",

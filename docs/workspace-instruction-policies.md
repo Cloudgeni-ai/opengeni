@@ -97,7 +97,7 @@ explicit target, and caller-supplied active-head revision/version baseline. Its
 draft records `knowledge_proposal` provenance with the Knowledge proposal UUID
 as source ID; the proposal source version is the exact content hash.
 
-Migration `0247_company_brain_governed_write_proposals.sql` extends the existing
+Migration `0255_company_brain_governed_write_proposals.sql` extends the existing
 database validator to require that the Knowledge proposal has workspace scope,
 the same workspace, `instruction_policy` target kind, exact normalized target
 key, `proposed` status, and the same content hash as the inactive draft. The

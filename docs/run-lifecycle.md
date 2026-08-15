@@ -498,6 +498,19 @@ Normal publication and crash recovery consume the same retained event value, so
 recovery cannot reconstruct a poorer MCP result from model-facing content or
 drop open protocol extension fields.
 
+For MCP, the runtime reads the complete provider `CallToolResult` through the
+SDK's `callToolResult` seam and carries a private duplicate only until the exact
+audit projection is durable. An HTTP-successful result with `isError: true`
+therefore remains a failed tool outcome in live SDK state, model-facing history,
+the pending receipt, the durable event, recovery, and the timeline. The physical
+invocation boundary also records
+`opengeni_mcp_tool_calls_total{outcome}` and
+`opengeni_mcp_tool_call_duration_seconds{outcome}` with one closed structural
+outcome: `success`, `provider_declared_error`, `auth_needed`,
+`outcome_uncertain`, `timeout`, `cancelled`, `thrown_transport_error`, or
+`thrown_protocol_error`. Server, tool, tenant, request, error, and content values
+are deliberately absent from labels.
+
 First-party `session_create` and `session_send_message` failures return an MCP
 `isError` result with a bounded structured `{ error: { code, message } }`
 projection. The durable tool-output event retains that raw MCP result, and the
@@ -526,6 +539,17 @@ their existing checkout available; runtime then indexes canonical
 sandbox session before the first model call. This performs no second clone,
 copy, or manifest materialization. With no repository resource, that workspace
 discovery capability is absent and cannot force provisioning.
+
+Host-owned rotating sandbox run credentials split resolution from sandbox
+materialization when lazy provisioning is enabled. The worker binds and resolves
+the exact accepted turn, attempt, shared sandbox group, initiator, and effective
+backend once before model preparation so partial `auth_needed` state is available
+as bounded model context and reconnect UI. Only the first actual sandbox
+operation enters the existing single-flight provisioner, writes that exact
+resolved material to the lease before the waiting operation, and starts renewal.
+A model-only turn therefore owns no credential write, renewal, lease, box, or
+exact-generation cleanup work. Signed file resources and generated-video files
+remain eager because their verified sandbox paths must exist before model dispatch.
 
 One model response's parallel tool calls are tracked as an in-memory settlement
 batch while its stream is active; batch identity is not durable schema. A
@@ -780,6 +804,17 @@ and truthful durations; a command-readiness failure is never rewritten as a
 rolls only the exact warming epoch back to cold, and fails the turn rather than
 rapidly creating sibling boxes. Any later display/setup failure follows the same
 owned cleanup path.
+
+Lazy establishment observes one correlation-qualified logical provision at a
+time. Its terminal durable `sandbox.provision` event records a closed structural
+stage/category/code plus internal-attempt count; expected lease supersession or
+capture/rotation wait is explicitly distinct from an actual logical failure.
+Provider create/resume ownership annotates the unchanged source diagnostic with
+its typed boundary stage, and classification otherwise uses typed error properties
+and provider status/code evidence—never arbitrary message matching. Metrics keep
+logical terminal outcomes separate from internal safe retries. A typed transport
+category is diagnostic only and never licenses replay of an outcome-unknown
+provider create or operation.
 
 Lease liveness is not provider or workspace truth. The durable recovery
 projection independently records provider existence, archive availability,
@@ -1307,6 +1342,6 @@ between supported providers; `remote_v2` sessions remain Codex-only.
 
 ## Agent-loop request lifecycle observability
 
-Provider request lifecycle diagnostics are synchronous, bounded, and best-effort. The Codex transport reports `headers`, `first_byte`, and one semantic `terminal` phase with a monotonic elapsed duration; terminal outcomes are `completed`, `failed`, or `timed_out`. The worker maps these to `opengeni_model_request_phases_total{provider,phase,outcome}` and `opengeni_model_request_phase_duration_seconds{provider,phase}`. Provider ids come from the resolved provider registry; request ids, model bodies, credentials, session ids, and token content are not metric labels.
+Provider request lifecycle diagnostics are synchronous, bounded, and best-effort. Codex reports `headers`, `first_byte`, and one semantic `terminal` phase; SuperGrok reports the equivalent `headers`, first valid SSE event, and terminal phases plus valid-event count/gap telemetry. Terminal outcomes are `completed`, `failed`, or `timed_out`. The worker maps these to `opengeni_model_request_phases_total{provider,phase,outcome}` and `opengeni_model_request_phase_duration_seconds{provider,phase}`. SuperGrok additionally exposes `opengeni_model_requests_inflight`, `opengeni_model_request_oldest_no_event_age_seconds`, `opengeni_model_request_stream_events_total`, and `opengeni_model_request_stream_event_gap_seconds`, all with provider-only labels. Provider ids come from the resolved provider registry; request ids, model bodies, credentials, session ids, and token content are not metric labels.
 
-The diagnostic observer runs before the existing awaited `agent.model.request` durable audit callback and cannot block or change it. Durable append/publish fencing and ordering therefore remain the source of audit truth. A Codex `response.completed`/`response.done` terminal is latched before downstream stream cleanup; if the consumer cancels after parsing that semantic terminal, the audit remains `completed` rather than producing a misleading trailing `failed`. Actual provider failure/incomplete/error, transport failure, timeout, or caller abort remains failed/timed out.
+The diagnostic observer runs before the existing awaited `agent.model.request` durable audit callback and cannot block or change it. Durable append/publish fencing and ordering therefore remain the source of audit truth. A semantic terminal is latched before downstream stream cleanup; if the consumer cancels after parsing it, the audit remains `completed` rather than producing a misleading trailing `failed`. Actual provider failure/incomplete/error, transport failure, timeout, or caller abort remains failed/timed out. SuperGrok persists only `started`, `headers`, `first_event`, and terminal checkpoints—not every streamed event—and the terminal checkpoint carries bounded event-count, last-event-type, last-progress-duration, and silence facts.

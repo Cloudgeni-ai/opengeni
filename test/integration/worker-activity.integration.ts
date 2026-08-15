@@ -22,12 +22,13 @@ import {
   createScheduledTask,
   createSession,
   createSessionGoal,
-  createWorkspaceEnvironment,
+  createVariableSet,
   dbSql,
   encryptEnvironmentValue,
   enablePackInstallation,
+  loadVariableSetForRun,
   registerWorkspacePack,
-  setWorkspaceEnvironmentVariable,
+  setVariableSetVariable,
   getSession,
   getSessionGoal,
   getBillingBalance,
@@ -75,10 +76,7 @@ import {
   PRE_CLAIM_FAILURE_MESSAGE,
   PRE_CLAIM_FAILURE_TYPE,
 } from "../../apps/worker/src/activities/types";
-import {
-  loadWorkspaceEnvironmentForRun,
-  sandboxEnvironmentForRun,
-} from "../../apps/worker/src/activities/environment";
+import { sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
 import { settingsWithSessionMcpServersForRun } from "../../apps/worker/src/activities/capabilities";
 import {
   ScriptedModel,
@@ -3557,16 +3555,57 @@ describe("worker activities integration", () => {
       },
       "Operator notes: API_TOKEN authenticates the worker against the test API.",
     );
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "load attached variable set",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      variableSetId: environment.id,
+      subjectId: grant.subjectId,
+    });
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "load attached variable set" } },
+    ]);
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `environment-fixture-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") {
+      throw new Error(`environment fixture was not claimed: ${claimed.reason}`);
+    }
+    const initiatingHumanSubjectId = claimed.turn.initiatingHumanSubjectId;
+    if (!initiatingHumanSubjectId) {
+      throw new Error("environment fixture has no initiating human");
+    }
+    const authority = {
+      kind: "agent_attempt" as const,
+      subjectId: initiatingHumanSubjectId,
+      sessionId: session.id,
+      turnId: claimed.turn.id,
+      attemptId,
+      executionGeneration: claimed.turn.executionGeneration,
+    };
 
     expect(
-      await loadWorkspaceEnvironmentForRun(dbClient.db, settings, grant.workspaceId, null),
+      await loadVariableSetForRun(dbClient.db, settings, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        variableSetId: null,
+        authority,
+      }),
     ).toBeNull();
-    const loaded = await loadWorkspaceEnvironmentForRun(
-      dbClient.db,
-      settings,
-      grant.workspaceId,
-      environment.id,
-    );
+    const loaded = await loadVariableSetForRun(dbClient.db, settings, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      variableSetId: environment.id,
+      authority,
+    });
     expect(loaded).toMatchObject({
       id: environment.id,
       name: environment.name,
@@ -3578,16 +3617,21 @@ describe("worker activities integration", () => {
     });
 
     await expect(
-      loadWorkspaceEnvironmentForRun(
-        dbClient.db,
-        testSettings({ databaseUrl: services.databaseUrl }),
-        grant.workspaceId,
-        environment.id,
-      ),
+      loadVariableSetForRun(dbClient.db, testSettings({ databaseUrl: services.databaseUrl }), {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        variableSetId: environment.id,
+        authority,
+      }),
     ).rejects.toThrow("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
     await expect(
-      loadWorkspaceEnvironmentForRun(dbClient.db, settings, grant.workspaceId, crypto.randomUUID()),
-    ).rejects.toThrow("variable set not found");
+      loadVariableSetForRun(dbClient.db, settings, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        variableSetId: crypto.randomUUID(),
+        authority,
+      }),
+    ).rejects.toThrow();
   });
 
   test("layers workspace environment values between deployment env and GitHub run auth", async () => {
@@ -3893,16 +3937,18 @@ async function seedWorkspaceEnvironment(
   description?: string,
 ): Promise<{ id: string; name: string }> {
   const key = new Uint8Array(Buffer.from(workerEnvironmentsKey, "base64"));
-  const environment = await createWorkspaceEnvironment(db, {
+  const environment = await createVariableSet(db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
     name: `worker-env-${crypto.randomUUID()}`,
     ...(description !== undefined ? { description } : {}),
   });
   for (const [name, value] of Object.entries(values)) {
-    await setWorkspaceEnvironmentVariable(db, {
+    await setVariableSetVariable(db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
       variableSetId: environment.id,
       name,
       valueEncrypted: encryptEnvironmentValue(key, value),

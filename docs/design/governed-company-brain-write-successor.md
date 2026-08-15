@@ -73,7 +73,7 @@ Instruction and preference proposals preserve the Knowledge change proposal
 UUID as provenance and record a content-free service actor while retaining the
 immutable causal human in the Knowledge audit chain. They cannot activate.
 Instruction materialization also
-requires an exact active-head baseline; migration 0247 verifies the Knowledge
+requires an exact active-head baseline; migration 0255 verifies the Knowledge
 proposal, workspace, target, status, and content hash at the database boundary.
 Preference materialization is workspace-only and creates an untrusted inactive
 proposal; its existing human lifecycle remains the only activation authority.

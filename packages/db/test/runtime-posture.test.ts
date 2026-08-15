@@ -229,6 +229,14 @@ function safePosture(): RuntimeDatabasePosture {
         update: false,
         delete: false,
       },
+      {
+        name: "scheduled_personal_resource_capabilities",
+        owner: "opengeni_migrator",
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+      },
     ],
     targetRoutines: RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
       name,
@@ -254,6 +262,13 @@ function safePosture(): RuntimeDatabasePosture {
         publicExecute: false,
         securityDefiner: true,
       },
+      {
+        name: "scheduled_personal_resource_capability_active(text)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
     ],
   };
 }
@@ -274,6 +289,11 @@ describe("runtime database posture evaluator", () => {
         .sort();
       const personalResourceProtectedTableCount = [
         "personal_resource_once_consumption_receipts",
+        "scheduled_task_personal_resource_authorities",
+        "scheduled_task_personal_resource_snapshots",
+        "scheduled_task_run_personal_resource_admissions",
+        "scheduled_task_run_personal_resource_once_receipts",
+        "scheduled_task_run_personal_resource_snapshots",
         "session_attempt_personal_resource_admissions",
         "session_attempt_personal_resource_snapshots",
       ].filter(
@@ -285,13 +305,13 @@ describe("runtime database posture evaluator", () => {
         ? ([
             [FORCE_RLS_TABLES, 240],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 139],
+            [RUNTIME_FULL_DML_TABLES, 137],
             [RUNTIME_READ_ONLY_TABLES, 17],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 29],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 20],
-            [RUNTIME_DML_TABLES, 231],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 22],
+            [RUNTIME_DML_TABLES, 229],
           ] as const)
         : ([
             [FORCE_RLS_TABLES, 184],
@@ -452,6 +472,11 @@ describe("runtime database posture evaluator", () => {
   test("accepts public-schema authority owned by the two protected tables", () => {
     const posture = safePosture();
     posture.schemas[0]!.owner = "pg_database_owner";
+    for (const routine of posture.targetRoutines) {
+      if (routine.name.includes("scoped_variable_set")) {
+        routine.owner = "pg_database_owner";
+      }
+    }
 
     expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
   });

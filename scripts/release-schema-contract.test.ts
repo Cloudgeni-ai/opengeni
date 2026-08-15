@@ -133,6 +133,12 @@ describe("release schema contract", () => {
       "0238_supergrok_realtime_model.sql",
       "0239_supergrok_video_funding.sql",
       "0240_model_context_user_messages.sql",
+      "0249_personal_resource_delegation_authority_correction.sql",
+      "0250_direct_retained_process_owner_liveness.sql",
+      "0251_connected_machine_operation_policy.sql",
+      "0252_scheduled_personal_resource_delegation.sql",
+      "0253_common_user_resource_authority_lifecycle.sql",
+      "0254_scoped_variable_set_authority.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -169,6 +175,14 @@ describe("release schema contract", () => {
     if (modelContextCutover) {
       expect(modelContextCutover).toMatchObject({ deploymentMode: "maintenance" });
     }
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0251_connected_machine_operation_policy.sql",
+      ),
+    ).toMatchObject({
+      sha256: "a37e307de730bc47ccf4ed6bf517427ebb0d20199640f54e8e525ae1ce046663",
+      deploymentMode: "maintenance",
+    });
     expect(
       completeSourceContract.migrations.find(
         (migration) => migration.path === "0240_enrollment_connection_authority.sql",
@@ -211,20 +225,61 @@ describe("release schema contract", () => {
     });
     expect(
       completeSourceContract.migrations.find(
-        (migration) => migration.path === "0247_company_brain_governed_write_proposals.sql",
+        (migration) =>
+          migration.path === "0249_personal_resource_delegation_authority_correction.sql",
       ),
     ).toMatchObject({
-      sha256: "f92d328e2a13fa0d06dff5a3563628fc15f02f0f2c4deb3b63289c2e0b638e0d",
+      sha256: "98b1e6059e955b7a8022ff45f977b44075a7f854828422e06d9879a8487d62f7",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0250_direct_retained_process_owner_liveness.sql",
+      ),
+    ).toMatchObject({
+      sha256: "8ae147f5de31c4173758e8e64bbb2597e8a3fc49d983a7a518f229fb95ef90f5",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0252_scheduled_personal_resource_delegation.sql",
+      ),
+    ).toMatchObject({
+      sha256: "ddc1c34835e4f5ac7ae5039e5c0dae5971d6e6284167eb9199151175f8766169",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0253_common_user_resource_authority_lifecycle.sql",
+      ),
+    ).toMatchObject({
+      sha256: "cfcffb54e01c41927aeed024a1ba610bac45ac3d5271a7c1b147f4beb28c2428",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0254_scoped_variable_set_authority.sql",
+      ),
+    ).toMatchObject({
+      sha256: "e99064ac5acd73e79c3a75872d71a5c8710bcedbbd12fbe3eee989d7f167c8cf",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0255_company_brain_governed_write_proposals.sql",
+      ),
+    ).toMatchObject({
+      sha256: "5d6527267b8de9cb9539e97a0cd30051dc9b2059fd5935261aa8c762d5d6a0d3",
       deploymentMode: "rolling",
     });
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0247_company_brain_governed_write_proposals.sql")) {
+      if (migrations.has("0255_company_brain_governed_write_proposals.sql")) {
         return includesActivation
-          ? "58e00ef613a283b8a0d161b020f15662d43daa5385a4c03b025884cef4d6651a"
-          : "af02ff330fe41a90c51bbda52e766dc5865fa3cc430e1f2f656b90f73190f1c4";
+          ? "7297e2ad81f65cfebfea608a8e541e1f8229e6b0e70f3a8d651319fefa72760d"
+          : "6bb2a825b85f0372d6fae7ca45aa43491d47e9283e19456554f8402166a203c9";
       }
       if (
         migrations.has("0236_session_visibility_slack_policy.sql") &&
@@ -340,6 +395,50 @@ describe("release schema contract", () => {
         ? "0a3c326f21e67422bdc84e9409d72b489aac967e18b08fbc7a410aab51cb17af"
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
+    const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
+      if (migrations.has("0255_company_brain_governed_write_proposals.sql")) {
+        return includesActivation
+          ? "7297e2ad81f65cfebfea608a8e541e1f8229e6b0e70f3a8d651319fefa72760d"
+          : "6bb2a825b85f0372d6fae7ca45aa43491d47e9283e19456554f8402166a203c9";
+      }
+      if (migrations.has("0248_terraform_stacks_component_resolution_fence.sql")) {
+        if (
+          migrations.has("0246_integration_personal_instance_authority.sql") &&
+          migrations.has("0241_atomic_personal_resource_delegation.sql")
+        ) {
+          return includesActivation
+            ? "80d175fb7eb7c37c6965f6df657bcefeacf1a454f894f412831c6564060fb23f"
+            : "21f47bdcee153ce1552bb6c55c25e62b475cb050c6bc4c7ff627ecc24c7c7c8c";
+        }
+        if (migrations.has("0246_integration_personal_instance_authority.sql")) {
+          return includesActivation
+            ? "fd62e02cda3bfcafc0a9e7530713636a52d99cb0185c9c01e56de929af5c7d3a"
+            : "6a4c6aa993c9dc1cd3db1b24e2d1e9e527dc3c20113368d9eef88a38da2a9d2a";
+        }
+        return includesActivation
+          ? "c9ee6c1d08989d738c0db3d4372eb0b19b15294a92f21216e08eec3de4260c30"
+          : "ece89076dd885e577e756f47ca9c299e25b1df3194a0221286739519ba58b580";
+      }
+      if (migrations.has("0247_terraform_stacks_provenance_repair.sql")) {
+        if (
+          migrations.has("0246_integration_personal_instance_authority.sql") &&
+          migrations.has("0241_atomic_personal_resource_delegation.sql")
+        ) {
+          return includesActivation
+            ? "ea50aa2d9a6b19febfee39a3b2ee8a077c978c7f1e7c215ece9b8add289a062f"
+            : "c0dbc7a03a111d7e5807bcb6c3ef371a95ad2d0b97528c89a0ef3e06ad48317a";
+        }
+        if (migrations.has("0246_integration_personal_instance_authority.sql")) {
+          return includesActivation
+            ? "0e98eb9af4b05809821914f2b6cd9ca1dc719b8c7c088f72cfbcbb955c7ec9a8"
+            : "e94a784536935dab356f8288a0460bcae1946df5b2e1ffa20ac541244c2139d2";
+        }
+        return includesActivation
+          ? "115a58c544c77745ee9b8af93b6cc58f89d05c618367c0dd706856c789ffd69e"
+          : "7aaa4256393e8ef72ee5862ca0c49675252d03f86dfa748436ca9c357f8290d2";
+      }
+      return sessionVisibilityContractHash(includesActivation);
+    };
     const currentMainContractHash = migrations.has("0235_canonical_human_login_bindings.sql")
       ? migrations.has("0234_xai_subscription_authority.sql")
         ? migrations.has("0223_pending_tool_event_output.sql")
@@ -405,7 +504,7 @@ describe("release schema contract", () => {
                                         : "e3048091a81b7e122b3c6d17cf52e5ffccff4c082780f6d2d330031742aef792";
     const activationMigration = migrations.get("0225_session_visibility_fork_activation.sql");
     if (activationMigration) {
-      expect(sourceContract.sha256).toBe(sessionVisibilityContractHash(true));
+      expect(sourceContract.sha256).toBe(releaseSchemaContractHash(true));
       expect(activationMigration).toMatchObject({
         sha256: "43945bc115ddf5e7b4b6e73a757c6bb63dde6929e1b3a89714c9cf330de87a12",
         deploymentMode: "rolling",
@@ -419,19 +518,17 @@ describe("release schema contract", () => {
         ...forwardMigrationPaths,
         "0225_session_visibility_fork_activation.sql",
       ]);
-      expect(contractWithoutActivation.sha256).toBe(sessionVisibilityContractHash(false));
+      expect(contractWithoutActivation.sha256).toBe(releaseSchemaContractHash(false));
       migrations.delete("0225_session_visibility_fork_activation.sql");
       sourceContract.migrations = contractWithoutActivation.migrations;
       sourceContract.fileCount = contractWithoutActivation.fileCount;
       sourceContract.latestMigration = contractWithoutActivation.latestMigration;
       sourceContract.sha256 = contractWithoutActivation.sha256;
     }
-    expect(sourceContract.sha256).toBe(
-      sessionVisibilityContractHash(false) ?? currentMainContractHash,
-    );
+    expect(sourceContract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const contract = {
       ...sourceContract,
-      sha256: sessionVisibilityContractHash(false) ?? currentMainContractHash,
+      sha256: releaseSchemaContractHash(false) ?? currentMainContractHash,
     };
     expect(migrations.get("0065_codex_subscription_overview.sql")).toMatchObject({
       deploymentMode: "maintenance",
@@ -489,6 +586,8 @@ describe("release schema contract", () => {
     );
     expect(contract.fileCount).toBe(
       108 +
+        (migrations.has("0247_terraform_stacks_provenance_repair.sql") ? 1 : 0) +
+        (migrations.has("0248_terraform_stacks_component_resolution_fence.sql") ? 1 : 0) +
         (migrations.has("0065_enrollment_credential_generation.sql") ? 1 : 0) +
         (migrations.has(currentMainToolPolicyMigration) ? 1 : 0) +
         (migrations.has("0117_sandbox_recovery_generations.sql") ? 1 : 0) +
@@ -632,11 +731,11 @@ describe("release schema contract", () => {
         (migrations.has("0244_slack_app_home_refresh_queue.sql") ? 1 : 0) +
         (migrations.has("0245_model_context_contribution_facts.sql") ? 1 : 0) +
         (migrations.has("0246_integration_personal_instance_authority.sql") ? 1 : 0) +
-        (migrations.has("0247_company_brain_governed_write_proposals.sql") ? 1 : 0),
+        (migrations.has("0255_company_brain_governed_write_proposals.sql") ? 1 : 0),
     );
-    expect(contract.sha256).toBe(sessionVisibilityContractHash(false) ?? currentMainContractHash);
+    expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
-      "0247_company_brain_governed_write_proposals.sql",
+      "0255_company_brain_governed_write_proposals.sql",
       "0246_integration_personal_instance_authority.sql",
       "0245_model_context_contribution_facts.sql",
       "0244_slack_app_home_refresh_queue.sql",
@@ -663,7 +762,15 @@ describe("release schema contract", () => {
       "0218_organization_tenancy_foundation.sql",
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
-    expect(contract.latestMigration).toBe(latestCompatibleMigration);
+    expect(contract.latestMigration).toBe(
+      migrations.has("0255_company_brain_governed_write_proposals.sql")
+        ? "0255_company_brain_governed_write_proposals.sql"
+        : migrations.has("0248_terraform_stacks_component_resolution_fence.sql")
+          ? "0248_terraform_stacks_component_resolution_fence.sql"
+          : migrations.has("0247_terraform_stacks_provenance_repair.sql")
+            ? "0247_terraform_stacks_provenance_repair.sql"
+            : latestCompatibleMigration,
+    );
     expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
       sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",
       deploymentMode: "maintenance",
@@ -820,6 +927,18 @@ describe("release schema contract", () => {
       sha256: "26ed3d2ffcaf572623ad263aaa0103625b4ed1e9d28bcb7b5d35eb972d9762d1",
       deploymentMode: "maintenance",
     });
+    if (migrations.has("0247_terraform_stacks_provenance_repair.sql")) {
+      expect(migrations.get("0247_terraform_stacks_provenance_repair.sql")).toMatchObject({
+        sha256: "0bb6196b0a89e4b9d2271ec098793e2c8cbeecf4c9ef7ff036f3ed26e1792cff",
+        deploymentMode: "maintenance",
+      });
+    }
+    if (migrations.has("0248_terraform_stacks_component_resolution_fence.sql")) {
+      expect(migrations.get("0248_terraform_stacks_component_resolution_fence.sql")).toMatchObject({
+        sha256: "4fe9beb4cdf182a4391f7268bc83d11fdbc3125c105d48c8ca0bf41349be095f",
+        deploymentMode: "maintenance",
+      });
+    }
     if (migrations.has("0223_pending_tool_event_output.sql")) {
       expect(migrations.get("0223_pending_tool_event_output.sql")).toMatchObject({
         sha256: "851cdb5dfe14f1cf6323e6cf59e55269b87d2db4406ea2ad10147553635eb707",
@@ -868,9 +987,9 @@ describe("release schema contract", () => {
         deploymentMode: "rolling",
       });
     }
-    if (migrations.has("0247_company_brain_governed_write_proposals.sql")) {
-      expect(migrations.get("0247_company_brain_governed_write_proposals.sql")).toMatchObject({
-        sha256: "f92d328e2a13fa0d06dff5a3563628fc15f02f0f2c4deb3b63289c2e0b638e0d",
+    if (migrations.has("0255_company_brain_governed_write_proposals.sql")) {
+      expect(migrations.get("0255_company_brain_governed_write_proposals.sql")).toMatchObject({
+        sha256: "5d6527267b8de9cb9539e97a0cd30051dc9b2059fd5935261aa8c762d5d6a0d3",
         deploymentMode: "rolling",
       });
     }

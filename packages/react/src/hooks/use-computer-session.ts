@@ -234,9 +234,9 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
 
   const selectTarget = useCallback(
     async (targetId: string): Promise<ComputerTarget> => {
-      if (!computerSessionId) throw new Error("No ComputerSession is selected.");
+      if (!computerSessionId) throw new Error("No desktop is selected.");
       const target = targetsRef.current.targets.find((candidate) => candidate.id === targetId);
-      if (!target) throw new Error("The selected computer target is no longer available.");
+      if (!target) throw new Error("The selected desktop target is no longer available.");
       invalidateRefresh();
       selectedTargetIdRef.current = target.id;
       observationRef.current = { computerSessionId, observation: null };
@@ -284,9 +284,9 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
       operationId: string,
       frame: ComputerFrame | null,
     ): Promise<ComputerActionReceipt> => {
-      if (!computerSessionId) throw new Error("No ComputerSession is selected.");
+      if (!computerSessionId) throw new Error("No desktop is selected.");
       if (frame && frame.computerSessionId !== computerSessionId) {
-        throw new Error("The displayed computer frame belongs to another ComputerSession.");
+        throw new Error("The displayed desktop frame belongs to another desktop session.");
       }
       const currentObservation =
         observationRef.current.computerSessionId === computerSessionId
@@ -302,18 +302,18 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
           (currentObservation?.target.id === frame.targetId ? currentObservation.target : null))
         : null;
       const target = frameTarget ?? focusTarget ?? currentObservation?.target ?? null;
-      if (!target) throw new Error("The computer target is not ready for input.");
+      if (!target) throw new Error("The desktop target is not ready for input.");
       if (frame && frame.targetId !== selectedTargetIdRef.current) {
-        throw new Error("The displayed computer frame is no longer selected.");
+        throw new Error("The displayed desktop frame is no longer selected.");
       }
       if (action.type === "pointer") {
         const expectedFrameId = frame?.frameId ?? currentObservation?.frameId ?? null;
         if (!expectedFrameId || action.frameId !== expectedFrameId) {
-          throw new Error("Pointer input must reference the exact displayed computer frame.");
+          throw new Error("Pointer input must reference the exact displayed desktop frame.");
         }
       }
       if (action.type === "semantic" && !currentObservation) {
-        throw new Error("The computer accessibility tree is not ready for input.");
+        throw new Error("The desktop accessibility tree is not ready for input.");
       }
 
       return await runMutation(computerSessionId, async () => {
@@ -367,7 +367,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
   );
 
   const readClipboard = useCallback(async (): Promise<ComputerClipboard> => {
-    if (!computerSessionId) throw new Error("No ComputerSession is selected.");
+    if (!computerSessionId) throw new Error("No desktop is selected.");
     return await client.readComputerClipboard(workspaceId, computerSessionId);
   }, [client, computerSessionId, workspaceId]);
 

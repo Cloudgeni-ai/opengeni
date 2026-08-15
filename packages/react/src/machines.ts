@@ -9,6 +9,7 @@
 export type {
   ConnectionStatus,
   MachineKind,
+  MachineOperationPolicy,
   MachineMetricsSeriesResponse,
   MachineState,
   MachineView,
@@ -48,6 +49,8 @@ export type {
 } from "./components/machines/metric-history-chart";
 export { MachineDetail } from "./components/machines/machine-detail";
 export type { MachineDetailProps } from "./components/machines/machine-detail";
+export { MachineOperationPolicyEditor } from "./components/machines/machine-operation-policy";
+export type { MachineOperationPolicyEditorProps } from "./components/machines/machine-operation-policy";
 export { METRICS, METRIC_WINDOWS, WINDOW_LABEL, pointsFor } from "./components/machines/series";
 export type { MetricDef, MetricKey, MetricWindow } from "./components/machines/series";
 export { MachinesDashboard } from "./components/machines-dashboard";

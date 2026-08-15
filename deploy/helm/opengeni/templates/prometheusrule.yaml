@@ -122,6 +122,15 @@ spec:
             severity: critical
           annotations:
             summary: OpenGeni has an agent turn without durable progress for more than 15 minutes
+        - alert: OpenGeniSuperGrokResponseStreamIdleTimeout
+          expr: |
+            sum(increase(opengeni_model_request_phases_total{provider="supergrok-subscription",phase="terminal",outcome="timed_out"}[15m])) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: A SuperGrok response stream stopped producing valid SSE events
+            description: The accepted stream was cancelled after its configured valid-event silence interval and was not replayed. Correlate the durable agent.model.request terminal checkpoint with provider request metadata.
         - alert: OpenGeniSandboxCreateFailureRatio
           expr: |
             (
@@ -136,6 +145,36 @@ spec:
             severity: warning
           annotations:
             summary: OpenGeni sandbox create failures exceed 20%
+        - alert: OpenGeniSandboxLogicalProvisionFailureRatio
+          expr: |
+            (
+              sum by (backend) (increase(opengeni_sandbox_provisions_total{outcome="failed"}[10m]))
+              /
+              clamp_min(sum by (backend) (increase(opengeni_sandbox_provisions_total{outcome=~"completed|failed"}[10m])), 1)
+            ) > 0.2
+            and
+            sum by (backend) (increase(opengeni_sandbox_provisions_total{outcome=~"completed|failed"}[10m])) >= 5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni logical sandbox provision failures exceed 20%
+            description: Expected lease and lifecycle transitions are excluded. Inspect failure category/stage and internal attempt metrics before changing retry policy.
+        - alert: OpenGeniSandboxUnknownProvisionFailureRatio
+          expr: |
+            (
+              sum by (backend) (increase(opengeni_sandbox_provisions_total{outcome="failed",category="unknown"}[30m]))
+              /
+              clamp_min(sum by (backend) (increase(opengeni_sandbox_provisions_total{outcome="failed"}[30m])), 1)
+            ) >= 0.01
+            and
+            sum by (backend) (increase(opengeni_sandbox_provisions_total{outcome="failed"}[30m])) >= 20
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni unknown logical sandbox provision failures are at least 1%
+            description: Extend the structural taxonomy at the owning typed boundary; do not classify failures from raw message text or add ambiguous provider retries.
         - alert: OpenGeniSandboxWarmingTimeout
           expr: sum(increase(opengeni_sandbox_warming_timeouts_total[15m])) > 0
           labels:

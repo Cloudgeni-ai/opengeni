@@ -33,16 +33,25 @@ describe("literal high-trust permissions", () => {
     expect(() => requireLiteralPermission(explicit, "secrets:read")).not.toThrow();
   });
 
-  test("legacy scopes imply granular metadata and write scopes but never plaintext", () => {
-    expect(hasPermission(["variable-sets:use"], "variable-sets:list")).toBe(true);
-    expect(hasPermission(["variable-sets:use"], "variable-sets:read")).toBe(true);
-    expect(hasPermission(["variable-sets:use"], "secrets:list")).toBe(true);
-    expect(hasPermission(["variable-sets:use"], "variable-sets:write")).toBe(false);
-    expect(hasPermission(["variable-sets:use"], "secrets:write")).toBe(false);
-
-    expect(hasPermission(["variable-sets:manage"], "variable-sets:write")).toBe(true);
-    expect(hasPermission(["variable-sets:manage"], "secrets:write")).toBe(true);
-    expect(hasPermission(["variable-sets:manage"], "secrets:read")).toBe(false);
+  test("variable-set capabilities do not imply one another", () => {
+    const exact = [
+      "variable-sets:list",
+      "variable-sets:read",
+      "variable-sets:write",
+      "variable-sets:attach",
+      "variable-sets:use",
+      "secrets:list",
+      "secrets:read",
+      "secrets:write",
+    ] as const;
+    for (const permission of exact) {
+      expect(hasPermission([permission], permission)).toBe(true);
+      for (const other of exact) {
+        if (other !== permission) expect(hasPermission([permission], other)).toBe(false);
+      }
+    }
+    expect(hasPermission(["variable-sets:manage"], "variable-sets:write")).toBe(false);
+    expect(hasPermission(["environments:use"], "variable-sets:use")).toBe(false);
   });
 
   test("verified agent-attempt depth claims reach grant metadata unchanged", async () => {

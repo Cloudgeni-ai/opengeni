@@ -1,5 +1,8 @@
 -- deployment-mode: rolling
 
+-- Allocated after the scoped Variable Set authority migration to preserve the
+-- repository's forward-only migration filename ledger.
+
 -- The historical proposal table keeps its onboarding name, but the canonical
 -- instruction revision already supports knowledge_proposal provenance. Broaden
 -- only its validator so an exact immutable scoped-Knowledge change proposal can

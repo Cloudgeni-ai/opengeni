@@ -356,6 +356,7 @@ export {
 // Agent-loop-free, so the API-direct control plane imports it from this leaf.
 export {
   SandboxChannelAService,
+  ChannelAPartialMutationError,
   ChannelAValidationError,
   ChannelAUnavailableError,
   ChannelAConflictError,
@@ -444,6 +445,8 @@ export {
   type SelfhostedSessionState,
   type SelfhostedSessionDeps,
   type SelfhostedSessionBuild,
+  type SelfhostedOperationResourcePolicy,
+  type SelfhostedOperationAdmission,
   type SelfhostedRelayConfig,
   type SelfhostedExecArgs,
   type SelfhostedExecResult,
@@ -496,6 +499,7 @@ export {
 // currently-active backend (Modal or selfhosted) — flippable mid-turn, single
 // active at a time, fence-retrying on a swap race.
 export {
+  isRoutingMutationOutcomeUnknownError,
   RoutingBackendRecoveryRequiredError,
   RoutingMutationOutcomeUnknownError,
   RoutingRetainedProcessNotFoundError,

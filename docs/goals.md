@@ -35,8 +35,9 @@ A goal is `active`, `paused`, or `completed`.
   `ScheduledTaskAgentConfig.goal` create it. Setting a goal on a session that
   already has one remains a supported low-level/API/scheduler redirect: it
   re-activates the goal, resets continuation counters, and arms a wake. The
-  agent-facing `goal_set` creates only; an existing goal is changed through the
-  policy-fenced `goal_update`, so an incidental set cannot silently redirect it.
+  agent-facing `goal_set` creates when no goal exists or replaces a completed
+  goal. Active and paused goals are changed through the policy-fenced
+  `goal_update`, so an incidental set cannot silently redirect live intent.
 - `goal_update` declares `refinement`, `adaptation`, or `replacement`, a
   rationale, and the expected objective revision. `review_changes` always
   records an immutable proposal; `preserve_intent` directly applies only a

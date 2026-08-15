@@ -5,10 +5,10 @@ import { fileURLToPath } from "node:url";
 
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
-  "../drizzle/0247_company_brain_governed_write_proposals.sql",
+  "../drizzle/0255_company_brain_governed_write_proposals.sql",
 );
 
-describe("migration 0247 Company Brain governed write proposals", () => {
+describe("migration 0255 Company Brain governed write proposals", () => {
   test("keeps onboarding validation and admits only exact workspace Knowledge instruction proposals", async () => {
     const sql = await readFile(migrationPath, "utf8");
     expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");

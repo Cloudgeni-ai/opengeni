@@ -105,6 +105,9 @@ describe("sandbox observability contract", () => {
       "opengeni_sandbox_inventory_refresh_failures_total",
       "opengeni_sandbox_creates_total",
       "opengeni_sandbox_create_duration_seconds_bucket",
+      "opengeni_sandbox_provisions_total",
+      "opengeni_sandbox_provision_duration_seconds_bucket",
+      "opengeni_sandbox_provision_attempts_total",
       "opengeni_sandbox_operations_total",
       "opengeni_sandbox_operation_duration_seconds_bucket",
       "opengeni_sandbox_warming_timeouts_total",
@@ -227,7 +230,12 @@ describe("sandbox observability contract", () => {
     const source = await Bun.file(rulePath).text();
     expect(source).toContain('age_bucket=~"5m_1h|1h_1d|gte_1d"');
     expect(source).toContain("OpenGeniSandboxOperationFailureRatio");
+    expect(source).toContain("OpenGeniSandboxLogicalProvisionFailureRatio");
+    expect(source).toContain("OpenGeniSandboxUnknownProvisionFailureRatio");
     expect(source).toContain('opengeni_sandbox_operations_total{outcome=~"ok|failed"}[10m]');
+    expect(source).toContain(
+      'opengeni_sandbox_provisions_total{outcome="failed",category="unknown"}[30m]',
+    );
     expect(source).toContain("must cover at least three sandbox reaper periods");
     expect(source).toContain("$inventoryFreshnessSeconds");
     expect(source).not.toMatch(/5m_to_15m|gt_15m/);

@@ -7,6 +7,7 @@ import {
   createDb,
   createRigVersion,
   createSession,
+  createVariableSet,
   getRigChange,
   listRigVersions,
   updateRigChangeStatus,
@@ -113,6 +114,46 @@ async function auditActions(workspaceId: string, targetId: string): Promise<stri
 }
 
 describe("rig route permission matrix", () => {
+  test("default Variable Set references require independent attach and use permissions", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const variableSet = await createVariableSet(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "rig-default-secret",
+    });
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const body = JSON.stringify({
+      name: "secret-rig",
+      defaultVariableSetIds: [variableSet.id],
+    });
+
+    for (const permissions of [
+      ["rigs:manage", "variable-sets:use"],
+      ["rigs:manage", "variable-sets:attach"],
+    ] satisfies Permission[][]) {
+      const denied = await app().request(base, {
+        method: "POST",
+        headers: { authorization: await bearer(ws, "user:m", permissions) },
+        body,
+      });
+      expect(denied.status).toBe(403);
+    }
+
+    const accepted = await app().request(base, {
+      method: "POST",
+      headers: {
+        authorization: await bearer(ws, "user:m", [
+          "rigs:manage",
+          "variable-sets:attach",
+          "variable-sets:use",
+        ]),
+      },
+      body,
+    });
+    expect(accepted.status).toBe(201);
+  });
+
   test("read requires rigs:use; write requires rigs:manage; propose requires rigs:use", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
@@ -474,7 +515,13 @@ describe("rig route permission matrix", () => {
 
     const badRef = await app().request(base, {
       method: "POST",
-      headers: manage,
+      headers: {
+        authorization: await bearer(ws, "user:m", [
+          "rigs:manage",
+          "variable-sets:attach",
+          "variable-sets:use",
+        ]),
+      },
       body: JSON.stringify({
         name: "bad-ref",
         defaultVariableSetIds: ["11111111-1111-4111-8111-111111111111"],

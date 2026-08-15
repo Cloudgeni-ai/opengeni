@@ -296,10 +296,11 @@ export function inlinePackSkillInstall(
 
 export async function previewCapabilityPackInstallation(
   db: Database,
-  workspaceId: string,
+  access: { accountId: string; workspaceId: string; subjectId: string },
   pack: CapabilityPack,
   options: { rigId?: string; variableSetId?: string } = {},
 ): Promise<PackInstallationPreview> {
+  const { workspaceId } = access;
   const installation = await getPackInstallation(db, workspaceId, pack.id);
   const inlineInstalls = pack.skills.map((skill) => inlinePackSkillInstall(pack, skill));
   const [referencedComponents, inlineComponents] = await Promise.all([
@@ -344,7 +345,7 @@ export async function previewCapabilityPackInstallation(
   if (pack.variableSet?.required && !variableSetId) {
     blockers.push("Choose saved configuration before installing this Pack");
   } else if (variableSetId) {
-    const variableSet = await getVariableSet(db, workspaceId, variableSetId);
+    const variableSet = await getVariableSet(db, access, variableSetId);
     if (!variableSet) {
       blockers.push("The selected configuration no longer exists in this workspace");
     } else {

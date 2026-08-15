@@ -81,7 +81,7 @@ const codexRegistry = JSON.stringify([
 describe("curated AI Gateway catalogue", () => {
   test("adds the two managed models with exact routes, capabilities, and prices", () => {
     const settings = {
-      ...getSettings(),
+      ...withEnv({}, () => getSettings()),
       modelProvidersJson: "[]",
       vercelAiGatewayApiKey: "vck_test",
     };
@@ -139,7 +139,11 @@ describe("curated AI Gateway catalogue", () => {
   });
 
   test("workspace overlay is externally billed and receives a key only at runtime", () => {
-    const base = { ...getSettings(), modelProvidersJson: "[]", vercelAiGatewayApiKey: undefined };
+    const base = {
+      ...withEnv({}, () => getSettings()),
+      modelProvidersJson: "[]",
+      vercelAiGatewayApiKey: undefined,
+    };
     const catalog = withWorkspaceGatewayCatalogProvider(base);
     const provider = configuredProviders(catalog).find(
       (candidate) => candidate.id === WORKSPACE_GATEWAY_PROVIDER_ID,
@@ -162,7 +166,7 @@ describe("curated AI Gateway catalogue", () => {
 
   test("managed debit fallback uses the highest approved DeepSeek route", () => {
     const settings = {
-      ...getSettings(),
+      ...withEnv({}, () => getSettings()),
       modelProvidersJson: "[]",
       vercelAiGatewayApiKey: "vck_test",
     };
@@ -177,7 +181,7 @@ describe("curated AI Gateway catalogue", () => {
 
   test("managed debit fallback applies normal Kimi cache-read pricing", () => {
     const settings = {
-      ...getSettings(),
+      ...withEnv({}, () => getSettings()),
       modelProvidersJson: "[]",
       vercelAiGatewayApiKey: "vck_test",
     };
@@ -192,7 +196,7 @@ describe("curated AI Gateway catalogue", () => {
 
   test("managed debit converts exact Gateway cost before applying margin", () => {
     const settings = {
-      ...getSettings(),
+      ...withEnv({}, () => getSettings()),
       modelProvidersJson: "[]",
       vercelAiGatewayApiKey: "vck_test",
     };
@@ -642,6 +646,26 @@ describe("productShortLabelForModelId", () => {
 });
 
 describe("configuredModels", () => {
+  test("parses the SuperGrok valid-event idle interval and rejects invalid bounds", () => {
+    const configured = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS: "123456",
+      },
+      () => getSettings(),
+    );
+    expect(configured.supergrokResponseStreamIdleTimeoutMs).toBe(123_456);
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_OPENAI_API_KEY: "sk-test",
+          OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS: "0",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow();
+  });
+
   test("SuperGrok catalog is a distinct externally billed xAI subscription rail", () => {
     const base = withEnv(
       {

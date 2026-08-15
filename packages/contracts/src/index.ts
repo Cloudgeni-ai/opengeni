@@ -16,6 +16,7 @@ export * from "./slack-bot-scopes";
 export * from "./slack-task-policy";
 export * from "./atlassian";
 export * from "./connector-destinations";
+export * from "./connector-attachments";
 export * from "./memory-slack-delivery";
 export * from "./image-generation";
 export * from "./video-generation";
@@ -724,6 +725,7 @@ export const Permission = z.enum([
   "variable-sets:read",
   "variable-sets:write",
   "variable-sets:manage",
+  "variable-sets:attach",
   "variable-sets:use",
   "secrets:list",
   "secrets:read",
@@ -781,8 +783,12 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
   // tools resolve an already-installed workspace principal. Credentials stay
   // inside the broker and remain subject to each tool's own authorization.
   "connections:read",
+  "variable-sets:list",
+  "variable-sets:write",
+  "variable-sets:attach",
   "variable-sets:use",
-  "variable-sets:manage",
+  "secrets:list",
+  "secrets:write",
   "rigs:use",
   "github:use",
   "artifacts:read",
@@ -1054,6 +1060,73 @@ export const PersonalResourceRetentionMode = z.enum(["retain", "delete_after"]);
 export type PersonalResourceRetentionMode = z.infer<typeof PersonalResourceRetentionMode>;
 
 export const SessionTenancyVisibility = z.enum(["user_private", "workspace_shared"]);
+
+export const UserResourceAuthorityScope = z.literal("user");
+export const UserResourceLifecycleGrantMode = z.enum(["once", "session", "always"]);
+export const UserResourceAuthorityGrant = z.object({
+  grantId: z.string().uuid(),
+  targetWorkspaceId: z.string().uuid(),
+  targetSessionId: z.string().uuid().nullable(),
+  action: z.string().min(1).max(64),
+  mode: UserResourceLifecycleGrantMode,
+  context: SessionTenancyVisibility,
+  generation: z.number().int().positive(),
+  status: z.enum(["active", "consumed", "revoked", "expired"]),
+  expiresAt: z.string().datetime().nullable(),
+});
+export const UserResourceAuthoritySummary = z.object({
+  authorityId: z.string().uuid(),
+  resourceKind: z.string().min(1).max(64),
+  generation: z.number().int().positive(),
+  status: z.enum(["active", "retained", "revoked"]),
+  grants: z.array(UserResourceAuthorityGrant),
+});
+export const ListUserResourceAuthoritiesQuery = z.object({
+  scope: UserResourceAuthorityScope,
+});
+export const ListUserResourceAuthoritiesResponse = z.object({
+  scope: UserResourceAuthorityScope,
+  authorities: z.array(UserResourceAuthoritySummary),
+});
+export const IssueUserResourceGrantRequest = z
+  .object({
+    scope: UserResourceAuthorityScope,
+    action: z.string().min(1).max(64),
+    mode: UserResourceLifecycleGrantMode,
+    context: SessionTenancyVisibility,
+    sessionId: z.string().uuid().nullable().optional(),
+    workspaceSharedAcknowledged: z.boolean().default(false),
+  })
+  .superRefine((value, context) => {
+    if (value.context === "workspace_shared" && !value.workspaceSharedAcknowledged) {
+      context.addIssue({
+        code: "custom",
+        path: ["workspaceSharedAcknowledged"],
+        message: "workspace_shared requires durable shared-output acknowledgement",
+      });
+    }
+    if (value.mode === "always" && value.sessionId) {
+      context.addIssue({
+        code: "custom",
+        path: ["sessionId"],
+        message: "always is unbound",
+      });
+    }
+    if (value.mode !== "always" && !value.sessionId) {
+      context.addIssue({
+        code: "custom",
+        path: ["sessionId"],
+        message: "once/session require a target session",
+      });
+    }
+  });
+export const UserResourceGrantMutationResponse = z.object({
+  scope: UserResourceAuthorityScope,
+  grant: UserResourceAuthorityGrant,
+});
+export const RevokeUserResourceGrantQuery = z.object({
+  scope: UserResourceAuthorityScope,
+});
 export type SessionTenancyVisibility = z.infer<typeof SessionTenancyVisibility>;
 
 /** Public/session API vocabulary. Persistence keeps the explicit tenancy names. */
@@ -3173,8 +3246,14 @@ export type GitCredentials = {
 export type SandboxSecretsRequest = {
   accountId: string;
   workspaceId: string;
-  // The variable set the run's session declares (null = unattached;
-  // the provider, like the self-mint path, returns null values for it).
+  // Exact live attempt authority. Hosts MUST revalidate this tuple, the
+  // session's selected resource identity, and any personal-resource grant
+  // immediately before returning plaintext.
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  initiatingHumanSubjectId: string;
   variableSetId: string;
 };
 
@@ -3183,8 +3262,17 @@ export type SandboxSecrets = {
   // `environmentsEncryptionKeyBytes` decrypt. Same shape the self-mint path
   // produces (plaintext name→value).
   values: Record<string, string>;
-  // workspace-scope cross-check echo: the workspace the provider scoped these secrets to.
+  // Exact scope/resource echoes are mandatory so a host routing bug cannot
+  // inject a sibling tenant, resource, or stale attempt's plaintext.
+  accountId: string;
   workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  variableSetId: string;
+  scope: VariableSetScope;
+  generation: number;
   // Optional variableSet metadata; when omitted the activity uses the
   // variableSetId as both id and name (the local decrypt carries the row's
   // id/name/description, but only `id` is load-bearing downstream).
@@ -6311,10 +6399,16 @@ export const VariableSetSecret = z.object({
 });
 export type VariableSetSecret = z.infer<typeof VariableSetSecret>;
 
+export const VariableSetScope = z.enum(["organization", "workspace", "user"]);
+export type VariableSetScope = z.infer<typeof VariableSetScope>;
+
 export const VariableSet = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
+  scope: VariableSetScope,
+  generation: z.number().int().positive(),
+  status: z.enum(["active", "revoked"]),
   name: z.string(),
   description: z.string().nullable(),
   variables: z.array(VariableSetVariableMetadata),
@@ -6328,6 +6422,8 @@ export const WorkspaceEnvironment = VariableSet;
 export type WorkspaceEnvironment = VariableSet;
 
 export const CreateVariableSetRequest = z.object({
+  // Omitted remains the legacy workspace-owned creation path.
+  scope: VariableSetScope.default("workspace"),
   name: z.string().min(1).max(120),
   description: z.string().max(2000).optional(),
   variables: z
@@ -6793,23 +6889,164 @@ export const ScheduledTaskScheduleSpec = /* @__PURE__ */ z.discriminatedUnion("t
 ]);
 export type ScheduledTaskScheduleSpec = z.infer<typeof ScheduledTaskScheduleSpec>;
 
-export const ScheduledTaskAgentConfig = /* @__PURE__ */ z.object({
-  prompt: z.string().min(1),
-  resources: z.array(ResourceRef).default([]),
-  tools: z.array(ToolRef).default([]),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-  // Explicit workspace-shared OpenGeni Slack bot binding for scheduled runs.
-  // The worker copies this non-secret pointer into session metadata; the
-  // first-party Slack tools never fall back to a personal hosted-MCP grant.
-  slackBotConnectionId: z.string().uuid().optional(),
-  model: z.string().min(1).optional(),
-  reasoningEffort: ReasoningEffort.optional(),
-  sandboxBackend: SandboxBackend.optional(),
-  goal: GoalSpec.optional(),
-  // Durable task override. Scheduled dispatch is trusted to preserve this
-  // snapshot even if the workspace/deployment policy narrows later.
-  maxNestedAgentDepth: NestedAgentDepthValue.optional(),
-});
+export const IncidentTelemetryExecutionClass = z.literal("incident_telemetry");
+export type IncidentTelemetryExecutionClass = z.infer<typeof IncidentTelemetryExecutionClass>;
+
+const IncidentTelemetryIdentifier = z.string().trim().min(1).max(200);
+const IncidentTelemetryMetricName = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z_:][A-Za-z0-9_:]*$/);
+const IncidentTelemetryLabelName = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
+
+export const IncidentTelemetrySeriesMetadata = z
+  .object({
+    metric: IncidentTelemetryMetricName,
+    labels: z.array(IncidentTelemetryLabelName).min(1).max(64),
+  })
+  .strict();
+export type IncidentTelemetrySeriesMetadata = z.infer<typeof IncidentTelemetrySeriesMetadata>;
+
+export const IncidentTelemetryDataRoute = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("mcp"),
+      serverId: SessionMcpServerId,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("first_party"),
+      tool: FirstPartyMcpToolName,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("variable_set"),
+      variableSetName: z.string().trim().min(1).max(120),
+      variableNames: z.array(VariableSetVariableName).min(1).max(100),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("rig_credential_hook"),
+      credentialHookId: IncidentTelemetryIdentifier,
+    })
+    .strict(),
+]);
+export type IncidentTelemetryDataRoute = z.infer<typeof IncidentTelemetryDataRoute>;
+
+export const IncidentTelemetryPreflight = z
+  .object({
+    // These are exact selected resource refs, not discovery hints. The core
+    // validator requires every entry to already be present in agentConfig.
+    requiredResources: z.array(ResourceRef).max(100).default([]),
+    requiredMcpServerIds: z.array(SessionMcpServerId).max(64).default([]),
+    requiredFirstPartyMcpTools: z.array(FirstPartyMcpToolName).max(100).default([]),
+    requiredFirstPartyMcpPermissions: z.array(Permission).max(100).default([]),
+    requiredRig: z
+      .object({
+        name: z.string().trim().min(1).max(120),
+        credentialHookIds: z.array(IncidentTelemetryIdentifier).max(50).default([]),
+      })
+      .strict()
+      .nullable()
+      .default(null),
+    // Names only. The dispatch preflight never reads or decrypts values.
+    requiredVariableSetNames: z.array(z.string().trim().min(1).max(120)).max(25).default([]),
+    requiredVariableNames: z.array(VariableSetVariableName).max(100).default([]),
+    dataSource: z
+      .object({
+        kind: z.literal("prometheus"),
+        // Exposition endpoints such as /metrics are deliberately excluded.
+        queryPath: z.enum(["/api/v1/query", "/api/v1/query_range"]),
+        workspaceLabel: IncidentTelemetryLabelName,
+        // Exact non-workspace labels whose values come from the validated
+        // structured alert occurrence and bound every telemetry query.
+        alertSelectorLabels: z.array(IncidentTelemetryLabelName).min(1).max(16),
+        route: IncidentTelemetryDataRoute,
+        requiredSeries: z.array(IncidentTelemetrySeriesMetadata).min(1).max(100),
+        availableSeries: z.array(IncidentTelemetrySeriesMetadata).min(1).max(500),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    for (const [index, label] of value.dataSource.alertSelectorLabels.entries()) {
+      if (label === value.dataSource.workspaceLabel) {
+        context.addIssue({
+          code: "custom",
+          path: ["dataSource", "alertSelectorLabels", index],
+          message: "alert selector labels must be non-workspace labels",
+        });
+      }
+    }
+    for (const [index, series] of value.dataSource.requiredSeries.entries()) {
+      if (!series.labels.includes(value.dataSource.workspaceLabel)) {
+        context.addIssue({
+          code: "custom",
+          path: ["dataSource", "requiredSeries", index, "labels"],
+          message: "required incident series must include the workspace label",
+        });
+      }
+      for (const label of value.dataSource.alertSelectorLabels) {
+        if (!series.labels.includes(label)) {
+          context.addIssue({
+            code: "custom",
+            path: ["dataSource", "requiredSeries", index, "labels"],
+            message: "required incident series must include every alert selector label",
+          });
+        }
+      }
+    }
+  });
+export type IncidentTelemetryPreflight = z.infer<typeof IncidentTelemetryPreflight>;
+
+export const ScheduledTaskAgentConfig = /* @__PURE__ */ z
+  .object({
+    prompt: z.string().min(1),
+    resources: z.array(ResourceRef).default([]),
+    tools: z.array(ToolRef).default([]),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+    // Explicit workspace-shared OpenGeni Slack bot binding for scheduled runs.
+    // The worker copies this non-secret pointer into session metadata; the
+    // first-party Slack tools never fall back to a personal hosted-MCP grant.
+    slackBotConnectionId: z.string().uuid().optional(),
+    model: z.string().min(1).optional(),
+    reasoningEffort: ReasoningEffort.optional(),
+    sandboxBackend: SandboxBackend.optional(),
+    goal: GoalSpec.optional(),
+    // Incident telemetry is the only special execution class. Omission keeps
+    // every existing task on the byte-compatible ordinary dispatch path.
+    executionClass: IncidentTelemetryExecutionClass.optional(),
+    incidentTelemetryPreflight: IncidentTelemetryPreflight.optional(),
+    // Durable task override. Scheduled dispatch is trusted to preserve this
+    // snapshot even if the workspace/deployment policy narrows later.
+    maxNestedAgentDepth: NestedAgentDepthValue.optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.executionClass === "incident_telemetry" && !value.incidentTelemetryPreflight) {
+      context.addIssue({
+        code: "custom",
+        path: ["incidentTelemetryPreflight"],
+        message: "incident telemetry tasks require incidentTelemetryPreflight",
+      });
+    }
+    if (value.executionClass !== "incident_telemetry" && value.incidentTelemetryPreflight) {
+      context.addIssue({
+        code: "custom",
+        path: ["executionClass"],
+        message: "incidentTelemetryPreflight requires executionClass=incident_telemetry",
+      });
+    }
+  });
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
 
 export const ScheduledTask = /* @__PURE__ */ z.object({
@@ -6830,6 +7067,8 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   }),
   createdByContext: TurnInitiatorContext.default({}),
   personalConnections: z.array(McpPersonalConnectionSummary).default([]),
+  authorityRevision: z.number().int().positive().default(1),
+  executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
   reusableSessionId: z.string().uuid().nullable(),
   targetSessionId: z.string().uuid().nullable().default(null),
   variableSetId: z.string().uuid().nullable().default(null),
@@ -6895,6 +7134,12 @@ export const ScheduledTaskRun = /* @__PURE__ */ z.object({
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   taskId: z.string().uuid(),
+  taskAuthorityRevision: z.number().int().positive().nullable().default(null),
+  taskExecutionDigest: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/u)
+    .nullable()
+    .default(null),
   status: ScheduledTaskRunStatus,
   triggerType: ScheduledTaskTriggerType,
   scheduledAt: z.string().nullable(),
@@ -9197,8 +9442,9 @@ export const SessionEventType = z.enum([
   "agent.reasoning.delta",
   "agent.toolCall.created",
   "agent.toolCall.output",
-  // Attempt-fenced Codex Responses lifecycle metadata (request identity,
-  // deadlines, first-byte/terminal phase, provider request id). Never body/auth.
+  // Attempt-fenced provider Responses lifecycle metadata (request identity,
+  // liveness policy, first-event/terminal phase, provider request id). Never
+  // request body, credentials, or model output.
   "agent.model.request",
   "agent.model.usage",
   "tool.auth_needed",
@@ -12384,6 +12630,8 @@ export const MachineRuntimeCapabilities = z.object({
   desktop: z.boolean(),
   opStream: z.boolean(),
   browserBridge: z.boolean(),
+  operationResourcePolicy: z.boolean(),
+  operationCpuQuota: z.boolean(),
 });
 export type MachineRuntimeCapabilities = z.infer<typeof MachineRuntimeCapabilities>;
 
@@ -12438,6 +12686,56 @@ export const UpdateMachineAgentResponse = z.object({
 });
 export type UpdateMachineAgentResponse = z.infer<typeof UpdateMachineAgentResponse>;
 
+const OperationMemoryBytes = z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable();
+const OperationCpuMillicores = z.number().int().positive().max(0xffff_ffff).nullable();
+
+function operationPolicyShape(
+  value: {
+    memoryMaxBytes: number | null;
+    memoryHighBytes: number | null;
+    cpuMaxMillicores?: number | null | undefined;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  if (
+    value.memoryMaxBytes !== null &&
+    value.memoryHighBytes !== null &&
+    value.memoryHighBytes > value.memoryMaxBytes
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["memoryHighBytes"],
+      message: "memoryHighBytes cannot exceed memoryMaxBytes",
+    });
+  }
+}
+
+/** Optional per-connection command resource policy. CPU is a period-independent
+ * millicore ratio; runners choose a documented representable cgroup period. Null
+ * values are unrestricted; revision is the optimistic concurrency fence. */
+export const MachineOperationPolicy = z
+  .object({
+    memoryMaxBytes: OperationMemoryBytes,
+    memoryHighBytes: OperationMemoryBytes,
+    cpuMaxMillicores: OperationCpuMillicores,
+    revision: z.number().int().nonnegative(),
+    updatedAt: z.string().nullable(),
+  })
+  .superRefine(operationPolicyShape);
+export type MachineOperationPolicy = z.infer<typeof MachineOperationPolicy>;
+
+export const UpdateMachineOperationPolicyRequest = z
+  .object({
+    memoryMaxBytes: OperationMemoryBytes,
+    memoryHighBytes: OperationMemoryBytes,
+    cpuMaxMillicores: OperationCpuMillicores.optional(),
+    expectedRevision: z.number().int().nonnegative(),
+  })
+  .superRefine(operationPolicyShape);
+export type UpdateMachineOperationPolicyRequest = z.infer<
+  typeof UpdateMachineOperationPolicyRequest
+>;
+
 /**
  * A machine as the Machines dashboard renders it. The workspace's enrolled
  * selfhosted machines PLUS the session's synthetic Modal group box
@@ -12471,6 +12769,8 @@ export const MachineView = z.object({
   // Exact connected-agent build/capabilities and current update operation. Null
   // for managed/session sandboxes and pre-runtime-reporting synthetic rows.
   runtime: MachineRuntime.nullable().default(null),
+  // Per-enrollment desired policy. Null for managed/session sandboxes.
+  operationPolicy: MachineOperationPolicy.nullable().default(null),
   metrics: MetricSample.nullable(),
 });
 export type MachineView = z.infer<typeof MachineView>;
@@ -12931,6 +13231,8 @@ export const WorkspaceModelCatalogModel =
   /* @__PURE__ */ defineModelContractSchema(() =>
     ClientModel.extend({
       credentialReadiness: ModelCredentialReadinessV1,
+      /** Exact workspace-policy verdict without exposing provider identity. */
+      policyAllowed: z.boolean().optional(),
       availability: ModelAvailabilityV1,
     }),
   );
@@ -12952,7 +13254,7 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-model-context-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-machine-resource-policy-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;

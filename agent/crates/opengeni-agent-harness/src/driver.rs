@@ -212,6 +212,7 @@ impl Driver {
         let control = ControlRequest {
             request_id,
             epoch: 0,
+            resource_policy: None,
             op: Some(op.into_wire()),
         };
         let payload = Bytes::from(control.encode_to_vec());

@@ -103,8 +103,13 @@ async function hydrateNewSessionDraft(
   const options = { ...mapped.options };
   if (options.variableSetId) {
     if (
+      !hasPermission(grant.permissions, "variable-sets:attach") ||
       !hasPermission(grant.permissions, "variable-sets:use") ||
-      !(await getVariableSet(deps.db, workspaceId, options.variableSetId))
+      !(await getVariableSet(
+        deps.db,
+        { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+        options.variableSetId,
+      ))
     ) {
       delete options.variableSetId;
     }

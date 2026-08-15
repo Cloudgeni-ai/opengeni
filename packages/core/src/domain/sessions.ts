@@ -1490,6 +1490,14 @@ export async function createSessionForRequestWithOutcome(
       }
       // else: workspace-default fallback that no longer resolves → rig-less.
     } else {
+      for (const defaultVariableSetId of new Set(rig.activeVersion.defaultVariableSetIds)) {
+        await validateVariableSetAttachment(
+          { settings, db },
+          grant,
+          workspaceId,
+          defaultVariableSetId,
+        );
+      }
       frozenRigId = rig.id;
       frozenRigVersionId = rig.activeVersion.id;
     }

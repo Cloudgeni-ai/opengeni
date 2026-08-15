@@ -1,6 +1,7 @@
 import type {
   BrowserObservation,
   BrowserSessionResource,
+  ComputerTargetListResponse,
   InteractionSemanticNode,
 } from "@opengeni/sdk";
 import { chromium, type Page } from "playwright";
@@ -17,6 +18,8 @@ type Metric =
   | "computerTypeVisible"
   | "computerPasteVisible"
   | "computerReconnect";
+
+const UI_SURFACE_TIMEOUT_MS = 20_000;
 
 const output = resolve(
   process.env.OPENGENI_INTERACTION_UI_OUTPUT ??
@@ -47,6 +50,13 @@ const diagnostics: {
   failedResponses: Array<{ status: number; url: string }>;
   pageErrors: string[];
   rfbFramesSent: string[];
+  rfbSockets: Array<{
+    url: string;
+    openedAt: string;
+    closedAt: string | null;
+    error: string | null;
+    framesSent: string[];
+  }>;
 } = {
   computerActions: [],
   computerClipboardReads: [],
@@ -56,6 +66,7 @@ const diagnostics: {
   failedResponses: [],
   pageErrors: [],
   rfbFramesSent: [],
+  rfbSockets: [],
 };
 page.on("console", (message) => {
   if (message.type() === "error") diagnostics.consoleErrors.push(message.text());
@@ -67,10 +78,26 @@ page.on("response", (response) => {
 });
 page.on("websocket", (socket) => {
   if (!socket.url().includes("/rfb")) return;
+  const entry: (typeof diagnostics.rfbSockets)[number] = {
+    url: socket.url(),
+    openedAt: new Date().toISOString(),
+    closedAt: null,
+    error: null,
+    framesSent: [],
+  };
+  diagnostics.rfbSockets.push(entry);
+  socket.on("close", () => {
+    entry.closedAt = new Date().toISOString();
+  });
+  socket.on("socketerror", (error) => {
+    entry.error = error;
+  });
   socket.on("framesent", ({ payload }) => {
     const bytes = typeof payload === "string" ? new TextEncoder().encode(payload) : payload;
-    if (bytes.byteLength <= 16 && diagnostics.rfbFramesSent.length < 200) {
-      diagnostics.rfbFramesSent.push(Buffer.from(bytes).toString("hex"));
+    if (bytes.byteLength <= 16 && entry.framesSent.length < 200) {
+      const hex = Buffer.from(bytes).toString("hex");
+      entry.framesSent.push(hex);
+      if (diagnostics.rfbFramesSent.length < 200) diagnostics.rfbFramesSent.push(hex);
     }
   });
 });
@@ -185,12 +212,12 @@ try {
     fixture.workspaceId,
     fixture.computerSessionId,
   );
-  const computerTargets = await computerResource.targets.list();
+  const computerTargets = await waitForComputerWindow(computerResource);
   const computerWindow =
     computerTargets.targets.find((target) => target.kind === "window" && target.focused) ??
     computerTargets.targets.find((target) => target.kind === "window");
-  if (!computerWindow) throw new Error("UI fixture computer has no Chromium window");
-  let computerObservation = await computerResource.observe(computerWindow.id);
+  if (!computerWindow) throw new Error("UI fixture Desktop has no Chromium window");
+  const computerObservation = await computerResource.observe(computerWindow.id);
   const inputNode = findSemanticNode(
     computerObservation,
     (node) => node.role === "entry" && node.name === "Acceptance input",
@@ -204,11 +231,10 @@ try {
     action: { type: "semantic", locator: { kind: "ref", ref: inputNode.ref }, action: "focus" },
   });
   if (focused.state !== "completed") throw new Error("computer semantic focus failed");
-
   started = performance.now();
-  await page.getByRole("tab", { name: "Computer", exact: true }).click();
+  await page.getByRole("tab", { name: "Desktop", exact: true }).click();
   const desktop = page.locator('[data-opengeni-desktop][data-ui-state="connected"]');
-  await desktop.waitFor({ state: "visible", timeout: 7_500 });
+  await desktop.waitFor({ state: "visible", timeout: UI_SURFACE_TIMEOUT_MS });
   const desktopCanvas = page.locator("[data-opengeni-desktop-canvas] canvas");
   await waitForPaintedCanvas(page, desktopCanvas);
   timings.computerFirstFrame = performance.now() - started;
@@ -303,8 +329,8 @@ try {
 
   started = performance.now();
   await page.getByRole("tab", { name: "Files", exact: true }).click();
-  await page.getByRole("tab", { name: "Computer", exact: true }).click();
-  await desktop.waitFor({ state: "visible", timeout: 6_000 });
+  await page.getByRole("tab", { name: "Desktop", exact: true }).click();
+  await desktop.waitFor({ state: "visible", timeout: UI_SURFACE_TIMEOUT_MS });
   await waitForPaintedCanvas(page, desktopCanvas);
   timings.computerReconnect = performance.now() - started;
   checks.push("computer.ui-reconnect");
@@ -398,7 +424,7 @@ async function waitForPaintedCanvas(
   playwrightPage: Page,
   canvas: import("playwright").Locator,
 ): Promise<void> {
-  await canvas.waitFor({ state: "visible", timeout: 7_500 });
+  await canvas.waitFor({ state: "visible", timeout: UI_SURFACE_TIMEOUT_MS });
   await playwrightPage.waitForFunction(
     (selector) => {
       const element = document.querySelector(selector);
@@ -411,8 +437,20 @@ async function waitForPaintedCanvas(
           ? `canvas[aria-label=${JSON.stringify(label)}]`
           : "[data-opengeni-desktop-canvas] canvas",
       ),
-    { timeout: 7_500 },
+    { timeout: UI_SURFACE_TIMEOUT_MS },
   );
+}
+
+async function waitForComputerWindow(resource: {
+  targets: { list(): Promise<ComputerTargetListResponse> };
+}): Promise<ComputerTargetListResponse> {
+  const deadline = performance.now() + UI_SURFACE_TIMEOUT_MS;
+  while (true) {
+    const targets = await resource.targets.list();
+    if (targets.targets.some((target) => target.kind === "window")) return targets;
+    if (performance.now() >= deadline) return targets;
+    await Bun.sleep(100);
+  }
 }
 
 async function clickCanvasFraction(

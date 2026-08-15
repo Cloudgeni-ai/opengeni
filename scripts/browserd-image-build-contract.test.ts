@@ -88,6 +88,7 @@ describe("browser controller image build contract", () => {
     expect(dockerfile).toContain("/tmp/google-chrome-stable.deb");
     expect(dockerfile).not.toContain("google-chrome-stable=${OPENGENI_GOOGLE_CHROME_VERSION}");
     expect(dockerfile).not.toContain("https://dl.google.com/linux/chrome/deb/ stable main");
+    expect(dockerfile).toContain("at-spi2-core libgtk-3-bin python3-gi gir1.2-gtk-3.0");
   });
 
   test("Debian Chromium remains available from one retained security snapshot", async () => {

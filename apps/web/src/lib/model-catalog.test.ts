@@ -15,6 +15,7 @@ function catalogModel(id: string): WorkspaceModelCatalogModel {
       basis: "configuration",
       checkedAt: null,
     },
+    policyAllowed: true,
     availability: {
       status: "available",
       selectable: true,

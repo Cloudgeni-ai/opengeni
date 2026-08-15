@@ -6,6 +6,7 @@ import {
   Runner,
   Usage,
   tool,
+  toolSearchTool,
   type Model,
   type ModelProvider,
   type ModelRequest,
@@ -18,8 +19,10 @@ import {
   installLazyToolRuntime,
   restoreGenericDispatchHistory,
   restoreGenericDispatchHistoryItems,
+  transformGenericDispatchResponse,
 } from "../src/lazy-tool-transport";
 import { boundModelToolOutputItem } from "@opengeni/codex";
+import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "../src/mcp-network";
 
 const SERVER_ID = "connected_tools";
 const WEATHER_TOOL = `${SERVER_ID}__weather_lookup`;
@@ -601,11 +604,11 @@ describe("generic lazy tool dispatch", () => {
     expect(JSON.stringify(projected)).not.toContain("opengeni.lazy_dispatch.v1");
   });
 
-  test("bounds generic search disclosure before output truncation", async () => {
+  test("preserves large generic search schemas across ordinary output truncation", async () => {
     const tools = Array.from({ length: 8 }, (_, index) =>
       tool({
         name: `${SERVER_ID}__weather_${index}`,
-        description: `weather capability ${"x".repeat(2_500)}`,
+        description: `weather capability ${index} ${"x".repeat(50_000)}`,
         parameters: {
           type: "object",
           properties: { city: { type: "string" } },
@@ -616,16 +619,12 @@ describe("generic lazy tool dispatch", () => {
         execute: () => "unused",
       }),
     ) as unknown as Tool[];
-    const runtime = installLazyToolRuntime(
-      {
-        async getAllTools() {
-          return tools;
-        },
+    const fakeAgent = {
+      async getAllTools() {
+        return tools;
       },
-      "generic_dispatch",
-      new Set([SERVER_ID]),
-      1_000,
-    );
+    };
+    const runtime = installLazyToolRuntime(fakeAgent, "generic_dispatch", new Set([SERVER_ID]));
     runtime.refresh(tools);
     const searchTool = runtime.controlTools.find(
       (candidate) => candidate.type === "function" && candidate.name === "tool_search",
@@ -640,45 +639,47 @@ describe("generic lazy tool dispatch", () => {
     const parsed = JSON.parse(String(output)) as { tools: unknown[] };
     expect(parsed.tools.length).toBeGreaterThan(0);
     expect(parsed.tools.length).toBeLessThan(tools.length);
+    expect(Buffer.byteLength(String(output))).toBeGreaterThan(48_000);
+    expect(Buffer.byteLength(String(output))).toBeLessThanOrEqual(
+      MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES,
+    );
 
     const item = { type: "function_call_result", callId: "search-1", output };
-    expect(boundModelToolOutputItem(item, 1_000)).toBe(item);
-
-    const tinyRuntime = installLazyToolRuntime(
-      {
-        async getAllTools() {
-          return tools;
-        },
-      },
-      "generic_dispatch",
-      new Set([SERVER_ID]),
-      1,
-    );
-    tinyRuntime.refresh(tools);
-    const tinySearch = tinyRuntime.controlTools.find(
-      (candidate) => candidate.type === "function" && candidate.name === "tool_search",
-    );
-    if (!tinySearch || tinySearch.type !== "function") throw new Error("missing tiny tool_search");
-    const tinyOutput = await tinySearch.invoke(
-      {} as never,
-      JSON.stringify({ query: "weather capability" }),
-      undefined as never,
-    );
-    expect(tinyOutput).toBe("{}");
-    const tinyItem = { type: "function_call_result", callId: "search-tiny", output: tinyOutput };
-    expect(boundModelToolOutputItem(tinyItem, 1)).toBe(tinyItem);
-
-    // Planted negative: the previous unbounded disclosure is mutated by the
-    // ordinary output truncator, corrupting at least one returned schema.
-    const unbounded = JSON.stringify({
-      tools: runtime.search({ query: "weather capability", limit: 20 }).map(serializedFunction),
-    });
-    const truncated = boundModelToolOutputItem(
-      { ...item, output: unbounded },
-      1_000,
-    ) as typeof item;
-    expect(truncated.output).not.toBe(unbounded);
+    const truncated = boundModelToolOutputItem(item, 10_000) as typeof item;
+    expect(truncated.output).not.toBe(output);
     expect(String(truncated.output)).toContain("tokens truncated");
+
+    const args = JSON.stringify({ query: "weather capability", limit: 20 });
+    const marked = transformGenericDispatchResponse(
+      {
+        usage: new Usage(),
+        output: [
+          {
+            type: "function_call",
+            callId: "search-1",
+            name: "tool_search",
+            arguments: args,
+          },
+        ],
+      },
+      runtime,
+    ).output[0]!;
+    const inner = new CapturingModel();
+    const wrapped = await new LazyToolModelProvider(providerFor(inner), runtime).getModel("test");
+    const visible = await fakeAgent.getAllTools(undefined);
+    await wrapped.getResponse({
+      ...baseRequest(visible.map(serializedFunction)),
+      input: [marked, truncated] as ModelRequest["input"],
+    });
+
+    const providerInput = inner.requests[0]!.input as Array<Record<string, unknown>>;
+    const providerCall = providerInput.find((candidate) => candidate.type === "function_call");
+    const providerResult = providerInput.find(
+      (candidate) => candidate.type === "function_call_result",
+    );
+    expect(providerCall?.providerData).toBeUndefined();
+    expect(providerResult?.output).toBe(output);
+    expect(() => JSON.parse(String(providerResult?.output))).not.toThrow();
   });
 
   test("reserves only the control names installed by each transport", () => {
@@ -732,6 +733,264 @@ describe("generic lazy tool dispatch", () => {
 });
 
 describe("OpenAI/Azure native client tool search", () => {
+  test("keeps the callback tool pool unique across multiple searches in one response", async () => {
+    const deferredTool = weatherTool();
+    (deferredTool as { deferLoading?: boolean }).deferLoading = true;
+    const matchingCounts: number[] = [];
+    const searchTool = toolSearchTool({
+      execution: "client",
+      description: "Search available tools",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string" } },
+        required: ["query"],
+        additionalProperties: false,
+      },
+      execute: async ({ availableTools }) => {
+        const matches = availableTools.filter(
+          (candidate) => candidate.type === "function" && candidate.name === WEATHER_TOOL,
+        );
+        matchingCounts.push(matches.length);
+        return matches;
+      },
+    });
+    const agent = new Agent({
+      name: "same-response-tool-search-test",
+      instructions: "Search for tools.",
+      model: "scripted",
+      tools: [deferredTool, searchTool],
+    });
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "tool_search_call",
+          call_id: "search-one",
+          execution: "client",
+          status: "completed",
+          arguments: { query: "weather" },
+        },
+        {
+          type: "tool_search_call",
+          call_id: "search-two",
+          execution: "client",
+          status: "completed",
+          arguments: { query: "weather" },
+        },
+      ],
+      [finalMessage("done")],
+    ]);
+    const result = await new Runner({ modelProvider: providerFor(model) }).run(
+      agent,
+      "Find weather tools twice.",
+      {
+        stream: true,
+        historyOwnership: "external",
+        maxTurns: 4,
+      },
+    );
+    for await (const _event of result.toStream()) void _event;
+    await result.completed;
+
+    expect(result.finalOutput).toBe("done");
+    expect(matchingCounts).toEqual([1, 1]);
+    const disclosedHistory = JSON.stringify(model.requests[1]!.input);
+    expect(disclosedHistory.match(/tool_search_output/g)).toHaveLength(2);
+  });
+
+  test("replaces a callback-created tool by routed identity within one response", async () => {
+    const dynamicName = "dynamic__lookup";
+    const firstDefinition = tool({
+      name: dynamicName,
+      description: "First definition",
+      parameters: {
+        type: "object",
+        properties: { old_query: { type: "string" } },
+        required: ["old_query"],
+        additionalProperties: false,
+      },
+      strict: false,
+      execute: () => "unused",
+    }) as unknown as Tool;
+    const currentDefinition = tool({
+      name: dynamicName,
+      description: "Current definition",
+      parameters: {
+        type: "object",
+        properties: { current_query: { type: "string" } },
+        required: ["current_query"],
+        additionalProperties: false,
+      },
+      strict: false,
+      execute: () => "unused",
+    }) as unknown as Tool;
+    const observedDefinitions: string[][] = [];
+    const searchTool = toolSearchTool({
+      execution: "client",
+      description: "Search dynamic tools",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string" } },
+        required: ["query"],
+        additionalProperties: false,
+      },
+      execute: async ({ availableTools, toolCall }) => {
+        const query = (toolCall.arguments as { query?: string }).query;
+        observedDefinitions.push(
+          availableTools
+            .filter((candidate) => candidate.type === "function" && candidate.name === dynamicName)
+            .map((candidate) => candidate.description),
+        );
+        if (query === "first") return [firstDefinition];
+        if (query === "replace") return [currentDefinition];
+        return availableTools.filter(
+          (candidate) => candidate.type === "function" && candidate.name === dynamicName,
+        );
+      },
+    });
+    const agent = new Agent({
+      name: "same-response-tool-replacement-test",
+      instructions: "Search for dynamic tools.",
+      model: "scripted",
+      tools: [searchTool],
+    });
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "tool_search_call",
+          call_id: "dynamic-first",
+          execution: "client",
+          status: "completed",
+          arguments: { query: "first" },
+        },
+        {
+          type: "tool_search_call",
+          call_id: "dynamic-replace",
+          execution: "client",
+          status: "completed",
+          arguments: { query: "replace" },
+        },
+        {
+          type: "tool_search_call",
+          call_id: "dynamic-current",
+          execution: "client",
+          status: "completed",
+          arguments: { query: "current" },
+        },
+      ],
+      [finalMessage("done")],
+    ]);
+    const result = await new Runner({ modelProvider: providerFor(model) }).run(
+      agent,
+      "Refresh the dynamic tool.",
+      {
+        stream: true,
+        historyOwnership: "external",
+        maxTurns: 4,
+      },
+    );
+    for await (const _event of result.toStream()) void _event;
+    await result.completed;
+
+    expect(result.finalOutput).toBe("done");
+    expect(observedDefinitions).toEqual([[], ["First definition"], ["Current definition"]]);
+  });
+
+  test("rebinds historical disclosure to today's same-identity tool definition", async () => {
+    let executedInput: { city: string; units: string } | undefined;
+    const currentTool = tool({
+      name: WEATHER_TOOL,
+      description: "Look up weather using the current units-aware schema",
+      parameters: {
+        type: "object",
+        properties: {
+          city: { type: "string" },
+          units: { type: "string" },
+        },
+        required: ["city", "units"],
+        additionalProperties: false,
+      },
+      strict: false,
+      execute: (input) => {
+        executedInput = input as { city: string; units: string };
+        return `${executedInput.city}:${executedInput.units}`;
+      },
+    }) as unknown as Tool;
+    (currentTool as { deferLoading?: boolean }).deferLoading = true;
+    const searchTool = toolSearchTool({
+      execution: "client",
+      execute: async () => [currentTool],
+    });
+    const agent = new Agent({
+      name: "historical-tool-refresh-test",
+      instructions: "Use current tools.",
+      model: "scripted",
+      tools: [currentTool, searchTool],
+    });
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "current-weather-call",
+          name: WEATHER_TOOL,
+          arguments: JSON.stringify({ city: "Oslo", units: "metric" }),
+        },
+      ],
+      [finalMessage("current-definition-used")],
+    ]);
+    const historicalInput = [
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Old weather request" }],
+      },
+      {
+        type: "tool_search_call",
+        call_id: "old-weather-search",
+        execution: "client",
+        status: "completed",
+        arguments: { query: "weather" },
+      },
+      {
+        type: "tool_search_output",
+        call_id: "old-weather-search",
+        execution: "client",
+        status: "completed",
+        tools: [
+          {
+            type: "function",
+            name: WEATHER_TOOL,
+            description: "Old city-only weather schema",
+            parameters: {
+              type: "object",
+              properties: { city: { type: "string" } },
+              required: ["city"],
+              additionalProperties: false,
+            },
+          },
+        ],
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Use metric units now" }],
+      },
+    ];
+    const result = await new Runner({ modelProvider: providerFor(model) }).run(
+      agent,
+      historicalInput as never,
+      {
+        stream: true,
+        historyOwnership: "external",
+        maxTurns: 4,
+      },
+    );
+    for await (const _event of result.toStream()) void _event;
+    await result.completed;
+
+    expect(result.finalOutput).toBe("current-definition-used");
+    expect(executedInput).toEqual({ city: "Oslo", units: "metric" });
+  });
+
   test("omits lazy schemas on the wire, discloses real tool objects, and executes normally", async () => {
     let approvalChecks = 0;
     let executions = 0;

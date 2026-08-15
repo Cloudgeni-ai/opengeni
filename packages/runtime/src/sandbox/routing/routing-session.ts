@@ -31,11 +31,20 @@ import type { ExposedPortEndpoint } from "../stream-port";
 import { SelfhostedControlError } from "../selfhosted/control-rpc";
 import { renderSelfhostedFault } from "../selfhosted/fault-rendering";
 import {
+  ChannelAPartialMutationError,
   isDefinitePathNotFoundError,
   isExecSessionLostBanner,
+  SandboxChannelAService,
   stripExecBanner,
 } from "../channel-a";
-import type { ChannelAExecArgs, ChannelAExecResult } from "../channel-a";
+import type {
+  ChannelAExecArgs,
+  ChannelAExecResult,
+  ChannelARoutedWorkspaceImportBatchRequest,
+  ChannelARoutedWorkspaceImportRequest,
+  ChannelASession,
+  WorkspaceFileImportReceipt,
+} from "../channel-a";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
 
@@ -312,6 +321,18 @@ export class RoutingMutationOutcomeUnknownError extends Error {
   ) {
     super(message, options);
     this.retainedProcess = options?.retainedProcess ?? null;
+  }
+}
+
+/** Recognize routed mutation uncertainty without allowing a hostile Proxy's
+ * prototype trap to replace the original provider failure. */
+export function isRoutingMutationOutcomeUnknownError(
+  error: unknown,
+): error is RoutingMutationOutcomeUnknownError {
+  try {
+    return error instanceof RoutingMutationOutcomeUnknownError;
+  } catch {
+    return false;
   }
 }
 
@@ -989,22 +1010,32 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           fn(backend.session, backend),
         );
       } catch (error) {
+        const partialMutation = error instanceof ChannelAPartialMutationError;
         if (mutatesWorkspace && this.deps.afterMutation) {
           try {
             await this.deps.afterMutation({
               op,
               backend,
               admission,
-              outcome: "rejected",
+              outcome: partialMutation ? "resolved" : "rejected",
             });
           } catch (settlementError) {
             this.invalidate(backend);
             throw new RoutingMutationOutcomeUnknownError(
               op,
-              `Mutating sandbox operation "${op}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
+              partialMutation
+                ? `Mutating sandbox operation "${op}" partially applied at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`
+                : `Mutating sandbox operation "${op}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
               { cause: settlementError },
             );
           }
+        }
+        if (partialMutation) {
+          throw new RoutingMutationOutcomeUnknownError(
+            op,
+            `Mutating sandbox operation "${op}" partially applied before a later batch item failed; the complete operation was not replayed`,
+            { cause: error },
+          );
         }
         if (!isFenceError(error)) {
           if (backend.sandboxId === null && this.deps.onDefaultBackendError) {
@@ -1411,6 +1442,57 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         return;
       }
       throw new RoutingUnsupportedError("deletePlacementPrivate", this.cached?.kind ?? "unknown");
+    });
+  }
+
+  /** Keep private download authority and its consuming import on one exact
+   * backend. A pointer move during the callback is handled by the enclosing
+   * mutation settlement; the operation is never replayed onto another route. */
+  async importWorkspaceFileOnResolvedBackend(
+    input: ChannelARoutedWorkspaceImportRequest,
+  ): Promise<WorkspaceFileImportReceipt> {
+    return await this.dispatch("importWorkspaceFile", true, async (session) => {
+      const channel = new SandboxChannelAService({
+        session: session as ChannelASession,
+        workspaceRoot: input.workspaceRoot,
+        revision: input.revision,
+        ...(input.runAs ? { runAs: input.runAs } : {}),
+      });
+      return await channel.importWorkspaceFile(input.request);
+    });
+  }
+
+  /** Keep every exact file in one logical attachment envelope on the same
+   * backend and under one mutation admission/settlement. A pointer move rejects
+   * the complete batch output as outcome-unknown; no attachment is replayed on
+   * the new route. */
+  async importWorkspaceFilesOnResolvedBackend(
+    input: ChannelARoutedWorkspaceImportBatchRequest,
+  ): Promise<readonly WorkspaceFileImportReceipt[]> {
+    return await this.dispatch("importWorkspaceFiles", true, async (session) => {
+      const channel = new SandboxChannelAService({
+        session: session as ChannelASession,
+        workspaceRoot: input.workspaceRoot,
+        revision: input.revision,
+        ...(input.runAs ? { runAs: input.runAs } : {}),
+      });
+      return await channel.importWorkspaceFiles(input.requests);
+    });
+  }
+
+  /** Inspect an exact-file envelope on one resolved backend without entering
+   * mutation admission or staging private source authority. */
+  async inspectWorkspaceFilesOnResolvedBackend(
+    input: ChannelARoutedWorkspaceImportBatchRequest,
+  ): Promise<readonly WorkspaceFileImportReceipt[] | null> {
+    return await this.dispatch("inspectWorkspaceFiles", false, async (session) => {
+      const channel = new SandboxChannelAService({
+        session: session as ChannelASession,
+        workspaceRoot: input.workspaceRoot,
+        revision: input.revision,
+        ...(input.runAs ? { runAs: input.runAs } : {}),
+      });
+      return await channel.inspectWorkspaceFiles(input.requests);
     });
   }
 

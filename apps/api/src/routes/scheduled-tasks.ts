@@ -21,6 +21,7 @@ import {
   manualScheduledTaskTriggerWorkflowId,
   scheduledTaskToolsProvided,
   scheduledTaskForGrant,
+  scheduledTaskAuthorityUpdateForGrant,
   scheduledTaskRunForGrant,
   scheduledTaskTriggerToken,
   requireScheduledTaskForApi,
@@ -130,6 +131,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const previous = await captureScheduledTaskRestoreState(db, existing);
     const task = await updateScheduledTask(db, workspaceId, existing.id, {
       status: "active",
+      ...scheduledTaskAuthorityUpdateForGrant(grant),
     });
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
     return c.json(scheduledTaskForGrant(task, grant));

@@ -1362,6 +1362,7 @@ describe("contracts", () => {
             basis: "configuration",
             checkedAt: null,
           },
+          policyAllowed: true,
           availability: {
             status: "unknown",
             selectable: true,
@@ -1371,6 +1372,7 @@ describe("contracts", () => {
         },
       ],
     });
+    expect(catalog.models[0]?.policyAllowed).toBe(true);
     expect(catalog.models[0]?.availability.selectable).toBe(true);
   });
 

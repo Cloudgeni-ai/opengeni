@@ -165,6 +165,7 @@ import type {
   CreateKnowledgeDropRequest,
   MoveDocumentRequest,
   ClientConfig,
+  WorkspaceModelAccessPolicy,
   WorkspaceModelCatalogResponse,
   WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
@@ -233,6 +234,8 @@ import type {
   MachineMetricsSeriesResponse,
   RemoveEnrollmentRequest,
   RemoveEnrollmentResponse,
+  MachineOperationPolicy,
+  UpdateMachineOperationPolicyRequest,
   UpdateMachineAgentResponse,
   // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).
   SwapActiveSandboxRequest,
@@ -365,6 +368,7 @@ import type {
   UpdateVariableSetRequest,
   UpdateRigRequest,
   UpdateWorkspaceMemberRequest,
+  UpdateWorkspaceModelAccessPolicyRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
   SetWorkspaceDefaultRigRequest,
@@ -1207,6 +1211,20 @@ export class OpenGeniClient {
     return await this.requestJson<UpdateMachineAgentResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/update`,
+    );
+  }
+
+  /** Revision-fenced update of a Connected Machine's optional command memory
+   * policy. Null byte limits preserve unrestricted machine access. */
+  async updateMachineOperationPolicy(
+    workspaceId: string,
+    enrollmentId: string,
+    request: UpdateMachineOperationPolicyRequest,
+  ): Promise<MachineOperationPolicy> {
+    return await this.requestJson<MachineOperationPolicy>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/operation-policy`,
+      request,
     );
   }
 
@@ -3396,6 +3414,26 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceModelCatalogResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/model-catalog`,
+    );
+  }
+
+  /** Read the workspace's hard provider/model allowlist. */
+  async getWorkspaceModelAccessPolicy(workspaceId: string): Promise<WorkspaceModelAccessPolicy> {
+    return await this.requestJson<WorkspaceModelAccessPolicy>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/model-policy`,
+    );
+  }
+
+  /** Fully replace the workspace's hard provider/model allowlist. */
+  async updateWorkspaceModelAccessPolicy(
+    workspaceId: string,
+    request: UpdateWorkspaceModelAccessPolicyRequest,
+  ): Promise<WorkspaceModelAccessPolicy> {
+    return await this.requestJson<WorkspaceModelAccessPolicy>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/model-policy`,
+      request,
     );
   }
 

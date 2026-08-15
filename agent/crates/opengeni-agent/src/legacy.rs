@@ -89,12 +89,27 @@ pub async fn serve_exec<P: Platform>(
 }
 
 /// Multi-connection form of [`serve_exec`].
+#[cfg(test)]
 pub async fn serve_exec_scoped<P: Platform>(
     engine: &Arc<Engine>,
     platform: &Arc<P>,
     scope: &str,
     request_id: String,
+    req: v1::ExecRequest,
+) -> ControlResponse {
+    serve_exec_scoped_with_policy(engine, platform, scope, request_id, req, None).await
+}
+
+/// Policy-aware legacy exec adapter. A configured policy is enforced by the
+/// same containment primitive as op-stream; older request/reply semantics change
+/// neither operation identity nor output assembly.
+pub async fn serve_exec_scoped_with_policy<P: Platform>(
+    engine: &Arc<Engine>,
+    platform: &Arc<P>,
+    scope: &str,
+    request_id: String,
     mut req: v1::ExecRequest,
+    resource_policy: Option<v1::OperationResourcePolicy>,
 ) -> ControlResponse {
     crate::codemode::expose_native_client(&mut req);
     let op_id = scoped_op_id(scope, &request_id);
@@ -124,7 +139,7 @@ pub async fn serve_exec_scoped<P: Platform>(
         ticket,
         stdin,
         deadline,
-        || platform.spawn_exec(&req),
+        || platform.spawn_exec_with_policy(&req, resource_policy.as_ref()),
         emit,
         // The legacy consumer never replays the Exit frame; its record flows
         // through the on_exit oneshot. An empty retained payload is enough.
@@ -217,12 +232,26 @@ pub async fn serve_git<P: Platform>(
 }
 
 /// Multi-connection form of [`serve_git`].
+#[cfg(test)]
 pub async fn serve_git_scoped<P: Platform>(
     engine: &Arc<Engine>,
     platform: &Arc<P>,
     scope: &str,
     request_id: String,
     req: v1::GitRequest,
+) -> ControlResponse {
+    serve_git_scoped_with_policy(engine, platform, scope, request_id, req, None).await
+}
+
+/// Policy-aware legacy git adapter. Git descendants and page cache share the
+/// same per-operation leaf and connection policy as exec.
+pub async fn serve_git_scoped_with_policy<P: Platform>(
+    engine: &Arc<Engine>,
+    platform: &Arc<P>,
+    scope: &str,
+    request_id: String,
+    req: v1::GitRequest,
+    resource_policy: Option<v1::OperationResourcePolicy>,
 ) -> ControlResponse {
     let op_id = scoped_op_id(scope, &request_id);
     let origin = scoped_origin(scope, LEGACY_ORIGIN);
@@ -244,7 +273,7 @@ pub async fn serve_git_scoped<P: Platform>(
         Vec::new(),
         // Rule C: git carries no caller deadline field; none is imposed.
         None,
-        || platform.spawn_git(&req),
+        || platform.spawn_git_with_policy(&req, resource_policy.as_ref()),
         emit,
         |_exit| Vec::new(),
         move |_exit_seq, exit: &JobExit| {

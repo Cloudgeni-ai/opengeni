@@ -57,7 +57,7 @@ is a write-destination receipt only; it does not select context, freeze a
 logical-turn snapshot, or overlap the permission-first selector's context
 receipt ownership.
 
-Migration `0247_company_brain_governed_write_proposals.sql` broadens the
+Migration `0255_company_brain_governed_write_proposals.sql` broadens the
 historically named onboarding-proposal validator without changing its table. A
 Knowledge-backed instruction draft is admitted only when its provenance source
 ID, workspace scope, target, and content hash match the exact immutable
@@ -147,4 +147,4 @@ Canonical implementation: `packages/contracts/src/task-notes.ts`,
 `packages/contracts/src/company-brain-governed-writes.ts`,
 `packages/db/src/company-brain-governed-writes.ts`,
 `packages/core/src/domain/company-brain-governed-writes.ts`, plus migration
-`0247_company_brain_governed_write_proposals.sql` for governed proposals.
+`0255_company_brain_governed_write_proposals.sql` for governed proposals.

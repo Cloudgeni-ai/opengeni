@@ -97,6 +97,14 @@ to validate a credential. Portable compaction reuses the same provider context. 
 durable generated-image operation/artifact boundary; xAI video helpers retain
 their existing durable video boundary.
 
+Each streaming response has one liveness rule: if no complete, valid SSE data
+event arrives for `OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS` (default
+five minutes), the transport cancels that accepted stream and surfaces a typed
+partial-response timeout without replay. Every valid event resets the timer;
+there is no model-call or run-duration deadline. Request lifecycle audit records
+request identity, attempt, headers, first event, event count/type, last-progress
+duration, and terminal outcome, but never request bodies, credentials, or output.
+
 ## Failure and durable capacity semantics
 
 Only definitive account refusal may walk the pool:
