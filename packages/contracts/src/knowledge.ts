@@ -3,6 +3,7 @@ import { z } from "zod";
 export const KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS = 1_024;
 export const KNOWLEDGE_BROWSE_DEFAULT_LIMIT = 20;
 export const KNOWLEDGE_BROWSE_MAX_LIMIT = 50;
+export const KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES = 64 * 1_024;
 export const KNOWLEDGE_TITLE_MAX_BYTES = 1_024;
 export const KNOWLEDGE_BODY_MAX_BYTES = 16 * 1_024;
 export const KNOWLEDGE_SUMMARY_MAX_BYTES = 4 * 1_024;
@@ -16,6 +17,7 @@ export const KNOWLEDGE_SOURCE_URI_MAX_BYTES = 8_192;
 export const KNOWLEDGE_SEARCH_MAX_RESULTS = 50;
 export const KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES = 64 * 1_024;
 export const KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN = 4;
+export const KNOWLEDGE_SEARCH_MAX_FLOOR_OMISSIONS = 200;
 // Cosine similarity for unrelated embeddings clusters around 0.5 after the
 // distance conversion used by Documents. Keyword search already excludes
 // non-matches in SQL, but a small normalized floor removes incidental hits.
@@ -194,9 +196,10 @@ export const KnowledgeRecord = z.object({
           "provenance.source.title",
           "provenance.source.author",
           "provenance.source.version",
+          "provenance.citation",
         ]),
       )
-      .max(10),
+      .max(11),
   }),
 });
 export type KnowledgeRecord = z.infer<typeof KnowledgeRecord>;
@@ -239,7 +242,7 @@ export const KnowledgeSearchResponse = z.object({
       omittedOnRecheck: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
     }),
     omitted: z.object({
-      belowRelevanceFloor: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+      belowRelevanceFloor: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_FLOOR_OMISSIONS),
       asDuplicate: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
       forLimit: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
       forResponseBudget: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
@@ -266,8 +269,26 @@ export const KnowledgeGetResponse = z.object({
 export type KnowledgeGetResponse = z.infer<typeof KnowledgeGetResponse>;
 
 export const KnowledgeBrowseResponse = z.object({
-  records: z.array(KnowledgeRecord),
+  records: z.array(KnowledgeRecord).max(KNOWLEDGE_BROWSE_MAX_LIMIT),
   nextCursor: z.string().min(1).max(KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS).nullable(),
   hasMore: z.boolean(),
+  selection: z.object({
+    omitted: z.object({
+      forResponseBudget: z.number().int().nonnegative().max(KNOWLEDGE_BROWSE_MAX_LIMIT),
+    }),
+    compactedRecordCount: z.number().int().nonnegative().max(1),
+    budget: z.object({
+      maxResults: z.literal(KNOWLEDGE_BROWSE_MAX_LIMIT),
+      maxResponseBytes: z.literal(KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES),
+      responseBytes: z.number().int().nonnegative().max(KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES),
+      tokenEstimateBytesPerToken: z.literal(KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN),
+      estimatedTokens: z.number().int().nonnegative(),
+      maxEstimatedTokens: z.literal(
+        Math.ceil(
+          KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES / KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN,
+        ),
+      ),
+    }),
+  }),
 });
 export type KnowledgeBrowseResponse = z.infer<typeof KnowledgeBrowseResponse>;

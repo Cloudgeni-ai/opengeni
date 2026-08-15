@@ -38,7 +38,10 @@ import { and, asc, desc, eq, gt, inArray, isNotNull, or, sql, type SQL } from "d
 import type OpenAI from "openai";
 import {
   KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS,
+  KNOWLEDGE_BROWSE_MAX_LIMIT,
+  KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES,
   KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES,
+  KNOWLEDGE_SEARCH_MAX_FLOOR_OMISSIONS,
   KNOWLEDGE_SEARCH_MAX_RESULTS,
   KNOWLEDGE_SEARCH_MIN_KEYWORD_SCORE,
   KNOWLEDGE_SEARCH_MIN_VECTOR_SCORE,
@@ -1798,6 +1801,20 @@ export async function searchDocuments(
   input: DocumentSearchInput,
   services: Pick<DocumentServices, "embedder"> = createDocumentServices(),
 ): Promise<DocumentSearchResult[]> {
+  return (await searchDocumentCandidates(db, input, services)).results;
+}
+
+export type DocumentCandidateRelevanceFloor = {
+  vectorScore: number;
+  keywordScore: number;
+};
+
+async function searchDocumentCandidates(
+  db: Database,
+  input: DocumentSearchInput,
+  services: Pick<DocumentServices, "embedder">,
+  relevanceFloor?: DocumentCandidateRelevanceFloor,
+): Promise<{ results: DocumentSearchResult[]; belowRelevanceFloor: number }> {
   await assertDocumentAccountWorkspace(db, input.accountId, input.workspaceId);
   const mode = input.mode ?? "hybrid";
   const limit = Math.min(Math.max(input.limit ?? 5, 1), 50);
@@ -1822,7 +1839,28 @@ export async function searchDocuments(
   if (mode === "keyword" || mode === "hybrid") {
     rows.push(...(await keywordSearchDocuments(db, input, candidateLimit)));
   }
-  return mergeDocumentSearchRows(rows, mode).slice(0, limit);
+  const merged = mergeDocumentSearchRows(rows, mode);
+  return selectDocumentSearchCandidateWindow(merged, limit, relevanceFloor);
+}
+
+export function selectDocumentSearchCandidateWindow(
+  merged: DocumentSearchResult[],
+  limit: number,
+  relevanceFloor?: DocumentCandidateRelevanceFloor,
+): { results: DocumentSearchResult[]; belowRelevanceFloor: number } {
+  const boundedLimit = Math.min(Math.max(Math.trunc(limit), 1), 50);
+  if (!relevanceFloor) {
+    return { results: merged.slice(0, boundedLimit), belowRelevanceFloor: 0 };
+  }
+  let belowRelevanceFloor = 0;
+  const relevant = merged.filter((result) => {
+    const included =
+      (result.vectorScore !== null && result.vectorScore >= relevanceFloor.vectorScore) ||
+      (result.keywordScore !== null && result.keywordScore >= relevanceFloor.keywordScore);
+    if (!included) belowRelevanceFloor += 1;
+    return included;
+  });
+  return { results: relevant.slice(0, boundedLimit), belowRelevanceFloor };
 }
 
 /**
@@ -1877,16 +1915,32 @@ export async function searchEffectiveKnowledge(
   // Pull a bounded surplus so the permission-safe result set can still satisfy
   // the caller after relevance filtering and exact-content deduplication.
   const candidateLimit = Math.min(requestedLimit * 4, KNOWLEDGE_SEARCH_MAX_RESULTS);
-  const ranked = await searchEffectiveDocuments(
+  const rankedSelection = await searchDocumentCandidates(
     db,
-    { ...input, limit: candidateLimit, initiatingSubjectId, surface: "agent" },
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      query: input.query,
+      limit: candidateLimit,
+      ...(input.baseIds ? { baseIds: input.baseIds } : {}),
+      ...(input.mode ? { mode: input.mode } : {}),
+      ...(input.sourceKinds ? { sourceKinds: input.sourceKinds } : {}),
+      ...(input.aclTags ? { aclTags: input.aclTags } : {}),
+      access: { agentOnly: true, viewerSubjectId: initiatingSubjectId },
+    },
     services,
+    {
+      vectorScore: KNOWLEDGE_SEARCH_MIN_VECTOR_SCORE,
+      keywordScore: KNOWLEDGE_SEARCH_MIN_KEYWORD_SCORE,
+    },
   );
+  const ranked = rankedSelection.results;
   if (ranked.length === 0) {
     return selectKnowledgeSearchResults({
       candidates: [],
       rankedCandidateCount: 0,
       requestedLimit,
+      alreadyBelowRelevanceFloor: rankedSelection.belowRelevanceFloor,
     });
   }
   const access: DocumentAccessFilter = { agentOnly: true, viewerSubjectId: initiatingSubjectId };
@@ -1923,6 +1977,7 @@ export async function searchEffectiveKnowledge(
   return selectKnowledgeSearchResults({
     rankedCandidateCount: ranked.length,
     requestedLimit,
+    alreadyBelowRelevanceFloor: rankedSelection.belowRelevanceFloor,
     candidates: ranked.flatMap((rankedResult) => {
       const row = currentByChunkId.get(rankedResult.chunkId);
       if (!row) return [];
@@ -1954,6 +2009,7 @@ type KnowledgeSearchSelectionInput = {
   candidates: KnowledgeSearchCandidate[];
   rankedCandidateCount: number;
   requestedLimit: number;
+  alreadyBelowRelevanceFloor?: number | undefined;
   now?: Date | undefined;
 };
 
@@ -1970,7 +2026,10 @@ export function selectKnowledgeSearchResults(
     KNOWLEDGE_SEARCH_MAX_RESULTS,
   );
   const nowMs = (input.now ?? new Date()).getTime();
-  let belowRelevanceFloor = 0;
+  let belowRelevanceFloor = Math.min(
+    Math.max(0, Math.trunc(input.alreadyBelowRelevanceFloor ?? 0)),
+    KNOWLEDGE_SEARCH_MAX_FLOOR_OMISSIONS,
+  );
   const relevant: KnowledgeSearchResult[] = [];
   for (const candidate of input.candidates) {
     const relevanceSignals: Array<"vector" | "keyword"> = [];
@@ -1987,7 +2046,7 @@ export function selectKnowledgeSearchResults(
       relevanceSignals.push("keyword");
     }
     if (relevanceSignals.length === 0) {
-      belowRelevanceFloor += 1;
+      belowRelevanceFloor = Math.min(belowRelevanceFloor + 1, KNOWLEDGE_SEARCH_MAX_FLOOR_OMISSIONS);
       continue;
     }
     const freshness = knowledgeFreshness(candidate.record.quality.freshnessAt, nowMs);
@@ -2157,6 +2216,159 @@ function knowledgeResponseBytes(response: KnowledgeSearchResponse): number {
   return Buffer.byteLength(JSON.stringify(response), "utf8");
 }
 
+type KnowledgeBrowseEntry = {
+  record: KnowledgeRecord;
+  cursorAfter: string;
+};
+
+/**
+ * Bound a browse page without skipping records. Tail records omitted for the
+ * response budget remain behind the returned cursor. If one complete record is
+ * itself too large, return a deterministic discovery projection; knowledge_get
+ * remains the freshly authorized full-record path.
+ */
+export function selectKnowledgeBrowseRecords(input: {
+  entries: KnowledgeBrowseEntry[];
+  hasMoreAfterEntries: boolean;
+}): KnowledgeBrowseResponse {
+  const entries = input.entries.slice(0, KNOWLEDGE_BROWSE_MAX_LIMIT);
+  const selected = entries.map((entry) => entry.record);
+  let omittedForResponseBudget = 0;
+  let compactedRecordCount = 0;
+  let response = knowledgeBrowseResponse({
+    records: selected,
+    nextCursor: input.hasMoreAfterEntries ? (entries.at(-1)?.cursorAfter ?? null) : null,
+    hasMore: input.hasMoreAfterEntries,
+    omittedForResponseBudget,
+    compactedRecordCount,
+  });
+  while (
+    selected.length > 1 &&
+    knowledgeBrowseResponseBytes(response) > KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES
+  ) {
+    selected.pop();
+    omittedForResponseBudget += 1;
+    response = knowledgeBrowseResponse({
+      records: selected,
+      nextCursor: entries[selected.length - 1]?.cursorAfter ?? null,
+      hasMore: true,
+      omittedForResponseBudget,
+      compactedRecordCount,
+    });
+  }
+  if (
+    selected.length === 1 &&
+    knowledgeBrowseResponseBytes(response) > KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES
+  ) {
+    selected[0] = compactKnowledgeBrowseRecord(selected[0]!);
+    compactedRecordCount = 1;
+    response = knowledgeBrowseResponse({
+      records: selected,
+      nextCursor:
+        omittedForResponseBudget > 0 || input.hasMoreAfterEntries
+          ? (entries[0]?.cursorAfter ?? null)
+          : null,
+      hasMore: omittedForResponseBudget > 0 || input.hasMoreAfterEntries,
+      omittedForResponseBudget,
+      compactedRecordCount,
+    });
+  }
+  if (knowledgeBrowseResponseBytes(response) > KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES) {
+    throw new Error("knowledge browse discovery projection exceeds the response budget");
+  }
+  return response;
+}
+
+function compactKnowledgeBrowseRecord(record: KnowledgeRecord): KnowledgeRecord {
+  const fields = new Set<KnowledgeRecord["projection"]["fields"][number]>([
+    ...record.projection.fields,
+    "content.body",
+    "content.summary",
+    "content.topics",
+    "content.metadata",
+    "provenance.source.uri",
+    "provenance.source.externalId",
+    "provenance.source.title",
+    "provenance.source.author",
+    "provenance.source.version",
+    "provenance.citation",
+  ]);
+  return {
+    ...record,
+    content: {
+      format: "markdown",
+      body: null,
+      summary: null,
+      topics: [],
+      metadata: {},
+    },
+    provenance: {
+      ...record.provenance,
+      source: {
+        ...record.provenance.source,
+        uri: null,
+        externalId: null,
+        title: null,
+        author: null,
+        version: null,
+      },
+      citation: null,
+    },
+    links: record.links.filter((link) => link.target.kind === "knowledge"),
+    projection: {
+      truncated: true,
+      fields: [...fields].sort(),
+    },
+  };
+}
+
+function knowledgeBrowseResponse(input: {
+  records: KnowledgeRecord[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  omittedForResponseBudget: number;
+  compactedRecordCount: number;
+}): KnowledgeBrowseResponse {
+  const response: KnowledgeBrowseResponse = {
+    records: [...input.records],
+    nextCursor: input.nextCursor,
+    hasMore: input.hasMore,
+    selection: {
+      omitted: { forResponseBudget: input.omittedForResponseBudget },
+      compactedRecordCount: input.compactedRecordCount,
+      budget: {
+        maxResults: KNOWLEDGE_BROWSE_MAX_LIMIT as 50,
+        maxResponseBytes: KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES as 65_536,
+        responseBytes: 0,
+        tokenEstimateBytesPerToken: KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN as 4,
+        estimatedTokens: 0,
+        maxEstimatedTokens: Math.ceil(
+          KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES / KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN,
+        ) as 16_384,
+      },
+    },
+  };
+  for (let index = 0; index < 8; index += 1) {
+    const responseBytes = knowledgeBrowseResponseBytes(response);
+    const estimatedTokens = Math.ceil(
+      responseBytes / KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN,
+    );
+    if (
+      response.selection.budget.responseBytes === responseBytes &&
+      response.selection.budget.estimatedTokens === estimatedTokens
+    ) {
+      break;
+    }
+    response.selection.budget.responseBytes = responseBytes;
+    response.selection.budget.estimatedTokens = estimatedTokens;
+  }
+  return response;
+}
+
+function knowledgeBrowseResponseBytes(response: KnowledgeBrowseResponse): number {
+  return Buffer.byteLength(JSON.stringify(response), "utf8");
+}
+
 /** Fetch one stable Knowledge record with a fresh authorization check. */
 export async function getEffectiveKnowledgeRecord(
   db: Database,
@@ -2259,7 +2471,7 @@ export async function browseEffectiveKnowledge(
   if (parent && (topic || sourceKinds.length > 0)) {
     throw new Error("knowledge browse document contents do not accept topic/source filters");
   }
-  const cursorScope = {
+  const cursorScope: KnowledgeBrowseCursorScope = {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     initiatingSubjectId,
@@ -2267,10 +2479,8 @@ export async function browseEffectiveKnowledge(
     topic,
     sourceKinds,
   };
-  const after = input.cursor ? decodeKnowledgeBrowseCursor(input.cursor, cursorScope) : 0n;
-  if (parent && after > 2_147_483_648n) {
-    throw new Error("invalid knowledge browse cursor");
-  }
+  const topLevelAfter =
+    !parent && input.cursor ? decodeKnowledgeBrowseCursor(input.cursor, cursorScope) : 0n;
   const access: DocumentAccessFilter = {
     agentOnly: true,
     viewerSubjectId: initiatingSubjectId,
@@ -2283,7 +2493,7 @@ export async function browseEffectiveKnowledge(
     async (scopedDb) => {
       if (parent) {
         const [authorizedParent] = await scopedDb
-          .select({ id: schema.documents.id })
+          .select({ id: schema.documents.id, indexSequence: schema.documents.indexSequence })
           .from(schema.documents)
           .where(
             and(
@@ -2294,7 +2504,22 @@ export async function browseEffectiveKnowledge(
             ),
           )
           .limit(1);
-        if (!authorizedParent) return { records: [], nextCursor: null, hasMore: false };
+        if (!authorizedParent) {
+          return selectKnowledgeBrowseRecords({ entries: [], hasMoreAfterEntries: false });
+        }
+        if (authorizedParent.indexSequence === null) {
+          throw new Error("ready knowledge document is missing its index revision");
+        }
+        const parentCursorScope: KnowledgeBrowseCursorScope = {
+          ...cursorScope,
+          parentRevision: authorizedParent.indexSequence.toString(),
+        };
+        const after = input.cursor
+          ? decodeKnowledgeBrowseCursor(input.cursor, parentCursorScope)
+          : 0n;
+        if (after > 2_147_483_648n) {
+          throw new Error("invalid knowledge browse cursor");
+        }
         const rows = await scopedDb
           .select({
             chunk: schema.documentChunks,
@@ -2311,6 +2536,7 @@ export async function browseEffectiveKnowledge(
               eq(schema.documentChunks.documentId, parent.id),
               gt(schema.documentChunks.chunkIndex, Number(after) - 1),
               eq(schema.documents.status, "ready"),
+              eq(schema.documents.indexSequence, authorizedParent.indexSequence),
               ...documentAccessConditions(input.workspaceId, access),
             ),
           )
@@ -2318,27 +2544,26 @@ export async function browseEffectiveKnowledge(
           .limit(limit + 1);
         const hasMore = rows.length > limit;
         const page = rows.slice(0, limit);
-        const last = page.at(-1)?.chunk.chunkIndex;
-        return {
-          records: page.map((row) =>
-            knowledgeChunkRecord(row.document, row.chunk, row.citation, {
+        return selectKnowledgeBrowseRecords({
+          entries: page.map((row) => ({
+            record: knowledgeChunkRecord(row.document, row.chunk, row.citation, {
               previousChunkId: row.previousChunkId,
               nextChunkId: row.nextChunkId,
             }),
-          ),
-          nextCursor:
-            hasMore && last !== undefined
-              ? encodeKnowledgeBrowseCursor(cursorScope, BigInt(last + 1))
-              : null,
-          hasMore,
-        };
+            cursorAfter: encodeKnowledgeBrowseCursor(
+              parentCursorScope,
+              BigInt(row.chunk.chunkIndex + 1),
+            ),
+          })),
+          hasMoreAfterEntries: hasMore,
+        });
       }
 
       const conditions: SQL[] = [
         eq(schema.documents.accountId, input.accountId),
         eq(schema.documents.status, "ready"),
         isNotNull(schema.documents.indexSequence),
-        gt(schema.documents.indexSequence, after),
+        gt(schema.documents.indexSequence, topLevelAfter),
         ...documentAccessConditions(input.workspaceId, access),
       ];
       if (topic) conditions.push(sql`${schema.documents.topics} ? ${topic}`);
@@ -2364,17 +2589,18 @@ export async function browseEffectiveKnowledge(
         .limit(limit + 1);
       const hasMore = rows.length > limit;
       const page = rows.slice(0, limit);
-      const last = page.at(-1)?.document.indexSequence;
-      return {
-        records: page.map((row) =>
-          knowledgeDocumentRecord(row.document, row.citation, row.firstChunkId),
-        ),
-        nextCursor:
-          hasMore && last !== undefined && last !== null
-            ? encodeKnowledgeBrowseCursor(cursorScope, last)
-            : null,
-        hasMore,
-      };
+      return selectKnowledgeBrowseRecords({
+        entries: page.map((row) => {
+          if (row.document.indexSequence === null) {
+            throw new Error("ready knowledge document is missing its index revision");
+          }
+          return {
+            record: knowledgeDocumentRecord(row.document, row.citation, row.firstChunkId),
+            cursorAfter: encodeKnowledgeBrowseCursor(cursorScope, row.document.indexSequence),
+          };
+        }),
+        hasMoreAfterEntries: hasMore,
+      });
     },
   );
 }
@@ -2384,6 +2610,7 @@ type KnowledgeBrowseCursorScope = {
   workspaceId: string;
   initiatingSubjectId: string;
   parentId: string | null;
+  parentRevision?: string | null | undefined;
   topic: string | null;
   sourceKinds: readonly string[];
 };
@@ -2393,8 +2620,9 @@ export function encodeKnowledgeBrowseCursor(
   position: bigint,
 ): string {
   if (position < 0n) throw new Error("knowledge browse cursor position is invalid");
+  const version = knowledgeBrowseCursorVersion(scope);
   return Buffer.from(
-    JSON.stringify({ v: 1, s: knowledgeBrowseCursorScope(scope), q: position.toString() }),
+    JSON.stringify({ v: version, s: knowledgeBrowseCursorScope(scope), q: position.toString() }),
     "utf8",
   ).toString("base64url");
 }
@@ -2410,9 +2638,10 @@ export function decodeKnowledgeBrowseCursor(
     const bytes = Buffer.from(value, "base64url");
     if (bytes.toString("base64url") !== value) throw new Error("cursor encoding");
     const parsed = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+    const expectedVersion = knowledgeBrowseCursorVersion(scope);
     if (
       Object.keys(parsed).sort().join(",") !== "q,s,v" ||
-      parsed.v !== 1 ||
+      parsed.v !== expectedVersion ||
       typeof parsed.s !== "string" ||
       typeof parsed.q !== "string" ||
       !/^(0|[1-9][0-9]*)$/.test(parsed.q)
@@ -2437,8 +2666,9 @@ export function decodeKnowledgeBrowseCursor(
 }
 
 function knowledgeBrowseCursorScope(scope: KnowledgeBrowseCursorScope): string {
-  return createHash("sha256")
-    .update("opengeni:knowledge-browse-cursor:v1\0")
+  const version = knowledgeBrowseCursorVersion(scope);
+  const hash = createHash("sha256")
+    .update(`opengeni:knowledge-browse-cursor:v${version}\0`)
     .update(scope.accountId)
     .update("\0")
     .update(scope.workspaceId)
@@ -2446,11 +2676,21 @@ function knowledgeBrowseCursorScope(scope: KnowledgeBrowseCursorScope): string {
     .update(canonicalEffectiveDocumentSubject(scope.initiatingSubjectId))
     .update("\0")
     .update(scope.parentId ?? "")
-    .update("\0")
+    .update("\0");
+  if (version === 2) hash.update(scope.parentRevision!).update("\0");
+  return hash
     .update(scope.topic ?? "")
     .update("\0")
     .update([...scope.sourceKinds].sort().join("\0"))
     .digest("hex");
+}
+
+function knowledgeBrowseCursorVersion(scope: KnowledgeBrowseCursorScope): 1 | 2 {
+  if (!scope.parentId) return 1;
+  if (!scope.parentRevision || !/^[1-9][0-9]*$/.test(scope.parentRevision)) {
+    throw new Error("knowledge browse parent cursor requires an exact document revision");
+  }
+  return 2;
 }
 
 function parseKnowledgeRecordId(value: string): {
@@ -2676,7 +2916,7 @@ async function vectorSearchDocuments(
         .from(schema.documentChunks)
         .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
         .where(and(...documentSearchConditions(input, services.embedder.model)))
-        .orderBy(distance)
+        .orderBy(distance, asc(schema.documentChunks.id))
         .limit(limit),
   );
   return rows.map((row) => ({
@@ -2732,7 +2972,7 @@ async function keywordSearchDocuments(
             sql`to_tsvector('simple', ${schema.documentChunks.text}) @@ plainto_tsquery('simple', ${input.query})`,
           ),
         )
-        .orderBy(desc(rank))
+        .orderBy(desc(rank), asc(schema.documentChunks.id))
         .limit(limit),
   );
   return rows.map((row) => ({
@@ -3112,7 +3352,8 @@ function mergeDocumentSearchRows(
         right.score - left.score ||
         (right.vectorScore ?? 0) - (left.vectorScore ?? 0) ||
         (right.keywordScore ?? 0) - (left.keywordScore ?? 0) ||
-        left.chunkIndex - right.chunkIndex,
+        left.chunkIndex - right.chunkIndex ||
+        (left.chunkId === right.chunkId ? 0 : left.chunkId < right.chunkId ? -1 : 1),
     );
 }
 

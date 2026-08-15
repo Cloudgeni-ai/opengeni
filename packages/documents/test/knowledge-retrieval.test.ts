@@ -1,12 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import {
+  KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES,
   KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES,
   KNOWLEDGE_SEARCH_MIN_KEYWORD_SCORE,
   KNOWLEDGE_SEARCH_MIN_VECTOR_SCORE,
+  KnowledgeBrowseResponse,
   KnowledgeSearchResponse,
+  type DocumentSearchResult,
   type KnowledgeRecord,
 } from "@opengeni/contracts";
-import { selectKnowledgeSearchResults } from "../src";
+import {
+  selectDocumentSearchCandidateWindow,
+  selectKnowledgeBrowseRecords,
+  selectKnowledgeSearchResults,
+} from "../src";
 
 const NOW = new Date("2026-08-15T12:00:00.000Z");
 
@@ -76,6 +83,33 @@ function candidate(
 }
 
 describe("permission-first Knowledge final selection", () => {
+  test("applies source relevance floors before the final hybrid candidate window", () => {
+    const incidentalVectors = Array.from(
+      { length: 50 },
+      (_, index) =>
+        ({
+          chunkId: `vector-${String(index).padStart(2, "0")}`,
+          score: 0.337,
+          vectorScore: KNOWLEDGE_SEARCH_MIN_VECTOR_SCORE - 0.001,
+          keywordScore: null,
+        }) as DocumentSearchResult,
+    );
+    const keywordHit = {
+      chunkId: "keyword-hit",
+      score: 0.0035,
+      vectorScore: null,
+      keywordScore: KNOWLEDGE_SEARCH_MIN_KEYWORD_SCORE,
+    } as DocumentSearchResult;
+
+    const selected = selectDocumentSearchCandidateWindow([...incidentalVectors, keywordHit], 5, {
+      vectorScore: KNOWLEDGE_SEARCH_MIN_VECTOR_SCORE,
+      keywordScore: KNOWLEDGE_SEARCH_MIN_KEYWORD_SCORE,
+    });
+
+    expect(selected.results.map((result) => result.chunkId)).toEqual(["keyword-hit"]);
+    expect(selected.belowRelevanceFloor).toBe(50);
+  });
+
   test("applies explicit vector/keyword relevance floors before output", () => {
     const below = candidate(record(1), {
       vectorScore: KNOWLEDGE_SEARCH_MIN_VECTOR_SCORE - 0.000001,
@@ -199,5 +233,47 @@ describe("permission-first Knowledge final selection", () => {
       rechecked: 3,
       omittedOnRecheck: 0,
     });
+  });
+
+  test("bounds browse pages without advancing past omitted records", () => {
+    const entries = Array.from({ length: 8 }, (_, index) => ({
+      record: record(index + 1, { body: `${index}:${"å".repeat(7_000)}` }),
+      cursorAfter: `cursor-${index + 1}`,
+    }));
+    const response = selectKnowledgeBrowseRecords({
+      entries,
+      hasMoreAfterEntries: false,
+    });
+    const bytes = Buffer.byteLength(JSON.stringify(response), "utf8");
+
+    expect(bytes).toBeLessThanOrEqual(KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES);
+    expect(response.selection.budget.responseBytes).toBe(bytes);
+    expect(response.selection.omitted.forResponseBudget).toBeGreaterThan(0);
+    expect(response.hasMore).toBe(true);
+    expect(response.nextCursor).toBe(`cursor-${response.records.length}`);
+    expect(KnowledgeBrowseResponse.parse(response)).toEqual(response);
+  });
+
+  test("compacts one JSON-expansive browse record and retains explicit loss facts", () => {
+    const response = selectKnowledgeBrowseRecords({
+      entries: [
+        {
+          record: record(1, { body: "\u0000".repeat(16_000) }),
+          cursorAfter: "cursor-1",
+        },
+      ],
+      hasMoreAfterEntries: false,
+    });
+
+    expect(response.records).toHaveLength(1);
+    expect(response.records[0]?.content.body).toBeNull();
+    expect(response.records[0]?.projection.fields).toContain("content.body");
+    expect(response.selection.compactedRecordCount).toBe(1);
+    expect(response.selection.omitted.forResponseBudget).toBe(0);
+    expect(response.hasMore).toBe(false);
+    expect(response.nextCursor).toBeNull();
+    expect(Buffer.byteLength(JSON.stringify(response), "utf8")).toBeLessThanOrEqual(
+      KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES,
+    );
   });
 });

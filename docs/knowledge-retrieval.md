@@ -48,6 +48,10 @@ Agents search first and follow stable links; they do not need to crawl document
 bases or folders. `knowledge_browse` topic/source filters are discovery hints,
 not authority. Its opaque cursor is bound to the exact account, requesting
 workspace, immutable initiating subject, parent, topic, and source filters.
+Top-level cursors retain their v1 compatibility identity. Child-content cursors
+are v2 and additionally bind the Document's monotonic indexing-completion
+revision; a successful reindex invalidates an older cursor instead of silently
+mixing chunk versions.
 
 Document records expose an authorized `contents` link to their first chunk;
 chunks expose their `parent` plus authorized `previous`/`next` neighbors. These
@@ -58,8 +62,12 @@ document therefore removes both its records and its traversal surface.
 
 ### Bounded search selection
 
-Search retrieves a bounded surplus of at most 50 already-authorized candidates,
-then applies one deterministic final selection after the exact-row recheck:
+Search retrieves a bounded surplus from each already-authorized vector/keyword
+arm. The per-signal relevance floors are applied to that union before the final
+50-candidate window, preventing incidental vector neighbors from evicting valid
+keyword hits. SQL arms and the merged ranking use the opaque chunk id as their
+last tie-break, then one deterministic final selection runs after the exact-row
+recheck:
 
 1. a result must have vector score `>= 0.52` or normalized keyword score
    `>= 0.01` (`any_signal`); incidental vector neighbors below the floor are
@@ -83,6 +91,15 @@ tokenizer. Counts describe only candidates already inside the authorized
 bounded window, so they cannot reveal inaccessible rows. Trust remains
 `sourced` and conflict remains `not_evaluated`; those honest neutral quality
 facts do not receive a hidden score adjustment.
+
+Browse applies the same 64 KiB complete-serialized-response boundary. Whole
+tail records remain behind the returned cursor, so following the cursor cannot
+skip a budget-omitted record. If one complete record alone cannot fit because
+JSON escaping expands otherwise bounded fields, browse returns one explicit
+compact discovery projection and the agent may use `knowledge_get` for the full
+freshly authorized record. Browse reports exact response bytes, the same
+deterministic four-byte token estimate, budget omissions, and whether that one
+record was compacted.
 
 The compatibility tools (`search_documents`, `knowledge_fetch`,
 `fetch_document_chunk`, and `list_document_bases`) remain available for existing
