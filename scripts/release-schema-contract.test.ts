@@ -135,6 +135,7 @@ describe("release schema contract", () => {
       "0240_model_context_user_messages.sql",
       "0249_personal_resource_delegation_authority_correction.sql",
       "0250_direct_retained_process_owner_liveness.sql",
+      "0251_connected_machine_operation_policy.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -171,6 +172,14 @@ describe("release schema contract", () => {
     if (modelContextCutover) {
       expect(modelContextCutover).toMatchObject({ deploymentMode: "maintenance" });
     }
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0251_connected_machine_operation_policy.sql",
+      ),
+    ).toMatchObject({
+      sha256: "a37e307de730bc47ccf4ed6bf517427ebb0d20199640f54e8e525ae1ce046663",
+      deploymentMode: "maintenance",
+    });
     expect(
       completeSourceContract.migrations.find(
         (migration) => migration.path === "0240_enrollment_connection_authority.sql",

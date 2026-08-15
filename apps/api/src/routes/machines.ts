@@ -15,9 +15,11 @@
 
 import {
   MachineMetricsSeriesResponse,
+  MachineOperationPolicy,
   MachinesResponse,
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
+  UpdateMachineOperationPolicyRequest,
   UpdateMachineAgentResponse,
 } from "@opengeni/contracts";
 import {
@@ -27,6 +29,7 @@ import {
   getLiveEnrollmentConnection,
   readMachineMetricsSeries,
   requireSession,
+  updateEnrollmentOperationPolicy,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -96,6 +99,47 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  // ── PATCH /workspaces/:ws/machines/:enrollmentId/operation-policy ──────────
+  // Null limits deliberately mean unrestricted. The revision is an optimistic
+  // concurrency fence so two operators cannot silently overwrite each other.
+  app.patch("/v1/workspaces/:workspaceId/machines/:enrollmentId/operation-policy", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:manage");
+    assertSelfhostedEnabled();
+    const enrollmentId = c.req.param("enrollmentId");
+    let json: unknown;
+    try {
+      json = await c.req.json();
+    } catch {
+      throw new HTTPException(400, { message: "operation policy body must be valid JSON" });
+    }
+    const parsed = UpdateMachineOperationPolicyRequest.safeParse(json);
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid machine operation policy" });
+    }
+    const body = parsed.data;
+    const current = await getEnrollment(db, workspaceId, enrollmentId);
+    if (!current || current.status !== "active") {
+      throw new HTTPException(404, { message: "machine not found in this workspace" });
+    }
+    const updated = await updateEnrollmentOperationPolicy(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      enrollmentId,
+      subjectId: grant.subjectId,
+      expectedRevision: body.expectedRevision,
+      memoryMaxBytes: body.memoryMaxBytes,
+      memoryHighBytes: body.memoryHighBytes,
+      ...(body.cpuMaxMillicores !== undefined ? { cpuMaxMillicores: body.cpuMaxMillicores } : {}),
+    });
+    if (!updated) {
+      throw new HTTPException(409, {
+        message: "machine operation policy changed; refresh and retry",
+      });
+    }
+    return c.json(MachineOperationPolicy.parse(updated.operationPolicy));
+  });
+
   // ── POST /workspaces/:ws/machines/:enrollmentId/update ─────────────────────
   // Reserve one exact-generation operation, ask the authoritative runner to
   // drain and apply the signed promoted release, then let progress events + the
@@ -153,6 +197,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       // `epoch` is the sandbox lease epoch, not the enrollment connection
       // generation, so this process-scoped operation intentionally leaves it 0.
       epoch: 0,
+      resourcePolicy: undefined,
       op: {
         $case: "agentUpdateApply",
         agentUpdateApply: {

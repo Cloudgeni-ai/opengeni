@@ -23,7 +23,7 @@ macos-desktop = ["dep:opengeni-agent-macos-ffi"]
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["fs", "process", "io-util", "time", "rt", "macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["fs", "process", "io-util", "time", "rt", "macros", "net", "rt-multi-thread"] }
 tracing = { workspace = true }
 prost = { workspace = true }
 
@@ -54,7 +54,7 @@ xattr = { workspace = true }
 opengeni-agent-macos-ffi = { path = "../opengeni-agent-macos-ffi", optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time", "net"] }
 tempfile = { workspace = true }
 # The wire types the cgroup-placement integration test builds an ExecRequest with.
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }

@@ -645,6 +645,10 @@ async function withChannelAOperation<T>(
         workingDir: pointer.workingDir,
         timeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
         execTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,
+        operationResourcePolicy: enrollment.operationPolicy,
+        operationResourcePolicySupported:
+          enrollment.agentCapabilities.operationResourcePolicy === true,
+        operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
         ...(settings.agentOpStreamEnabled === true &&
         enrollment?.opStream === true &&
         bus.getOpStreamConnection
