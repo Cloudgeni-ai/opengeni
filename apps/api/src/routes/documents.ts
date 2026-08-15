@@ -651,13 +651,19 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
     const sessionId =
       typeof grant.metadata?.sessionId === "string" ? grant.metadata.sessionId : undefined;
+    const attemptId =
+      typeof grant.metadata?.attemptId === "string" ? grant.metadata.attemptId : undefined;
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     const server = buildDocumentsMcpServer(
       db,
       grant.accountId,
       workspaceId,
       getDocumentServices(),
-      { createdBySessionId: sessionId, initiatingSubjectId: grant.subjectId },
+      {
+        createdBySessionId: sessionId,
+        attemptId,
+        initiatingSubjectId: grant.subjectId,
+      },
     );
     await server.connect(transport);
     return await transport.handleRequest(c.req.raw);

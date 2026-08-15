@@ -155,3 +155,39 @@ export async function resolveSessionAttemptPersonalResources(
     )`);
   });
 }
+
+export type PersonalDocumentAuthority = {
+  authorityId: string;
+  ownerOrganizationMembershipId: string;
+  authorityGeneration: number;
+};
+
+/**
+ * Create the common organization-user authority before inserting a personal
+ * Document. Call this inside the same database transaction as the Document
+ * insert so a failed write cannot leave an orphan authority.
+ */
+export async function createPersonalDocumentAuthority(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    documentId: string;
+  },
+): Promise<PersonalDocumentAuthority> {
+  await setSubjectRlsContext(db, input.subjectId);
+  const [row] = await rawRows<PersonalDocumentAuthority>(
+    db,
+    sql`
+      select authority_id as "authorityId",
+        owner_organization_membership_id as "ownerOrganizationMembershipId",
+        authority_generation::int as "authorityGeneration"
+      from create_personal_document_authority(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.documentId}::uuid
+      )
+    `,
+  );
+  if (!row) throw new Error("personal document authority was not returned");
+  return row;
+}

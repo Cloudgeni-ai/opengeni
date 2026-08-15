@@ -55,6 +55,27 @@ session visibility, authority epoch, generation, status, and interruption
 fences. Direct turns re-run the corrected resolver before any Rig or Variable
 Set read; sessions without personal resources take a no-op path.
 
+Migration `0258_three_scope_document_knowledge_authority.sql` applies the same
+organization-user lifecycle to newly-created personal Documents. The physical
+workspace/base/file still owns ingestion and indexing, while
+`origin_workspace_id` is immutable provenance and the common authority's active
+organization membership is ownership. Consequently, an owner can retrieve the
+Document from any workspace they currently access in the same organization,
+and losing the origin workspace does not transfer or delete it. Existing
+personal Documents remain anchored to their original workspace instead of
+being guessed into a new organization-user authority.
+
+Agent access is separate from human ownership. At exact attempt admission the
+database freezes only ready, agent-enabled personal Documents backed by an
+active `document.read` grant for that target workspace and the session's exact
+`user_private|workspace_shared` context. Shared-context grant issuance uses the
+common durable acknowledgement. Every search, get, browse, compatibility fetch,
+and chunk read revalidates membership, target-workspace access, authority and
+grant generations, session epoch, attempt liveness, and interruption state;
+revocation therefore takes effect before the next read. An agent call without
+an exact admitted attempt receives organization and current-workspace knowledge
+only—never ambient personal knowledge.
+
 ## Slice B: managed-human lifecycle provisioning and first runtime projection
 
 Migration `0219_organization_tenancy_managed_human_provisioning.sql` adds the

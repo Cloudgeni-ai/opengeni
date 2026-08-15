@@ -117,6 +117,13 @@ const SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE =
 const SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE = "scheduled_personal_resource_capabilities";
 const VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE = "variable_set_authority_capability_active(text)";
 const VARIABLE_SET_CAPABILITY_TABLE = "variable_set_authority_capabilities";
+const PERSONAL_DOCUMENT_CAPABILITY_PREDICATE_ROUTINE =
+  "personal_document_authority_capability_active(text)";
+const PERSONAL_DOCUMENT_CAPABILITY_TABLE = "personal_document_authority_capabilities";
+const PERSONAL_DOCUMENT_AUTHORITY_ROUTINES = [
+  "create_personal_document_authority(uuid, uuid, uuid)",
+  "resolve_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid)",
+] as const;
 const VARIABLE_SET_AUTHORITY_ROUTINES = [
   "create_scoped_variable_set(uuid, uuid, text, text, text, jsonb, boolean)",
   "list_scoped_variable_sets(uuid, uuid, uuid, text, text)",
@@ -192,6 +199,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE,
   ...VARIABLE_SET_AUTHORITY_ROUTINES,
   ...CONNECTION_AUTHORITY_ROUTINES,
+  ...PERSONAL_DOCUMENT_AUTHORITY_ROUTINES,
   ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
@@ -353,6 +361,7 @@ export const FORCE_RLS_TABLES = [
   "organization_user_retention_policies",
   "pack_installation_components",
   "pack_installations",
+  "personal_document_once_consumption_receipts",
   "personal_resource_once_consumption_receipts",
   "preference_registry_events",
   "preference_registry_preferences",
@@ -379,6 +388,8 @@ export const FORCE_RLS_TABLES = [
   "scheduled_tasks",
   "session_attempt_codemode_calls",
   "session_attempt_interruptions",
+  "session_attempt_personal_document_admissions",
+  "session_attempt_personal_document_snapshots",
   "session_attempt_personal_resource_admissions",
   "session_attempt_personal_resource_snapshots",
   "session_attempt_tool_catalogs",
@@ -759,12 +770,15 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_policies",
+  "personal_document_once_consumption_receipts",
   "personal_resource_once_consumption_receipts",
   "scheduled_task_personal_resource_authorities",
   "scheduled_task_personal_resource_snapshots",
   "scheduled_task_run_personal_resource_admissions",
   "scheduled_task_run_personal_resource_once_receipts",
   "scheduled_task_run_personal_resource_snapshots",
+  "session_attempt_personal_document_admissions",
+  "session_attempt_personal_document_snapshots",
   "session_attempt_personal_resource_admissions",
   "session_attempt_personal_resource_snapshots",
   "session_visibility_write_capabilities",
@@ -1140,7 +1154,8 @@ export async function inspectRuntimeDatabasePosture(
             and c.relname in (
               ${PERSONAL_RESOURCE_CAPABILITY_TABLE},
               ${SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE},
-              ${VARIABLE_SET_CAPABILITY_TABLE}
+              ${VARIABLE_SET_CAPABILITY_TABLE},
+              ${PERSONAL_DOCUMENT_CAPABILITY_TABLE}
             )
         `),
       ).map((row) => ({
@@ -1528,6 +1543,13 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
         );
       }
+    } else if ((PERSONAL_DOCUMENT_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityOwner = tableByName.get("documents")?.owner ?? targetSchemaOwner;
+      if (authorityOwner && routine.owner !== authorityOwner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match document authority owner ${authorityOwner}`,
+        );
+      }
     } else if ((VARIABLE_SET_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)) {
       const authorityTables = ["workspace_variable_sets", "workspace_variable_set_variables"]
         .map((tableName) => tableByName.get(tableName))
@@ -1806,6 +1828,59 @@ export function evaluateRuntimeDatabasePosture(
     if (routine.publicExecute) {
       violations.push(
         `PUBLIC has forbidden personal-resource capability predicate ${routine.name}`,
+      );
+    }
+    const directPrivileges = [
+      ["SELECT", table.select],
+      ["INSERT", table.insert],
+      ["UPDATE", table.update],
+      ["DELETE", table.delete],
+    ].filter(([, granted]) => granted);
+    if (directPrivileges.length > 0) {
+      violations.push(
+        `runtime role has forbidden direct privileges on private table ${table.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
+      );
+    }
+  }
+
+  const personalDocumentCapabilityTables = posture.privateTables.filter(
+    (table) => table.name === PERSONAL_DOCUMENT_CAPABILITY_TABLE,
+  );
+  const personalDocumentCapabilityRoutines = posture.privateRoutines.filter(
+    (routine) => routine.name === PERSONAL_DOCUMENT_CAPABILITY_PREDICATE_ROUTINE,
+  );
+  if (personalDocumentCapabilityTables.length !== 1) {
+    violations.push(
+      `personal-document capability table ${PERSONAL_DOCUMENT_CAPABILITY_TABLE} is missing or ambiguous`,
+    );
+  }
+  if (personalDocumentCapabilityRoutines.length !== 1) {
+    violations.push(
+      `personal-document capability predicate ${PERSONAL_DOCUMENT_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
+    );
+  }
+  if (
+    personalDocumentCapabilityTables.length === 1 &&
+    personalDocumentCapabilityRoutines.length === 1
+  ) {
+    const table = personalDocumentCapabilityTables[0]!;
+    const routine = personalDocumentCapabilityRoutines[0]!;
+    if (routine.owner !== table.owner) {
+      violations.push(
+        `personal-document capability predicate ${routine.name} owner ${routine.owner} does not match table owner ${table.owner}`,
+      );
+    }
+    if (!routine.securityDefiner) {
+      violations.push(
+        `personal-document capability predicate ${routine.name} is not SECURITY DEFINER`,
+      );
+    }
+    if (!routine.execute) {
+      violations.push(`runtime role lacks personal-document capability predicate ${routine.name}`);
+    }
+    if (routine.publicExecute) {
+      violations.push(
+        `PUBLIC has forbidden personal-document capability predicate ${routine.name}`,
       );
     }
     const directPrivileges = [

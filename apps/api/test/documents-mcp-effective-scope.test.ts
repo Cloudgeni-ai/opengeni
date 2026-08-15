@@ -149,6 +149,43 @@ test("docs MCP binds effective retrieval to its immutable initiating subject", a
   }
 });
 
+test("docs MCP binds personal-document reads to the exact session attempt", async () => {
+  const sessionId = "33333333-3333-4333-8333-333333333333";
+  const attemptId = "44444444-4444-4444-8444-444444444444";
+  const start = searchInputs.length;
+  const server = buildDocumentsMcpServer(
+    fakeDb as never,
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222",
+    {} as never,
+    { initiatingSubjectId: "user:initiator", createdBySessionId: sessionId, attemptId },
+  );
+  const client = new Client({ name: "documents-attempt-authority-test", version: "1" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    await client.callTool({
+      name: "knowledge_search",
+      arguments: { query: "personal evidence", mode: "keyword" },
+    });
+    expect(searchInputs.slice(start)).toEqual([
+      {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        query: "personal evidence",
+        mode: "keyword",
+        initiatingSubjectId: "user:initiator",
+        agentAuthority: { sessionId, attemptId },
+        surface: "agent",
+      },
+    ]);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
 test("docs MCP rebinds Knowledge fetch and browse to its immutable initiating subject", async () => {
   const server = buildDocumentsMcpServer(
     fakeDb as never,
