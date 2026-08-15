@@ -4559,6 +4559,7 @@ export type Document = {
   authorityKind: DocumentAuthorityKind;
   authorityWorkspaceId: string | null;
   authoritySubjectId: string | null;
+  authorityId?: string | null | undefined;
   visibility: DocumentVisibility;
   createdBy: string | null;
   agentAccess: boolean;

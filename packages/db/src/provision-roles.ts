@@ -1054,6 +1054,24 @@ BEGIN
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.resolve_connection_use_authority(uuid, uuid, uuid, jsonb) TO %I', ${literal(schema)}, ${literal(role)});
     END IF;
     IF to_regprocedure(
+      format('%I.create_personal_document_authority(uuid,uuid,uuid)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.create_personal_document_authority(uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.create_personal_document_authority(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.resolve_document_original_file(uuid, uuid, text, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.resolve_document_original_file(uuid, uuid, text, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.prepare_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.prepare_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid) FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.resolve_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.resolve_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.personal_document_authority_capability_active(text) FROM PUBLIC');
+      EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.personal_document_authority_capability_active(text) TO %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE opengeni_private.personal_document_authority_capabilities FROM %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.session_attempt_personal_document_admissions FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.session_attempt_personal_document_snapshots FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.personal_document_once_consumption_receipts FROM %I', ${literal(schema)}, ${literal(role)});
+    END IF;
+    IF to_regprocedure(
       format('%I.create_scoped_variable_set(uuid,uuid,text,text,text,jsonb,boolean)', ${literal(schema)})
     ) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.create_scoped_variable_set(uuid, uuid, text, text, text, jsonb, boolean) TO %I', ${literal(schema)}, ${literal(role)});

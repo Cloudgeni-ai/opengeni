@@ -283,6 +283,14 @@ describe("release schema contract", () => {
     });
     expect(
       completeSourceContract.migrations.find(
+        (migration) => migration.path === "0258_three_scope_document_knowledge_authority.sql",
+      ),
+    ).toMatchObject({
+      sha256: "e9349cb0f88673fcf602aba495e8ad90970c7d46ed1490acffc530baf2d6c484",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
         (migration) => migration.path === "0259_company_brain_context_selection_receipts.sql",
       ),
     ).toMatchObject({
@@ -295,8 +303,13 @@ describe("release schema contract", () => {
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0259_company_brain_context_selection_receipts.sql")) {
         return includesActivation
-          ? "4f666fa2e842e3d77efc0ea40f13fb99fbab74a93dd7912d21253e114eaa3eb6"
-          : "3fd5ecf174e5c400eb888ae683b222392865886d6fdc558e65c2ed0fda742cb8";
+          ? "59cda520a2634003dd1ee3144d5c9eabf449825efcdf574dc43b00e65d2a05de"
+          : "9dc07149adb2813d81c60fbb3f410009e29a9c79223d4ab16fa8694a0cf8c165";
+      }
+      if (migrations.has("0258_three_scope_document_knowledge_authority.sql")) {
+        return includesActivation
+          ? "119d394b27853a7c9edfa65be82793cd6e1bac684a32fc2e6524bdd8a8fa225a"
+          : "9d0bc49c13b78936d8d8248efe388f15449f87033792a97ec78148dfd047979e";
       }
       if (migrations.has("0255_company_brain_governed_write_proposals.sql")) {
         return includesActivation
@@ -420,8 +433,13 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0259_company_brain_context_selection_receipts.sql")) {
         return includesActivation
-          ? "4f666fa2e842e3d77efc0ea40f13fb99fbab74a93dd7912d21253e114eaa3eb6"
-          : "3fd5ecf174e5c400eb888ae683b222392865886d6fdc558e65c2ed0fda742cb8";
+          ? "59cda520a2634003dd1ee3144d5c9eabf449825efcdf574dc43b00e65d2a05de"
+          : "9dc07149adb2813d81c60fbb3f410009e29a9c79223d4ab16fa8694a0cf8c165";
+      }
+      if (migrations.has("0258_three_scope_document_knowledge_authority.sql")) {
+        return includesActivation
+          ? "119d394b27853a7c9edfa65be82793cd6e1bac684a32fc2e6524bdd8a8fa225a"
+          : "9d0bc49c13b78936d8d8248efe388f15449f87033792a97ec78148dfd047979e";
       }
       if (migrations.has("0255_company_brain_governed_write_proposals.sql")) {
         return includesActivation
@@ -759,11 +777,13 @@ describe("release schema contract", () => {
         (migrations.has("0245_model_context_contribution_facts.sql") ? 1 : 0) +
         (migrations.has("0246_integration_personal_instance_authority.sql") ? 1 : 0) +
         (migrations.has("0255_company_brain_governed_write_proposals.sql") ? 1 : 0) +
+        (migrations.has("0258_three_scope_document_knowledge_authority.sql") ? 1 : 0) +
         (migrations.has("0259_company_brain_context_selection_receipts.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
       "0259_company_brain_context_selection_receipts.sql",
+      "0258_three_scope_document_knowledge_authority.sql",
       "0255_company_brain_governed_write_proposals.sql",
       "0246_integration_personal_instance_authority.sql",
       "0245_model_context_contribution_facts.sql",
@@ -794,13 +814,15 @@ describe("release schema contract", () => {
     expect(contract.latestMigration).toBe(
       migrations.has("0259_company_brain_context_selection_receipts.sql")
         ? "0259_company_brain_context_selection_receipts.sql"
-        : migrations.has("0255_company_brain_governed_write_proposals.sql")
-          ? "0255_company_brain_governed_write_proposals.sql"
-          : migrations.has("0248_terraform_stacks_component_resolution_fence.sql")
-            ? "0248_terraform_stacks_component_resolution_fence.sql"
-            : migrations.has("0247_terraform_stacks_provenance_repair.sql")
-              ? "0247_terraform_stacks_provenance_repair.sql"
-              : latestCompatibleMigration,
+        : migrations.has("0258_three_scope_document_knowledge_authority.sql")
+          ? "0258_three_scope_document_knowledge_authority.sql"
+          : migrations.has("0255_company_brain_governed_write_proposals.sql")
+            ? "0255_company_brain_governed_write_proposals.sql"
+            : migrations.has("0248_terraform_stacks_component_resolution_fence.sql")
+              ? "0248_terraform_stacks_component_resolution_fence.sql"
+              : migrations.has("0247_terraform_stacks_provenance_repair.sql")
+                ? "0247_terraform_stacks_provenance_repair.sql"
+                : latestCompatibleMigration,
     );
     expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
       sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",

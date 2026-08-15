@@ -212,6 +212,21 @@ describe("documents", () => {
     ).toBe(false);
   });
 
+  test("lets activated personal authority follow only its exact owner across workspaces", () => {
+    const workspaceId = "11111111-1111-4111-8111-111111111111";
+    const siblingWorkspaceId = "22222222-2222-4222-8222-222222222222";
+    const document = {
+      authorityKind: "personal",
+      authorityWorkspaceId: null,
+      authoritySubjectId: "subject:owner",
+    } as const;
+
+    expect(canViewDocument(document, "subject:owner", workspaceId)).toBe(true);
+    expect(canViewDocument(document, "subject:owner", siblingWorkspaceId)).toBe(true);
+    expect(canViewDocument(document, "subject:other", siblingWorkspaceId)).toBe(false);
+    expect(canViewDocument(document, null, siblingWorkspaceId)).toBe(false);
+  });
+
   test("resolves fixed authority tuples and deterministic legacy compatibility", () => {
     const workspaceId = "11111111-1111-4111-8111-111111111111";
     expect(resolveDocumentAuthority({ kind: "organization", workspaceId })).toEqual({

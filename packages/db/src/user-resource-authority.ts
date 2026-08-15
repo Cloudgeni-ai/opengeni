@@ -155,3 +155,41 @@ export async function resolveSessionAttemptPersonalResources(
     )`);
   });
 }
+
+export type PersonalDocumentAuthority = {
+  authorityId: string;
+  ownerOrganizationMembershipId: string;
+  authorityGeneration: number;
+};
+
+/**
+ * Create the common organization-user authority before inserting a personal
+ * Document. Returns null for a configured/local or rolling-legacy subject that
+ * has no eligible active organization membership, preserving the existing
+ * workspace-anchored personal lane. Call this inside the same database
+ * transaction as the Document insert so a failed write cannot leave an orphan
+ * authority.
+ */
+export async function createPersonalDocumentAuthority(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    documentId: string;
+  },
+): Promise<PersonalDocumentAuthority | null> {
+  await setSubjectRlsContext(db, input.subjectId);
+  const [row] = await rawRows<PersonalDocumentAuthority>(
+    db,
+    sql`
+      select authority_id as "authorityId",
+        owner_organization_membership_id as "ownerOrganizationMembershipId",
+        authority_generation::int as "authorityGeneration"
+      from create_personal_document_authority(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.documentId}::uuid
+      )
+    `,
+  );
+  return row ?? null;
+}

@@ -23,7 +23,9 @@ import {
   ListIndexedDocumentsResponse,
 } from "@opengeni/contracts";
 import {
+  createPersonalDocumentAuthority,
   getFilesForSubject,
+  resolveDocumentOriginalFileForSubject,
   rlsContextForWorkspace,
   setSubjectRlsContext,
   withRlsContext,
@@ -33,8 +35,8 @@ import {
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import type { ObjectStorage } from "@opengeni/storage";
-import { createHash } from "node:crypto";
-import { and, asc, desc, eq, gt, inArray, isNotNull, or, sql, type SQL } from "drizzle-orm";
+import { createHash, randomUUID } from "node:crypto";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, or, sql, type SQL } from "drizzle-orm";
 import type OpenAI from "openai";
 import {
   KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS,
@@ -149,12 +151,26 @@ export type DocumentAccessFilter = {
    * only when the agent carries the creating subject as its viewer subject.
    */
   agentOnly?: boolean | undefined;
+  /** Exact attempt whose grant snapshot must be revalidated in the content query. */
+  authorizedPersonalAttempt?:
+    | {
+        accountId: string;
+        workspaceId: string;
+        sessionId: string;
+        attemptId: string;
+      }
+    | undefined;
 };
 
 export type DocumentAuthority = {
   kind: DocumentAuthorityKind;
   workspaceId: string | null;
   subjectId: string | null;
+};
+
+export type AgentDocumentAuthorityContext = {
+  sessionId: string;
+  attemptId: string;
 };
 
 export type DocumentInventoryStatusCounts = Record<DocumentStatus, number>;
@@ -207,6 +223,7 @@ export type EffectiveDocumentSearchInput = Omit<DocumentSearchInput, "access"> &
   initiatingSubjectId: string;
   /** Agent retrieval additionally enforces documents.agent_access. */
   surface: "human" | "agent";
+  agentAuthority?: AgentDocumentAuthorityContext | undefined;
 };
 
 export type ListEffectiveIndexedDocumentsInput = {
@@ -216,6 +233,7 @@ export type ListEffectiveIndexedDocumentsInput = {
   initiatingSubjectId: string;
   checkpoint?: string | undefined;
   limit?: number | undefined;
+  agentAuthority?: AgentDocumentAuthorityContext | undefined;
 };
 
 export type EffectiveKnowledgeBrowseInput = {
@@ -229,6 +247,7 @@ export type EffectiveKnowledgeBrowseInput = {
   sourceKinds?: KnowledgeSourceKind[] | undefined;
   cursor?: string | undefined;
   limit?: number | undefined;
+  agentAuthority?: AgentDocumentAuthorityContext | undefined;
 };
 
 export type DocumentIndexHooks = {
@@ -1053,36 +1072,53 @@ export async function addDocumentToBase(
           .returning();
         return mapDocument(updated ?? existing);
       }
-      const [row] = await scopedDb
-        .insert(schema.documents)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          baseId: input.baseId,
-          fileId: input.fileId,
-          status: "queued",
-          title: cleanString(input.title) ?? cleanString(input.sourceTitle) ?? file.filename,
-          parser: DEFAULT_DOCUMENT_PARSER,
-          sourceKind: input.sourceKind ?? "manual_upload",
-          sourceUri: cleanString(input.sourceUri) ?? null,
-          sourceExternalId: cleanString(input.sourceExternalId) ?? null,
-          sourceTitle: cleanString(input.sourceTitle) ?? null,
-          sourceAuthor: cleanString(input.sourceAuthor) ?? null,
-          sourceCreatedAt: parseOptionalDate(input.sourceCreatedAt),
-          sourceUpdatedAt: parseOptionalDate(input.sourceUpdatedAt),
-          sourceVersion: cleanString(input.sourceVersion) ?? null,
-          knowledgeSourceIdentity,
-          aclTags: cleanStringArray(input.aclTags),
-          authorityKind: authority.kind,
-          authorityWorkspaceId: authority.workspaceId,
-          authoritySubjectId: authority.subjectId,
-          visibility: authority.kind === "personal" ? "private" : "workspace",
-          agentAccess: input.agentAccess ?? true,
-          createdBy: fileAuthoritySubjectId,
-          curationStatus: input.curationStatus ?? "none",
-          updatedAt: now,
-        })
-        .returning();
+      const documentId = randomUUID();
+      const row = await scopedDb.transaction(async (tx) => {
+        const userAuthority =
+          authority.kind === "personal"
+            ? await createPersonalDocumentAuthority(tx, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                subjectId: authority.subjectId!,
+                documentId,
+              })
+            : null;
+        const [inserted] = await tx
+          .insert(schema.documents)
+          .values({
+            id: documentId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            baseId: input.baseId,
+            fileId: input.fileId,
+            status: "queued",
+            title: cleanString(input.title) ?? cleanString(input.sourceTitle) ?? file.filename,
+            parser: DEFAULT_DOCUMENT_PARSER,
+            sourceKind: input.sourceKind ?? "manual_upload",
+            sourceUri: cleanString(input.sourceUri) ?? null,
+            sourceExternalId: cleanString(input.sourceExternalId) ?? null,
+            sourceTitle: cleanString(input.sourceTitle) ?? null,
+            sourceAuthor: cleanString(input.sourceAuthor) ?? null,
+            sourceCreatedAt: parseOptionalDate(input.sourceCreatedAt),
+            sourceUpdatedAt: parseOptionalDate(input.sourceUpdatedAt),
+            sourceVersion: cleanString(input.sourceVersion) ?? null,
+            knowledgeSourceIdentity,
+            aclTags: cleanStringArray(input.aclTags),
+            authorityKind: authority.kind,
+            authorityWorkspaceId: userAuthority ? null : authority.workspaceId,
+            authoritySubjectId: authority.subjectId,
+            authorityId: userAuthority?.authorityId ?? null,
+            ownerOrganizationMembershipId: userAuthority?.ownerOrganizationMembershipId ?? null,
+            originWorkspaceId: input.workspaceId,
+            visibility: authority.kind === "personal" ? "private" : "workspace",
+            agentAccess: input.agentAccess ?? true,
+            createdBy: fileAuthoritySubjectId,
+            curationStatus: input.curationStatus ?? "none",
+            updatedAt: now,
+          })
+          .returning();
+        return inserted;
+      });
       if (!row) throw new Error("Failed to create document");
       return mapDocument(row);
     },
@@ -1116,7 +1152,7 @@ export async function moveDocumentToBase(
         .from(schema.documents)
         .where(
           and(
-            eq(schema.documents.workspaceId, input.workspaceId),
+            eq(schema.documents.accountId, input.accountId),
             eq(schema.documents.id, input.documentId),
             ...documentAccessConditions(input.workspaceId, input.access),
           ),
@@ -1131,14 +1167,18 @@ export async function moveDocumentToBase(
         throw new Error("document has no suggested base; pass targetBaseId");
       }
       if (targetBaseId === row.baseId) return mapDocument(row);
-      const base = await getDocumentBase(scopedDb, input.workspaceId, targetBaseId);
+      // A portable personal Document retains its immutable ingestion workspace
+      // as provenance and physical storage. Management may be authorized from
+      // another same-organization workspace, but filing still targets a base
+      // in that origin workspace rather than silently copying authority/data.
+      const base = await getDocumentBase(scopedDb, row.workspaceId, targetBaseId);
       if (!base) throw new Error(`Document base not found: ${targetBaseId}`);
       const [conflict] = await scopedDb
         .select({ id: schema.documents.id })
         .from(schema.documents)
         .where(
           and(
-            eq(schema.documents.workspaceId, input.workspaceId),
+            eq(schema.documents.workspaceId, row.workspaceId),
             eq(schema.documents.baseId, targetBaseId),
             ...(row.knowledgeSourceIdentity
               ? [eq(schema.documents.knowledgeSourceIdentity, row.knowledgeSourceIdentity)]
@@ -1162,7 +1202,7 @@ export async function moveDocumentToBase(
           })
           .where(
             and(
-              eq(schema.documents.workspaceId, input.workspaceId),
+              eq(schema.documents.workspaceId, row.workspaceId),
               eq(schema.documents.id, input.documentId),
               ...documentAccessConditions(input.workspaceId, input.access),
             ),
@@ -1174,7 +1214,7 @@ export async function moveDocumentToBase(
             .set({ baseId: targetBaseId })
             .where(
               and(
-                eq(schema.documentChunks.workspaceId, input.workspaceId),
+                eq(schema.documentChunks.workspaceId, row.workspaceId),
                 eq(schema.documentChunks.documentId, input.documentId),
               ),
             );
@@ -1209,7 +1249,7 @@ export async function deleteDocumentFromBase(
         .from(schema.documents)
         .where(
           and(
-            eq(schema.documents.workspaceId, input.workspaceId),
+            eq(schema.documents.accountId, input.accountId),
             eq(schema.documents.id, input.documentId),
             ...documentAccessConditions(input.workspaceId, input.access),
           ),
@@ -1229,7 +1269,7 @@ export async function deleteDocumentFromBase(
         .delete(schema.documents)
         .where(
           and(
-            eq(schema.documents.workspaceId, input.workspaceId),
+            eq(schema.documents.accountId, input.accountId),
             eq(schema.documents.id, input.documentId),
             ...documentAccessConditions(input.workspaceId, input.access),
           ),
@@ -1261,6 +1301,28 @@ export async function listDocuments(
 }
 
 /**
+ * List Documents the human can discover and manage from the requested
+ * workspace. Organization Documents are account-wide, workspace Documents are
+ * local, activated organization-user Documents are portable across the owner's
+ * same-organization workspaces, and legacy personal rows remain anchored to
+ * their ingestion workspace through documentAccessConditions.
+ */
+export async function listAccessibleDocuments(
+  db: Database,
+  workspaceId: string,
+  access: DocumentAccessFilter,
+): Promise<Document[]> {
+  return await withDocumentRls(db, workspaceId, access, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.documents)
+      .where(and(...documentAccessConditions(workspaceId, access)))
+      .orderBy(desc(schema.documents.updatedAt), asc(schema.documents.createdAt));
+    return rows.map(mapDocument);
+  });
+}
+
+/**
  * List newly ready documents in the same effective scope used by agent
  * retrieval. The opaque checkpoint is bound to the account, requesting
  * workspace, and immutable initiating subject, so it cannot be reused across
@@ -1282,10 +1344,13 @@ export async function listEffectiveIndexedDocuments(
         initiatingSubjectId,
       })
     : 0n;
-  const access: DocumentAccessFilter = {
-    agentOnly: true,
-    viewerSubjectId: initiatingSubjectId,
-  };
+  const access = await resolveEffectiveDocumentAccess(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    initiatingSubjectId,
+    surface: "agent",
+    agentAuthority: input.agentAuthority,
+  });
   const rows = await withDocumentAccountRls(
     db,
     input.accountId,
@@ -1416,14 +1481,34 @@ export async function getDocument(
       .select()
       .from(schema.documents)
       .where(
-        and(
-          eq(schema.documents.workspaceId, workspaceId),
-          eq(schema.documents.id, documentId),
-          ...documentAccessConditions(workspaceId, access),
-        ),
+        and(eq(schema.documents.id, documentId), ...documentAccessConditions(workspaceId, access)),
       )
       .limit(1);
     return row ? mapDocument(row) : null;
+  });
+}
+
+/**
+ * Resolve the immutable source file through Document authority in the requested
+ * workspace. The file remains physically owned by its ingestion workspace;
+ * callers never gain generic access to that workspace's file inventory.
+ */
+export async function getDocumentOriginalFile(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    documentId: string;
+    access: DocumentAccessFilter;
+  },
+): Promise<FileAsset | null> {
+  const subjectId = cleanString(input.access.viewerSubjectId ?? null);
+  if (!subjectId || input.access.agentOnly) return null;
+  return await resolveDocumentOriginalFileForSubject(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId,
+    documentId: input.documentId,
   });
 }
 
@@ -1460,14 +1545,10 @@ export async function queueDocumentForReindex(
 ): Promise<Document> {
   return await withDocumentRls(db, workspaceId, access, async (scopedDb) => {
     const [document] = await scopedDb
-      .select({ authorityKind: schema.documents.authorityKind })
+      .select()
       .from(schema.documents)
       .where(
-        and(
-          eq(schema.documents.workspaceId, workspaceId),
-          eq(schema.documents.id, documentId),
-          ...documentAccessConditions(workspaceId, access),
-        ),
+        and(eq(schema.documents.id, documentId), ...documentAccessConditions(workspaceId, access)),
       )
       .limit(1);
     if (!document) throw new Error(`Document not found: ${documentId}`);
@@ -1480,11 +1561,7 @@ export async function queueDocumentForReindex(
         updatedAt: new Date(),
       })
       .where(
-        and(
-          eq(schema.documents.workspaceId, workspaceId),
-          eq(schema.documents.id, documentId),
-          ...documentAccessConditions(workspaceId, access),
-        ),
+        and(eq(schema.documents.id, documentId), ...documentAccessConditions(workspaceId, access)),
       )
       .returning();
     if (!row) throw new Error(`Document not found: ${documentId}`);
@@ -1877,6 +1954,13 @@ export async function searchEffectiveDocuments(
   if (!initiatingSubjectId) {
     throw new Error("effective document retrieval requires an initiating subject");
   }
+  const access = await resolveEffectiveDocumentAccess(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    initiatingSubjectId,
+    surface: input.surface,
+    agentAuthority: input.agentAuthority,
+  });
   return await searchDocuments(
     db,
     {
@@ -1890,10 +1974,7 @@ export async function searchEffectiveDocuments(
       aclTags: input.aclTags,
       // Construct the lower-level access filter here instead of spreading the
       // caller input, so an untyped/legacy access override is always ignored.
-      access: {
-        viewerSubjectId: initiatingSubjectId,
-        ...(input.surface === "agent" ? { agentOnly: true } : {}),
-      },
+      access,
     },
     services,
   );
@@ -1912,6 +1993,13 @@ export async function searchEffectiveKnowledge(
 ): Promise<KnowledgeSearchResponse> {
   const initiatingSubjectId = canonicalEffectiveDocumentSubject(input.initiatingSubjectId);
   const requestedLimit = Math.min(Math.max(input.limit ?? 5, 1), KNOWLEDGE_SEARCH_MAX_RESULTS);
+  const access = await resolveEffectiveDocumentAccess(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    initiatingSubjectId,
+    surface: "agent",
+    agentAuthority: input.agentAuthority,
+  });
   // Pull a bounded surplus so the permission-safe result set can still satisfy
   // the caller after relevance filtering and exact-content deduplication.
   const candidateLimit = Math.min(requestedLimit * 4, KNOWLEDGE_SEARCH_MAX_RESULTS);
@@ -1926,7 +2014,7 @@ export async function searchEffectiveKnowledge(
       ...(input.mode ? { mode: input.mode } : {}),
       ...(input.sourceKinds ? { sourceKinds: input.sourceKinds } : {}),
       ...(input.aclTags ? { aclTags: input.aclTags } : {}),
-      access: { agentOnly: true, viewerSubjectId: initiatingSubjectId },
+      access,
     },
     services,
     {
@@ -1943,7 +2031,6 @@ export async function searchEffectiveKnowledge(
       alreadyBelowRelevanceFloor: rankedSelection.belowRelevanceFloor,
     });
   }
-  const access: DocumentAccessFilter = { agentOnly: true, viewerSubjectId: initiatingSubjectId };
   const current = await withDocumentAccountRls(
     db,
     input.accountId,
@@ -2377,11 +2464,18 @@ export async function getEffectiveKnowledgeRecord(
     workspaceId: string;
     initiatingSubjectId: string;
     id: string;
+    agentAuthority?: AgentDocumentAuthorityContext | undefined;
   },
 ): Promise<KnowledgeRecord | null> {
   const initiatingSubjectId = canonicalEffectiveDocumentSubject(input.initiatingSubjectId);
   const target = parseKnowledgeRecordId(input.id);
-  const access: DocumentAccessFilter = { agentOnly: true, viewerSubjectId: initiatingSubjectId };
+  const access = await resolveEffectiveDocumentAccess(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    initiatingSubjectId,
+    surface: "agent",
+    agentAuthority: input.agentAuthority,
+  });
   return await withDocumentAccountRls(
     db,
     input.accountId,
@@ -2481,10 +2575,13 @@ export async function browseEffectiveKnowledge(
   };
   const topLevelAfter =
     !parent && input.cursor ? decodeKnowledgeBrowseCursor(input.cursor, cursorScope) : 0n;
-  const access: DocumentAccessFilter = {
-    agentOnly: true,
-    viewerSubjectId: initiatingSubjectId,
-  };
+  const access = await resolveEffectiveDocumentAccess(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    initiatingSubjectId,
+    surface: "agent",
+    agentAuthority: input.agentAuthority,
+  });
   return await withDocumentAccountRls(
     db,
     input.accountId,
@@ -3122,6 +3219,33 @@ async function assertDocumentAccountWorkspace(
   return context;
 }
 
+export async function resolveEffectiveDocumentAccess(
+  _db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    initiatingSubjectId: string;
+    surface: "human" | "agent";
+    agentAuthority?: AgentDocumentAuthorityContext | undefined;
+  },
+): Promise<DocumentAccessFilter> {
+  if (input.surface === "human") {
+    return { viewerSubjectId: input.initiatingSubjectId };
+  }
+  return {
+    agentOnly: true,
+    viewerSubjectId: input.initiatingSubjectId,
+    authorizedPersonalAttempt: input.agentAuthority
+      ? {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.agentAuthority.sessionId,
+          attemptId: input.agentAuthority.attemptId,
+        }
+      : undefined,
+  };
+}
+
 /**
  * Visibility/agent scoping shared by every document read path. Fail-closed:
  * with no filter supplied, private documents are invisible.
@@ -3136,11 +3260,33 @@ function documentAccessConditions(
     eq(schema.documents.authorityWorkspaceId, workspaceId),
   );
   const viewer = cleanString(access?.viewerSubjectId ?? null);
+  const personalAttempt = access?.authorizedPersonalAttempt;
+  const authorizedPersonal = personalAttempt
+    ? sql`${schema.documents.id} IN (
+        SELECT resolve_session_attempt_personal_document_reads(
+          ${personalAttempt.accountId}::uuid,
+          ${personalAttempt.workspaceId}::uuid,
+          ${personalAttempt.sessionId}::uuid,
+          ${personalAttempt.attemptId}::uuid
+        )
+      )`
+    : sql`false`;
   const personal = viewer
     ? and(
         eq(schema.documents.authorityKind, "personal"),
-        eq(schema.documents.authorityWorkspaceId, workspaceId),
         eq(schema.documents.authoritySubjectId, viewer),
+        access?.agentOnly
+          ? (or(
+              and(
+                isNull(schema.documents.authorityId),
+                eq(schema.documents.authorityWorkspaceId, workspaceId),
+              ),
+              and(isNotNull(schema.documents.authorityId), authorizedPersonal),
+            ) ?? authorizedPersonal)
+          : (or(
+              eq(schema.documents.authorityWorkspaceId, workspaceId),
+              isNull(schema.documents.authorityWorkspaceId),
+            ) ?? eq(schema.documents.authorityWorkspaceId, workspaceId)),
       )
     : undefined;
   const authority = viewer
@@ -3162,13 +3308,22 @@ function documentAccessConditions(
 function documentMatchesAccess(
   document: Pick<
     DocumentAccessRecord,
-    "authorityKind" | "authorityWorkspaceId" | "authoritySubjectId" | "agentAccess"
+    | "id"
+    | "authorityId"
+    | "authorityKind"
+    | "authorityWorkspaceId"
+    | "authoritySubjectId"
+    | "agentAccess"
   >,
   workspaceId: string,
   access: DocumentAccessFilter | undefined,
 ): boolean {
   if (access?.agentOnly) {
-    return document.agentAccess && canViewDocument(document, access.viewerSubjectId, workspaceId);
+    return (
+      document.agentAccess &&
+      (document.authorityKind !== "personal" || document.authorityId === null) &&
+      canViewDocument(document, access.viewerSubjectId, workspaceId)
+    );
   }
   return canViewDocument(document, access?.viewerSubjectId, workspaceId);
 }
@@ -3186,9 +3341,9 @@ function canonicalDocumentAuthoritySubject(value: unknown): string | undefined {
 /**
  * Whether a single already-fetched document is readable in this workspace.
  *
- * Keep this compatibility predicate as strict as SQL/RLS: personal authority
- * remains anchored to its originating workspace, and unknown or incomplete
- * authority tuples deny instead of falling through as workspace-visible.
+ * Keep this compatibility predicate as strict as SQL/RLS: legacy personal
+ * authority remains origin-workspace anchored while activated personal
+ * authority has a null workspace and follows the exact owner within the org.
  */
 export function canViewDocument(
   document: Pick<DocumentAccessRecord, "authorityKind" | "authoritySubjectId"> & {
@@ -3201,21 +3356,31 @@ export function canViewDocument(
     return document.authorityWorkspaceId === null && document.authoritySubjectId === null;
   }
   const normalizedWorkspaceId = cleanString(workspaceId ?? null);
-  if (!normalizedWorkspaceId || document.authorityWorkspaceId !== normalizedWorkspaceId) {
+  if (!normalizedWorkspaceId) {
     return false;
   }
   if (document.authorityKind === "workspace") {
-    return document.authoritySubjectId === null;
+    return (
+      document.authorityWorkspaceId === normalizedWorkspaceId &&
+      document.authoritySubjectId === null
+    );
   }
   if (document.authorityKind === "personal") {
     const authoritySubjectId = canonicalDocumentAuthoritySubject(document.authoritySubjectId);
     const viewer = canonicalDocumentAuthoritySubject(viewerSubjectId);
-    return !!authoritySubjectId && authoritySubjectId === viewer;
+    return (
+      !!authoritySubjectId &&
+      authoritySubjectId === viewer &&
+      (document.authorityWorkspaceId === null ||
+        document.authorityWorkspaceId === normalizedWorkspaceId)
+    );
   }
   return false;
 }
 
 type DocumentAccessRecord = {
+  id: string;
+  authorityId: string | null;
   authorityKind: string;
   authorityWorkspaceId: string | null;
   authoritySubjectId: string | null;
@@ -3609,6 +3774,7 @@ function mapDocument(row: typeof schema.documents.$inferSelect): Document {
     authorityKind: normalizeDocumentAuthorityKind(row.authorityKind),
     authorityWorkspaceId: row.authorityWorkspaceId,
     authoritySubjectId: row.authoritySubjectId,
+    authorityId: row.authorityId,
     visibility: normalizeDocumentVisibility(row.visibility),
     createdBy: row.createdBy,
     agentAccess: row.agentAccess,
