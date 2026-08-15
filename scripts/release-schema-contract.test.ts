@@ -281,6 +281,15 @@ describe("release schema contract", () => {
       sha256: "669f96626b41fc0cf8c82914d1e39183925af1717510032fc70950ee7040ff84",
       deploymentMode: "rolling",
     });
+    expect(
+      completeSourceContract.migrations.filter((migration) => migration.path.startsWith("0258_")),
+    ).toEqual([
+      {
+        path: "0258_task_note_knowledge_promotion.sql",
+        sha256: "ca399faca6fc873a400666f6fd54244c688032cbee392cf4233803af19fb7254",
+        deploymentMode: "rolling",
+      },
+    ]);
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
@@ -405,6 +414,11 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
+      if (migrations.has("0258_task_note_knowledge_promotion.sql")) {
+        return includesActivation
+          ? "778fef339ad9c442b7a91a758a95c7f07a300a231bd915cbe3449244685f3bc6"
+          : "0c1eeef8334779f6ac9afb15441b315b709a7fffa2ab70af7320af0069f6c41b";
+      }
       if (migrations.has("0255_company_brain_governed_write_proposals.sql")) {
         return includesActivation
           ? "7297e2ad81f65cfebfea608a8e541e1f8229e6b0e70f3a8d651319fefa72760d"
@@ -740,7 +754,8 @@ describe("release schema contract", () => {
         (migrations.has("0244_slack_app_home_refresh_queue.sql") ? 1 : 0) +
         (migrations.has("0245_model_context_contribution_facts.sql") ? 1 : 0) +
         (migrations.has("0246_integration_personal_instance_authority.sql") ? 1 : 0) +
-        (migrations.has("0255_company_brain_governed_write_proposals.sql") ? 1 : 0),
+        (migrations.has("0255_company_brain_governed_write_proposals.sql") ? 1 : 0) +
+        (migrations.has("0258_task_note_knowledge_promotion.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -772,13 +787,15 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0255_company_brain_governed_write_proposals.sql")
-        ? "0255_company_brain_governed_write_proposals.sql"
-        : migrations.has("0248_terraform_stacks_component_resolution_fence.sql")
-          ? "0248_terraform_stacks_component_resolution_fence.sql"
-          : migrations.has("0247_terraform_stacks_provenance_repair.sql")
-            ? "0247_terraform_stacks_provenance_repair.sql"
-            : latestCompatibleMigration,
+      migrations.has("0258_task_note_knowledge_promotion.sql")
+        ? "0258_task_note_knowledge_promotion.sql"
+        : migrations.has("0255_company_brain_governed_write_proposals.sql")
+          ? "0255_company_brain_governed_write_proposals.sql"
+          : migrations.has("0248_terraform_stacks_component_resolution_fence.sql")
+            ? "0248_terraform_stacks_component_resolution_fence.sql"
+            : migrations.has("0247_terraform_stacks_provenance_repair.sql")
+              ? "0247_terraform_stacks_provenance_repair.sql"
+              : latestCompatibleMigration,
     );
     expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
       sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",
