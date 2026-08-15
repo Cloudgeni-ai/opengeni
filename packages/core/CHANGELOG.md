@@ -1,5 +1,50 @@
 # @opengeni/core
 
+## 1.0.2
+
+### Patch Changes
+
+- 90c0c3e: Persist bounded, content-free Company Brain prompt contribution estimates on authoritative model-call facts and expose their source breakdown and coverage in Workspace Insights.
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+- 4d1ed07: Preserve complete bounded lazy-search tool schemas across durable model history, expose Linux desktop application launch when the image supports it, suppress the managed Chrome sandbox warning, label Computer sessions as Desktops in the UI, and keep AnyDoc available in headed desktop sandboxes.
+- ffbbf4c: Add organization, workspace, and owner-private Variable Set scopes with independent metadata, plaintext-read, write, attachment, and runtime-use authority. Runtime secret materialization now revalidates the exact live attempt and personal grant immediately before ciphertext egress while audits remain value-free.
+- d2f172c: Add fail-closed, metadata-only capability, exact rig-version health, exact alert-selector data-source checks, and source/claim authority fencing for scheduled incident telemetry responders before expensive retrieval.
+- 04b1a1f: Add exact-attempt, workspace-local governed Knowledge proposal/correction
+  routing and inactive instruction-policy and preference proposal adapters while
+  preserving human activation authority and immutable Knowledge provenance.
+- Updated dependencies [a551666]
+- Updated dependencies [31231dc]
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [4d1ed07]
+- Updated dependencies [ce3b370]
+- Updated dependencies [e98daf6]
+- Updated dependencies [b2af2df]
+- Updated dependencies [e9e1016]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ec00479]
+- Updated dependencies [ffbbf4c]
+- Updated dependencies [3843825]
+- Updated dependencies [1ab8023]
+- Updated dependencies [d34dd9a]
+- Updated dependencies [79f57b5]
+- Updated dependencies [886682d]
+- Updated dependencies [234a5e7]
+- Updated dependencies [c3f0598]
+- Updated dependencies [79f57b5]
+- Updated dependencies [d2f172c]
+- Updated dependencies [04b1a1f]
+- Updated dependencies [c056063]
+  - @opengeni/db@1.0.2
+  - @opengeni/observability@0.7.8
+  - @opengeni/contracts@1.1.0
+  - @opengeni/config@0.16.5
+  - @opengeni/events@0.3.113
+  - @opengeni/runtime@1.0.2
+  - @opengeni/documents@0.5.42
+  - @opengeni/storage@0.2.97
+
 ## 1.0.1
 
 ### Patch Changes
