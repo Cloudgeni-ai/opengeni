@@ -244,6 +244,37 @@ CREATE TRIGGER connections_authority_binding
 $ddl$, data_schema);
 
 EXECUTE format($ddl$
+CREATE OR REPLACE FUNCTION opengeni_private.validate_user_resource_grant_action()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = %1$I, pg_catalog, pg_temp
+AS $body$
+BEGIN
+  IF NEW.action <> 'connection.use' AND EXISTS (
+    SELECT 1
+    FROM organization_user_resource_authorities authority
+    WHERE authority.id = NEW.authority_id
+      AND authority.account_id = NEW.account_id
+      AND authority.resource_kind = 'connection'
+  ) THEN
+    RAISE EXCEPTION 'connection grants require connection.use'
+      USING ERRCODE = '22023';
+  END IF;
+  RETURN NEW;
+END
+$body$
+$ddl$, data_schema);
+
+EXECUTE format($ddl$
+CREATE TRIGGER organization_user_resource_grants_action_contract
+  BEFORE INSERT OR UPDATE OF account_id, authority_id, action
+  ON %1$I.organization_user_resource_grants
+  FOR EACH ROW
+  EXECUTE FUNCTION opengeni_private.validate_user_resource_grant_action()
+$ddl$, data_schema);
+
+EXECUTE format($ddl$
 CREATE OR REPLACE FUNCTION %1$I.list_self_connection_authorities(
   p_account_id uuid
 ) RETURNS TABLE (
@@ -639,6 +670,7 @@ $ddl$, data_schema);
 END
 $connection_authority_routines$;
 
+REVOKE ALL ON FUNCTION opengeni_private.validate_user_resource_grant_action() FROM PUBLIC;
 REVOKE ALL ON FUNCTION list_self_connection_authorities(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION issue_self_connection_use_grant(
   uuid, uuid, uuid, text, text, uuid, boolean

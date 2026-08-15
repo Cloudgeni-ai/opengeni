@@ -19,6 +19,8 @@ describe("migration 0255 connection authority delegation", () => {
     expect(source).toContain('ADD COLUMN "authority_generation" bigint NOT NULL DEFAULT 1');
     expect(source).toContain("resource_kind = 'connection'");
     expect(source).toContain("'connection.use'");
+    expect(source).toContain("connection grants require connection.use");
+    expect(source).toContain("organization_user_resource_grants_action_contract");
     expect(source).toContain("CREATE OR REPLACE FUNCTION %1$I.resolve_connection_use_authority");
     expect(source).toContain("connection_use_once_consumption_receipts");
     expect(source).toContain("REVOKE ALL ON TABLE connection_use_once_consumption_receipts");
@@ -37,7 +39,10 @@ describe("migration 0255 connection authority delegation", () => {
     if (!blank) return;
 
     await migrate(blank.databaseUrl);
-    const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
+    const sql = postgres(blank.databaseUrl, {
+      max: 1,
+      onnotice: () => undefined,
+    });
     const client = createDb(blank.databaseUrl, { max: 1 });
     try {
       const [account] = await sql<{ id: string }[]>`
@@ -142,7 +147,11 @@ describe("migration 0255 connection authority delegation", () => {
       );
       expect(ownerMetadata?.authorityId).toBe(personal.authorityId);
       const [authority] = await sql<
-        Array<{ resourceKind: string; resourceId: string; membershipId: string }>
+        Array<{
+          resourceKind: string;
+          resourceId: string;
+          membershipId: string;
+        }>
       >`
         select resource_kind as "resourceKind", resource_id as "resourceId",
           organization_membership_id as "membershipId"
@@ -168,7 +177,10 @@ describe("migration 0255 connection authority delegation", () => {
         subjectId: ownerSubjectId,
       });
       const [sessionAuthority] = await sql<
-        Array<{ visibility: "user_private" | "workspace_shared"; authorityEpoch: number }>
+        Array<{
+          visibility: "user_private" | "workspace_shared";
+          authorityEpoch: number;
+        }>
       >`
         select visibility, authority_epoch::int as "authorityEpoch"
         from sessions where id = ${targetSession.id}
@@ -197,6 +209,46 @@ describe("migration 0255 connection authority delegation", () => {
           )
       `;
 
+      await expect(
+        sql.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+          await tx`select set_config('opengeni.workspace_id', ${targetWorkspace!.id}, true)`;
+          await tx`select set_config('opengeni.subject_id', ${ownerSubjectId}, true)`;
+          await tx`
+            select * from issue_self_user_resource_grant(
+              ${account!.id}::uuid, ${personal.authorityId}::uuid,
+              ${targetWorkspace!.id}::uuid, 'provider.delete', 'once',
+              ${sessionAuthority.visibility}, ${targetSession.id}::uuid,
+              ${sessionAuthority.visibility === "workspace_shared"}
+            )
+          `;
+        }),
+      ).rejects.toMatchObject({ code: "22023" });
+
+      const genericGrant = await sql.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${targetWorkspace!.id}, true)`;
+        await tx`select set_config('opengeni.subject_id', ${ownerSubjectId}, true)`;
+        const [row] = await tx<
+          Array<{
+            grantId: string;
+            generation: number;
+            status: string;
+          }>
+        >`
+          select grant_id as "grantId", grant_generation::int as generation,
+            grant_status as status
+          from issue_self_user_resource_grant(
+            ${account!.id}::uuid, ${personal.authorityId}::uuid,
+            ${targetWorkspace!.id}::uuid, 'connection.use', 'once',
+            ${sessionAuthority.visibility}, ${targetSession.id}::uuid,
+            ${sessionAuthority.visibility === "workspace_shared"}
+          )
+        `;
+        return row!;
+      });
+      expect(genericGrant).toMatchObject({ generation: 1, status: "active" });
+
       const grant = await sql.begin(async (tx) => {
         await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
         await tx`select set_config('opengeni.workspace_id', ${targetWorkspace!.id}, true)`;
@@ -219,6 +271,7 @@ describe("migration 0255 connection authority delegation", () => {
         return row!;
       });
       expect(grant).toMatchObject({ generation: 1, status: "active" });
+      expect(grant.grantId).toBe(genericGrant.grantId);
 
       const personalSnapshot = {
         organizationId: account!.id,
@@ -404,7 +457,10 @@ describe("migration 0255 connection authority delegation", () => {
         `;
         return row!;
       });
-      expect(resolution).toEqual({ status: "denied", reason: "session_inactive" });
+      expect(resolution).toEqual({
+        status: "denied",
+        reason: "session_inactive",
+      });
     } finally {
       await client.close();
       await sql.end();
