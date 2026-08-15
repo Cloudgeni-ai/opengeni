@@ -8,6 +8,7 @@ import {
   getEffectiveKnowledgeRecord,
   getDocument,
   getDocumentChunk,
+  getDocumentOriginalFile,
   listAccessibleDocuments,
   moveDocumentToBase,
   queueDocumentForReindex,
@@ -190,6 +191,30 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
     await expect(
       getDocument(forced.db, otherOrganization.workspaceId, created.id, ownerAccess),
     ).resolves.toBeNull();
+    await expect(
+      getDocumentOriginalFile(forced.db, {
+        accountId: origin.accountId,
+        workspaceId: sibling.workspaceId,
+        documentId: created.id,
+        access: ownerAccess,
+      }),
+    ).resolves.toMatchObject({ id: file!.id, workspaceId: origin.workspaceId });
+    await expect(
+      getDocumentOriginalFile(forced.db, {
+        accountId: origin.accountId,
+        workspaceId: sibling.workspaceId,
+        documentId: created.id,
+        access: { viewerSubjectId: otherSubjectId },
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      getDocumentOriginalFile(forced.db, {
+        accountId: otherOrganization.accountId,
+        workspaceId: otherOrganization.workspaceId,
+        documentId: created.id,
+        access: ownerAccess,
+      }),
+    ).resolves.toBeNull();
 
     const queued = await queueDocumentForReindex(
       forced.db,
@@ -365,7 +390,7 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
         surface: "agent",
       });
       expect(effectiveAll.map((result) => result.documentId).sort()).toEqual(
-        [organization.documentId, workspace.documentId].sort(),
+        [organization.documentId, workspace.documentId, personal.documentId].sort(),
       );
       const knowledge = await searchEffectiveKnowledge(client.db, {
         accountId: origin.accountId,
@@ -377,7 +402,9 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
         surface: "agent",
       });
       expect(knowledge.results.map((result) => result.record.id).sort()).toEqual(
-        [organization.chunkId, workspace.chunkId].map((id) => `document_chunk:${id}`).sort(),
+        [organization.chunkId, workspace.chunkId, personal.chunkId]
+          .map((id) => `document_chunk:${id}`)
+          .sort(),
       );
       expect(JSON.stringify(knowledge)).not.toContain("user:alice");
       expect(knowledge.results[0]?.record).toMatchObject({
@@ -393,7 +420,7 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
           initiatingSubjectId: "user:alice",
           id: `document_chunk:${personal.chunkId}`,
         }),
-      ).resolves.toBeNull();
+      ).resolves.toMatchObject({ id: `document_chunk:${personal.chunkId}` });
       await expect(
         getEffectiveKnowledgeRecord(client.db, {
           accountId: origin.accountId,
@@ -410,7 +437,9 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
         limit: 50,
       });
       expect(browse.records.map((record) => record.id).sort()).toEqual(
-        [organization.documentId, workspace.documentId].map((id) => `document:${id}`).sort(),
+        [organization.documentId, workspace.documentId, personal.documentId]
+          .map((id) => `document:${id}`)
+          .sort(),
       );
       expect(JSON.stringify(browse)).not.toContain("user:alice");
       const contents = await browseEffectiveKnowledge(client.db, {
@@ -420,7 +449,22 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
         parentId: `document:${personal.documentId}`,
         limit: 50,
       });
-      expect(contents).toEqual({ records: [], nextCursor: null, hasMore: false });
+      expect(contents.records.map((record) => record.id)).toEqual([
+        `document_chunk:${personal.chunkId}`,
+      ]);
+
+      const wrongSubjectLegacy = await searchEffectiveDocuments(client.db, {
+        accountId: origin.accountId,
+        workspaceId: origin.workspaceId,
+        query: "personal",
+        mode: "keyword",
+        limit: 50,
+        initiatingSubjectId: "user:bob",
+        surface: "agent",
+      });
+      expect(wrongSubjectLegacy.map((result) => result.documentId)).not.toContain(
+        personal.documentId,
+      );
 
       const siblingResults = await searchDocuments(client.db, {
         accountId: sibling.accountId,

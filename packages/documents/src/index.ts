@@ -24,6 +24,7 @@ import {
 import {
   createPersonalDocumentAuthority,
   getFilesForSubject,
+  requireFileForSubject,
   rlsContextForWorkspace,
   setSubjectRlsContext,
   withRlsContext,
@@ -1477,6 +1478,30 @@ export async function getDocument(
 }
 
 /**
+ * Resolve the immutable source file through Document authority in the requested
+ * workspace. The file remains physically owned by its ingestion workspace;
+ * callers never gain generic access to that workspace's file inventory.
+ */
+export async function getDocumentOriginalFile(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    documentId: string;
+    access: DocumentAccessFilter;
+  },
+): Promise<FileAsset | null> {
+  const document = await getDocument(db, input.workspaceId, input.documentId, input.access);
+  if (!document) return null;
+  return await requireFileForSubject(db, {
+    accountId: input.accountId,
+    workspaceId: document.workspaceId,
+    subjectId: cleanString(input.access.viewerSubjectId ?? null) ?? null,
+    fileId: document.fileId,
+  }).catch(() => null);
+}
+
+/**
  * Internal ingestion-only read used after the worker has independently resolved
  * and fenced the immutable document authority tuple. It deliberately does not
  * apply provider retrieval authorization because a new Drive document must be
@@ -2667,7 +2692,13 @@ function documentAccessConditions(
         eq(schema.documents.authorityKind, "personal"),
         eq(schema.documents.authoritySubjectId, viewer),
         access?.agentOnly
-          ? authorizedPersonal
+          ? (or(
+              and(
+                isNull(schema.documents.authorityId),
+                eq(schema.documents.authorityWorkspaceId, workspaceId),
+              ),
+              and(isNotNull(schema.documents.authorityId), authorizedPersonal),
+            ) ?? authorizedPersonal)
           : (or(
               eq(schema.documents.authorityWorkspaceId, workspaceId),
               isNull(schema.documents.authorityWorkspaceId),
@@ -2693,7 +2724,12 @@ function documentAccessConditions(
 function documentMatchesAccess(
   document: Pick<
     DocumentAccessRecord,
-    "id" | "authorityKind" | "authorityWorkspaceId" | "authoritySubjectId" | "agentAccess"
+    | "id"
+    | "authorityId"
+    | "authorityKind"
+    | "authorityWorkspaceId"
+    | "authoritySubjectId"
+    | "agentAccess"
   >,
   workspaceId: string,
   access: DocumentAccessFilter | undefined,
@@ -2701,7 +2737,7 @@ function documentMatchesAccess(
   if (access?.agentOnly) {
     return (
       document.agentAccess &&
-      document.authorityKind !== "personal" &&
+      (document.authorityKind !== "personal" || document.authorityId === null) &&
       canViewDocument(document, access.viewerSubjectId, workspaceId)
     );
   }
@@ -2760,6 +2796,7 @@ export function canViewDocument(
 
 type DocumentAccessRecord = {
   id: string;
+  authorityId: string | null;
   authorityKind: string;
   authorityWorkspaceId: string | null;
   authoritySubjectId: string | null;

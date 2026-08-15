@@ -7,6 +7,8 @@ import {
   DocumentBase,
   DocumentSearchRequest,
   DocumentSearchResponse,
+  FileAsset,
+  FileDownloadUrlResponse,
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
   MoveDocumentRequest,
@@ -29,6 +31,7 @@ import {
   deleteDocumentFromBase,
   ensureDefaultBase,
   getDocument,
+  getDocumentOriginalFile,
   getDocumentBase,
   listAccessibleDocuments,
   listDocumentBasesEnsuringDefault,
@@ -174,6 +177,53 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  app.get("/v1/workspaces/:workspaceId/documents/:documentId/original-file", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const file = await getDocumentOriginalFile(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      documentId: c.req.param("documentId"),
+      access: { viewerSubjectId: grant.subjectId },
+    });
+    if (!file) {
+      throw new HTTPException(404, { message: "document file not found" });
+    }
+    return c.json(FileAsset.parse(file));
+  });
+
+  app.post(
+    "/v1/workspaces/:workspaceId/documents/:documentId/original-file/download-url",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
+      await requireAccessGrant(c, deps, workspaceId, "files:read");
+      if (!objectStorage) {
+        throw new HTTPException(503, { message: "object storage is not configured" });
+      }
+      const file = await getDocumentOriginalFile(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        documentId: c.req.param("documentId"),
+        access: { viewerSubjectId: grant.subjectId },
+      });
+      if (!file) {
+        throw new HTTPException(404, { message: "document file not found" });
+      }
+      if (file.status !== "ready") {
+        throw new HTTPException(409, { message: `file is ${file.status}` });
+      }
+      const signed = await objectStorage.createGetUrl({ key: file.objectKey });
+      return c.json(
+        FileDownloadUrlResponse.parse({
+          url: signed.url,
+          expiresAt: signed.expiresAt.toISOString(),
+        }),
+      );
+    },
+  );
+
   app.delete(
     "/v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId",
     async (c) => {
@@ -225,7 +275,9 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       const { grant } = authorization;
       const organizationAuthorityGranted = hasAccountAdminAuthority(authorization);
       if (!objectStorage) {
-        throw new HTTPException(503, { message: "object storage is not configured" });
+        throw new HTTPException(503, {
+          message: "object storage is not configured",
+        });
       }
       await requireLimit(deps, {
         accountId: grant.accountId,

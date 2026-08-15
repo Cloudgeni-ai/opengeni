@@ -1141,6 +1141,8 @@ describe("OpenGeniClient documents", () => {
     await client.addDocument(WORKSPACE_ID, BASE_ID, { fileId: FILE_ID });
     await client.listDocuments(WORKSPACE_ID, BASE_ID);
     await client.listAccessibleDocuments(WORKSPACE_ID);
+    await client.getDocumentOriginalFile(WORKSPACE_ID, DOCUMENT_ID);
+    await client.createDocumentOriginalFileDownloadUrl(WORKSPACE_ID, DOCUMENT_ID);
     await client.reindexDocument(WORKSPACE_ID, BASE_ID, DOCUMENT_ID);
     const search = await client.searchDocuments(WORKSPACE_ID, BASE_ID, {
       query: "rollback steps",
@@ -1180,6 +1182,8 @@ describe("OpenGeniClient documents", () => {
         `POST /v1/workspaces/${WORKSPACE_ID}/document-bases/${BASE_ID}/documents`,
         `GET /v1/workspaces/${WORKSPACE_ID}/document-bases/${BASE_ID}/documents`,
         `GET /v1/workspaces/${WORKSPACE_ID}/documents`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/original-file`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/original-file/download-url`,
         `POST /v1/workspaces/${WORKSPACE_ID}/document-bases/${BASE_ID}/documents/${DOCUMENT_ID}/reindex`,
         `POST /v1/workspaces/${WORKSPACE_ID}/document-bases/${BASE_ID}/search`,
         `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/search`,
@@ -1191,27 +1195,27 @@ describe("OpenGeniClient documents", () => {
         `POST /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/move`,
       ],
     );
-    expect(JSON.parse(requests[7]!.body!)).toEqual({
+    expect(JSON.parse(requests[9]!.body!)).toEqual({
       query: "rollback steps",
       limit: 3,
     });
-    expect(JSON.parse(requests[8]!.body!)).toEqual({
+    expect(JSON.parse(requests[10]!.body!)).toEqual({
       query: "decision",
       mode: "keyword",
       limit: 2,
     });
-    expect(new URL(requests[9]!.url).searchParams.get("status")).toBe("approved");
-    expect(JSON.parse(requests[11]!.body!)).toEqual({
+    expect(new URL(requests[11]!.url).searchParams.get("status")).toBe("approved");
+    expect(JSON.parse(requests[13]!.body!)).toEqual({
       text: "Prefer reviewed memory.",
       kind: "decision",
     });
-    expect(JSON.parse(requests[12]!.body!)).toEqual({ status: "approved" });
-    expect(JSON.parse(requests[13]!.body!)).toEqual({
+    expect(JSON.parse(requests[14]!.body!)).toEqual({ status: "approved" });
+    expect(JSON.parse(requests[15]!.body!)).toEqual({
       text: "meeting notes",
       visibility: "private",
       agentAccess: false,
     });
-    expect(JSON.parse(requests[14]!.body!)).toEqual({});
+    expect(JSON.parse(requests[16]!.body!)).toEqual({});
   });
 
   test("deleteDocument DELETEs the document and resolves on 204", async () => {

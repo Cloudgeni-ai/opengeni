@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- OPE-202 activates organization-user ownership for personal Documents. Existing
+-- This migration activates organization-user ownership for personal Documents. Existing
 -- personal rows remain fail-closed to their original workspace; new personal
 -- rows may carry the common user-resource authority and follow their owner
 -- across workspaces in the same organization. Agent reads require an exact

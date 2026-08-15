@@ -182,7 +182,10 @@ immutable ingestion/indexing origin, but human discovery and management follow
 the owner across that owner's currently accessible same-organization
 workspaces. `GET /v1/workspaces/:workspaceId/documents` is the effective human
 inventory; exact reads, reindex, filing, and deletion use the same authority
-predicate while operating on the immutable origin rows. Configured/local
+predicate while operating on the immutable origin rows. Document-scoped
+original-file metadata and signed-download routes use that predicate before
+resolving the one immutable origin file, without widening generic file access.
+Configured/local
 subjects without an eligible active organization membership and legacy private
 rows keep the workspace binding established by migration 0165.
 
@@ -194,7 +197,10 @@ snapshot and all membership, authority, grant, session-epoch, attempt, and
 interruption fences. Missing attempt identity omits personal evidence, and
 revocation fails closed before content is returned. The common grant lifecycle
 requires explicit durable acknowledgement before personal content can be used
-in a workspace-shared session.
+in a workspace-shared session. A legacy null-authority private Document remains
+available to an agent only for the exact initiating subject in its origin
+workspace; this compatibility lane cannot cross workspaces, while every
+common-authority personal Document still requires the exact attempt snapshot.
 
 The workspace-local agent projection builds on that boundary without another
 store. Docs-MCP `knowledge_search` returns strict Knowledge envelopes over

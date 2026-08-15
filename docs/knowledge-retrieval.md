@@ -81,7 +81,9 @@ exact owner across that owner's currently accessible workspaces in the same
 organization. Losing access to the origin workspace removes its workspace
 knowledge but does not remove the owner's personal Document. Legacy personal
 Documents remain origin-workspace anchored and are never inferred into the new
-authority.
+authority. Document-scoped original-file reads and downloads authorize through
+this same effective Document boundary, then resolve only the immutable origin
+file; generic file access does not become portable.
 
 Personal ownership is not an agent grant. When an exact turn attempt is
 admitted, the database freezes only ready, agent-enabled personal Documents
@@ -93,6 +95,10 @@ access, organization membership revision, resource generation, grant generation
 and expiry, and Document status. Calls without an exact attempt omit personal
 Documents. Revoking any fence removes access immediately; a permission granted
 after admission cannot widen the already-running attempt.
+The sole compatibility lane is a legacy null-authority personal Document: an
+agent may read it only for the exact initiating subject in its origin workspace.
+It cannot follow that subject to another workspace, and common-authority
+personal Documents never bypass the admitted snapshot.
 
 ### Google Drive object authority
 

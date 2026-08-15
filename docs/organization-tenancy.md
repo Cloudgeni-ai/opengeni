@@ -64,6 +64,9 @@ read, reindex, file, and delete the Document from any workspace they currently
 access in the same organization, and losing the origin workspace does not
 transfer or delete it. Those operations retain the original workspace, base,
 file, and chunk storage rather than copying data into the authorizing workspace.
+The document-scoped original-file metadata and download routes first authorize
+the Document in the requested workspace, then resolve only its immutable origin
+file; they do not make the origin workspace's generic file inventory portable.
 Configured/local subjects without an eligible active organization membership,
 and existing personal Documents, remain on the legacy origin-workspace lane
 instead of being guessed into a new organization-user authority.
@@ -78,6 +81,11 @@ grant generations, session epoch, attempt liveness, and interruption state;
 revocation therefore takes effect before the next read. An agent call without
 an exact admitted attempt receives organization and current-workspace knowledge
 only—never ambient personal knowledge.
+The bounded compatibility exception is a null-authority legacy personal
+Document: an agent may read it only in its origin workspace and only for the
+exact initiating subject. It never follows the subject to another workspace;
+activated common-authority Documents always require the admitted grant
+snapshot.
 
 ## Slice B: managed-human lifecycle provisioning and first runtime projection
 

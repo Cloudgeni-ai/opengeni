@@ -3,6 +3,7 @@
 // it belongs to, and search everything they are authorized to access.
 import {
   ArrowLeftIcon,
+  DownloadIcon,
   FileIcon,
   FileImageIcon,
   FileSearchIcon,
@@ -174,6 +175,7 @@ export function DocumentsRoute({
   // nothing reads as "No results" rather than the initial prompt.
   const [searched, setSearched] = useState<string | null>(null);
   const [retryingIds, setRetryingIds] = useState<Set<string>>(() => new Set());
+  const [downloadingIds, setDownloadingIds] = useState<Set<string>>(() => new Set());
   const [retryingAll, setRetryingAll] = useState(false);
   // Set when background indexing-status polling fails, so stale "indexing…"
   // rows carry a visible notice instead of silently freezing.
@@ -411,6 +413,24 @@ export function DocumentsRoute({
     }
   }
 
+  async function handleDownloadDocument(document: IndexedDocument) {
+    setDownloadingIds((current) => new Set(current).add(document.id));
+    try {
+      const signed = await client.createDocumentOriginalFileDownloadUrl(workspaceId, document.id);
+      window.open(signed.url, "_blank", "noopener,noreferrer");
+    } catch (error) {
+      toast.error("Failed to download document", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setDownloadingIds((current) => {
+        const next = new Set(current);
+        next.delete(document.id);
+        return next;
+      });
+    }
+  }
+
   return (
     <ContentPage>
       <section className="flex min-h-0 flex-1 flex-col text-left">
@@ -637,6 +657,21 @@ export function DocumentsRoute({
                             pulse={document.status === "indexing"}
                           />
                           <span className="sr-only">{document.status}</span>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            disabled={downloadingIds.has(document.id)}
+                            onClick={() => void handleDownloadDocument(document)}
+                            aria-label={`Download ${document.title}`}
+                            title="Download original file"
+                          >
+                            {downloadingIds.has(document.id) ? (
+                              <Loader2Icon className="size-4 animate-spin" />
+                            ) : (
+                              <DownloadIcon className="size-4" />
+                            )}
+                          </Button>
                           {document.status === "failed" ? (
                             <Button
                               type="button"
