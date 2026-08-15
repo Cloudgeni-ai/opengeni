@@ -688,7 +688,9 @@ BEGIN
         FROM sessions session_value
         WHERE session_value.account_id = p_account_id
           AND session_value.variable_set_id = variable_set_row.id
-          AND session_value.status IN ('queued', 'running', 'requires_action');
+          AND session_value.status IN (
+            'queued', 'running', 'requires_action', 'recovering', 'waiting_capacity'
+          );
         IF attached_tasks > 0 OR attached_sessions > 0 THEN
           RAISE EXCEPTION 'variable set remains attached to %% scheduled tasks and %% sessions',
             attached_tasks, attached_sessions USING ERRCODE = '23503';
