@@ -1090,9 +1090,10 @@ observability:
     turnStartupQueueP95Seconds: 5
     turnStartupProviderDispatchP95Seconds: 60
     turnStartupFirstByteP95Seconds: 120
-    # Canonical durable first-byte completions divided by completed plus failed
-    # first-byte milestones over the alert window. Failures/timeouts before a
-    # byte reduce availability instead of disappearing from latency quantiles.
+    # Exclusive logical-turn first-byte completions divided by completed plus
+    # terminal failed-without-byte milestones over the alert window. A failed
+    # turn after dispatch reduces availability instead of disappearing from
+    # latency quantiles; later tool-loop failures cannot downgrade a success.
     turnStartupFirstByteAvailabilityRatio: 0.95
     turnStartupMinSamples: 5
     labels: {}

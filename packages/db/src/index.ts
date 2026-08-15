@@ -52747,15 +52747,14 @@ function startupMilestoneForEvent(
 ): Pick<CanonicalTurnStartupMilestoneReceipt, "milestone" | "outcome"> | null {
   if (event.turnAssociation !== "current") return null;
   if (event.type === "turn.started") return { milestone: "queue", outcome: "completed" };
+  if (event.type === "turn.failed") return { milestone: "first_byte", outcome: "failed" };
   if (event.type !== "agent.model.request") return null;
   const phase = sessionEventPayloadRecord(event.payload, event.payloadCodecVersion).phase;
   if (phase === "started") return { milestone: "provider_dispatch", outcome: "completed" };
   if (phase === "first_byte" || phase === "first_event") {
     return { milestone: "first_byte", outcome: "completed" };
   }
-  return phase === "completed" || phase === "failed" || phase === "timed_out"
-    ? { milestone: "first_byte", outcome: "failed" }
-    : null;
+  return null;
 }
 
 async function canonicalTurnStartupMilestonesForInsertedEvents(
@@ -52766,6 +52765,7 @@ async function canonicalTurnStartupMilestonesForInsertedEvents(
     turnId: string;
     turnCreatedAt: Date;
     inserted: Array<typeof schema.sessionEvents.$inferSelect>;
+    terminalTurnFailed: boolean;
   },
 ): Promise<CanonicalTurnStartupMilestoneReceipt[]> {
   const insertedIds = new Set(input.inserted.map((event) => event.id));
@@ -52778,6 +52778,11 @@ async function canonicalTurnStartupMilestonesForInsertedEvents(
   const receipts: CanonicalTurnStartupMilestoneReceipt[] = [];
   for (const checkpoint of TURN_STARTUP_CHECKPOINTS) {
     const { milestone, outcome } = checkpoint;
+    // A request-local transport terminal is not a logical startup failure: it
+    // may recover, or it may follow a byte during a later tool loop. Only the
+    // atomic terminal failed-turn settlement may project the exclusive failed
+    // outcome; ordinary append/replay paths keep this flag false.
+    if (outcome === "failed" && !input.terminalTurnFailed) continue;
     if (!insertedCheckpoints.has(startupCheckpointKey(checkpoint))) continue;
     const phaseCondition =
       milestone === "provider_dispatch"
@@ -52786,26 +52791,26 @@ async function canonicalTurnStartupMilestonesForInsertedEvents(
           ? sql`${schema.sessionEvents.payload} ->> 'phase' in ('first_byte', 'first_event')`
           : milestone === "first_byte"
             ? and(
-                sql`${schema.sessionEvents.payload} ->> 'phase' in ('completed', 'failed', 'timed_out')`,
+                sql`exists (
+                  select 1
+                  from session_events dispatched
+                  where dispatched.workspace_id = ${schema.sessionEvents.workspaceId}
+                    and dispatched.session_id = ${schema.sessionEvents.sessionId}
+                    and dispatched.turn_id = ${schema.sessionEvents.turnId}
+                    and dispatched.turn_association = 'current'
+                    and dispatched.type = 'agent.model.request'
+                    and dispatched.sequence < ${schema.sessionEvents.sequence}
+                    and dispatched.payload ->> 'phase' = 'started'
+                )`,
                 sql`not exists (
                   select 1
-                  from session_events prior
-                  where prior.workspace_id = ${schema.sessionEvents.workspaceId}
-                    and prior.session_id = ${schema.sessionEvents.sessionId}
-                    and prior.turn_id = ${schema.sessionEvents.turnId}
-                    and prior.turn_attempt_id = ${schema.sessionEvents.turnAttemptId}
-                    and prior.turn_association = 'current'
-                    and prior.type = 'agent.model.request'
-                    and prior.sequence < ${schema.sessionEvents.sequence}
-                    and (
-                      (${schema.sessionEvents.payload} ->> 'requestId') is null
-                      or (
-                        prior.payload ->> 'requestId' = ${schema.sessionEvents.payload} ->> 'requestId'
-                        and coalesce(prior.payload ->> 'transportAttempt', '') =
-                          coalesce(${schema.sessionEvents.payload} ->> 'transportAttempt', '')
-                      )
-                    )
-                    and prior.payload ->> 'phase' in ('first_byte', 'first_event')
+                  from session_events responded
+                  where responded.workspace_id = ${schema.sessionEvents.workspaceId}
+                    and responded.session_id = ${schema.sessionEvents.sessionId}
+                    and responded.turn_id = ${schema.sessionEvents.turnId}
+                    and responded.turn_association = 'current'
+                    and responded.type = 'agent.model.request'
+                    and responded.payload ->> 'phase' in ('first_byte', 'first_event')
                 )`,
               )
             : undefined;
@@ -52827,7 +52832,11 @@ async function canonicalTurnStartupMilestonesForInsertedEvents(
           eq(schema.sessionEvents.turnAssociation, "current"),
           eq(
             schema.sessionEvents.type,
-            milestone === "queue" ? "turn.started" : "agent.model.request",
+            milestone === "queue"
+              ? "turn.started"
+              : milestone === "first_byte" && outcome === "failed"
+                ? "turn.failed"
+                : "agent.model.request",
           ),
           phaseCondition,
         ),
@@ -53370,6 +53379,7 @@ export async function applySessionTurnSettlement(
           turnId: input.turnId,
           turnCreatedAt: turn.createdAt,
           inserted,
+          terminalTurnFailed: input.turnStatus === "failed",
         },
       );
       const requestedEvents = inserted.filter(
@@ -56907,6 +56917,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                   turnId,
                   turnCreatedAt: fence.turn!.createdAt,
                   inserted,
+                  terminalTurnFailed: false,
                 })
               : [];
             if (fence.allowed) {

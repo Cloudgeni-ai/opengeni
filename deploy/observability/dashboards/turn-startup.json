@@ -370,7 +370,7 @@
       "id": 10,
       "type": "timeseries",
       "title": "First-byte availability and pre-byte failure pressure",
-      "description": "Across generic and subscription providers, canonical durable first-byte completions are divided by completed plus failed first-byte milestones. Failed milestones are terminal provider requests with no earlier first byte, including failed or timed-out transports. Successful latency remains a separate distribution.",
+      "description": "Across generic and subscription providers, exclusive logical-turn first-byte completions are divided by completed plus failed first-byte milestones. A failed milestone requires a terminal failed turn after provider dispatch with no canonical byte in any attempt, so recovery and later tool-loop failures cannot downgrade a successful startup. Successful latency remains a separate distribution.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {

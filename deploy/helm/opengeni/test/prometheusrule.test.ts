@@ -56,7 +56,7 @@ describe("turn-capacity Prometheus alerts", () => {
     expect(staging).not.toContain('environment="production"');
   });
 
-  test("alerts when bounded provider attempts terminate without first-byte availability", async () => {
+  test("alerts when bounded logical turns terminate failed without first-byte availability", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
       "utf8",

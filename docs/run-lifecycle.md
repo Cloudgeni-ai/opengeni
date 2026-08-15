@@ -1363,13 +1363,15 @@ credential, and content values remain only in authenticated durable events.
 The database returns a milestone receipt only when the current transaction
 inserted the first canonical current-association checkpoint, so ordinary
 attempt recovery and callback replay cannot deterministically double-count it.
-A terminal provider checkpoint before that attempt's first byte contributes one
-bounded failed first-byte sample while successful first-byte latency remains a
-separate completed series. Prometheus observation is still an in-process,
-at-most-once side effect after the database commit: a process crash in that
-COMMIT-to-observe window can lose a sample. It is not transactionally
-exactly-once; a replica-safe Postgres-backed metrics projector would be a
-separate observability architecture.
+A terminal `turn.failed` after provider dispatch contributes one bounded failed
+first-byte sample only when the logical turn produced no canonical byte in any
+attempt. A recoverable pre-byte attempt and a later tool-loop failure after a
+byte therefore cannot downgrade the logical startup outcome; successful
+first-byte latency remains a separate completed series. Prometheus observation
+is still an in-process, at-most-once side effect after the database commit: a
+process crash in that COMMIT-to-observe window can lose a sample. It is not
+transactionally exactly-once; a replica-safe Postgres-backed metrics projector
+would be a separate observability architecture.
 
 Provider request lifecycle diagnostics are synchronous, bounded, and best-effort. Codex reports `headers`, `first_byte`, and one semantic `terminal` phase; SuperGrok reports the equivalent `headers`, first valid SSE event, and terminal phases plus valid-event count/gap telemetry. Terminal outcomes are `completed`, `failed`, or `timed_out`. The worker maps these to `opengeni_model_request_phases_total{provider,phase,outcome}` and `opengeni_model_request_phase_duration_seconds{provider,phase}`. SuperGrok additionally exposes `opengeni_model_requests_inflight`, `opengeni_model_request_oldest_no_event_age_seconds`, `opengeni_model_request_stream_events_total`, and `opengeni_model_request_stream_event_gap_seconds`, all with provider-only labels. Provider ids come from the resolved provider registry; request ids, model bodies, credentials, session ids, and token content are not metric labels.
 

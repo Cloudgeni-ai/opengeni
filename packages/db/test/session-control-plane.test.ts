@@ -4862,6 +4862,33 @@ describe("clean session control plane", () => {
       action: "settled",
       canonicalStartupMilestones: [{ milestone: "queue", outcome: "completed", durationMs: 100 }],
     });
+    const firstProviderAttempt = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      first.id,
+      first.executionGeneration,
+      firstAttemptId,
+      [
+        {
+          type: "agent.model.request",
+          payload: { phase: "started" },
+          occurredAt: new Date(queuedAt + 200),
+        },
+        {
+          type: "agent.model.request",
+          payload: { phase: "failed" },
+          occurredAt: new Date(queuedAt + 225),
+        },
+      ],
+    );
+    expect(firstProviderAttempt.canonicalStartupMilestones).toEqual([
+      expect.objectContaining({
+        milestone: "provider_dispatch",
+        outcome: "completed",
+        durationMs: 200,
+      }),
+    ]);
 
     expect(
       await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
@@ -4897,17 +4924,12 @@ describe("clean session control plane", () => {
         },
         {
           type: "agent.model.request",
-          payload: { phase: "first_byte" },
+          payload: { phase: "first_event" },
           occurredAt: new Date(queuedAt + 400),
         },
       ],
     );
     expect(recoveredMilestones.canonicalStartupMilestones).toEqual([
-      expect.objectContaining({
-        milestone: "provider_dispatch",
-        outcome: "completed",
-        durationMs: 250,
-      }),
       expect.objectContaining({
         milestone: "first_byte",
         outcome: "completed",
@@ -4924,7 +4946,7 @@ describe("clean session control plane", () => {
       secondAttemptId,
       [
         { type: "agent.model.request", payload: { phase: "started" } },
-        { type: "agent.model.request", payload: { phase: "first_byte" } },
+        { type: "agent.model.request", payload: { phase: "first_event" } },
       ],
     );
     expect(replay.canonicalStartupMilestones).toEqual([]);
@@ -4941,7 +4963,7 @@ describe("clean session control plane", () => {
     expect(late).toMatchObject({ accepted: false, canonicalStartupMilestones: [] });
   });
 
-  test("a terminal provider request before first byte emits bounded failure evidence", async () => {
+  test("a terminal failed turn after provider dispatch emits bounded no-first-byte evidence", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "measure provider failure");
     const attemptId = crypto.randomUUID();
@@ -4966,7 +4988,7 @@ describe("clean session control plane", () => {
     expect(started.canonicalStartupMilestones).toEqual([
       expect.objectContaining({ milestone: "provider_dispatch", outcome: "completed" }),
     ]);
-    const failed = await appendSessionEventsForTurnAttempt(
+    const timedOut = await appendSessionEventsForTurnAttempt(
       client.db,
       grant.workspaceId!,
       session.id,
@@ -4975,9 +4997,26 @@ describe("clean session control plane", () => {
       attemptId,
       [{ type: "agent.model.request", payload: { phase: "timed_out" } }],
     );
-    expect(failed.canonicalStartupMilestones).toEqual([
-      expect.objectContaining({ milestone: "first_byte", outcome: "failed" }),
-    ]);
+    expect(timedOut.canonicalStartupMilestones).toEqual([]);
+    const failed = await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: turn.triggerEventId,
+      attemptId,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        { type: "turn.failed", payload: { error: "provider timed out before first byte" } },
+        { type: "session.status.changed", payload: { status: "idle" } },
+      ],
+    });
+    expect(failed).toMatchObject({
+      action: "settled",
+      canonicalStartupMilestones: [
+        expect.objectContaining({ milestone: "first_byte", outcome: "failed" }),
+      ],
+    });
     const repeated = await appendSessionEventsForTurnAttempt(
       client.db,
       grant.workspaceId!,
@@ -4985,12 +5024,50 @@ describe("clean session control plane", () => {
       turn.id,
       turn.executionGeneration,
       attemptId,
-      [{ type: "agent.model.request", payload: { phase: "failed" } }],
+      [{ type: "turn.failed", payload: { error: "late duplicate failure" } }],
     );
+    expect(repeated.accepted).toBe(false);
     expect(repeated.canonicalStartupMilestones).toEqual([]);
+
+    const undispatchedFixture = await fixture();
+    await send(
+      undispatchedFixture.grant,
+      undispatchedFixture.session.id,
+      "fail before provider dispatch",
+    );
+    const undispatchedAttemptId = crypto.randomUUID();
+    const undispatchedTurn = await claimTestSessionWork(
+      client.db,
+      undispatchedFixture.grant.workspaceId!,
+      undispatchedFixture.session.id,
+      `session-${undispatchedFixture.session.id}`,
+      { attemptId: undispatchedAttemptId },
+    );
+    if (!undispatchedTurn) throw new Error("undispatched failure test turn was not claimed");
+    const undispatchedFailure = await applySessionTurnSettlement(
+      client.db,
+      undispatchedFixture.grant.workspaceId!,
+      {
+        sessionId: undispatchedFixture.session.id,
+        turnId: undispatchedTurn.id,
+        triggerEventId: undispatchedTurn.triggerEventId,
+        attemptId: undispatchedAttemptId,
+        turnStatus: "failed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [
+          { type: "turn.failed", payload: { error: "tool preparation failed" } },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ],
+      },
+    );
+    expect(undispatchedFailure).toMatchObject({
+      action: "settled",
+      canonicalStartupMilestones: [],
+    });
   });
 
-  test("a later request failure stays visible after an earlier request produced bytes", async () => {
+  test("a later request failure cannot downgrade a logical turn that produced bytes", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "measure a later provider failure");
     const attemptId = crypto.randomUUID();
@@ -5043,9 +5120,21 @@ describe("clean session control plane", () => {
         },
       ],
     );
-    expect(laterFailure.canonicalStartupMilestones).toEqual([
-      expect.objectContaining({ milestone: "first_byte", outcome: "failed" }),
-    ]);
+    expect(laterFailure.canonicalStartupMilestones).toEqual([]);
+    const terminal = await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: turn.triggerEventId,
+      attemptId,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        { type: "turn.failed", payload: { error: "later tool-loop request failed" } },
+        { type: "session.status.changed", payload: { status: "idle" } },
+      ],
+    });
+    expect(terminal).toMatchObject({ action: "settled", canonicalStartupMilestones: [] });
   });
 
   test("attempt writes run concurrently across sessions while workspace control stays exclusive", async () => {

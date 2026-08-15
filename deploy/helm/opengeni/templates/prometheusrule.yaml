@@ -192,7 +192,7 @@ spec:
             severity: warning
           annotations:
             summary: OpenGeni first-byte availability is below {{ $turnStartupFirstByteAvailabilityRatio }} for {{ "{{ $labels.provider }}" }}
-            description: Canonical durable provider requests terminated before a first byte, including failed or timed-out transports. Successful first-byte latency remains a separate SLO; inspect provider transport diagnostics rather than treating missing bytes as fast latency samples.
+            description: Canonical durable logical turns terminated failed after provider dispatch without producing a first byte in any attempt. Successful first-byte latency remains a separate SLO; inspect provider transport diagnostics rather than treating missing bytes as fast latency samples.
         - alert: OpenGeniSuperGrokResponseStreamIdleTimeout
           expr: |
             sum(increase(opengeni_model_request_phases_total{provider="supergrok-subscription",phase="terminal",outcome="timed_out"}[15m])) > 0
