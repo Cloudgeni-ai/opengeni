@@ -302,7 +302,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0261_preference_knowledge_proposal_actor_binding.sql",
       ),
     ).toMatchObject({
-      sha256: "39295baa487fbdbb8b316f3724b0ebbb80acccf6203747dfc2d200f0e1d2ecb4",
+      sha256: "5a69388e22a8690cbb23dc7792afd92b1d6c314600cbf11b5201528a6ef1890c",
       deploymentMode: "rolling",
     });
     const migrations = new Map(
@@ -436,8 +436,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0261_preference_knowledge_proposal_actor_binding.sql")) {
         return includesActivation
-          ? "e0ded66ee212afd2190c745f7a90ad57134595cd6e71e2422f01c88f574d0572"
-          : "e5714869dae7f60462d7226e3d96a26ddf295b3917794a8e8013e356b329f504";
+          ? "c298a30bb91d64f454bc87b33ff97900208ae961d83f33e2eb78c3e63691da4e"
+          : "1c40b0316a2e6725294dad89cd41f5936982658ce37ed679cd6c7439947eaa61";
       }
       if (migrations.has("0260_task_note_knowledge_promotion.sql")) {
         return includesActivation

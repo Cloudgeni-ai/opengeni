@@ -783,14 +783,14 @@ describe("task-tree notes PostgreSQL authority", () => {
         ...claims(firstAttempt),
         operationId: crypto.randomUUID(),
         kind: "decision",
-        text: "OPE-224 workspace lock order: first rooted instruction.",
+        text: "Concurrent workspace lock order: first rooted instruction.",
         expiresInDays: 7,
       }),
       createTaskNote(client.db, {
         ...claims(secondAttempt),
         operationId: crypto.randomUUID(),
         kind: "decision",
-        text: "OPE-224 workspace lock order: second rooted instruction.",
+        text: "Concurrent workspace lock order: second rooted instruction.",
         expiresInDays: 7,
       }),
     ]);
@@ -831,7 +831,7 @@ describe("task-tree notes PostgreSQL authority", () => {
         AS $$
         BEGIN
           IF NEW.target_kind = 'instruction_policy'
-            AND NEW.content LIKE 'OPE-224 workspace lock order:%'
+            AND NEW.content LIKE 'Concurrent workspace lock order:%'
           THEN
             PERFORM pg_advisory_xact_lock_shared(2240260);
           END IF;
@@ -896,7 +896,7 @@ describe("task-tree notes PostgreSQL authority", () => {
             JOIN workspace_instruction_policy_revisions revision
               ON revision.id = proposal.draft_revision_id
             WHERE proposal.workspace_id = ${f.grant.workspaceId}
-              AND revision.content LIKE 'OPE-224 workspace lock order:%') AS "proposalCount",
+              AND revision.content LIKE 'Concurrent workspace lock order:%') AS "proposalCount",
           (SELECT count(*)::integer FROM workspace_instruction_policy_heads head
             WHERE head.workspace_id = ${f.grant.workspaceId}) AS "headCount",
           (SELECT count(*)::integer FROM workspace_instruction_policy_activation_events event
