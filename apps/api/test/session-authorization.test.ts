@@ -31,6 +31,8 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["DELETE", "/goal", "session.goal.write"],
   ["GET", "/goal/revisions", "session.goal.read"],
   ["POST", "/goal/revisions/33333333-3333-4333-8333-333333333333/apply", "session.goal.write"],
+  ["POST", "/goal/revisions/33333333-3333-4333-8333-333333333333/reject", "session.goal.write"],
+  ["POST", "/goal/revisions/33333333-3333-4333-8333-333333333333/rollback", "session.goal.write"],
   ["POST", "/context/clear", "session.context.write"],
   ["POST", "/context/compact", "session.context.write"],
   ["GET", "/events", "session.events.read"],

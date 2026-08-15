@@ -1,6 +1,9 @@
 import {
   AcknowledgeStreamRequest,
   ApplySessionGoalRevisionRequest,
+  ListSessionGoalRevisionsQuery,
+  RejectSessionGoalRevisionRequest,
+  RollbackSessionGoalRevisionRequest,
   ActivateCodexRealtimeConnectionRequest,
   AttachViewerRequest,
   BeginSessionRealtimeRequest,
@@ -95,6 +98,7 @@ import {
   listSessionEventPage,
   listSessionHumanInputRequests,
   listSessionGoalRevisions,
+  rejectSessionGoalRevisionWithEvent,
   listSessionIdsInGroup,
   listSessionDiscoverySummaries,
   listSessionDiscoveryAncestorPaths,
@@ -1574,7 +1578,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    return c.json(await listSessionGoalRevisions(db, workspaceId, sessionId));
+    const query = ListSessionGoalRevisionsQuery.parse({
+      limit: c.req.query("limit"),
+      before: c.req.query("before"),
+    });
+    return c.json(
+      await listSessionGoalRevisions(db, workspaceId, sessionId, {
+        limit: query.limit,
+        ...(query.before ? { before: query.before } : {}),
+      }),
+    );
   });
 
   app.post(
@@ -1608,6 +1621,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           sessionId,
           text: revision.text,
           successCriteria: revision.successCriteria,
+          rootConstraints: revision.rootConstraints,
           mutationPolicy: revision.mutationPolicy,
           expectedObjectiveRevision: payload.expectedObjectiveRevision,
           expectedGoalId: revision.goalId,
@@ -1640,6 +1654,88 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     },
   );
 
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/goal/revisions/:revisionId/reject",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      const sessionId = c.req.param("sessionId");
+      await assertSessionExists(db, workspaceId, sessionId);
+      const payload = RejectSessionGoalRevisionRequest.parse(await c.req.json());
+      try {
+        const result = await rejectSessionGoalRevisionWithEvent(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          revisionId: c.req.param("revisionId"),
+          expectedObjectiveRevision: payload.expectedObjectiveRevision,
+          rationale: payload.rationale,
+        });
+        await publishDurableSessionEvents(bus, workspaceId, sessionId, result.events);
+        return c.json({ revision: result.revision, replay: result.replay });
+      } catch (error) {
+        if (error instanceof SessionControlConflictError) {
+          throw new HTTPException(409, { message: error.message, cause: error });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/goal/revisions/:revisionId/rollback",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      const sessionId = c.req.param("sessionId");
+      await assertSessionExists(db, workspaceId, sessionId);
+      const payload = RollbackSessionGoalRevisionRequest.parse(await c.req.json());
+      const revision = await getSessionGoalRevision(
+        db,
+        workspaceId,
+        sessionId,
+        c.req.param("revisionId"),
+      );
+      if (!revision || revision.disposition !== "applied") {
+        throw new HTTPException(404, { message: "applied goal revision not found" });
+      }
+      try {
+        const { goal, workflowWakeRevision, events } = await upsertSessionGoalWithEvent(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          text: revision.text,
+          successCriteria: revision.successCriteria,
+          rootConstraints: revision.rootConstraints,
+          mutationPolicy: revision.mutationPolicy,
+          expectedObjectiveRevision: payload.expectedObjectiveRevision,
+          expectedGoalId: revision.goalId,
+          changeKind: "replacement",
+          changeRationale: payload.rationale,
+          rollbackOfRevisionId: revision.id,
+          createdBy: "api",
+          actor: "api",
+        });
+        await publishDurableSessionEvents(bus, workspaceId, sessionId, events);
+        if (workflowWakeRevision !== null) {
+          await workflowClient.wakeSessionWorkflow({
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            workflowId: workflowIdForSession(sessionId),
+            wakeRevision: workflowWakeRevision,
+          });
+        }
+        return c.json((await getSessionGoalWithContinuation(db, workspaceId, sessionId)) ?? goal);
+      } catch (error) {
+        if (error instanceof SessionControlConflictError) {
+          throw new HTTPException(409, { message: error.message, cause: error });
+        }
+        throw error;
+      }
+    },
+  );
+
   app.patch("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
@@ -1661,6 +1757,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             payload.successCriteria !== undefined
               ? payload.successCriteria
               : existing.successCriteria,
+          rootConstraints:
+            payload.rootConstraints !== undefined
+              ? payload.rootConstraints
+              : existing.rootConstraints,
           maxAutoContinuations: existing.maxAutoContinuations,
           mutationPolicy: payload.mutationPolicy ?? existing.mutationPolicy,
           expectedObjectiveRevision: payload.expectedObjectiveRevision,
@@ -3560,6 +3660,9 @@ export function sessionAuthorizationOperationForHttp(
   }
   if (suffix === "/goal/revisions" && verb === "GET") return "session.goal.read";
   if (/^\/goal\/revisions\/[^/]+\/apply$/.test(suffix) && verb === "POST") {
+    return "session.goal.write";
+  }
+  if (/^\/goal\/revisions\/[^/]+\/(reject|rollback)$/.test(suffix) && verb === "POST") {
     return "session.goal.write";
   }
   if (suffix === "/context/clear" || suffix === "/context/compact") {

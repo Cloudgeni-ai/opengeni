@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { DEFAULT_FIRST_PARTY_MCP_TOOLS } from "@opengeni/contracts";
-import { resolveFirstPartyMcpToolsForCreate } from "../src/domain/sessions";
+import {
+  resolveChildGoalFromAcceptedSnapshot,
+  resolveFirstPartyMcpToolsForCreate,
+} from "../src/domain/sessions";
 
 describe("first-party MCP tool selection at session creation", () => {
   test("top-level omission snapshots the complete default catalog", () => {
@@ -44,5 +47,42 @@ describe("first-party MCP tool selection at session creation", () => {
         policy,
       ),
     ).toEqual(["session_get", "goal_update"]);
+  });
+});
+
+describe("child goal root constraints", () => {
+  const snapshot = {
+    state: "active" as const,
+    goalId: "11111111-1111-4111-8111-111111111111",
+    objectiveRevision: 3,
+    text: "Ship safely",
+    successCriteria: null,
+    rootConstraints: ["Keep tenant isolation", "No production deploy"],
+    mutationPolicy: "preserve_intent" as const,
+    capturedAt: "2026-08-15T00:00:00.000Z",
+  };
+
+  test("omission inherits the exact frozen set while explicit empty remains empty", () => {
+    expect(resolveChildGoalFromAcceptedSnapshot({ text: "delegate" }, snapshot)).toMatchObject({
+      rootConstraints: snapshot.rootConstraints,
+    });
+    expect(
+      resolveChildGoalFromAcceptedSnapshot({ text: "delegate", rootConstraints: [] }, snapshot),
+    ).toMatchObject({ rootConstraints: [] });
+  });
+
+  test("accepts only an exact subset and never reads a later mutable parent head", () => {
+    expect(
+      resolveChildGoalFromAcceptedSnapshot(
+        { text: "delegate", rootConstraints: ["Keep tenant isolation"] },
+        snapshot,
+      ),
+    ).toMatchObject({ rootConstraints: ["Keep tenant isolation"] });
+    expect(() =>
+      resolveChildGoalFromAcceptedSnapshot(
+        { text: "delegate", rootConstraints: ["A later mutable constraint"] },
+        snapshot,
+      ),
+    ).toThrow("exact subset");
   });
 });

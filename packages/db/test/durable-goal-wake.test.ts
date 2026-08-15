@@ -635,7 +635,7 @@ describe("durable active-goal wake", () => {
       goal: { text: "Explicit human redirect", objectiveRevision: 2 },
     });
     expect(proposed.proposalId).toBeTruthy();
-    const revisions = await listSessionGoalRevisions(
+    const { revisions } = await listSessionGoalRevisions(
       client.db,
       ctx.grant.workspaceId!,
       ctx.session.id,
@@ -666,7 +666,7 @@ describe("durable active-goal wake", () => {
       text: "Agent replacement awaiting review",
       objectiveRevision: 3,
     });
-    const afterApply = await listSessionGoalRevisions(
+    const { revisions: afterApply } = await listSessionGoalRevisions(
       client.db,
       ctx.grant.workspaceId!,
       ctx.session.id,
@@ -1083,6 +1083,9 @@ describe("durable active-goal wake", () => {
         await updateSessionGoalWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
           text: "Committed before the caller lost its response",
           progressNote: "first attempt persisted",
+          changeKind: "refinement",
+          rationale: "preserve the accepted objective while recording recovery evidence",
+          expectedObjectiveRevision: 1,
           actor: "agent",
           command: goalCommand(ctx, {
             attemptId: ctx.attemptId,
@@ -1123,6 +1126,9 @@ describe("durable active-goal wake", () => {
       {
         text: "Committed before the caller lost its response",
         progressNote: "first attempt persisted",
+        changeKind: "refinement",
+        rationale: "preserve the accepted objective while recording recovery evidence",
+        expectedObjectiveRevision: 1,
         actor: "agent",
         command: goalCommand(ctx, {
           attemptId: replacementAttemptId,
@@ -1145,6 +1151,9 @@ describe("durable active-goal wake", () => {
       {
         text: "Newer recovered-attempt direction remains authoritative",
         progressNote: "replacement attempt advanced the goal",
+        changeKind: "adaptation",
+        rationale: "the recovered attempt received newer authoritative direction",
+        expectedObjectiveRevision: 2,
         actor: "agent",
         command: goalCommand(ctx, {
           attemptId: replacementAttemptId,
@@ -1166,6 +1175,9 @@ describe("durable active-goal wake", () => {
       {
         text: "Committed before the caller lost its response",
         progressNote: "first attempt persisted",
+        changeKind: "refinement",
+        rationale: "preserve the accepted objective while recording recovery evidence",
+        expectedObjectiveRevision: 1,
         actor: "agent",
         command: goalCommand(ctx, {
           attemptId: replacementAttemptId,
@@ -1191,6 +1203,9 @@ describe("durable active-goal wake", () => {
     await expect(
       updateSessionGoalWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
         text: "Conflicting reuse must not apply",
+        changeKind: "replacement",
+        rationale: "exercise conflicting receipt reuse",
+        expectedObjectiveRevision: 3,
         actor: "agent",
         command: goalCommand(ctx, {
           attemptId: replacementAttemptId,
