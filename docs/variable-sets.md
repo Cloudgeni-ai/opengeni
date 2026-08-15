@@ -26,7 +26,7 @@ rewritten by an older release cannot be reconstructed.
 
 ## Deliberate v1 storage decision
 
-`docs/packs.md` states that connector secrets should live behind `credentialRef` in an external broker, not in Postgres. Workspace variable-sets deliberately differ: they DO store secret values in Postgres, encrypted with an operator key that lives only in the deployment's secret set. The current lossless `v2:` envelope preserves every UTF-16 code unit and the reader retains historical `v1:` compatibility; a future keyed envelope or external reference can still use another prefix without a schema change. Use `credentialRef` connectors for OAuth-broker-shaped credentials; use variable-sets for plain `NAME=value` material an agent process expects.
+`docs/packs.md` states that connector secrets should live behind `credentialRef` in an external broker, not in Postgres. Scoped Variable Sets deliberately differ: they DO store secret values in Postgres, encrypted with an operator key that lives only in the deployment's secret set. The current lossless `v2:` envelope preserves every UTF-16 code unit and the reader retains historical `v1:` compatibility; a future keyed envelope or external reference can still use another prefix without a schema change. Use `credentialRef` connectors for OAuth-broker-shaped credentials; use Variable Sets for plain `NAME=value` material an agent process expects.
 
 ## Configuration
 
@@ -96,7 +96,7 @@ Attachment points:
 - When the selected Variable Set, Rig, or one of the Rig version's defaults is personal, scheduled-task acceptance freezes the causal human plus exact membership/resource/grant generations. Each occurrence revalidates and copies that immutable authority before dispatch; task edits, current Rig defaults, the current API user, and workspace defaults are never fallback authority. `once` grants belong to one admitted occurrence across recovery attempts. A rolling upgrade pauses legacy tasks that lack this ledger, and an explicit resume converts them before dispatch; old-writer authority-free runs are rejected in PostgreSQL. Only identifiers and generations are stored in this ledger; plaintext still crosses only the ordinary materialization/read boundaries described above.
 - `POST /v1/workspaces/:id/packs/:packId/enable` accepts `variableSetId` when a pack declares a `variable set` block and requires both attachment permissions; required variables are checked by **name**. Scheduled tasks created from that installation's templates inherit the attachment without re-checking either permission on the caller — both were authorized at enable time.
 
-An unknown or cross-workspace `variableSetId` in any attachment payload returns `422 unknown variableSetId`; RLS makes the two cases indistinguishable by design.
+An organization- or user-scoped `variableSetId` may originate in another workspace in the same organization when its scoped authority makes it visible from the target workspace. Unknown, inaccessible, workspace-scoped foreign, and cross-organization ids return `422 unknown variableSetId`; RLS makes those cases indistinguishable by design.
 
 ### Variable names
 
@@ -107,13 +107,13 @@ Names must match `^[A-Z][A-Z0-9_]*$` (max 128 chars). Names the platform manages
 
 ## Composition with the deployment allowlist
 
-`OPENGENI_SANDBOX_ENV_ALLOWLIST` and `OPENGENI_SANDBOX_PREPARATION_PROFILES` keep their meaning: the deployment operator forwards those process-env values into every sandbox. Workspace variable-sets are layered on top per run:
+`OPENGENI_SANDBOX_ENV_ALLOWLIST` and `OPENGENI_SANDBOX_PREPARATION_PROFILES` keep their meaning: the deployment operator forwards those process-env values into every sandbox. Scoped Variable Sets are layered on top per run:
 
 ```
-deployment allowlist < git identity < workspace variable set < run-scoped GitHub auth
+deployment allowlist < git identity < session-attached variable set < run-scoped GitHub auth
 ```
 
-Later wins. A session bound to a [rig](rigs.md) with `defaultVariableSetIds` gets one more layer, inserted **below** the session's own attached variable set: `deployment allowlist < git identity < rig default variable sets < workspace variable set < run-scoped GitHub auth`. A rig default is pure convenience for tooling every session on that rig should have; the session's own attachment still wins any name collision. Reserved-name validation prevents collisions with the platform-managed git/GitHub entries, so the run-scoped GitHub token block always applies last untouched. Note that sandbox lifecycle hooks are profile-driven: workspace-provided `AZURE_CLIENT_ID`/`AZURE_CLIENT_SECRET`/`AZURE_TENANT_ID` only trigger the `azure-cli-login` hook on deployments that enable the `azure` preparation profile; on profile-less deployments the values are injected but no login hook runs.
+Later wins. A session bound to a [rig](rigs.md) with `defaultVariableSetIds` gets one more layer, inserted **below** the session's own attached Variable Set: `deployment allowlist < git identity < rig default variable sets < session-attached variable set < run-scoped GitHub auth`. A rig default is pure convenience for tooling every session on that rig should have; the session's own attachment still wins any name collision. Reserved-name validation prevents collisions with the platform-managed git/GitHub entries, so the run-scoped GitHub token block always applies last untouched. Note that sandbox lifecycle hooks are profile-driven: workspace-provided `AZURE_CLIENT_ID`/`AZURE_CLIENT_SECRET`/`AZURE_TENANT_ID` only trigger the `azure-cli-login` hook on deployments that enable the `azure` preparation profile; on profile-less deployments the values are injected but no login hook runs.
 
 ### Env injection is a managed-sandbox concept
 

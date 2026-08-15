@@ -16,7 +16,7 @@ A workspace owns named **rigs**: versioned sandbox machine definitions (a base i
 
 - `OPENGENI_RIG_SETUP_TIMEOUT_MS` — the budget for the rig's own setup script, separate from the general 120s sandbox-lifecycle-hook default. Defaults to 600000 (10 minutes). Applies to both a live turn's setup hook and a rig-CI verification run.
 - `OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED` — default `false`. When false, rig CI fails before lease acquire/provider create rather than falling back to an unowned sandbox. Enable only after every worker capable of running the global sandbox reaper has the matching pre-termination lease revalidation behavior; see [Operational rollout](#operational-rollout).
-- No dedicated encryption key: a rig's `setupScript`/`image`/`checks` are not secret material — secrets are attached only via the rig's `defaultVariableSetIds`, which reference workspace variable-sets and are subject to their own encryption (see [`variable-sets.md`](variable-sets.md)).
+- No dedicated encryption key: a rig's `setupScript`/`image`/`checks` are not secret material — secrets are attached only via the rig's `defaultVariableSetIds`, which reference scoped Variable Sets visible from the rig's workspace and are subject to their own encryption (see [`variable-sets.md`](variable-sets.md)).
 
 ## Rig setup at runtime
 
@@ -40,13 +40,13 @@ Fresh-create latency remains an observed SLO, not a code-level promise. The exis
 
 ### Default variable sets
 
-A rig version's `defaultVariableSetIds` are decrypted and merged in listed order, then layered **below** the session's own attached variable set in the env-injection chain:
+A rig version's `defaultVariableSetIds` are decrypted and merged in listed order, then layered **below** the session's own attached Variable Set in the env-injection chain:
 
 ```
-deployment allowlist < git identity < rig default variable sets < workspace variable set < run-scoped GitHub auth
+deployment allowlist < git identity < rig default variable sets < session-attached variable set < run-scoped GitHub auth
 ```
 
-A later entry wins on a name collision, so a session's own variable-set attachment always overrides a rig default with the same variable name. See [`variable-sets.md`](variable-sets.md) for the rest of that layering (permissioned secret access, exact content, reserved names, and the managed-sandbox-only scope).
+A later entry wins on a name collision, so a session's own Variable Set attachment always overrides a rig default with the same variable name. See [`variable-sets.md`](variable-sets.md) for the rest of that layering (permissioned secret access, exact content, reserved names, and the managed-sandbox-only scope).
 
 ### Agent-visible doctrine
 
@@ -122,7 +122,7 @@ Rollback is the reverse safety order: disable the flag first, drain/stop verifie
 
 ## Composition with variable sets
 
-A rig's `defaultVariableSetIds` reference workspace variable-sets by id. Changing that field, including clearing it, requires `variable-sets:attach`; a non-empty value additionally requires `variable-sets:use` and validates every reference at rig create/edit/change-propose time. An unknown or cross-workspace id 422s, same as a session's own `variableSetId` attachment. Binding any rig version with defaults to a session independently re-requires both permissions and revalidates each referenced set for the initiating subject, including when the rig came from the workspace default. They are pure references: a rig never stores variable values itself, and deleting a variable-set that a rig still references is unaffected by the rig (variable-set deletion semantics are governed entirely by [`variable-sets.md`](variable-sets.md#deletion-semantics), not by rig references). At runtime the rig's default sets are decrypted and merged in listed order, then the session's own attached set is layered on top and wins any name collision — see [Default variable sets](#default-variable-sets) above.
+A rig's `defaultVariableSetIds` reference scoped Variable Sets visible to the initiating subject from the rig's workspace. Changing that field, including clearing it, requires `variable-sets:attach`; a non-empty value additionally requires `variable-sets:use` and validates every reference at rig create/edit/change-propose time. Organization- and user-scoped sets may originate in another workspace in the same organization when their scoped authority makes them visible; unknown, inaccessible, workspace-scoped foreign, and cross-organization ids remain indistinguishable and 422. Binding any rig version with defaults to a session independently re-requires both permissions and revalidates each referenced set for the initiating subject, including when the rig came from the workspace default. They are pure references: a rig never stores variable values itself, and deleting a Variable Set that a rig still references is unaffected by the rig (Variable Set deletion semantics are governed entirely by [`variable-sets.md`](variable-sets.md#deletion-semantics), not by rig references). At runtime the rig's default sets are decrypted and merged in listed order, then the session's own attached set is layered on top and wins any name collision — see [Default variable sets](#default-variable-sets) above.
 
 ## MCP surface
 
