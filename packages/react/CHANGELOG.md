@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 1.0.3
+
+### Patch Changes
+
+- 2a69f65: Keep versioned direct-session web builds within the measured release bundle contract.
+
 ## 1.0.2
 
 ### Patch Changes
