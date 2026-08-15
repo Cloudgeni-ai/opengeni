@@ -1,5 +1,21 @@
 # @opengeni/codemode
 
+## 0.4.5
+
+### Patch Changes
+
+- 79f57b5: Send the OpenGeni API contract revision on catalog and operation requests so the packaged client remains compatible with protected mutation routes.
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ffbbf4c]
+- Updated dependencies [d34dd9a]
+- Updated dependencies [c3f0598]
+- Updated dependencies [d2f172c]
+- Updated dependencies [c056063]
+  - @opengeni/contracts@1.1.0
+
 ## 0.4.4
 
 ### Patch Changes

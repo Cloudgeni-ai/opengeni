@@ -1,5 +1,37 @@
 # @opengeni/runtime
 
+## 1.0.2
+
+### Patch Changes
+
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+- 4d1ed07: Preserve complete bounded lazy-search tool schemas across durable model history, expose Linux desktop application launch when the image supports it, suppress the managed Chrome sandbox warning, label Computer sessions as Desktops in the UI, and keep AnyDoc available in headed desktop sandboxes.
+- ce3b370: Restore the MPL-2.0 license and notice for the curated HashiCorp Terraform Skills in the published runtime package, and forward-repair the persisted Terraform Stacks provenance URL.
+- e98daf6: Measure physical MCP tool calls by bounded structural outcome and lock the existing provider-declared error path with an HTTP-200 SDK/durability regression.
+- e9e1016: Allow agent `goal_set` to replace completed goals while continuing to protect
+  active and paused goal intent.
+- d34dd9a: Add revision-fenced per-command memory and CPU policies for Connected Machines, exact live runner capability gating, and lifecycle-safe Linux operation accounting without introducing default resource limits.
+- c3f0598: Materialize authorized connector attachments as exact, hash-verified sandbox files while keeping provider bytes and private download URLs out of model, Codemode, and durable event output.
+- 79f57b5: Keep interaction discovery scoped to the current agent session by default, with explicit workspace inventory opt-in, so stale peer resources, reusable identities, and attached profiles cannot flood model context.
+- Updated dependencies [79f57b5]
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ec00479]
+- Updated dependencies [ffbbf4c]
+- Updated dependencies [d34dd9a]
+- Updated dependencies [79f57b5]
+- Updated dependencies [c3f0598]
+- Updated dependencies [d2f172c]
+- Updated dependencies [c056063]
+  - @opengeni/codemode@0.4.5
+  - @opengeni/contracts@1.1.0
+  - @opengeni/sdk@1.0.2
+  - @opengeni/agent-proto@0.5.1
+  - @opengeni/config@0.16.5
+  - @opengeni/xai-subscription@0.1.1
+
 ## 1.0.1
 
 ### Patch Changes
