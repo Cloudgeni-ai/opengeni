@@ -55,6 +55,39 @@ session visibility, authority epoch, generation, status, and interruption
 fences. Direct turns re-run the corrected resolver before any Rig or Variable
 Set read; sessions without personal resources take a no-op path.
 
+Migration `0258_three_scope_document_knowledge_authority.sql` applies the same
+organization-user lifecycle to newly-created personal Documents. The physical
+workspace/base/file still owns ingestion and indexing, while
+`origin_workspace_id` is immutable provenance and the common authority's active
+organization membership is ownership. Consequently, an owner can discover,
+read, reindex, file, and delete the Document from any workspace they currently
+access in the same organization, and losing the origin workspace does not
+transfer or delete it. Those operations retain the original workspace, base,
+file, and chunk storage rather than copying data into the authorizing workspace.
+The document-scoped original-file metadata and download routes resolve the
+requested-workspace Document authority, its current owner/organization state,
+provider ACL, and the one immutable origin file in one database authority
+boundary; they do not make the origin workspace's generic file inventory portable.
+Configured/local subjects without an eligible active organization membership,
+and existing personal Documents, remain on the legacy origin-workspace lane
+instead of being guessed into a new organization-user authority.
+
+Agent access is separate from human ownership. At exact attempt admission the
+database freezes only ready, agent-enabled personal Documents backed by an
+active `document.read` grant for that target workspace and the session's exact
+`user_private|workspace_shared` context. Shared-context grant issuance uses the
+common durable acknowledgement. Every search, get, browse, compatibility fetch,
+and chunk read revalidates membership, target-workspace access, authority and
+grant generations, session epoch, attempt liveness, and interruption state;
+revocation therefore takes effect before the next read. An agent call without
+an exact admitted attempt receives organization and current-workspace knowledge
+only—never ambient personal knowledge.
+The bounded compatibility exception is a null-authority legacy personal
+Document: an agent may read it only in its origin workspace and only for the
+exact initiating subject. It never follows the subject to another workspace;
+activated common-authority Documents always require the admitted grant
+snapshot.
+
 ## Slice B: managed-human lifecycle provisioning and first runtime projection
 
 Migration `0219_organization_tenancy_managed_human_provisioning.sql` adds the

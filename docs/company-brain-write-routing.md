@@ -12,7 +12,7 @@ notes plus governed Knowledge and Ways-of-working proposals.
 | --- | --- | --- | --- | --- |
 | Knowledge | Sourced company facts and evidence | Documents/scoped-knowledge authority | Permission-first `knowledge_search`/`get`/`browse`; never prompt-injected | Workspace-local claim proposal/correction plus rooted Task-note promotion implemented as append-only review/relation evidence |
 | Ways of working | Human-authoritative policy and preferences | Existing instruction-policy and preference-registry heads | Bounded descriptors by default; full bodies on demand | Workspace-local Knowledge-backed inactive proposal adapters implemented; activation remains human-only |
-| Task notes | Short-lived technical coordination inside one root session tree | Exact accepted turn/attempt plus root-session visibility | Explicit `task_notes_list`; never prompt-injected | Create/list/archive implemented by migration 0239; atomic correction/revert lineage by migration 0258 |
+| Task notes | Short-lived technical coordination inside one root session tree | Exact accepted turn/attempt plus root-session visibility | Explicit `task_notes_list`; never prompt-injected | Create/list/archive implemented by migration 0239; atomic correction/revert lineage by migration 0260 |
 | Durable agent learning | Reusable technical knowledge beyond one task tree | Existing Memory/governed-learning authorities | Existing retrieval rules | Routing/promotion remains later work |
 
 The router must preserve the selected destination's provenance and may propose
@@ -94,7 +94,7 @@ different learning-policy source, or replacement evidence bytes.
 `task_note_promote_knowledge` accepts an active, unexpired version-one note from
 the exact caller's root tree plus normalized entity/predicate metadata. The note
 text becomes the proposed workspace Knowledge fact value. Migration
-`0258_task_note_knowledge_promotion.sql` extends claim evidence with exactly one
+`0260_task_note_knowledge_promotion.sql` extends claim evidence with exactly one
 Document-version or Task-note source shape. Task-note evidence stores only the
 note/root/version/content-hash facts; it never copies note
 text into evidence metadata. The security-definer resolver revalidates the
@@ -172,7 +172,7 @@ or reactivated, and failure of either half rolls back the entire replacement.
 ## Deployment and deferred work
 
 Migrations `0239_task_tree_notes.sql` and
-`0258_task_note_knowledge_promotion.sql` are rolling and additive. Migration 0258
+`0260_task_note_knowledge_promotion.sql` are rolling and additive. Migration 0260
 also adds immutable replacement receipts and the exact replacement lifecycle
 function. Neither activates organization or personal cross-workspace reads,
 changes goal behavior, injects prompt context, or replaces any Knowledge,
@@ -194,4 +194,4 @@ Canonical implementation: `packages/contracts/src/task-notes.ts`,
 `packages/db/src/company-brain-governed-writes.ts`,
 `packages/core/src/domain/company-brain-governed-writes.ts`, plus migration
 `0255_company_brain_governed_write_proposals.sql` for governed proposals and
-`0258_task_note_knowledge_promotion.sql` for exact Task-note evidence.
+`0260_task_note_knowledge_promotion.sql` for exact Task-note evidence.

@@ -4693,6 +4693,54 @@ export async function requireFileForSubject(
   );
 }
 
+/**
+ * Resolve a Document's immutable origin File through one database authority
+ * statement. The resolver proves target-workspace Document visibility, live
+ * portable-owner authority, and provider ACL before returning origin metadata;
+ * it never grants generic visibility into the origin workspace's Files.
+ */
+export async function resolveDocumentOriginalFileForSubject(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    documentId: string;
+  },
+): Promise<FileAsset | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.subjectId);
+      const rows = await rawRows<FileAsset>(
+        scopedDb,
+        sql`select
+          original_file.id as "id",
+          original_file.account_id as "accountId",
+          original_file.workspace_id as "workspaceId",
+          original_file.status as "status",
+          original_file.filename as "filename",
+          original_file.safe_filename as "safeFilename",
+          original_file.content_type as "contentType",
+          original_file.size_bytes::double precision as "sizeBytes",
+          original_file.sha256 as "sha256",
+          original_file.bucket as "bucket",
+          original_file.object_key as "objectKey",
+          original_file.created_at::text as "createdAt",
+          original_file.updated_at::text as "updatedAt"
+        from resolve_document_original_file(
+          ${input.accountId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.subjectId},
+          ${input.documentId}::uuid
+        ) original_file`,
+      );
+      return rows[0] ?? null;
+    },
+  );
+}
+
 /** Batch form of requireFileForSubject for durable model-history projection. */
 export async function getFilesForSubject(
   db: Database,
