@@ -670,6 +670,7 @@ $ddl$, data_schema);
 END
 $connection_authority_routines$;
 
+REVOKE ALL ON FUNCTION opengeni_private.bind_connection_authority() FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.validate_user_resource_grant_action() FROM PUBLIC;
 REVOKE ALL ON FUNCTION list_self_connection_authorities(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION issue_self_connection_use_grant(

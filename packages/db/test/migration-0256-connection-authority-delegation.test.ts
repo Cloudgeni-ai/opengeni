@@ -23,6 +23,9 @@ describe("migration 0256 connection authority delegation", () => {
     expect(source).toContain("organization_user_resource_grants_action_contract");
     expect(source).toContain("CREATE OR REPLACE FUNCTION %1$I.resolve_connection_use_authority");
     expect(source).toContain("connection_use_once_consumption_receipts");
+    expect(source).toContain(
+      "REVOKE ALL ON FUNCTION opengeni_private.bind_connection_authority() FROM PUBLIC",
+    );
     expect(source).toContain("REVOKE ALL ON TABLE connection_use_once_consumption_receipts");
     expect(source).not.toMatch(/credential_encrypted\s*(?:->|#>|#>>)|decrypt/iu);
     expect(createHash("sha256").update(source).digest("hex")).toMatch(/^[0-9a-f]{64}$/u);
