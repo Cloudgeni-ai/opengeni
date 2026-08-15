@@ -795,6 +795,7 @@ export function buildConnectionTokenResolver(
   return async (input) => {
     let ref = input.connectionRef;
     let subjectId = input.subjectId;
+    let credentialWorkspaceId = input.workspaceId;
     let expectedAuthorityGeneration: number | undefined;
     let connectionUseAttribution: ConnectionUseAttribution | undefined;
     // Repository-scoped provider bindings require a broker that can prove the
@@ -831,6 +832,14 @@ export function buildConnectionTokenResolver(
       }
       connectionUseAttribution = authorization.attribution;
       expectedAuthorityGeneration = authority.connectionGeneration;
+      // Personal resources are organization-user owned and may originate in a
+      // different workspace from the session using them. Authorization is
+      // evaluated against the target workspace above; the exact credential is
+      // then loaded from its frozen physical origin, never rediscovered in the
+      // target workspace.
+      credentialWorkspaceId = expectedPersonal
+        ? authority.originWorkspaceId
+        : authority.targetWorkspaceId;
       subjectId = authority.ownerSubjectId ?? undefined;
       ref = {
         ...ref,
@@ -845,7 +854,7 @@ export function buildConnectionTokenResolver(
     let cred: ConnectionCredentialForBroker | null;
     try {
       cred = await load({
-        workspaceId: input.workspaceId,
+        workspaceId: credentialWorkspaceId,
         connectionRef: ref,
         ...(subjectId ? { subjectId } : {}),
         ...(expectedAuthorityGeneration !== undefined ? { expectedAuthorityGeneration } : {}),

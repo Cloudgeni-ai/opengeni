@@ -90,6 +90,7 @@ function brokerCredential(
 const authorityIds = {
   organizationId: "00000000-0000-4000-8000-000000000101",
   workspaceId: "00000000-0000-4000-8000-000000000102",
+  originWorkspaceId: "00000000-0000-4000-8000-000000000106",
   sessionId: "00000000-0000-4000-8000-000000000103",
   turnId: "00000000-0000-4000-8000-000000000104",
   connectionId: "00000000-0000-4000-8000-000000000105",
@@ -115,6 +116,30 @@ function workspaceConnectionUseAuthority() {
     authoritySource: "explicit_workspace",
     selectionSources: ["mcp:workspace"],
     userDelegation: null,
+  } as const;
+}
+
+function personalConnectionUseAuthority() {
+  return {
+    ...workspaceConnectionUseAuthority(),
+    originWorkspaceId: authorityIds.originWorkspaceId,
+    scope: "user",
+    ownerSubjectId: "user:owner",
+    ownerOrganizationMembershipId: "00000000-0000-4000-8000-000000000107",
+    authoritySource: "user_delegation",
+    userDelegation: {
+      authorityId: "00000000-0000-4000-8000-000000000108",
+      grantId: "00000000-0000-4000-8000-000000000109",
+      organizationId: authorityIds.organizationId,
+      workspaceId: authorityIds.workspaceId,
+      sessionId: null,
+      action: "connection.use",
+      mode: "always",
+      context: "workspace_shared",
+      authorityEpoch: null,
+      authorityGeneration: 1,
+      grantGeneration: 1,
+    },
   } as const;
 }
 
@@ -1337,6 +1362,64 @@ describe("buildConnectionTokenResolver", () => {
       connectionUseAttribution: attribution,
     });
     expect(counts.recordUsed).toBe(1);
+  });
+
+  test("loads an authorized personal connection from its frozen origin workspace", async () => {
+    const authority = personalConnectionUseAuthority();
+    const attribution = {
+      organizationId: authorityIds.organizationId,
+      workspaceId: authorityIds.workspaceId,
+      sessionId: authorityIds.sessionId,
+      connectionId: authorityIds.connectionId,
+      connectionGeneration: 7,
+      scope: "user" as const,
+      ownerSubjectId: authority.ownerSubjectId,
+      authorityId: authority.userDelegation.authorityId,
+      grantId: authority.userDelegation.grantId,
+    };
+    const { deps, counts } = resolverDeps({
+      authorizeUse: async () => ({ status: "authorized", attribution }),
+      loadCredential: async (_db, _settings, input) => {
+        counts.load += 1;
+        counts.loadInputs.push(input);
+        return brokerCredential({
+          id: authorityIds.connectionId,
+          accountId: authorityIds.organizationId,
+          workspaceId: authorityIds.originWorkspaceId,
+          subjectId: authority.ownerSubjectId,
+          authorityGeneration: 7,
+        });
+      },
+    });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const result = await resolver({
+      workspaceId: authorityIds.workspaceId,
+      serverId: "personal-cross-workspace",
+      destinationUrl: "https://api.example.com/mcp",
+      connectionRef: {
+        connectionId: authorityIds.connectionId,
+        providerDomain: "api.example.com",
+        kind: "api_key",
+        subjectScope: "subject",
+      },
+      connectionUseAuthority: authority,
+    });
+    expect(counts.loadInputs).toEqual([
+      {
+        workspaceId: authorityIds.originWorkspaceId,
+        providerDomain: "api.example.com",
+        allowSubjectOwned: true,
+        subjectId: authority.ownerSubjectId,
+        expectedAuthorityGeneration: 7,
+        connectionId: authorityIds.connectionId,
+        kind: "api_key",
+      },
+    ]);
+    expect(result).toMatchObject({
+      status: "ok",
+      connectionId: authorityIds.connectionId,
+      connectionUseAttribution: attribution,
+    });
   });
 
   test("rejects a credential whose authority generation changed after authorization", async () => {

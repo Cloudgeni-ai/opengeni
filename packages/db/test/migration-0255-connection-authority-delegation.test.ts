@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { acquireBlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
-import { createDb, createSession } from "../src/index";
+import { createDb, createSession, getConnectionMetadata } from "../src/index";
 import { migrate } from "../src/migrate";
 
 const migrationUrl = new URL(
@@ -70,6 +70,36 @@ describe("migration 0255 connection authority delegation", () => {
         values (${account!.id}, ${targetWorkspace!.id}, ${ownerSubjectId})
       `;
 
+      const legacySubjectId = `legacy:${crypto.randomUUID()}`;
+      const legacy = await sql.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${targetWorkspace!.id}, true)`;
+        await tx`select set_config('opengeni.subject_id', ${legacySubjectId}, true)`;
+        const [row] = await tx<
+          Array<{
+            authorityScope: string;
+            authorityId: string | null;
+            ownerMembershipId: string | null;
+          }>
+        >`
+          insert into connections (
+            account_id, workspace_id, subject_id, provider_domain, kind,
+            credential_encrypted
+          ) values (
+            ${account!.id}, ${targetWorkspace!.id}, ${legacySubjectId},
+            'legacy.example.com', 'api_key', 'legacy-ciphertext'
+          ) returning authority_scope as "authorityScope",
+            authority_id as "authorityId",
+            owner_organization_membership_id as "ownerMembershipId"
+        `;
+        return row!;
+      });
+      expect(legacy).toEqual({
+        authorityScope: "legacy_user",
+        authorityId: null,
+        ownerMembershipId: null,
+      });
+
       const personal = await sql.begin(async (tx) => {
         await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
         await tx`select set_config('opengeni.workspace_id', ${personalWorkspace!.id}, true)`;
@@ -104,6 +134,13 @@ describe("migration 0255 connection authority delegation", () => {
         originWorkspaceId: personalWorkspace!.id,
         authorityGeneration: 1,
       });
+      const ownerMetadata = await getConnectionMetadata(
+        client.db,
+        personalWorkspace!.id,
+        personal.id,
+        ownerSubjectId,
+      );
+      expect(ownerMetadata?.authorityId).toBe(personal.authorityId);
       const [authority] = await sql<
         Array<{ resourceKind: string; resourceId: string; membershipId: string }>
       >`

@@ -7709,6 +7709,7 @@ export function mcpServerIdForCapability(
 
 const connectionMetadataColumns = {
   id: schema.connections.id,
+  authorityId: schema.connections.authorityId,
   accountId: schema.connections.accountId,
   workspaceId: schema.connections.workspaceId,
   subjectId: schema.connections.subjectId,
@@ -58032,6 +58033,7 @@ function projectInstallationConfig(config: Record<string, unknown>): Record<stri
 
 function mapConnectionMetadata(row: {
   id: string;
+  authorityId?: string | null;
   accountId: string;
   workspaceId: string;
   subjectId: string | null;
@@ -58054,6 +58056,7 @@ function mapConnectionMetadata(row: {
 }): ConnectionMetadataWithVerification {
   return {
     id: row.id,
+    ...(row.subjectId !== null && row.authorityId ? { authorityId: row.authorityId } : {}),
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     subjectId: row.subjectId,

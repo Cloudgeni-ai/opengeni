@@ -970,7 +970,11 @@ export const connections = pgTable(
     updatedBySubjectId: text("updated_by_subject_id"),
     // Explicit execution authority. Workspace rows have no member authority;
     // user rows bind one immutable organization membership and common resource
-    // authority. Public metadata projections intentionally omit these fields.
+    // authority. `legacy_user` preserves pre-tenancy personal rows without
+    // inventing an owner membership; it is ineligible for delegated use until
+    // the migration cutover binds it. Public metadata projects only the opaque
+    // authority id to the exact subject owner; membership, scope, origin, and
+    // generation remain internal.
     authorityScope: text("authority_scope").notNull().default("workspace"),
     authorityId: uuid("authority_id"),
     ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
@@ -1012,7 +1016,7 @@ export const connections = pgTable(
       .where(sql`${table.authorityScope} = 'user'`),
     authorityScopeValid: check(
       "connections_authority_scope_check",
-      sql`${table.authorityScope} in ('workspace', 'user')`,
+      sql`${table.authorityScope} in ('workspace', 'user', 'legacy_user')`,
     ),
     authorityShapeValid: check(
       "connections_authority_shape_check",
@@ -1027,6 +1031,12 @@ export const connections = pgTable(
           and ${table.subjectId} is not null
           and ${table.authorityId} is not null
           and ${table.ownerOrganizationMembershipId} is not null
+          and ${table.originWorkspaceId} is not null
+        ) or (
+          ${table.authorityScope} = 'legacy_user'
+          and ${table.subjectId} is not null
+          and ${table.authorityId} is null
+          and ${table.ownerOrganizationMembershipId} is null
           and ${table.originWorkspaceId} is not null
         )`,
     ),

@@ -31,10 +31,22 @@ BEGIN
     ORDER BY connection_value.account_id, connection_value.id
     FOR UPDATE
   LOOP
-    SELECT membership.id INTO STRICT membership_id
+    SELECT membership.id INTO membership_id
     FROM organization_memberships membership
     WHERE membership.account_id = connection_row.account_id
-      AND membership.subject_id = connection_row.subject_id;
+      AND membership.subject_id = connection_row.subject_id
+      AND membership.status = 'active'
+      AND membership.revoked_at IS NULL;
+
+    IF membership_id IS NULL THEN
+      UPDATE connections
+      SET authority_scope = 'legacy_user', authority_id = NULL,
+        owner_organization_membership_id = NULL,
+        origin_workspace_id = connection_row.workspace_id,
+        authority_generation = 1
+      WHERE id = connection_row.id;
+      CONTINUE;
+    END IF;
 
     authority_value := pg_catalog.gen_random_uuid();
     INSERT INTO organization_user_resource_authorities (
@@ -57,7 +69,7 @@ $backfill_personal_connection_authority$;
 
 ALTER TABLE "connections"
   ADD CONSTRAINT "connections_authority_scope_check"
-    CHECK ("authority_scope" IN ('workspace', 'user')) NOT VALID,
+    CHECK ("authority_scope" IN ('workspace', 'user', 'legacy_user')) NOT VALID,
   ADD CONSTRAINT "connections_authority_shape_check" CHECK (
     (
       "authority_scope" = 'workspace'
@@ -70,6 +82,12 @@ ALTER TABLE "connections"
       AND "subject_id" IS NOT NULL
       AND "authority_id" IS NOT NULL
       AND "owner_organization_membership_id" IS NOT NULL
+      AND "origin_workspace_id" IS NOT NULL
+    ) OR (
+      "authority_scope" = 'legacy_user'
+      AND "subject_id" IS NOT NULL
+      AND "authority_id" IS NULL
+      AND "owner_organization_membership_id" IS NULL
       AND "origin_workspace_id" IS NOT NULL
     )
   ) NOT VALID,
@@ -164,13 +182,19 @@ BEGIN
       RAISE EXCEPTION 'personal connection owner must be the authenticated subject'
         USING ERRCODE = '42501';
     END IF;
-    SELECT membership.id INTO STRICT membership_id
+    SELECT membership.id INTO membership_id
     FROM organization_memberships membership
     WHERE membership.account_id = NEW.account_id
       AND membership.subject_id = caller_subject
       AND membership.status = 'active'
       AND membership.revoked_at IS NULL
     FOR SHARE;
+    IF membership_id IS NULL THEN
+      NEW.authority_scope := 'legacy_user';
+      NEW.authority_id := NULL;
+      NEW.owner_organization_membership_id := NULL;
+      RETURN NEW;
+    END IF;
     authority_value := gen_random_uuid();
     INSERT INTO organization_user_resource_authorities (
       id, account_id, organization_membership_id, resource_kind, resource_id,
