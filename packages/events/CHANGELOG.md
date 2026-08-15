@@ -1,5 +1,33 @@
 # @opengeni/events
 
+## 0.3.113
+
+### Patch Changes
+
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+- Updated dependencies [a551666]
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [4d1ed07]
+- Updated dependencies [ce3b370]
+- Updated dependencies [b2af2df]
+- Updated dependencies [e9e1016]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ffbbf4c]
+- Updated dependencies [3843825]
+- Updated dependencies [1ab8023]
+- Updated dependencies [d34dd9a]
+- Updated dependencies [eeb7cb6]
+- Updated dependencies [886682d]
+- Updated dependencies [234a5e7]
+- Updated dependencies [c3f0598]
+- Updated dependencies [d2f172c]
+- Updated dependencies [04b1a1f]
+- Updated dependencies [c056063]
+  - @opengeni/db@1.0.2
+  - @opengeni/contracts@1.1.0
+
 ## 0.3.112
 
 ### Patch Changes
