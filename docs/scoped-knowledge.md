@@ -178,9 +178,13 @@ input, authorization predicates run before vector/keyword ranking and limits,
 and results retain source plus immutable authority provenance. Agent calls also
 require `agent_access=true`. Migration 0258 activates common organization-user
 authority for new personal Documents: their physical workspace remains the
-immutable ingestion/indexing origin, but human retrieval follows the owner
-across that owner's currently accessible same-organization workspaces. Legacy
-private rows keep the workspace binding established by migration 0165.
+immutable ingestion/indexing origin, but human discovery and management follow
+the owner across that owner's currently accessible same-organization
+workspaces. `GET /v1/workspaces/:workspaceId/documents` is the effective human
+inventory; exact reads, reindex, filing, and deletion use the same authority
+predicate while operating on the immutable origin rows. Configured/local
+subjects without an eligible active organization membership and legacy private
+rows keep the workspace binding established by migration 0165.
 
 Personal Document ownership never becomes ambient agent authority. The exact
 attempt-admission transaction freezes only Documents covered by a live

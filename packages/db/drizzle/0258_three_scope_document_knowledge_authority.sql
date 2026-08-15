@@ -380,13 +380,26 @@ BEGIN
         RAISE EXCEPTION 'personal document creation scope mismatch' USING ERRCODE = '42501';
       END IF;
 
-      SELECT membership.* INTO STRICT member_row
+      SELECT membership.* INTO member_row
       FROM organization_memberships membership
       WHERE membership.account_id = p_account_id
         AND membership.subject_id = caller_subject
         AND membership.status = 'active'
         AND membership.revoked_at IS NULL
       FOR SHARE;
+
+      -- Configured/local and rolling-legacy subjects may legitimately use the
+      -- pre-organization personal Document lane. Only create the portable
+      -- organization-user authority when there is one deterministic active
+      -- organization membership; otherwise the caller inserts the existing
+      -- workspace-anchored personal tuple in the same transaction.
+      IF NOT FOUND THEN
+        DELETE FROM opengeni_private.personal_document_authority_capabilities
+        WHERE backend_pid = pg_catalog.pg_backend_pid()
+          AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+          AND capability_kind = 'write';
+        RETURN;
+      END IF;
 
       IF member_row.personal_workspace_id IS DISTINCT FROM p_workspace_id THEN
         PERFORM 1 FROM workspace_memberships workspace_membership

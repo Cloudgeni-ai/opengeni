@@ -210,26 +210,19 @@ export function DocumentsRoute({
     }
   }, [client, workspaceId]);
 
-  const refreshDocuments = useCallback(
-    async (availableBases: DocumentBase[]) => {
-      setDocumentsLoading(true);
-      try {
-        const grouped = await Promise.all(
-          availableBases.map((base) => client.listDocuments(workspaceId, base.id)),
-        );
-        setDocuments(
-          grouped.flat().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
-        );
-        setDocumentsError(null);
-      } catch (error) {
-        setDocumentsError(error instanceof Error ? error : new Error(String(error)));
-        toast.error("Failed to load documents", { description: String(error) });
-      } finally {
-        setDocumentsLoading(false);
-      }
-    },
-    [client, workspaceId],
-  );
+  const refreshDocuments = useCallback(async () => {
+    setDocumentsLoading(true);
+    try {
+      const next = await client.listAccessibleDocuments(workspaceId);
+      setDocuments(next.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)));
+      setDocumentsError(null);
+    } catch (error) {
+      setDocumentsError(error instanceof Error ? error : new Error(String(error)));
+      toast.error("Failed to load documents", { description: String(error) });
+    } finally {
+      setDocumentsLoading(false);
+    }
+  }, [client, workspaceId]);
 
   useEffect(() => {
     void refreshBases();
@@ -244,7 +237,7 @@ export function DocumentsRoute({
       setDocumentsError(null);
       return;
     }
-    void refreshDocuments(bases);
+    void refreshDocuments();
   }, [bases, basesError, basesLoading, refreshDocuments]);
 
   useEffect(() => {
@@ -258,12 +251,11 @@ export function DocumentsRoute({
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const load = async () => {
-      await Promise.all(bases.map((base) => client.listDocuments(workspaceId, base.id)))
+      await client
+        .listAccessibleDocuments(workspaceId)
         .then((next) => {
           if (!cancelled) {
-            setDocuments(
-              next.flat().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
-            );
+            setDocuments(next.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)));
             setPollFailed(false);
           }
         })
@@ -289,7 +281,7 @@ export function DocumentsRoute({
     } catch {
       // The existing inventory can still be refreshed if the base-list request fails.
     }
-    await refreshDocuments(nextBases);
+    await refreshDocuments();
   }
 
   async function handleDropText() {
@@ -565,7 +557,7 @@ export function DocumentsRoute({
                           type="button"
                           variant="ghost"
                           size="xs"
-                          onClick={() => void refreshDocuments(bases)}
+                          onClick={() => void refreshDocuments()}
                         >
                           <RefreshCwIcon className="size-3" />
                           Refresh
@@ -584,7 +576,7 @@ export function DocumentsRoute({
                     <LoadErrorState
                       title="Couldn't load documents"
                       error={documentsError}
-                      onRetry={() => void refreshDocuments(bases)}
+                      onRetry={() => void refreshDocuments()}
                     />
                   ) : visibleDocumentsView === "empty" ? (
                     <EmptyState

@@ -164,8 +164,11 @@ export type PersonalDocumentAuthority = {
 
 /**
  * Create the common organization-user authority before inserting a personal
- * Document. Call this inside the same database transaction as the Document
- * insert so a failed write cannot leave an orphan authority.
+ * Document. Returns null for a configured/local or rolling-legacy subject that
+ * has no eligible active organization membership, preserving the existing
+ * workspace-anchored personal lane. Call this inside the same database
+ * transaction as the Document insert so a failed write cannot leave an orphan
+ * authority.
  */
 export async function createPersonalDocumentAuthority(
   db: Database,
@@ -175,7 +178,7 @@ export async function createPersonalDocumentAuthority(
     subjectId: string;
     documentId: string;
   },
-): Promise<PersonalDocumentAuthority> {
+): Promise<PersonalDocumentAuthority | null> {
   await setSubjectRlsContext(db, input.subjectId);
   const [row] = await rawRows<PersonalDocumentAuthority>(
     db,
@@ -188,6 +191,5 @@ export async function createPersonalDocumentAuthority(
       )
     `,
   );
-  if (!row) throw new Error("personal document authority was not returned");
-  return row;
+  return row ?? null;
 }

@@ -6,7 +6,9 @@ import {
   browseEffectiveKnowledge,
   deleteDocumentFromBase,
   getEffectiveKnowledgeRecord,
+  getDocument,
   getDocumentChunk,
+  listAccessibleDocuments,
   moveDocumentToBase,
   queueDocumentForReindex,
   searchEffectiveKnowledge,
@@ -119,6 +121,111 @@ afterAll(async () => {
 }, 180_000);
 
 describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
+  test("owner manages an activated personal document after losing origin workspace access", async () => {
+    if (!available) return;
+    const subjectId = `human:${crypto.randomUUID()}`;
+    const otherSubjectId = `human:${crypto.randomUUID()}`;
+    const personal = await freshWorkspace("portable-personal");
+    const origin = await freshWorkspace("portable-origin", personal.accountId);
+    const sibling = await freshWorkspace("portable-sibling", personal.accountId);
+    const otherOrganization = await freshWorkspace("portable-other-organization");
+    await shared!.admin`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id, authorization_revision
+      ) values (${personal.accountId}, ${subjectId}, 'active', ${personal.workspaceId}, 1)`;
+    await shared!.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id) values
+        (${origin.accountId}, ${origin.workspaceId}, ${subjectId}),
+        (${sibling.accountId}, ${sibling.workspaceId}, ${subjectId}),
+        (${sibling.accountId}, ${sibling.workspaceId}, ${otherSubjectId})`;
+    const [file] = await shared!.admin<{ id: string }[]>`
+      insert into files (
+        account_id, workspace_id, status, filename, safe_filename, content_type,
+        size_bytes, bucket, object_key
+      ) values (
+        ${origin.accountId}, ${origin.workspaceId}, 'ready', 'portable.txt',
+        'portable.txt', 'text/plain', 1, 'test', ${`documents/${crypto.randomUUID()}`}
+      ) returning id`;
+    const bases = await shared!.admin<{ id: string }[]>`
+      insert into document_bases (account_id, workspace_id, name) values
+        (${origin.accountId}, ${origin.workspaceId}, ${`portable-a-${crypto.randomUUID()}`}),
+        (${origin.accountId}, ${origin.workspaceId}, ${`portable-b-${crypto.randomUUID()}`})
+      returning id`;
+    const created = await addDocumentToBase(forced.db, {
+      accountId: origin.accountId,
+      workspaceId: origin.workspaceId,
+      baseId: bases[0]!.id,
+      fileId: file!.id,
+      authorityKind: "personal",
+      createdBy: subjectId,
+      initiatingSubjectId: subjectId,
+      access: { viewerSubjectId: subjectId },
+    });
+    expect(created.authorityId).toEqual(expect.any(String));
+    expect(created.authorityWorkspaceId).toBeNull();
+
+    await shared!.admin`
+      delete from workspace_memberships
+      where account_id = ${origin.accountId} and workspace_id = ${origin.workspaceId}
+        and subject_id = ${subjectId}`;
+
+    const ownerAccess = { viewerSubjectId: subjectId };
+    expect(
+      (await listAccessibleDocuments(forced.db, sibling.workspaceId, ownerAccess)).map(
+        (document) => document.id,
+      ),
+    ).toContain(created.id);
+    await expect(
+      getDocument(forced.db, sibling.workspaceId, created.id, ownerAccess),
+    ).resolves.toMatchObject({
+      id: created.id,
+      workspaceId: origin.workspaceId,
+      baseId: bases[0]!.id,
+    });
+    await expect(
+      getDocument(forced.db, sibling.workspaceId, created.id, {
+        viewerSubjectId: otherSubjectId,
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      getDocument(forced.db, otherOrganization.workspaceId, created.id, ownerAccess),
+    ).resolves.toBeNull();
+
+    const queued = await queueDocumentForReindex(
+      forced.db,
+      sibling.workspaceId,
+      created.id,
+      ownerAccess,
+    );
+    expect(queued).toMatchObject({
+      id: created.id,
+      workspaceId: origin.workspaceId,
+      status: "queued",
+    });
+    const moved = await moveDocumentToBase(forced.db, {
+      accountId: origin.accountId,
+      workspaceId: sibling.workspaceId,
+      documentId: created.id,
+      targetBaseId: bases[1]!.id,
+      access: ownerAccess,
+    });
+    expect(moved).toMatchObject({
+      id: created.id,
+      workspaceId: origin.workspaceId,
+      baseId: bases[1]!.id,
+    });
+    await deleteDocumentFromBase(forced.db, {
+      accountId: origin.accountId,
+      workspaceId: sibling.workspaceId,
+      baseId: bases[1]!.id,
+      documentId: created.id,
+      access: ownerAccess,
+    });
+    await expect(
+      getDocument(forced.db, sibling.workspaceId, created.id, ownerAccess),
+    ).resolves.toBeNull();
+  });
+
   test("searches and fetches by account plus immutable authority before ranking", async () => {
     if (!available) return;
     const origin = await freshWorkspace("origin");

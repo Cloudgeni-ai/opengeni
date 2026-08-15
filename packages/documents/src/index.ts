@@ -1140,7 +1140,7 @@ export async function moveDocumentToBase(
         .from(schema.documents)
         .where(
           and(
-            eq(schema.documents.workspaceId, input.workspaceId),
+            eq(schema.documents.accountId, input.accountId),
             eq(schema.documents.id, input.documentId),
             ...documentAccessConditions(input.workspaceId, input.access),
           ),
@@ -1155,14 +1155,18 @@ export async function moveDocumentToBase(
         throw new Error("document has no suggested base; pass targetBaseId");
       }
       if (targetBaseId === row.baseId) return mapDocument(row);
-      const base = await getDocumentBase(scopedDb, input.workspaceId, targetBaseId);
+      // A portable personal Document retains its immutable ingestion workspace
+      // as provenance and physical storage. Management may be authorized from
+      // another same-organization workspace, but filing still targets a base
+      // in that origin workspace rather than silently copying authority/data.
+      const base = await getDocumentBase(scopedDb, row.workspaceId, targetBaseId);
       if (!base) throw new Error(`Document base not found: ${targetBaseId}`);
       const [conflict] = await scopedDb
         .select({ id: schema.documents.id })
         .from(schema.documents)
         .where(
           and(
-            eq(schema.documents.workspaceId, input.workspaceId),
+            eq(schema.documents.workspaceId, row.workspaceId),
             eq(schema.documents.baseId, targetBaseId),
             ...(row.knowledgeSourceIdentity
               ? [eq(schema.documents.knowledgeSourceIdentity, row.knowledgeSourceIdentity)]
@@ -1186,7 +1190,7 @@ export async function moveDocumentToBase(
           })
           .where(
             and(
-              eq(schema.documents.workspaceId, input.workspaceId),
+              eq(schema.documents.workspaceId, row.workspaceId),
               eq(schema.documents.id, input.documentId),
               ...documentAccessConditions(input.workspaceId, input.access),
             ),
@@ -1198,7 +1202,7 @@ export async function moveDocumentToBase(
             .set({ baseId: targetBaseId })
             .where(
               and(
-                eq(schema.documentChunks.workspaceId, input.workspaceId),
+                eq(schema.documentChunks.workspaceId, row.workspaceId),
                 eq(schema.documentChunks.documentId, input.documentId),
               ),
             );
@@ -1233,7 +1237,7 @@ export async function deleteDocumentFromBase(
         .from(schema.documents)
         .where(
           and(
-            eq(schema.documents.workspaceId, input.workspaceId),
+            eq(schema.documents.accountId, input.accountId),
             eq(schema.documents.id, input.documentId),
             ...documentAccessConditions(input.workspaceId, input.access),
           ),
@@ -1253,7 +1257,7 @@ export async function deleteDocumentFromBase(
         .delete(schema.documents)
         .where(
           and(
-            eq(schema.documents.workspaceId, input.workspaceId),
+            eq(schema.documents.accountId, input.accountId),
             eq(schema.documents.id, input.documentId),
             ...documentAccessConditions(input.workspaceId, input.access),
           ),
@@ -1280,6 +1284,28 @@ export async function listDocuments(
         ),
       )
       .orderBy(asc(schema.documents.createdAt));
+    return rows.map(mapDocument);
+  });
+}
+
+/**
+ * List Documents the human can discover and manage from the requested
+ * workspace. Organization Documents are account-wide, workspace Documents are
+ * local, activated organization-user Documents are portable across the owner's
+ * same-organization workspaces, and legacy personal rows remain anchored to
+ * their ingestion workspace through documentAccessConditions.
+ */
+export async function listAccessibleDocuments(
+  db: Database,
+  workspaceId: string,
+  access: DocumentAccessFilter,
+): Promise<Document[]> {
+  return await withDocumentRls(db, workspaceId, access, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.documents)
+      .where(and(...documentAccessConditions(workspaceId, access)))
+      .orderBy(desc(schema.documents.updatedAt), asc(schema.documents.createdAt));
     return rows.map(mapDocument);
   });
 }
@@ -1443,11 +1469,7 @@ export async function getDocument(
       .select()
       .from(schema.documents)
       .where(
-        and(
-          eq(schema.documents.workspaceId, workspaceId),
-          eq(schema.documents.id, documentId),
-          ...documentAccessConditions(workspaceId, access),
-        ),
+        and(eq(schema.documents.id, documentId), ...documentAccessConditions(workspaceId, access)),
       )
       .limit(1);
     return row ? mapDocument(row) : null;
@@ -1487,14 +1509,10 @@ export async function queueDocumentForReindex(
 ): Promise<Document> {
   return await withDocumentRls(db, workspaceId, access, async (scopedDb) => {
     const [document] = await scopedDb
-      .select({ authorityKind: schema.documents.authorityKind })
+      .select()
       .from(schema.documents)
       .where(
-        and(
-          eq(schema.documents.workspaceId, workspaceId),
-          eq(schema.documents.id, documentId),
-          ...documentAccessConditions(workspaceId, access),
-        ),
+        and(eq(schema.documents.id, documentId), ...documentAccessConditions(workspaceId, access)),
       )
       .limit(1);
     if (!document) throw new Error(`Document not found: ${documentId}`);
@@ -1507,11 +1525,7 @@ export async function queueDocumentForReindex(
         updatedAt: new Date(),
       })
       .where(
-        and(
-          eq(schema.documents.workspaceId, workspaceId),
-          eq(schema.documents.id, documentId),
-          ...documentAccessConditions(workspaceId, access),
-        ),
+        and(eq(schema.documents.id, documentId), ...documentAccessConditions(workspaceId, access)),
       )
       .returning();
     if (!row) throw new Error(`Document not found: ${documentId}`);

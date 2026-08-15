@@ -59,11 +59,14 @@ Migration `0258_three_scope_document_knowledge_authority.sql` applies the same
 organization-user lifecycle to newly-created personal Documents. The physical
 workspace/base/file still owns ingestion and indexing, while
 `origin_workspace_id` is immutable provenance and the common authority's active
-organization membership is ownership. Consequently, an owner can retrieve the
-Document from any workspace they currently access in the same organization,
-and losing the origin workspace does not transfer or delete it. Existing
-personal Documents remain anchored to their original workspace instead of
-being guessed into a new organization-user authority.
+organization membership is ownership. Consequently, an owner can discover,
+read, reindex, file, and delete the Document from any workspace they currently
+access in the same organization, and losing the origin workspace does not
+transfer or delete it. Those operations retain the original workspace, base,
+file, and chunk storage rather than copying data into the authorizing workspace.
+Configured/local subjects without an eligible active organization membership,
+and existing personal Documents, remain on the legacy origin-workspace lane
+instead of being guessed into a new organization-user authority.
 
 Agent access is separate from human ownership. At exact attempt admission the
 database freezes only ready, agent-enabled personal Documents backed by an

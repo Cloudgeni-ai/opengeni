@@ -43,6 +43,8 @@ describe("migration 0258 three-scope Document/Knowledge authority", () => {
     expect(source).toContain('"authority_workspace_id" = "workspace_id"');
     expect(source).toContain('"authority_workspace_id" IS NULL');
     expect(source).toContain("origin_workspace_id");
+    expect(source).toContain("IF NOT FOUND THEN");
+    expect(source).not.toContain("INTO STRICT member_row");
     expect(source).not.toMatch(/p_owner|p_subject|owner_subject/iu);
   });
 
@@ -130,6 +132,28 @@ describe("migration 0258 three-scope Document/Knowledge authority", () => {
         workspaceId: workspaceB.id,
         subjectId: otherSubject,
       };
+      const legacySubject = `configured:${crypto.randomUUID()}`;
+      const legacyDocumentId = crypto.randomUUID();
+      const legacyAuthority = await withScope(
+        app,
+        {
+          accountId: account!.id,
+          workspaceId: workspaceA.id,
+          subjectId: legacySubject,
+        },
+        async (tx) =>
+          await tx<Array<{ authorityId: string }>>`
+            select authority_id as "authorityId"
+            from create_personal_document_authority(
+              ${account!.id}::uuid, ${workspaceA.id}::uuid, ${legacyDocumentId}::uuid
+            )`,
+      );
+      expect([...legacyAuthority]).toEqual([]);
+      const legacyRows = await admin<Array<{ id: string }>>`
+        select id from organization_user_resource_authorities
+        where account_id = ${account!.id} and resource_kind = 'document'
+          and resource_id = ${legacyDocumentId}`;
+      expect([...legacyRows]).toEqual([]);
       const [file] = await admin<Array<{ id: string }>>`
         insert into files (
           account_id, workspace_id, status, filename, safe_filename, content_type,

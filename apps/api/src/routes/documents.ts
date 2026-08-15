@@ -30,6 +30,7 @@ import {
   ensureDefaultBase,
   getDocument,
   getDocumentBase,
+  listAccessibleDocuments,
   listDocumentBasesEnsuringDefault,
   listDocuments,
   moveDocumentToBase,
@@ -161,6 +162,18 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  app.get("/v1/workspaces/:workspaceId/documents", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    return c.json(
+      (
+        await listAccessibleDocuments(db, workspaceId, {
+          viewerSubjectId: grant.subjectId,
+        })
+      ).map((document) => Document.parse(document)),
+    );
+  });
+
   app.delete(
     "/v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId",
     async (c) => {
@@ -246,7 +259,9 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         const indexed =
           (await documentIndexer.indexDocument({
             accountId: grant.accountId,
-            workspaceId,
+            // The requested workspace authorizes the human operation; the
+            // immutable ingestion workspace remains the indexing authority.
+            workspaceId: queued.workspaceId,
             documentId: document.id,
             authorityKind: document.authorityKind,
             authorityWorkspaceId: document.authorityWorkspaceId,
