@@ -85,12 +85,12 @@ claiming permission-first selector or logical-turn context-receipt ownership.
 
 - permission-first selector, accepted-boundary snapshot, recovery reuse, and
   logical-turn context-receipt ownership;
-- Task-note storage or retrieval;
+- Task-note storage or retrieval beyond the existing explicit note tools;
 - generic `memory_save`, generic durable learning, or Memory promotion;
 - personal or cross-workspace organization activation;
 - implicit policy/preference activation or correction;
 - workspace-learning-policy routing decisions;
-- MCP/API/UI/export surfaces;
+- API/UI/export surfaces;
 - deployment, release, provider, cloud, or production mutation.
 
 ## Follow-on learning-policy decision seam
@@ -105,5 +105,9 @@ for the destination authority, while truthfully retaining `activated=false`;
 it does not bypass the human-only instruction/preference lifecycle. The
 source-specific receipt omits unrelated source overrides.
 
-This follow-on does not change the bounded successor's destination or scope
-matrix and does not add a public tool, Task-note promotion, or active authority.
+The workspace-local completion adds explicit first-party proposal tools and
+version-one active rooted Task-note promotion into proposed Knowledge. Migration
+0258 stores only exact value-free note evidence and retains the note text as the
+proposed fact value; another root, archived/expired note, or stale attempt is
+denied. This still does not add personal/organization routing, generic Memory,
+or active authority.

@@ -67,6 +67,7 @@ describe("Company Brain governed write tools", () => {
     expect([...handlers.keys()]).toEqual([
       "knowledge_propose",
       "knowledge_correct",
+      "task_note_promote_knowledge",
       "instruction_policy_propose",
       "preference_propose",
     ]);

@@ -79,6 +79,44 @@ export function registerCompanyBrainGovernedWriteTools(
   );
 
   input.server.registerTool(
+    "task_note_promote_knowledge",
+    {
+      description:
+        "Promote one still-active note from this exact root task tree into a normalized workspace Knowledge proposal. The immutable note bytes remain source evidence; this never activates the claim or widens it to personal/organization scope.",
+      inputSchema: {
+        operationId: z.string().uuid(),
+        noteId: z.string().uuid(),
+        expectedNoteVersion: z.literal(1),
+        entityType: z
+          .string()
+          .trim()
+          .min(1)
+          .max(96)
+          .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+        normalizedKey: z.string().trim().min(1).max(512),
+        displayName: z.string().trim().min(1).max(512),
+        predicateKey: z
+          .string()
+          .trim()
+          .min(1)
+          .max(128)
+          .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+        confidenceBps: z.number().int().min(0).max(10_000),
+        reason,
+      },
+    },
+    async (request) => {
+      await input.authorize();
+      return input.json(
+        await router.write({
+          attempt: input.attempt,
+          request: { kind: "promote_task_note_knowledge", ...request },
+        }),
+      );
+    },
+  );
+
+  input.server.registerTool(
     "instruction_policy_propose",
     {
       description:

@@ -3114,7 +3114,7 @@ export async function appendKnowledgeClaimEvidence(
               )
               .limit(1)
           )[0];
-        if (!row || row.inputHash !== inputHash) {
+        if (!row || row.inputHash !== inputHash || row.documentVersionId === null) {
           throw new ScopedKnowledgeConflictError(
             "Claim-evidence operation id was replayed with different input",
           );

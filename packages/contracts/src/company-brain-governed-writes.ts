@@ -58,6 +58,38 @@ export type CorrectWorkspaceKnowledgeClaimRequest = z.infer<
   typeof CorrectWorkspaceKnowledgeClaimRequest
 >;
 
+/**
+ * Promote one still-active task-tree note into a normalized, workspace-local
+ * Knowledge claim proposal. The note text is the exact fact value and source
+ * evidence; callers may describe the subject and predicate but cannot widen
+ * authority or supply replacement source bytes.
+ */
+export const PromoteTaskNoteKnowledgeRequest = z
+  .object({
+    kind: z.literal("promote_task_note_knowledge"),
+    operationId,
+    noteId: z.string().uuid(),
+    expectedNoteVersion: z.literal(1),
+    entityType: z
+      .string()
+      .trim()
+      .min(1)
+      .max(96)
+      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+    normalizedKey: z.string().trim().min(1).max(512),
+    displayName: z.string().trim().min(1).max(512),
+    predicateKey: z
+      .string()
+      .trim()
+      .min(1)
+      .max(128)
+      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+    confidenceBps: z.number().int().min(0).max(10_000),
+    reason: boundedReason,
+  })
+  .strict();
+export type PromoteTaskNoteKnowledgeRequest = z.infer<typeof PromoteTaskNoteKnowledgeRequest>;
+
 export const ProposeWorkspaceInstructionPolicyRequest = z
   .strictObject({
     kind: z.literal("propose_instruction_policy"),
@@ -112,6 +144,7 @@ export type ProposeWorkspacePreferenceRequest = z.infer<typeof ProposeWorkspaceP
 export const CompanyBrainGovernedWriteRequest = z.discriminatedUnion("kind", [
   ProposeWorkspaceKnowledgeClaimRequest,
   CorrectWorkspaceKnowledgeClaimRequest,
+  PromoteTaskNoteKnowledgeRequest,
   ProposeWorkspaceInstructionPolicyRequest,
   ProposeWorkspacePreferenceRequest,
 ]);
@@ -139,6 +172,15 @@ export const CompanyBrainGovernedWriteReceipt = z.object({
   knowledgeChangeProposalId: z.string().uuid().nullable(),
   destinationProposalId: z.string().uuid().nullable(),
   destinationRevisionId: z.string().uuid().nullable(),
+  taskNoteSource: z
+    .object({
+      noteId: z.string().uuid(),
+      rootSessionId: z.string().uuid(),
+      noteVersion: z.literal(1),
+      textHash: z.string().regex(/^[0-9a-f]{64}$/),
+    })
+    .nullable()
+    .optional(),
   effectiveBoundary: z.literal("human_review_required"),
   rollback: z.object({
     supported: z.literal(false),

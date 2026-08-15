@@ -76,8 +76,11 @@ export function createCompanyBrainLearningPolicyRouter(
         executionGeneration: attempt.executionGeneration,
       });
       const effectivePolicy = resolveWorkspaceLearningPolicyEffectiveMode(policySnapshot, {
-        kind: "scoped-knowledge-evidence",
-        id: request.evidenceId,
+        kind:
+          request.kind === "promote_task_note_knowledge"
+            ? "task-note"
+            : "scoped-knowledge-evidence",
+        id: request.kind === "promote_task_note_knowledge" ? request.noteId : request.evidenceId,
       });
       if (effectivePolicy.mode === "off") {
         return CompanyBrainLearningPolicyRouteReceipt.parse({

@@ -11,6 +11,7 @@ import {
   listTaskNotes,
   nestedPostgresSqlState,
   transitionSessionVisibility,
+  writeCompanyBrainGovernedProposal,
   withSessionRlsActorContext,
   type DbClient,
 } from "../src";
@@ -176,6 +177,138 @@ function claims(attempt: Awaited<ReturnType<typeof seedAttempt>>) {
 }
 
 describe("task-tree notes PostgreSQL authority", () => {
+  test("promotes an active rooted note into proposed workspace Knowledge with replay-safe provenance", async () => {
+    if (!shared || !client) return;
+    const f = await fixture();
+    const attempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.root.id,
+      initiatorSubjectId: f.ownerSubjectId,
+      initiatingHumanSubjectId: f.ownerSubjectId,
+    });
+    const note = await createTaskNote(client.db, {
+      ...claims(attempt),
+      operationId: crypto.randomUUID(),
+      kind: "finding",
+      text: "Acme's enterprise renewal date is 2027-04-01.",
+      expiresInDays: 7,
+    });
+    const operationId = crypto.randomUUID();
+    const input = {
+      attempt: claims(attempt),
+      request: {
+        kind: "promote_task_note_knowledge" as const,
+        operationId,
+        noteId: note.note.id,
+        expectedNoteVersion: 1 as const,
+        entityType: "company",
+        normalizedKey: "acme",
+        displayName: "Acme",
+        predicateKey: "company.renewal-date",
+        confidenceBps: 8_500,
+        reason: "Promote the rooted finding for human Knowledge review.",
+      },
+    };
+    const first = await writeCompanyBrainGovernedProposal(client.db, input);
+    expect(first.destination).toBe("knowledge");
+    expect(first.taskNoteSource).toEqual({
+      noteId: note.note.id,
+      rootSessionId: f.root.id,
+      noteVersion: 1,
+      textHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(first.effectiveBoundary).toBe("human_review_required");
+
+    const unrelatedRoot = await withSessionRlsActorContext(
+      { subjectId: f.ownerSubjectId },
+      async () =>
+        await createSession(client!.db, {
+          accountId: f.grant.accountId,
+          workspaceId: f.grant.workspaceId,
+          initialMessage: "unrelated root",
+          resources: [],
+          metadata: {},
+          model: "test-model",
+          sandboxBackend: "none",
+          createdBy: { kind: "subject", subjectId: f.ownerSubjectId },
+          createdByContext: {},
+        }),
+    );
+    const unrelatedAttempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: unrelatedRoot.id,
+      initiatorSubjectId: f.ownerSubjectId,
+      initiatingHumanSubjectId: f.ownerSubjectId,
+    });
+    await expect(
+      writeCompanyBrainGovernedProposal(client.db, {
+        attempt: claims(unrelatedAttempt),
+        request: { ...input.request, operationId: crypto.randomUUID() },
+      }),
+    ).rejects.toThrow();
+
+    await expectSqlState(
+      async () =>
+        await shared!.admin`
+          insert into knowledge_claim_evidence (
+            account_id, scope_kind, scope_workspace_id, scope_subject_id, scope_key,
+            claim_id, document_version_id, task_note_id, task_note_root_session_id,
+            task_note_version, polarity, content_hash, operation_id, input_hash,
+            actor_kind, actor_subject_id, initiating_human_subject_id
+          )
+          select account_id, scope_kind, scope_workspace_id, scope_subject_id, scope_key,
+            claim_id, null, task_note_id, task_note_root_session_id,
+            task_note_version, polarity, ${"0".repeat(64)}, ${crypto.randomUUID()},
+            ${"1".repeat(64)}, actor_kind, actor_subject_id, initiating_human_subject_id
+          from knowledge_claim_evidence where id = ${first.evidenceId}
+        `,
+      "23514",
+    );
+
+    await archiveTaskNote(client.db, {
+      ...claims(attempt),
+      operationId: crypto.randomUUID(),
+      noteId: note.note.id,
+      expectedVersion: 1,
+      reason: "Promotion completed.",
+    });
+    expect(await writeCompanyBrainGovernedProposal(client.db, input)).toEqual(first);
+
+    const [stored] = await shared.admin<
+      {
+        evidence_id: string;
+        task_note_id: string;
+        document_version_id: string | null;
+        object_value: unknown;
+        review_state: string;
+      }[]
+    >`
+      select evidence.id as evidence_id, evidence.task_note_id,
+        evidence.document_version_id, fact.object_value, review.state as review_state
+      from knowledge_claim_evidence evidence
+      join knowledge_claims claim on claim.id = evidence.claim_id
+      join knowledge_facts fact on fact.id = claim.fact_id
+      join knowledge_claim_reviews review on review.claim_id = claim.id
+      where evidence.id = ${first.evidenceId}
+    `;
+    expect(stored).toMatchObject({
+      evidence_id: first.evidenceId,
+      task_note_id: note.note.id,
+      document_version_id: null,
+      object_value: "Acme's enterprise renewal date is 2027-04-01.",
+      review_state: "proposed",
+    });
+
+    await expect(
+      writeCompanyBrainGovernedProposal(client.db, {
+        ...input,
+        request: { ...input.request, displayName: "Different immutable input" },
+      }),
+    ).rejects.toThrow("different immutable input");
+  });
+
   test("gives the runtime role lifecycle functions but no direct table access", async () => {
     if (!shared) return;
     const f = await fixture();

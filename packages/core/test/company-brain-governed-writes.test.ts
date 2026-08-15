@@ -41,8 +41,14 @@ function receiptFor(request: CompanyBrainGovernedWriteRequest): CompanyBrainGove
     workspaceId: WORKSPACE_ID,
     destination,
     outcome: "proposed",
-    claimId: request.claimId,
-    evidenceId: request.evidenceId,
+    claimId:
+      request.kind === "promote_task_note_knowledge"
+        ? "00000000-0000-4000-8000-000000000118"
+        : request.claimId,
+    evidenceId:
+      request.kind === "promote_task_note_knowledge"
+        ? "00000000-0000-4000-8000-000000000119"
+        : request.evidenceId,
     relationId:
       request.kind === "correct_knowledge" ? "00000000-0000-4000-8000-000000000109" : null,
     reviewId: "00000000-0000-4000-8000-000000000110",
@@ -84,6 +90,18 @@ describe("Company Brain governed write router", () => {
         reason: "Propose the replacement while preserving the old claim in the audit graph.",
       },
       {
+        kind: "promote_task_note_knowledge",
+        operationId: "00000000-0000-4000-8000-000000000120",
+        noteId: "00000000-0000-4000-8000-000000000121",
+        expectedNoteVersion: 1,
+        entityType: "company",
+        normalizedKey: "acme",
+        displayName: "Acme",
+        predicateKey: "company.fact",
+        confidenceBps: 8_000,
+        reason: "Promote the rooted task finding as proposed workspace Knowledge.",
+      },
+      {
         kind: "propose_instruction_policy",
         operationId: "00000000-0000-4000-8000-000000000116",
         claimId: CLAIM_ID,
@@ -123,6 +141,7 @@ describe("Company Brain governed write router", () => {
     expect(captured.map((request) => request.kind)).toEqual([
       "propose_knowledge",
       "correct_knowledge",
+      "promote_task_note_knowledge",
       "propose_instruction_policy",
       "propose_preference",
     ]);
@@ -282,5 +301,33 @@ describe("Company Brain learning-policy router", () => {
       kind: "scoped-knowledge-evidence",
       id: EVIDENCE_ID,
     });
+  });
+
+  test("Task-note promotion derives its policy source from the exact note id", async () => {
+    const noteId = "00000000-0000-4000-8000-000000000298";
+    const promotion: CompanyBrainGovernedWriteRequest = {
+      kind: "promote_task_note_knowledge",
+      operationId: "00000000-0000-4000-8000-000000000297",
+      noteId,
+      expectedNoteVersion: 1,
+      entityType: "company",
+      normalizedKey: "acme",
+      displayName: "Acme",
+      predicateKey: "company.fact",
+      confidenceBps: 8_000,
+      reason: "Promote the rooted finding for review.",
+    };
+    const router = createCompanyBrainLearningPolicyRouter({
+      db: {} as Database,
+      async learningPolicySnapshot() {
+        return policySnapshot("automatic", [{ kind: "task-note", id: noteId, mode: "off" }]);
+      },
+      async authority() {
+        throw new Error("note-specific off override must prevent a write");
+      },
+    });
+    const result = await router.write({ attempt, request: promotion });
+    expect(result.decision).toBe("blocked");
+    expect(result.effectivePolicy.source).toEqual({ kind: "task-note", id: noteId });
   });
 });

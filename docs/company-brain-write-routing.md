@@ -10,7 +10,7 @@ notes plus governed Knowledge and Ways-of-working proposals.
 
 | Destination | Purpose | Authority | Model access | Current status |
 | --- | --- | --- | --- | --- |
-| Knowledge | Sourced company facts and evidence | Documents/scoped-knowledge authority | Permission-first `knowledge_search`/`get`/`browse`; never prompt-injected | Workspace-local claim proposal/correction routing implemented as append-only review/relation evidence |
+| Knowledge | Sourced company facts and evidence | Documents/scoped-knowledge authority | Permission-first `knowledge_search`/`get`/`browse`; never prompt-injected | Workspace-local claim proposal/correction plus rooted Task-note promotion implemented as append-only review/relation evidence |
 | Ways of working | Human-authoritative policy and preferences | Existing instruction-policy and preference-registry heads | Bounded descriptors by default; full bodies on demand | Workspace-local Knowledge-backed inactive proposal adapters implemented; activation remains human-only |
 | Task notes | Short-lived technical coordination inside one root session tree | Exact accepted turn/attempt plus root-session visibility | Explicit `task_notes_list`; never prompt-injected | Implemented by migration 0239 |
 | Durable agent learning | Reusable technical knowledge beyond one task tree | Existing Memory/governed-learning authorities | Existing retrieval rules | Routing/promotion remains later work |
@@ -85,6 +85,25 @@ inactive until their existing authority accepts them, even in automatic mode.
 The public receipt exposes only the effective source-specific decision and
 snapshot identity/hash, not the snapshot's other source overrides.
 
+The first-party proposal surface is intentionally explicit:
+`knowledge_propose`, `knowledge_correct`, `task_note_promote_knowledge`,
+`instruction_policy_propose`, and `preference_propose`. The signed host supplies
+the exact attempt tuple. Tool input cannot select scope, active authority, a
+different learning-policy source, or replacement evidence bytes.
+
+`task_note_promote_knowledge` accepts an active, unexpired version-one note from
+the exact caller's root tree plus normalized entity/predicate metadata. The note
+text becomes the proposed workspace Knowledge fact value. Migration
+`0258_task_note_knowledge_promotion.sql` extends claim evidence with exactly one
+Document-version or Task-note source shape. Task-note evidence stores only the
+note/root/version/content-hash facts; it never copies note
+text into evidence metadata. The security-definer resolver revalidates the
+current attempt and immutable initiating human, locks the note, and rejects
+another root, workspace, tenant, archived note, expired note, or stale version.
+The resulting claim is `proposed`, never approved or prompt-active. Exact retry
+reconstructs the same receipt even after the short-lived note is archived;
+changed input conflicts, and source cleanup cannot silently widen authority.
+
 ## Root-task-tree notes
 
 `task_notes` is a bounded coordination ledger, not conversation compaction,
@@ -144,10 +163,12 @@ activate organization or personal cross-workspace reads, change goal behavior,
 inject prompt context, or replace any Knowledge, policy, preference, Memory, or
 learning authority.
 
-Still required for the complete write-router architecture:
+Still required outside this workspace-local slice:
 
-- durable agent-learning routing and promotion;
-- an explicitly reviewed API/tool surface for the governed proposal contract;
+- Personal/Organization promotion and explicit scope commands after their
+  canonical cross-workspace authorities are active;
+- destination-owned automatic activation/undo controllers beyond inactive
+  proposal creation; and
 - bounded expiry cleanup and user-facing Advanced/search/export surfaces.
 
 Canonical implementation: `packages/contracts/src/task-notes.ts`,
@@ -157,4 +178,5 @@ Canonical implementation: `packages/contracts/src/task-notes.ts`,
 `packages/contracts/src/company-brain-governed-writes.ts`,
 `packages/db/src/company-brain-governed-writes.ts`,
 `packages/core/src/domain/company-brain-governed-writes.ts`, plus migration
-`0255_company_brain_governed_write_proposals.sql` for governed proposals.
+`0255_company_brain_governed_write_proposals.sql` for governed proposals and
+`0258_task_note_knowledge_promotion.sql` for exact Task-note evidence.
