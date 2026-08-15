@@ -241,7 +241,7 @@ function PreferenceProposalComposer({
             revisionId: revision.id,
             expectedCurrentRevisionId: null,
             expectedScopeVersion: preference.scopeVersion,
-            reason: "Saved by a user from Agent Brain",
+            reason: "Saved by a user from Company Brain",
           },
         );
         preference = activated.preference;

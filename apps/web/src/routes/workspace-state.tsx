@@ -32,6 +32,7 @@ import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions"
 
 import { BrainOverview } from "./agent-brain-overview";
 import { AgentBrainPrompt } from "./agent-brain-prompt";
+import { CompanyBrainExportButton } from "./company-brain-export";
 import {
   useCompanyProfileInventory,
   useWorkspaceInstructionPolicyOnboardingProposals,
@@ -101,7 +102,7 @@ function Metric({ label, value }: { label: string; value: ReactNode }) {
 
 function WorkspaceStateLoading() {
   return (
-    <div aria-label="Loading Agent Brain" className="grid gap-4">
+    <div aria-label="Loading Company Brain" className="grid gap-4">
       <Skeleton className="h-28 w-full" />
       <div className="grid gap-4 lg:grid-cols-2">
         <Skeleton className="h-64 w-full" />
@@ -537,7 +538,7 @@ function onboardingProposalErrorMessage(error: unknown): string {
       case "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_OVERSIZED":
         return "The proposal is larger than the instruction-policy draft limit.";
       case "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_STALE":
-        return "The active policy changed. Refresh Agent Brain and review the new baseline.";
+        return "The active policy changed. Refresh Company Brain and review the new baseline.";
       case "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_CONFLICT":
         return "That source version already proposed a draft for this policy target.";
       case "WORKSPACE_INSTRUCTION_POLICY_OPERATION_REUSED":
@@ -1253,7 +1254,7 @@ function FocusedInstructions({
         operationId: crypto.randomUUID(),
         expectedCurrentRevisionId: activeHead?.revisionId ?? null,
         expectedActivationVersion: activeHead?.activationVersion ?? 0,
-        reason: "Updated by a workspace admin from Agent Brain",
+        reason: "Updated by a workspace admin from Company Brain",
       });
       await onWorkspaceStateReload();
       setMessage("Saved. New agent turns will use these workspace instructions.");
@@ -1365,7 +1366,7 @@ export function WorkspaceStateRoute({
               ? "Workspace instructions"
               : view === "preferences"
                 ? "Preferences"
-                : "Agent Brain"
+                : "Company Brain"
         }
         description={
           view === "company"
@@ -1374,7 +1375,10 @@ export function WorkspaceStateRoute({
               ? "Set how agents should work in this workspace."
               : view === "preferences"
                 ? "Save reusable instructions agents can apply when relevant."
-                : "What every agent starts with, and what it can find when needed."
+                : "Knowledge, rules, guides, review, and learning - with scope and delivery kept explicit."
+        }
+        actions={
+          view ? undefined : <CompanyBrainExportButton client={client} workspaceId={workspaceId} />
         }
       />
       <div className="mt-6">
@@ -1386,13 +1390,13 @@ export function WorkspaceStateRoute({
             className="mb-4 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
           >
             <ArrowLeftIcon className="size-3" />
-            Back to Agent Brain
+            Back to Company Brain
           </Link>
         ) : null}
         {loading && !state ? <WorkspaceStateLoading /> : null}
         {error && !state ? (
           <LoadErrorState
-            title="Couldn't load Agent Brain"
+            title="Couldn't load Company Brain"
             error={error}
             onRetry={() => void reload()}
           />
@@ -1401,7 +1405,7 @@ export function WorkspaceStateRoute({
           <div className="grid gap-4">
             {error ? (
               <LoadErrorState
-                title="Couldn't refresh Agent Brain"
+                title="Couldn't refresh Company Brain"
                 error={error}
                 onRetry={() => void reload()}
               />

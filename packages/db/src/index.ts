@@ -357,6 +357,7 @@ export * from "./preference-registry";
 export * from "./memory-governance";
 export * from "./memory-slack-delivery";
 export * from "./scoped-knowledge";
+export * from "./company-brain";
 export * from "./company-brain-governed-writes";
 export * from "./knowledge-source-sync";
 export * from "./task-notes";

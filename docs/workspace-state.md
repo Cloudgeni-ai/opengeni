@@ -1,13 +1,15 @@
-# Agent Brain overview (Workspace State projection)
+# Company Brain overview (Workspace State projection)
 
-The Agent Brain page is a plain-language overview of existing workspace
+The Company Brain page is a plain-language overview of existing workspace
 authorities, backed by the Workspace State projection. Its default view groups
-them by the two ways agents use them:
+them by the questions people ask most often:
 
-- bounded charter/policy context and preference descriptors are always-known
-  governance;
-- Documents/RAG evidence and Memory records remain searchable and are retrieved
-  when relevant.
+- **Always followed**: company profile and mandatory workspace instructions;
+- **Available when needed**: guides, preferences, Documents/RAG evidence, and
+  Memory records;
+- **Needs attention**: explicit, permission-filtered gaps and partial coverage;
+- **Recent changes**: bounded update facts from authorities visible to the
+  requesting subject.
 
 The overview links to focused workspace-instruction and preference views rather
 than opening the diagnostic inventory. Both focused views are prompt-first: the
@@ -71,7 +73,7 @@ changes remain proposals only: if represented as instruction policy, they must
 be inactive, provenance-linked drafts until an authorized policy operation
 explicitly activates them.
 
-The same Agent Brain console also presents the account-scoped organization
+The same Company Brain console also presents the account-scoped organization
 company profile and its immutable history through the canonical company-profile
 API. Workspace State does not own or duplicate that profile; see
 [`company-profile.md`](company-profile.md).
@@ -87,6 +89,28 @@ accepted attempt.
 requires the same permissions, and runs the same permission-filtered projection
 before serialization. It returns canonical JSON as a private, no-store
 attachment. The export is not a raw database dump or compliance audit log.
+
+`GET /v1/workspaces/:workspaceId/company-brain` is the portable Company Brain
+read projection. It requires `workspace:read` and returns the full authorized
+company-profile, instruction-policy, and structured-preference revision bodies
+that the requesting subject may read through the existing FORCE-RLS authority.
+Personal preference bodies for another subject never enter the candidate set.
+Knowledge remains an independently permission-filtered Workspace State
+projection: without `documents:search` it is explicitly `unavailable`, which is
+distinct from an authorized but empty knowledge inventory.
+
+`GET /v1/workspaces/:workspaceId/company-brain/export` runs that same projection
+and returns a private, no-store Markdown attachment. The single fenced `yaml`
+payload is canonical JSON, which is a YAML 1.2 subset. Guidance newlines and
+Markdown delimiters therefore remain escaped data and cannot terminate or alter
+the package structure. Entries and object keys have deterministic ordering.
+The package carries explicit source-history, 512-item, and 4 MiB aggregate
+UTF-8 truncation facts and an omission manifest; active guidance is retained
+first within the aggregate bound, and links to omitted or inaccessible targets
+are themselves omitted rather than emitted as metadata. It intentionally
+excludes Document bodies, Memory bodies and provenance, secrets, credentials,
+session messages, task notes, and policy or preference actor identifiers.
+PostgreSQL remains canonical after export or round-trip parsing.
 
 The separate proposal surface lives at
 `/v1/workspaces/:workspaceId/instruction-policies/onboarding-proposals`.
@@ -268,7 +292,7 @@ changes. Gaps are not persisted and cannot activate policy.
 
 ## Console surface
 
-`/workspaces/:workspaceId/state` is labeled **Agent Brain** in the console and
+`/workspaces/:workspaceId/state` is labeled **Company Brain** in the console and
 renders loading, empty, permission-unavailable, error/retry, partial-coverage,
 freshness, and accepted-attempt governance states. The default page is a compact
 mental model rather than a diagnostic inventory:

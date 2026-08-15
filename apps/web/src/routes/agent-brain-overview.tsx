@@ -5,6 +5,9 @@ import {
   BookOpenIcon,
   BrainCircuitIcon,
   Building2Icon,
+  CheckCircle2Icon,
+  CircleAlertIcon,
+  Clock3Icon,
   FileSearchIcon,
   SlidersHorizontalIcon,
 } from "lucide-react";
@@ -161,10 +164,26 @@ export function BrainOverview({
 }) {
   const documents = documentStatus(state);
   const memory = memoryStatus(state);
+  const attention: string[] = [];
+  if (companyProfileStatus.label === "Not configured") attention.push("Company profile is not set");
+  if (workspaceInstructionStatus(state) === "Not set")
+    attention.push("Workspace instructions are not set");
+  if (documents.tone === "warning") attention.push(documents.status);
+  if (state.preferences.truncated) attention.push("Preference summaries are partially shown");
+  const recentChanges = [
+    ...state.policy.activeHeads.map((head) => ({ label: "Rules", at: head.activatedAt })),
+    ...(state.knowledge.availability === "available" && state.knowledge.latestDocumentUpdatedAt
+      ? [{ label: "Knowledge", at: state.knowledge.latestDocumentUpdatedAt }]
+      : []),
+    ...(state.knowledge.availability === "available" && state.knowledge.memorySample.latestUpdatedAt
+      ? [{ label: "Memory", at: state.knowledge.memorySample.latestUpdatedAt }]
+      : []),
+  ];
+  recentChanges.sort((left, right) => right.at.localeCompare(left.at));
 
   return (
     <div className="grid gap-6">
-      <SummaryGroup title="Included automatically">
+      <SummaryGroup title="Always followed">
         <SummaryRow
           icon={<Building2Icon className="size-4" />}
           title="Company profile & goals"
@@ -188,9 +207,12 @@ export function BrainOverview({
             </FocusAction>
           }
         />
+      </SummaryGroup>
+
+      <SummaryGroup title="Available when needed">
         <SummaryRow
           icon={<SlidersHorizontalIcon className="size-4" />}
-          title="Preferences"
+          title="Guides & preferences"
           status={`${state.preferences.activeDescriptorCount} active`}
           description="Short summaries are always known; full instructions are fetched when needed."
           tone={state.preferences.truncated ? "warning" : "default"}
@@ -200,9 +222,6 @@ export function BrainOverview({
             </FocusAction>
           }
         />
-      </SummaryGroup>
-
-      <SummaryGroup title="Available when needed">
         <SummaryRow
           icon={<FileSearchIcon className="size-4" />}
           title="Documents"
@@ -227,6 +246,51 @@ export function BrainOverview({
             </RouteAction>
           }
         />
+      </SummaryGroup>
+
+      <SummaryGroup title="Needs attention">
+        {attention.length === 0 ? (
+          <SummaryRow
+            icon={<CheckCircle2Icon className="size-4" />}
+            title="No review needed"
+            status="Up to date"
+            description="No visible proposals, indexing problems, or partial projections need attention."
+          />
+        ) : (
+          attention.map((item) => (
+            <SummaryRow
+              key={item}
+              icon={<CircleAlertIcon className="size-4" />}
+              title={item}
+              status="Review"
+              tone="warning"
+              description="Open the relevant Company Brain section to inspect the current authority."
+            />
+          ))
+        )}
+      </SummaryGroup>
+
+      <SummaryGroup title="Recent changes">
+        {recentChanges.length === 0 ? (
+          <SummaryRow
+            icon={<Clock3Icon className="size-4" />}
+            title="No recent changes"
+            status="Empty"
+            description="No visible Company Brain change timestamps are available yet."
+          />
+        ) : (
+          recentChanges
+            .slice(0, 3)
+            .map((change) => (
+              <SummaryRow
+                key={`${change.label}:${change.at}`}
+                icon={<Clock3Icon className="size-4" />}
+                title={change.label}
+                status={new Date(change.at).toLocaleString()}
+                description="Visible authority changed at this time. Open the relevant section for history."
+              />
+            ))
+        )}
       </SummaryGroup>
     </div>
   );
