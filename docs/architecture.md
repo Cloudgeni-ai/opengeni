@@ -210,12 +210,16 @@ inactive instruction-policy draft, or materialize it as an inactive untrusted
 workspace preference. An active rooted Task note may also be promoted into
 proposed Knowledge alone or, atomically, onward into either inactive Ways
 destination; its exact note bytes become both the proposed fact and destination
-content, never caller-supplied replacement bytes. One transaction locks and revalidates the exact active
-session, turn, attempt, execution generation, immutable initiating human, and
-fresh interruption state. A common immutable Knowledge review binds the full
-input hash and operation UUID across all destinations; exact retry reconstructs
-the same content-free receipt and changed input conflicts. The preference path
-adds an immutable destination receipt so later human activation, rejection, or
+content, never caller-supplied replacement bytes. One transaction locks and
+revalidates the exact active session, turn, attempt, execution generation,
+immutable initiating human, and fresh interruption state. Instruction-policy
+destinations take their exclusive workspace lock before rooted Task-note session
+locks, so the nested policy lifecycle never upgrades a workspace lock after two
+independent roots have diverged; Knowledge and preference retain their narrower
+lock path. A common immutable Knowledge review binds the full input hash and
+operation UUID across all destinations; exact retry reconstructs the same
+content-free receipt and changed input conflicts. The preference path adds an
+immutable destination receipt so later human activation, rejection, or
 supersession cannot rewrite replay identity. Human-governed destination
 lifecycle remains the only activation authority. This slice owns no selector or
 logical-turn context receipt, personal/organization activation, MCP/API/UI

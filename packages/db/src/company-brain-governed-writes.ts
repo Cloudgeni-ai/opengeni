@@ -149,6 +149,7 @@ function normalizePreferenceProposal(
 async function withCompanyBrainGovernedWriteAuthority<T, P>(
   db: Database,
   attempt: CompanyBrainGovernedWriteAttempt,
+  destinationWorkspaceLock: "key_share" | "update",
   prelock: (db: Database) => Promise<P>,
   fn: (db: Database, authority: AttemptAuthority, prelocked: P) => Promise<T>,
 ): Promise<T> {
@@ -156,6 +157,28 @@ async function withCompanyBrainGovernedWriteAuthority<T, P>(
     db,
     { accountId: attempt.accountId, workspaceId: attempt.workspaceId },
     async (scopedDb) => {
+      // Instruction-policy lifecycle writes serialize on the workspace row.
+      // Acquire that destination lock before Task-note root/session locks so a
+      // later nested lifecycle call only re-enters a lock already held by this
+      // transaction. Taking KEY SHARE here and upgrading after distinct roots
+      // are locked lets two valid promotions deadlock each other.
+      if (destinationWorkspaceLock === "update") {
+        const lockedWorkspace = await rawRows<{ id: string }>(
+          scopedDb,
+          sql`
+            SELECT workspace.id
+            FROM workspaces workspace
+            WHERE workspace.id = ${attempt.workspaceId}::uuid
+              AND workspace.account_id = ${attempt.accountId}::uuid
+            FOR UPDATE OF workspace
+          `,
+        );
+        if (!lockedWorkspace[0]) {
+          throw new CompanyBrainGovernedWriteAuthorityError(
+            "Governed Company Brain write workspace is unavailable",
+          );
+        }
+      }
       // Tree-scoped authorities own the root/current-session lock prefix. Run
       // them before the generic current-session locks below to avoid inverting
       // the canonical Task-note lifecycle order.
@@ -757,7 +780,7 @@ async function materializeTaskNoteKnowledge(
 }
 
 function isInstructionPolicyProposal(
-  request: InstructionPolicyProposalRequest | PreferenceProposalRequest,
+  request: CompanyBrainGovernedWriteRequestType,
 ): request is InstructionPolicyProposalRequest {
   return (
     request.kind === "propose_instruction_policy" ||
@@ -885,6 +908,7 @@ export async function writeCompanyBrainGovernedProposal(
   return await withCompanyBrainGovernedWriteAuthority(
     db,
     attempt,
+    isInstructionPolicyProposal(request) ? "update" : "key_share",
     async (scopedDb): Promise<TaskNotePromotionSource | null> => {
       if (!isTaskNotePromotion(request)) return null;
       if (

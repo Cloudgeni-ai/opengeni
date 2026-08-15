@@ -42,6 +42,20 @@ describe("Company Brain governed write admission", () => {
     ).toContain("resolveTaskNotePromotionSource");
   });
 
+  test("takes the instruction destination workspace lock before rooted Task-note locks", async () => {
+    const source = await readFile(sourcePath, "utf8");
+    const destinationLock = source.indexOf('if (destinationWorkspaceLock === "update")');
+    const workspaceUpdate = source.indexOf("FOR UPDATE OF workspace", destinationLock);
+    const rootedPrelock = source.indexOf("const prelocked = await prelock(scopedDb)");
+    const modeSelection = source.lastIndexOf(
+      'isInstructionPolicyProposal(request) ? "update" : "key_share"',
+    );
+    expect(destinationLock).toBeGreaterThanOrEqual(0);
+    expect(workspaceUpdate).toBeGreaterThan(destinationLock);
+    expect(rootedPrelock).toBeGreaterThan(workspaceUpdate);
+    expect(modeSelection).toBeGreaterThan(rootedPrelock);
+  });
+
   test("reconstructs archived Task-note replay from bounded immutable Knowledge evidence", async () => {
     const source = await readFile(sourcePath, "utf8");
     const replayStart = source.indexOf("async function replayTaskNoteKnowledgeMaterialization");

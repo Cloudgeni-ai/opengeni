@@ -723,6 +723,199 @@ describe("task-tree notes PostgreSQL authority", () => {
     });
   });
 
+  test("serializes distinct-root instruction promotions before Task-note session locks", async () => {
+    if (!shared || !client) return;
+    const f = await fixture();
+    const policy = await createWorkspaceLearningPolicyRevision(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      workspaceMode: "suggest",
+      actorSubjectId: f.ownerSubjectId,
+      principalKind: "human_session",
+    });
+    await activateWorkspaceLearningPolicyRevision(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      revisionId: policy.id,
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      actorSubjectId: f.ownerSubjectId,
+      principalKind: "human_session",
+      reason: "Exercise concurrent rooted instruction proposals.",
+    });
+    const secondRoot = await withSessionRlsActorContext(
+      { subjectId: f.ownerSubjectId },
+      async () =>
+        await createSession(client!.db, {
+          accountId: f.grant.accountId,
+          workspaceId: f.grant.workspaceId,
+          initialMessage: "second independent instruction root",
+          resources: [],
+          metadata: {},
+          model: "test-model",
+          sandboxBackend: "none",
+          createdBy: { kind: "subject", subjectId: f.ownerSubjectId },
+          createdByContext: {},
+        }),
+    );
+    const [firstAttempt, secondAttempt] = await Promise.all([
+      seedAttempt({
+        accountId: f.grant.accountId,
+        workspaceId: f.grant.workspaceId,
+        sessionId: f.root.id,
+        initiatorSubjectId: f.ownerSubjectId,
+        initiatingHumanSubjectId: f.ownerSubjectId,
+      }),
+      seedAttempt({
+        accountId: f.grant.accountId,
+        workspaceId: f.grant.workspaceId,
+        sessionId: secondRoot.id,
+        initiatorSubjectId: f.ownerSubjectId,
+        initiatingHumanSubjectId: f.ownerSubjectId,
+      }),
+    ]);
+    await Promise.all([
+      getOrCreateWorkspaceLearningPolicySnapshot(client.db, claims(firstAttempt)),
+      getOrCreateWorkspaceLearningPolicySnapshot(client.db, claims(secondAttempt)),
+    ]);
+    const [firstNote, secondNote] = await Promise.all([
+      createTaskNote(client.db, {
+        ...claims(firstAttempt),
+        operationId: crypto.randomUUID(),
+        kind: "decision",
+        text: "OPE-224 workspace lock order: first rooted instruction.",
+        expiresInDays: 7,
+      }),
+      createTaskNote(client.db, {
+        ...claims(secondAttempt),
+        operationId: crypto.randomUUID(),
+        kind: "decision",
+        text: "OPE-224 workspace lock order: second rooted instruction.",
+        expiresInDays: 7,
+      }),
+    ]);
+    const inputs = [
+      { attempt: firstAttempt, note: firstNote, key: "first" },
+      { attempt: secondAttempt, note: secondNote, key: "second" },
+    ].map(({ attempt, note, key }) => ({
+      attempt: claims(attempt),
+      request: {
+        kind: "promote_task_note_instruction_policy" as const,
+        operationId: crypto.randomUUID(),
+        noteId: note.note.id,
+        expectedNoteVersion: 1 as const,
+        entityType: "ways-of-working",
+        normalizedKey: `instruction-lock-order-${key}`,
+        displayName: `Instruction lock order ${key}`,
+        predicateKey: `ways.instruction-lock-order.${key}`,
+        confidenceBps: 9_000,
+        target: { kind: "policy" as const, scope: "global" as const, roleKey: null },
+        expectedCurrentRevisionId: null,
+        expectedActivationVersion: 0,
+        reason: `Promote the ${key} rooted instruction without lock inversion.`,
+      },
+    }));
+
+    // Hold a test-only advisory barrier immediately before the destination
+    // lifecycle call. With the old lock order, both roots reached this point
+    // while holding workspace KEY SHARE and then deadlocked on the workspace
+    // upgrade. The canonical workspace-first path permits only one waiter.
+    const barrierKey = 2_240_260;
+    const blocker = postgres(shared.adminUrl, { max: 1, prepare: false });
+    let barrierHeld = false;
+    try {
+      await shared.admin.unsafe(`
+        CREATE OR REPLACE FUNCTION task_note_instruction_promotion_test_barrier()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF NEW.target_kind = 'instruction_policy'
+            AND NEW.content LIKE 'OPE-224 workspace lock order:%'
+          THEN
+            PERFORM pg_advisory_xact_lock_shared(2240260);
+          END IF;
+          RETURN NEW;
+        END;
+        $$;
+        DROP TRIGGER IF EXISTS task_note_instruction_promotion_test_barrier
+          ON knowledge_change_proposals;
+        CREATE TRIGGER task_note_instruction_promotion_test_barrier
+          BEFORE INSERT ON knowledge_change_proposals
+          FOR EACH ROW EXECUTE FUNCTION task_note_instruction_promotion_test_barrier();
+      `);
+      await blocker`select pg_advisory_lock(${barrierKey})`;
+      barrierHeld = true;
+      const pending = Promise.allSettled(
+        inputs.map(async (input) => await writeCompanyBrainGovernedProposal(client!.db, input)),
+      );
+      let maxWaitingBarrierLocks = 0;
+      const deadline = Date.now() + 1_000;
+      while (Date.now() < deadline && maxWaitingBarrierLocks < 2) {
+        const [waiting] = await shared.admin<Array<{ count: number }>>`
+          SELECT count(*)::integer AS count
+          FROM pg_locks
+          WHERE locktype = 'advisory'
+            AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+            AND classid = 0
+            AND objid = ${barrierKey}::oid
+            AND objsubid = 1
+            AND NOT granted
+        `;
+        maxWaitingBarrierLocks = Math.max(maxWaitingBarrierLocks, waiting?.count ?? 0);
+        if (maxWaitingBarrierLocks < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      }
+      expect(maxWaitingBarrierLocks).toBe(1);
+      const [unlocked] = await blocker<Array<{ unlocked: boolean }>>`
+        SELECT pg_advisory_unlock(${barrierKey}) AS unlocked
+      `;
+      expect(unlocked?.unlocked).toBe(true);
+      barrierHeld = false;
+      const results = await pending;
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(2);
+      expect(results.filter((result) => result.status === "rejected")).toHaveLength(0);
+      const receipts = results
+        .filter(
+          (
+            result,
+          ): result is PromiseFulfilledResult<
+            Awaited<ReturnType<typeof writeCompanyBrainGovernedProposal>>
+          > => result.status === "fulfilled",
+        )
+        .map((result) => result.value);
+      expect(new Set(receipts.map((receipt) => receipt.destinationProposalId)).size).toBe(2);
+
+      const [durable] = await shared.admin<
+        Array<{ proposalCount: number; headCount: number; activationCount: number }>
+      >`
+        SELECT
+          (SELECT count(*)::integer
+            FROM workspace_instruction_policy_onboarding_proposals proposal
+            JOIN workspace_instruction_policy_revisions revision
+              ON revision.id = proposal.draft_revision_id
+            WHERE proposal.workspace_id = ${f.grant.workspaceId}
+              AND revision.content LIKE 'OPE-224 workspace lock order:%') AS "proposalCount",
+          (SELECT count(*)::integer FROM workspace_instruction_policy_heads head
+            WHERE head.workspace_id = ${f.grant.workspaceId}) AS "headCount",
+          (SELECT count(*)::integer FROM workspace_instruction_policy_activation_events event
+            WHERE event.workspace_id = ${f.grant.workspaceId}) AS "activationCount"
+      `;
+      expect(durable).toEqual({ proposalCount: 2, headCount: 0, activationCount: 0 });
+    } finally {
+      if (barrierHeld) {
+        await blocker`select pg_advisory_unlock(${barrierKey})`.catch(() => undefined);
+      }
+      await blocker.end().catch(() => undefined);
+      await shared.admin.unsafe(`
+        DROP TRIGGER IF EXISTS task_note_instruction_promotion_test_barrier
+          ON knowledge_change_proposals;
+        DROP FUNCTION IF EXISTS task_note_instruction_promotion_test_barrier();
+      `);
+    }
+  });
+
   test("gives the runtime role lifecycle functions but no direct table access", async () => {
     if (!shared) return;
     const f = await fixture();

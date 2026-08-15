@@ -45,6 +45,12 @@ of a live interruption. It then requires a workspace-scoped claim and exact
 supporting evidence. Organization, personal, generic Memory, and caller-selected
 active authority are not valid inputs.
 
+Instruction-policy proposals acquire their destination's exclusive workspace
+lock before any rooted Task-note session locks. The nested policy lifecycle
+therefore re-enters an already-held workspace lock instead of upgrading after a
+root lock; concurrent independent roots serialize without deadlock. Knowledge
+and preference routes retain their less-exclusive workspace lock path.
+
 Every route first appends one `proposed` Knowledge review using a deterministic
 sub-operation UUID. Its immutable input hash binds the complete request and
 exact attempt through a content-free service actor identity. This common guard
