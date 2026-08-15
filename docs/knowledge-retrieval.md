@@ -96,14 +96,15 @@ authorization timestamps. The citation function invokes the same current
 authorization predicate and exposes neither connection UUIDs nor principal
 identities; denial returns no record rather than a citation without authority.
 
-## Deliberately deferred
+## Explicit retrieval boundary
 
-This no-migration slice does not make normalized scoped claims model-visible,
-activate cross-workspace Personal authority, implement shared-session grants or
-revocation fencing, persist Task-tree notes, or write durable logical-turn
-selection receipts. Those require the staged tenancy/grant work and the
-separate governed write/promotion lane. Until then, the Knowledge tools remain
-explicit retrieval rather than automatic prompt composition.
+Normalized scoped claims are not yet model-visible, and cross-workspace
+Personal/Organization authority remains behind the staged tenancy/grant work.
+The accepted-logical-turn Company Brain receipt deliberately does not select or
+inject Knowledge records: these tools authorize and fetch on demand, and their
+completed tool results already enter canonical session history. The receipt
+only freezes bounded legacy workspace-Memory candidates and composition facts;
+it cannot turn Documents or RAG evidence into standing prompt state.
 
 The runtime's existing Skills capability already gives selected Skills an
 always-visible bounded name/description index and lazily materializes the full

@@ -9630,6 +9630,7 @@ export * from "./preference-registry-schema";
 export * from "./memory-governance-schema";
 export * from "./scoped-knowledge-schema";
 export * from "./task-notes-schema";
+export * from "./company-brain-context-selection-schema";
 export * from "./knowledge-source-sync-schema";
 export * from "./transcription-recordings-schema";
 export * from "./interaction-schema";

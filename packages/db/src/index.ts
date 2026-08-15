@@ -353,6 +353,7 @@ export * from "./memory-governance";
 export * from "./memory-slack-delivery";
 export * from "./scoped-knowledge";
 export * from "./company-brain-governed-writes";
+export * from "./company-brain-context-selection";
 export * from "./knowledge-source-sync";
 export * from "./task-notes";
 export * from "./generated-images";

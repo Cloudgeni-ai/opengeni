@@ -167,16 +167,26 @@ charter/policy authority. A `knowledge_memories.kind = preference` row is legacy
 knowledge observation, not a preference-registry record or instruction-policy
 activation.
 
+Migration 0256 adds one content-free Company Brain selection receipt per
+accepted logical turn. The first exact attempt freezes root/child role,
+`memoryPromptMode`, company-profile inclusion, existing governance snapshot
+hashes, and at most 50 legacy workspace-Memory candidate references in the
+existing pinned/recency order. References contain identity, version, and hashes,
+never memory text. A replacement attempt reuses the same receipt, cannot admit a
+newer row, and rechecks current scope, lifecycle, validity, version, pinned state,
+and exact content hashes before loading each candidate. Revocation or drift can
+therefore only shrink recovery context. Normalized Knowledge and Task notes stay
+explicit tool reads and are not automatic prompt candidates.
+
 At ordinary and provider-backed compaction model-request boundaries, the worker
-emits content-free, exact-attempt contribution telemetry for mandatory rules,
-guide/Skill descriptors, company profile, and the legacy standing block when present. The
-structured log carries the exact attempt plus the already-durable policy,
-preference, and company-profile snapshot ids, root/child role, inclusion reason,
-authority class, UTF-8 bytes, and an estimated token count. Prometheus receives
-only bounded category/source/reason/scope/role/mode labels and token estimates.
-No memory or preference content enters telemetry. A new durable contribution
-receipt is intentionally deferred to the final selector architecture rather
-than introducing a competing ledger here.
+also emits content-free, exact-attempt contribution telemetry for mandatory
+rules, guide/Skill descriptors, company profile, and the legacy standing block
+when present. The structured log carries the selection receipt id, exact attempt,
+already-durable policy, preference, and company-profile snapshot ids, root/child
+role, inclusion reason, authority class, UTF-8 bytes, and an estimated token
+count. Prometheus receives only bounded category/source/reason/scope/role/mode
+labels and token estimates. No memory or preference content enters either
+receipt or telemetry.
 
 Canonical source anchors:
 
@@ -184,4 +194,6 @@ Canonical source anchors:
 - `packages/db/src/memory-domain.ts`
 - `packages/db/src/memory-governance.ts`
 - `packages/db/src/memory-governance-schema.ts`
+- `packages/db/src/company-brain-context-selection.ts`
+- `packages/db/drizzle/0256_company_brain_context_selection_receipts.sql`
 - `packages/db/src/runtime-posture.ts`

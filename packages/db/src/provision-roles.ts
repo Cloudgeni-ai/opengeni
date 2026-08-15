@@ -649,6 +649,18 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.company_brain_context_get_or_create_selection(uuid,uuid,uuid,uuid,uuid,integer)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.company_brain_context_get_or_create_selection(uuid, uuid, uuid, uuid, uuid, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.workspace_instruction_policy_get_or_create_snapshot(uuid,uuid,uuid,uuid,uuid,integer)',
         ${literal(schema)}
       )

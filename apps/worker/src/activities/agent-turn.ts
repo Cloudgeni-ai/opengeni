@@ -53,7 +53,7 @@ import {
   recordCodexAccountUsageWithWakeTargets,
   quarantineCodexCredentialForLease,
   setActiveCodexCredential,
-  resolveWorkspaceMemoryBlock,
+  resolveCompanyBrainContextSelection,
   setCodexCredentialExhaustedWithWakeTargets,
   withSessionCodexCapacityMutation,
   countConsecutiveReactiveRotations,
@@ -490,7 +490,6 @@ import {
   evaluateWorkspaceModelPolicy,
   readTurnExecutionPolicyV1,
   resolveWorkspaceAgentHumanInputEnabled,
-  resolveWorkspaceMemoryPromptMode,
   resourceMountPath,
   VideoGenerationRejectedResult,
   type LatencyMode,
@@ -5798,10 +5797,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
       const workspaceAgentInstructions = workspace.agentInstructions;
       const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
-      const memoryPromptMode = resolveWorkspaceMemoryPromptMode(workspace.settings);
+      const contextSelection = await resolveCompanyBrainContextSelection(db, governanceClaims);
+      const memoryPromptMode = contextSelection.receipt.memoryPromptMode;
       assertWorkspaceHumanInputAllowed(agentHumanInputEnabled, "resume", humanInputResume !== null);
-      const companyProfileIncluded =
-        memoryPromptMode === "legacy_standing" || session.nestedAgentDepth === 0;
+      const companyProfileIncluded = contextSelection.receipt.companyProfileIncluded;
       const workspaceGovernance = renderWorkspaceGovernanceContext(
         {
           companyProfile: companyProfileSnapshot,
@@ -5814,13 +5813,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       const structuredWorkspacePolicyActive =
         hasActiveWorkspaceInstructionPolicy(instructionPolicySnapshot);
-      const workspaceMemory = await resolveWorkspaceMemoryBlock(db, input.workspaceId);
+      const workspaceMemory = contextSelection.workspaceMemory;
       const buildCompanyBrainContributionReceiptFor = (
         skillActivations: Parameters<
           typeof buildCompanyBrainContributionReceipt
         >[0]["skillActivations"],
       ) =>
         buildCompanyBrainContributionReceipt({
+          contextSelectionReceiptId: contextSelection.receipt.id,
           attemptId: input.attemptId,
           turnId: turn.id,
           nestedAgentDepth: session.nestedAgentDepth,
@@ -8879,6 +8879,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           observability.info("model context contribution receipt", {
             attemptId: companyBrainContributionReceipt.attemptId,
             turnId: companyBrainContributionReceipt.turnId,
+            contextSelectionReceiptId: companyBrainContributionReceipt.contextSelectionReceiptId,
             sessionRole: companyBrainContributionReceipt.sessionRole,
             memoryPromptMode: companyBrainContributionReceipt.memoryPromptMode,
             instructionPolicySnapshotId:
