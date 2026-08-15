@@ -21,6 +21,9 @@ const VARIABLE_SET: WorkspaceVariableSet = {
   id: "variable-set-1",
   accountId: "account-1",
   workspaceId: "workspace-1",
+  scope: "workspace",
+  generation: 1,
+  status: "active",
   name: "staging",
   description: "Test-only metadata",
   variables: [

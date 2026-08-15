@@ -459,7 +459,7 @@ export async function validatedScheduledTaskUpdate(input: {
       if (input.existing.variableSetId !== null) {
         // Detaching is also an attachment change: it strips the secrets a
         // task's instructions were designed around.
-        requirePermission(input.grant, "variable-sets:use");
+        requirePermission(input.grant, "variable-sets:attach");
       }
       update.variableSetId = null;
     } else {

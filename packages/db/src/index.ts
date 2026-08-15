@@ -1110,6 +1110,7 @@ export const allWorkspacePermissions: Permission[] = [
   "variable-sets:read",
   "variable-sets:write",
   "variable-sets:manage",
+  "variable-sets:attach",
   "variable-sets:use",
   "secrets:list",
   "secrets:read",
@@ -1148,6 +1149,7 @@ export const managedPersonalWorkspacePermissions: Permission[] = [
   "variable-sets:read",
   "variable-sets:write",
   "variable-sets:manage",
+  "variable-sets:attach",
   "variable-sets:use",
   "secrets:list",
   "secrets:read",
@@ -13520,7 +13522,9 @@ export async function updateScheduledTask(
         ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
         ...(input.refreshPersonalResourceAuthority ||
         input.clonePersonalResourceAuthorityFromRevision !== undefined
-          ? { authorityRevision: sql`${schema.scheduledTasks.authorityRevision} + 1` }
+          ? {
+              authorityRevision: sql`${schema.scheduledTasks.authorityRevision} + 1`,
+            }
           : {}),
         updatedAt: new Date(),
       })
@@ -14186,135 +14190,102 @@ export async function createVariableSet(
   input: {
     accountId: string;
     workspaceId: string;
+    scope?: VariableSet["scope"];
+    subjectId?: string;
+    allowOrganization?: boolean;
     name: string;
     description?: string | null;
     variables?: Array<{ name: string; valueEncrypted: string }>;
   },
 ): Promise<VariableSet> {
-  // withRlsContext wraps the callback in one transaction, so the variableSet
-  // row and all initial variables commit or roll back together.
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.workspaceVariableSets)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          name: input.name,
-          description: input.description ?? null,
-        })
-        .returning();
-      if (!row) {
-        throw new Error("Failed to create variable set");
-      }
-      const variables = input.variables ?? [];
-      if (variables.length === 0) {
-        return mapVariableSet(row, []);
-      }
-      const inserted = await scopedDb
-        .insert(schema.workspaceVariableSetVariables)
-        .values(
-          variables.map((variable) => ({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            variableSetId: row.id,
-            name: variable.name,
-            valueEncrypted: variable.valueEncrypted,
-          })),
-        )
-        .returning({
-          name: schema.workspaceVariableSetVariables.name,
-          version: schema.workspaceVariableSetVariables.version,
-          createdAt: schema.workspaceVariableSetVariables.createdAt,
-          updatedAt: schema.workspaceVariableSetVariables.updatedAt,
-        });
-      return mapVariableSet(
-        row,
-        inserted.map(mapVariableSetVariableMetadata).sort((a, b) => a.name.localeCompare(b.name)),
+      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
+      const [created] = await rawRows<{ variableSetId: string }>(
+        scopedDb,
+        sql`select variable_set_id as "variableSetId"
+          from create_scoped_variable_set(
+            ${input.accountId}::uuid,
+            ${input.workspaceId}::uuid,
+            ${input.scope ?? "workspace"},
+            ${input.name},
+            ${input.description ?? null},
+            ${JSON.stringify(input.variables ?? [])}::jsonb,
+            ${input.allowOrganization === true}
+          )`,
       );
+      if (!created) throw new Error("Failed to create variable set");
+      const [row] = await rawRows<{ value: VariableSet }>(
+        scopedDb,
+        sql`select value from list_scoped_variable_sets(
+          ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+          ${created.variableSetId}::uuid, null, null
+        ) value`,
+      );
+      if (!row) throw new Error("Failed to create variable set");
+      return row.value;
     },
   );
 }
 
-export async function listVariableSets(db: Database, workspaceId: string): Promise<VariableSet[]> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.workspaceVariableSets)
-      .where(eq(schema.workspaceVariableSets.workspaceId, workspaceId))
-      .orderBy(asc(schema.workspaceVariableSets.createdAt));
-    const variableRows = await scopedDb
-      .select({
-        variableSetId: schema.workspaceVariableSetVariables.variableSetId,
-        name: schema.workspaceVariableSetVariables.name,
-        version: schema.workspaceVariableSetVariables.version,
-        createdAt: schema.workspaceVariableSetVariables.createdAt,
-        updatedAt: schema.workspaceVariableSetVariables.updatedAt,
-      })
-      .from(schema.workspaceVariableSetVariables)
-      .where(eq(schema.workspaceVariableSetVariables.workspaceId, workspaceId))
-      .orderBy(asc(schema.workspaceVariableSetVariables.name));
-    const grouped = new Map<string, VariableSetVariableMetadata[]>();
-    for (const variable of variableRows) {
-      const list = grouped.get(variable.variableSetId) ?? [];
-      list.push(mapVariableSetVariableMetadata(variable));
-      grouped.set(variable.variableSetId, list);
-    }
-    return rows.map((row) => mapVariableSet(row, grouped.get(row.id) ?? []));
+export type VariableSetAccessContext = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+};
+
+export async function listVariableSets(
+  db: Database,
+  context: VariableSetAccessContext,
+): Promise<VariableSet[]> {
+  return await withRlsContext(db, context, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, context.subjectId);
+    const rows = await rawRows<{ value: VariableSet }>(
+      scopedDb,
+      sql`select value from list_scoped_variable_sets(
+        ${context.accountId}::uuid, ${context.workspaceId}::uuid, null, null, null
+      ) value`,
+    );
+    return rows.map((row) => row.value);
   });
 }
 
 export async function getVariableSet(
   db: Database,
-  workspaceId: string,
+  context: VariableSetAccessContext,
   variableSetId: string,
 ): Promise<VariableSet | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.workspaceVariableSets)
-      .where(
-        and(
-          eq(schema.workspaceVariableSets.workspaceId, workspaceId),
-          eq(schema.workspaceVariableSets.id, variableSetId),
-        ),
-      )
-      .limit(1);
-    if (!row) {
-      return null;
-    }
-    return mapVariableSet(
-      row,
-      await listVariableSetVariableMetadata(scopedDb, workspaceId, variableSetId),
+  return await withRlsContext(db, context, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, context.subjectId);
+    const [row] = await rawRows<{ value: VariableSet }>(
+      scopedDb,
+      sql`select value from list_scoped_variable_sets(
+        ${context.accountId}::uuid, ${context.workspaceId}::uuid,
+        ${variableSetId}::uuid, null, null
+      ) value`,
     );
+    return row?.value ?? null;
   });
 }
 
 export async function getVariableSetByName(
   db: Database,
-  workspaceId: string,
+  context: VariableSetAccessContext,
   name: string,
+  scope?: VariableSet["scope"],
 ): Promise<VariableSet | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.workspaceVariableSets)
-      .where(
-        and(
-          eq(schema.workspaceVariableSets.workspaceId, workspaceId),
-          eq(schema.workspaceVariableSets.name, name),
-        ),
-      )
-      .limit(1);
-    if (!row) {
-      return null;
-    }
-    return mapVariableSet(
-      row,
-      await listVariableSetVariableMetadata(scopedDb, workspaceId, row.id),
+  return await withRlsContext(db, context, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, context.subjectId);
+    const [row] = await rawRows<{ value: VariableSet }>(
+      scopedDb,
+      sql`select value from list_scoped_variable_sets(
+        ${context.accountId}::uuid, ${context.workspaceId}::uuid,
+        null, ${name}, ${scope ?? null}
+      ) value`,
     );
+    return row?.value ?? null;
   });
 }
 
@@ -14367,86 +14338,55 @@ export async function readVariableSetSecretAtomically(
     async (scopedDb) =>
       await scopedDb.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Database;
+        await setSubjectRlsContext(tx, input.subjectId);
         if (input.actor.kind === "agent_attempt") {
-          const fence = await lockTurnAttemptWriteFenceTx(tx, {
-            workspaceId: input.workspaceId,
-            sessionId: input.actor.sessionId,
-            turnId: input.actor.turnId,
-            attemptId: input.actor.attemptId,
-            executionGeneration: input.actor.executionGeneration,
+          await tx.execute(sql`select set_config(
+            'opengeni.initiating_human_subject_id', ${input.subjectId}, true
+          )`);
+        }
+        let rows: Array<{
+          variableSetId: string;
+          name: string;
+          version: number;
+          valueEncrypted: string;
+        }>;
+        try {
+          rows = await rawTx.transaction(async (nestedRawTx) => {
+            const nestedTx = nestedRawTx as unknown as Database;
+            return await rawRows(
+              nestedTx,
+              sql`select
+              variable_set_id as "variableSetId",
+              variable_name as "name",
+              variable_version as "version",
+              value_encrypted as "valueEncrypted"
+            from read_scoped_variable_set_secret(
+              ${input.accountId}::uuid,
+              ${input.workspaceId}::uuid,
+              ${input.variableSetId ?? null}::uuid,
+              ${input.variableSetName ?? null},
+              ${input.name},
+              ${input.actor.kind},
+              ${input.actor.kind === "agent_attempt" ? input.actor.sessionId : null}::uuid,
+              ${input.actor.kind === "agent_attempt" ? input.actor.turnId : null}::uuid,
+              ${input.actor.kind === "agent_attempt" ? input.actor.attemptId : null}::uuid,
+              ${input.actor.kind === "agent_attempt" ? input.actor.executionGeneration : null}::integer
+            )`,
+            );
           });
-          if (
-            !fence.allowed ||
-            fence.workspace.accountId !== input.accountId ||
-            fence.session.accountId !== input.accountId
-          ) {
+        } catch (error) {
+          if (input.actor.kind === "agent_attempt") {
             throw new VariableSetSecretReadAuthorityError();
           }
+          if (nestedPostgresSqlState(error) === "P0002") {
+            return null;
+          }
+          throw error;
         }
-
-        const [row] = await tx
-          .select({
-            variableSetId: schema.workspaceVariableSets.id,
-            name: schema.workspaceVariableSetVariables.name,
-            version: schema.workspaceVariableSetVariables.version,
-            valueEncrypted: schema.workspaceVariableSetVariables.valueEncrypted,
-          })
-          .from(schema.workspaceVariableSets)
-          .innerJoin(
-            schema.workspaceVariableSetVariables,
-            and(
-              eq(
-                schema.workspaceVariableSetVariables.variableSetId,
-                schema.workspaceVariableSets.id,
-              ),
-              eq(
-                schema.workspaceVariableSetVariables.workspaceId,
-                schema.workspaceVariableSets.workspaceId,
-              ),
-            ),
-          )
-          .where(
-            and(
-              eq(schema.workspaceVariableSets.accountId, input.accountId),
-              eq(schema.workspaceVariableSets.workspaceId, input.workspaceId),
-              input.variableSetId !== undefined
-                ? eq(schema.workspaceVariableSets.id, input.variableSetId)
-                : eq(schema.workspaceVariableSets.name, input.variableSetName!),
-              eq(schema.workspaceVariableSetVariables.name, input.name),
-            ),
-          )
-          .limit(1);
+        const [row] = rows;
         if (!row) return null;
 
         const value = input.decrypt(row.valueEncrypted);
-        await tx.insert(schema.auditEvents).values(
-          withLosslessContentWriteVersion(
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId: input.subjectId,
-              action: "variable_set.variable.read",
-              targetType: "workspace_variable_set",
-              targetId: row.variableSetId,
-              metadata: {
-                variableSetId: row.variableSetId,
-                name: row.name,
-                version: row.version,
-                actorKind: input.actor.kind,
-                ...(input.actor.kind === "agent_attempt"
-                  ? {
-                      sessionId: input.actor.sessionId,
-                      turnId: input.actor.turnId,
-                      attemptId: input.actor.attemptId,
-                      executionGeneration: input.actor.executionGeneration,
-                    }
-                  : {}),
-              },
-            },
-            "metadata",
-            "metadataCodecVersion",
-          ),
-        );
         return {
           variableSetId: row.variableSetId,
           name: row.name,
@@ -14459,66 +14399,81 @@ export async function readVariableSetSecretAtomically(
 
 export async function updateVariableSet(
   db: Database,
-  workspaceId: string,
+  context: VariableSetAccessContext,
   variableSetId: string,
   input: {
     name?: string;
     description?: string | null;
+    allowOrganization?: boolean;
   },
 ): Promise<VariableSet> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.workspaceVariableSets)
-      .set({
-        ...(input.name !== undefined ? { name: input.name } : {}),
-        ...(input.description !== undefined ? { description: input.description } : {}),
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.workspaceVariableSets.workspaceId, workspaceId),
-          eq(schema.workspaceVariableSets.id, variableSetId),
-        ),
-      )
-      .returning();
-    if (!row) {
-      throw new Error(`Variable set not found: ${variableSetId}`);
-    }
-    return mapVariableSet(
-      row,
-      await listVariableSetVariableMetadata(scopedDb, workspaceId, variableSetId),
+  return await withRlsContext(db, context, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, context.subjectId);
+    const [row] = await rawRows<{
+      result: { variableSet: VariableSet | null };
+    }>(
+      scopedDb,
+      sql`select mutate_scoped_variable_set(
+        ${context.accountId}::uuid, ${context.workspaceId}::uuid, ${variableSetId}::uuid,
+        'update', ${input.name ?? null}, ${input.name !== undefined},
+        ${input.description ?? null}, ${input.description !== undefined},
+        null, null, ${input.allowOrganization === true}
+      ) as result`,
     );
+    if (!row?.result.variableSet) throw new Error(`Variable set not found: ${variableSetId}`);
+    return row.result.variableSet;
   });
+}
+
+export class VariableSetAttachedError extends Error {
+  readonly name = "VariableSetAttachedError";
+
+  constructor(cause?: unknown) {
+    super(
+      "variable set remains attached to a scheduled task or active session",
+      cause === undefined ? undefined : { cause },
+    );
+  }
 }
 
 export async function deleteVariableSet(
   db: Database,
-  workspaceId: string,
+  context: VariableSetAccessContext,
   variableSetId: string,
+  options: { allowOrganization?: boolean } = {},
 ): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .delete(schema.workspaceVariableSets)
-      .where(
-        and(
-          eq(schema.workspaceVariableSets.workspaceId, workspaceId),
-          eq(schema.workspaceVariableSets.id, variableSetId),
-        ),
-      )
-      .returning({ id: schema.workspaceVariableSets.id });
-    return rows.length > 0;
+  return await withRlsContext(db, context, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, context.subjectId);
+    try {
+      await scopedDb.execute(sql`select mutate_scoped_variable_set(
+        ${context.accountId}::uuid, ${context.workspaceId}::uuid, ${variableSetId}::uuid,
+        'revoke', null, false, null, false, null, null,
+        ${options.allowOrganization === true}
+      )`);
+    } catch (error) {
+      if (nestedPostgresSqlState(error) === "23503") {
+        throw new VariableSetAttachedError(error);
+      }
+      throw error;
+    }
+    return true;
   });
 }
 
-export async function countVariableSets(db: Database, workspaceId: string): Promise<number> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [{ count } = { count: 0 }] = await scopedDb
-      .select({
-        count: sql<number>`count(*)::int`,
-      })
-      .from(schema.workspaceVariableSets)
-      .where(eq(schema.workspaceVariableSets.workspaceId, workspaceId));
-    return Number(count);
+export async function countVariableSets(
+  db: Database,
+  context: VariableSetAccessContext,
+  scope: VariableSet["scope"] = "workspace",
+): Promise<number> {
+  return await withRlsContext(db, context, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, context.subjectId);
+    const [row] = await rawRows<{ count: number }>(
+      scopedDb,
+      sql`select count_scoped_variable_sets(
+        ${context.accountId}::uuid, ${context.workspaceId}::uuid, ${scope}
+      ) as count`,
+    );
+    return Number(row?.count ?? 0);
   });
 }
 
@@ -14570,89 +14525,56 @@ export async function setVariableSetVariable(
   input: {
     accountId: string;
     workspaceId: string;
+    subjectId: string;
     variableSetId: string;
     name: string;
     valueEncrypted: string;
+    allowOrganization?: boolean;
   },
 ): Promise<VariableSetVariableMetadata> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const now = new Date();
-      const [row] = await scopedDb
-        .insert(schema.workspaceVariableSetVariables)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          variableSetId: input.variableSetId,
-          name: input.name,
-          valueEncrypted: input.valueEncrypted,
-        })
-        .onConflictDoUpdate({
-          target: [
-            schema.workspaceVariableSetVariables.workspaceId,
-            schema.workspaceVariableSetVariables.variableSetId,
-            schema.workspaceVariableSetVariables.name,
-          ],
-          set: {
-            valueEncrypted: input.valueEncrypted,
-            version: sql`${schema.workspaceVariableSetVariables.version} + 1`,
-            updatedAt: now,
-          },
-        })
-        .returning({
-          name: schema.workspaceVariableSetVariables.name,
-          version: schema.workspaceVariableSetVariables.version,
-          createdAt: schema.workspaceVariableSetVariables.createdAt,
-          updatedAt: schema.workspaceVariableSetVariables.updatedAt,
-        });
-      if (!row) {
-        throw new Error("Failed to set variable set variable");
-      }
-      await scopedDb
-        .update(schema.workspaceVariableSets)
-        .set({ updatedAt: now })
-        .where(
-          and(
-            eq(schema.workspaceVariableSets.workspaceId, input.workspaceId),
-            eq(schema.workspaceVariableSets.id, input.variableSetId),
-          ),
-        );
-      return mapVariableSetVariableMetadata(row);
+      await setSubjectRlsContext(scopedDb, input.subjectId);
+      const [row] = await rawRows<{
+        result: { variableSet: VariableSet | null };
+      }>(
+        scopedDb,
+        sql`select mutate_scoped_variable_set(
+          ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+          ${input.variableSetId}::uuid, 'set_variable', null, false, null, false,
+          ${input.name}, ${input.valueEncrypted}, ${input.allowOrganization === true}
+        ) as result`,
+      );
+      const metadata = row?.result.variableSet?.variables.find(
+        (variable) => variable.name === input.name,
+      );
+      if (!metadata) throw new Error("Failed to set variable set variable");
+      return metadata;
     },
   );
 }
 
 export async function deleteVariableSetVariable(
   db: Database,
-  workspaceId: string,
-  variableSetId: string,
-  name: string,
+  input: VariableSetAccessContext & {
+    variableSetId: string;
+    name: string;
+    allowOrganization?: boolean;
+  },
 ): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .delete(schema.workspaceVariableSetVariables)
-      .where(
-        and(
-          eq(schema.workspaceVariableSetVariables.workspaceId, workspaceId),
-          eq(schema.workspaceVariableSetVariables.variableSetId, variableSetId),
-          eq(schema.workspaceVariableSetVariables.name, name),
-        ),
-      )
-      .returning({ id: schema.workspaceVariableSetVariables.id });
-    if (rows.length > 0) {
-      await scopedDb
-        .update(schema.workspaceVariableSets)
-        .set({ updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.workspaceVariableSets.workspaceId, workspaceId),
-            eq(schema.workspaceVariableSets.id, variableSetId),
-          ),
-        );
-    }
-    return rows.length > 0;
+  return await withRlsContext(db, input, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, input.subjectId);
+    const [row] = await rawRows<{ result: { deletedVariable: boolean } }>(
+      scopedDb,
+      sql`select mutate_scoped_variable_set(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+        ${input.variableSetId}::uuid, 'delete_variable', null, false, null, false,
+        ${input.name}, null, ${input.allowOrganization === true}
+      ) as result`,
+    );
+    return row?.result.deletedVariable === true;
   });
 }
 
@@ -16386,49 +16308,94 @@ export async function beginRigChangeVerificationAttempt(
  */
 export async function getVariableSetValuesForRun(
   db: Database,
-  workspaceId: string,
-  variableSetId: string,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    variableSetId: string;
+    authority:
+      | {
+          kind: "agent_attempt";
+          subjectId: string;
+          sessionId: string;
+          turnId: string;
+          attemptId: string;
+          executionGeneration: number;
+        }
+      | { kind: "session_attach"; sessionId: string };
+  },
 ): Promise<{
-  variableSet: { id: string; name: string; description: string | null };
+  variableSet: {
+    id: string;
+    name: string;
+    description: string | null;
+    scope: VariableSet["scope"];
+    generation: number;
+  };
   values: Record<string, string>;
 } | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [variableSet] = await scopedDb
-      .select({
-        id: schema.workspaceVariableSets.id,
-        name: schema.workspaceVariableSets.name,
-        description: schema.workspaceVariableSets.description,
-      })
-      .from(schema.workspaceVariableSets)
-      .where(
-        and(
-          eq(schema.workspaceVariableSets.workspaceId, workspaceId),
-          eq(schema.workspaceVariableSets.id, variableSetId),
-        ),
-      )
-      .limit(1);
-    if (!variableSet) {
-      return null;
+  return await withRlsContext(db, input, async (scopedDb) => {
+    if (input.authority.kind === "agent_attempt") {
+      await setSubjectRlsContext(scopedDb, input.authority.subjectId);
+      await scopedDb.execute(sql`select set_config(
+        'opengeni.initiating_human_subject_id', ${input.authority.subjectId}, true
+      )`);
     }
-    const rows = await scopedDb
-      .select({
-        name: schema.workspaceVariableSetVariables.name,
-        valueEncrypted: schema.workspaceVariableSetVariables.valueEncrypted,
-      })
-      .from(schema.workspaceVariableSetVariables)
-      .where(
-        and(
-          eq(schema.workspaceVariableSetVariables.workspaceId, workspaceId),
-          eq(schema.workspaceVariableSetVariables.variableSetId, variableSetId),
-        ),
-      );
+    const rows = await rawRows<{
+      id: string;
+      name: string;
+      description: string | null;
+      scope: VariableSet["scope"];
+      generation: number;
+      variableName: string | null;
+      valueEncrypted: string | null;
+    }>(
+      scopedDb,
+      input.authority.kind === "agent_attempt"
+        ? sql`select
+            variable_set_id as id,
+            variable_set_name as name,
+            variable_set_description as description,
+            authority_scope as scope,
+            variable_set_generation as generation,
+            variable_name as "variableName",
+            value_encrypted as "valueEncrypted"
+          from materialize_scoped_variable_set_for_attempt(
+            ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+            ${input.authority.sessionId}::uuid, ${input.authority.turnId}::uuid,
+            ${input.authority.attemptId}::uuid,
+            ${input.authority.executionGeneration}::integer,
+            ${input.variableSetId}::uuid
+          )`
+        : sql`select
+            variable_set_id as id,
+            variable_set_name as name,
+            variable_set_description as description,
+            authority_scope as scope,
+            variable_set_generation as generation,
+            variable_name as "variableName",
+            value_encrypted as "valueEncrypted"
+          from materialize_scoped_variable_set_for_session(
+            ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+            ${input.authority.sessionId}::uuid, ${input.variableSetId}::uuid
+          )`,
+    );
+    const [variableSet] = rows;
+    if (!variableSet) return null;
     return {
       variableSet: {
         id: variableSet.id,
         name: variableSet.name,
         description: variableSet.description,
+        scope: variableSet.scope,
+        generation: Number(variableSet.generation),
       },
-      values: Object.fromEntries(rows.map((row) => [row.name, row.valueEncrypted])),
+      values: Object.fromEntries(
+        rows.flatMap((row) =>
+          row.variableName !== null && row.valueEncrypted !== null
+            ? [[row.variableName, row.valueEncrypted]]
+            : [],
+        ),
+      ),
     };
   });
 }
@@ -16462,6 +16429,8 @@ export type VariableSetForRun = {
   id: string;
   name: string;
   description: string | null;
+  scope: VariableSet["scope"];
+  generation: number;
   values: Record<string, string>;
 };
 
@@ -16482,10 +16451,23 @@ export type VariableSetForRun = {
 export async function loadVariableSetForRun(
   db: Database,
   settings: Settings,
-  workspaceId: string,
-  variableSetId: string | null,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    variableSetId: string | null;
+    authority:
+      | {
+          kind: "agent_attempt";
+          subjectId: string;
+          sessionId: string;
+          turnId: string;
+          attemptId: string;
+          executionGeneration: number;
+        }
+      | { kind: "session_attach"; sessionId: string };
+  },
 ): Promise<VariableSetForRun | null> {
-  if (!variableSetId) {
+  if (!input.variableSetId) {
     return null;
   }
   const key = environmentsEncryptionKeyBytes(settings);
@@ -16494,9 +16476,12 @@ export async function loadVariableSetForRun(
       "variable set attached but OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured",
     );
   }
-  const stored = await getVariableSetValuesForRun(db, workspaceId, variableSetId);
+  const stored = await getVariableSetValuesForRun(db, {
+    ...input,
+    variableSetId: input.variableSetId,
+  });
   if (!stored) {
-    throw new Error(`variable set not found: ${variableSetId}`);
+    throw new Error(`variable set not found: ${input.variableSetId}`);
   }
   const values: Record<string, string> = {};
   for (const [name, encrypted] of Object.entries(stored.values)) {
@@ -16513,6 +16498,8 @@ export async function loadVariableSetForRun(
     id: stored.variableSet.id,
     name: stored.variableSet.name,
     description: stored.variableSet.description,
+    scope: stored.variableSet.scope,
+    generation: stored.variableSet.generation,
     values,
   };
 }
@@ -22375,59 +22362,6 @@ export async function recordAuditEvent(
       );
     },
   );
-}
-
-async function listVariableSetVariableMetadata(
-  db: Database,
-  workspaceId: string,
-  variableSetId: string,
-): Promise<VariableSetVariableMetadata[]> {
-  const rows = await db
-    .select({
-      name: schema.workspaceVariableSetVariables.name,
-      version: schema.workspaceVariableSetVariables.version,
-      createdAt: schema.workspaceVariableSetVariables.createdAt,
-      updatedAt: schema.workspaceVariableSetVariables.updatedAt,
-    })
-    .from(schema.workspaceVariableSetVariables)
-    .where(
-      and(
-        eq(schema.workspaceVariableSetVariables.workspaceId, workspaceId),
-        eq(schema.workspaceVariableSetVariables.variableSetId, variableSetId),
-      ),
-    )
-    .orderBy(asc(schema.workspaceVariableSetVariables.name));
-  return rows.map(mapVariableSetVariableMetadata);
-}
-
-function mapVariableSet(
-  row: typeof schema.workspaceVariableSets.$inferSelect,
-  variables: VariableSetVariableMetadata[],
-): VariableSet {
-  return {
-    id: row.id,
-    accountId: row.accountId,
-    workspaceId: row.workspaceId,
-    name: row.name,
-    description: row.description,
-    variables,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
-  };
-}
-
-function mapVariableSetVariableMetadata(row: {
-  name: string;
-  version: number;
-  createdAt: Date;
-  updatedAt: Date;
-}): VariableSetVariableMetadata {
-  return {
-    name: row.name,
-    version: row.version,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
-  };
 }
 
 function mapSessionMcpServerMetadata(

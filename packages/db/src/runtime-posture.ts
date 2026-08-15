@@ -92,6 +92,17 @@ const PERSONAL_RESOURCE_CAPABILITY_TABLE = "personal_resource_delegation_capabil
 const SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE =
   "scheduled_personal_resource_capability_active(text)";
 const SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE = "scheduled_personal_resource_capabilities";
+const VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE = "variable_set_authority_capability_active(text)";
+const VARIABLE_SET_CAPABILITY_TABLE = "variable_set_authority_capabilities";
+const VARIABLE_SET_AUTHORITY_ROUTINES = [
+  "create_scoped_variable_set(uuid, uuid, text, text, text, jsonb, boolean)",
+  "list_scoped_variable_sets(uuid, uuid, uuid, text, text)",
+  "count_scoped_variable_sets(uuid, uuid, text)",
+  "mutate_scoped_variable_set(uuid, uuid, uuid, text, text, boolean, text, boolean, text, text, boolean)",
+  "read_scoped_variable_set_secret(uuid, uuid, uuid, text, text, text, uuid, uuid, uuid, integer)",
+  "materialize_scoped_variable_set_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
+  "materialize_scoped_variable_set_for_session(uuid, uuid, uuid, uuid)",
+] as const;
 const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
   "ensure_canonical_human_identity(text, text)",
   "validate_canonical_human_session(text, text, boolean)",
@@ -154,6 +165,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
   PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
+  ...VARIABLE_SET_AUTHORITY_ROUTINES,
   ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
@@ -581,8 +593,6 @@ export const RUNTIME_FULL_DML_TABLES = [
   "workspace_model_policies",
   "workspace_packs",
   "workspace_screenshot_quotas",
-  "workspace_variable_set_variables",
-  "workspace_variable_sets",
   "workspace_video_generation_policies",
   "workspace_video_generation_quotas",
   "workspaces",
@@ -731,6 +741,8 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "task_note_events",
   "task_note_write_capabilities",
   "task_notes",
+  "workspace_variable_set_variables",
+  "workspace_variable_sets",
 ] as const;
 
 export type RuntimeTableDmlPrivilege = "SELECT" | "INSERT" | "UPDATE" | "DELETE";
@@ -1097,7 +1109,8 @@ export async function inspectRuntimeDatabasePosture(
             and c.relkind in ('r', 'p')
             and c.relname in (
               ${PERSONAL_RESOURCE_CAPABILITY_TABLE},
-              ${SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE}
+              ${SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE},
+              ${VARIABLE_SET_CAPABILITY_TABLE}
             )
         `),
       ).map((row) => ({
@@ -1459,6 +1472,23 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
         );
       }
+    } else if ((VARIABLE_SET_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = ["workspace_variable_sets", "workspace_variable_set_variables"]
+        .map((tableName) => tableByName.get(tableName))
+        .filter((table): table is RuntimeTablePosture => table !== undefined);
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityOwners.size > 1) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} variable-set table owners do not match`,
+        );
+      } else {
+        const authorityOwner = authorityTables[0]?.owner ?? targetSchemaOwner;
+        if (authorityOwner && routine.owner !== authorityOwner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match variable-set authority owner ${authorityOwner}`,
+          );
+        }
+      }
     } else if (SESSION_AUTHORITY_ROUTINES.has(routine.name)) {
       const authorityOwner = tableByName.get("sessions")?.owner ?? targetSchemaOwner;
       if (authorityOwner && routine.owner !== authorityOwner) {
@@ -1784,6 +1814,56 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(
         `runtime role has forbidden direct privileges on private table ${table.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
       );
+    }
+  }
+
+  if (options.protectedTables === undefined) {
+    const variableSetCapabilityTables = posture.privateTables.filter(
+      (table) => table.name === VARIABLE_SET_CAPABILITY_TABLE,
+    );
+    const variableSetCapabilityRoutines = posture.privateRoutines.filter(
+      (routine) => routine.name === VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE,
+    );
+    if (variableSetCapabilityTables.length !== 1) {
+      violations.push(
+        `variable-set capability table ${VARIABLE_SET_CAPABILITY_TABLE} is missing or ambiguous`,
+      );
+    }
+    if (variableSetCapabilityRoutines.length !== 1) {
+      violations.push(
+        `variable-set capability predicate ${VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
+      );
+    }
+    if (variableSetCapabilityTables.length === 1 && variableSetCapabilityRoutines.length === 1) {
+      const table = variableSetCapabilityTables[0]!;
+      const routine = variableSetCapabilityRoutines[0]!;
+      if (routine.owner !== table.owner) {
+        violations.push(
+          `variable-set capability predicate ${routine.name} owner ${routine.owner} does not match table owner ${table.owner}`,
+        );
+      }
+      if (!routine.securityDefiner) {
+        violations.push(
+          `variable-set capability predicate ${routine.name} is not SECURITY DEFINER`,
+        );
+      }
+      if (!routine.execute) {
+        violations.push(`runtime role lacks variable-set capability predicate ${routine.name}`);
+      }
+      if (routine.publicExecute) {
+        violations.push(`PUBLIC has forbidden variable-set capability predicate ${routine.name}`);
+      }
+      const directPrivileges = [
+        ["SELECT", table.select],
+        ["INSERT", table.insert],
+        ["UPDATE", table.update],
+        ["DELETE", table.delete],
+      ].filter(([, granted]) => granted);
+      if (directPrivileges.length > 0) {
+        violations.push(
+          `runtime role has forbidden direct privileges on private table ${table.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
+        );
+      }
     }
   }
 

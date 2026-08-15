@@ -4146,6 +4146,9 @@ function fabricateEnvironment(
     id: demoUuid(),
     accountId: ACCOUNT_ID,
     workspaceId: WORKSPACE_ID,
+    scope: "workspace",
+    generation: 1,
+    status: "active",
     name,
     description: `${name} credentials`,
     variables: variableNames.map((variableName) => ({

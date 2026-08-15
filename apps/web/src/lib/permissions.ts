@@ -26,6 +26,7 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "variable-sets:read": "Variable sets",
   "variable-sets:write": "Variable sets",
   "variable-sets:manage": "Variable sets",
+  "variable-sets:attach": "Variable sets",
   "variable-sets:use": "Variable sets",
   "secrets:list": "Variable sets",
   "secrets:read": "Variable sets",
@@ -205,7 +206,13 @@ export const defaultWorkspaceMemberPermissions = new Set<string>([
   "scheduled_tasks:manage",
   "scheduled_tasks:run",
   "github:use",
+  "variable-sets:list",
+  "variable-sets:read",
+  "variable-sets:write",
+  "variable-sets:attach",
   "variable-sets:use",
+  "secrets:list",
+  "secrets:write",
   "goals:manage",
 ]);
 
@@ -215,32 +222,9 @@ export function hasWorkspacePermission(
   permission: string,
 ): boolean {
   const grant = context?.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
-  const legacyAliases: Partial<Record<string, string[]>> = {
-    "variable-sets:list": [
-      "variable-sets:use",
-      "variable-sets:manage",
-      "environments:use",
-      "environments:manage",
-    ],
-    "variable-sets:read": [
-      "variable-sets:use",
-      "variable-sets:manage",
-      "environments:use",
-      "environments:manage",
-    ],
-    "variable-sets:write": ["variable-sets:manage", "environments:manage"],
-    "secrets:list": [
-      "variable-sets:use",
-      "variable-sets:manage",
-      "environments:use",
-      "environments:manage",
-    ],
-    "secrets:write": ["variable-sets:manage", "environments:manage"],
-  };
   return Boolean(
     grant &&
     (grant.permissions.includes(permission) ||
-      legacyAliases[permission]?.some((alias) => grant.permissions.includes(alias)) ||
       (permission !== "secrets:read" && grant.permissions.includes("workspace:admin"))),
   );
 }

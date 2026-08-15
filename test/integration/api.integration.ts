@@ -32,7 +32,7 @@ import {
   getPackInstallation,
   getScheduledTask,
   getSessionGoal,
-  getWorkspaceEnvironmentValuesForRun,
+  getVariableSetValuesForRun,
   grantWorkspaceAccess,
   listGitHubInstallationAccessForWorkspace,
   initializeSessionStartAtomically,
@@ -7833,22 +7833,81 @@ describe("API component integration", () => {
       variableSetName: environment.name,
     });
     expect(JSON.stringify(events)).not.toContain("session-secret-abcdef");
+  });
 
-    // Attached queued sessions block environment deletion; idle ones detach.
-    const blockedDelete = await app.request(
-      workspacePath(workspaceId, `/environments/${environment.id}`),
-      { method: "DELETE" },
-    );
-    expect(blockedDelete.status).toBe(409);
-    expect(await blockedDelete.text()).toContain("active session");
-    await setSessionStatus(dbClient.db, workspaceId, session.id, "idle", null);
-    const allowedDelete = await app.request(
-      workspacePath(workspaceId, `/environments/${environment.id}`),
-      { method: "DELETE" },
-    );
-    expect(allowedDelete.status).toBe(200);
-    const detached = await app.request(workspacePath(workspaceId, `/sessions/${session.id}`));
-    expect(((await detached.json()) as { environmentId: string | null }).environmentId).toBeNull();
+  test("preserves active Variable Set deletion fences and clears terminal attachments", async () => {
+    workflow = new FakeWorkflowClient();
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        environmentsEncryptionKey: environmentsTestKey,
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+
+    const createAttachedSession = async (status: SessionStatus) => {
+      const environment = await createTestEnvironment(app, workspaceId, {});
+      const response = await app.request(workspacePath(workspaceId, "/sessions"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          initialMessage: `deletion fence ${status}`,
+          environmentId: environment.id,
+        }),
+      });
+      expect(response.status).toBe(202);
+      const session = (await response.json()) as {
+        id: string;
+        environmentId: string | null;
+      };
+      if (status !== "queued") {
+        await setSessionStatus(dbClient.db, workspaceId, session.id, status, null);
+      }
+      return { environment, session };
+    };
+
+    for (const status of [
+      "queued",
+      "running",
+      "requires_action",
+      "recovering",
+      "waiting_capacity",
+    ] as const) {
+      const { environment, session } = await createAttachedSession(status);
+      const blocked = await app.request(
+        workspacePath(workspaceId, `/environments/${environment.id}`),
+        { method: "DELETE" },
+      );
+      expect(blocked.status).toBe(409);
+      expect(await blocked.text()).toContain("active session");
+      const retained = await app.request(workspacePath(workspaceId, `/sessions/${session.id}`));
+      expect(((await retained.json()) as { environmentId: string | null }).environmentId).toBe(
+        environment.id,
+      );
+
+      await setSessionStatus(dbClient.db, workspaceId, session.id, "cancelled", null);
+      const cleanup = await app.request(
+        workspacePath(workspaceId, `/environments/${environment.id}`),
+        { method: "DELETE" },
+      );
+      expect(cleanup.status).toBe(200);
+    }
+
+    for (const status of ["idle", "failed", "cancelled"] as const) {
+      const { environment, session } = await createAttachedSession(status);
+      const allowed = await app.request(
+        workspacePath(workspaceId, `/environments/${environment.id}`),
+        { method: "DELETE" },
+      );
+      expect(allowed.status).toBe(200);
+      const detached = await app.request(workspacePath(workspaceId, `/sessions/${session.id}`));
+      expect(
+        ((await detached.json()) as { environmentId: string | null }).environmentId,
+      ).toBeNull();
+    }
   });
 
   test("enforces environment permissions for management and attachment", async () => {
@@ -7897,13 +7956,21 @@ describe("API component integration", () => {
       headers: limitedAuth,
     });
     expect(forbiddenList.status).toBe(403);
-    const legacyUseAuth = {
+    const deprecatedAliasAuth = {
       authorization: await signToken(["workspace:read", "environments:use" as Permission]),
     };
-    const legacyUseList = await app.request(workspacePath(grant.workspaceId, "/variable-sets"), {
-      headers: legacyUseAuth,
+    const deprecatedAliasList = await app.request(
+      workspacePath(grant.workspaceId, "/variable-sets"),
+      { headers: deprecatedAliasAuth },
+    );
+    expect(deprecatedAliasList.status).toBe(403);
+    const explicitListAuth = {
+      authorization: await signToken(["workspace:read", "variable-sets:list", "secrets:list"]),
+    };
+    const explicitList = await app.request(workspacePath(grant.workspaceId, "/variable-sets"), {
+      headers: explicitListAuth,
     });
-    expect(legacyUseList.status).toBe(200);
+    expect(explicitList.status).toBe(200);
 
     const createdResponse = await app.request(workspacePath(grant.workspaceId, "/environments"), {
       method: "POST",
@@ -7925,7 +7992,7 @@ describe("API component integration", () => {
       }),
     });
     expect(forbiddenAttach.status).toBe(403);
-    expect(await forbiddenAttach.text()).toContain("environments:use");
+    expect(await forbiddenAttach.text()).toContain("variable-sets:attach");
 
     const taskResponse = await app.request(workspacePath(grant.workspaceId, "/scheduled-tasks"), {
       method: "POST",
@@ -8073,6 +8140,9 @@ describe("API component integration", () => {
     });
     expect(detach.status).toBe(200);
     expect(((await detach.json()) as { environmentId: string | null }).environmentId).toBeNull();
+    // The still-attached idle reusable session remains a live attachment even
+    // after the task detaches. Terminal settlement releases that deletion fence.
+    await setSessionStatus(dbClient.db, workspaceId, reusableSession.id, "failed", null);
     const deleteResponse = await app.request(
       workspacePath(workspaceId, `/environments/${environment.id}`),
       { method: "DELETE" },
@@ -8080,7 +8150,7 @@ describe("API component integration", () => {
     expect(deleteResponse.status).toBe(200);
   });
 
-  test("MCP scheduled task tools reject environment self-attachment without environments:use", async () => {
+  test("MCP scheduled task tools require independent Variable Set attach and use permissions", async () => {
     workflow = new FakeWorkflowClient();
     const settings = testSettings({
       databaseUrl: services.databaseUrl,
@@ -8107,8 +8177,8 @@ describe("API component integration", () => {
       name: `mcp-env-${crypto.randomUUID()}`,
     });
 
-    // The worker's first-party delegated permissions exclude environments:use.
-    const sandboxGrant = {
+    // The worker's first-party delegated permissions exclude both exact gates.
+    const noAttachGrant = {
       ...grant,
       permissions: [
         "workspace:read",
@@ -8118,10 +8188,24 @@ describe("API component integration", () => {
         "scheduled_tasks:run",
       ] as Permission[],
     };
-    const sandboxMcp = buildOpenGeniMcpServer(mcpDeps, sandboxGrant);
+    const noAttachMcp = buildOpenGeniMcpServer(mcpDeps, noAttachGrant);
     await expect(
-      callMcpTool(sandboxMcp, "scheduled_tasks_create", {
+      callMcpTool(noAttachMcp, "scheduled_tasks_create", {
         name: `mcp-self-attach-${crypto.randomUUID()}`,
+        schedule: { type: "interval", everySeconds: 3600 },
+        agentConfig: { prompt: "inspect" },
+        environmentId: environment.id,
+      }),
+    ).rejects.toThrow("missing permission: variable-sets:attach");
+
+    const attachOnlyGrant = {
+      ...noAttachGrant,
+      permissions: [...noAttachGrant.permissions, "variable-sets:attach"] as Permission[],
+    };
+    const attachOnlyMcp = buildOpenGeniMcpServer(mcpDeps, attachOnlyGrant);
+    await expect(
+      callMcpTool(attachOnlyMcp, "scheduled_tasks_create", {
+        name: `mcp-without-use-${crypto.randomUUID()}`,
         schedule: { type: "interval", everySeconds: 3600 },
         agentConfig: { prompt: "inspect" },
         environmentId: environment.id,
@@ -8146,19 +8230,25 @@ describe("API component integration", () => {
     expect(created?.variableSetId).toBe(environment.id);
 
     await expect(
-      callMcpTool(sandboxMcp, "scheduled_tasks_update", {
+      callMcpTool(noAttachMcp, "scheduled_tasks_update", {
+        id: createdReceipt.resource.id,
+        environmentId: environment.id,
+      }),
+    ).rejects.toThrow("missing permission: variable-sets:attach");
+    await expect(
+      callMcpTool(noAttachMcp, "scheduled_tasks_update", {
+        id: createdReceipt.resource.id,
+        environmentId: null,
+      }),
+    ).rejects.toThrow("missing permission: variable-sets:attach");
+    await expect(
+      callMcpTool(attachOnlyMcp, "scheduled_tasks_update", {
         id: createdReceipt.resource.id,
         environmentId: environment.id,
       }),
     ).rejects.toThrow("missing permission: variable-sets:use");
     await expect(
-      callMcpTool(sandboxMcp, "scheduled_tasks_update", {
-        id: createdReceipt.resource.id,
-        environmentId: null,
-      }),
-    ).rejects.toThrow("missing permission: variable-sets:use");
-    await expect(
-      callMcpTool(sandboxMcp, "scheduled_tasks_update", {
+      callMcpTool(attachOnlyMcp, "scheduled_tasks_update", {
         id: createdReceipt.resource.id,
         agentConfig: { prompt: "exfiltrate the injected secrets" },
       }),
@@ -9726,7 +9816,7 @@ describe("API component integration", () => {
     });
 
     // sessions:create alone cannot attach workspace secrets to a spawned
-    // session; environments:use stays the attachment gate on every surface.
+    // session; attachment and use remain independent exact gates.
     const spawnOnlyGrant = {
       ...grant,
       permissions: ["workspace:read", "sessions:create"] as Permission[],
@@ -9741,7 +9831,23 @@ describe("API component integration", () => {
         environmentId: environment.id,
       },
       "session_create_forbidden",
-      "missing permission: variable-sets:use (deprecated alias: environments:use)",
+      "missing permission: variable-sets:attach",
+    );
+
+    const attachOnlyMcp = buildOpenGeniMcpServer(mcpDeps, {
+      ...spawnOnlyGrant,
+      permissions: [...spawnOnlyGrant.permissions, "variable-sets:attach"] as Permission[],
+    });
+    await expectMcpOrchestrationFailure(
+      attachOnlyMcp,
+      "session_create",
+      {
+        initialMessage: "attach without use",
+        model: "scripted-model",
+        environmentId: environment.id,
+      },
+      "session_create_forbidden",
+      "missing permission: variable-sets:use",
     );
 
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
@@ -9916,11 +10022,43 @@ describe("API component integration", () => {
 
     // The stored value round-trips through the operator key, proving the MCP
     // write path encrypts exactly like the REST route.
-    const stored = await getWorkspaceEnvironmentValuesForRun(
-      dbClient.db,
-      grant.workspaceId,
-      first.resource.id,
-    );
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "verify exact variable-set storage",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      variableSetId: first.resource.id,
+      subjectId: grant.subjectId,
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+    });
+    await initializeSessionStartAtomically(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      clientEventId: `initial:${session.id}`,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const claimed = await claimCreatedSessionForRun(dbClient.db, grant, session.id);
+    if (!claimed.initiatingHumanSubjectId) {
+      throw new Error("variable-set storage fixture has no initiating human");
+    }
+    const stored = await getVariableSetValuesForRun(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      variableSetId: first.resource.id,
+      authority: {
+        kind: "agent_attempt",
+        subjectId: claimed.initiatingHumanSubjectId,
+        sessionId: session.id,
+        turnId: claimed.turnId,
+        attemptId: claimed.attemptId,
+        executionGeneration: claimed.executionGeneration,
+      },
+    });
     const key = new Uint8Array(Buffer.from(environmentsTestKey, "base64"));
     expect(decryptEnvironmentValue(key, stored!.values["AZURE_CLIENT_SECRET"]!)).toBe(rotatedValue);
 
@@ -9971,21 +10109,20 @@ describe("API component integration", () => {
       }),
     ).rejects.toThrow("environment not found");
 
-    // environments:use lists but cannot write; environments:manage is the
-    // write gate, mirroring the REST routes.
-    const useOnlyGrant = {
+    // Exact list permissions expose metadata but cannot write values.
+    const listOnlyGrant = {
       ...grant,
-      permissions: ["workspace:read", "environments:use"] as Permission[],
+      permissions: ["workspace:read", "variable-sets:list", "secrets:list"] as Permission[],
     };
-    const useOnlyMcp = buildOpenGeniMcpServer(mcpDeps, useOnlyGrant);
-    const useOnlyList = await callMcpTool<{
+    const listOnlyMcp = buildOpenGeniMcpServer(mcpDeps, listOnlyGrant);
+    const listOnlyResult = await callMcpTool<{
       environments: Array<{ id: string }>;
-    }>(useOnlyMcp, "environment_list", {});
-    expect(useOnlyList.environments.some((candidate) => candidate.id === first.resource.id)).toBe(
-      true,
-    );
+    }>(listOnlyMcp, "environment_list", {});
+    expect(
+      listOnlyResult.environments.some((candidate) => candidate.id === first.resource.id),
+    ).toBe(true);
     await expect(
-      callMcpTool(useOnlyMcp, "environment_set_variable", {
+      callMcpTool(listOnlyMcp, "environment_set_variable", {
         environmentName,
         name: "BLOCKED",
         value: "nope",
@@ -10042,7 +10179,9 @@ describe("API component integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
       firstPartyMcpPermissions: grant.permissions,
+      variableSetId: written.resource.id,
       subjectId: grant.subjectId,
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
     });
     await initializeSessionStartAtomically(dbClient.db, {
       accountId: grant.accountId,
@@ -10064,8 +10203,12 @@ describe("API component integration", () => {
     if (claimed.action !== "claimed") {
       throw new Error(`failed to claim secret-read fixture: ${claimed.reason}`);
     }
+    if (!claimed.turn.initiatingHumanSubjectId) {
+      throw new Error("secret-read fixture has no initiating human");
+    }
     const liveGrant = {
       ...grant,
+      subjectId: claimed.turn.initiatingHumanSubjectId,
       principalKind: "agent_attempt" as const,
       metadata: {
         delegated: true,
@@ -10139,24 +10282,29 @@ describe("API component integration", () => {
     });
     expect(observedOperations).toEqual(["session.secret.read"]);
 
-    const [audit] = await dbClient.db.execute(
-      dbSql<{ metadata: Record<string, unknown> }>`
-        select metadata
-          from audit_events
-         where workspace_id = ${grant.workspaceId}
-           and target_id = ${written.resource.id}
-           and action = 'variable_set.variable.read'
-         order by occurred_at desc
-         limit 1`,
-    );
+    const audit = await withWorkspaceRls(dbClient.db, grant.workspaceId, async (scopedDb) => {
+      const [row] = await scopedDb.execute(
+        dbSql<{ metadata: Record<string, unknown> }>`
+          select metadata
+            from audit_events
+           where workspace_id = ${grant.workspaceId}
+             and target_id = ${written.resource.id}
+             and action = 'variable_set.variable.read'
+           order by occurred_at desc
+           limit 1`,
+      );
+      return row;
+    });
     expect(audit?.metadata).toMatchObject({
       actorKind: "agent_attempt",
       sessionId: session.id,
       turnId: claimed.turn.id,
       attemptId,
       executionGeneration: claimed.turn.executionGeneration,
+      variableSetId: written.resource.id,
       name: "EXACT_VALUE",
-      version: 1,
+      scope: "workspace",
+      generation: expect.any(Number),
     });
     expect(JSON.stringify(audit)).not.toContain(exact);
 
@@ -10545,6 +10693,7 @@ type ClaimedSessionAttempt = {
   turnId: string;
   attemptId: string;
   executionGeneration: number;
+  initiatingHumanSubjectId: string | null;
 };
 
 async function claimCreatedSessionForRun(
@@ -10568,6 +10717,7 @@ async function claimCreatedSessionForRun(
     turnId: claimed.turn.id,
     attemptId,
     executionGeneration: claimed.turn.executionGeneration,
+    initiatingHumanSubjectId: claimed.turn.initiatingHumanSubjectId,
   };
 }
 

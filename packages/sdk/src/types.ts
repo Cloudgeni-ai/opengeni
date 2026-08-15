@@ -2427,6 +2427,7 @@ export const KNOWN_PERMISSIONS = [
   "variable-sets:read",
   "variable-sets:write",
   "variable-sets:manage",
+  "variable-sets:attach",
   "variable-sets:use",
   "secrets:list",
   "secrets:read",
@@ -3974,6 +3975,9 @@ export type VariableSet = {
   id: string;
   accountId: string;
   workspaceId: string;
+  scope: "organization" | "workspace" | "user";
+  generation: number;
+  status: "active" | "revoked";
   name: string;
   description: string | null;
   variables: VariableSetVariableMetadata[];
@@ -3988,6 +3992,8 @@ export type WorkspaceEnvironmentVariableMetadata = VariableSetVariableMetadata;
 export type WorkspaceEnvironment = VariableSet;
 
 export type CreateVariableSetRequest = {
+  /** Omitted remains the legacy workspace-owned path. */
+  scope?: "organization" | "workspace" | "user" | undefined;
   name: string;
   description?: string | undefined;
   /** Initial variables. Values are write-only: they never come back on reads. */

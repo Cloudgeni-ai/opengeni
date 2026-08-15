@@ -531,12 +531,12 @@ async function withChannelAOperation<T>(
 
   // The STABLE run-environment used by both a cloud home and a machine home.
   // It also carries the per-session Codemode pointer selected below.
-  const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
-    db,
-    settings,
+  const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, settings, {
+    accountId,
     workspaceId,
-    session.environmentId,
-  );
+    variableSetId: session.environmentId,
+    authority: { kind: "session_attach", sessionId: session.id },
+  });
   const settingsForSession =
     session.sandboxBackend !== settings.sandboxBackend
       ? { ...settings, sandboxBackend: session.sandboxBackend }
@@ -580,7 +580,13 @@ async function withChannelAOperation<T>(
       leaseEpoch: lease?.leaseEpoch ?? session.activeEpoch,
       emit,
     });
-    const result = await fn({ service, lease, homeSession, routingSession, requestId });
+    const result = await fn({
+      service,
+      lease,
+      homeSession,
+      routingSession,
+      requestId,
+    });
     // The direct request has accepted the result in memory. Finalize every
     // Connected Machine backend the routing proxy reached so a mid-request
     // route transition cannot leave completed output retained until TTL.

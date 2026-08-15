@@ -5,8 +5,6 @@ import {
   VariableSetVariableName,
 } from "@opengeni/contracts";
 import {
-  countActiveSessionsUsingVariableSet,
-  countScheduledTasksUsingVariableSet,
   countVariableSets,
   createVariableSet,
   decryptVariableSetValue,
@@ -18,10 +16,16 @@ import {
   readVariableSetSecretAtomically,
   setVariableSetVariable,
   updateVariableSet,
+  VariableSetAttachedError,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant, requireLiteralPermission, requirePermission } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  requireLiteralPermission,
+  requirePermission,
+} from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   assertAllowedVariableSetVariableName,
@@ -45,15 +49,35 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
       const grant = await requireAccessGrant(c, deps, workspaceId);
       requirePermission(grant, "variable-sets:list");
       requirePermission(grant, "secrets:list");
-      return c.json(await listVariableSets(db, workspaceId));
+      return c.json(
+        await listVariableSets(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+        }),
+      );
     });
 
     app.post(`${prefix}`, async (c) => {
       const workspaceId = c.req.param("workspaceId")!;
-      const grant = await requireAccessGrant(c, deps, workspaceId);
+      const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+      const grant = authorization.grant;
       requirePermission(grant, "variable-sets:write");
       const key = requireVariableSetEncryption(settings);
       const payload = CreateVariableSetRequest.parse(await c.req.json());
+      if (prefix.endsWith("/environments") && payload.scope !== "workspace") {
+        throw new HTTPException(422, {
+          message: "the legacy environments route only creates workspace-scoped variable sets",
+        });
+      }
+      if (
+        payload.scope === "organization" &&
+        authorization.accountGrant?.permissions.includes("account:admin") !== true
+      ) {
+        throw new HTTPException(403, {
+          message: "missing permission: account:admin",
+        });
+      }
       if (payload.variables.length > 0) {
         requirePermission(grant, "secrets:write");
       }
@@ -73,12 +97,17 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
         }
         variableNames.add(variable.name);
       }
-      if ((await countVariableSets(db, workspaceId)) >= MAX_ENVIRONMENTS_PER_WORKSPACE) {
+      const access = {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+      };
+      if ((await countVariableSets(db, access, payload.scope)) >= MAX_ENVIRONMENTS_PER_WORKSPACE) {
         throw new HTTPException(422, {
           message: `a workspace supports at most ${MAX_ENVIRONMENTS_PER_WORKSPACE} variable sets`,
         });
       }
-      if (await getVariableSetByName(db, workspaceId, name)) {
+      if (await getVariableSetByName(db, access, name, payload.scope)) {
         throw new HTTPException(409, {
           message: `variable set name is already in use: ${name}`,
         });
@@ -88,6 +117,9 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
       const created = await createVariableSet(db, {
         accountId: grant.accountId,
         workspaceId,
+        scope: payload.scope,
+        subjectId: grant.subjectId,
+        allowOrganization: payload.scope === "organization",
         name,
         description: payload.description ?? null,
         variables: payload.variables.map((variable) => ({
@@ -108,7 +140,7 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
       const grant = await requireAccessGrant(c, deps, workspaceId);
       requirePermission(grant, "variable-sets:read");
       requirePermission(grant, "secrets:list");
-      return c.json(await requireVariableSetForApi(db, workspaceId, c.req.param("variableSetId")!));
+      return c.json(await requireVariableSetForApi(db, grant, c.req.param("variableSetId")!));
     });
 
     if (prefix.endsWith("/variable-sets")) {
@@ -139,27 +171,47 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
 
     app.patch(`${prefix}/:variableSetId`, async (c) => {
       const workspaceId = c.req.param("workspaceId")!;
-      const grant = await requireAccessGrant(c, deps, workspaceId);
+      const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+      const grant = authorization.grant;
       requirePermission(grant, "variable-sets:write");
-      const variableSet = await requireVariableSetForApi(
-        db,
-        workspaceId,
-        c.req.param("variableSetId")!,
-      );
+      const variableSet = await requireVariableSetForApi(db, grant, c.req.param("variableSetId")!);
+      const allowOrganization =
+        variableSet.scope === "organization" &&
+        authorization.accountGrant?.permissions.includes("account:admin") === true;
+      if (variableSet.scope === "organization" && !allowOrganization) {
+        throw new HTTPException(403, {
+          message: "missing permission: account:admin",
+        });
+      }
       const payload = UpdateVariableSetRequest.parse(await c.req.json());
       const name = payload.name !== undefined ? trimmedVariableSetName(payload.name) : undefined;
       if (name !== undefined && name !== variableSet.name) {
-        const existing = await getVariableSetByName(db, workspaceId, name);
+        const existing = await getVariableSetByName(
+          db,
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+          },
+          name,
+          variableSet.scope,
+        );
         if (existing && existing.id !== variableSet.id) {
           throw new HTTPException(409, {
             message: `variable set name is already in use: ${name}`,
           });
         }
       }
-      const updated = await updateVariableSet(db, workspaceId, variableSet.id, {
-        ...(name !== undefined ? { name } : {}),
-        ...(payload.description !== undefined ? { description: payload.description } : {}),
-      });
+      const updated = await updateVariableSet(
+        db,
+        { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+        variableSet.id,
+        {
+          ...(name !== undefined ? { name } : {}),
+          ...(payload.description !== undefined ? { description: payload.description } : {}),
+          allowOrganization,
+        },
+      );
       await recordVariableSetAuditEvent(db, {
         grant,
         action: "variable_set.updated",
@@ -170,35 +222,36 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
 
     app.delete(`${prefix}/:variableSetId`, async (c) => {
       const workspaceId = c.req.param("workspaceId")!;
-      const grant = await requireAccessGrant(c, deps, workspaceId);
+      const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+      const grant = authorization.grant;
       requirePermission(grant, "variable-sets:write");
       requirePermission(grant, "secrets:write");
-      const variableSet = await requireVariableSetForApi(
-        db,
-        workspaceId,
-        c.req.param("variableSetId")!,
-      );
-      const attachedTasks = await countScheduledTasksUsingVariableSet(
-        db,
-        workspaceId,
-        variableSet.id,
-      );
-      if (attachedTasks > 0) {
-        throw new HTTPException(409, {
-          message: `variable set is attached to ${attachedTasks} scheduled task(s); detach first`,
+      const variableSet = await requireVariableSetForApi(db, grant, c.req.param("variableSetId")!);
+      const allowOrganization =
+        variableSet.scope === "organization" &&
+        authorization.accountGrant?.permissions.includes("account:admin") === true;
+      if (variableSet.scope === "organization" && !allowOrganization) {
+        throw new HTTPException(403, {
+          message: "missing permission: account:admin",
         });
       }
-      const activeSessions = await countActiveSessionsUsingVariableSet(
-        db,
-        workspaceId,
-        variableSet.id,
-      );
-      if (activeSessions > 0) {
-        throw new HTTPException(409, {
-          message: `variable set is attached to ${activeSessions} active session(s); wait for them to finish or cancel them first`,
-        });
+      try {
+        await deleteVariableSet(
+          db,
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+          },
+          variableSet.id,
+          { allowOrganization },
+        );
+      } catch (error) {
+        if (error instanceof VariableSetAttachedError) {
+          throw new HTTPException(409, { message: error.message });
+        }
+        throw error;
       }
-      await deleteVariableSet(db, workspaceId, variableSet.id);
       await recordVariableSetAuditEvent(db, {
         grant,
         action: "variable_set.deleted",
@@ -209,16 +262,21 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
 
     app.put(`${prefix}/:variableSetId/variables/:name`, async (c) => {
       const workspaceId = c.req.param("workspaceId")!;
-      const grant = await requireAccessGrant(c, deps, workspaceId);
+      const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+      const grant = authorization.grant;
       requirePermission(grant, "variable-sets:write");
       requirePermission(grant, "secrets:write");
       const key = requireVariableSetEncryption(settings);
       const name = parseVariableName(c.req.param("name")!);
-      const variableSet = await requireVariableSetForApi(
-        db,
-        workspaceId,
-        c.req.param("variableSetId")!,
-      );
+      const variableSet = await requireVariableSetForApi(db, grant, c.req.param("variableSetId")!);
+      const allowOrganization =
+        variableSet.scope === "organization" &&
+        authorization.accountGrant?.permissions.includes("account:admin") === true;
+      if (variableSet.scope === "organization" && !allowOrganization) {
+        throw new HTTPException(403, {
+          message: "missing permission: account:admin",
+        });
+      }
       const payload = SetVariableSetVariableRequest.parse(await c.req.json());
       const exists = variableSet.variables.some((variable) => variable.name === name);
       if (!exists && variableSet.variables.length >= MAX_VARIABLES_PER_ENVIRONMENT) {
@@ -229,9 +287,11 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
       const metadata = await setVariableSetVariable(db, {
         accountId: grant.accountId,
         workspaceId,
+        subjectId: grant.subjectId,
         variableSetId: variableSet.id,
         name,
         valueEncrypted: encryptVariableSetValue(key, payload.value),
+        allowOrganization,
       });
       await recordVariableSetAuditEvent(db, {
         grant,
@@ -244,16 +304,28 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
 
     app.delete(`${prefix}/:variableSetId/variables/:name`, async (c) => {
       const workspaceId = c.req.param("workspaceId")!;
-      const grant = await requireAccessGrant(c, deps, workspaceId);
+      const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+      const grant = authorization.grant;
       requirePermission(grant, "variable-sets:write");
       requirePermission(grant, "secrets:write");
       const name = parseVariableName(c.req.param("name")!);
-      const variableSet = await requireVariableSetForApi(
-        db,
+      const variableSet = await requireVariableSetForApi(db, grant, c.req.param("variableSetId")!);
+      const allowOrganization =
+        variableSet.scope === "organization" &&
+        authorization.accountGrant?.permissions.includes("account:admin") === true;
+      if (variableSet.scope === "organization" && !allowOrganization) {
+        throw new HTTPException(403, {
+          message: "missing permission: account:admin",
+        });
+      }
+      const deleted = await deleteVariableSetVariable(db, {
+        accountId: grant.accountId,
         workspaceId,
-        c.req.param("variableSetId")!,
-      );
-      const deleted = await deleteVariableSetVariable(db, workspaceId, variableSet.id, name);
+        subjectId: grant.subjectId,
+        variableSetId: variableSet.id,
+        name,
+        allowOrganization,
+      });
       if (!deleted) {
         throw new HTTPException(404, {
           message: "variable set variable not found",

@@ -270,13 +270,13 @@ describe("runtime database posture evaluator", () => {
         ? ([
             [FORCE_RLS_TABLES, 239],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 139],
+            [RUNTIME_FULL_DML_TABLES, 137],
             [RUNTIME_READ_ONLY_TABLES, 17],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 29],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 19],
-            [RUNTIME_DML_TABLES, 231],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 21],
+            [RUNTIME_DML_TABLES, 229],
           ] as const)
         : ([
             [FORCE_RLS_TABLES, 183],
@@ -440,6 +440,7 @@ describe("runtime database posture evaluator", () => {
     for (const routine of posture.targetRoutines) {
       if (
         routine.name === "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)" ||
+        routine.name.includes("scoped_variable_set") ||
         routine.name === "resolve_session_attempt_personal_resources(uuid, uuid, uuid)" ||
         routine.name === "session_private_actor_visible(uuid, uuid, uuid, text)" ||
         routine.name === "session_reference_visible(uuid, uuid, uuid)" ||

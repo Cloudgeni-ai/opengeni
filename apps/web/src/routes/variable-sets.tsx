@@ -31,11 +31,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
+import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { formatTimestamp } from "@/lib/format";
 import { listViewState } from "@/lib/load-state";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import type {
   ScheduledTask,
   Session,
@@ -58,6 +59,13 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
   const canReadSecrets =
     hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:read") &&
     hasWorkspacePermission(context.accessContext, workspaceId, "secrets:read");
+  const workspaceGrant = context.accessContext.workspaceGrants.find(
+    (grant) => grant.workspaceId === workspaceId,
+  );
+  const canManageOrganization = Boolean(
+    workspaceGrant?.accountId &&
+    hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
+  );
   const variableSets = useVariableSets({ enabled: canList });
   // Attachment views: which sessions and scheduled tasks carry each variableSet.
   const {
@@ -77,6 +85,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
   const [createDescription, setCreateDescription] = useState("");
+  const [createScope, setCreateScope] = useState<WorkspaceVariableSet["scope"]>("workspace");
   const [revealEpoch, setRevealEpoch] = useState(0);
   // Honest list state: a failed load renders as an error with retry, never as
   // the "No variable sets yet…" empty state.
@@ -93,6 +102,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
       return;
     }
     const created = await variableSets.create({
+      scope: createScope,
       name,
       ...(createDescription.trim() ? { description: createDescription.trim() } : {}),
     });
@@ -100,6 +110,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
       setCreateOpen(false);
       setCreateName("");
       setCreateDescription("");
+      setCreateScope("workspace");
       toast.success("Variable set created");
     } else if (variableSets.mutationError) {
       toast.error("Failed to create variableSet", {
@@ -152,7 +163,22 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
           <Notice tone="info">You don&apos;t have permission to list variable sets.</Notice>
         </div>
       ) : createOpen && canWriteSet ? (
-        <div className="mt-4 grid gap-3 rounded-lg border border-border bg-surface p-3 sm:grid-cols-[14rem_minmax(0,1fr)_auto]">
+        <div className="mt-4 grid gap-3 rounded-lg border border-border bg-surface p-3 sm:grid-cols-[11rem_14rem_minmax(0,1fr)_auto]">
+          <div className="grid gap-1.5">
+            <Label htmlFor="variableSet-scope">Scope</Label>
+            <Select
+              id="variableSet-scope"
+              value={createScope}
+              onChange={(event) =>
+                setCreateScope(event.target.value as WorkspaceVariableSet["scope"])
+              }
+              aria-label="Variable set scope"
+            >
+              <option value="user">Only me</option>
+              <option value="workspace">Workspace</option>
+              {canManageOrganization ? <option value="organization">Organization</option> : null}
+            </Select>
+          </div>
           <div className="grid gap-1.5">
             <Label htmlFor="variableSet-name">Name</Label>
             <Input
@@ -246,6 +272,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
               mutating={variableSets.mutating}
               canWriteSet={canWriteSet}
               canWriteSecrets={canWriteSecrets}
+              canManageOrganization={canManageOrganization}
               canReadSecrets={canReadSecrets}
               revealEpoch={revealEpoch}
               onUpdate={(patch) => variableSets.update(variableSet.id, patch)}
@@ -293,6 +320,7 @@ export function VariableSetCard(props: {
   mutating: boolean;
   canWriteSet: boolean;
   canWriteSecrets: boolean;
+  canManageOrganization?: boolean;
   canReadSecrets: boolean;
   revealEpoch: number;
   onUpdate: (patch: {
@@ -320,6 +348,10 @@ export function VariableSetCard(props: {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmDeleteVariable, setConfirmDeleteVariable] = useState<string | null>(null);
   const attachmentCount = props.attachedSessions.length + props.attachedTasks.length;
+  const canManageSet =
+    props.canWriteSet && (variableSet.scope !== "organization" || props.canManageOrganization);
+  const canManageSecrets =
+    props.canWriteSecrets && (variableSet.scope !== "organization" || props.canManageOrganization);
   const deleteBlocked = attachmentCount > 0 || props.attachmentsUnknown;
   const deleteBlockedReason = props.attachmentsUnknown
     ? "Checking where this variable set is used…"
@@ -438,11 +470,20 @@ export function VariableSetCard(props: {
             </div>
           ) : (
             <div className="min-w-0">
-              <div
-                className="break-words text-sm font-medium [overflow-wrap:anywhere]"
-                title={variableSet.name}
-              >
-                {variableSet.name}
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className="break-words text-sm font-medium [overflow-wrap:anywhere]"
+                  title={variableSet.name}
+                >
+                  {variableSet.name}
+                </span>
+                <MetaChip>
+                  {variableSet.scope === "user"
+                    ? "Only me"
+                    : variableSet.scope === "organization"
+                      ? "Organization"
+                      : "Workspace"}
+                </MetaChip>
               </div>
               <div className="mt-0.5 break-words text-xs text-fg-muted [overflow-wrap:anywhere]">
                 {variableSet.description ?? "No description"}
@@ -482,7 +523,7 @@ export function VariableSetCard(props: {
               </>
             ) : (
               <>
-                {props.canWriteSet ? (
+                {canManageSet ? (
                   <Button
                     type="button"
                     variant="ghost"
@@ -498,7 +539,7 @@ export function VariableSetCard(props: {
                     <PencilIcon className="size-3.5" />
                   </Button>
                 ) : null}
-                {props.canWriteSecrets ? (
+                {canManageSecrets ? (
                   <Button
                     type="button"
                     variant="ghost"

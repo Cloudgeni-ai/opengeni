@@ -350,7 +350,15 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             // The FK on scheduled_tasks.variable_set_id is ON DELETE RESTRICT, so
             // an attached variableSet must still exist here; fail closed if not.
             const variableSet = task.variableSetId
-              ? await getVariableSet(dispatchDb, task.workspaceId, task.variableSetId)
+              ? await getVariableSet(
+                  dispatchDb,
+                  {
+                    accountId: task.accountId,
+                    workspaceId: task.workspaceId,
+                    subjectId: task.createdBy.subjectId,
+                  },
+                  task.variableSetId,
+                )
               : null;
             if (task.variableSetId && !variableSet) {
               throw new Error(`variable set not found: ${task.variableSetId}`);
