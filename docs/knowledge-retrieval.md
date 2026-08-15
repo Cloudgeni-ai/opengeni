@@ -49,6 +49,41 @@ bases or folders. `knowledge_browse` topic/source filters are discovery hints,
 not authority. Its opaque cursor is bound to the exact account, requesting
 workspace, immutable initiating subject, parent, topic, and source filters.
 
+Document records expose an authorized `contents` link to their first chunk;
+chunks expose their `parent` plus authorized `previous`/`next` neighbors. These
+links contain only opaque stable ids. A linked title, source, quality fact, or
+body is never copied into the originating record, and following any link is a
+fresh `knowledge_get`/`knowledge_browse` authorization check. Revoking the
+document therefore removes both its records and its traversal surface.
+
+### Bounded search selection
+
+Search retrieves a bounded surplus of at most 50 already-authorized candidates,
+then applies one deterministic final selection after the exact-row recheck:
+
+1. a result must have vector score `>= 0.52` or normalized keyword score
+   `>= 0.01` (`any_signal`); incidental vector neighbors below the floor are
+   omitted;
+2. freshness is classified at response construction as `current` (at most 90
+   days), `aging` (at most 365 days), or `stale`; current/aging evidence receives
+   a small `0.02`/`0.01` ordering adjustment while stale evidence remains
+   retrievable with no boost;
+3. exact textual content (title, body, summary, and topics) is deduplicated,
+   retaining the highest-ranked authorized source and reporting the number of
+   duplicates; source/provenance metadata is not used to manufacture a second
+   copy of identical model-visible content;
+4. the caller limit is applied, then whole records are removed from the tail
+   until the complete serialized response is at most 64 KiB.
+
+Every response reports the bounded ranked and rechecked candidate counts,
+recheck/floor/dedupe/limit/response-budget omissions, exact serialized UTF-8
+bytes, and a deterministic byte-based token estimate (four bytes per estimated
+token). The token value is a budget fact, not a claim about a provider-specific
+tokenizer. Counts describe only candidates already inside the authorized
+bounded window, so they cannot reveal inaccessible rows. Trust remains
+`sourced` and conflict remains `not_evaluated`; those honest neutral quality
+facts do not receive a hidden score adjustment.
+
 The compatibility tools (`search_documents`, `knowledge_fetch`,
 `fetch_document_chunk`, and `list_document_bases`) remain available for existing
 callers, but new Knowledge navigation should use the three tools above.
@@ -64,7 +99,9 @@ subject + agent_access` before a row can be ranked or returned:
    revocation removes it from the response;
 3. get performs a fresh exact-record authorization check;
 4. browse rechecks the parent before listing children and filters every child;
-5. following an internal link is an ordinary get/browse and rechecks authority.
+5. structural link ids are selected under the same RLS context as the visible
+   record, without linked titles or source metadata;
+6. following an internal link is an ordinary get/browse and rechecks authority.
 
 An inaccessible parent returns no children and no title, source, or relationship
 metadata. A cursor can only move within the already-authorized query; it never

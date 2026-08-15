@@ -50,6 +50,7 @@ async function createReadyDocument(
     kind: "organization" | "workspace" | "personal";
     subjectId?: string;
     text?: string;
+    sourceUpdatedAt?: Date;
   },
 ): Promise<StoredDocument> {
   const [file] = await shared!.admin<{ id: string }[]>`
@@ -68,12 +69,14 @@ async function createReadyDocument(
   const [document] = await shared!.admin<{ id: string }[]>`
     insert into documents (
       account_id, workspace_id, base_id, file_id, status, title, created_by,
-      authority_kind, authority_workspace_id, authority_subject_id, visibility
+      authority_kind, authority_workspace_id, authority_subject_id, visibility,
+      source_updated_at
     ) values (
       ${workspace.accountId}, ${workspace.workspaceId}, ${base!.id}, ${file!.id},
       'ready', ${input.label}, ${input.subjectId ?? "user:alice"}, ${input.kind},
       ${input.kind === "organization" ? null : workspace.workspaceId}, ${subjectId},
-      ${input.kind === "personal" ? "private" : "workspace"}
+      ${input.kind === "personal" ? "private" : "workspace"},
+      ${input.sourceUpdatedAt ?? null}
     ) returning id`;
   const zeroVector = `[${Array.from({ length: 3072 }, () => "0").join(",")}]`;
   const [chunk] = await shared!.admin<{ id: string }[]>`
@@ -407,5 +410,192 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
         }),
       ).resolves.toBeNull();
     }
+  });
+
+  test("rechecks traversal, lifecycle, quality, dedupe, and response bounds under FORCE RLS", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace("knowledge-selection");
+    const traversal = await createReadyDocument(workspace, {
+      label: "private-traversal",
+      kind: "personal",
+      subjectId: "user:alice",
+      text: "traversal-zero",
+    });
+    const zeroVector = `[${Array.from({ length: 3072 }, () => "0").join(",")}]`;
+    const extraChunks = await shared!.admin<{ id: string; chunkIndex: number }[]>`
+      insert into document_chunks (
+        account_id, workspace_id, document_id, base_id, file_id, chunk_index,
+        text, metadata, embedding, embedding_model
+      ) values
+        (${workspace.accountId}, ${workspace.workspaceId}, ${traversal.documentId},
+         ${traversal.baseId}, ${traversal.fileId}, 1, 'traversal-one', '{}'::jsonb,
+         ${zeroVector}::vector, 'authority-test'),
+        (${workspace.accountId}, ${workspace.workspaceId}, ${traversal.documentId},
+         ${traversal.baseId}, ${traversal.fileId}, 2, 'traversal-two', '{}'::jsonb,
+         ${zeroVector}::vector, 'authority-test')
+      returning id, chunk_index as "chunkIndex"`;
+    extraChunks.sort((left, right) => left.chunkIndex - right.chunkIndex);
+
+    const documentRecord = await getEffectiveKnowledgeRecord(forced.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      initiatingSubjectId: "user:alice",
+      id: `document:${traversal.documentId}`,
+    });
+    expect(documentRecord?.links).toContainEqual({
+      relation: "contents",
+      target: { kind: "knowledge", id: `document_chunk:${traversal.chunkId}` },
+    });
+    const first = await getEffectiveKnowledgeRecord(forced.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      initiatingSubjectId: "user:alice",
+      id: `document_chunk:${traversal.chunkId}`,
+    });
+    expect(first?.links).toContainEqual({
+      relation: "next",
+      target: { kind: "knowledge", id: `document_chunk:${extraChunks[0]!.id}` },
+    });
+    const middle = await getEffectiveKnowledgeRecord(forced.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      initiatingSubjectId: "user:alice",
+      id: `document_chunk:${extraChunks[0]!.id}`,
+    });
+    expect(middle?.links).toEqual(
+      expect.arrayContaining([
+        {
+          relation: "previous",
+          target: {
+            kind: "knowledge",
+            id: `document_chunk:${traversal.chunkId}`,
+          },
+        },
+        {
+          relation: "next",
+          target: {
+            kind: "knowledge",
+            id: `document_chunk:${extraChunks[1]!.id}`,
+          },
+        },
+      ]),
+    );
+    await expect(
+      getEffectiveKnowledgeRecord(forced.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        initiatingSubjectId: "user:bob",
+        id: `document_chunk:${extraChunks[0]!.id}`,
+      }),
+    ).resolves.toBeNull();
+
+    // Revocation is effective for exact get, traversal, and ranking. The empty
+    // response contains no neighboring ids or other record metadata.
+    await shared!.admin`
+      update documents set agent_access = false where id = ${traversal.documentId}`;
+    await expect(
+      getEffectiveKnowledgeRecord(forced.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        initiatingSubjectId: "user:alice",
+        id: `document_chunk:${extraChunks[0]!.id}`,
+      }),
+    ).resolves.toBeNull();
+    const revokedTraversal = await browseEffectiveKnowledge(forced.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      initiatingSubjectId: "user:alice",
+      parentId: `document:${traversal.documentId}`,
+    });
+    expect(revokedTraversal).toEqual({
+      records: [],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const revokedSearch = await searchEffectiveKnowledge(forced.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      query: "traversal-one",
+      mode: "keyword",
+      limit: 10,
+      initiatingSubjectId: "user:alice",
+      surface: "agent",
+    });
+    expect(revokedSearch.results).toEqual([]);
+    const revokedSearchJson = JSON.stringify(revokedSearch);
+    expect(revokedSearchJson).not.toContain(extraChunks[0]!.id);
+    expect(revokedSearchJson).not.toContain("private-traversal");
+    expect(revokedSearchJson).not.toContain("traversal-one");
+
+    const stale = await createReadyDocument(workspace, {
+      label: "stale-evidence",
+      kind: "workspace",
+      text: "stalemarker durable architecture",
+      sourceUpdatedAt: new Date("2020-01-01T00:00:00.000Z"),
+    });
+    const staleSearch = await searchEffectiveKnowledge(forced.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      query: "stalemarker",
+      mode: "keyword",
+      limit: 10,
+      initiatingSubjectId: "user:alice",
+      surface: "agent",
+    });
+    expect(staleSearch.results).toHaveLength(1);
+    expect(staleSearch.results[0]).toMatchObject({
+      record: {
+        id: `document_chunk:${stale.chunkId}`,
+        quality: { trust: "sourced", conflict: "not_evaluated" },
+      },
+      retrieval: { freshness: "stale", qualityAdjustment: 0 },
+    });
+
+    const duplicateA = await createReadyDocument(workspace, {
+      label: "duplicate-a",
+      kind: "workspace",
+      text: "dedupemarker identical sourced fact",
+    });
+    const duplicateB = await createReadyDocument(workspace, {
+      label: "duplicate-b",
+      kind: "workspace",
+      text: "dedupemarker identical sourced fact",
+    });
+    await shared!.admin`
+      update documents set title = 'Duplicate fact'
+      where id in (${duplicateA.documentId}, ${duplicateB.documentId})`;
+    const deduped = await searchEffectiveKnowledge(forced.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      query: "dedupemarker",
+      mode: "keyword",
+      limit: 10,
+      initiatingSubjectId: "user:alice",
+      surface: "agent",
+    });
+    expect(deduped.results).toHaveLength(1);
+    expect(deduped.results[0]?.retrieval.duplicateCount).toBe(1);
+    expect(deduped.selection.omitted.asDuplicate).toBe(1);
+
+    for (let index = 0; index < 7; index += 1) {
+      await createReadyDocument(workspace, {
+        label: `large-${index}`,
+        kind: "workspace",
+        text: `budgetmarker ${index} ${"å ".repeat(7_000)}`,
+      });
+    }
+    const bounded = await searchEffectiveKnowledge(forced.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      query: "budgetmarker",
+      mode: "keyword",
+      limit: 20,
+      initiatingSubjectId: "user:alice",
+      surface: "agent",
+    });
+    const responseBytes = Buffer.byteLength(JSON.stringify(bounded), "utf8");
+    expect(responseBytes).toBeLessThanOrEqual(bounded.selection.budget.maxResponseBytes);
+    expect(bounded.selection.budget.responseBytes).toBe(responseBytes);
+    expect(bounded.selection.omitted.forResponseBudget).toBeGreaterThan(0);
   });
 });

@@ -17,6 +17,7 @@ import {
   IndexedDocumentSummary,
   KnowledgeBrowseResponse,
   KnowledgeRecord,
+  KnowledgeSearchResult,
   KnowledgeSearchResponse,
   KnowledgeSourceKind,
   ListIndexedDocumentsResponse,
@@ -35,7 +36,14 @@ import type { ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, or, sql, type SQL } from "drizzle-orm";
 import type OpenAI from "openai";
-import { KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS } from "@opengeni/contracts";
+import {
+  KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS,
+  KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES,
+  KNOWLEDGE_SEARCH_MAX_RESULTS,
+  KNOWLEDGE_SEARCH_MIN_KEYWORD_SCORE,
+  KNOWLEDGE_SEARCH_MIN_VECTOR_SCORE,
+  KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN,
+} from "@opengeni/contracts";
 import { projectKnowledgeRecord } from "./knowledge-projection";
 
 export { projectKnowledgeRecord } from "./knowledge-projection";
@@ -1865,12 +1873,22 @@ export async function searchEffectiveKnowledge(
   services: Pick<DocumentServices, "embedder"> = createDocumentServices(),
 ): Promise<KnowledgeSearchResponse> {
   const initiatingSubjectId = canonicalEffectiveDocumentSubject(input.initiatingSubjectId);
+  const requestedLimit = Math.min(Math.max(input.limit ?? 5, 1), KNOWLEDGE_SEARCH_MAX_RESULTS);
+  // Pull a bounded surplus so the permission-safe result set can still satisfy
+  // the caller after relevance filtering and exact-content deduplication.
+  const candidateLimit = Math.min(requestedLimit * 4, KNOWLEDGE_SEARCH_MAX_RESULTS);
   const ranked = await searchEffectiveDocuments(
     db,
-    { ...input, initiatingSubjectId, surface: "agent" },
+    { ...input, limit: candidateLimit, initiatingSubjectId, surface: "agent" },
     services,
   );
-  if (ranked.length === 0) return { results: [] };
+  if (ranked.length === 0) {
+    return selectKnowledgeSearchResults({
+      candidates: [],
+      rankedCandidateCount: 0,
+      requestedLimit,
+    });
+  }
   const access: DocumentAccessFilter = { agentOnly: true, viewerSubjectId: initiatingSubjectId };
   const current = await withDocumentAccountRls(
     db,
@@ -1883,6 +1901,8 @@ export async function searchEffectiveKnowledge(
           chunk: schema.documentChunks,
           document: schema.documents,
           citation: googleDriveCitationProjection(input.workspaceId, access),
+          previousChunkId: knowledgePreviousChunkIdProjection(),
+          nextChunkId: knowledgeNextChunkIdProjection(),
         })
         .from(schema.documentChunks)
         .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
@@ -1900,23 +1920,241 @@ export async function searchEffectiveKnowledge(
         ),
   );
   const currentByChunkId = new Map(current.map((row) => [row.chunk.id, row]));
-  return {
-    results: ranked.flatMap((rankedResult) => {
+  return selectKnowledgeSearchResults({
+    rankedCandidateCount: ranked.length,
+    requestedLimit,
+    candidates: ranked.flatMap((rankedResult) => {
       const row = currentByChunkId.get(rankedResult.chunkId);
       if (!row) return [];
       return [
         {
-          record: knowledgeChunkRecord(row.document, row.chunk, row.citation),
-          retrieval: {
-            score: rankedResult.score,
-            matchType: rankedResult.matchType,
-            vectorScore: rankedResult.vectorScore,
-            keywordScore: rankedResult.keywordScore,
-          },
+          record: knowledgeChunkRecord(row.document, row.chunk, row.citation, {
+            previousChunkId: row.previousChunkId,
+            nextChunkId: row.nextChunkId,
+          }),
+          semanticScore: rankedResult.score,
+          matchType: rankedResult.matchType,
+          vectorScore: rankedResult.vectorScore,
+          keywordScore: rankedResult.keywordScore,
         },
       ];
     }),
+  });
+}
+
+type KnowledgeSearchCandidate = {
+  record: KnowledgeRecord;
+  semanticScore: number;
+  matchType: DocumentSearchMode;
+  vectorScore: number | null;
+  keywordScore: number | null;
+};
+
+type KnowledgeSearchSelectionInput = {
+  candidates: KnowledgeSearchCandidate[];
+  rankedCandidateCount: number;
+  requestedLimit: number;
+  now?: Date | undefined;
+};
+
+/**
+ * Deterministic, content-safe final selection over already-authorized and
+ * freshly rechecked Knowledge candidates. Exported for boundary tests; callers
+ * must never use it as a substitute for the database authorization pass above.
+ */
+export function selectKnowledgeSearchResults(
+  input: KnowledgeSearchSelectionInput,
+): KnowledgeSearchResponse {
+  const requestedLimit = Math.min(
+    Math.max(Math.trunc(input.requestedLimit), 1),
+    KNOWLEDGE_SEARCH_MAX_RESULTS,
+  );
+  const nowMs = (input.now ?? new Date()).getTime();
+  let belowRelevanceFloor = 0;
+  const relevant: KnowledgeSearchResult[] = [];
+  for (const candidate of input.candidates) {
+    const relevanceSignals: Array<"vector" | "keyword"> = [];
+    if (
+      candidate.vectorScore !== null &&
+      candidate.vectorScore >= KNOWLEDGE_SEARCH_MIN_VECTOR_SCORE
+    ) {
+      relevanceSignals.push("vector");
+    }
+    if (
+      candidate.keywordScore !== null &&
+      candidate.keywordScore >= KNOWLEDGE_SEARCH_MIN_KEYWORD_SCORE
+    ) {
+      relevanceSignals.push("keyword");
+    }
+    if (relevanceSignals.length === 0) {
+      belowRelevanceFloor += 1;
+      continue;
+    }
+    const freshness = knowledgeFreshness(candidate.record.quality.freshnessAt, nowMs);
+    const qualityAdjustment = freshness === "current" ? 0.02 : freshness === "aging" ? 0.01 : 0;
+    relevant.push({
+      record: candidate.record,
+      retrieval: {
+        score: roundScore(Math.min(1, candidate.semanticScore + qualityAdjustment)),
+        semanticScore: roundScore(candidate.semanticScore),
+        matchType: candidate.matchType,
+        vectorScore: candidate.vectorScore === null ? null : roundScore(candidate.vectorScore),
+        keywordScore: candidate.keywordScore === null ? null : roundScore(candidate.keywordScore),
+        relevanceSignals,
+        freshness,
+        qualityAdjustment,
+        duplicateCount: 0,
+      },
+    });
+  }
+  relevant.sort(compareKnowledgeSearchResults);
+
+  const deduped: KnowledgeSearchResult[] = [];
+  const byContent = new Map<string, number>();
+  let asDuplicate = 0;
+  for (const result of relevant) {
+    const key = knowledgeTextualContentKey(result.record);
+    const retainedIndex = byContent.get(key);
+    if (retainedIndex === undefined) {
+      byContent.set(key, deduped.length);
+      deduped.push(result);
+      continue;
+    }
+    asDuplicate += 1;
+    const retained = deduped[retainedIndex]!;
+    retained.retrieval.duplicateCount += 1;
+  }
+
+  const forLimit = Math.max(0, deduped.length - requestedLimit);
+  const bounded = deduped.slice(0, requestedLimit);
+  let forResponseBudget = 0;
+  let response = knowledgeSearchResponse({
+    results: bounded,
+    rankedCandidateCount: input.rankedCandidateCount,
+    recheckedCandidateCount: input.candidates.length,
+    belowRelevanceFloor,
+    asDuplicate,
+    forLimit,
+    forResponseBudget,
+  });
+  while (knowledgeResponseBytes(response) > KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES) {
+    if (bounded.length === 0) {
+      throw new Error("knowledge search selection facts exceed the response budget");
+    }
+    bounded.pop();
+    forResponseBudget += 1;
+    response = knowledgeSearchResponse({
+      results: bounded,
+      rankedCandidateCount: input.rankedCandidateCount,
+      recheckedCandidateCount: input.candidates.length,
+      belowRelevanceFloor,
+      asDuplicate,
+      forLimit,
+      forResponseBudget,
+    });
+  }
+  return response;
+}
+
+function compareKnowledgeSearchResults(
+  left: KnowledgeSearchResult,
+  right: KnowledgeSearchResult,
+): number {
+  return (
+    right.retrieval.score - left.retrieval.score ||
+    right.retrieval.semanticScore - left.retrieval.semanticScore ||
+    (right.retrieval.vectorScore ?? 0) - (left.retrieval.vectorScore ?? 0) ||
+    (right.retrieval.keywordScore ?? 0) - (left.retrieval.keywordScore ?? 0) ||
+    (left.record.id === right.record.id ? 0 : left.record.id < right.record.id ? -1 : 1)
+  );
+}
+
+function knowledgeFreshness(value: string, nowMs: number): "current" | "aging" | "stale" {
+  const freshnessMs = Date.parse(value);
+  if (!Number.isFinite(freshnessMs)) return "stale";
+  const ageDays = Math.max(0, (nowMs - freshnessMs) / 86_400_000);
+  if (ageDays <= 90) return "current";
+  return ageDays <= 365 ? "aging" : "stale";
+}
+
+function knowledgeTextualContentKey(record: KnowledgeRecord): string {
+  return createHash("sha256")
+    .update("opengeni:knowledge-search-content:v1\0")
+    .update(record.title)
+    .update("\0")
+    .update(
+      JSON.stringify({
+        body: record.content.body,
+        summary: record.content.summary,
+        topics: record.content.topics,
+      }),
+    )
+    .digest("hex");
+}
+
+function knowledgeSearchResponse(input: {
+  results: KnowledgeSearchResult[];
+  rankedCandidateCount: number;
+  recheckedCandidateCount: number;
+  belowRelevanceFloor: number;
+  asDuplicate: number;
+  forLimit: number;
+  forResponseBudget: number;
+}): KnowledgeSearchResponse {
+  const selection = {
+    relevanceFloor: {
+      policy: "any_signal" as const,
+      vectorScore: KNOWLEDGE_SEARCH_MIN_VECTOR_SCORE as 0.52,
+      keywordScore: KNOWLEDGE_SEARCH_MIN_KEYWORD_SCORE as 0.01,
+    },
+    dedupe: { policy: "exact_textual_content" as const },
+    candidates: {
+      ranked: input.rankedCandidateCount,
+      rechecked: input.recheckedCandidateCount,
+      omittedOnRecheck: Math.max(0, input.rankedCandidateCount - input.recheckedCandidateCount),
+    },
+    omitted: {
+      belowRelevanceFloor: input.belowRelevanceFloor,
+      asDuplicate: input.asDuplicate,
+      forLimit: input.forLimit,
+      forResponseBudget: input.forResponseBudget,
+    },
+    budget: {
+      maxResults: KNOWLEDGE_SEARCH_MAX_RESULTS as 50,
+      maxResponseBytes: KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES as 65_536,
+      responseBytes: 0,
+      tokenEstimateBytesPerToken: KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN as 4,
+      estimatedTokens: 0,
+      maxEstimatedTokens: Math.ceil(
+        KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES / KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN,
+      ) as 16_384,
+    },
   };
+  const response: KnowledgeSearchResponse = {
+    results: [...input.results],
+    selection,
+  };
+  // The counters themselves contribute a few bytes. Iterate to a fixed point so
+  // responseBytes describes the actual serialized response, not an approximation.
+  for (let index = 0; index < 8; index += 1) {
+    const responseBytes = knowledgeResponseBytes(response);
+    const estimatedTokens = Math.ceil(
+      responseBytes / KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN,
+    );
+    if (
+      response.selection.budget.responseBytes === responseBytes &&
+      response.selection.budget.estimatedTokens === estimatedTokens
+    ) {
+      break;
+    }
+    response.selection.budget.responseBytes = responseBytes;
+    response.selection.budget.estimatedTokens = estimatedTokens;
+  }
+  return response;
+}
+
+function knowledgeResponseBytes(response: KnowledgeSearchResponse): number {
+  return Buffer.byteLength(JSON.stringify(response), "utf8");
 }
 
 /** Fetch one stable Knowledge record with a fresh authorization check. */
@@ -1943,8 +2181,17 @@ export async function getEffectiveKnowledgeRecord(
           .select({
             document: schema.documents,
             citation: googleDriveCitationProjection(input.workspaceId, access),
+            firstChunkId: schema.documentChunks.id,
           })
           .from(schema.documents)
+          .leftJoin(
+            schema.documentChunks,
+            and(
+              eq(schema.documentChunks.accountId, schema.documents.accountId),
+              eq(schema.documentChunks.documentId, schema.documents.id),
+              eq(schema.documentChunks.chunkIndex, 0),
+            ),
+          )
           .where(
             and(
               eq(schema.documents.accountId, input.accountId),
@@ -1954,13 +2201,15 @@ export async function getEffectiveKnowledgeRecord(
             ),
           )
           .limit(1);
-        return row ? knowledgeDocumentRecord(row.document, row.citation) : null;
+        return row ? knowledgeDocumentRecord(row.document, row.citation, row.firstChunkId) : null;
       }
       const [row] = await scopedDb
         .select({
           chunk: schema.documentChunks,
           document: schema.documents,
           citation: googleDriveCitationProjection(input.workspaceId, access),
+          previousChunkId: knowledgePreviousChunkIdProjection(),
+          nextChunkId: knowledgeNextChunkIdProjection(),
         })
         .from(schema.documentChunks)
         .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
@@ -1974,7 +2223,12 @@ export async function getEffectiveKnowledgeRecord(
           ),
         )
         .limit(1);
-      return row ? knowledgeChunkRecord(row.document, row.chunk, row.citation) : null;
+      return row
+        ? knowledgeChunkRecord(row.document, row.chunk, row.citation, {
+            previousChunkId: row.previousChunkId,
+            nextChunkId: row.nextChunkId,
+          })
+        : null;
     },
   );
 }
@@ -2017,7 +2271,10 @@ export async function browseEffectiveKnowledge(
   if (parent && after > 2_147_483_648n) {
     throw new Error("invalid knowledge browse cursor");
   }
-  const access: DocumentAccessFilter = { agentOnly: true, viewerSubjectId: initiatingSubjectId };
+  const access: DocumentAccessFilter = {
+    agentOnly: true,
+    viewerSubjectId: initiatingSubjectId,
+  };
   return await withDocumentAccountRls(
     db,
     input.accountId,
@@ -2043,6 +2300,8 @@ export async function browseEffectiveKnowledge(
             chunk: schema.documentChunks,
             document: schema.documents,
             citation: googleDriveCitationProjection(input.workspaceId, access),
+            previousChunkId: knowledgePreviousChunkIdProjection(),
+            nextChunkId: knowledgeNextChunkIdProjection(),
           })
           .from(schema.documentChunks)
           .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
@@ -2061,7 +2320,12 @@ export async function browseEffectiveKnowledge(
         const page = rows.slice(0, limit);
         const last = page.at(-1)?.chunk.chunkIndex;
         return {
-          records: page.map((row) => knowledgeChunkRecord(row.document, row.chunk, row.citation)),
+          records: page.map((row) =>
+            knowledgeChunkRecord(row.document, row.chunk, row.citation, {
+              previousChunkId: row.previousChunkId,
+              nextChunkId: row.nextChunkId,
+            }),
+          ),
           nextCursor:
             hasMore && last !== undefined
               ? encodeKnowledgeBrowseCursor(cursorScope, BigInt(last + 1))
@@ -2084,8 +2348,17 @@ export async function browseEffectiveKnowledge(
         .select({
           document: schema.documents,
           citation: googleDriveCitationProjection(input.workspaceId, access),
+          firstChunkId: schema.documentChunks.id,
         })
         .from(schema.documents)
+        .leftJoin(
+          schema.documentChunks,
+          and(
+            eq(schema.documentChunks.accountId, schema.documents.accountId),
+            eq(schema.documentChunks.documentId, schema.documents.id),
+            eq(schema.documentChunks.chunkIndex, 0),
+          ),
+        )
         .where(and(...conditions))
         .orderBy(asc(schema.documents.indexSequence))
         .limit(limit + 1);
@@ -2093,7 +2366,9 @@ export async function browseEffectiveKnowledge(
       const page = rows.slice(0, limit);
       const last = page.at(-1)?.document.indexSequence;
       return {
-        records: page.map((row) => knowledgeDocumentRecord(row.document, row.citation)),
+        records: page.map((row) =>
+          knowledgeDocumentRecord(row.document, row.citation, row.firstChunkId),
+        ),
         nextCursor:
           hasMore && last !== undefined && last !== null
             ? encodeKnowledgeBrowseCursor(cursorScope, last)
@@ -2193,6 +2468,7 @@ function parseKnowledgeRecordId(value: string): {
 function knowledgeDocumentRecord(
   document: typeof schema.documents.$inferSelect,
   citation: unknown = null,
+  firstChunkId: string | null = null,
 ): KnowledgeRecord {
   if (!document.indexedAt) throw new Error(`Ready document is missing indexed_at: ${document.id}`);
   const projected = projectKnowledgeRecord({
@@ -2216,7 +2492,20 @@ function knowledgeDocumentRecord(
     },
     lifecycle: { state: "active", updatedAt: document.updatedAt.toISOString() },
     quality: knowledgeQuality(document),
-    links: knowledgeSourceLinks(projected.source.uri),
+    links: [
+      ...(firstChunkId
+        ? [
+            {
+              relation: "contents" as const,
+              target: {
+                kind: "knowledge" as const,
+                id: `document_chunk:${firstChunkId}` as const,
+              },
+            },
+          ]
+        : []),
+      ...knowledgeSourceLinks(projected.source.uri),
+    ],
     projection: projected.projection,
   };
 }
@@ -2225,6 +2514,10 @@ function knowledgeChunkRecord(
   document: typeof schema.documents.$inferSelect,
   chunk: typeof schema.documentChunks.$inferSelect,
   citation: unknown = null,
+  traversal: {
+    previousChunkId: string | null;
+    nextChunkId: string | null;
+  } = { previousChunkId: null, nextChunkId: null },
 ): KnowledgeRecord {
   if (!document.indexedAt) throw new Error(`Ready document is missing indexed_at: ${document.id}`);
   const projected = projectKnowledgeRecord({
@@ -2249,7 +2542,32 @@ function knowledgeChunkRecord(
     lifecycle: { state: "active", updatedAt: document.updatedAt.toISOString() },
     quality: knowledgeQuality(document),
     links: [
-      { relation: "parent", target: { kind: "knowledge", id: `document:${document.id}` } },
+      {
+        relation: "parent",
+        target: { kind: "knowledge", id: `document:${document.id}` },
+      },
+      ...(traversal.previousChunkId
+        ? [
+            {
+              relation: "previous" as const,
+              target: {
+                kind: "knowledge" as const,
+                id: `document_chunk:${traversal.previousChunkId}` as const,
+              },
+            },
+          ]
+        : []),
+      ...(traversal.nextChunkId
+        ? [
+            {
+              relation: "next" as const,
+              target: {
+                kind: "knowledge" as const,
+                id: `document_chunk:${traversal.nextChunkId}` as const,
+              },
+            },
+          ]
+        : []),
       ...knowledgeSourceLinks(projected.source.uri),
     ],
     projection: projected.projection,
@@ -2283,6 +2601,35 @@ function knowledgeQuality(
 
 function knowledgeSourceLinks(sourceUri: string | null): KnowledgeRecord["links"] {
   return sourceUri ? [{ relation: "source", target: { kind: "external", uri: sourceUri } }] : [];
+}
+
+/**
+ * These structural targets are selected inside the same authorization-scoped
+ * transaction as their owning record. Only opaque ids are projected; titles,
+ * source fields, and content require a subsequent freshly authorized get.
+ */
+function knowledgePreviousChunkIdProjection(): SQL<string | null> {
+  return sql<string | null>`(
+    select knowledge_previous_chunk.id
+    from document_chunks knowledge_previous_chunk
+    where knowledge_previous_chunk.account_id = ${schema.documentChunks.accountId}
+      and knowledge_previous_chunk.document_id = ${schema.documentChunks.documentId}
+      and knowledge_previous_chunk.chunk_index < ${schema.documentChunks.chunkIndex}
+    order by knowledge_previous_chunk.chunk_index desc
+    limit 1
+  )`;
+}
+
+function knowledgeNextChunkIdProjection(): SQL<string | null> {
+  return sql<string | null>`(
+    select knowledge_next_chunk.id
+    from document_chunks knowledge_next_chunk
+    where knowledge_next_chunk.account_id = ${schema.documentChunks.accountId}
+      and knowledge_next_chunk.document_id = ${schema.documentChunks.documentId}
+      and knowledge_next_chunk.chunk_index > ${schema.documentChunks.chunkIndex}
+    order by knowledge_next_chunk.chunk_index asc
+    limit 1
+  )`;
 }
 
 async function vectorSearchDocuments(
