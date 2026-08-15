@@ -1,9 +1,56 @@
--- deployment-mode: rolling
+-- deployment-mode: maintenance
 -- Complete governed goal revision decisions and freeze bounded root constraints
 -- into the existing accepted-turn goal authority.
+-- This is a one-way application protocol cutover: stop every API, control
+-- worker, and turn worker before applying it, and never restart a pre-0257
+-- image after commit. Old workers strip root constraints from the accepted-turn
+-- snapshot and therefore cannot safely execute against this schema.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
+
+-- Reject mixed-version writers before locking, then repeat after the locks to
+-- close the connect-before-lock race. The deployment must keep every old image
+-- stopped until a 0257-compatible application fleet is active.
+DO $goal_revision_writer_drain_before_lock$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app')
+    AND EXISTS (
+      SELECT 1
+      FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND usename = 'opengeni_app'
+        AND pid <> pg_backend_pid()
+    )
+  THEN
+    RAISE EXCEPTION
+      'goal revision authority activation requires all opengeni_app sessions to be stopped'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$goal_revision_writer_drain_before_lock$;
+
+LOCK TABLE "session_goals" IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE "session_goal_revisions" IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE "session_turns" IN ACCESS EXCLUSIVE MODE;
+
+DO $goal_revision_writer_drain_after_lock$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app')
+    AND EXISTS (
+      SELECT 1
+      FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND usename = 'opengeni_app'
+        AND pid <> pg_backend_pid()
+    )
+  THEN
+    RAISE EXCEPTION
+      'goal revision authority activation requires all opengeni_app sessions to be stopped'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$goal_revision_writer_drain_after_lock$;
 
 CREATE OR REPLACE FUNCTION session_goal_normalize_root_constraints(value jsonb)
 RETURNS jsonb

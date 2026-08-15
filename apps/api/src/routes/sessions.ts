@@ -97,6 +97,7 @@ import {
   insertPtySession,
   listSessionEventPage,
   listSessionHumanInputRequests,
+  listSessionGoalRevisionPage,
   listSessionGoalRevisions,
   rejectSessionGoalRevisionWithEvent,
   listSessionIdsInGroup,
@@ -1578,12 +1579,20 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
+    return c.json(await listSessionGoalRevisions(db, workspaceId, sessionId));
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/goal/revisions/page", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
     const query = ListSessionGoalRevisionsQuery.parse({
       limit: c.req.query("limit"),
       before: c.req.query("before"),
     });
     return c.json(
-      await listSessionGoalRevisions(db, workspaceId, sessionId, {
+      await listSessionGoalRevisionPage(db, workspaceId, sessionId, {
         limit: query.limit,
         ...(query.before ? { before: query.before } : {}),
       }),
@@ -3659,6 +3668,7 @@ export function sessionAuthorizationOperationForHttp(
         : null;
   }
   if (suffix === "/goal/revisions" && verb === "GET") return "session.goal.read";
+  if (suffix === "/goal/revisions/page" && verb === "GET") return "session.goal.read";
   if (/^\/goal\/revisions\/[^/]+\/apply$/.test(suffix) && verb === "POST") {
     return "session.goal.write";
   }

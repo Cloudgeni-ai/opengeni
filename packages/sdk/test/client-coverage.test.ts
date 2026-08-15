@@ -281,14 +281,17 @@ describe("OpenGeniClient goals", () => {
     expect(JSON.parse(requests[1]!.body!)).toEqual({ status: "active" });
   });
 
-  test("pages and decides immutable goal revisions through the bounded routes", async () => {
+  test("preserves the raw revision list and pages through the separately named route", async () => {
     const revisionId = "33333333-3333-4333-8333-333333333333";
-    const { client, requests } = makeClient((request) =>
-      request.method === "GET"
+    const { client, requests } = makeClient((request) => {
+      if (request.method !== "GET") return jsonResponse({ id: "goal-1", status: "active" });
+      return new URL(request.url).pathname.endsWith("/page")
         ? jsonResponse({ revisions: [], hasMore: false, nextCursor: null })
-        : jsonResponse({ id: "goal-1", status: "active" }),
-    );
-    await client.listGoalRevisions(WORKSPACE_ID, SESSION_ID, {
+        : jsonResponse([]);
+    });
+    const revisions = await client.listGoalRevisions(WORKSPACE_ID, SESSION_ID);
+    expect(revisions).toEqual([]);
+    await client.listGoalRevisionPage(WORKSPACE_ID, SESSION_ID, {
       limit: 25,
       before: revisionId,
     });
@@ -306,13 +309,15 @@ describe("OpenGeniClient goals", () => {
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [
         `GET /v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal/revisions`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal/revisions/page`,
         `POST /v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal/revisions/${revisionId}/apply`,
         `POST /v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal/revisions/${revisionId}/reject`,
         `POST /v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal/revisions/${revisionId}/rollback`,
       ],
     );
-    expect(new URL(requests[0]!.url).searchParams.toString()).toBe(`limit=25&before=${revisionId}`);
-    expect(requests.slice(1).map((request) => JSON.parse(request.body!))).toEqual([
+    expect(new URL(requests[0]!.url).searchParams.toString()).toBe("");
+    expect(new URL(requests[1]!.url).searchParams.toString()).toBe(`limit=25&before=${revisionId}`);
+    expect(requests.slice(2).map((request) => JSON.parse(request.body!))).toEqual([
       { expectedObjectiveRevision: 3 },
       { expectedObjectiveRevision: 3, rationale: "keep current intent" },
       { expectedObjectiveRevision: 4, rationale: "restore prior intent" },

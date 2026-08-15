@@ -51,6 +51,7 @@ afterAll(async () => {
 async function runningGoalFixture(
   options: {
     withAncestor?: boolean;
+    mutationPolicy?: "review_changes" | "preserve_intent" | "autonomous_adaptation";
     personalConnectionDelegations?:
       | McpPersonalConnectionDelegation[]
       | ((subjectId: string) => McpPersonalConnectionDelegation[]);
@@ -103,7 +104,10 @@ async function runningGoalFixture(
     clientEventId: `initial:${session.id}`,
     reasoningEffortFallback: "low",
     createdEventPayload: {},
-    goal: { text: "Finish the durable wake proof" },
+    goal: {
+      text: "Finish the durable wake proof",
+      mutationPolicy: options.mutationPolicy ?? "preserve_intent",
+    },
   });
   const attemptId = crypto.randomUUID();
   const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
@@ -635,7 +639,7 @@ describe("durable active-goal wake", () => {
       goal: { text: "Explicit human redirect", objectiveRevision: 2 },
     });
     expect(proposed.proposalId).toBeTruthy();
-    const { revisions } = await listSessionGoalRevisions(
+    const revisions = await listSessionGoalRevisions(
       client.db,
       ctx.grant.workspaceId!,
       ctx.session.id,
@@ -666,7 +670,7 @@ describe("durable active-goal wake", () => {
       text: "Agent replacement awaiting review",
       objectiveRevision: 3,
     });
-    const { revisions: afterApply } = await listSessionGoalRevisions(
+    const afterApply = await listSessionGoalRevisions(
       client.db,
       ctx.grant.workspaceId!,
       ctx.session.id,
@@ -1074,7 +1078,7 @@ describe("durable active-goal wake", () => {
   });
 
   test("a recovered attempt reconciles an ambiguously committed goal update without overwriting newer truth", async () => {
-    const ctx = await runningGoalFixture();
+    const ctx = await runningGoalFixture({ mutationPolicy: "autonomous_adaptation" });
     const firstKey = crypto.randomUUID();
     const secondKey = crypto.randomUUID();
 

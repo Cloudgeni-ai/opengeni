@@ -27,6 +27,18 @@ in `session_turns.goal_snapshot` when the turn is accepted. Ordinary turns,
 goal continuations, recovery, and both compaction modes compose only that
 snapshot, never a later mutable goal head.
 
+## Migration 0257 deployment boundary
+
+Migration `0257_goal_revision_decisions_and_root_constraints.sql` is a one-way
+maintenance cutover, not a rolling application change. Stop every API,
+control-worker, and turn-worker process before applying it. The migration checks
+for another live `opengeni_app` database session both before and after taking
+exclusive locks and aborts with SQLSTATE `55000` when the fleet is not drained.
+After commit, never restart a pre-0257 image: an old worker does not understand
+the accepted-turn `rootConstraints` snapshot and would execute without that
+frozen authority. Application rollback is valid only before migration
+activation; afterward, recovery is forward-only with a 0257-compatible image.
+
 ## Lifecycle
 
 A goal is `active`, `paused`, or `completed`.
@@ -68,8 +80,7 @@ A goal is `active`, `paused`, or `completed`.
 New goal text and success criteria are each limited to 8 KiB of UTF-8, rewrite
 and pause rationales to 2 KiB, and progress notes to 4 KiB. Root constraints
 are limited to 16 items, 512 UTF-8 bytes per item, and 4 KiB in aggregate.
-Rolling legacy
-goals remain exact and lifecycle-mutable even when larger. Their immutable
+Pre-0257 goals remain exact and lifecycle-mutable even when larger. Their immutable
 accepted-turn prompt snapshot uses a deterministic UTF-8 prefix with an
 explicit original-byte truncation fact, so ordinary turns, recovery, and
 compaction stay bounded without rewriting canonical history.
@@ -205,8 +216,10 @@ recovery of the same turn, not creation or charging of another continuation.
   expectedObjectiveRevision }`.
   This user-authoritative path may replace/re-activate a completed goal and
   wakes an otherwise idle session.
-- `GET .../goal/revisions?limit=...&before=...` returns a bounded keyset page
-  of immutable applied, proposed, and rejected history.
+- `GET .../goal/revisions` preserves the original unbounded raw-array contract
+  for existing clients. `GET .../goal/revisions/page?limit=...&before=...`
+  exposes a separately named bounded keyset page of immutable applied,
+  proposed, and rejected history.
   `POST .../goal/revisions/:revisionId/apply` applies a proposal under an exact
   objective-revision fence; the proposal row remains immutable and the new
   applied revision links it by `proposalId`. `POST .../reject` records an

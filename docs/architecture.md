@@ -665,6 +665,14 @@ Key transitions (canonical: `apps/worker/src/workflows/session.ts`):
 
 A **goal** flips the default: terminal settlement arms a goal-owned Postgres revision, then one locked transaction materializes it as one typed goal-continuation internal update, which joins the next coalesced internal-update inference without becoming a human queue row. The update records its exact `causalTurnId` and copies that latest finished causal turn's personal-MCP delegation snapshot; a later unrelated human turn cannot change the already-materialized continuation. Human prompts, Steer, approval, recovery, capacity waits, and recursive Pause remain authoritative. Stopping becomes an explicit act (`goal_complete`/`goal_pause`). Agent `goal_update` is a target-scoped revisioned command with mandatory change classification, rationale, and objective-revision fence. Its policy either applies the rewrite or records an immutable proposal. Humans can apply or reject proposals and roll back to an applied revision through new immutable CAS-fenced decisions. Bounded root constraints freeze with each accepted-turn goal snapshot; a goal-bearing child inherits that exact set or explicitly narrows it, and an agent cannot widen or remove it. Goals are bounded by progress (`OPENGENI_GOAL_NO_PROGRESS_LIMIT`, default 3) and budget guards, **not by count**. The API projects `inactive | scheduled | running | blocked | invariant_broken` from one repeatable snapshot instead of inferring autonomy from session status. Deep dive: [`goals.md`](goals.md).
 
+Migration `0257_goal_revision_decisions_and_root_constraints.sql` is the
+maintenance-only activation boundary for governed revision decisions and
+accepted-turn root constraints. All API/control/turn-worker `opengeni_app`
+sessions must stop before it runs; the migration rejects a live runtime role
+with SQLSTATE `55000`, and a pre-0257 image must never restart after commit.
+The public raw-array goal-revision list remains compatible, while bounded
+pagination uses the separately named `/goal/revisions/page` surface.
+
 ### 5.4 Memory model
 
 See §3.5 — the three stores (`session_history_items`, `agent_run_states`, `session_events`) plus `sandbox_session_envelopes`. Conversation truth is client-side, so model calls strip provider item ids by default (`OPENGENI_OPENAI_PROVIDER_ITEM_IDS=strip`) and round-trip `reasoning.encrypted_content` instead. Deep dive: [`run-lifecycle.md`](run-lifecycle.md).

@@ -284,6 +284,7 @@ import type {
   SessionEventListOptions,
   SessionEventPage,
   SessionGoal,
+  SessionGoalRevision,
   ListSessionGoalRevisionsOptions,
   ListSessionGoalRevisionsResponse,
   RejectSessionGoalRevisionRequest,
@@ -2030,7 +2031,14 @@ export class OpenGeniClient {
     );
   }
 
-  async listGoalRevisions(
+  async listGoalRevisions(workspaceId: string, sessionId: string): Promise<SessionGoalRevision[]> {
+    return await this.requestJson<SessionGoalRevision[]>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions`,
+    );
+  }
+
+  async listGoalRevisionPage(
     workspaceId: string,
     sessionId: string,
     options: ListSessionGoalRevisionsOptions = {},
@@ -2041,7 +2049,7 @@ export class OpenGeniClient {
     const suffix = query.size > 0 ? `?${query.toString()}` : "";
     return await this.requestJson<ListSessionGoalRevisionsResponse>(
       "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions${suffix}`,
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions/page${suffix}`,
     );
   }
 

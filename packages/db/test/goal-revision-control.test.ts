@@ -9,6 +9,7 @@ import {
   getSessionGoal,
   getSessionTurnForAttempt,
   initializeSessionStartAtomically,
+  listSessionGoalRevisionPage,
   listSessionGoalRevisions,
   recoverSessionDispatch,
   rejectSessionGoalRevisionWithEvent,
@@ -182,9 +183,8 @@ describe("goal revision decisions", () => {
       client.db,
       ctx.grant.workspaceId,
       ctx.session.id,
-      { limit: 10 },
     );
-    expect(history.revisions.map((revision) => revision.disposition)).toEqual([
+    expect(history.map((revision) => revision.disposition)).toEqual([
       "rejected",
       "proposed",
       "applied",
@@ -210,9 +210,14 @@ describe("goal revision decisions", () => {
       createdBy: "api",
       actor: "api",
     });
-    const page = await listSessionGoalRevisions(client.db, ctx.grant.workspaceId, ctx.session.id, {
-      limit: 10,
-    });
+    const page = await listSessionGoalRevisionPage(
+      client.db,
+      ctx.grant.workspaceId,
+      ctx.session.id,
+      {
+        limit: 10,
+      },
+    );
     const initial = page.revisions.find((revision) => revision.resultObjectiveRevision === 1);
     if (!initial) throw new Error("initial applied revision missing");
     const rollback = () =>
@@ -241,9 +246,14 @@ describe("goal revision decisions", () => {
       rootConstraints: ["alpha", "beta"],
       objectiveRevision: 3,
     });
-    const after = await listSessionGoalRevisions(client.db, ctx.grant.workspaceId, ctx.session.id, {
-      limit: 10,
-    });
+    const after = await listSessionGoalRevisionPage(
+      client.db,
+      ctx.grant.workspaceId,
+      ctx.session.id,
+      {
+        limit: 10,
+      },
+    );
     expect(after.revisions).toContainEqual(
       expect.objectContaining({
         disposition: "applied",
@@ -316,13 +326,18 @@ describe("goal revision decisions", () => {
       createdBy: "api",
       actor: "api",
     });
-    const first = await listSessionGoalRevisions(client.db, ctx.grant.workspaceId, ctx.session.id, {
-      limit: 2,
-    });
+    const first = await listSessionGoalRevisionPage(
+      client.db,
+      ctx.grant.workspaceId,
+      ctx.session.id,
+      {
+        limit: 2,
+      },
+    );
     expect(first).toMatchObject({ hasMore: true });
     expect(first.revisions).toHaveLength(2);
     if (!first.nextCursor) throw new Error("next revision cursor missing");
-    const second = await listSessionGoalRevisions(
+    const second = await listSessionGoalRevisionPage(
       client.db,
       ctx.grant.workspaceId,
       ctx.session.id,
@@ -353,10 +368,10 @@ describe("goal revision decisions", () => {
       ),
     ).toBeNull();
     await expect(
-      listSessionGoalRevisions(client.db, ctx.grant.workspaceId, ctx.session.id, {
+      listSessionGoalRevisionPage(client.db, ctx.grant.workspaceId, ctx.session.id, {
         limit: 2,
         before: (
-          await listSessionGoalRevisions(client.db, other.grant.workspaceId, other.session.id, {
+          await listSessionGoalRevisionPage(client.db, other.grant.workspaceId, other.session.id, {
             limit: 1,
           })
         ).revisions[0]!.id,

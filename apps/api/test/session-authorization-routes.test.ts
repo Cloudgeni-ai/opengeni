@@ -185,6 +185,37 @@ async function fixture() {
 }
 
 describe("embedding host session authorization routes", () => {
+  test("keeps the legacy raw revision array and exposes pagination separately", async () => {
+    if (!available || !shared) return;
+    const value = await fixture();
+    await shared.admin`
+      insert into session_goals (account_id, workspace_id, session_id, text)
+      values (
+        ${value.grant.accountId}, ${value.grant.workspaceId}, ${value.child.id},
+        'API revision compatibility goal'
+      )`;
+
+    const rawResponse = await appWith().request(
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/goal/revisions`,
+      { headers: { authorization: value.authorization } },
+    );
+    expect(rawResponse.status).toBe(200);
+    const raw = (await rawResponse.json()) as unknown;
+    expect(Array.isArray(raw)).toBe(true);
+    expect(raw).toHaveLength(1);
+
+    const pageResponse = await appWith().request(
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/goal/revisions/page?limit=1`,
+      { headers: { authorization: value.authorization } },
+    );
+    expect(pageResponse.status).toBe(200);
+    expect(await pageResponse.json()).toMatchObject({
+      revisions: expect.any(Array),
+      hasMore: false,
+      nextCursor: null,
+    });
+  });
+
   test("GET goal ignores a malformed legacy continuation instead of returning 500", async () => {
     if (!available || !shared) return;
     const value = await fixture();

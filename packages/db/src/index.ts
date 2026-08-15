@@ -45939,6 +45939,26 @@ export async function listSessionGoalRevisions(
   db: Database,
   workspaceId: string,
   sessionId: string,
+): Promise<SessionGoalRevision[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.sessionGoalRevisions)
+      .where(
+        and(
+          eq(schema.sessionGoalRevisions.workspaceId, workspaceId),
+          eq(schema.sessionGoalRevisions.sessionId, sessionId),
+        ),
+      )
+      .orderBy(desc(schema.sessionGoalRevisions.createdAt), desc(schema.sessionGoalRevisions.id));
+    return rows.map(mapSessionGoalRevision);
+  });
+}
+
+export async function listSessionGoalRevisionPage(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
   options: { limit: number; before?: string } = { limit: 50 },
 ): Promise<{
   revisions: SessionGoalRevision[];

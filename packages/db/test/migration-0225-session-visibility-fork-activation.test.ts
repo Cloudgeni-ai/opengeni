@@ -467,8 +467,8 @@ describe("migration 0225 session visibility and fork activation", () => {
       { subjectId: value.ownerSubjectId },
       () => listSessionGoalRevisions(client!.db, value.ownerGrant.workspaceId, value.session.id),
     );
-    expect(ownerGoalRevisions.revisions).toHaveLength(1);
-    expect(ownerGoalRevisions.revisions[0]).toMatchObject({
+    expect(ownerGoalRevisions).toHaveLength(1);
+    expect(ownerGoalRevisions[0]).toMatchObject({
       sessionId: value.session.id,
       disposition: "applied",
       text: "private goal",
@@ -548,8 +548,8 @@ describe("migration 0225 session visibility and fork activation", () => {
       { subjectId: value.otherSubjectId },
       () => listSessionGoalRevisions(client!.db, value.ownerGrant.workspaceId, value.session.id),
     );
-    expect(sharedGoalRevisions.revisions).toHaveLength(1);
-    expect(sharedGoalRevisions.revisions[0]?.sessionId).toBe(value.session.id);
+    expect(sharedGoalRevisions).toHaveLength(1);
+    expect(sharedGoalRevisions[0]?.sessionId).toBe(value.session.id);
   });
 
   test("denies a suspended owner and rejects direct authority writes", async () => {
