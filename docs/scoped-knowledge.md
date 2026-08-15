@@ -170,14 +170,38 @@ activation.
 
 The later Documents retrieval slice does not expose normalized claims or create
 a second prompt/memory path. `searchEffectiveDocuments` composes only current
-Document/chunk evidence authorized for the exact account, requesting workspace,
-and immutable initiating human. The public `/knowledge/search` route, SDK
+Document/chunk evidence authorized for the exact organization, requesting
+workspace, and immutable initiating human. The public `/knowledge/search` route, SDK
 `searchKnowledge`, and docs-MCP `knowledge_search` all use that same boundary;
 the subject is derived from the authenticated grant rather than request/tool
 input, authorization predicates run before vector/keyword ranking and limits,
 and results retain source plus immutable authority provenance. Agent calls also
-require `agent_access=true`. Legacy workspace and legacy private rows keep the
-workspace bindings established by migration 0165.
+require `agent_access=true`. Migration 0258 activates common organization-user
+authority for new personal Documents: their physical workspace remains the
+immutable ingestion/indexing origin, but human discovery and management follow
+the owner across that owner's currently accessible same-organization
+workspaces. `GET /v1/workspaces/:workspaceId/documents` is the effective human
+inventory; exact reads, reindex, filing, and deletion use the same authority
+predicate while operating on the immutable origin rows. Document-scoped
+original-file metadata and signed-download routes atomically resolve that
+predicate, current owner authority, provider ACL, and the one immutable origin
+file, without widening generic file access.
+Configured/local
+subjects without an eligible active organization membership and legacy private
+rows keep the workspace binding established by migration 0165.
+
+Personal Document ownership never becomes ambient agent authority. The exact
+attempt-admission transaction freezes only Documents covered by a live
+`document.read` once/session/always grant for the target workspace and exact
+private/shared session context. Every subsequent retrieval revalidates that
+snapshot and all membership, authority, grant, session-epoch, attempt, and
+interruption fences. Missing attempt identity omits personal evidence, and
+revocation fails closed before content is returned. The common grant lifecycle
+requires explicit durable acknowledgement before personal content can be used
+in a workspace-shared session. A legacy null-authority private Document remains
+available to an agent only for the exact initiating subject in its origin
+workspace; this compatibility lane cannot cross workspaces, while every
+common-authority personal Document still requires the exact attempt snapshot.
 
 The workspace-local agent projection builds on that boundary without another
 store. Docs-MCP `knowledge_search` returns strict Knowledge envelopes over
@@ -186,5 +210,8 @@ projection. `knowledge_get` rechecks one stable Document/chunk id, while
 `knowledge_browse` rechecks an authorized Document parent before returning its
 chunks and binds its opaque cursor to the exact account, requesting workspace,
 initiating subject, parent, and filters. Personal subject ids and inaccessible
-linked-record metadata are absent from this projection. See
+linked-record metadata are absent from this projection; origin workspace, base,
+and file ids also remain outside the Knowledge envelope. This changes neither
+`knowledge_memories` nor the preference registry, company profile, instruction
+policy, prompt composition, or governed learning/write routing. See
 [`knowledge-retrieval.md`](knowledge-retrieval.md).

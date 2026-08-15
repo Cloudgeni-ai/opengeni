@@ -4795,6 +4795,34 @@ export class OpenGeniClient {
   }
 
   /**
+   * List every Document the current human can manage from this workspace,
+   * including portable personal and organization-scoped Documents whose
+   * immutable ingestion workspace is different.
+   */
+  async listAccessibleDocuments(workspaceId: string): Promise<Document[]> {
+    return await this.requestJson<Document[]>("GET", `/v1/workspaces/${workspaceId}/documents`);
+  }
+
+  /** Read the immutable source file through the Document's effective authority. */
+  async getDocumentOriginalFile(workspaceId: string, documentId: string): Promise<FileAsset> {
+    return await this.requestJson<FileAsset>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/documents/${documentId}/original-file`,
+    );
+  }
+
+  /** Mint a source-file URL through the Document's effective authority. */
+  async createDocumentOriginalFileDownloadUrl(
+    workspaceId: string,
+    documentId: string,
+  ): Promise<FileDownloadUrlResponse> {
+    return await this.requestJson<FileDownloadUrlResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/documents/${documentId}/original-file/download-url`,
+    );
+  }
+
+  /**
    * Drop raw text or an already-uploaded file into the workspace's Default
    * base. When curation is enabled, it may name, summarize, categorize, and
    * (confidence permitting) file the document into the best-matching base;
