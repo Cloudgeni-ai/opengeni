@@ -3409,14 +3409,16 @@ describe("workflow contracts", () => {
     );
     const imageLeaves = [
       "api-image",
-      "worker-web-images",
+      "worker-image",
+      "web-image",
       "artifact-materializer-image",
       "artifact-outbox-dispatcher-image",
       "relay-image",
       "sandbox-image",
     ];
     for (const jobName of [
-      "worker-web-images",
+      "worker-image",
+      "web-image",
       "artifact-outbox-dispatcher-image",
       "relay-image",
     ]) {
@@ -3457,7 +3459,8 @@ describe("workflow contracts", () => {
     const exactSelectorJobs = new Set([
       "deployment",
       "api-image",
-      "worker-web-images",
+      "worker-image",
+      "web-image",
       "artifact-materializer-image",
       "artifact-outbox-dispatcher-image",
       "relay-image",
@@ -3476,7 +3479,8 @@ describe("workflow contracts", () => {
       "test",
       "deployment",
       "api-image",
-      "worker-web-images",
+      "worker-image",
+      "web-image",
       "artifact-materializer-image",
       "artifact-outbox-dispatcher-image",
       "relay-image",

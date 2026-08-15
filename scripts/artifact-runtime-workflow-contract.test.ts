@@ -112,8 +112,8 @@ describe("artifact runtime workflow contract", () => {
 
     const serverBuilds = [
       ["api-image", "api_image"],
-      ["worker-web-images", "worker_image"],
-      ["worker-web-images", "web_image"],
+      ["worker-image", "worker_image"],
+      ["web-image", "web_image"],
       ["artifact-materializer-image", "artifact_materializer_image"],
       ["artifact-outbox-dispatcher-image", "artifact_outbox_dispatcher_image"],
     ].map(([jobName, stepId]) =>

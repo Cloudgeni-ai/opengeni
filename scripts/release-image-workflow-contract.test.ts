@@ -459,14 +459,16 @@ describe("release image workflow contract", () => {
 
     const leafNames = [
       "api-image",
-      "worker-web-images",
+      "worker-image",
+      "web-image",
       "artifact-materializer-image",
       "artifact-outbox-dispatcher-image",
       "relay-image",
       "sandbox-image",
     ];
     for (const jobName of [
-      "worker-web-images",
+      "worker-image",
+      "web-image",
       "artifact-outbox-dispatcher-image",
       "relay-image",
     ]) {
@@ -484,7 +486,8 @@ describe("release image workflow contract", () => {
       "automation-admission",
       "plan",
       "api-image",
-      "worker-web-images",
+      "worker-image",
+      "web-image",
       "artifact-materializer-image",
       "artifact-outbox-dispatcher-image",
       "relay-image",
@@ -494,14 +497,15 @@ describe("release image workflow contract", () => {
       expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["api-image"]?.if);
     }
     for (const jobName of [
-      "worker-web-images",
+      "worker-image",
+      "web-image",
       "artifact-outbox-dispatcher-image",
       "relay-image",
     ]) {
-      expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["worker-web-images"]?.if);
+      expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["worker-image"]?.if);
     }
-    expect(parsed.jobs.images?.if).toBe(parsed.jobs["worker-web-images"]?.if);
-    expect(images.match(/packages: write/g)).toHaveLength(6);
+    expect(parsed.jobs.images?.if).toBe(parsed.jobs["worker-image"]?.if);
+    expect(images.match(/packages: write/g)).toHaveLength(7);
     for (const jobName of leafNames) {
       const login = parsed.jobs[jobName]?.steps?.find((step) => step.name === "Log in to GHCR");
       expect(login?.with).toEqual({
@@ -531,7 +535,8 @@ describe("release image workflow contract", () => {
     );
     expect(images).toContain("Require every workload image build");
     expect(images).toContain("API_IMAGE_RESULT: ${{ needs.api-image.result }}");
-    expect(images).toContain("WORKER_WEB_IMAGES_RESULT: ${{ needs.worker-web-images.result }}");
+    expect(images).toContain("WORKER_IMAGE_RESULT: ${{ needs.worker-image.result }}");
+    expect(images).toContain("WEB_IMAGE_RESULT: ${{ needs.web-image.result }}");
     expect(images).toContain(
       "ARTIFACT_MATERIALIZER_IMAGE_RESULT: ${{ needs.artifact-materializer-image.result }}",
     );
@@ -545,7 +550,8 @@ describe("release image workflow contract", () => {
     );
     expect(aggregate?.env).toEqual({
       API_IMAGE_RESULT: "${{ needs.api-image.result }}",
-      WORKER_WEB_IMAGES_RESULT: "${{ needs.worker-web-images.result }}",
+      WORKER_IMAGE_RESULT: "${{ needs.worker-image.result }}",
+      WEB_IMAGE_RESULT: "${{ needs.web-image.result }}",
       ARTIFACT_MATERIALIZER_IMAGE_RESULT: "${{ needs.artifact-materializer-image.result }}",
       ARTIFACT_OUTBOX_DISPATCHER_IMAGE_RESULT:
         "${{ needs.artifact-outbox-dispatcher-image.result }}",
@@ -557,19 +563,20 @@ describe("release image workflow contract", () => {
         env: {
           ...process.env,
           API_IMAGE_RESULT: results[0],
-          WORKER_WEB_IMAGES_RESULT: results[1],
-          ARTIFACT_MATERIALIZER_IMAGE_RESULT: results[2],
-          ARTIFACT_OUTBOX_DISPATCHER_IMAGE_RESULT: results[3],
-          RELAY_IMAGE_RESULT: results[4],
-          SANDBOX_IMAGE_RESULT: results[5],
+          WORKER_IMAGE_RESULT: results[1],
+          WEB_IMAGE_RESULT: results[2],
+          ARTIFACT_MATERIALIZER_IMAGE_RESULT: results[3],
+          ARTIFACT_OUTBOX_DISPATCHER_IMAGE_RESULT: results[4],
+          RELAY_IMAGE_RESULT: results[5],
+          SANDBOX_IMAGE_RESULT: results[6],
         },
       }).exitCode;
-    expect(aggregateResult("success", "success", "success", "success", "success", "success")).toBe(
-      0,
-    );
+    expect(
+      aggregateResult("success", "success", "success", "success", "success", "success", "success"),
+    ).toBe(0);
     for (const result of ["failure", "skipped", "cancelled", ""]) {
-      for (let index = 0; index < 6; index += 1) {
-        const results = Array(6).fill("success") as string[];
+      for (let index = 0; index < 7; index += 1) {
+        const results = Array(7).fill("success") as string[];
         results[index] = result;
         expect(aggregateResult(...results)).not.toBe(0);
       }
@@ -582,8 +589,8 @@ describe("release image workflow contract", () => {
     expect(images).toContain("Write exact-main-SHA dogfood receipt");
     expect(images).toContain("Upload exact-main-SHA dogfood receipt");
     expect(images).toContain("API_DIGEST: ${{ needs.api-image.outputs.api_digest }}");
-    expect(images).toContain("WORKER_DIGEST: ${{ needs.worker-web-images.outputs.worker_digest }}");
-    expect(images).toContain("WEB_DIGEST: ${{ needs.worker-web-images.outputs.web_digest }}");
+    expect(images).toContain("WORKER_DIGEST: ${{ needs.worker-image.outputs.worker_digest }}");
+    expect(images).toContain("WEB_DIGEST: ${{ needs.web-image.outputs.web_digest }}");
     expect(images).toContain("RELAY_DIGEST: ${{ needs.relay-image.outputs.relay_digest }}");
     expect(images).toContain("SANDBOX_DIGEST: ${{ needs.sandbox-image.outputs.sandbox_digest }}");
     expect(images).toContain(
@@ -1020,7 +1027,8 @@ ${parser}`,
 
     const imageSteps = [
       "api-image",
-      "worker-web-images",
+      "worker-image",
+      "web-image",
       "artifact-materializer-image",
       "artifact-outbox-dispatcher-image",
       "relay-image",
@@ -1046,12 +1054,12 @@ ${parser}`,
         fingerprint: "791b6b1d1ea3bbb12a893b2056b2db1c343c2972f6202fe1be6276eed30f66f1",
       },
       {
-        jobName: "worker-web-images",
+        jobName: "worker-image",
         name: "Build worker image",
         fingerprint: "18b96f7cc2e97584967f580b6e678f20c96022ca77db76fea49753df8e82641a",
       },
       {
-        jobName: "worker-web-images",
+        jobName: "web-image",
         name: "Build web image",
         fingerprint: "1689497eac266bd4b700ddea4e1f4d7ced2316657a2be37062d6ee064bf2d8e8",
       },
