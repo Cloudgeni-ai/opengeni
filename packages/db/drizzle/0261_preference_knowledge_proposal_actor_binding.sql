@@ -5,6 +5,9 @@
 -- 0255 used an output-column-conflicting PL/pgSQL local name in preference SQL
 -- predicates and projected instruction targets in a shape rejected by the
 -- canonical Knowledge table constraint.
+-- The replacement SECURITY DEFINER function is pinned after creation to a
+-- target-schema-safe path with pg_temp explicitly last, so caller temporary
+-- relations cannot shadow any durable authority relation.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
@@ -453,3 +456,16 @@ BEGIN
   RETURN NEXT;
 END;
 $$;
+
+DO $preference_knowledge_proposal_search_path$
+DECLARE
+  data_schema text := current_schema();
+BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION %I.preference_registry_create_knowledge_proposal_for_attempt('
+      || 'uuid,uuid,uuid,uuid,uuid,integer,uuid,text,uuid,text,text,text,text,integer,text,jsonb,timestamptz,text) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+END;
+$preference_knowledge_proposal_search_path$;

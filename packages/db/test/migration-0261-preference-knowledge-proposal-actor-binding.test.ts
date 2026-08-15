@@ -22,6 +22,10 @@ describe("migration 0261 Knowledge-backed Ways adapter repair", () => {
     );
     expect(migration).toContain("SECURITY DEFINER");
     expect(migration).toContain("SET search_path FROM CURRENT");
+    expect(migration).toContain("SET search_path = pg_catalog, %I, pg_temp");
+    expect(migration).toContain(
+      "ALTER FUNCTION %I.preference_registry_create_knowledge_proposal_for_attempt(",
+    );
     expect(migration).toContain("v_actor_subject_id text;");
     expect(migration).toContain("proposal.actor_subject_id = v_actor_subject_id");
     expect(migration).toContain("review.actor_subject_id = v_actor_subject_id");

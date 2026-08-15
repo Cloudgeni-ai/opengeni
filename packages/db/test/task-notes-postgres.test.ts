@@ -564,6 +564,59 @@ describe("task-tree notes PostgreSQL authority", () => {
         noteVersion: 1,
       },
     });
+    const preferenceProposalId = preferenceFirst.destinationProposalId;
+    const preferenceRevisionId = preferenceFirst.destinationRevisionId;
+    if (!preferenceProposalId || !preferenceRevisionId) {
+      throw new Error("preference promotion did not return exact destination lineage");
+    }
+
+    const [preferenceReceipt] = await shared.admin<
+      Array<{ input_hash: string; knowledge_proposal_id: string }>
+    >`
+      select input_hash, knowledge_proposal_id
+      from company_brain_preference_proposal_receipts
+      where preference_id = ${preferenceProposalId}
+    `;
+    expect(preferenceReceipt).toBeDefined();
+    const app = postgres(shared.appUrl, { max: 1, prepare: false });
+    try {
+      const [shadowSafeReplay] = await app.begin(async (sql) => {
+        await sql`select set_config('opengeni.account_id', ${f.grant.accountId}, true)`;
+        await sql`select set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true)`;
+        await sql`select set_config('opengeni.subject_id', ${f.ownerSubjectId}, true)`;
+        await sql`select set_config('opengeni.initiating_human_subject_id', ${f.ownerSubjectId}, true)`;
+        await sql.unsafe("create temporary table workspaces (trap text) on commit drop");
+        return await sql<Array<{ preference_id: string; revision_id: string }>>`
+          select preference_id, revision_id
+          from preference_registry_create_knowledge_proposal_for_attempt(
+            ${attempt.accountId}::uuid,
+            ${attempt.workspaceId}::uuid,
+            ${attempt.sessionId}::uuid,
+            ${attempt.turnId}::uuid,
+            ${attempt.attemptId}::uuid,
+            ${attempt.executionGeneration}::integer,
+            ${preferenceInput.request.operationId}::uuid,
+            ${preferenceReceipt!.input_hash}::text,
+            ${preferenceReceipt!.knowledge_proposal_id}::uuid,
+            ${preferenceInput.request.stableKey}::text,
+            ${preferenceInput.request.title}::text,
+            ${preferenceInput.request.description}::text,
+            ${preferenceText}::text,
+            ${preferenceInput.request.precedenceRank}::integer,
+            ${preferenceInput.request.conflictStrategy}::text,
+            ${sql.json(preferenceInput.request.conflictsWith)}::jsonb,
+            ${preferenceInput.request.expiresAt}::timestamptz,
+            ${preferenceInput.request.reason}::text
+          )
+        `;
+      });
+      expect(shadowSafeReplay).toEqual({
+        preference_id: preferenceProposalId,
+        revision_id: preferenceRevisionId,
+      });
+    } finally {
+      await app.end();
+    }
 
     const instructionText = "Never place secret values in public logs.";
     const instructionNote = await createTaskNote(client.db, {

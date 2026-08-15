@@ -678,7 +678,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       securityDefiner: true,
       appExecute: true,
       publicExecute: false,
-      settings: [`search_path=${SCHEMA}, opengeni_private, public`],
+      settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
     });
 
     const [receiptTable] = await admin<

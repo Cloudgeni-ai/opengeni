@@ -125,6 +125,8 @@ DML and cannot forge Task-note evidence onto another claim. Every migration
 0260 definer path pins `pg_catalog`, the deployment target schema, then
 `pg_temp`, so caller-created temporary relations cannot shadow durable
 authority relations.
+The migration 0261 preference-adapter repair preserves that same explicit
+`pg_catalog`, deployment target schema, `pg_temp` definer boundary.
 The resulting claim is `proposed`, never approved or prompt-active. Exact retry
 reconstructs the same receipt even after the short-lived note is archived;
 changed input conflicts, and source cleanup cannot silently widen authority.
