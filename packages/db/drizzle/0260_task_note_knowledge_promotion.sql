@@ -4,6 +4,8 @@
 -- The evidence row retains a value-free immutable source receipt after the
 -- short-lived task tree is cleaned up; the source bytes remain in the ordinary
 -- Task-note lifecycle and are never copied into evidence metadata.
+-- Every SECURITY DEFINER path explicitly puts pg_temp last so caller-created
+-- temporary relations cannot shadow target-schema authority relations.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
@@ -707,24 +709,24 @@ BEGIN
   );
   EXECUTE format(
     'ALTER FUNCTION %I.validate_task_note_knowledge_evidence() '
-      || 'SET search_path = pg_catalog, %I',
+      || 'SET search_path = pg_catalog, %I, pg_temp',
     data_schema, data_schema
   );
   EXECUTE format(
     'ALTER FUNCTION %I.reject_task_note_replacement_receipt_mutation() '
-      || 'SET search_path = pg_catalog, %I',
+      || 'SET search_path = pg_catalog, %I, pg_temp',
     data_schema, data_schema
   );
   EXECUTE format(
     'ALTER FUNCTION %I.replace_task_note_for_attempt('
       || 'uuid,uuid,uuid,uuid,uuid,integer,uuid,uuid,uuid,uuid,integer,text,text,integer,text) '
-      || 'SET search_path = pg_catalog, %I',
+      || 'SET search_path = pg_catalog, %I, pg_temp',
     data_schema, data_schema
   );
   EXECUTE format(
     'ALTER FUNCTION %I.resolve_task_note_knowledge_promotion_source('
       || 'uuid,uuid,uuid,uuid,uuid,integer,uuid,integer,text,text,text) '
-      || 'SET search_path = pg_catalog, %I',
+      || 'SET search_path = pg_catalog, %I, pg_temp',
     data_schema, data_schema
   );
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN

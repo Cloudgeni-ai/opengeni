@@ -53,7 +53,7 @@ describe("migration 0260 Task-note Knowledge promotion", () => {
     expect(sql).toContain("FROM workspace_learning_policy_snapshots snapshot");
     expect(sql).toContain("effective_learning_mode NOT IN ('suggest', 'automatic')");
     expect(sql).toContain("DELETE FROM task_note_knowledge_promotion_capabilities capability");
-    expect(sql).toContain("SET search_path = pg_catalog, %I");
+    expect(sql.match(/SET search_path = pg_catalog, %I, pg_temp/g)).toHaveLength(4);
     expect(sql).toContain("resolve_task_note_knowledge_promotion_source(");
   });
 
@@ -74,7 +74,7 @@ describe("migration 0260 Task-note Knowledge promotion", () => {
     expect(sql).toContain("Task-note replacement receipts are immutable");
     expect(sql).toContain("CREATE OR REPLACE FUNCTION replace_task_note_for_attempt(");
     expect(sql).toContain("receipt_row.input_hash IS DISTINCT FROM calculated_input_hash");
-    expect(sql).toContain("SET search_path = pg_catalog, %I");
+    expect(sql.match(/SET search_path = pg_catalog, %I, pg_temp/g)).toHaveLength(4);
     expect(sql).toContain("GRANT EXECUTE ON FUNCTION %I.replace_task_note_for_attempt(");
   });
 });
