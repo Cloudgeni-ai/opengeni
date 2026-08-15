@@ -667,9 +667,11 @@ A **goal** flips the default: terminal settlement arms a goal-owned Postgres rev
 
 Migration `0257_goal_revision_decisions_and_root_constraints.sql` is the
 maintenance-only activation boundary for governed revision decisions and
-accepted-turn root constraints. All API/control/turn-worker `opengeni_app`
-sessions must stop before it runs; the migration rejects a live runtime role
-with SQLSTATE `55000`, and a pre-0257 image must never restart after commit.
+accepted-turn root constraints. All API/control/turn-worker sessions must stop
+before it runs; the migration rejects any live identity in the deployment's
+explicit `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` list with SQLSTATE
+`55000`, and a pre-0257 image must never restart after commit. Dedicated-schema
+callers pass the same exact list through `applicationDatabaseRoles`.
 The public raw-array goal-revision list remains compatible, while bounded
 pagination uses the separately named `/goal/revisions/page` surface.
 
@@ -930,11 +932,13 @@ accepted-turn goal snapshot. It adds one FORCE-RLS table to both the
 SELECT/INSERT evidence/revision and runtime-DML ledgers; the checked-in posture
 arrays and tests remain the authoritative exact counts.
 
-Migration 0257 is rolling: it extends the existing goal authority with bounded
-normalized root constraints, immutable proposal-rejection and rollback lineage,
-and accepted-turn snapshot freezing. Existing goals and revisions receive an
-empty constraint set; proposal decisions remain append-only and tenant/session
-RLS continues to govern their text.
+Migration 0257 is maintenance-only: it extends the existing goal authority with
+bounded normalized root constraints, immutable proposal-rejection and rollback
+lineage, and accepted-turn snapshot freezing. Its explicit deployment-role list
+fences custom FORCE-RLS and dedicated-schema runtime identities before and after
+the table locks. Existing goals and revisions receive an empty constraint set;
+proposal decisions remain append-only and tenant/session RLS continues to govern
+their text.
 
 Migration 0233 (`0233_skill_and_integration_authority_cutover.sql`) is maintenance-only: after all app sessions and capability operations are drained, it makes normalized Plugin/Version/Facet installations authoritative for Skills, Plugins, and Integration Definitions, keeps Packs authoritative in their dedicated installation ledger, and materializes exact active curated Skill selections from the reviewed immutable library. It retires non-MCP rows from the generic catalog/installations compatibility projection and constrains those generic tables to MCP-only. Old binaries that dual-write or read those projections must not restart after activation.
 

@@ -39,6 +39,7 @@ describe("single-node secret bootstrap", () => {
       expect(migrations.OPENGENI_MIGRATIONS_DATABASE_URL).toContain(
         encodeURIComponent(postgres.POSTGRES_PASSWORD ?? ""),
       );
+      expect(migrations.OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES).toBe("opengeni_app");
       expect(minio.MINIO_ROOT_PASSWORD?.length).toBeGreaterThanOrEqual(32);
 
       const accountSeed = runtime.OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED;

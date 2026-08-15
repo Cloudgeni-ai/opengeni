@@ -13,18 +13,59 @@ SET LOCAL statement_timeout = '10min';
 -- close the connect-before-lock race. The deployment must keep every old image
 -- stopped until a 0257-compatible application fleet is active.
 DO $goal_revision_writer_drain_before_lock$
+DECLARE
+  configured_roles_text text := nullif(
+    current_setting('opengeni.migration_application_roles', true),
+    ''
+  );
+  configured_roles jsonb;
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app')
-    AND EXISTS (
-      SELECT 1
-      FROM pg_stat_activity
-      WHERE datname = current_database()
-        AND usename = 'opengeni_app'
-        AND pid <> pg_backend_pid()
+  IF configured_roles_text IS NULL THEN
+    RAISE EXCEPTION
+      'goal revision authority activation requires an explicit application database role list'
+      USING ERRCODE = '55000';
+  END IF;
+  BEGIN
+    configured_roles := configured_roles_text::jsonb;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION
+      'goal revision authority activation received a malformed application database role list'
+      USING ERRCODE = '55000';
+  END;
+  IF jsonb_typeof(configured_roles) <> 'array' THEN
+    RAISE EXCEPTION
+      'goal revision authority activation received an invalid application database role list'
+      USING ERRCODE = '55000';
+  END IF;
+  IF jsonb_array_length(configured_roles) < 1
+    OR jsonb_array_length(configured_roles) > 16
+    OR EXISTS (
+      SELECT 1 FROM jsonb_array_elements(configured_roles) AS roles(value)
+      WHERE jsonb_typeof(value) <> 'string'
+        OR btrim(value #>> '{}') = ''
+        OR octet_length(value #>> '{}') > 63
+    )
+    OR (
+      SELECT count(*) FROM jsonb_array_elements_text(configured_roles)
+    ) <> (
+      SELECT count(DISTINCT value) FROM jsonb_array_elements_text(configured_roles) AS roles(value)
     )
   THEN
     RAISE EXCEPTION
-      'goal revision authority activation requires all opengeni_app sessions to be stopped'
+      'goal revision authority activation received an invalid application database role list'
+      USING ERRCODE = '55000';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_stat_activity AS activity
+    JOIN jsonb_array_elements_text(configured_roles) AS roles(role_name)
+      ON roles.role_name = activity.usename
+    WHERE activity.datname = current_database()
+      AND activity.pid <> pg_backend_pid()
+  )
+  THEN
+    RAISE EXCEPTION
+      'goal revision authority activation requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -35,18 +76,23 @@ LOCK TABLE "session_goal_revisions" IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE "session_turns" IN ACCESS EXCLUSIVE MODE;
 
 DO $goal_revision_writer_drain_after_lock$
+DECLARE
+  configured_roles jsonb := current_setting(
+    'opengeni.migration_application_roles',
+    false
+  )::jsonb;
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app')
-    AND EXISTS (
-      SELECT 1
-      FROM pg_stat_activity
-      WHERE datname = current_database()
-        AND usename = 'opengeni_app'
-        AND pid <> pg_backend_pid()
-    )
+  IF EXISTS (
+    SELECT 1
+    FROM pg_stat_activity AS activity
+    JOIN jsonb_array_elements_text(configured_roles) AS roles(role_name)
+      ON roles.role_name = activity.usename
+    WHERE activity.datname = current_database()
+      AND activity.pid <> pg_backend_pid()
+  )
   THEN
     RAISE EXCEPTION
-      'goal revision authority activation requires all opengeni_app sessions to be stopped'
+      'goal revision authority activation requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END

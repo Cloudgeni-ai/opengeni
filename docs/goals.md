@@ -31,9 +31,17 @@ snapshot, never a later mutable goal head.
 
 Migration `0257_goal_revision_decisions_and_root_constraints.sql` is a one-way
 maintenance cutover, not a rolling application change. Stop every API,
-control-worker, and turn-worker process before applying it. The migration checks
-for another live `opengeni_app` database session both before and after taking
-exclusive locks and aborts with SQLSTATE `55000` when the fleet is not drained.
+control-worker, and turn-worker process before applying it. Set
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` to the comma-separated exact
+database logins used by every old and new API/worker identity, then run the
+migration. The programmatic equivalent is
+`runMigrations(adminUrl, schema, { applicationDatabaseRoles: [...] })`;
+dedicated-schema/scoped deployments must use that explicit option. Only the
+canonical standalone `opengeni_app` topology has a default. Migration 0257
+checks the supplied roles both before and after taking exclusive locks and
+aborts with SQLSTATE `55000` when any listed identity remains connected. Do not
+derive the list from the migration-owner URL or omit a retired identity during
+a role rotation.
 After commit, never restart a pre-0257 image: an old worker does not understand
 the accepted-turn `rootConstraints` snapshot and would execute without that
 frozen authority. Application rollback is valid only before migration

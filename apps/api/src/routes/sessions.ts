@@ -1587,16 +1587,27 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const query = ListSessionGoalRevisionsQuery.parse({
+    const parsedQuery = ListSessionGoalRevisionsQuery.safeParse({
       limit: c.req.query("limit"),
       before: c.req.query("before"),
     });
-    return c.json(
-      await listSessionGoalRevisionPage(db, workspaceId, sessionId, {
-        limit: query.limit,
-        ...(query.before ? { before: query.before } : {}),
-      }),
-    );
+    if (!parsedQuery.success) {
+      throw new HTTPException(400, { message: "invalid goal revision page query" });
+    }
+    const query = parsedQuery.data;
+    try {
+      return c.json(
+        await listSessionGoalRevisionPage(db, workspaceId, sessionId, {
+          limit: query.limit,
+          ...(query.before ? { before: query.before } : {}),
+        }),
+      );
+    } catch (error) {
+      if (error instanceof SessionControlConflictError) {
+        throw new HTTPException(409, { message: error.message, cause: error });
+      }
+      throw error;
+    }
   });
 
   app.post(
