@@ -36,6 +36,8 @@ export type EventBusOptions = {
   logger?: EventLogger;
   /** Test/host transport seam; production defaults to the nats.js connector. */
   connect?: typeof connect;
+  /** Test/host seam for the managed session-event flush deadline. */
+  publishFlushTimeoutMs?: number;
 };
 
 const silentLogger: Required<EventLogger> = {
@@ -109,15 +111,28 @@ export const WORKSPACE_CONTROL_HTTP_PAGE_MAX_BYTES = 1024 * 1024;
  * outage from stalling an in-flight turn; the published message stays buffered
  * and is delivered on reconnect regardless. A flush rejection (connection fully
  * CLOSED) is swallowed here so the timeout race never leaks an unhandled
- * rejection — the caller's publish path is what logs the drop.
+ * rejection. The returned outcome lets the activity-owned fanout lane account
+ * for the transport result without changing the legacy no-throw publish API.
  */
-async function flushWithTimeout(nc: NatsConnection, timeoutMs: number): Promise<void> {
+async function flushWithTimeout(
+  nc: NatsConnection,
+  timeoutMs: number,
+): Promise<SessionEventLivePublishOutcome> {
+  let flush: Promise<SessionEventLivePublishOutcome>;
+  try {
+    flush = nc.flush().then<SessionEventLivePublishOutcome, SessionEventLivePublishOutcome>(
+      () => "succeeded",
+      () => "failed",
+    );
+  } catch {
+    return "failed";
+  }
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<void>((resolve) => {
-    timer = setTimeout(resolve, timeoutMs);
+  const timeout = new Promise<SessionEventLivePublishOutcome>((resolve) => {
+    timer = setTimeout(() => resolve("timed_out"), timeoutMs);
   });
   try {
-    await Promise.race([nc.flush().catch(() => undefined), timeout]);
+    return await Promise.race([flush, timeout]);
   } finally {
     if (timer) {
       clearTimeout(timer);
@@ -227,8 +242,20 @@ export type RequestHandler = (
   subject: string,
 ) => Promise<Uint8Array> | Uint8Array;
 
+export type SessionEventLivePublishOutcome = "succeeded" | "failed" | "timed_out";
+
 export type EventBus = {
   publish: (workspaceId: string, sessionId: string, events: SessionEvent[]) => Promise<void>;
+  /**
+   * Outcome-aware form used by the bounded activity fanout lane. The normal
+   * `publish` method remains no-throw for compatibility with durable-first
+   * callers that do not own live-delivery accounting.
+   */
+  publishWithOutcome?: (
+    workspaceId: string,
+    sessionId: string,
+    events: SessionEvent[],
+  ) => Promise<SessionEventLivePublishOutcome>;
   subscribe: (
     workspaceId: string,
     sessionId: string,
@@ -289,6 +316,385 @@ export type EventBus = {
   close: () => Promise<void>;
 };
 
+export type DetachedSessionEventFanoutOutcome = "succeeded" | "failed" | "timed_out" | "dropped";
+
+export type DetachedSessionEventFanoutCloseReason =
+  | "activity_completed"
+  | "activity_failed"
+  | "activity_cancelled"
+  | "worker_shutdown";
+
+export type DetachedSessionEventFanoutReservation = {
+  commit: (events: SessionEvent[]) => Promise<void>;
+  cancel: () => void;
+};
+
+export type DetachedSessionEventFanout = {
+  reserve: (
+    mode: "detached" | "awaited",
+    workspaceId: string,
+    sessionId: string,
+    observe?: AppendPublishObserver,
+  ) => DetachedSessionEventFanoutReservation;
+  enqueue: (workspaceId: string, sessionId: string, events: SessionEvent[]) => void;
+  publishAwaited: (
+    workspaceId: string,
+    sessionId: string,
+    events: SessionEvent[],
+    observe?: AppendPublishObserver,
+  ) => Promise<void>;
+  drain: () => Promise<void>;
+  close: (reason: DetachedSessionEventFanoutCloseReason) => Promise<void>;
+};
+
+export type DetachedSessionEventFanoutOptions = {
+  timeoutMs?: number;
+  closeTimeoutMs?: number;
+  timeoutScheduler?: (callback: () => void, timeoutMs: number) => () => void;
+  onPublishOutcome?: (input: {
+    outcome: DetachedSessionEventFanoutOutcome;
+    durationSeconds: number;
+    count: number;
+  }) => void;
+};
+
+/**
+ * Run one bounded, best-effort live fanout lane independently of detached callers.
+ *
+ * Detached live-only capacity is deliberately tiny: one active publish and the
+ * oldest pending detached batch. Later detached batches are dropped from LIVE
+ * delivery, never from the durable ledger. Every fenced publisher reserves its
+ * place before starting the Postgres append. The lane blocks behind unresolved
+ * earlier reservations, then orders each ready prefix by the DB-assigned session
+ * sequence, so a faster higher-sequence append cannot overtake a slower lower
+ * sequence. Awaited publications use the same reservation domain and are not
+ * subject to detached overflow drops.
+ * This is safe only for events whose DB append is already authoritative and
+ * whose consumers replay/gap-fill from Postgres. The caller must retain awaited
+ * publication for control/recovery, model-memory, and tool-call creation
+ * events. A worker may opt structural tool output into this path only after
+ * its durable pending-call/history reconciliation has completed. Awaited event
+ * classes use the same lane so a lower detached sequence is invoked before a
+ * higher critical sequence. Every provider promise has both fulfillment and
+ * rejection handlers; timeout releases lane ownership without retaining the
+ * provider promise. An unresolved detached append reservation is itself bounded:
+ * on timeout its future LIVE delivery is dropped so it cannot pin an already-
+ * durable awaited batch; a late commit remains only in Postgres and reconciles
+ * through replay. Close drops pending live-only work before forcing the one
+ * active operation through the same bounded timeout settlement.
+ */
+export function createDetachedSessionEventFanout(
+  bus: Pick<EventBus, "publish" | "publishWithOutcome">,
+  options: DetachedSessionEventFanoutOptions = {},
+): DetachedSessionEventFanout {
+  const timeoutMs = Math.max(1, Math.floor(options.timeoutMs ?? PUBLISH_FLUSH_TIMEOUT_MS + 250));
+  const closeTimeoutMs = Math.max(1, Math.floor(options.closeTimeoutMs ?? timeoutMs));
+  const scheduleTimeout =
+    options.timeoutScheduler ??
+    ((callback: () => void, delayMs: number) => {
+      const timer = setTimeout(callback, delayMs);
+      return () => clearTimeout(timer);
+    });
+  type FanoutItem = {
+    reservationOrder: number;
+    reservedAt: number;
+    mode: "detached" | "awaited";
+    workspaceId: string;
+    sessionId: string;
+    events: SessionEvent[] | null;
+    observe?: AppendPublishObserver;
+    state: "reserved" | "ready" | "active" | "settled" | "dropped" | "cancelled";
+    cancelReservationTimeout: (() => void) | null;
+    dropOutcomeEmitted: boolean;
+    resolveCompletion: () => void;
+    completion: Promise<void>;
+  };
+  type ActiveFanout = {
+    item: FanoutItem;
+    done: Promise<void>;
+    forceTimeout: () => void;
+  };
+  let accepting = true;
+  let active: ActiveFanout | null = null;
+  const reservations: FanoutItem[] = [];
+  let nextReservationOrder = 0;
+  let closePromise: Promise<void> | null = null;
+
+  const emitOutcome = (
+    outcome: DetachedSessionEventFanoutOutcome,
+    startedAt: number,
+    count: number,
+  ): void => {
+    try {
+      options.onPublishOutcome?.({
+        outcome,
+        durationSeconds: Math.max(0, (performance.now() - startedAt) / 1000),
+        count,
+      });
+    } catch {
+      // Detached telemetry must never affect the durable event path.
+    }
+  };
+
+  const start = (item: FanoutItem): ActiveFanout => {
+    const events = item.events;
+    if (!events) {
+      throw new Error("Session event fanout reservation has no committed events");
+    }
+    item.state = "active";
+    const startedAt = performance.now();
+    let resolveDone!: () => void;
+    const done = new Promise<void>((resolve) => {
+      resolveDone = resolve;
+    });
+    let settled = false;
+    let cancelTimeout: (() => void) | null = null;
+    let operation!: ActiveFanout;
+
+    const finish = (outcome: Exclude<DetachedSessionEventFanoutOutcome, "dropped">): void => {
+      if (settled) return;
+      settled = true;
+      cancelTimeout?.();
+      if (item.mode === "detached") {
+        emitOutcome(outcome, startedAt, events.length);
+      } else {
+        observeSince(item.observe?.onPublish, startedAt, events.length);
+      }
+      if (active === operation) {
+        active = null;
+        item.state = "settled";
+        item.resolveCompletion();
+        pump();
+      }
+      resolveDone();
+    };
+
+    operation = {
+      item,
+      done,
+      forceTimeout: () => finish("timed_out"),
+    };
+    active = operation;
+    cancelTimeout = scheduleTimeout(operation.forceTimeout, timeoutMs);
+    try {
+      const providerPromise = bus.publishWithOutcome
+        ? Promise.resolve(bus.publishWithOutcome(item.workspaceId, item.sessionId, events))
+        : Promise.resolve(bus.publish(item.workspaceId, item.sessionId, events)).then(
+            () => "succeeded" as const,
+            () => "failed" as const,
+          );
+      // Attach both handlers immediately. A late provider rejection after timeout
+      // or close is observed here and cannot become an unhandled rejection.
+      void providerPromise.then(
+        (outcome) => finish(outcome),
+        () => finish("failed"),
+      );
+    } catch {
+      finish("failed");
+    }
+    return operation;
+  };
+
+  const firstSequence = (item: FanoutItem): number =>
+    item.events?.[0]?.sequence ?? Number.MAX_SAFE_INTEGER;
+
+  const pump = (): void => {
+    if (active || !accepting) return;
+    for (let index = reservations.length - 1; index >= 0; index -= 1) {
+      const state = reservations[index]?.state;
+      if (state === "settled" || state === "cancelled" || state === "dropped") {
+        reservations.splice(index, 1);
+      }
+    }
+    if (reservations.length === 0) return;
+    const ready = reservations.filter(
+      (candidate) =>
+        candidate.state === "ready" &&
+        !reservations.some(
+          (item) =>
+            item.state === "reserved" &&
+            item.workspaceId === candidate.workspaceId &&
+            item.sessionId === candidate.sessionId,
+        ),
+    );
+    ready.sort((left, right) => {
+      if (left.workspaceId !== right.workspaceId || left.sessionId !== right.sessionId) {
+        return left.reservationOrder - right.reservationOrder;
+      }
+      return (
+        firstSequence(left) - firstSequence(right) || left.reservationOrder - right.reservationOrder
+      );
+    });
+    const next = ready[0];
+    if (!next) return;
+    reservations.splice(reservations.indexOf(next), 1);
+    start(next);
+  };
+
+  const reserve = (
+    mode: "detached" | "awaited",
+    workspaceId: string,
+    sessionId: string,
+    observe?: AppendPublishObserver,
+  ): DetachedSessionEventFanoutReservation => {
+    let resolveCompletion!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+    const liveDetachedReservations =
+      (active?.item.mode === "detached" ? 1 : 0) +
+      reservations.filter(
+        (item) =>
+          item.mode === "detached" &&
+          item.state !== "settled" &&
+          item.state !== "cancelled" &&
+          item.state !== "dropped",
+      ).length;
+    const detachedCapacity =
+      active?.item.mode === "detached"
+        ? 2
+        : active?.item.mode === "awaited" || reservations.some((item) => item.mode === "awaited")
+          ? 1
+          : 2;
+    const dropped =
+      !accepting || (mode === "detached" && liveDetachedReservations >= detachedCapacity);
+    const item: FanoutItem = {
+      reservationOrder: nextReservationOrder++,
+      reservedAt: performance.now(),
+      mode,
+      workspaceId,
+      sessionId,
+      events: null,
+      ...(observe ? { observe } : {}),
+      state: dropped ? "dropped" : "reserved",
+      cancelReservationTimeout: null,
+      dropOutcomeEmitted: false,
+      resolveCompletion,
+      completion,
+    };
+    reservations.push(item);
+    if (mode === "detached" && !dropped) {
+      queueMicrotask(() => {
+        if (item.state !== "reserved" || !accepting) return;
+        item.cancelReservationTimeout = scheduleTimeout(() => {
+          if (item.state !== "reserved") return;
+          item.cancelReservationTimeout = null;
+          item.state = "dropped";
+          item.dropOutcomeEmitted = true;
+          emitOutcome("timed_out", item.reservedAt, 0);
+          item.resolveCompletion();
+          pump();
+        }, timeoutMs);
+      });
+    }
+
+    return {
+      async commit(events) {
+        if (item.state === "cancelled" || item.state === "settled") return;
+        item.cancelReservationTimeout?.();
+        item.cancelReservationTimeout = null;
+        item.events = events;
+        if (item.state === "dropped") {
+          if (item.mode === "detached" && events.length > 0 && !item.dropOutcomeEmitted) {
+            item.dropOutcomeEmitted = true;
+            emitOutcome("dropped", item.reservedAt, events.length);
+          }
+          item.resolveCompletion();
+          pump();
+          return;
+        }
+        if (events.length === 0 || !accepting) {
+          item.state = item.mode === "detached" ? "dropped" : "cancelled";
+          if (item.mode === "detached" && events.length > 0 && !item.dropOutcomeEmitted) {
+            item.dropOutcomeEmitted = true;
+            emitOutcome("dropped", item.reservedAt, events.length);
+          }
+          item.resolveCompletion();
+          pump();
+          return;
+        }
+        item.state = "ready";
+        pump();
+        if (item.mode === "awaited") {
+          await item.completion;
+        }
+      },
+      cancel() {
+        if (item.state !== "reserved") return;
+        item.cancelReservationTimeout?.();
+        item.cancelReservationTimeout = null;
+        item.state = "cancelled";
+        item.resolveCompletion();
+        pump();
+      },
+    };
+  };
+
+  const drain = async (): Promise<void> => {
+    for (;;) {
+      const current = active;
+      if (!current) {
+        pump();
+        if (!active) {
+          const pendingCompletion = reservations.find(
+            (item) =>
+              item.state !== "settled" && item.state !== "cancelled" && item.state !== "dropped",
+          )?.completion;
+          if (!pendingCompletion) return;
+          await pendingCompletion;
+        }
+        continue;
+      }
+      await current.done;
+    }
+  };
+
+  return {
+    reserve,
+    enqueue(workspaceId, sessionId, events) {
+      if (events.length === 0) return;
+      void reserve("detached", workspaceId, sessionId).commit(events);
+    },
+    async publishAwaited(workspaceId, sessionId, events, observe) {
+      if (events.length === 0) return;
+      await reserve("awaited", workspaceId, sessionId, observe).commit(events);
+    },
+    drain,
+    async close(_reason) {
+      if (closePromise) return await closePromise;
+      accepting = false;
+      for (const item of reservations.splice(0)) {
+        if (item.state === "active" || item.state === "settled") continue;
+        item.cancelReservationTimeout?.();
+        item.cancelReservationTimeout = null;
+        if (
+          item.mode === "detached" &&
+          item.events &&
+          item.events.length > 0 &&
+          !item.dropOutcomeEmitted
+        ) {
+          item.dropOutcomeEmitted = true;
+          emitOutcome("dropped", item.reservedAt, item.events.length);
+        }
+        item.state = item.mode === "detached" ? "dropped" : "cancelled";
+        item.resolveCompletion();
+      }
+      const current = active;
+      if (!current) return;
+      closePromise = (async () => {
+        const cancelCloseTimeout = scheduleTimeout(current.forceTimeout, closeTimeoutMs);
+        try {
+          await current.done;
+        } finally {
+          cancelCloseTimeout();
+          active = null;
+        }
+      })();
+      return await closePromise;
+    },
+  };
+}
+
 /**
  * Connect the event bus + control-plane request/reply over ONE managed NATS
  * connection. `auth` is the PRIVILEGED control-plane login (M-AUTH): when the
@@ -332,52 +738,64 @@ export async function createNatsEventBus(
     },
     flush: () => nc.flush(),
   };
+  const publishFlushTimeoutMs = Math.max(
+    1,
+    Math.floor(options.publishFlushTimeoutMs ?? PUBLISH_FLUSH_TIMEOUT_MS),
+  );
+  const publishSessionEventsWithOutcome = async (
+    workspaceId: string,
+    sessionId: string,
+    events: SessionEvent[],
+  ): Promise<SessionEventLivePublishOutcome> => {
+    if (events.length === 0) {
+      return "succeeded";
+    }
+    // Best-effort LIVE fan-out. These events are ALREADY durably appended to
+    // the DB before we get here (they carry a DB-assigned `sequence`), and
+    // every consumer reconciles from that durable log — the server SSE stream
+    // replays + gap-backfills via `listSessionEvents`, and the SDK client
+    // reconnects and replays from the durable events endpoint. So a publish
+    // that fails during a broker blip only delays LIVE delivery (healed by the
+    // next successful publish's gap-backfill, or a stream reconnect); it must
+    // never throw the in-flight turn to death.
+    try {
+      const batches = sessionEventBatchesByBytes(workspaceId, sessionId, events);
+      for (const batch of batches) {
+        nc.publish(
+          sessionSubject(workspaceId, sessionId),
+          codec.encode({ workspaceId, sessionId, events: batch }),
+        );
+      }
+      if (batches.length > 1) {
+        (options.logger?.debug ?? silentLogger.debug)("NATS session event batch chunked", {
+          workspaceId,
+          sessionId,
+          eventCount: events.length,
+          batchCount: batches.length,
+          maxMessageBytes: SESSION_EVENT_NATS_MESSAGE_MAX_BYTES,
+        });
+      }
+      observeEventBoundaries(batches.flat(), options.logger);
+    } catch (error) {
+      // `publish()` throws synchronously only when the connection is fully
+      // CLOSED (with infinite reconnect, effectively never outside shutdown).
+      (options.logger?.warn ?? silentLogger.warn)(
+        "NATS live publish dropped; events are durable in the DB and reconcile on stream replay",
+        {
+          workspaceId,
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      );
+      return "failed";
+    }
+    return await flushWithTimeout(nc, publishFlushTimeoutMs);
+  };
   return {
     publish: async (workspaceId, sessionId, events) => {
-      if (events.length === 0) {
-        return;
-      }
-      // Best-effort LIVE fan-out. These events are ALREADY durably appended to
-      // the DB before we get here (they carry a DB-assigned `sequence`), and
-      // every consumer reconciles from that durable log — the server SSE stream
-      // replays + gap-backfills via `listSessionEvents`, and the SDK client
-      // reconnects and replays from the durable events endpoint. So a publish
-      // that fails during a broker blip only delays LIVE delivery (healed by the
-      // next successful publish's gap-backfill, or a stream reconnect); it must
-      // never throw the in-flight turn to death.
-      try {
-        const batches = sessionEventBatchesByBytes(workspaceId, sessionId, events);
-        for (const batch of batches) {
-          nc.publish(
-            sessionSubject(workspaceId, sessionId),
-            codec.encode({ workspaceId, sessionId, events: batch }),
-          );
-        }
-        if (batches.length > 1) {
-          (options.logger?.debug ?? silentLogger.debug)("NATS session event batch chunked", {
-            workspaceId,
-            sessionId,
-            eventCount: events.length,
-            batchCount: batches.length,
-            maxMessageBytes: SESSION_EVENT_NATS_MESSAGE_MAX_BYTES,
-          });
-        }
-        observeEventBoundaries(batches.flat(), options.logger);
-      } catch (error) {
-        // `publish()` throws synchronously only when the connection is fully
-        // CLOSED (with infinite reconnect, effectively never outside shutdown).
-        (options.logger?.warn ?? silentLogger.warn)(
-          "NATS live publish dropped; events are durable in the DB and reconcile on stream replay",
-          {
-            workspaceId,
-            sessionId,
-            error: error instanceof Error ? error.message : String(error),
-          },
-        );
-        return;
-      }
-      await flushWithTimeout(nc, PUBLISH_FLUSH_TIMEOUT_MS);
+      await publishSessionEventsWithOutcome(workspaceId, sessionId, events);
     },
+    publishWithOutcome: publishSessionEventsWithOutcome,
     subscribe: async (workspaceId, sessionId, onEvents) =>
       subscribeSession(nc, workspaceId, sessionId, onEvents),
     publishWorkspaceControl: async (workspaceId, event) => {
@@ -632,19 +1050,39 @@ export async function appendAndPublishTurnEventsFenced(
   executionGeneration: number,
   attemptId: string,
   events: AppendEventInput[],
-  observe?: AppendPublishObserver,
+  observe?: AppendPublishObserver & {
+    fanout?: "awaited" | "detached";
+    detachedFanout?: DetachedSessionEventFanout;
+    appendSessionEventsForTurnAttempt?: typeof appendSessionEventsForTurnAttempt;
+  },
 ): Promise<{ events: SessionEvent[]; accepted: boolean }> {
+  let fanoutReservation: DetachedSessionEventFanoutReservation | null = null;
+  if (observe?.fanout) {
+    if (!observe.detachedFanout) {
+      throw new Error("Session event fanout is not configured");
+    }
+    fanoutReservation = observe.detachedFanout.reserve(
+      observe.fanout,
+      workspaceId,
+      sessionId,
+      observe,
+    );
+  }
   const appendStartedAt = performance.now();
-  const result = await appendSessionEventsForTurnAttempt(
-    db,
-    workspaceId,
-    sessionId,
-    turnId,
-    executionGeneration,
-    attemptId,
-    events,
-  );
+  let result: { events: SessionEvent[]; accepted: boolean };
+  try {
+    result = await (
+      observe?.appendSessionEventsForTurnAttempt ?? appendSessionEventsForTurnAttempt
+    )(db, workspaceId, sessionId, turnId, executionGeneration, attemptId, events);
+  } catch (error) {
+    fanoutReservation?.cancel();
+    throw error;
+  }
   observeSince(observe?.onAppend, appendStartedAt, result.events.length);
+  if (fanoutReservation) {
+    await fanoutReservation.commit(result.events);
+    return result;
+  }
   if (result.events.length === 0) return result;
   const publishStartedAt = performance.now();
   try {

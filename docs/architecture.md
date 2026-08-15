@@ -61,6 +61,19 @@ These are the load-bearing, cross-cutting rules. Breaking one tends to be a subt
   authoritative session event without a prior durable append; never reverse the
   order. A fanout failure must not kill an in-flight turn because consumers
   reconcile missed events from the durable log.
+- **Worker live fanout has an explicit durable-first fast path.** Noncritical
+  sandbox/rig lifecycle notifications and structural `agent.toolCall.output`
+  notifications may return to the agent loop after their attempt-fenced Postgres
+  append and durable tool/history reconciliation. One activity-owned lane retains
+  at most one active plus the oldest pending live-only batch; later overflow is
+  dropped, and `succeeded|failed|timed_out|dropped` are the only outcome labels.
+  Critical control, recovery, auth, model, tool-call creation, and terminal
+  settlement events remain awaited but cross that same lane, so a lower detached
+  sequence is invoked before a higher critical sequence. Activity success,
+  failure, cancellation, and graceful shutdown close the lane with a bounded
+  timeout, drop pending live-only work, and retain no promise into worker reuse.
+  A dropped or timed-out live notification is never treated as lost authoritative
+  state: reconnect and replay/gap-fill use the committed Postgres sequence.
 - **Prompt admission acknowledges the durable commit, not transport follow-up.**
   Send/Steer authorization, policy and limit checks precede one transaction that
   commits the `user.message`, queued turn, session/queue mutation, audit record,

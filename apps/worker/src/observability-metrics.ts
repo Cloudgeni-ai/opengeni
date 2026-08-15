@@ -1431,6 +1431,85 @@ export function recordSessionEventPublishLatency(
   });
 }
 
+export type AgentLoopPhase =
+  | "durable_append"
+  | "live_fanout"
+  | "provision_to_model_preparation"
+  | "tool_output_to_model_continuation";
+
+const AGENT_LOOP_PHASE_BUCKETS = [
+  0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60,
+];
+
+/** Closed-label agent-loop phase timing; never attach session, turn, or provider IDs. */
+export function recordAgentLoopPhaseDuration(
+  observability: Observability,
+  input: { phase: AgentLoopPhase; durationSeconds: number },
+): void {
+  observability.observeHistogram({
+    name: "opengeni_agent_loop_phase_duration_seconds",
+    help: "Agent-loop latency by closed phase.",
+    buckets: AGENT_LOOP_PHASE_BUCKETS,
+    labels: { phase: input.phase },
+    value: Math.max(0, input.durationSeconds),
+  });
+}
+
+export function recordDetachedSessionEventFanoutOutcome(
+  observability: Observability,
+  input: {
+    outcome: "succeeded" | "failed" | "timed_out" | "dropped";
+    durationSeconds: number;
+  },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_session_event_detached_fanout_total",
+    help: "Detached session-event live fanout outcomes by bounded outcome.",
+    labels: { outcome: input.outcome },
+  });
+  recordAgentLoopPhaseDuration(observability, {
+    phase: "live_fanout",
+    durationSeconds: input.durationSeconds,
+  });
+}
+
+/**
+ * Tracks the two cross-boundary agent-loop phases without retaining IDs or
+ * allowing a completed phase to be observed again on a later model request.
+ */
+export class AgentLoopPhaseTracker {
+  private provisionCompletedAt: number | null = null;
+  private toolOutputAt: number | null = null;
+
+  constructor(private readonly now: () => number = () => performance.now()) {}
+
+  markProvisionCompleted(): void {
+    this.provisionCompletedAt ??= this.now();
+  }
+
+  markToolOutput(): void {
+    this.toolOutputAt ??= this.now();
+  }
+
+  recordModelRequestStart(observability: Observability): void {
+    const now = this.now();
+    if (this.provisionCompletedAt !== null) {
+      recordAgentLoopPhaseDuration(observability, {
+        phase: "provision_to_model_preparation",
+        durationSeconds: Math.max(0, (now - this.provisionCompletedAt) / 1000),
+      });
+      this.provisionCompletedAt = null;
+    }
+    if (this.toolOutputAt !== null) {
+      recordAgentLoopPhaseDuration(observability, {
+        phase: "tool_output_to_model_continuation",
+        durationSeconds: Math.max(0, (now - this.toolOutputAt) / 1000),
+      });
+      this.toolOutputAt = null;
+    }
+  }
+}
+
 // Context tokens per response span a wide range; buckets track the pressure toward
 // a model's window so "sessions are running hot but never compacting" is queryable.
 const MODEL_INPUT_TOKENS_BUCKETS = [
