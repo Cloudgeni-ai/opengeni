@@ -42,6 +42,10 @@
       "types": "./src/connector-attachments.ts",
       "default": "./src/connector-attachments.ts"
     },
+    "./connection-authority": {
+      "types": "./src/connection-authority.ts",
+      "default": "./src/connection-authority.ts"
+    },
     "./video-generation": {
       "types": "./src/video-generation.ts",
       "default": "./src/video-generation.ts"

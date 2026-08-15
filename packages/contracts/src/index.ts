@@ -7957,6 +7957,8 @@ export type FikenOAuthStartResponse = z.infer<typeof FikenOAuthStartResponse>;
 
 export const ConnectionMetadata = z.object({
   id: z.string().uuid(),
+  /** Opaque owner-only handle used to manage this personal connection's grants. */
+  authorityId: z.string().uuid().optional(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   subjectId: z.string().nullable(),
