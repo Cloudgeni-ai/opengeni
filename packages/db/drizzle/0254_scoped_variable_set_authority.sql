@@ -689,7 +689,7 @@ BEGIN
         WHERE session_value.account_id = p_account_id
           AND session_value.variable_set_id = variable_set_row.id
           AND session_value.status IN (
-            'queued', 'running', 'requires_action', 'recovering', 'waiting_capacity'
+            'queued', 'running', 'requires_action'
           );
         IF attached_tasks > 0 OR attached_sessions > 0 THEN
           RAISE EXCEPTION 'variable set remains attached to %% scheduled tasks and %% sessions',

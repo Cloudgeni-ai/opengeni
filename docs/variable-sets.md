@@ -12,7 +12,7 @@ A variable set is attached to runnable things — a session (at creation only), 
 
 1. **Plaintext has one explicit read boundary.** Generic workspace, session, event, capability, installation, list, and variable-set metadata responses remain value-free. One dedicated REST route and one live-session MCP tool return exactly one configured value, and only when the caller holds both the resource permission and literal `secrets:read`.
 2. **No attachment, no injection.** A run whose session has `variableSetId = null` gets exactly the pre-existing behavior: the deployment env allowlist, git identity, and run-scoped GitHub auth. Nothing more. (This injection describes a **managed sandbox**; a Connected Machine session is not injected this way — see [Env injection is a managed-sandbox concept](#env-injection-is-a-managed-sandbox-concept).)
-3. **Attachment and use are separate.** `variable-sets:attach` changes a runnable attachment; `variable-sets:use` authorizes runtime use. Neither implies metadata, write, or plaintext-read authority.
+3. **Attachment and use are separate.** Creating or changing a runnable attachment requires both `variable-sets:attach` and `variable-sets:use`; neither permission implies the other. `variable-sets:attach` alone permits detaching, while `variable-sets:use` alone permits neither attaching nor detaching. Neither implies metadata, write, or plaintext-read authority.
 4. **Capability-only storage boundary.** The runtime role has no direct DML on variable-set or ciphertext tables. Security-definer routines enforce organization/workspace/user visibility and mutation rules under forced RLS.
 5. **Encryption at rest.** Values are AES-256-GCM encrypted with an operator key (`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`) held outside Postgres. A database dump alone does not reveal values.
 6. **No content rewriting.** If an authorized agent echoes a configured value into model history, events, tool results, errors, memory, or UI-visible OpenGeni data, that content remains exact. Public or third-party telemetry uses a sink-local, closed schema and never writes back over canonical OpenGeni data.
@@ -46,8 +46,8 @@ openssl rand -base64 32   # generate OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY
 | `variable-sets:list`   | List variable-set containers and metadata.                             |
 | `variable-sets:read`   | Read one variable-set container and metadata.                          |
 | `variable-sets:write`  | Create, rename, or delete variable-set containers.                     |
-| `variable-sets:attach` | Attach or detach a variable set on a runnable resource.                 |
-| `variable-sets:use`    | Attach and inject variable sets; never reveal plaintext by itself.     |
+| `variable-sets:attach` | Authorize attachment changes; setting a non-null attachment also requires `variable-sets:use`. |
+| `variable-sets:use`    | Authorize runtime use of an attached variable set; never attach or reveal plaintext by itself. |
 | `secrets:list`         | List configured secret names, versions, and timestamps.                |
 | `secrets:read`         | Retrieve one exact plaintext configured secret through a dedicated operation. |
 | `secrets:write`        | Create, rotate, or delete configured secret values.                    |
@@ -67,8 +67,9 @@ Reads are deliberately not folded under `workspace:read`: listing the names of
 secret sets is itself sensitive. Editing the `agentConfig` of a scheduled task
 that has a variable set attached also requires `variable-sets:use`, because
 changing the instructions of a secret-bearing task is equivalent to attaching
-those secrets to new instructions. Changing or removing an attachment requires
-it for the same reason.
+those secrets to new instructions. Setting or changing a non-null attachment
+requires both attachment permissions; removing one requires
+`variable-sets:attach`.
 
 ## API
 
@@ -83,12 +84,17 @@ it for the same reason.
 | `PUT /v1/workspaces/:workspaceId/variable-sets/:variableSetId/variables/:name`    | `variable-sets:write` + `secrets:write`          | Set or rotate one value; bumps `version`.                                                                                    |
 | `DELETE /v1/workspaces/:workspaceId/variable-sets/:variableSetId/variables/:name` | `variable-sets:write` + `secrets:write`          | Remove a variable.                                                                                                           |
 
+Creating or changing a non-null attachment requires both
+`variable-sets:attach` and `variable-sets:use`. Detaching requires
+`variable-sets:attach`; the permissions remain independent and neither implies
+the other.
+
 Attachment points:
 
-- `POST /v1/workspaces/:id/sessions` accepts `variableSetId`. The attachment is fixed at creation; follow-up `user.message` events cannot add or switch one. The `session.created` event carries `variableSetId`/`variableSetName` (names only).
-- `POST`/`PATCH /v1/workspaces/:id/scheduled-tasks` accept `variableSetId` (null detaches on update). Changing the attachment of a task with a live reusable session returns 409 — the session keeps its creation-time attachment, so recreate the task instead.
+- `POST /v1/workspaces/:id/sessions` accepts `variableSetId` and requires both attachment permissions when it is present. The attachment is fixed at creation; follow-up `user.message` events cannot add or switch one. The `session.created` event carries `variableSetId`/`variableSetName` (names only).
+- `POST`/`PATCH /v1/workspaces/:id/scheduled-tasks` accept `variableSetId` (null detaches on update). Setting or changing a non-null attachment requires both permissions; detaching requires `variable-sets:attach`. Changing the attachment of a task with a live reusable session returns 409 — the session keeps its creation-time attachment, so recreate the task instead.
 - When the selected Variable Set, Rig, or one of the Rig version's defaults is personal, scheduled-task acceptance freezes the causal human plus exact membership/resource/grant generations. Each occurrence revalidates and copies that immutable authority before dispatch; task edits, current Rig defaults, the current API user, and workspace defaults are never fallback authority. `once` grants belong to one admitted occurrence across recovery attempts. A rolling upgrade pauses legacy tasks that lack this ledger, and an explicit resume converts them before dispatch; old-writer authority-free runs are rejected in PostgreSQL. Only identifiers and generations are stored in this ledger; plaintext still crosses only the ordinary materialization/read boundaries described above.
-- `POST /v1/workspaces/:id/packs/:packId/enable` accepts `variableSetId` when a pack declares a `variable set` block; required variables are checked by **name**. Scheduled tasks created from that installation's templates inherit the attachment without re-checking `variable-sets:use` on the caller — it was authorized at enable time.
+- `POST /v1/workspaces/:id/packs/:packId/enable` accepts `variableSetId` when a pack declares a `variable set` block and requires both attachment permissions; required variables are checked by **name**. Scheduled tasks created from that installation's templates inherit the attachment without re-checking either permission on the caller — both were authorized at enable time.
 
 An unknown or cross-workspace `variableSetId` in any attachment payload returns `422 unknown variableSetId`; RLS makes the two cases indistinguishable by design.
 
@@ -121,7 +127,7 @@ Practically: attaching a variable set shapes what a managed sandbox sees; it doe
 ## Deletion semantics
 
 - A variable set attached to scheduled tasks cannot be deleted (409 from the API; `ON DELETE RESTRICT` as the database backstop). Detach the tasks first.
-- A variable set attached to sessions in a non-terminal state (`queued`, `running`, `requires_action`, `recovering`, `waiting_capacity`) cannot be deleted (409). Wait for them to finish or cancel them.
+- A variable set attached to sessions in `queued`, `running`, or `requires_action` state cannot be deleted (409). Wait for them to finish or cancel them.
 - Sessions in `idle`, `failed`, or `cancelled` state do **not** block deletion; their `variable_set_id` is set to NULL (`ON DELETE SET NULL`) so run history is preserved. An idle **reusable** session cannot be silently detached this way: its scheduled task holds its own RESTRICT-backed attachment (and the API refuses to change a live reusable task's attachment), so deletion stays blocked until the task is detached or deleted — and a deleted task never re-dispatches. Be aware of the consequence: sending a new message to a formerly-attached idle session after its variable set was deleted runs **without** workspace variable set injection, indistinguishable from a never-attached session. If the work depends on the secrets, create a new session with a current attachment.
 
 ## Rotation
@@ -152,15 +158,16 @@ The first-party MCP server exposes variable set tools, gated by the same permiss
 - `variable_set_list` (`variable-sets:list` + `secrets:list`) — variable-sets with variable names and metadata, never values.
 - `variable_set_get_variable` (`variable-sets:read` + literal `secrets:read`) — return one exact plaintext value. It is available only on a session-bound first-party MCP server, never codemode, and additionally requires a current signed workspace/session/turn/attempt/generation claim plus the `session.secret.read` host authorization operation. The database rechecks that the exact attempt is live before atomically committing the read and metadata-only audit.
 - `variable_set_set_variable` (`variable-sets:write` + `secrets:write`) — set or rotate one variable, targeted by `variableSetId` or by `variableSetName` (created on first use). The value arrives in plain tool arguments by design; responses return metadata, never values.
-- `session_create` (`sessions:create`) accepts `variableSetId`; attachment requires `variable-sets:use` like the REST route. There is deliberately no attach-after-create tool because attachment is fixed at session creation (see above).
+- `session_create` (`sessions:create`) accepts `variableSetId`; attachment requires both `variable-sets:attach` and `variable-sets:use` like the REST route. There is deliberately no attach-after-create tool because attachment is fixed at session creation (see above).
 
 The worker's current **default** first-party delegated token carries both
-`variable-sets:use` and `variable-sets:manage`, so list and write tools are
-registered through the compatibility mapping. It still cannot read a
-configured value or change its own creation-time attachment because the default
-grant does not contain literal `secrets:read`. A creator can narrow or otherwise
-customize a session's current permissions through explicit, creator-capped
-`firstPartyMcpPermissions`.
+`variable-sets:list|write|attach|use` and `secrets:list|write`. It does not carry
+the deprecated `variable-sets:manage` compatibility permission, and list/write
+tools are registered from the granular permissions directly. It still cannot
+read a configured value or change its own creation-time attachment because the
+default grant contains neither `variable-sets:read` nor literal `secrets:read`.
+A creator can narrow or otherwise customize a session's current permissions
+through explicit, creator-capped `firstPartyMcpPermissions`.
 
 Every plaintext read records actor, target name/reference, action, version,
 timestamp, and session/turn/attempt/generation when present. The audit never
