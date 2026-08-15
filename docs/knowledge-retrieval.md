@@ -1,6 +1,6 @@
 # Agent Knowledge retrieval
 
-This document is the canonical contract for the workspace-local agent Knowledge
+This document is the canonical contract for the permission-first agent Knowledge
 read surface. It is a projection over authorized, ready Documents; it does not
 create another durable store, a prompt-injection path, or behavioral authority.
 
@@ -55,9 +55,10 @@ callers, but new Knowledge navigation should use the three tools above.
 
 ## Permission-first reads
 
-The immutable initiating human is bound by the MCP server; no tool argument can
-replace it. Every path applies `account + requesting workspace + initiating
-subject + agent_access` before a row can be ranked or returned:
+The immutable initiating human and exact session attempt are bound by the MCP
+server; no tool argument can replace either. Every path applies `organization +
+requesting workspace + initiating subject + agent_access` before a row can be
+ranked or returned:
 
 1. search filters before vector/keyword ranking and limits;
 2. search re-fetches every selected chunk before projection, so a concurrent
@@ -69,6 +70,35 @@ subject + agent_access` before a row can be ranked or returned:
 An inaccessible parent returns no children and no title, source, or relationship
 metadata. A cursor can only move within the already-authorized query; it never
 widens access.
+
+### Three-scope Document authority
+
+Organization Documents are available throughout their organization. Workspace
+Documents are available only in their authority workspace. New personal
+Documents use a common organization-user authority: their physical workspace is
+immutable ingestion/indexing provenance, while human retrieval follows the
+exact owner across that owner's currently accessible workspaces in the same
+organization. Losing access to the origin workspace removes its workspace
+knowledge but does not remove the owner's personal Document. Legacy personal
+Documents remain origin-workspace anchored and are never inferred into the new
+authority. Document-scoped original-file reads and downloads atomically resolve
+this same effective Document boundary, current owner authority, provider ACL,
+and only the immutable origin file; generic file access does not become portable.
+
+Personal ownership is not an agent grant. When an exact turn attempt is
+admitted, the database freezes only ready, agent-enabled personal Documents
+covered by a matching `document.read` once/session/always grant for the target
+workspace, session visibility, and authority epoch. Workspace-shared grants
+require the common explicit shared-output acknowledgement. Every later read
+rechecks the exact attempt and interruption state, current target-workspace
+access, organization membership revision, resource generation, grant generation
+and expiry, and Document status. Calls without an exact attempt omit personal
+Documents. Revoking any fence removes access immediately; a permission granted
+after admission cannot widen the already-running attempt.
+The sole compatibility lane is a legacy null-authority personal Document: an
+agent may read it only for the exact initiating subject in its origin workspace.
+It cannot follow that subject to another workspace, and common-authority
+personal Documents never bypass the admitted snapshot.
 
 ### Google Drive object authority
 
@@ -98,11 +128,10 @@ identities; denial returns no record rather than a citation without authority.
 
 ## Deliberately deferred
 
-This no-migration slice does not make normalized scoped claims model-visible,
-activate cross-workspace Personal authority, implement shared-session grants or
-revocation fencing, persist Task-tree notes, or write durable logical-turn
-selection receipts. Those require the staged tenancy/grant work and the
-separate governed write/promotion lane. Until then, the Knowledge tools remain
+This retrieval surface does not make normalized scoped claims model-visible,
+persist Task-tree notes, or enter the separate governed write/promotion lane.
+It does not change `knowledge_memories`, structured preferences, company
+profile, instruction policy, or prompt composition. Knowledge tools remain
 explicit retrieval rather than automatic prompt composition.
 
 The runtime's existing Skills capability already gives selected Skills an

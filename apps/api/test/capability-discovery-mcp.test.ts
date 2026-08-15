@@ -188,19 +188,24 @@ async function seedAttempt(): Promise<{
       ${workspace.subjectId}, '{"accepted":true}'::jsonb
     ) RETURNING id`;
   const attemptId = crypto.randomUUID();
-  await shared!.admin`
-    INSERT INTO session_turn_attempts (
-      id, account_id, workspace_id, session_id, turn_id, execution_generation,
-      state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
-      verified_control_revision, mcp_approval_policies
-    ) VALUES (
-      ${attemptId}, ${workspace.accountId}, ${workspace.workspaceId}, ${session.id}, ${turn!.id},
-      ${executionGeneration}, 'running', 'capability-wf', ${`run-${attemptId}`},
-      ${`activity-${attemptId}`}, 0, '{}'::jsonb
-    )`;
-  await shared!.admin`
-    UPDATE session_turns SET active_attempt_id = ${attemptId} WHERE id = ${turn!.id}`;
-  await shared!.admin`
-    UPDATE sessions SET active_turn_id = ${turn!.id} WHERE id = ${session.id}`;
+  await shared!.admin.begin(async (tx) => {
+    await tx.unsafe("set local opengeni.session_inference_claim = '1'");
+    await tx`
+      UPDATE sessions SET active_turn_id = ${turn!.id}, status = 'running'
+      WHERE id = ${session.id}`;
+    await tx`
+      UPDATE session_turns SET active_attempt_id = ${attemptId}
+      WHERE id = ${turn!.id}`;
+    await tx`
+      INSERT INTO session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+        verified_control_revision, mcp_approval_policies
+      ) VALUES (
+        ${attemptId}, ${workspace.accountId}, ${workspace.workspaceId}, ${session.id}, ${turn!.id},
+        ${executionGeneration}, 'running', 'capability-wf', ${`run-${attemptId}`},
+        ${`activity-${attemptId}`}, 0, '{}'::jsonb
+      )`;
+  });
   return { sessionId: session.id, turnId: turn!.id, attemptId, executionGeneration };
 }

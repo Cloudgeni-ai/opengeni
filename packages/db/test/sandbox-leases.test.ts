@@ -1588,20 +1588,25 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
         1, 'lease heartbeat fixture', '[]'::jsonb, '[]'::jsonb,
         'test-model', 'low', 'modal', '{}'::jsonb, '{}'::jsonb, 1
       )`;
-    await admin`
-      insert into session_turn_attempts (
-        id, account_id, workspace_id, session_id, turn_id,
-        execution_generation, state, temporal_workflow_id,
-        temporal_workflow_run_id, temporal_activity_id,
-        verified_control_revision, mcp_approval_policies
-      ) values (
-        ${attemptId}, ${accountId}, ${workspaceId}, ${sessionId}, ${turnId},
-        1, 'running', ${`session-${sessionId}`}, ${crypto.randomUUID()}, '2',
-        0, '{}'::jsonb
-      )`;
-    await admin`
-      update session_turns set active_attempt_id = ${attemptId}
-      where workspace_id = ${workspaceId} and id = ${turnId}`;
+    await admin.begin(async (tx) => {
+      await tx`
+        update sessions set active_turn_id = ${turnId}
+        where workspace_id = ${workspaceId} and id = ${sessionId}`;
+      await tx`
+        update session_turns set active_attempt_id = ${attemptId}
+        where workspace_id = ${workspaceId} and id = ${turnId}`;
+      await tx`
+        insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id,
+          execution_generation, state, temporal_workflow_id,
+          temporal_workflow_run_id, temporal_activity_id,
+          verified_control_revision, mcp_approval_policies
+        ) values (
+          ${attemptId}, ${accountId}, ${workspaceId}, ${sessionId}, ${turnId},
+          1, 'running', ${`session-${sessionId}`}, ${crypto.randomUUID()}, '2',
+          0, '{}'::jsonb
+        )`;
+    });
 
     await acquireLease(db, {
       accountId,
