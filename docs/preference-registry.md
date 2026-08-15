@@ -84,15 +84,15 @@ revision and retain the corrected revision. Rejected and superseded records are
 terminal. Expiry is derived at read time: expired heads remain historical truth
 but do not produce descriptors.
 
-All governance mutations require a positively identified `human_session`
-principal. Delegated bearer principal kind is a mandatory immutable HMAC-signed
-claim; agent-attempt, service, API-key, configured-key, and missing principal
-kinds fail closed even when their permission strings would otherwise be
-sufficient. Mixed or mismatched authenticated subject/account contexts also
-fail closed. Organization authorization uses the matching account grant rather
-than copying `account:admin` into workspace permissions. The verified kind is
-propagated into the database transaction and rechecked by the lifecycle
-function. Each successful transition
+All human governance lifecycle mutations require a positively identified
+`human_session` principal. Delegated bearer principal kind is a mandatory
+immutable HMAC-signed claim; agent-attempt, service, API-key, configured-key,
+and missing principal kinds fail closed even when their permission strings
+would otherwise be sufficient. Mixed or mismatched authenticated
+subject/account contexts also fail closed. Organization authorization uses the
+matching account grant rather than copying `account:admin` into workspace
+permissions. The verified kind is propagated into the database transaction and
+rechecked by the lifecycle function. Each successful transition
 records the actor, bounded reason, old/new revision or target, related
 preference where applicable, and monotonic event version.
 
@@ -129,8 +129,19 @@ automatic policy. Connectors, ingestion, workers, source text, and arbitrary
 services still cannot activate directly.
 
 This registry does not ingest source content and does not define connector or
-source/fact schemas. Those systems can call proposal creation later, but cannot
-bypass proposal status or human activation.
+source/fact schemas. The governed Company Brain write adapter can now
+materialize an exact workspace-scoped Knowledge change proposal as one inactive
+workspace preference. Exact replay converges by stable key plus Knowledge
+proposal provenance; changed content or a pre-existing key from another source
+fails closed. The resulting revision retains `knowledge_proposal` provenance
+and `untrusted_proposal` trust. Its security-definer writer revalidates the exact
+current attempt, execution generation, immutable causal human, and absence of a
+live interruption, then records a content-free service actor instead of
+borrowing `human_session`. The adapter cannot select organization or user scope,
+activate, correct, change scope, or bypass the existing human lifecycle.
+Its separate immutable workspace receipt preserves exact operation/input and
+destination revision identities, so a retry does not depend on mutable current
+status, active head, or scope after a later human lifecycle action.
 
 ## Deterministic descriptors and authorized full content
 

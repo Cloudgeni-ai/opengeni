@@ -88,6 +88,23 @@ revision has the same tenant, target, actor, content fingerprint, and exact
 `onboarding` provenance. Proposal creation never writes a head or activation
 event, and there is intentionally no proposal activation endpoint.
 
+## Knowledge-backed inactive proposals
+
+The governed Company Brain write adapter reuses the same immutable proposal and
+inactive-revision lifecycle for workspace-scoped Knowledge evidence. It requires
+an exact `knowledge_change_proposals` row, exact supporting claim/evidence,
+explicit target, and caller-supplied active-head revision/version baseline. Its
+draft records `knowledge_proposal` provenance with the Knowledge proposal UUID
+as source ID; the proposal source version is the exact content hash.
+
+Migration `0255_company_brain_governed_write_proposals.sql` extends the existing
+database validator to require that the Knowledge proposal has workspace scope,
+the same workspace, `instruction_policy` target kind, exact normalized target
+key, `proposed` status, and the same content hash as the inactive draft. The
+original onboarding branch remains unchanged. This adapter has no API route and
+cannot write a head or activation event; activation and rollback remain in the
+existing authenticated human lifecycle.
+
 ## Activation, conflicts, and rollback
 
 At most one head may exist for each charter, global policy, or normalized role

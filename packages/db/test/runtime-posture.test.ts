@@ -103,6 +103,40 @@ function canonicalHumanIdentityAuthorityTables(): RuntimeTablePosture[] {
   }));
 }
 
+function companyBrainPreferenceAuthorityTables(): RuntimeTablePosture[] {
+  return [
+    "company_brain_preference_proposal_receipts",
+    "knowledge_change_proposals",
+    "knowledge_claim_evidence",
+    "knowledge_claim_reviews",
+    "knowledge_claims",
+    "preference_registry_events",
+    "preference_registry_preferences",
+    "preference_registry_revisions",
+    "session_attempt_interruptions",
+    "session_turn_attempts",
+    "session_turns",
+    "sessions",
+    "workspaces",
+  ].map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
+
 function xaiAuthorityTables(): RuntimeTablePosture[] {
   return [
     "organization_memberships",
@@ -183,6 +217,7 @@ function safePosture(): RuntimeDatabasePosture {
       ...knowledgeAuthorityTables(),
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
+      ...companyBrainPreferenceAuthorityTables(),
       ...xaiAuthorityTables(),
     ],
     privateTables: [
@@ -268,25 +303,25 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 239],
+            [FORCE_RLS_TABLES, 240],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 137],
             [RUNTIME_READ_ONLY_TABLES, 17],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 29],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 21],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 22],
             [RUNTIME_DML_TABLES, 229],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 183],
+            [FORCE_RLS_TABLES, 184],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 112],
             [RUNTIME_READ_ONLY_TABLES, 16],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 38],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 16],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 17],
             [RUNTIME_DML_TABLES, 178],
           ] as const);
       for (const [tables, length] of contracts) {
@@ -300,7 +335,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 250 : 194;
+      const tableCount = hasCurrentMainActivityLedger ? 251 : 195;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
@@ -361,14 +396,14 @@ describe("runtime database posture evaluator", () => {
     }
 
     const contracts = [
-      [FORCE_RLS_TABLES, 210],
+      [FORCE_RLS_TABLES, 211],
       [NON_RLS_RUNTIME_TABLES, 11],
       [RUNTIME_FULL_DML_TABLES, 133],
       [RUNTIME_READ_ONLY_TABLES, 14],
       [RUNTIME_READ_UPDATE_TABLES, 1],
       [RUNTIME_READ_INSERT_TABLES, 41],
       [RUNTIME_READ_INSERT_UPDATE_TABLES, 18],
-      [PROTECTED_NO_DIRECT_DML_TABLES, 19],
+      [PROTECTED_NO_DIRECT_DML_TABLES, 20],
       [RUNTIME_DML_TABLES, 207],
     ] as const;
     for (const [tables, length] of contracts) {
@@ -378,8 +413,8 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(226);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(221);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(227);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(222);
     expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
       "SELECT",
       "INSERT",
@@ -438,15 +473,7 @@ describe("runtime database posture evaluator", () => {
     const posture = safePosture();
     posture.schemas[0]!.owner = "pg_database_owner";
     for (const routine of posture.targetRoutines) {
-      if (
-        routine.name === "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)" ||
-        routine.name.includes("scoped_variable_set") ||
-        routine.name === "resolve_session_attempt_personal_resources(uuid, uuid, uuid)" ||
-        routine.name === "session_private_actor_visible(uuid, uuid, uuid, text)" ||
-        routine.name === "session_reference_visible(uuid, uuid, uuid)" ||
-        routine.name ===
-          "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)"
-      ) {
+      if (routine.name.includes("scoped_variable_set")) {
         routine.owner = "pg_database_owner";
       }
     }
@@ -520,6 +547,34 @@ describe("runtime database posture evaluator", () => {
       expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
       expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
     }
+  });
+
+  test("classifies the Company Brain preference receipt as FORCE-RLS capability-only state", () => {
+    expect(FORCE_RLS_TABLES).toContain("company_brain_preference_proposal_receipts");
+    expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("company_brain_preference_proposal_receipts");
+    expect(RUNTIME_TABLE_PRIVILEGES.company_brain_preference_proposal_receipts).toBeUndefined();
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
+      "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)",
+    );
+  });
+
+  test("requires same-owner Company Brain preference proposal authority", () => {
+    const routineName =
+      "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)";
+    const split = safePosture();
+    split.tables.find(
+      (table) => table.name === "company_brain_preference_proposal_receipts",
+    )!.owner = "another_owner";
+    expect(evaluateRuntimeDatabasePosture(split, options)).toContain(
+      `target-schema runtime capability ${routineName} authority table owners do not match: company_brain_preference_proposal_receipts=another_owner, knowledge_change_proposals=opengeni_migrator, knowledge_claim_evidence=opengeni_migrator, knowledge_claim_reviews=opengeni_migrator, knowledge_claims=opengeni_migrator, preference_registry_events=opengeni_migrator, preference_registry_preferences=opengeni_migrator, preference_registry_revisions=opengeni_migrator, session_attempt_interruptions=opengeni_migrator, session_turn_attempts=opengeni_migrator, session_turns=opengeni_migrator, sessions=opengeni_migrator, workspaces=opengeni_migrator`,
+    );
+
+    const invalidRoutine = safePosture();
+    invalidRoutine.targetRoutines.find((routine) => routine.name === routineName)!.owner =
+      "another_owner";
+    expect(evaluateRuntimeDatabasePosture(invalidRoutine, options)).toContain(
+      `target-schema runtime capability ${routineName} owner another_owner does not match authority table owner opengeni_migrator`,
+    );
   });
 
   test("rejects xAI authority routine and table owner mismatch", () => {

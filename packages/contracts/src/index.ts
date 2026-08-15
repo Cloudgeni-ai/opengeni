@@ -13432,6 +13432,7 @@ export * from "./workspace-learning-policy";
 export * from "./workspace-state";
 export * from "./preference-registry";
 export * from "./scoped-knowledge";
+export * from "./company-brain-governed-writes";
 export * from "./knowledge";
 export * from "./task-notes";
 export * from "./canonical-human-identities";

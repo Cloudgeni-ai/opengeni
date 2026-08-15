@@ -264,10 +264,23 @@ describe("release schema contract", () => {
       sha256: "e99064ac5acd73e79c3a75872d71a5c8710bcedbbd12fbe3eee989d7f167c8cf",
       deploymentMode: "rolling",
     });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0255_company_brain_governed_write_proposals.sql",
+      ),
+    ).toMatchObject({
+      sha256: "5d6527267b8de9cb9539e97a0cd30051dc9b2059fd5935261aa8c762d5d6a0d3",
+      deploymentMode: "rolling",
+    });
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
+      if (migrations.has("0255_company_brain_governed_write_proposals.sql")) {
+        return includesActivation
+          ? "7297e2ad81f65cfebfea608a8e541e1f8229e6b0e70f3a8d651319fefa72760d"
+          : "6bb2a825b85f0372d6fae7ca45aa43491d47e9283e19456554f8402166a203c9";
+      }
       if (
         migrations.has("0236_session_visibility_slack_policy.sql") &&
         migrations.has("0246_integration_personal_instance_authority.sql") &&
@@ -383,6 +396,11 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
+      if (migrations.has("0255_company_brain_governed_write_proposals.sql")) {
+        return includesActivation
+          ? "7297e2ad81f65cfebfea608a8e541e1f8229e6b0e70f3a8d651319fefa72760d"
+          : "6bb2a825b85f0372d6fae7ca45aa43491d47e9283e19456554f8402166a203c9";
+      }
       if (migrations.has("0248_terraform_stacks_component_resolution_fence.sql")) {
         if (
           migrations.has("0246_integration_personal_instance_authority.sql") &&
@@ -712,10 +730,12 @@ describe("release schema contract", () => {
         (migrations.has("0243_google_drive_object_acl_authority.sql") ? 1 : 0) +
         (migrations.has("0244_slack_app_home_refresh_queue.sql") ? 1 : 0) +
         (migrations.has("0245_model_context_contribution_facts.sql") ? 1 : 0) +
-        (migrations.has("0246_integration_personal_instance_authority.sql") ? 1 : 0),
+        (migrations.has("0246_integration_personal_instance_authority.sql") ? 1 : 0) +
+        (migrations.has("0255_company_brain_governed_write_proposals.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
+      "0255_company_brain_governed_write_proposals.sql",
       "0246_integration_personal_instance_authority.sql",
       "0245_model_context_contribution_facts.sql",
       "0244_slack_app_home_refresh_queue.sql",
@@ -743,11 +763,13 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0248_terraform_stacks_component_resolution_fence.sql")
-        ? "0248_terraform_stacks_component_resolution_fence.sql"
-        : migrations.has("0247_terraform_stacks_provenance_repair.sql")
-          ? "0247_terraform_stacks_provenance_repair.sql"
-          : latestCompatibleMigration,
+      migrations.has("0255_company_brain_governed_write_proposals.sql")
+        ? "0255_company_brain_governed_write_proposals.sql"
+        : migrations.has("0248_terraform_stacks_component_resolution_fence.sql")
+          ? "0248_terraform_stacks_component_resolution_fence.sql"
+          : migrations.has("0247_terraform_stacks_provenance_repair.sql")
+            ? "0247_terraform_stacks_provenance_repair.sql"
+            : latestCompatibleMigration,
     );
     expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
       sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",
@@ -962,6 +984,12 @@ describe("release schema contract", () => {
     if (migrations.has("0245_model_context_contribution_facts.sql")) {
       expect(migrations.get("0245_model_context_contribution_facts.sql")).toMatchObject({
         sha256: "437bb07ffe12f9c714bd2a40d0ecd8ed9df1fd9003f4d057fe11101999841f40",
+        deploymentMode: "rolling",
+      });
+    }
+    if (migrations.has("0255_company_brain_governed_write_proposals.sql")) {
+      expect(migrations.get("0255_company_brain_governed_write_proposals.sql")).toMatchObject({
+        sha256: "5d6527267b8de9cb9539e97a0cd30051dc9b2059fd5935261aa8c762d5d6a0d3",
         deploymentMode: "rolling",
       });
     }

@@ -424,6 +424,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       Array<{
         lock_execute: boolean;
         lifecycle_execute: boolean;
+        knowledge_proposal_execute: boolean;
         snapshot_execute: boolean;
       }>
     >`
@@ -442,8 +443,14 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
           'opengeni_app',
           ${`${SCHEMA}.preference_registry_get_or_create_snapshot(uuid,uuid,uuid,uuid,uuid,integer)`},
           'EXECUTE'
-        ) AS snapshot_execute`;
+        ) AS snapshot_execute,
+        has_function_privilege(
+          'opengeni_app',
+          ${`${SCHEMA}.preference_registry_create_knowledge_proposal_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,uuid,text,text,text,text,integer,text,jsonb,timestamptz,text)`},
+          'EXECUTE'
+        ) AS knowledge_proposal_execute`;
     expect(preferenceFunctions).toEqual({
+      knowledge_proposal_execute: true,
       lock_execute: true,
       lifecycle_execute: true,
       snapshot_execute: true,
@@ -615,6 +622,82 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
           ${object.id}::uuid
         )
       `);
+    });
+  });
+
+  test("migrate-then-provision grants only the Company Brain preference proposal capability", async () => {
+    if (!available) return;
+    expect(appRoleExistedBeforeMigration).toBe(false);
+
+    const [routine] = await admin<
+      Array<{
+        arguments: string;
+        securityDefiner: boolean;
+        appExecute: boolean;
+        publicExecute: boolean;
+        settings: string[] | null;
+      }>
+    >`
+      SELECT
+        pg_catalog.oidvectortypes(procedure.proargtypes) AS arguments,
+        procedure.prosecdef AS "securityDefiner",
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') AS "appExecute",
+        exists (
+          SELECT 1
+          FROM aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+        ) AS "publicExecute",
+        procedure.proconfig AS settings
+      FROM pg_proc procedure
+      JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+      WHERE namespace.nspname = ${SCHEMA}
+        AND procedure.proname = 'preference_registry_create_knowledge_proposal_for_attempt'`;
+    expect(routine).toEqual({
+      arguments:
+        "uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text",
+      securityDefiner: true,
+      appExecute: true,
+      publicExecute: false,
+      settings: [`search_path=${SCHEMA}, opengeni_private, public`],
+    });
+
+    const [receiptTable] = await admin<
+      Array<{
+        rlsEnabled: boolean;
+        rlsForced: boolean;
+        select: boolean;
+        insert: boolean;
+        update: boolean;
+        delete: boolean;
+        sessionVisibility: boolean;
+      }>
+    >`
+      SELECT
+        relation.relrowsecurity AS "rlsEnabled",
+        relation.relforcerowsecurity AS "rlsForced",
+        has_table_privilege('opengeni_app', relation.oid, 'SELECT') AS select,
+        has_table_privilege('opengeni_app', relation.oid, 'INSERT') AS insert,
+        has_table_privilege('opengeni_app', relation.oid, 'UPDATE') AS update,
+        has_table_privilege('opengeni_app', relation.oid, 'DELETE') AS delete,
+        exists (
+          SELECT 1
+          FROM pg_policy policy
+          WHERE policy.polrelid = relation.oid
+            AND policy.polname = 'session_visibility_isolation'
+            AND policy.polpermissive = false
+        ) AS "sessionVisibility"
+      FROM pg_class relation
+      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      WHERE namespace.nspname = ${SCHEMA}
+        AND relation.relname = 'company_brain_preference_proposal_receipts'`;
+    expect(receiptTable).toEqual({
+      rlsEnabled: true,
+      rlsForced: true,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+      sessionVisibility: true,
     });
   });
 

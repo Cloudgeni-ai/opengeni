@@ -87,6 +87,19 @@ type OnboardingProposalInput = OnboardingProposalRequestInput & {
   requestFingerprint: string;
 };
 
+export type WorkspaceInstructionPolicyKnowledgeProposalInput = WorkspaceInstructionPolicyTarget & {
+  operationId: string;
+  accountId: string;
+  workspaceId: string;
+  content: string;
+  knowledgeProposalId: string;
+  knowledgeProposalContentHash: string;
+  confidenceBps: number;
+  expectedCurrentRevisionId: string | null;
+  expectedActivationVersion: number;
+  createdBySubjectId: string;
+};
+
 export class WorkspaceInstructionPolicyConflictError extends Error {
   readonly name = "WorkspaceInstructionPolicyConflictError";
   readonly code = "WORKSPACE_INSTRUCTION_POLICY_CONFLICT";
@@ -278,6 +291,23 @@ function onboardingProposalRequestFingerprint(input: OnboardingProposalRequestIn
     ["content", true, input.content],
     ["sourceId", true, input.sourceId],
     ["sourceVersion", true, input.sourceVersion],
+    ["confidenceBps", true, input.confidenceBps],
+    ["expectedCurrentRevisionId", true, input.expectedCurrentRevisionId],
+    ["expectedActivationVersion", true, input.expectedActivationVersion],
+    ["createdBySubjectId", true, input.createdBySubjectId],
+  ]);
+}
+
+function knowledgeProposalRequestFingerprint(input: OnboardingProposalRequestInput): string {
+  return operationRequestFingerprint("create_knowledge_proposal", [
+    ["accountId", true, input.accountId],
+    ["workspaceId", true, input.workspaceId],
+    ["kind", true, input.kind],
+    ["scope", true, input.scope],
+    ["roleKey", true, input.roleKey],
+    ["content", true, input.content],
+    ["knowledgeProposalId", true, input.sourceId],
+    ["knowledgeProposalContentHash", true, input.sourceVersion],
     ["confidenceBps", true, input.confidenceBps],
     ["expectedCurrentRevisionId", true, input.expectedCurrentRevisionId],
     ["expectedActivationVersion", true, input.expectedActivationVersion],
@@ -893,6 +923,136 @@ export async function importLegacyWorkspaceInstructionPolicyDraft(
   );
 }
 
+async function createWorkspaceInstructionPolicySourceProposal(
+  db: Database,
+  input: OnboardingProposalInput,
+  draftProvenanceSource: WorkspaceInstructionPolicyDraftProvenanceSource,
+  draftProvenanceSourceId: (proposalId: string) => string,
+): Promise<WorkspaceInstructionPolicyOnboardingProposal> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await lockWorkspace(scopedDb, input);
+      const existing = await getOnboardingProposalByOperationInTransaction(
+        scopedDb,
+        input.workspaceId,
+        input.operationId,
+      );
+      if (existing) {
+        if (existing.requestFingerprint !== input.requestFingerprint) {
+          throw new WorkspaceInstructionPolicyOperationReuseError();
+        }
+        return await resolveOnboardingProposalInTransaction(scopedDb, existing);
+      }
+      if (
+        (await getEventByOperationInTransaction(scopedDb, input.workspaceId, input.operationId)) ||
+        (await getRevisionByOperationInTransaction(scopedDb, input.workspaceId, input.operationId))
+      ) {
+        throw new WorkspaceInstructionPolicyOperationReuseError();
+      }
+
+      const target: WorkspaceInstructionPolicyTarget = {
+        kind: input.kind,
+        scope: input.scope,
+        roleKey: input.roleKey,
+      };
+      const currentRow = await getHeadInTransaction(scopedDb, input.workspaceId, target);
+      const currentHead = currentRow ? headFromRow(currentRow) : null;
+      if (
+        (currentHead?.revisionId ?? null) !== input.expectedCurrentRevisionId ||
+        (currentHead?.activationVersion ?? 0) !== input.expectedActivationVersion
+      ) {
+        throw new WorkspaceInstructionPolicyOnboardingProposalStaleError(currentHead);
+      }
+
+      const sourceConflict = await getOnboardingProposalBySourceVersionInTransaction(
+        scopedDb,
+        input,
+      );
+      if (sourceConflict) {
+        throw new WorkspaceInstructionPolicyOnboardingProposalConflictError(
+          sourceConflict.id,
+          sourceConflict.draftRevisionId,
+        );
+      }
+
+      const proposalId = randomUUID();
+      const draft = await createDraftInTransaction(scopedDb, {
+        operationId: input.operationId,
+        requestFingerprint: input.requestFingerprint,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        kind: input.kind,
+        scope: input.scope,
+        roleKey: input.roleKey,
+        content: input.content,
+        provenanceSource: draftProvenanceSource,
+        provenanceSourceId: draftProvenanceSourceId(proposalId),
+        supersedesRevisionId: currentHead?.revisionId ?? null,
+        createdBySubjectId: input.createdBySubjectId,
+      });
+      const createdAt = new Date();
+      const [created] = await scopedDb
+        .insert(schema.workspaceInstructionPolicyOnboardingProposals)
+        .values({
+          id: proposalId,
+          operationId: input.operationId,
+          requestFingerprint: input.requestFingerprint,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          kind: input.kind,
+          scope: input.scope,
+          roleKey: input.roleKey,
+          sourceId: input.sourceId,
+          sourceVersion: input.sourceVersion,
+          confidenceBps: input.confidenceBps,
+          baselineRevisionId: currentHead?.revisionId ?? null,
+          baselineRevision: currentHead?.revision ?? null,
+          baselineContentHash: currentHead?.contentHash ?? null,
+          baselineActivationVersion: currentHead?.activationVersion ?? 0,
+          baselineActivatedAt: currentHead ? new Date(currentHead.activatedAt) : null,
+          draftRevisionId: draft.id,
+          draftRevision: draft.revision,
+          draftContentHash: draft.contentHash,
+          status: "proposed",
+          createdBySubjectId: input.createdBySubjectId,
+          createdAt,
+        })
+        .onConflictDoNothing()
+        .returning();
+      if (created) {
+        const draftRow = await getRevisionInTransaction(scopedDb, input.workspaceId, draft.id);
+        if (!draftRow) throw new Error("Instruction-policy proposal draft was not recorded");
+        return onboardingProposalFromRow(created, draftRow);
+      }
+
+      const concurrentOperation = await getOnboardingProposalByOperationInTransaction(
+        scopedDb,
+        input.workspaceId,
+        input.operationId,
+      );
+      if (concurrentOperation) {
+        if (concurrentOperation.requestFingerprint !== input.requestFingerprint) {
+          throw new WorkspaceInstructionPolicyOperationReuseError();
+        }
+        return await resolveOnboardingProposalInTransaction(scopedDb, concurrentOperation);
+      }
+      const concurrentSource = await getOnboardingProposalBySourceVersionInTransaction(
+        scopedDb,
+        input,
+      );
+      if (concurrentSource) {
+        throw new WorkspaceInstructionPolicyOnboardingProposalConflictError(
+          concurrentSource.id,
+          concurrentSource.draftRevisionId,
+        );
+      }
+      throw new Error("Workspace instruction-policy proposal was not created");
+    },
+  );
+}
+
 export async function createWorkspaceInstructionPolicyOnboardingProposal(
   db: Database,
   input: Omit<OnboardingProposalRequestInput, "operationId"> & { operationId?: string },
@@ -913,139 +1073,57 @@ export async function createWorkspaceInstructionPolicyOnboardingProposal(
     sourceId: input.sourceId.trim(),
     sourceVersion: input.sourceVersion.trim(),
   };
-  const normalized: OnboardingProposalInput = {
-    ...request,
-    requestFingerprint: onboardingProposalRequestFingerprint(request),
-  };
-  return await withRlsContext(
+  return await createWorkspaceInstructionPolicySourceProposal(
     db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      await lockWorkspace(scopedDb, input);
-      const existing = await getOnboardingProposalByOperationInTransaction(
-        scopedDb,
-        input.workspaceId,
-        normalized.operationId,
-      );
-      if (existing) {
-        if (existing.requestFingerprint !== normalized.requestFingerprint) {
-          throw new WorkspaceInstructionPolicyOperationReuseError();
-        }
-        return await resolveOnboardingProposalInTransaction(scopedDb, existing);
-      }
-      if (
-        (await getEventByOperationInTransaction(
-          scopedDb,
-          input.workspaceId,
-          normalized.operationId,
-        )) ||
-        (await getRevisionByOperationInTransaction(
-          scopedDb,
-          input.workspaceId,
-          normalized.operationId,
-        ))
-      ) {
-        throw new WorkspaceInstructionPolicyOperationReuseError();
-      }
+    { ...request, requestFingerprint: onboardingProposalRequestFingerprint(request) },
+    "onboarding",
+    (proposalId) => proposalId,
+  );
+}
 
-      const target: WorkspaceInstructionPolicyTarget = {
-        kind: normalized.kind,
-        scope: normalized.scope,
-        roleKey: normalized.roleKey,
-      };
-      const currentRow = await getHeadInTransaction(scopedDb, input.workspaceId, target);
-      const currentHead = currentRow ? headFromRow(currentRow) : null;
-      if (
-        (currentHead?.revisionId ?? null) !== normalized.expectedCurrentRevisionId ||
-        (currentHead?.activationVersion ?? 0) !== normalized.expectedActivationVersion
-      ) {
-        throw new WorkspaceInstructionPolicyOnboardingProposalStaleError(currentHead);
-      }
-
-      const sourceConflict = await getOnboardingProposalBySourceVersionInTransaction(
-        scopedDb,
-        normalized,
-      );
-      if (sourceConflict) {
-        throw new WorkspaceInstructionPolicyOnboardingProposalConflictError(
-          sourceConflict.id,
-          sourceConflict.draftRevisionId,
-        );
-      }
-
-      const proposalId = randomUUID();
-      const draft = await createDraftInTransaction(scopedDb, {
-        operationId: normalized.operationId,
-        requestFingerprint: normalized.requestFingerprint,
-        accountId: normalized.accountId,
-        workspaceId: normalized.workspaceId,
-        kind: normalized.kind,
-        scope: normalized.scope,
-        roleKey: normalized.roleKey,
-        content: normalized.content,
-        provenanceSource: "onboarding",
-        provenanceSourceId: proposalId,
-        supersedesRevisionId: currentHead?.revisionId ?? null,
-        createdBySubjectId: normalized.createdBySubjectId,
-      });
-      const createdAt = new Date();
-      const [created] = await scopedDb
-        .insert(schema.workspaceInstructionPolicyOnboardingProposals)
-        .values({
-          id: proposalId,
-          operationId: normalized.operationId,
-          requestFingerprint: normalized.requestFingerprint,
-          accountId: normalized.accountId,
-          workspaceId: normalized.workspaceId,
-          kind: normalized.kind,
-          scope: normalized.scope,
-          roleKey: normalized.roleKey,
-          sourceId: normalized.sourceId,
-          sourceVersion: normalized.sourceVersion,
-          confidenceBps: normalized.confidenceBps,
-          baselineRevisionId: currentHead?.revisionId ?? null,
-          baselineRevision: currentHead?.revision ?? null,
-          baselineContentHash: currentHead?.contentHash ?? null,
-          baselineActivationVersion: currentHead?.activationVersion ?? 0,
-          baselineActivatedAt: currentHead ? new Date(currentHead.activatedAt) : null,
-          draftRevisionId: draft.id,
-          draftRevision: draft.revision,
-          draftContentHash: draft.contentHash,
-          status: "proposed",
-          createdBySubjectId: normalized.createdBySubjectId,
-          createdAt,
-        })
-        .onConflictDoNothing()
-        .returning();
-      if (created) {
-        const draftRow = await getRevisionInTransaction(scopedDb, input.workspaceId, draft.id);
-        if (!draftRow) throw new Error("Onboarding proposal draft was not recorded");
-        return onboardingProposalFromRow(created, draftRow);
-      }
-
-      const concurrentOperation = await getOnboardingProposalByOperationInTransaction(
-        scopedDb,
-        input.workspaceId,
-        normalized.operationId,
-      );
-      if (concurrentOperation) {
-        if (concurrentOperation.requestFingerprint !== normalized.requestFingerprint) {
-          throw new WorkspaceInstructionPolicyOperationReuseError();
-        }
-        return await resolveOnboardingProposalInTransaction(scopedDb, concurrentOperation);
-      }
-      const concurrentSource = await getOnboardingProposalBySourceVersionInTransaction(
-        scopedDb,
-        normalized,
-      );
-      if (concurrentSource) {
-        throw new WorkspaceInstructionPolicyOnboardingProposalConflictError(
-          concurrentSource.id,
-          concurrentSource.draftRevisionId,
-        );
-      }
-      throw new Error("Workspace instruction-policy onboarding proposal was not created");
-    },
+/**
+ * Materialize an immutable Knowledge change proposal as an inactive instruction
+ * draft. Human activation remains exclusively in the existing lifecycle API.
+ */
+export async function createWorkspaceInstructionPolicyKnowledgeProposal(
+  db: Database,
+  input: WorkspaceInstructionPolicyKnowledgeProposalInput,
+): Promise<WorkspaceInstructionPolicyOnboardingProposal> {
+  if (input.content.trim().length === 0) {
+    throw new WorkspaceInstructionPolicyInvalidOperationError(
+      "A Knowledge-backed instruction proposal must contain non-blank content",
+    );
+  }
+  if (input.content.length > WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS) {
+    throw new WorkspaceInstructionPolicyInvalidOperationError(
+      `A Knowledge-backed instruction proposal must not exceed ${WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters`,
+    );
+  }
+  if (!/^[0-9a-f]{64}$/.test(input.knowledgeProposalContentHash)) {
+    throw new WorkspaceInstructionPolicyInvalidOperationError(
+      "Knowledge proposal content hash must be lowercase SHA-256",
+    );
+  }
+  const request: OnboardingProposalRequestInput = {
+    operationId: input.operationId,
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    kind: input.kind,
+    scope: input.scope,
+    roleKey: input.roleKey,
+    content: input.content,
+    sourceId: input.knowledgeProposalId,
+    sourceVersion: input.knowledgeProposalContentHash,
+    confidenceBps: input.confidenceBps,
+    expectedCurrentRevisionId: input.expectedCurrentRevisionId,
+    expectedActivationVersion: input.expectedActivationVersion,
+    createdBySubjectId: input.createdBySubjectId,
+  };
+  return await createWorkspaceInstructionPolicySourceProposal(
+    db,
+    { ...request, requestFingerprint: knowledgeProposalRequestFingerprint(request) },
+    "knowledge_proposal",
+    () => input.knowledgeProposalId,
   );
 }
 
