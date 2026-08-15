@@ -14351,29 +14351,35 @@ export async function readVariableSetSecretAtomically(
           valueEncrypted: string;
         }>;
         try {
-          rows = await rawRows(
-            tx,
-            sql`select
-            variable_set_id as "variableSetId",
-            variable_name as "name",
-            variable_version as "version",
-            value_encrypted as "valueEncrypted"
-          from read_scoped_variable_set_secret(
-            ${input.accountId}::uuid,
-            ${input.workspaceId}::uuid,
-            ${input.variableSetId ?? null}::uuid,
-            ${input.variableSetName ?? null},
-            ${input.name},
-            ${input.actor.kind},
-            ${input.actor.kind === "agent_attempt" ? input.actor.sessionId : null}::uuid,
-            ${input.actor.kind === "agent_attempt" ? input.actor.turnId : null}::uuid,
-            ${input.actor.kind === "agent_attempt" ? input.actor.attemptId : null}::uuid,
-            ${input.actor.kind === "agent_attempt" ? input.actor.executionGeneration : null}::integer
-          )`,
-          );
+          rows = await rawTx.transaction(async (nestedRawTx) => {
+            const nestedTx = nestedRawTx as unknown as Database;
+            return await rawRows(
+              nestedTx,
+              sql`select
+              variable_set_id as "variableSetId",
+              variable_name as "name",
+              variable_version as "version",
+              value_encrypted as "valueEncrypted"
+            from read_scoped_variable_set_secret(
+              ${input.accountId}::uuid,
+              ${input.workspaceId}::uuid,
+              ${input.variableSetId ?? null}::uuid,
+              ${input.variableSetName ?? null},
+              ${input.name},
+              ${input.actor.kind},
+              ${input.actor.kind === "agent_attempt" ? input.actor.sessionId : null}::uuid,
+              ${input.actor.kind === "agent_attempt" ? input.actor.turnId : null}::uuid,
+              ${input.actor.kind === "agent_attempt" ? input.actor.attemptId : null}::uuid,
+              ${input.actor.kind === "agent_attempt" ? input.actor.executionGeneration : null}::integer
+            )`,
+            );
+          });
         } catch (error) {
           if (input.actor.kind === "agent_attempt") {
             throw new VariableSetSecretReadAuthorityError();
+          }
+          if (nestedPostgresSqlState(error) === "P0002") {
+            return null;
           }
           throw error;
         }
