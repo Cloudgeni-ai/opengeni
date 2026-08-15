@@ -1,7 +1,7 @@
 {
   "uid": "opengeni-turn-startup",
   "title": "OpenGeni · Turn Startup",
-  "description": "Queue-to-first-byte SLOs and bounded worker preparation phases. Session drill-down stays in durable authenticated events; no session or turn identity is a metric label.",
+  "description": "Queue-to-first-byte SLOs and bounded worker preparation phases for one exact namespace, environment, and Helm release. Session drill-down stays in durable authenticated events; no session or turn identity is a metric label.",
   "schemaVersion": 39,
   "version": 1,
   "editable": true,
@@ -26,12 +26,60 @@
         "refresh": 1
       },
       {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": {
+          "query": "label_values(opengeni_turn_startup_phase_duration_seconds_bucket, namespace)",
+          "refId": "namespace"
+        },
+        "definition": "label_values(opengeni_turn_startup_phase_duration_seconds_bucket, namespace)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "environment",
+        "label": "Environment",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": {
+          "query": "label_values(opengeni_turn_startup_phase_duration_seconds_bucket{namespace=\"$namespace\"}, environment)",
+          "refId": "environment"
+        },
+        "definition": "label_values(opengeni_turn_startup_phase_duration_seconds_bucket{namespace=\"$namespace\"}, environment)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "release",
+        "label": "Release",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": {
+          "query": "label_values(opengeni_turn_startup_phase_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\"}, release)",
+          "refId": "release"
+        },
+        "definition": "label_values(opengeni_turn_startup_phase_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\"}, release)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
         "name": "provider",
         "label": "Provider",
         "type": "query",
         "datasource": { "type": "prometheus", "uid": "${datasource}" },
         "query": {
-          "query": "label_values(opengeni_turn_startup_phase_duration_seconds_bucket, provider)",
+          "query": "label_values(opengeni_turn_startup_phase_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}, provider)",
           "refId": "provider"
         },
         "includeAll": true,
@@ -45,7 +93,7 @@
         "type": "query",
         "datasource": { "type": "prometheus", "uid": "${datasource}" },
         "query": {
-          "query": "label_values(opengeni_turn_startup_phase_duration_seconds_bucket, backend)",
+          "query": "label_values(opengeni_turn_startup_phase_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}, backend)",
           "refId": "backend"
         },
         "includeAll": true,
@@ -69,7 +117,7 @@
         "type": "query",
         "datasource": { "type": "prometheus", "uid": "${datasource}" },
         "query": {
-          "query": "label_values(opengeni_turn_startup_phase_duration_seconds_bucket, phase)",
+          "query": "label_values(opengeni_turn_startup_phase_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}, phase)",
           "refId": "phase"
         },
         "includeAll": true,
@@ -120,21 +168,21 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.50, sum by (le, provider, backend) (rate(opengeni_turn_worker_preparation_duration_seconds_bucket{provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le, provider, backend) (rate(opengeni_turn_worker_preparation_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\"}[$__rate_interval])))",
           "legendFormat": "{{provider}} · {{backend}} p50",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le, provider, backend) (rate(opengeni_turn_worker_preparation_duration_seconds_bucket{provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, provider, backend) (rate(opengeni_turn_worker_preparation_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\"}[$__rate_interval])))",
           "legendFormat": "{{provider}} · {{backend}} p95",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "C",
-          "expr": "histogram_quantile(0.99, sum by (le, provider, backend) (rate(opengeni_turn_worker_preparation_duration_seconds_bucket{provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le, provider, backend) (rate(opengeni_turn_worker_preparation_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\"}[$__rate_interval])))",
           "legendFormat": "{{provider}} · {{backend}} p99",
           "editorMode": "code",
           "range": true
@@ -156,21 +204,21 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.50, sum by (le, phase) (rate(opengeni_turn_startup_phase_duration_seconds_bucket{phase=~\"$phase\",provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\",cache=~\"$cache\",count_bucket=~\"$count_bucket\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le, phase) (rate(opengeni_turn_startup_phase_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",phase=~\"$phase\",provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\",cache=~\"$cache\",count_bucket=~\"$count_bucket\"}[$__rate_interval])))",
           "legendFormat": "{{phase}} p50",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le, phase) (rate(opengeni_turn_startup_phase_duration_seconds_bucket{phase=~\"$phase\",provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\",cache=~\"$cache\",count_bucket=~\"$count_bucket\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, phase) (rate(opengeni_turn_startup_phase_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",phase=~\"$phase\",provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\",cache=~\"$cache\",count_bucket=~\"$count_bucket\"}[$__rate_interval])))",
           "legendFormat": "{{phase}} p95",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "C",
-          "expr": "histogram_quantile(0.99, sum by (le, phase) (rate(opengeni_turn_startup_phase_duration_seconds_bucket{phase=~\"$phase\",provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\",cache=~\"$cache\",count_bucket=~\"$count_bucket\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le, phase) (rate(opengeni_turn_startup_phase_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",phase=~\"$phase\",provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\",cache=~\"$cache\",count_bucket=~\"$count_bucket\"}[$__rate_interval])))",
           "legendFormat": "{{phase}} p99",
           "editorMode": "code",
           "range": true
@@ -194,7 +242,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, phase) (rate(opengeni_turn_startup_phase_duration_seconds_bucket{provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\",cache=~\"$cache\",count_bucket=~\"$count_bucket\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, phase) (rate(opengeni_turn_startup_phase_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\",cache=~\"$cache\",count_bucket=~\"$count_bucket\"}[$__rate_interval])))",
           "legendFormat": "{{phase}}",
           "editorMode": "code",
           "range": true
@@ -216,7 +264,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (phase, provider, backend) (increase(opengeni_turn_startup_phase_duration_seconds_count{outcome=\"failed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
+          "expr": "sum by (phase, provider, backend) (increase(opengeni_turn_startup_phase_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"failed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
           "legendFormat": "{{phase}} · {{provider}} · {{backend}}",
           "editorMode": "code",
           "range": true
@@ -236,7 +284,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "End-to-end startup milestones p50 / p95 / p99",
-      "description": "Cumulative latency measured from the durable turn queue timestamp. first_byte is a real end-to-end TTFB sample, not a sum of independently distributed phase percentiles.",
+      "description": "Successful cumulative latency measured from the durable turn queue timestamp. first_byte is a real end-to-end TTFB sample, not a sum of independently distributed phase percentiles. Attempts that terminate before a byte are tracked by the separate availability panel.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "options": {
@@ -246,21 +294,21 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.50, sum by (le, milestone) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le, milestone) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",backend=~\"$backend\",outcome=\"completed\"}[$__rate_interval])))",
           "legendFormat": "{{milestone}} p50",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le, milestone) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, milestone) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",backend=~\"$backend\",outcome=\"completed\"}[$__rate_interval])))",
           "legendFormat": "{{milestone}} p95",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "C",
-          "expr": "histogram_quantile(0.99, sum by (le, milestone) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le, milestone) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",backend=~\"$backend\",outcome=\"completed\"}[$__rate_interval])))",
           "legendFormat": "{{milestone}} p99",
           "editorMode": "code",
           "range": true
@@ -272,7 +320,7 @@
       "id": 8,
       "type": "stat",
       "title": "Startup SLO misses",
-      "description": "Turns above the default queue (5s), provider-dispatch (60s), and first-byte (120s) SLOs over the selected 7- or 30-day range.",
+      "description": "Successful turns above the default queue (5s), provider-dispatch (60s), and first-byte (120s) latency SLOs over the selected range. Pre-byte failures and timeouts are availability misses in the panel below, not latency samples.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
@@ -296,27 +344,63 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{milestone=\"queue\",outcome=\"completed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range])) - sum(increase(opengeni_turn_startup_milestone_duration_seconds_bucket{milestone=\"queue\",outcome=\"completed\",le=\"5\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
+          "expr": "sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"queue\",outcome=\"completed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range])) - sum(increase(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"queue\",outcome=\"completed\",le=\"5\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
           "legendFormat": "queue >5s",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "B",
-          "expr": "sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{milestone=\"provider_dispatch\",outcome=\"completed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range])) - sum(increase(opengeni_turn_startup_milestone_duration_seconds_bucket{milestone=\"provider_dispatch\",outcome=\"completed\",le=\"60\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
+          "expr": "sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"provider_dispatch\",outcome=\"completed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range])) - sum(increase(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"provider_dispatch\",outcome=\"completed\",le=\"60\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
           "legendFormat": "dispatch >60s",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "C",
-          "expr": "sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{milestone=\"first_byte\",outcome=\"completed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range])) - sum(increase(opengeni_turn_startup_milestone_duration_seconds_bucket{milestone=\"first_byte\",outcome=\"completed\",le=\"120\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
+          "expr": "sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"first_byte\",outcome=\"completed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range])) - sum(increase(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"first_byte\",outcome=\"completed\",le=\"120\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
           "legendFormat": "first byte >120s",
           "editorMode": "code",
           "range": true
         }
       ],
       "gridPos": { "x": 16, "y": 20, "w": 8, "h": 10 }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "First-byte availability and terminal pressure",
+      "description": "For instrumented subscription transports, first-byte availability is first-byte phases divided by terminal attempts. A failure after a byte contributes to both counts, so only attempts that terminate without a byte lower availability. The bounded failed/timed_out terminal ratios remain separate diagnostics.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "min"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "clamp_max((sum by (provider) (rate(opengeni_model_request_phases_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",phase=\"first_byte\"}[$__rate_interval])) or on(provider) 0 * sum by (provider) (rate(opengeni_model_request_phases_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",phase=\"terminal\"}[$__rate_interval]))) / clamp_min(sum by (provider) (rate(opengeni_model_request_phases_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",phase=\"terminal\"}[$__rate_interval])), 0.000000001), 1)",
+          "legendFormat": "{{provider}} first-byte availability",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (provider, outcome) (rate(opengeni_model_request_phases_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",phase=\"terminal\",outcome=~\"failed|timed_out\"}[$__rate_interval])) / ignoring(outcome) group_left clamp_min(sum by (provider) (rate(opengeni_model_request_phases_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",phase=\"terminal\"}[$__rate_interval])), 0.000000001)",
+          "legendFormat": "{{provider}} terminal {{outcome}} ratio",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 30, "w": 12, "h": 9 }
     },
     {
       "id": 9,
@@ -332,27 +416,27 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(opengeni_turn_worker_preparation_duration_seconds_bucket{provider=~\"$provider\",backend=~\"$backend\",outcome=\"completed\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(opengeni_turn_worker_preparation_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",backend=~\"$backend\",outcome=\"completed\"}[$__rate_interval])))",
           "legendFormat": "platform preparation p95",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(opengeni_model_request_phase_duration_seconds_bucket{phase=\"first_byte\",provider=~\"$provider\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(opengeni_model_request_phase_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",phase=\"first_byte\",provider=~\"$provider\"}[$__rate_interval])))",
           "legendFormat": "provider first byte p95",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "C",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(opengeni_stream_ttft_seconds_bucket{provider=~\"$provider\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(opengeni_stream_ttft_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\"}[$__rate_interval])))",
           "legendFormat": "stream TTFT p95",
           "editorMode": "code",
           "range": true
         }
       ],
-      "gridPos": { "x": 0, "y": 30, "w": 24, "h": 9 }
+      "gridPos": { "x": 12, "y": 30, "w": 12, "h": 9 }
     }
   ]
 }

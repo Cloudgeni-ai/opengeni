@@ -14,7 +14,17 @@ different "manage and fix problems as soon as they arise" question:
 
 All six are theme-agnostic, tagged `opengeni` + `observability`, and carry a
 `$datasource` template variable — pick your Prometheus datasource on import; no UID
-is hardcoded.
+is hardcoded. The Turn Startup dashboard additionally requires one exact
+`$namespace`, `$environment`, and `$release` selection so a shared Prometheus
+cannot combine separate OpenGeni deployments. Its first-byte latency quantiles
+contain successful samples only; the adjacent availability panel separately
+shows instrumented provider attempts that terminate without a first byte.
+
+The dashboards offer 30-day views, but a selector cannot manufacture retained
+history. The production example's 30-day time limit plus 80 GB size limit does
+not guarantee 30 days: Prometheus applies whichever limit is reached first.
+Size local storage from measured ingestion or use remote write before relying
+on the full window.
 
 ## Importing
 

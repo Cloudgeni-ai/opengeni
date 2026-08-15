@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 
 const SCRAPE_IDENTITY = "and on(namespace, release, environment, component, instance)";
+const DEPLOYMENT_SCOPE =
+  "namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}";
 
 describe("turn-capacity Prometheus alerts", () => {
   test("alerts on cumulative queue, provider-dispatch, and first-byte p95 SLOs", async () => {
@@ -19,9 +21,62 @@ describe("turn-capacity Prometheus alerts", () => {
       expect(expression).toContain(`milestone="${milestone}"`);
       expect(expression).toContain("histogram_quantile(");
       expect(expression).toContain("turnStartupMinSamples");
+      for (const selector of metricSelectors(expression)) {
+        expect(selector).toContain(DEPLOYMENT_SCOPE);
+      }
       expect(expression).not.toContain("sessionId");
       expect(expression).not.toContain("turnId");
     }
+  });
+
+  test("renders disjoint startup alert scopes for separate releases and environments", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const expression = alertExpression(template, "OpenGeniTurnStartupFirstByteP95High");
+    const production = renderDeploymentScope(expression, {
+      namespace: "opengeni-shared",
+      release: "release-a",
+      environment: "production",
+    });
+    const staging = renderDeploymentScope(expression, {
+      namespace: "opengeni-shared",
+      release: "release-b",
+      environment: "staging",
+    });
+
+    expect(production).toContain(
+      'namespace="opengeni-shared",release="release-a",environment="production"',
+    );
+    expect(production).not.toContain('release="release-b"');
+    expect(staging).toContain(
+      'namespace="opengeni-shared",release="release-b",environment="staging"',
+    );
+    expect(staging).not.toContain('environment="production"');
+  });
+
+  test("alerts when bounded provider attempts terminate without first-byte availability", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const availability = alertExpression(template, "OpenGeniTurnStartupFirstByteAvailabilityLow");
+    const latency = alertExpression(template, "OpenGeniTurnStartupFirstByteP95High");
+
+    expect(availability).toContain("opengeni_model_request_phases_total");
+    expect(availability).toContain('phase="first_byte"');
+    expect(availability).toContain('phase="terminal"');
+    expect(availability).toContain('outcome=~"failed|timed_out"');
+    expect(availability).toContain("or on(provider)");
+    expect(availability).toContain("0 * sum by (provider)");
+    expect(availability).toContain("turnStartupFirstByteAvailabilityRatio");
+    expect(availability).toContain("turnStartupMinSamples");
+    for (const selector of metricSelectors(availability)) {
+      expect(selector).toContain(DEPLOYMENT_SCOPE);
+    }
+    expect(latency).toContain('milestone="first_byte",outcome="completed"');
+    expect(latency).not.toContain("opengeni_model_request_phases_total");
   });
 
   test("alerts on actual SuperGrok valid-event idle timeout terminals", async () => {
@@ -89,4 +144,20 @@ function alertExpression(template: string, alertName: string): string {
     throw new Error(`Missing expression boundaries for ${alertName}`);
   }
   return template.slice(expressionStart + "          expr: |\n".length, expressionEnd);
+}
+
+function metricSelectors(expression: string): string[] {
+  return [...expression.matchAll(/opengeni_[a-zA-Z0-9_:]+\{([^\n]*)\}/g)].map(
+    (match) => match[1] ?? "",
+  );
+}
+
+function renderDeploymentScope(
+  expression: string,
+  scope: { namespace: string; release: string; environment: string },
+): string {
+  return expression
+    .replaceAll("{{ .Release.Namespace | quote }}", JSON.stringify(scope.namespace))
+    .replaceAll("{{ .Release.Name | quote }}", JSON.stringify(scope.release))
+    .replaceAll("{{ $environment | quote }}", JSON.stringify(scope.environment));
 }

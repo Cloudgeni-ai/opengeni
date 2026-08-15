@@ -7,9 +7,11 @@ kube-prometheus-stack:
     prometheusSpec:
       externalLabels:
         environment: production
-      # Startup SLO dashboards expose both 7d and 30d windows. Keep at least
-      # the full 30-day window in the production profile; private overlays must
-      # size storage/remote-write retention for their actual series volume.
+      # Startup SLO dashboards expose both 7d and 30d windows. These are
+      # independent upper bounds: Prometheus deletes data when either the time
+      # limit or size limit is reached, so 80 GB may retain less than 30 days.
+      # Measure actual series volume and ingestion, then raise local capacity or
+      # configure remote write if 30 days is an operational requirement.
       retention: 30d
       retentionSize: 80GB
       resources:
