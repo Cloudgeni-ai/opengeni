@@ -56,6 +56,7 @@ export function canonicalControlRequest(): ControlRequest {
   return {
     requestId: "req-0002",
     epoch: 7,
+    resourcePolicy: undefined,
     op: {
       $case: "exec",
       exec: {
@@ -104,6 +105,8 @@ export function canonicalHello(): Hello {
       // the existing cross-stack fixtures stay valid (mirrors the Rust corpus).
       opStream: false,
       browserBridge: false,
+      operationResourcePolicy: false,
+      operationCpuQuota: false,
     },
     updateChannel: "stable",
     resumeToken: "resume-token-1",

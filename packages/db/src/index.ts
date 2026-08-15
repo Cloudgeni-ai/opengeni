@@ -41771,6 +41771,13 @@ export type EnrollmentRecord = {
    *  not granted); null when capture is permitted or the machine is headless. */
   desktopUnavailableReason: string | null;
   allowScreenControl: boolean;
+  operationPolicy: {
+    memoryMaxBytes: number | null;
+    memoryHighBytes: number | null;
+    cpuMaxMillicores: number | null;
+    revision: number;
+    updatedAt: string | null;
+  };
   status: EnrollmentStatus;
   credentialGeneration: number;
   /** Exact live runner instance receiving this machine's control traffic. */
@@ -41812,6 +41819,13 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
     opStream: row.opStream,
     desktopUnavailableReason: row.desktopUnavailableReason ?? null,
     allowScreenControl: row.allowScreenControl,
+    operationPolicy: {
+      memoryMaxBytes: row.operationMemoryMaxBytes ?? null,
+      memoryHighBytes: row.operationMemoryHighBytes ?? null,
+      cpuMaxMillicores: row.operationCpuMaxMillicores ?? null,
+      revision: Number(row.operationPolicyRevision),
+      updatedAt: row.operationPolicyUpdatedAt?.toISOString() ?? null,
+    },
     status: row.status as EnrollmentStatus,
     credentialGeneration: Number(row.credentialGeneration),
     connectionInstanceId: row.connectionInstanceId ?? null,
@@ -41996,6 +42010,68 @@ export async function getLiveEnrollmentConnection(
       .limit(1);
     return row ? mapEnrollment(row) : null;
   });
+}
+
+/** Revision-fenced workspace-operator update of one Connected Machine's optional
+ * command resource policy. NULL remains unrestricted. The active-enrollment check,
+ * CAS, mutation, and audit receipt share one RLS transaction. */
+export async function updateEnrollmentOperationPolicy(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    subjectId?: string;
+    expectedRevision: number;
+    memoryMaxBytes: number | null;
+    memoryHighBytes: number | null;
+    cpuMaxMillicores?: number | null;
+  },
+): Promise<EnrollmentRecord | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const now = new Date();
+      const [row] = await scopedDb
+        .update(schema.enrollments)
+        .set({
+          operationMemoryMaxBytes: input.memoryMaxBytes,
+          operationMemoryHighBytes: input.memoryHighBytes,
+          ...(input.cpuMaxMillicores !== undefined
+            ? { operationCpuMaxMillicores: input.cpuMaxMillicores }
+            : {}),
+          operationPolicyRevision: sql`${schema.enrollments.operationPolicyRevision} + 1`,
+          operationPolicyUpdatedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.status, "active"),
+            eq(schema.enrollments.operationPolicyRevision, input.expectedRevision),
+          ),
+        )
+        .returning();
+      if (!row) return null;
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId ?? null,
+        action: "connected_machine.operation_policy.updated",
+        targetType: "enrollment",
+        targetId: input.enrollmentId,
+        metadata: {
+          revision: Number(row.operationPolicyRevision),
+          memoryMaxBytes: row.operationMemoryMaxBytes,
+          memoryHighBytes: row.operationMemoryHighBytes,
+          cpuMaxMillicores: row.operationCpuMaxMillicores,
+        },
+      });
+      return mapEnrollment(row);
+    },
+  );
 }
 
 export type EnrollmentConnectionClaim = {

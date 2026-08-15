@@ -403,7 +403,7 @@ mod tests {
         image::codecs::png::PngEncoder::new(&mut png)
             .write_image(&rgba, w, h, image::ExtendedColorType::Rgba8)
             .expect("encode macOS-style png");
-        assert!(!png.is_empty());
+        assert_ne!(png.len(), 0);
 
         // Force a hard downscale: budget a fraction of the native PNG size.
         let budget = png.len() / 8;

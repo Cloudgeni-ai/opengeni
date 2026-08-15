@@ -797,6 +797,10 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         epoch: 0,
         timeoutMs: deps.settings.sandboxSelfhostedControlTimeoutMs,
         execTimeoutMs: deps.settings.sandboxSelfhostedExecTimeoutMs,
+        operationResourcePolicy: enrollment.operationPolicy,
+        operationResourcePolicySupported:
+          enrollment.agentCapabilities.operationResourcePolicy === true,
+        operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
         ...(deps.settings.agentOpStreamEnabled === true &&
         enrollment.opStream === true &&
         deps.bus.getOpStreamConnection

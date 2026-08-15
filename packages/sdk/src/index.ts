@@ -906,6 +906,8 @@ export type {
   MachineUpdateState,
   MachineRuntime,
   UpdateMachineAgentResponse,
+  MachineOperationPolicy,
+  UpdateMachineOperationPolicyRequest,
   MachineView,
   MachinesResponse,
   MachineMetricsSeriesResponse,

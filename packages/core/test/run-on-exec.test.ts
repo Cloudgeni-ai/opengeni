@@ -169,6 +169,44 @@ async function run(
 }
 
 describe("run_on Connected Machine exec receipts", () => {
+  test("threads the enrollment command policy and fails closed without support", async () => {
+    const supported = new InMemoryMachineRunner({ true: { durationMs: 1, exitCode: 0 } });
+    const base = {
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      relay: { host: "relay.test", tls: true } as const,
+      controlTimeoutMs: 30_000,
+      execTimeoutMs: 120_000,
+      operationResourcePolicy: { memoryMaxBytes: 1_073_741_824 },
+    };
+
+    const accepted = await executeRunOnSelfhostedMachine(
+      {
+        ...base,
+        controlRpc: supported,
+        operationResourcePolicySupported: true,
+      },
+      TARGET,
+      { kind: "exec", cmd: "true" },
+    );
+    expect(accepted.ok).toBe(true);
+    expect(supported.requests[0]?.req.resourcePolicy?.memoryMaxBytes).toBe("1073741824");
+
+    const incapable = new InMemoryMachineRunner({ true: { durationMs: 1, exitCode: 0 } });
+    const rejected = await executeRunOnSelfhostedMachine(
+      {
+        ...base,
+        controlRpc: incapable,
+        operationResourcePolicySupported: false,
+      },
+      TARGET,
+      { kind: "exec", cmd: "true" },
+    );
+    expect(rejected).toMatchObject({ ok: false, kind: "exec" });
+    expect(rejected.reason).toContain("cannot enforce");
+    expect(incapable.requests).toHaveLength(0);
+  });
+
   test("projects exact-attempt values only onto the one-off child exec", async () => {
     const runner = new InMemoryMachineRunner({
       inspect: { durationMs: 1, exitCode: 0 },

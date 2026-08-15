@@ -236,6 +236,22 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
                   },
                 }
               : {})}
+            {...(machines.canUpdateOperationPolicy
+              ? {
+                  onUpdateOperationPolicy: async (machine, request) => {
+                    if (!machine.enrollmentId) return;
+                    const updated = await machines.updateOperationPolicy(
+                      machine.enrollmentId,
+                      request,
+                    );
+                    if (updated) {
+                      toast.success(`Updated command policy for ${machine.name}`);
+                    }
+                  },
+                  updatingOperationPolicy:
+                    machines.updatingOperationPolicyEnrollmentId === selectedMachine.enrollmentId,
+                }
+              : {})}
             now={now}
           />
         ) : (

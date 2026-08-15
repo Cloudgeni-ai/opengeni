@@ -745,6 +745,7 @@ describe("workbench prewarm gating (Refinement 1)", () => {
               duplicateRunnerDeniedCount: 0,
               duplicateRunnerDeniedAt: null,
             },
+            operationPolicy: null,
             runtime: null,
             metrics: null,
           },

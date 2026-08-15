@@ -73,6 +73,9 @@ e2e(
           downloadDirectory: downloadStore.filesDirectory,
           screenshotDirectory: join(directory, "screenshots"),
           headed: false,
+          ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+            ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+            : {}),
         });
     const driver = new AgentBrowserDriver({
       browserSessionId,

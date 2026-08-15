@@ -116,6 +116,37 @@ describe("OpenGeniClient", () => {
     await expect(request).rejects.toHaveProperty("name", "AbortError");
   });
 
+  test("updateMachineOperationPolicy patches the exact revision-fenced contract", async () => {
+    const enrollmentId = "11111111-1111-4111-8111-111111111111";
+    const response = {
+      memoryMaxBytes: 1_073_741_824,
+      memoryHighBytes: null,
+      cpuMaxMillicores: 1_500,
+      revision: 3,
+      updatedAt: "2026-08-14T10:00:00.000Z",
+    };
+    const { client, requests } = makeClient(() => jsonResponse(response));
+
+    expect(
+      await client.updateMachineOperationPolicy(WORKSPACE_ID, enrollmentId, {
+        memoryMaxBytes: 1_073_741_824,
+        memoryHighBytes: null,
+        cpuMaxMillicores: 1_500,
+        expectedRevision: 2,
+      }),
+    ).toEqual(response);
+    expect(requests[0]).toMatchObject({
+      method: "PATCH",
+      url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/machines/${enrollmentId}/operation-policy`,
+      body: JSON.stringify({
+        memoryMaxBytes: 1_073_741_824,
+        memoryHighBytes: null,
+        cpuMaxMillicores: 1_500,
+        expectedRevision: 2,
+      }),
+    });
+  });
+
   test("removeEnrollment posts the workspace-scoped idempotent removal contract", async () => {
     const enrollmentId = "11111111-1111-4111-8111-111111111111";
     const response: RemoveEnrollmentResponse = {

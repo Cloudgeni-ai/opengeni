@@ -28,6 +28,7 @@ import {
   type ComputerFramesOpenRequest,
   type ExecRequest,
   type ExecResponse,
+  type OperationResourcePolicy,
   type StreamChannel,
 } from "@opengeni/agent-proto";
 import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
@@ -221,6 +222,39 @@ const SELFHOSTED_EXEC_REPLY_GRACE_MS = 5_000;
  *  range while also fitting the reply grace. */
 const SELFHOSTED_MAX_EXEC_TIMEOUT_MS = 2_147_483_647 - SELFHOSTED_EXEC_REPLY_GRACE_MS;
 
+function normalizeOperationResourcePolicy(
+  policy: SelfhostedOperationResourcePolicy | undefined,
+): OperationResourcePolicy | undefined {
+  const memoryMaxBytes = policy?.memoryMaxBytes ?? null;
+  const memoryHighBytes = policy?.memoryHighBytes ?? null;
+  const cpuMaxMillicores = policy?.cpuMaxMillicores ?? null;
+  for (const [name, value] of [
+    ["memoryMaxBytes", memoryMaxBytes],
+    ["memoryHighBytes", memoryHighBytes],
+  ] as const) {
+    if (value !== null && (!Number.isSafeInteger(value) || value <= 0)) {
+      throw new Error(`${name} must be a positive safe-integer byte count or null`);
+    }
+  }
+  if (memoryMaxBytes !== null && memoryHighBytes !== null && memoryHighBytes > memoryMaxBytes) {
+    throw new Error("memoryHighBytes cannot exceed memoryMaxBytes");
+  }
+  if (
+    cpuMaxMillicores !== null &&
+    (!Number.isInteger(cpuMaxMillicores) || cpuMaxMillicores <= 0 || cpuMaxMillicores > 0xffff_ffff)
+  ) {
+    throw new Error("cpuMaxMillicores must be a positive uint32 value or null");
+  }
+  if (memoryMaxBytes === null && memoryHighBytes === null && cpuMaxMillicores === null) {
+    return undefined;
+  }
+  return {
+    ...(memoryMaxBytes !== null ? { memoryMaxBytes: String(memoryMaxBytes) } : {}),
+    ...(memoryHighBytes !== null ? { memoryHighBytes: String(memoryHighBytes) } : {}),
+    ...(cpuMaxMillicores !== null ? { cpuMaxMillicores } : {}),
+  };
+}
+
 /** The relay-URL shape config the session needs to build a stream endpoint. M8b
  *  wires the real relay deployment behind THIS seam so `buildStreamUrl` works
  *  unchanged behind `resolveExposedPort`. */
@@ -257,6 +291,29 @@ export interface SelfhostedOpStreamDeps {
   reconnectHoldMs?: number;
 }
 
+export interface SelfhostedOperationResourcePolicy {
+  memoryMaxBytes?: number | null;
+  memoryHighBytes?: number | null;
+  cpuMaxMillicores?: number | null;
+}
+
+/** Exact command-admission snapshot. A worker resolves this immediately before
+ * every exec/Git admission; retries and already-started operations retain it. */
+export interface SelfhostedOperationAdmission {
+  connectionInstanceId: string;
+  opStream?: SelfhostedOpStreamDeps;
+  operationResourcePolicy: {
+    memoryMaxBytes: number | null;
+    memoryHighBytes: number | null;
+    cpuMaxMillicores: number | null;
+    /** Optimistic-control revision identifies the coherent admission truth; it
+     * is not itself an enforcement setting. */
+    revision: number;
+  };
+  operationResourcePolicySupported: boolean;
+  operationCpuQuotaSupported: boolean;
+}
+
 export interface SelfhostedSessionDeps {
   workspaceId: string;
   agentId: string;
@@ -289,6 +346,17 @@ export interface SelfhostedSessionDeps {
    * field explicitly.
    */
   execTimeoutMs?: number;
+  /** Optional per-connection command memory policy. Missing/null values are
+   * unrestricted. The runner's local and ancestor policy may only tighten it. */
+  operationResourcePolicy?: SelfhostedOperationResourcePolicy;
+  /** Exact live Hello capability paired with this connection snapshot. */
+  operationResourcePolicySupported?: boolean;
+  /** Exact live CPU enforcement capability paired with the same snapshot. */
+  operationCpuQuotaSupported?: boolean;
+  /** Re-read only for newly admitted exec/Git. It must return connection identity,
+   * policy revision, capabilities, and op-stream state from one authoritative
+   * snapshot. PTY/desktop/browser/computer/fs operations never invoke it. */
+  resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
   /** The clock the bounded control-op retry loop drives (sleep + jitter). Injected
    *  so tests are deterministic; defaults to a real timer + `Math.random()`. */
   retryClock?: SelfhostedRetryClock;
@@ -377,13 +445,23 @@ export class SelfhostedSession {
   private readonly retryClock: SelfhostedRetryClock;
   private readonly onOp: SelfhostedOpObserver | undefined;
   private readonly subject: string;
-  /** The op-stream exec client — constructed iff `deps.opStream` was injected
-   *  (= the streaming transport is enabled for this session). */
-  private readonly opStreamClient: OpStreamExecClient | undefined;
+  /** Command clients are admission-snapshot-bound. Keep them through the turn-end
+   * durability hook; never retarget an already-admitted operation on reconnect. */
+  private readonly opStreamClients = new Map<string, OpStreamExecClient>();
+  private readonly inFlightOpStreamClients = new Map<string, OpStreamExecClient>();
+  private readonly defaultOpStreamClient: OpStreamExecClient | undefined;
   /** The session working directory — the path/cwd base every op is rooted under
    *  (see `toMachinePath`). "" by default ⇒ today's workspace_root behavior. */
   private readonly workingDir: string;
   private readonly transientExecEnvironment: (() => Readonly<Record<string, string>>) | undefined;
+  private readonly resourcePolicy: OperationResourcePolicy | undefined;
+  private readonly resourcePolicySupported: boolean;
+  private readonly operationCpuQuotaSupported: boolean;
+  private readonly defaultOpStream: SelfhostedOpStreamDeps | undefined;
+  private readonly connectionInstanceId: string | undefined;
+  private readonly resolveOperationAdmission:
+    | (() => Promise<SelfhostedOperationAdmission | null>)
+    | undefined;
 
   /**
    * The structural `state` slice consumers read. `agentId`/`instanceId` serve the
@@ -433,34 +511,24 @@ export class SelfhostedSession {
     this.subject = subjectFor(deps.workspaceId, deps.agentId, deps.connectionInstanceId);
     this.workingDir = deps.workingDir ?? "";
     this.transientExecEnvironment = deps.transientExecEnvironment;
-    this.opStreamClient = deps.opStream
-      ? new OpStreamExecClient({
-          workspaceId: deps.workspaceId,
-          agentId: deps.agentId,
-          ...(deps.connectionInstanceId !== undefined
-            ? { connectionInstanceId: deps.connectionInstanceId }
-            : {}),
-          epoch: this.epoch,
-          controlRpc: deps.controlRpc,
-          rpcSubject: this.subject,
-          transport: deps.opStream.transport,
-          controlTimeoutMs: this.timeoutMs,
-          retryClock: this.retryClock,
-          ...(deps.opStream.journal !== undefined ? { journal: deps.opStream.journal } : {}),
-          ...(deps.opStream.windowBytes !== undefined
-            ? { windowBytes: deps.opStream.windowBytes }
-            : {}),
-          ...(deps.opStream.ackIntervalMs !== undefined
-            ? { ackIntervalMs: deps.opStream.ackIntervalMs }
-            : {}),
-          ...(deps.opStream.silenceTimeoutMs !== undefined
-            ? { silenceTimeoutMs: deps.opStream.silenceTimeoutMs }
-            : {}),
-          ...(deps.opStream.reconnectHoldMs !== undefined
-            ? { reconnectHoldMs: deps.opStream.reconnectHoldMs }
-            : {}),
-        })
-      : undefined;
+    this.resourcePolicy = normalizeOperationResourcePolicy(deps.operationResourcePolicy);
+    this.resourcePolicySupported = deps.operationResourcePolicySupported === true;
+    this.operationCpuQuotaSupported = deps.operationCpuQuotaSupported === true;
+    this.defaultOpStream = deps.opStream;
+    this.connectionInstanceId = deps.connectionInstanceId;
+    this.resolveOperationAdmission = deps.resolveOperationAdmission;
+    // A pre-admission tombstone is safe only for a static connection. Dynamic
+    // sessions must never route an unknown op id through their constructor's
+    // potentially stale connection after a reconnect.
+    this.defaultOpStreamClient =
+      deps.opStream && !deps.resolveOperationAdmission
+        ? this.opStreamClientFor({
+            connectionInstanceId: deps.connectionInstanceId,
+            subject: this.subject,
+            resourcePolicy: this.resourcePolicy,
+            opStream: deps.opStream,
+          })
+        : undefined;
     // A valid Manifest mirroring the Modal create-manifest shape (sandbox/index.ts
     // `createManifest`: `new Manifest({ root: "/workspace", environment })`). `root`
     // is "/workspace" to match `buildManifest`'s declared root (the root-delta guard
@@ -503,6 +571,117 @@ export class SelfhostedSession {
     }
   }
 
+  private assertResourcePolicySupported(
+    policy: OperationResourcePolicy | undefined,
+    memorySupported: boolean,
+    cpuSupported: boolean,
+  ): void {
+    const memoryConfigured =
+      policy?.memoryMaxBytes !== undefined || policy?.memoryHighBytes !== undefined;
+    if (memoryConfigured && !memorySupported) {
+      throw new SelfhostedControlError({
+        message:
+          "This Connected Machine has an operation memory policy, but its current runner, OS, or service configuration cannot enforce it. Update or reconfigure the installation, or clear the memory policy before executing commands.",
+        code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+        reason: null,
+        retryable: false,
+      });
+    }
+    if (policy?.cpuMaxMillicores !== undefined && (!memorySupported || !cpuSupported)) {
+      throw new SelfhostedControlError({
+        message:
+          "This Connected Machine has an operation CPU policy, but its current runner, OS, or service configuration cannot enforce CPU quotas. Update or reconfigure the installation, or clear the CPU policy before executing commands.",
+        code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+        reason: null,
+        retryable: false,
+      });
+    }
+  }
+
+  private async admitCommand(): Promise<{
+    connectionInstanceId: string | undefined;
+    subject: string;
+    resourcePolicy: OperationResourcePolicy | undefined;
+    opStream: SelfhostedOpStreamDeps | undefined;
+  }> {
+    if (!this.resolveOperationAdmission) {
+      this.assertResourcePolicySupported(
+        this.resourcePolicy,
+        this.resourcePolicySupported,
+        this.operationCpuQuotaSupported,
+      );
+      return {
+        connectionInstanceId: this.connectionInstanceId,
+        subject: this.subject,
+        resourcePolicy: this.resourcePolicy,
+        opStream: this.defaultOpStream,
+      };
+    }
+
+    const resolved = await this.resolveOperationAdmission();
+    if (!resolved) {
+      throw new SelfhostedControlError({
+        message: "The Connected Machine has no authoritative live runner connection.",
+        code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+        reason: "agent_offline",
+        retryable: false,
+        agentOffline: true,
+      });
+    }
+    const resourcePolicy = normalizeOperationResourcePolicy(resolved.operationResourcePolicy);
+    this.assertResourcePolicySupported(
+      resourcePolicy,
+      resolved.operationResourcePolicySupported,
+      resolved.operationCpuQuotaSupported,
+    );
+    return {
+      connectionInstanceId: resolved.connectionInstanceId,
+      subject: subjectFor(this.workspaceId, this.agentId, resolved.connectionInstanceId),
+      resourcePolicy,
+      opStream: resolved.opStream,
+    };
+  }
+
+  private opStreamClientFor(
+    admission: Awaited<ReturnType<SelfhostedSession["admitCommand"]>>,
+  ): OpStreamExecClient | undefined {
+    const stream = admission.opStream;
+    if (!stream) return undefined;
+    const key = JSON.stringify([
+      admission.connectionInstanceId ?? null,
+      admission.resourcePolicy?.memoryMaxBytes ?? null,
+      admission.resourcePolicy?.memoryHighBytes ?? null,
+      admission.resourcePolicy?.cpuMaxMillicores ?? null,
+    ]);
+    const existing = this.opStreamClients.get(key);
+    if (existing) return existing;
+    const client = new OpStreamExecClient({
+      workspaceId: this.workspaceId,
+      agentId: this.agentId,
+      ...(admission.connectionInstanceId !== undefined
+        ? { connectionInstanceId: admission.connectionInstanceId }
+        : {}),
+      epoch: this.epoch,
+      controlRpc: this.controlRpc,
+      rpcSubject: admission.subject,
+      transport: stream.transport,
+      controlTimeoutMs: this.timeoutMs,
+      retryClock: this.retryClock,
+      ...(admission.resourcePolicy !== undefined
+        ? { resourcePolicy: admission.resourcePolicy }
+        : {}),
+      ...(stream.journal !== undefined ? { journal: stream.journal } : {}),
+      ...(stream.windowBytes !== undefined ? { windowBytes: stream.windowBytes } : {}),
+      ...(stream.ackIntervalMs !== undefined ? { ackIntervalMs: stream.ackIntervalMs } : {}),
+      ...(stream.silenceTimeoutMs !== undefined
+        ? { silenceTimeoutMs: stream.silenceTimeoutMs }
+        : {}),
+      ...(stream.reconnectHoldMs !== undefined ? { reconnectHoldMs: stream.reconnectHoldMs } : {}),
+    });
+    this.opStreamClients.set(key, client);
+    return client;
+  }
+
   /**
    * Issue a control op, decoding the agent's reply or throwing the mapped
    * `SelfhostedControlError` on an AgentError (incl. a synthesized offline /
@@ -522,19 +701,28 @@ export class SelfhostedSession {
   private async call(
     op: NonNullable<ControlRequest["op"]>,
     timeoutMs = this.timeoutMs,
+    admittedCommand?: Awaited<ReturnType<SelfhostedSession["admitCommand"]>>,
   ): Promise<NonNullable<ControlResponse["result"]>> {
     const opKind = op.$case;
+    const commandAdmission =
+      opKind === "exec" || opKind === "git"
+        ? (admittedCommand ?? (await this.admitCommand()))
+        : undefined;
     const startedAt = Date.now();
     let drainingRetries = 0;
     let timeoutRetries = 0;
     let neverSentRetries = 0;
     for (;;) {
+      const resourcePolicy = commandAdmission?.resourcePolicy;
       const req: ControlRequest = {
         requestId: crypto.randomUUID(),
         epoch: this.epoch,
+        resourcePolicy,
         op,
       };
-      const res = await this.controlRpc.request(this.subject, req, { timeoutMs });
+      const res = await this.controlRpc.request(commandAdmission?.subject ?? this.subject, req, {
+        timeoutMs,
+      });
       if (!res.error && res.result) {
         const retries = drainingRetries + timeoutRetries + neverSentRetries;
         this.emitOp({
@@ -629,6 +817,9 @@ export class SelfhostedSession {
 
   /** Channel-A `exec`: run a command on the machine and return its output. */
   async exec(args: SelfhostedExecArgs): Promise<SelfhostedExecResult> {
+    // Admission is the only mutable-policy read. Everything below retains this
+    // exact connection/capability/policy-revision snapshot through completion.
+    const admission = await this.admitCommand();
     // 0 deliberately means no process deadline. That contract is safe only over
     // op-stream: its liveness probes, replay, and cancellation do not depend on a
     // request/reply timer or a monolithic response.
@@ -654,9 +845,10 @@ export class SelfhostedSession {
       stdin: new Uint8Array(0),
       timeoutMs: executionTimeoutMs,
     };
-    if (this.opStreamClient) {
+    const opStreamClient = this.opStreamClientFor(admission);
+    if (opStreamClient) {
       try {
-        return await this.execViaOpStream(this.opStreamClient, execReq, executionTimeoutMs);
+        return await this.execViaOpStream(opStreamClient, execReq, executionTimeoutMs);
       } catch (error) {
         // The transport had no live connection, or the runner refused the START
         // itself (capability/downgrade race). The op provably never ran. A bounded
@@ -673,7 +865,7 @@ export class SelfhostedSession {
     if (executionTimeoutMs === 0) {
       throw unboundedExecRequiresOpStream();
     }
-    return this.execLegacy(execReq, executionTimeoutMs);
+    return this.execLegacy(execReq, executionTimeoutMs, admission);
   }
 
   /** The legacy monolithic exec request/reply — the permanent fallback wire
@@ -681,10 +873,12 @@ export class SelfhostedSession {
   private async execLegacy(
     execReq: ExecRequest,
     executionTimeoutMs: number,
+    admission: Awaited<ReturnType<SelfhostedSession["admitCommand"]>>,
   ): Promise<SelfhostedExecResult> {
     const result = await this.call(
       { $case: "exec", exec: execReq },
       executionTimeoutMs + SELFHOSTED_EXEC_REPLY_GRACE_MS,
+      admission,
     );
     if (result.$case !== "exec") {
       throw new Error(`selfhosted exec: unexpected result ${result.$case}`);
@@ -708,6 +902,7 @@ export class SelfhostedSession {
   ): Promise<SelfhostedExecResult> {
     const startedAt = Date.now();
     const opId = nextDurableOpId() ?? `anon_${crypto.randomUUID()}`;
+    this.inFlightOpStreamClients.set(opId, client);
     try {
       const outcome = await client.exec(
         opId,
@@ -757,6 +952,8 @@ export class SelfhostedSession {
         faultClass: selfhostedFaultClass(controlError),
       });
       throw controlError;
+    } finally {
+      this.inFlightOpStreamClients.delete(opId);
     }
   }
 
@@ -768,7 +965,9 @@ export class SelfhostedSession {
    * A no-op for sessions without the op-stream transport.
    */
   async finalizeOpStreamOps(): Promise<void> {
-    await this.opStreamClient?.finalizeSettledOps();
+    for (const client of this.opStreamClients.values()) {
+      await client.finalizeSettledOps();
+    }
   }
 
   // ── The agent-turn provided-session contract (over the SAME NATS primitives) ──
@@ -804,8 +1003,9 @@ export class SelfhostedSession {
    * deadline rather than claiming the machine is quiescent.
    */
   async cancelExecCommand(opId: string): Promise<boolean> {
-    if (!this.opStreamClient) return false;
-    await this.opStreamClient.cancel(opId);
+    const client = this.inFlightOpStreamClients.get(opId) ?? this.defaultOpStreamClient;
+    if (!client) return false;
+    await client.cancel(opId);
     return true;
   }
 
@@ -1169,6 +1369,7 @@ export class SelfhostedSession {
     const req: ControlRequest = {
       requestId: crypto.randomUUID(),
       epoch: this.epoch,
+      resourcePolicy: undefined,
       op: { $case: "ping", ping: { nonce } },
     };
     const res = await this.controlRpc.request(this.subject, req, { timeoutMs: this.timeoutMs });
@@ -1311,6 +1512,12 @@ export class SelfhostedSandboxClient {
   private readonly environment: Record<string, string> | undefined;
   private readonly transientExecEnvironment: (() => Readonly<Record<string, string>>) | undefined;
   private readonly workingDir: string | undefined;
+  private readonly operationResourcePolicy: SelfhostedOperationResourcePolicy | undefined;
+  private readonly operationResourcePolicySupported: boolean | undefined;
+  private readonly operationCpuQuotaSupported: boolean | undefined;
+  private readonly resolveOperationAdmission:
+    | (() => Promise<SelfhostedOperationAdmission | null>)
+    | undefined;
   private readonly onOp: SelfhostedOpObserver | undefined;
   private readonly opStream: SelfhostedOpStreamDeps | undefined;
   private controlRpcMemo: ControlRpc | undefined;
@@ -1334,6 +1541,10 @@ export class SelfhostedSandboxClient {
      *  `timeoutMs`; 0 means no duration deadline, while omission preserves the
      *  legacy control-timeout fallback for older embedding callers). */
     execTimeoutMs?: number;
+    operationResourcePolicy?: SelfhostedOperationResourcePolicy;
+    operationResourcePolicySupported?: boolean;
+    operationCpuQuotaSupported?: boolean;
+    resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
     /** The run's declared sandbox environment, threaded into every bound session's
      *  `state.manifest.environment` so the SDK's per-turn manifest-env delta is
      *  empty (validateNoEnvironmentDelta). See SelfhostedSessionDeps.environment.
@@ -1360,6 +1571,10 @@ export class SelfhostedSandboxClient {
     this.epoch = opts.epoch;
     this.timeoutMs = opts.timeoutMs;
     this.execTimeoutMs = opts.execTimeoutMs;
+    this.operationResourcePolicy = opts.operationResourcePolicy;
+    this.operationResourcePolicySupported = opts.operationResourcePolicySupported;
+    this.operationCpuQuotaSupported = opts.operationCpuQuotaSupported;
+    this.resolveOperationAdmission = opts.resolveOperationAdmission;
     this.environment = opts.environment;
     this.transientExecEnvironment = opts.transientExecEnvironment;
     this.workingDir = opts.workingDir;
@@ -1387,6 +1602,18 @@ export class SelfhostedSandboxClient {
       ...(this.epoch !== undefined ? { epoch: this.epoch } : {}),
       ...(this.timeoutMs !== undefined ? { timeoutMs: this.timeoutMs } : {}),
       ...(this.execTimeoutMs !== undefined ? { execTimeoutMs: this.execTimeoutMs } : {}),
+      ...(this.operationResourcePolicy !== undefined
+        ? { operationResourcePolicy: this.operationResourcePolicy }
+        : {}),
+      ...(this.operationResourcePolicySupported !== undefined
+        ? { operationResourcePolicySupported: this.operationResourcePolicySupported }
+        : {}),
+      ...(this.operationCpuQuotaSupported !== undefined
+        ? { operationCpuQuotaSupported: this.operationCpuQuotaSupported }
+        : {}),
+      ...(this.resolveOperationAdmission !== undefined
+        ? { resolveOperationAdmission: this.resolveOperationAdmission }
+        : {}),
       ...(this.environment !== undefined ? { environment: this.environment } : {}),
       ...(this.transientExecEnvironment !== undefined
         ? { transientExecEnvironment: this.transientExecEnvironment }
@@ -1477,6 +1704,15 @@ export interface SelfhostedSessionBuild {
   /** The exec process deadline, distinct from `timeoutMs`. 0 = none; absence
    *  preserves the control-timeout fallback for older embedding callers. */
   execTimeoutMs?: number;
+  /** Per-enrollment optional command policy resolved from the same database
+   * snapshot as the exact connection identity. */
+  operationResourcePolicy?: SelfhostedOperationResourcePolicy;
+  /** Exact live runner capability paired with that snapshot. */
+  operationResourcePolicySupported?: boolean;
+  /** Exact live CPU enforcement capability paired with the initial snapshot. */
+  operationCpuQuotaSupported?: boolean;
+  /** Live command-only admission resolver; see SelfhostedSessionDeps. */
+  resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
   /** The per-op observer (out-of-band telemetry). Absent ⇒ no-op. */
   onOp?: SelfhostedOpObserver;
   /** The op-stream exec transport (present when the runner advertises it and the
@@ -1513,6 +1749,18 @@ export async function buildSelfhostedBackendSession(
     ...(deps.terminalScopeId !== undefined ? { terminalScopeId: deps.terminalScopeId } : {}),
     ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
     ...(deps.execTimeoutMs !== undefined ? { execTimeoutMs: deps.execTimeoutMs } : {}),
+    ...(deps.operationResourcePolicy !== undefined
+      ? { operationResourcePolicy: deps.operationResourcePolicy }
+      : {}),
+    ...(deps.operationResourcePolicySupported !== undefined
+      ? { operationResourcePolicySupported: deps.operationResourcePolicySupported }
+      : {}),
+    ...(deps.operationCpuQuotaSupported !== undefined
+      ? { operationCpuQuotaSupported: deps.operationCpuQuotaSupported }
+      : {}),
+    ...(deps.resolveOperationAdmission !== undefined
+      ? { resolveOperationAdmission: deps.resolveOperationAdmission }
+      : {}),
     ...(deps.onOp !== undefined ? { onOp: deps.onOp } : {}),
     ...(deps.environment !== undefined ? { environment: deps.environment } : {}),
     ...(deps.transientExecEnvironment !== undefined
