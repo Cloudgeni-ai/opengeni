@@ -318,6 +318,24 @@ export function scheduledTaskRunForGrant<T extends { sessionId: string | null }>
   return { ...run, sessionId: null };
 }
 
+export function scheduledTaskAuthorityUpdateForGrant(
+  grant: AccessGrant,
+): Pick<
+  UpdateScheduledTaskInput,
+  | "refreshPersonalResourceAuthority"
+  | "authorityUpdatedBy"
+  | "authorityUpdatedByContext"
+  | "authorityUpdatedByActor"
+> {
+  const writer = creationInitiatorForGrant(grant);
+  return {
+    refreshPersonalResourceAuthority: true,
+    ...(writer.initiator ? { authorityUpdatedBy: writer.initiator } : {}),
+    ...(writer.context ? { authorityUpdatedByContext: writer.context } : {}),
+    authorityUpdatedByActor: writer.actor ?? null,
+  };
+}
+
 // Validate a scheduled task's rig reference: it must name a rig in the
 // workspace. A missing/cross-workspace id is a 422 (RLS-invisible == missing).
 async function requireScheduledTaskRig(
@@ -560,6 +578,7 @@ export async function validatedScheduledTaskUpdate(input: {
   ) {
     update.targetSessionId = nextTargetSessionId;
   }
+  Object.assign(update, scheduledTaskAuthorityUpdateForGrant(input.grant));
   return update;
 }
 
@@ -614,6 +633,7 @@ export async function restoreScheduledTask(
     variableSetId: task.variableSetId,
     rigId: task.rigId,
     metadata: task.metadata,
+    clonePersonalResourceAuthorityFromRevision: task.authorityRevision,
   });
 }
 

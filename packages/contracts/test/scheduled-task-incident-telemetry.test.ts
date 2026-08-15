@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { IncidentTelemetryPreflight, ScheduledTaskAgentConfig } from "../src";
+import { IncidentTelemetryPreflight, ScheduledTask, ScheduledTaskAgentConfig } from "../src";
 
 const repository = {
   kind: "repository" as const,
@@ -47,6 +47,34 @@ const preflight = {
 };
 
 describe("scheduled incident telemetry contract", () => {
+  test("requires the exact scheduled-task execution digest", () => {
+    const task = {
+      id: crypto.randomUUID(),
+      accountId: crypto.randomUUID(),
+      workspaceId: crypto.randomUUID(),
+      name: "digest-bound task",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "bound", resources: [], tools: [], metadata: {} },
+      authorityRevision: 2,
+      executionDigest: "a".repeat(64),
+      reusableSessionId: null,
+      metadata: {},
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    expect(ScheduledTask.parse(task)).toMatchObject({
+      authorityRevision: 2,
+      executionDigest: "a".repeat(64),
+    });
+    expect(ScheduledTask.safeParse({ ...task, executionDigest: "A".repeat(64) }).success).toBe(
+      false,
+    );
+  });
+
   test("keeps ordinary scheduled task agent config unchanged", () => {
     expect(
       ScheduledTaskAgentConfig.parse({

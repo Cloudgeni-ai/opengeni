@@ -3784,6 +3784,11 @@ export type UpdateScheduledTaskInput = Partial<{
   variableSetId: string | null;
   rigId: string | null;
   metadata: Record<string, unknown>;
+  refreshPersonalResourceAuthority: boolean;
+  clonePersonalResourceAuthorityFromRevision: number;
+  authorityUpdatedBy: TurnInitiator;
+  authorityUpdatedByContext: TurnInitiatorContext;
+  authorityUpdatedByActor: AgentSessionCreationActor | null;
 }>;
 
 export type CreatePackInstallationInput = {
@@ -13423,6 +13428,7 @@ export async function createScheduledTask(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const frozenCreator = await frozenSessionCreatorForInsert(scopedDb, input);
+      await setScheduledTaskAuthorityRlsContext(scopedDb, frozenCreator);
       const [row] = await scopedDb
         .insert(schema.scheduledTasks)
         .values({
@@ -13451,6 +13457,12 @@ export async function createScheduledTask(
       if (!row) {
         throw new Error("Failed to create scheduled task");
       }
+      await scopedDb.execute(sql`select freeze_scheduled_task_personal_resources(
+        ${row.accountId}::uuid,
+        ${row.workspaceId}::uuid,
+        ${row.id}::uuid,
+        ${row.authorityRevision}::bigint
+      )`);
       return mapScheduledTask(row);
     },
   );
@@ -13463,6 +13475,25 @@ export async function updateScheduledTask(
   input: UpdateScheduledTaskInput,
 ): Promise<ScheduledTask> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    if (
+      input.refreshPersonalResourceAuthority &&
+      input.clonePersonalResourceAuthorityFromRevision !== undefined
+    ) {
+      throw new Error("scheduled task authority refresh and clone are mutually exclusive");
+    }
+    if (input.refreshPersonalResourceAuthority) {
+      const frozenUpdater = await frozenSessionCreatorForInsert(scopedDb, {
+        workspaceId,
+        ...(input.authorityUpdatedBy ? { createdBy: input.authorityUpdatedBy } : {}),
+        ...(input.authorityUpdatedByContext
+          ? { createdByContext: input.authorityUpdatedByContext }
+          : {}),
+        ...(input.authorityUpdatedByActor !== undefined
+          ? { createdByActor: input.authorityUpdatedByActor }
+          : {}),
+      });
+      await setScheduledTaskAuthorityRlsContext(scopedDb, frozenUpdater);
+    }
     const [row] = await scopedDb
       .update(schema.scheduledTasks)
       .set({
@@ -13486,6 +13517,10 @@ export async function updateScheduledTask(
         ...(input.variableSetId !== undefined ? { variableSetId: input.variableSetId } : {}),
         ...(input.rigId !== undefined ? { rigId: input.rigId } : {}),
         ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+        ...(input.refreshPersonalResourceAuthority ||
+        input.clonePersonalResourceAuthorityFromRevision !== undefined
+          ? { authorityRevision: sql`${schema.scheduledTasks.authorityRevision} + 1` }
+          : {}),
         updatedAt: new Date(),
       })
       .where(
@@ -13497,6 +13532,22 @@ export async function updateScheduledTask(
       .returning();
     if (!row) {
       throw new Error(`Scheduled task not found: ${taskId}`);
+    }
+    if (input.refreshPersonalResourceAuthority) {
+      await scopedDb.execute(sql`select freeze_scheduled_task_personal_resources(
+        ${row.accountId}::uuid,
+        ${row.workspaceId}::uuid,
+        ${row.id}::uuid,
+        ${row.authorityRevision}::bigint
+      )`);
+    } else if (input.clonePersonalResourceAuthorityFromRevision !== undefined) {
+      await scopedDb.execute(sql`select clone_scheduled_task_personal_resource_authority(
+        ${row.accountId}::uuid,
+        ${row.workspaceId}::uuid,
+        ${row.id}::uuid,
+        ${input.clonePersonalResourceAuthorityFromRevision}::bigint,
+        ${row.authorityRevision}::bigint
+      )`);
     }
     return mapScheduledTask(row);
   });
@@ -13771,6 +13822,10 @@ export async function createScheduledTaskRun(
   input: {
     workspaceId: string;
     taskId: string;
+    /** Exact task snapshot read by the dispatching worker. */
+    taskAuthorityRevision?: number | null;
+    /** Exact task snapshot read by the dispatching worker. */
+    taskExecutionDigest?: string | null;
     triggerType: ScheduledTaskTriggerType;
     /** Stable Temporal workflow/activity producer identity for replay repair. */
     producerKey?: string | null;
@@ -13779,6 +13834,9 @@ export async function createScheduledTaskRun(
   },
 ): Promise<ScheduledTaskRun> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    if ((input.taskAuthorityRevision == null) !== (input.taskExecutionDigest == null)) {
+      throw new Error("scheduled task run execution binding is incomplete");
+    }
     const [taskRow] = await scopedDb
       .select()
       .from(schema.scheduledTasks)
@@ -13796,6 +13854,8 @@ export async function createScheduledTaskRun(
       accountId: taskRow.accountId,
       workspaceId: taskRow.workspaceId,
       taskId: input.taskId,
+      taskAuthorityRevision: input.taskAuthorityRevision ?? null,
+      taskExecutionDigest: input.taskExecutionDigest ?? null,
       triggerType: input.triggerType,
       producerKey: input.producerKey ?? null,
       scheduledAt: input.scheduledAt ?? null,
@@ -13829,8 +13889,153 @@ export async function createScheduledTaskRun(
     if (!row) {
       throw new Error("Failed to create scheduled task run");
     }
+    if (
+      input.taskAuthorityRevision != null &&
+      (row.taskAuthorityRevision !== input.taskAuthorityRevision ||
+        row.taskExecutionDigest !== input.taskExecutionDigest)
+    ) {
+      throw new Error("scheduled task run execution binding changed");
+    }
     return mapScheduledTaskRun(row);
   });
+}
+
+export type ScheduledTaskRunPersonalResourceAuthority = {
+  taskId: string;
+  taskAuthorityRevision: number;
+  executionDigest: string;
+  initiatingHumanSubjectId: string;
+  resources: Array<{
+    resourceKind: "variable_set" | "rig";
+    resourceId: string;
+    resourceVersionId: string;
+    selectionSources: string[];
+    authorityId: string;
+    authorityGeneration: number;
+    grantId: string;
+    grantGeneration: number;
+    grantMode: "once" | "session" | "always";
+  }>;
+};
+
+export async function getScheduledTaskRunPersonalResourceAuthority(
+  db: Database,
+  input: { accountId: string; workspaceId: string; runId: string },
+): Promise<ScheduledTaskRunPersonalResourceAuthority | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await rawRows<{
+        taskId: string;
+        taskAuthorityRevision: number;
+        executionDigest: string;
+        initiatingHumanSubjectId: string;
+        resourceKind: "variable_set" | "rig";
+        resourceId: string;
+        resourceVersionId: string;
+        selectionSources: string[];
+        authorityId: string;
+        authorityGeneration: number;
+        grantId: string;
+        grantGeneration: number;
+        grantMode: "once" | "session" | "always";
+      }>(
+        scopedDb,
+        sql`select
+          task_id as "taskId",
+          task_authority_revision::int as "taskAuthorityRevision",
+          execution_digest as "executionDigest",
+          initiating_human_subject_id as "initiatingHumanSubjectId",
+          resource_kind as "resourceKind",
+          resource_id as "resourceId",
+          resource_version_id as "resourceVersionId",
+          selection_sources as "selectionSources",
+          authority_id as "authorityId",
+          authority_generation::int as "authorityGeneration",
+          grant_id as "grantId",
+          grant_generation::int as "grantGeneration",
+          grant_mode as "grantMode"
+        from scheduled_task_run_personal_resource_authority(
+          ${input.accountId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.runId}::uuid
+        )`,
+      );
+      const first = rows[0];
+      if (!first) return null;
+      return {
+        taskId: first.taskId,
+        taskAuthorityRevision: Number(first.taskAuthorityRevision),
+        executionDigest: first.executionDigest,
+        initiatingHumanSubjectId: first.initiatingHumanSubjectId,
+        resources: rows.map((row) => ({
+          resourceKind: row.resourceKind,
+          resourceId: row.resourceId,
+          resourceVersionId: row.resourceVersionId,
+          selectionSources: row.selectionSources,
+          authorityId: row.authorityId,
+          authorityGeneration: Number(row.authorityGeneration),
+          grantId: row.grantId,
+          grantGeneration: Number(row.grantGeneration),
+          grantMode: row.grantMode,
+        })),
+      };
+    },
+  );
+}
+
+export async function materializeScheduledTaskReusableSessionFromRun(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    taskId: string;
+    runId: string;
+    sessionId: string;
+    sourceTaskAuthorityRevision: number;
+    sourceExecutionDigest: string;
+  },
+): Promise<number> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ authorityRevision: number }>(
+        scopedDb,
+        sql`select materialize_scheduled_task_reusable_session_from_run(
+          ${input.accountId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.taskId}::uuid,
+          ${input.runId}::uuid,
+          ${input.sessionId}::uuid,
+          ${input.sourceTaskAuthorityRevision}::bigint,
+          ${input.sourceExecutionDigest}::text
+        )::int as "authorityRevision"`,
+      );
+      if (!row) {
+        throw new Error("scheduled reusable-session materialization returned no revision");
+      }
+      return Number(row.authorityRevision);
+    },
+  );
+}
+
+async function scheduledTaskRunCausalHumanInTransaction(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; runId: string },
+): Promise<string | null> {
+  const [row] = await rawRows<{ initiatingHumanSubjectId: string }>(
+    tx,
+    sql`select initiating_human_subject_id as "initiatingHumanSubjectId"
+      from scheduled_task_run_personal_resource_authority(
+        ${input.accountId}::uuid,
+        ${input.workspaceId}::uuid,
+        ${input.runId}::uuid
+      )
+      limit 1`,
+  );
+  return row?.initiatingHumanSubjectId ?? null;
 }
 
 /** Failure settlement must not rewrite a source already committed as dispatched. */
@@ -23610,6 +23815,21 @@ async function frozenSessionCreatorForInsert(
     action: "message",
   });
   return await frozenInitiatorForCommandActor(tx, input.workspaceId, input.createdByActor);
+}
+
+async function setScheduledTaskAuthorityRlsContext(
+  tx: Database,
+  frozen: FrozenTurnInitiator,
+): Promise<void> {
+  const subjectId = frozen.initiator.subjectId.trim();
+  if (!subjectId) throw new Error("scheduled task authority writer has no subject");
+  await tx.execute(sql`select
+    set_config('opengeni.subject_id', ${subjectId}, true),
+    set_config(
+      'opengeni.initiating_human_subject_id',
+      ${frozen.initiator.kind === "subject" ? subjectId : ""},
+      true
+    )`);
 }
 
 export type SessionCreateInput = {
@@ -48087,6 +48307,7 @@ type BoundedSystemUpdate = Pick<
   | "lineage"
   | "personalConnectionDelegations"
   | "xaiProviderAccountAuthoritySnapshot"
+  | "scheduledTaskRunId"
 >;
 
 export type FrozenXaiExecutionAuthority = {
@@ -48122,6 +48343,7 @@ function systemUpdateExecutionAuthorityKey(update: BoundedSystemUpdate): string 
       `session_system_updates:${update.id}`,
     ),
     xai: frozenXaiExecutionAuthority(update),
+    scheduledTaskRunId: update.scheduledTaskRunId,
   });
 }
 
@@ -49639,6 +49861,14 @@ export async function claimSessionWorkForAttempt(
             typeof goalPolicy?.sandboxBackend === "string"
               ? goalPolicy.sandboxBackend
               : (latestStarted?.sandboxBackend ?? session.sandboxBackend);
+          const scheduledTaskRunId = delivered.updates[0]?.scheduledTaskRunId ?? null;
+          const scheduledTaskCausalHuman = scheduledTaskRunId
+            ? await scheduledTaskRunCausalHumanInTransaction(tx as unknown as Database, {
+                accountId: session.accountId,
+                workspaceId,
+                runId: scheduledTaskRunId,
+              })
+            : null;
           let initiatingHumanSubjectId =
             internalInitiator.initiator.kind === "subject"
               ? internalInitiator.initiator.subjectId
@@ -49680,6 +49910,12 @@ export async function claimSessionWorkForAttempt(
               throw new Error("xAI system-update subject does not match turn provenance");
             }
             initiatingHumanSubjectId = internalXaiAuthority.subjectId;
+          }
+          if (scheduledTaskCausalHuman) {
+            if (initiatingHumanSubjectId && initiatingHumanSubjectId !== scheduledTaskCausalHuman) {
+              throw new Error("scheduled personal-resource subject does not match turn provenance");
+            }
+            initiatingHumanSubjectId = scheduledTaskCausalHuman;
           }
           await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
           const [internalTurn] = await tx
@@ -55469,6 +55705,7 @@ export type AddSessionSystemUpdateInput = {
   lineage?: Record<string, unknown>;
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
+  scheduledTaskRunId?: string | null;
 } & SessionSystemUpdateInputVariant;
 
 export type AddSessionSystemUpdateResult =
@@ -55573,6 +55810,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
                   xaiProviderAccountAuthoritySnapshot:
                     input.xaiProviderAccountAuthoritySnapshot ??
                     WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                  scheduledTaskRunId: input.scheduledTaskRunId ?? null,
                   state: "pending",
                 },
                 "summary",
@@ -57339,6 +57577,8 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
       row.personalConnectionDelegations,
       `scheduled_tasks:${row.workspaceId}:${row.id}`,
     ).map(({ serverId, providerDomain }) => ({ serverId, providerDomain })),
+    authorityRevision: row.authorityRevision,
+    executionDigest: row.executionDigest,
     reusableSessionId: existingSessionTarget ? null : row.reusableSessionId,
     targetSessionId: existingSessionTarget ? row.reusableSessionId : null,
     variableSetId: row.variableSetId,
@@ -57356,6 +57596,8 @@ function mapScheduledTaskRun(row: typeof schema.scheduledTaskRuns.$inferSelect):
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     taskId: row.taskId,
+    taskAuthorityRevision: row.taskAuthorityRevision,
+    taskExecutionDigest: row.taskExecutionDigest,
     status: row.status as ScheduledTaskRunStatus,
     triggerType: row.triggerType as ScheduledTaskTriggerType,
     scheduledAt: row.scheduledAt ? row.scheduledAt.toISOString() : null,

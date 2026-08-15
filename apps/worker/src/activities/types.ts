@@ -377,6 +377,7 @@ export type DispatchScheduledTaskRunResult =
         | "monthly_model_cost_limit"
         | "monthly_agent_run_limit"
         | "malformed_manual_trigger"
+        | "scheduled_task_paused"
         | "knowledge_source_paused"
         | "incident_preflight_metadata_missing"
         | "incident_responder_under_capable"

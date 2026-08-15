@@ -1009,6 +1009,49 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.freeze_scheduled_task_personal_resources(uuid,uuid,uuid,bigint)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.materialize_scheduled_task_reusable_session_from_run(uuid, uuid, uuid, uuid, uuid, bigint, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.materialize_scheduled_task_reusable_session_from_run(uuid, uuid, uuid, uuid, uuid, bigint, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.scheduled_task_run_personal_resource_authority(uuid, uuid, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.scheduled_task_run_personal_resource_authority(uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.scoped_knowledge_advance_source_acl(uuid,uuid,bigint,bigint,uuid,text,text,text,text,text,text)',
         ${literal(schema)}
       )
@@ -1072,6 +1115,15 @@ BEGIN
         FROM PUBLIC;
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION opengeni_private.personal_resource_delegation_capability_active(text) TO %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.scheduled_personal_resource_capability_active(text)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION
+        opengeni_private.scheduled_personal_resource_capability_active(text)
+        FROM PUBLIC;
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.scheduled_personal_resource_capability_active(text) TO %I',
         ${literal(role)}
       );
     END IF;

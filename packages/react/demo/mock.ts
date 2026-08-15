@@ -4327,6 +4327,8 @@ function scheduledTask(
     runMode: "new_session_per_run",
     overlapPolicy: "skip",
     action: { kind: "agent_turn" },
+    authorityRevision: 1,
+    executionDigest: "a".repeat(64),
     agentConfig: { prompt, resources: [], tools: [], metadata: {} },
     targetSessionId: null,
     reusableSessionId: null,

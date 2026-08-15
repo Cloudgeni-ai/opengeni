@@ -6972,6 +6972,8 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   }),
   createdByContext: TurnInitiatorContext.default({}),
   personalConnections: z.array(McpPersonalConnectionSummary).default([]),
+  authorityRevision: z.number().int().positive().default(1),
+  executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
   reusableSessionId: z.string().uuid().nullable(),
   targetSessionId: z.string().uuid().nullable().default(null),
   variableSetId: z.string().uuid().nullable().default(null),
@@ -7037,6 +7039,12 @@ export const ScheduledTaskRun = /* @__PURE__ */ z.object({
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   taskId: z.string().uuid(),
+  taskAuthorityRevision: z.number().int().positive().nullable().default(null),
+  taskExecutionDigest: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/u)
+    .nullable()
+    .default(null),
   status: ScheduledTaskRunStatus,
   triggerType: ScheduledTaskTriggerType,
   scheduledAt: z.string().nullable(),

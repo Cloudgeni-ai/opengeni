@@ -5550,6 +5550,9 @@ export const sessionSystemUpdates = pgTable(
       .$type<XaiProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
+    // Private scheduled-occurrence authority linkage. Public update/event
+    // projections intentionally omit this producer identifier.
+    scheduledTaskRunId: uuid("scheduled_task_run_id"),
     // pending is visible queue truth; delivered means its exact model-memory
     // batch was durably claimed. Terminal cancellation/supersession is explicit.
     state: text("state").notNull().default("pending"),
@@ -7915,6 +7918,12 @@ export const scheduledTasks = pgTable(
       .$type<XaiProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
+    authorityRevision: bigint("authority_revision", { mode: "number" }).notNull().default(1),
+    // The migration-owned BEFORE INSERT/UPDATE trigger replaces this client
+    // placeholder with the canonical whole-row execution digest.
+    executionDigest: text("execution_digest")
+      .notNull()
+      .$defaultFn(() => ""),
     reusableSessionId: uuid("reusable_session_id").references(() => sessions.id, {
       onDelete: "set null",
     }),
@@ -7998,6 +8007,8 @@ export const scheduledTaskRuns = pgTable(
     taskId: uuid("task_id")
       .notNull()
       .references(() => scheduledTasks.id, { onDelete: "cascade" }),
+    taskAuthorityRevision: bigint("task_authority_revision", { mode: "number" }),
+    taskExecutionDigest: text("task_execution_digest"),
     status: text("status").notNull().default("queued"),
     triggerType: text("trigger_type").notNull(),
     scheduledAt: timestamp("scheduled_at", { withTimezone: true }),

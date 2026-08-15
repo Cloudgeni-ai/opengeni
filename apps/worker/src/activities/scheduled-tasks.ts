@@ -23,11 +23,13 @@ import {
   getScheduledTask,
   ensureKnowledgeSourceSyncState,
   getScheduledTaskPersonalConnectionDelegations,
+  getScheduledTaskRunPersonalResourceAuthority,
   getScheduledTaskXaiProviderAccountAuthoritySnapshot,
   getRig,
   getSessionByCreateIdempotencyKey,
   getVariableSet,
   initializeSessionStartAtomically,
+  materializeScheduledTaskReusableSessionFromRun,
   markScheduledTaskRunFailedIfQueued,
   recordKnowledgeSourceSyncWake,
   recordUsageEvent,
@@ -95,6 +97,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         const run = await createScheduledTaskRun(db, {
           workspaceId: task.workspaceId,
           taskId: task.id,
+          taskAuthorityRevision: task.authorityRevision,
+          taskExecutionDigest: task.executionDigest,
           triggerType: input.triggerType,
           producerKey:
             input.producerKey ??
@@ -151,6 +155,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           sourceId: task.action.sourceId,
           overlapPolicy: task.overlapPolicy as "skip" | "buffer_one",
         };
+      }
+      if (task.status !== "active") {
+        return { action: "blocked", reason: "scheduled_task_paused" };
       }
       const structuredAlertOccurrence = scheduledAlertOccurrenceIdentity({
         workspaceId: task.workspaceId,
@@ -260,6 +267,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         let run = await createScheduledTaskRun(dispatchDb, {
           workspaceId: task.workspaceId,
           taskId: task.id,
+          taskAuthorityRevision: task.authorityRevision,
+          taskExecutionDigest: task.executionDigest,
           triggerType: input.triggerType,
           producerKey:
             input.producerKey ??
@@ -267,6 +276,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             `scheduled:${crypto.randomUUID()}`,
           scheduledAt: null,
         });
+        const runPersonalResourceAuthority = await getScheduledTaskRunPersonalResourceAuthority(
+          dispatchDb,
+          {
+            accountId: task.accountId,
+            workspaceId: task.workspaceId,
+            runId: run.id,
+          },
+        );
         await recordScheduledTaskFiredUsage(dispatchDb, task, run, input);
         if (run?.status === "dispatched" && run.sessionId && run.triggerEventId) {
           if (deferPublications) {
@@ -351,7 +368,10 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 throw new Error(`rig has no active version to bind: ${task.rigId}`);
               }
               frozenRigId = rig.id;
-              frozenRigVersionId = rig.activeVersion.id;
+              frozenRigVersionId =
+                runPersonalResourceAuthority?.resources.find(
+                  (resource) => resource.resourceKind === "rig" && resource.resourceId === rig.id,
+                )?.resourceVersionId ?? rig.activeVersion.id;
             }
             let session: Awaited<ReturnType<typeof createSession>>;
             let sessionCreated = true;
@@ -550,9 +570,21 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               workflowId = workflowIdForSession(session.id);
               await setTemporalWorkflowId(dispatchDb, task.workspaceId, session.id, workflowId);
               if (task.runMode === "reusable_session") {
-                await updateScheduledTask(dispatchDb, task.workspaceId, task.id, {
-                  reusableSessionId: session.id,
-                });
+                if (runPersonalResourceAuthority) {
+                  await materializeScheduledTaskReusableSessionFromRun(dispatchDb, {
+                    accountId: task.accountId,
+                    workspaceId: task.workspaceId,
+                    taskId: task.id,
+                    runId: run.id,
+                    sessionId: session.id,
+                    sourceTaskAuthorityRevision: runPersonalResourceAuthority.taskAuthorityRevision,
+                    sourceExecutionDigest: runPersonalResourceAuthority.executionDigest,
+                  });
+                } else {
+                  await updateScheduledTask(dispatchDb, task.workspaceId, task.id, {
+                    reusableSessionId: session.id,
+                  });
+                }
               }
               if (sessionCreated) {
                 const createdEvents: Parameters<typeof appendSessionEvents>[3] = [
@@ -653,6 +685,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 },
                 personalConnectionDelegations: taskPersonalConnectionDelegations,
                 xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
+                scheduledTaskRunId: run.id,
               },
               async (tx, wakeEventId) => {
                 if (!wakeEventId) throw new Error("Scheduled delivery has no wake event");
@@ -810,6 +843,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 },
                 personalConnectionDelegations: taskPersonalConnectionDelegations,
                 xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
+                scheduledTaskRunId: run.id,
               },
               async (tx, wakeEventId) => {
                 if (task.runMode === "existing_session") {

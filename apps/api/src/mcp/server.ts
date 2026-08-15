@@ -172,6 +172,7 @@ import {
   manualScheduledTaskTriggerUsageKey,
   manualScheduledTaskTriggerWorkflowId,
   scheduledTaskForGrant,
+  scheduledTaskAuthorityUpdateForGrant,
   scheduledTaskRunForGrant,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
@@ -1526,6 +1527,7 @@ export function buildOpenGeniMcpServer(
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const task = await updateScheduledTask(deps.db, grant.workspaceId, id, {
           status: "active",
+          ...scheduledTaskAuthorityUpdateForGrant(grant),
         });
         await syncUpdatedScheduledTask({
           db: deps.db,
