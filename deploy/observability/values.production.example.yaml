@@ -7,8 +7,13 @@ kube-prometheus-stack:
     prometheusSpec:
       externalLabels:
         environment: production
-      retention: 15d
-      retentionSize: 40GB
+      # Startup SLO dashboards expose both 7d and 30d windows. These are
+      # independent upper bounds: Prometheus deletes data when either the time
+      # limit or size limit is reached, so 80 GB may retain less than 30 days.
+      # Measure actual series volume and ingestion, then raise local capacity or
+      # configure remote write if 30 days is an operational requirement.
+      retention: 30d
+      retentionSize: 80GB
       resources:
         requests:
           cpu: 500m
@@ -23,7 +28,7 @@ kube-prometheus-stack:
               - ReadWriteOnce
             resources:
               requests:
-                storage: 50Gi
+                storage: 100Gi
 
   alertmanager:
     alertmanagerSpec:

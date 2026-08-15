@@ -547,7 +547,12 @@ function createTurnSummaryContext(
     if (item.kind === "reasoning") {
       return !item.streaming;
     }
-    if (item.kind === "tool-call" || item.kind === "worker" || item.kind === "sandbox") {
+    if (
+      item.kind === "tool-call" ||
+      item.kind === "worker" ||
+      item.kind === "sandbox" ||
+      item.kind === "startup-phase"
+    ) {
       return item.status !== "running";
     }
     return true;

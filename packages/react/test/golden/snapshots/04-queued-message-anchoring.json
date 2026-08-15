@@ -9,6 +9,18 @@
       "tools": []
     },
     {
+      "kind": "startup-phase",
+      "id": "00000000-0000-4000-8000-000000000403-queue",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000006",
+      "occurredAt": "2026-01-02T13:00:02.000Z",
+      "phase": "queue",
+      "status": "complete",
+      "startedAt": "2026-01-02T13:00:02.000Z",
+      "completedAt": "2026-01-02T13:00:03.000Z",
+      "durationMs": 1000,
+      "outcome": null
+    },
+    {
       "kind": "tool-call",
       "id": "00000000-0000-4000-8000-000000000404",
       "turnId": "aaaaaaaa-0000-4000-8000-000000000006",
@@ -45,6 +57,18 @@
       "text": "Actually lint before deploy.",
       "resources": [],
       "tools": []
+    },
+    {
+      "kind": "startup-phase",
+      "id": "00000000-0000-4000-8000-000000000415-queue",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000008",
+      "occurredAt": "2026-01-02T13:00:08.000Z",
+      "phase": "queue",
+      "status": "complete",
+      "startedAt": "2026-01-02T13:00:08.000Z",
+      "completedAt": "2026-01-02T13:00:15.000Z",
+      "durationMs": 7000,
+      "outcome": null
     },
     {
       "kind": "tool-call",
@@ -85,6 +109,18 @@
       "tools": []
     },
     {
+      "kind": "startup-phase",
+      "id": "00000000-0000-4000-8000-000000000419-queue",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000007",
+      "occurredAt": "2026-01-02T13:00:06.000Z",
+      "phase": "queue",
+      "status": "complete",
+      "startedAt": "2026-01-02T13:00:06.000Z",
+      "completedAt": "2026-01-02T13:00:19.000Z",
+      "durationMs": 13000,
+      "outcome": null
+    },
+    {
       "kind": "tool-call",
       "id": "00000000-0000-4000-8000-000000000420",
       "turnId": "aaaaaaaa-0000-4000-8000-000000000007",
@@ -115,19 +151,32 @@
       "kind": "turn",
       "id": "turn-aaaaaaaa-0000-4000-8000-000000000006",
       "outcome": "complete",
-      "startedAt": "2026-01-02T13:00:04.000Z",
+      "startedAt": "2026-01-02T13:00:02.000Z",
       "endedAt": "2026-01-02T13:00:14.000Z",
       "groupCount": 1,
       "groups": [
         {
           "kind": "activity",
-          "id": "activity-00000000-0000-4000-8000-000000000404",
-          "itemCount": 1,
+          "id": "activity-00000000-0000-4000-8000-000000000403-queue",
+          "itemCount": 2,
           "itemKinds": {
+            "startup-phase": 1,
             "tool-call": 1
           },
           "outcome": "complete",
           "items": [
+            {
+              "kind": "startup-phase",
+              "id": "00000000-0000-4000-8000-000000000403-queue",
+              "turnId": "aaaaaaaa-0000-4000-8000-000000000006",
+              "occurredAt": "2026-01-02T13:00:02.000Z",
+              "phase": "queue",
+              "status": "complete",
+              "startedAt": "2026-01-02T13:00:02.000Z",
+              "completedAt": "2026-01-02T13:00:03.000Z",
+              "durationMs": 1000,
+              "outcome": null
+            },
             {
               "kind": "tool-call",
               "id": "00000000-0000-4000-8000-000000000404",
@@ -172,19 +221,32 @@
       "kind": "turn",
       "id": "turn-aaaaaaaa-0000-4000-8000-000000000008",
       "outcome": "complete",
-      "startedAt": "2026-01-02T13:00:16.000Z",
+      "startedAt": "2026-01-02T13:00:08.000Z",
       "endedAt": "2026-01-02T13:00:18.000Z",
       "groupCount": 1,
       "groups": [
         {
           "kind": "activity",
-          "id": "activity-00000000-0000-4000-8000-000000000416",
-          "itemCount": 1,
+          "id": "activity-00000000-0000-4000-8000-000000000415-queue",
+          "itemCount": 2,
           "itemKinds": {
+            "startup-phase": 1,
             "tool-call": 1
           },
           "outcome": "complete",
           "items": [
+            {
+              "kind": "startup-phase",
+              "id": "00000000-0000-4000-8000-000000000415-queue",
+              "turnId": "aaaaaaaa-0000-4000-8000-000000000008",
+              "occurredAt": "2026-01-02T13:00:08.000Z",
+              "phase": "queue",
+              "status": "complete",
+              "startedAt": "2026-01-02T13:00:08.000Z",
+              "completedAt": "2026-01-02T13:00:15.000Z",
+              "durationMs": 7000,
+              "outcome": null
+            },
             {
               "kind": "tool-call",
               "id": "00000000-0000-4000-8000-000000000416",
@@ -227,12 +289,25 @@
     },
     {
       "kind": "activity",
-      "id": "activity-00000000-0000-4000-8000-000000000420",
-      "itemCount": 1,
+      "id": "activity-00000000-0000-4000-8000-000000000419-queue",
+      "itemCount": 2,
       "itemKinds": {
+        "startup-phase": 1,
         "tool-call": 1
       },
       "items": [
+        {
+          "kind": "startup-phase",
+          "id": "00000000-0000-4000-8000-000000000419-queue",
+          "turnId": "aaaaaaaa-0000-4000-8000-000000000007",
+          "occurredAt": "2026-01-02T13:00:06.000Z",
+          "phase": "queue",
+          "status": "complete",
+          "startedAt": "2026-01-02T13:00:06.000Z",
+          "completedAt": "2026-01-02T13:00:19.000Z",
+          "durationMs": 13000,
+          "outcome": null
+        },
         {
           "kind": "tool-call",
           "id": "00000000-0000-4000-8000-000000000420",
@@ -253,6 +328,7 @@
   "facets": {
     "itemKinds": {
       "agent-message": 2,
+      "startup-phase": 3,
       "tool-call": 3,
       "turn-end": 2,
       "user-message": 3
@@ -263,6 +339,7 @@
       "turn": 2
     },
     "activityItemKinds": {
+      "startup-phase": 3,
       "tool-call": 3
     },
     "turnOutcomes": {

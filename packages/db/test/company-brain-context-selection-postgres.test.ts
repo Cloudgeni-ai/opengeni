@@ -24,7 +24,7 @@ import {
 
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
-  "../drizzle/0256_company_brain_context_selection_receipts.sql",
+  "../drizzle/0259_company_brain_context_selection_receipts.sql",
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;

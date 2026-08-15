@@ -8,6 +8,7 @@ import { migrate } from "../src/migrate";
 
 const migrationName = "0249_personal_resource_delegation_authority_correction.sql";
 const commonAuthorityMigrationName = "0253_common_user_resource_authority_lifecycle.sql";
+const connectionAuthorityMigrationName = "0256_connection_authority_delegation.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 const migration0241Url = new URL(
   "../drizzle/0241_atomic_personal_resource_delegation.sql",
@@ -144,9 +145,22 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           applied_at timestamptz not null default now()
         )
       `);
-      await sql`insert into schema_migrations (name) values (${migrationName}), (${commonAuthorityMigrationName})`;
+      await sql`
+        insert into schema_migrations (name)
+        values
+          (${migrationName}),
+          (${commonAuthorityMigrationName}),
+          (${connectionAuthorityMigrationName})
+      `;
       await migrate(databaseUrl);
-      await sql`delete from schema_migrations where name in (${migrationName}, ${commonAuthorityMigrationName})`;
+      await sql`
+        delete from schema_migrations
+        where name in (
+          ${migrationName},
+          ${commonAuthorityMigrationName},
+          ${connectionAuthorityMigrationName}
+        )
+      `;
 
       const ids = await createFixture(sql, databaseUrl, {
         target: "personal",
@@ -157,10 +171,21 @@ describe("migration 0249 personal-resource delegation authority correction", () 
       );
 
       await migrate(databaseUrl);
-      const [receipt] = await sql<Array<{ count: number }>>`
-        select count(*)::int as count from schema_migrations where name = ${migrationName}
+      const receipts = await sql<Array<{ name: string }>>`
+        select name
+        from schema_migrations
+        where name in (
+          ${migrationName},
+          ${commonAuthorityMigrationName},
+          ${connectionAuthorityMigrationName}
+        )
+        order by name
       `;
-      expect(receipt?.count).toBe(1);
+      expect(receipts.map((receipt) => receipt.name)).toEqual([
+        migrationName,
+        commonAuthorityMigrationName,
+        connectionAuthorityMigrationName,
+      ]);
       expect(await countWorkspaceMemberships(sql, ids)).toBe(0);
       await insertAttempt(sql, ids, ids.attemptId);
       await setRuntimeScope(sql, ids);

@@ -14,6 +14,7 @@ export default defineConfig({
   entry: [
     "src/index.ts",
     "src/canonical-human-identities.ts",
+    "src/domain/connection-authority.ts",
     "src/editable-artifacts.ts",
     "src/editable-artifact-live.ts",
   ],

@@ -1349,6 +1349,50 @@ between supported providers; `remote_v2` sessions remain Codex-only.
 
 ## Agent-loop request lifecycle observability
 
+The user-visible startup critical path is also durable and phase-specific. The
+existing `turn.queued`/`turn.started`, `sandbox.operation.*`, `rig.setup.*`, and
+`agent.model.request` events reconstruct queueing, box establishment, rig,
+repository/file work, and provider first byte. Compact
+`turn.startup.phase.started|completed|failed` checkpoints fill the two gaps for
+tool connection and model-request preparation; terminal payloads contain only a
+closed phase name and non-negative `durationMs`. In particular, lazy
+`sandbox.provision` completes as soon as the box is established, before owned
+rig/repository/file setup, so “Starting sandbox” never absorbs unrelated work.
+
+Fleet metrics keep this drill-down identity-free:
+`opengeni_turn_worker_preparation_duration_seconds` measures the platform path,
+`opengeni_turn_startup_phase_duration_seconds` attributes its bounded phases,
+and `opengeni_turn_startup_milestone_duration_seconds` records real cumulative
+queue, provider-dispatch, and first-byte SLO samples from the durable turn queue
+timestamp. Their labels are limited to the closed provider/backend/outcome and,
+where applicable, phase/count/cache vocabularies; session, turn, request,
+credential, and content values remain only in authenticated durable events.
+The database returns a milestone receipt only when the current transaction
+inserted the first canonical current-association checkpoint, so ordinary
+attempt recovery and callback replay cannot deterministically double-count it.
+A terminal `turn.failed` after provider dispatch contributes one bounded failed
+first-byte sample only when the logical turn produced no canonical byte in any
+attempt. A recoverable pre-byte attempt and a later tool-loop failure after a
+byte therefore cannot downgrade the logical startup outcome; successful
+first-byte latency remains a separate completed series. Prometheus observation
+is still an in-process, at-most-once side effect after the database commit: a
+process crash in that COMMIT-to-observe window can lose a sample. It is not
+transactionally exactly-once; a replica-safe Postgres-backed metrics projector
+would be a separate observability architecture.
+
 Provider request lifecycle diagnostics are synchronous, bounded, and best-effort. Codex reports `headers`, `first_byte`, and one semantic `terminal` phase; SuperGrok reports the equivalent `headers`, first valid SSE event, and terminal phases plus valid-event count/gap telemetry. Terminal outcomes are `completed`, `failed`, or `timed_out`. The worker maps these to `opengeni_model_request_phases_total{provider,phase,outcome}` and `opengeni_model_request_phase_duration_seconds{provider,phase}`. SuperGrok additionally exposes `opengeni_model_requests_inflight`, `opengeni_model_request_oldest_no_event_age_seconds`, `opengeni_model_request_stream_events_total`, and `opengeni_model_request_stream_event_gap_seconds`, all with provider-only labels. Provider ids come from the resolved provider registry; request ids, model bodies, credentials, session ids, and token content are not metric labels.
 
-The diagnostic observer runs before the existing awaited `agent.model.request` durable audit callback and cannot block or change it. Durable append/publish fencing and ordering therefore remain the source of audit truth. A semantic terminal is latched before downstream stream cleanup; if the consumer cancels after parsing it, the audit remains `completed` rather than producing a misleading trailing `failed`. Actual provider failure/incomplete/error, transport failure, timeout, or caller abort remains failed/timed out. SuperGrok persists only `started`, `headers`, `first_event`, and terminal checkpoints—not every streamed event—and the terminal checkpoint carries bounded event-count, last-event-type, last-progress-duration, and silence facts.
+Native diagnostic observers run before the existing awaited
+`agent.model.request` durable audit callback and cannot block or change it.
+Durable append/publish fencing and ordering therefore remain the source of audit
+truth. For generic providers, an attempt-local async context instead awaits the
+durable `started` checkpoint at the literal pre-fetch boundary; request bytes
+cannot reach the wire first. Model-preparation `started` is durable before
+`runStream` is invoked, including an immediately-calling native transport. A
+semantic terminal is latched before downstream stream cleanup; if the consumer
+cancels after parsing it, the audit remains `completed` rather than producing a
+misleading trailing `failed`. Actual provider failure/incomplete/error,
+transport failure, timeout, or caller abort remains failed/timed out. SuperGrok
+persists only `started`, `headers`, `first_event`, and terminal checkpoints—not
+every streamed event—and the terminal checkpoint carries bounded event-count,
+last-event-type, last-progress-duration, and silence facts.

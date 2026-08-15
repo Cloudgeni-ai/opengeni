@@ -1,4 +1,5 @@
 -- deployment-mode: rolling
+-- Migration 0259: accepted-turn Company Brain context selection receipts.
 -- Freeze Company Brain mode and bounded legacy workspace instructions at turn
 -- acceptance, then bind them to one content-free first-attempt selection
 -- receipt. Recovery reuses the frozen rendered subset and may only lose rows

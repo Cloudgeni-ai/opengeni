@@ -167,7 +167,7 @@ charter/policy authority. A `knowledge_memories.kind = preference` row is legacy
 knowledge observation, not a preference-registry record or instruction-policy
 activation.
 
-Migration 0256 freezes `memoryEnabled`, `memoryPromptMode`, and legacy workspace
+Migration 0259 freezes `memoryEnabled`, `memoryPromptMode`, and legacy workspace
 instructions when a logical turn is accepted. Instructions live only in a
 bounded immutable turn-context snapshot, with original UTF-8 byte count and an
 explicit truncation marker when a legacy value exceeds the bound. A pre-migration
@@ -203,5 +203,5 @@ Canonical source anchors:
 - `packages/db/src/memory-governance.ts`
 - `packages/db/src/memory-governance-schema.ts`
 - `packages/db/src/company-brain-context-selection.ts`
-- `packages/db/drizzle/0256_company_brain_context_selection_receipts.sql`
+- `packages/db/drizzle/0259_company_brain_context_selection_receipts.sql`
 - `packages/db/src/runtime-posture.ts`

@@ -111,6 +111,7 @@ import {
   type CodexCredentialLeaseSelectionContext,
   type ApplySessionTurnSettlementInput,
   type ApiIntegrationRuntime,
+  type CanonicalTurnStartupMilestoneReceipt,
   type SessionAttemptQuiescenceCommit,
   type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
@@ -418,6 +419,7 @@ import {
   recordSessionEventPublishLatency,
   recordTurnSandboxEstablishPolicy,
   recordTurnStartupPhase,
+  recordTurnStartupMilestone,
   recordTurnWorkerPreparationTotal,
   runtimeMetricsHooksForObservability,
   StreamTimingMetrics,
@@ -1473,7 +1475,11 @@ export async function recordCompletedModelCallBeforeOwnershipFences(input: {
 type TurnEventPublisher = (
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
   immediate?: boolean,
-) => Promise<{ events: SessionEvent[]; accepted: boolean }>;
+) => Promise<{
+  events: SessionEvent[];
+  accepted: boolean;
+  canonicalStartupMilestones: CanonicalTurnStartupMilestoneReceipt[];
+}>;
 
 export type ModelResponseEventState = {
   responseCount: number;
@@ -2963,7 +2969,7 @@ export function createTurnSandboxProvisioner<T>(
     onAttemptSettled?: (attempt: TurnSandboxProvisionAttempt<T>) => Promise<void> | void;
     beforeCompleted?: (
       result: T,
-      settlement: Pick<TurnSandboxProvisionSettlement, "provisionId" | "internalAttempts">,
+      settlement: TurnSandboxProvisionSettlement,
     ) => Promise<void> | void;
     onCompleted?: (result: T, settlement: TurnSandboxProvisionSettlement) => Promise<void> | void;
     onFailed?: (error: unknown, settlement: TurnSandboxProvisionSettlement) => Promise<void> | void;
@@ -3039,6 +3045,7 @@ export function createTurnSandboxProvisioner<T>(
             await options.beforeCompleted?.(result, {
               provisionId,
               internalAttempts,
+              durationMs: performance.now() - startedAt,
             });
             throwIfTurnOperationCancelled(options.signal);
             await options.onCompleted?.(result, {
@@ -4708,6 +4715,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const modelUsageDispatchId = activityContext?.info.activityId ?? dispatchId;
       const claimedModelUsageSourceKeys = new Set<string>();
       const emittedModelUsageSourceKeys = new Set<string>();
+      let startupMilestoneBackend: Settings["sandboxBackend"] = turn.sandboxBackend;
+      const recordCanonicalStartupMilestones = (
+        receipts: CanonicalTurnStartupMilestoneReceipt[],
+      ): void => {
+        for (const receipt of receipts) {
+          recordTurnStartupMilestone(observability, {
+            milestone: receipt.milestone,
+            provider: turnExecutionPolicy.providerId,
+            backend: startupMilestoneBackend,
+            outcome: receipt.outcome,
+            durationSeconds: receipt.durationMs / 1_000,
+          });
+        }
+      };
       publish = async (
         events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
         immediate = false,
@@ -4742,6 +4763,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (inputs.length > 0 && !appended.accepted) {
           throw new TurnAttemptFencedError("turn execution generation was fenced");
         }
+        recordCanonicalStartupMilestones(appended.canonicalStartupMilestones);
         if (inputs.length > 0) {
           turnLifecycleMetricsFor(observability).progress(turnId!);
         }
@@ -4838,6 +4860,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnMetricOutcome = "cancelled";
           return false;
         }
+        recordCanonicalStartupMilestones(result.canonicalStartupMilestones);
         turnLifecycleMetricsFor(observability).progress(turnId!);
         if (recordingForSettlement && preparedRecording) {
           if (result.recordingMutationApplied) {
@@ -6143,6 +6166,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   let auditOutcome: "completed" | "failed" = "completed";
                   try {
                     await publish([
+                      ...(shouldRecordStartedAudit && firstModelRequestPreparationStartedAt !== null
+                        ? [
+                            {
+                              type: "turn.startup.phase.completed" as const,
+                              payload: {
+                                phase: "model_preparation",
+                                durationMs: Math.max(
+                                  0,
+                                  Math.round(
+                                    performance.now() - firstModelRequestPreparationStartedAt,
+                                  ),
+                                ),
+                              },
+                            },
+                          ]
+                        : []),
                       {
                         type: "agent.model.request",
                         payload: {
@@ -6267,6 +6306,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             let auditOutcome: "completed" | "failed" = "completed";
             try {
               await publish([
+                ...(shouldRecordStartedAudit && firstModelRequestPreparationStartedAt !== null
+                  ? [
+                      {
+                        type: "turn.startup.phase.completed" as const,
+                        payload: {
+                          phase: "model_preparation",
+                          durationMs: Math.max(
+                            0,
+                            Math.round(performance.now() - firstModelRequestPreparationStartedAt),
+                          ),
+                        },
+                      },
+                    ]
+                  : []),
                 {
                   type: "agent.model.request",
                   payload: {
@@ -6779,6 +6832,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         runSettings.sandboxBackend === "selfhosted" && !machinePrimary
           ? settings.sandboxBackend
           : runSettings.sandboxBackend;
+      startupMilestoneBackend = activeSandboxBackend ?? groupBoxBackend;
       const groupBoxImage = rigProviderImageSourceImage(runSettings, groupBoxBackend);
       const sandboxCreationBackend: Settings["sandboxBackend"] =
         settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
@@ -7487,59 +7541,93 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // proxy's first default-pointer op. A chat-only turn never calls it, so
             // no lease row, no provider box, no warm-meter interval.
           } else {
-            resolvedSandbox = await waitForTurnOperation(
-              resumeBoxForTurn(
-                {
-                  db,
-                  settings: runSettings,
-                  logicalFallbackSettings: logicalSandboxSettings,
-                  cancellationSignal: sandboxResumeSignal,
-                  sandboxMetrics: runtimeMetricsHooksForObservability(observability),
-                  onSandboxLost: publishSandboxLost,
-                },
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sandboxGroupId: session.sandboxGroupId,
-                  sessionId: input.sessionId,
-                  // groupBoxBackend, not turn.sandboxBackend: a machine-home turn that
-                  // is not machine-primary resumes a real cloud group box (the
-                  // deployment default), never a "selfhosted" box (which would throw
-                  // for lack of a bound agentId).
-                  backend: groupBoxBackend,
-                  os: session.sandboxOs,
-                  environment: sandboxEnvironment,
-                  // IMAGE IS SHARED STATE (B3): the container image
-                  // this run resolves. The lease stamps it + conflicts on a live shared box
-                  // running a DIFFERENT image (solo → durable rotation; N-holders →
-                  // SandboxImageConflictError surfaced as an actionable turn error). Select
-                  // the image for the actual group-box backend; a configured Modal image must
-                  // never override a Docker run. The selfhosted branch
-                  // (establishSelfhostedTurnSession) NEVER passes
-                  // an image — B3 lives only on this managed-box branch.
-                  ...(groupBoxImage
-                    ? {
-                        image: groupBoxImage,
-                      }
-                    : {}),
-                  // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
-                  // conflicts on a live shared box set up under a different rig (solo
-                  // durable rotation / N-holders SandboxRigConflictError). Omitted for a
-                  // rig-less turn -> never stamped or enforced (shares exactly as today).
-                  ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
-                },
-                "turn",
-                managedOwnership!.holderId,
-              ),
-              sandboxResumeSignal,
-              releaseLateSandbox,
+            await publish!(
+              [{ type: "sandbox.operation.started", payload: { name: "sandbox.provision" } }],
+              true,
             );
+            try {
+              resolvedSandbox = await waitForTurnOperation(
+                resumeBoxForTurn(
+                  {
+                    db,
+                    settings: runSettings,
+                    logicalFallbackSettings: logicalSandboxSettings,
+                    cancellationSignal: sandboxResumeSignal,
+                    sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+                    onSandboxLost: publishSandboxLost,
+                  },
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sandboxGroupId: session.sandboxGroupId,
+                    sessionId: input.sessionId,
+                    // groupBoxBackend, not turn.sandboxBackend: a machine-home turn that
+                    // is not machine-primary resumes a real cloud group box (the
+                    // deployment default), never a "selfhosted" box (which would throw
+                    // for lack of a bound agentId).
+                    backend: groupBoxBackend,
+                    os: session.sandboxOs,
+                    environment: sandboxEnvironment,
+                    // IMAGE IS SHARED STATE (B3): the container image
+                    // this run resolves. The lease stamps it + conflicts on a live shared box
+                    // running a DIFFERENT image (solo → durable rotation; N-holders →
+                    // SandboxImageConflictError surfaced as an actionable turn error). Select
+                    // the image for the actual group-box backend; a configured Modal image must
+                    // never override a Docker run. The selfhosted branch
+                    // (establishSelfhostedTurnSession) NEVER passes
+                    // an image — B3 lives only on this managed-box branch.
+                    ...(groupBoxImage
+                      ? {
+                          image: groupBoxImage,
+                        }
+                      : {}),
+                    // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
+                    // conflicts on a live shared box set up under a different rig (solo
+                    // durable rotation / N-holders SandboxRigConflictError). Omitted for a
+                    // rig-less turn -> never stamped or enforced (shares exactly as today).
+                    ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
+                  },
+                  "turn",
+                  managedOwnership!.holderId,
+                ),
+                sandboxResumeSignal,
+                releaseLateSandbox,
+              );
+            } catch (error) {
+              await publish!(
+                [
+                  {
+                    type: "sandbox.operation.failed",
+                    payload: {
+                      name: "sandbox.provision",
+                      error: error instanceof Error ? error.message : String(error),
+                    },
+                  },
+                ],
+                true,
+              );
+              throw error;
+            }
             setupBoxSession = resolvedSandbox.established.session;
             // Durable box-lifecycle events (sandbox-file-persistence observability):
             // record every box transition in session_events so the NEXT box loss is
             // attributable from the DB alone — worker logs rotate within hours, which
             // left both 2026-07-06 incidents without a durable trace. Best-effort.
             await publishSandboxLifecycleEvents(resolvedSandbox);
+            await publish!(
+              [
+                {
+                  type: "sandbox.operation.completed",
+                  payload: {
+                    name: "sandbox.provision",
+                    ...(resolvedSandbox.established.origin
+                      ? { origin: resolvedSandbox.established.origin }
+                      : {}),
+                  },
+                },
+              ],
+              true,
+            );
             // M7 hot-swap: when the selfhosted feature is on, wrap the established
             // group box in the STABLE routing proxy before it is injected NON-OWNED
             // into the run. The SDK binds to this ONE object once and calls its
@@ -7852,6 +7940,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         durationSeconds: (performance.now() - toolContextPreparationStartedAt) / 1_000,
         count: turnTools.length,
       });
+      await publish!([
+        {
+          type: "turn.startup.phase.started",
+          payload: { phase: "tools" },
+        },
+      ]);
       const toolPreparationStartedAt = performance.now();
       let toolPreparationOutcome: "completed" | "failed" = "completed";
       const materializeConnectorAttachments = async (
@@ -7962,14 +8056,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         toolPreparationOutcome = "failed";
         throw error;
       } finally {
+        const toolPreparationDurationMs = performance.now() - toolPreparationStartedAt;
         recordTurnStartupPhase(observability, {
           phase: "tool_preparation",
           provider: turnExecutionPolicy.providerId,
           backend: activeSandboxBackend ?? groupBoxBackend,
           outcome: toolPreparationOutcome,
-          durationSeconds: (performance.now() - toolPreparationStartedAt) / 1_000,
+          durationSeconds: toolPreparationDurationMs / 1_000,
           count: turnTools.length,
         });
+        await publish!([
+          {
+            type:
+              toolPreparationOutcome === "completed"
+                ? "turn.startup.phase.completed"
+                : "turn.startup.phase.failed",
+            payload: {
+              phase: "tools",
+              durationMs: Math.max(0, Math.round(toolPreparationDurationMs)),
+            },
+          },
+        ]);
       }
       const postToolPreparationStartedAt = performance.now();
       if (turnId && preparedTools.attemptToolEnvironment) {
@@ -8589,23 +8696,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const lazyClient = {
           backendId: sdkBackendIdForSandboxBackend(groupBoxBackend),
         } as EstablishedSandboxSession["client"];
+        let lazySandboxEstablishmentSettled = false;
         turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>(
           async () => {
             throwIfWorkerShuttingDown();
             throwIfTurnCancelled();
-            const lazyGitCredentials =
-              activeSandboxBackend === "selfhosted"
-                ? undefined
-                : await mintRunGitCredentials(runSettings, turnResources, {
-                    scope: connectionScope,
-                    ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
-                    gitCredentials: connectionCredentials?.gitCredentials,
-                    authorizeGitHubTokenMint,
-                  });
-            const lazyGitTokens = lazyGitCredentials?.gitTokens;
-            const lazyCodemodeToken = sandboxCodemodeToken
-              ? await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority)
-              : undefined;
             const provisioned = await resumeBoxForTurn(
               {
                 db,
@@ -8637,62 +8732,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               lazyHolderId,
             );
             await publishSandboxLifecycleEvents(provisioned);
-            await attachRunCredentialRenewal(
-              provisioned.established.session as RunCredentialCommandSession,
-              initialRunCredentialMaterial,
-              provisioned,
-            );
-            const provisionedSetupSession = initialRunCredentialMaterial
-              ? withRunCredentialsSession(
-                  provisioned.established.session as object,
-                  input.sessionId,
-                )
-              : provisioned.established.session;
-            await runWorkspaceMutationForSandbox(
-              provisioned,
-              "lazyOwnedSandboxSetup",
-              async () =>
-                await runOwnedSandboxSetup(
-                  agent,
-                  provisioned.established.session as never,
-                  provisionedSetupSession as never,
-                  {
-                    settings: runSettings,
-                    environment: sandboxEnvironment,
-                    onRuntimeEvent: async (event) => {
-                      await publish?.([{ type: event.type, payload: event.payload }], true);
-                    },
-                    ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
-                    ...(lazyGitCredentials?.bindings
-                      ? {
-                          gitCredentialBindingsOverride: lazyGitCredentials.bindings,
-                        }
-                      : {}),
-                    ...(lazyCodemodeToken
-                      ? {
-                          codemodeTokenSeedOverride: lazyCodemodeToken.token,
-                        }
-                      : {}),
-                    ...(toolCancellationFenceRef.current
-                      ? {
-                          commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
-                            toolCancellationFenceRef.current,
-                          ),
-                        }
-                      : {}),
-                  },
-                ),
-            );
-            await attachCodemodeTokenRenewal(
-              provisioned.established.session as CodemodeTokenWriterSession,
-              lazyCodemodeToken?.expiresAt,
-              provisioned,
-            );
-            await attachGitCredentialRenewal(
-              provisioned.established.session as GitCredentialTokenWriterSession,
-              lazyGitCredentials,
-              provisioned,
-            );
             // Return the REAL established box (NOT a copy whose session is the routing
             // proxy). resolveActiveBackend dispatches ops to `provisioned.established.session`;
             // if that were the proxy itself, proxy.exec -> dispatch -> resolve ->
@@ -8736,25 +8775,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 durationSeconds: durationMs / 1_000,
               });
             },
-            beforeCompleted: async (provisioned) => {
+            beforeCompleted: async (provisioned, settlement) => {
               throwIfTurnOperationCancelled(sandboxResumeSignal);
               startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
               setupBoxSession = provisioned.established.session;
               resolvedSandbox = provisioned;
-              // `get()` does not release the first routed sandbox operation
-              // until this hook returns. Materialize durable generated images
-              // here so that operation can use their advertised paths without
-              // racing a best-effort background copy.
-              for (const receipt of generatedImageReceiptsByArtifactId.values()) {
-                await materializeGeneratedImageInSandbox(
-                  receipt,
-                  provisioned,
-                  provisioned.established.session,
-                );
-              }
-              throwIfTurnOperationCancelled(sandboxResumeSignal);
-            },
-            onCompleted: async (provisioned, settlement) => {
+              // This durable completion and its logical metric close at actual box
+              // establishment. Credential, rig, repository, and file preparation below
+              // must never be attributed to "Starting sandbox" or provision latency.
               await publish?.(
                 [
                   {
@@ -8788,8 +8816,92 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 internalAttempts: settlement.internalAttempts,
                 durationSeconds: settlement.durationMs / 1_000,
               });
+              lazySandboxEstablishmentSettled = true;
+
+              const lazyGitCredentials =
+                activeSandboxBackend === "selfhosted"
+                  ? undefined
+                  : await mintRunGitCredentials(runSettings, turnResources, {
+                      scope: connectionScope,
+                      ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
+                      gitCredentials: connectionCredentials?.gitCredentials,
+                      authorizeGitHubTokenMint,
+                    });
+              const lazyGitTokens = lazyGitCredentials?.gitTokens;
+              const lazyCodemodeToken = sandboxCodemodeToken
+                ? await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority)
+                : undefined;
+              await attachRunCredentialRenewal(
+                provisioned.established.session as RunCredentialCommandSession,
+                initialRunCredentialMaterial,
+                provisioned,
+              );
+              const provisionedSetupSession = initialRunCredentialMaterial
+                ? withRunCredentialsSession(
+                    provisioned.established.session as object,
+                    input.sessionId,
+                  )
+                : provisioned.established.session;
+              await runWorkspaceMutationForSandbox(
+                provisioned,
+                "lazyOwnedSandboxSetup",
+                async () =>
+                  await runOwnedSandboxSetup(
+                    agent,
+                    provisioned.established.session as never,
+                    provisionedSetupSession as never,
+                    {
+                      settings: runSettings,
+                      environment: sandboxEnvironment,
+                      onRuntimeEvent: async (event) => {
+                        await publish?.([{ type: event.type, payload: event.payload }], true);
+                      },
+                      ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
+                      ...(lazyGitCredentials?.bindings
+                        ? {
+                            gitCredentialBindingsOverride: lazyGitCredentials.bindings,
+                          }
+                        : {}),
+                      ...(lazyCodemodeToken
+                        ? {
+                            codemodeTokenSeedOverride: lazyCodemodeToken.token,
+                          }
+                        : {}),
+                      ...(toolCancellationFenceRef.current
+                        ? {
+                            commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                              toolCancellationFenceRef.current,
+                            ),
+                          }
+                        : {}),
+                    },
+                  ),
+              );
+              await attachCodemodeTokenRenewal(
+                provisioned.established.session as CodemodeTokenWriterSession,
+                lazyCodemodeToken?.expiresAt,
+                provisioned,
+              );
+              await attachGitCredentialRenewal(
+                provisioned.established.session as GitCredentialTokenWriterSession,
+                lazyGitCredentials,
+                provisioned,
+              );
+              // `get()` does not release the first routed sandbox operation
+              // until this hook returns. Materialize durable generated images
+              // here so that operation can use their advertised paths without
+              // racing a best-effort background copy.
+              for (const receipt of generatedImageReceiptsByArtifactId.values()) {
+                await materializeGeneratedImageInSandbox(
+                  receipt,
+                  provisioned,
+                  provisioned.established.session,
+                );
+              }
+              throwIfTurnOperationCancelled(sandboxResumeSignal);
             },
             onFailed: async (error, settlement) => {
+              if (lazySandboxEstablishmentSettled) return;
               const failure = classifySandboxLogicalProvisionFailure(groupBoxBackend, error);
               await publish?.(
                 [
@@ -9466,6 +9578,70 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
         throwIfWorkerShuttingDown();
         throwIfTurnCancelled();
+        const streamProvider = resolvedModel?.provider.id ?? settings.openaiProvider ?? "openai";
+        const providerPublishesNativeRequestEvents =
+          resolvedModel?.provider.kind === "codex-subscription" ||
+          resolvedModel?.provider.kind === "xai-subscription";
+        let fallbackProviderRequestStartedAt: number | null = null;
+        const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
+          if (
+            providerPublishesNativeRequestEvents ||
+            firstModelRequestPreparationRecorded ||
+            firstModelRequestPreparationStartedAt === null
+          ) {
+            return;
+          }
+          firstModelRequestPreparationRecorded = true;
+          const preparationDurationMs = Math.max(
+            0,
+            performance.now() - firstModelRequestPreparationStartedAt,
+          );
+          recordTurnStartupPhase(observability, {
+            phase: "model_request_preparation",
+            provider: turnExecutionPolicy.providerId,
+            backend: activeSandboxBackend ?? groupBoxBackend,
+            outcome: "completed",
+            durationSeconds: preparationDurationMs / 1_000,
+            count: turnTools.length,
+          });
+          const auditStartedAt = performance.now();
+          let auditOutcome: "completed" | "failed" = "completed";
+          try {
+            await publish!([
+              {
+                type: "turn.startup.phase.completed",
+                payload: {
+                  phase: "model_preparation",
+                  durationMs: Math.round(preparationDurationMs),
+                },
+              },
+              {
+                type: "agent.model.request",
+                payload: {
+                  phase: "started",
+                  provider: streamProvider,
+                  turnId: activeTurnId,
+                  attemptId: input.attemptId,
+                  dispatchId,
+                  executionGeneration,
+                },
+              },
+            ]);
+            fallbackProviderRequestStartedAt = performance.now();
+          } catch (error) {
+            auditOutcome = "failed";
+            throw error;
+          } finally {
+            recordTurnStartupPhase(observability, {
+              phase: "model_request_audit",
+              provider: turnExecutionPolicy.providerId,
+              backend: activeSandboxBackend ?? groupBoxBackend,
+              outcome: auditOutcome,
+              durationSeconds: (performance.now() - auditStartedAt) / 1_000,
+              count: turnTools.length,
+            });
+          }
+        };
         const ownedEstablished = resolvedSandbox?.established ?? lazyOwnedSandbox;
         const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
           // Eager owned sessions must settle the exact platform-setup provider
@@ -9546,6 +9722,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // Escaped MCP setup timeouts are automatically recoverable only
           // before this line.
           recordCompanyBrainContributionReceiptOnce();
+          if (!firstModelRequestPreparationRecorded) {
+            await publish!([
+              {
+                type: "turn.startup.phase.started",
+                payload: { phase: "model_preparation" },
+              },
+            ]);
+            firstModelRequestPreparationStartedAt = performance.now();
+            firstModelRequestCheckpointAt = firstModelRequestPreparationStartedAt;
+          }
           const providerDispatchStartedAt = performance.now();
           let providerDispatchOutcome: "completed" | "failed" = "completed";
           try {
@@ -9657,6 +9843,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   ...(measurement.count === undefined ? {} : { count: measurement.count }),
                 });
               },
+              ...(!providerPublishesNativeRequestEvents
+                ? { onModelTransportStarted: recordFallbackProviderDispatchAtWire }
+                : {}),
               ...(toolCancellationFenceRef.current
                 ? {
                     turnToolCancellationFence: toolCancellationFenceRef.current,
@@ -9686,7 +9875,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // Bounded provider label for the streaming SLIs — the resolved registry
         // provider id (or the built-in OpenAI/Azure provider), never a raw
         // user-supplied model string.
-        const streamProvider = resolvedModel?.provider.id ?? settings.openaiProvider ?? "openai";
         const streamTiming = new StreamTimingMetrics(observability, {
           provider: streamProvider,
         });
@@ -9714,10 +9902,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             count: turnTools.length,
           });
         };
-        if (!firstModelRequestPreparationRecorded) {
-          firstModelRequestPreparationStartedAt = performance.now();
-          firstModelRequestCheckpointAt = firstModelRequestPreparationStartedAt;
-        }
+        const settleFallbackProviderFirstByte = async (): Promise<void> => {
+          if (fallbackProviderRequestStartedAt === null) return;
+          const durationMs = Math.max(0, performance.now() - fallbackProviderRequestStartedAt);
+          fallbackProviderRequestStartedAt = null;
+          await publish!([
+            {
+              type: "agent.model.request",
+              payload: {
+                phase: "first_byte",
+                provider: streamProvider,
+                durationMs: Math.round(durationMs),
+                turnId: activeTurnId,
+                attemptId: input.attemptId,
+                dispatchId,
+                executionGeneration,
+              },
+            },
+          ]);
+        };
         const iterator = stream.toStream()[Symbol.asyncIterator]();
         let streamDone = false;
         try {
@@ -9728,6 +9931,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               streamDone = true;
               break;
             }
+            await settleFallbackProviderFirstByte();
             let stableToolCallIdsToClear: string[] | null = null;
             let completedCurrentToolBatch = false;
             let retainedScreenshotMetadata: RetainedArtifactMetadata | null = null;
@@ -10055,6 +10259,53 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               }
             }
           }
+        } catch (error) {
+          if (fallbackProviderRequestStartedAt !== null) {
+            const durationMs = Math.max(0, performance.now() - fallbackProviderRequestStartedAt);
+            fallbackProviderRequestStartedAt = null;
+            await publish!([
+              {
+                type: "agent.model.request",
+                payload: {
+                  phase: "failed",
+                  provider: streamProvider,
+                  durationMs: Math.round(durationMs),
+                  turnId: activeTurnId,
+                  attemptId: input.attemptId,
+                  dispatchId,
+                  executionGeneration,
+                },
+              },
+            ]);
+          }
+          if (
+            !firstModelRequestPreparationRecorded &&
+            firstModelRequestPreparationStartedAt !== null
+          ) {
+            firstModelRequestPreparationRecorded = true;
+            const durationMs = Math.max(
+              0,
+              performance.now() - firstModelRequestPreparationStartedAt,
+            );
+            recordTurnStartupPhase(observability, {
+              phase: "model_request_preparation",
+              provider: turnExecutionPolicy.providerId,
+              backend: activeSandboxBackend ?? groupBoxBackend,
+              outcome: "failed",
+              durationSeconds: durationMs / 1_000,
+              count: turnTools.length,
+            });
+            await publish!([
+              {
+                type: "turn.startup.phase.failed",
+                payload: {
+                  phase: "model_preparation",
+                  durationMs: Math.round(durationMs),
+                },
+              },
+            ]);
+          }
+          throw error;
         } finally {
           if (!streamDone) {
             // ReadableStream cancellation synchronously trips the Agents SDK's

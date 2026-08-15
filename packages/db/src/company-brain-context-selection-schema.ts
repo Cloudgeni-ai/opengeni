@@ -12,7 +12,7 @@ import {
 import type { CompanyBrainMemorySelectionReference } from "./company-brain-context-selection";
 
 /**
- * Content-free accepted-logical-turn selection receipt. Migration 0256 owns
+ * Content-free accepted-logical-turn selection receipt. Migration 0259 owns
  * the exact-attempt writer, immutable trigger, FORCE-RLS policy, and grants.
  */
 export const companyBrainContextSelectionReceipts = pgTable(

@@ -7957,6 +7957,8 @@ export type FikenOAuthStartResponse = z.infer<typeof FikenOAuthStartResponse>;
 
 export const ConnectionMetadata = z.object({
   id: z.string().uuid(),
+  /** Opaque owner-only handle used to manage this personal connection's grants. */
+  authorityId: z.string().uuid().optional(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   subjectId: z.string().nullable(),
@@ -9437,6 +9439,12 @@ export const SessionEventType = z.enum([
   "turn.superseded",
   "turn.recovery.requested",
   "turn.capacity_waiting",
+  // Compact, attempt-fenced user-visible worker preparation checkpoints. The
+  // payload phase is a closed enum and terminal events carry durationMs; no
+  // session-specific value is ever promoted into Prometheus labels.
+  "turn.startup.phase.started",
+  "turn.startup.phase.completed",
+  "turn.startup.phase.failed",
   "agent.message.delta",
   "agent.message.completed",
   "agent.reasoning.delta",

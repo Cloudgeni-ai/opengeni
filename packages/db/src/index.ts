@@ -360,6 +360,7 @@ export * from "./generated-images";
 export * from "./slack-user-link-access";
 export * from "./video-generation";
 export * from "./user-resource-authority";
+export * from "./connection-authority";
 export * from "./xai-subscription";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
@@ -458,6 +459,7 @@ import {
   type ConnectionCredentialForBroker,
   type ConnectionTokenResolverOptions,
 } from "./connection-token-resolver";
+import { resolveConnectionUseAuthority } from "./connection-authority";
 import { resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./xai-subscription";
 
 function parsedPersonalConnectionDelegations(
@@ -7708,6 +7710,7 @@ export function mcpServerIdForCapability(
 
 const connectionMetadataColumns = {
   id: schema.connections.id,
+  authorityId: schema.connections.authorityId,
   accountId: schema.connections.accountId,
   workspaceId: schema.connections.workspaceId,
   subjectId: schema.connections.subjectId,
@@ -7992,6 +7995,7 @@ async function updateConnectionInScope(
       ? {
           credentialEncrypted: input.credentialEncrypted,
           version: sql`${schema.connections.version} + 1`,
+          authorityGeneration: sql`${schema.connections.authorityGeneration} + 1`,
           lastError: null,
         }
       : {}),
@@ -11305,6 +11309,7 @@ export async function loadConnectionCredentialForBroker(
     kind?: ConnectionKind;
     subjectId?: string | null;
     allowSubjectOwned?: boolean;
+    expectedAuthorityGeneration?: number;
   },
 ): Promise<ConnectionCredentialForBroker | null> {
   if (input.allowSubjectOwned && !input.subjectId) {
@@ -11332,6 +11337,9 @@ export async function loadConnectionCredentialForBroker(
     if (input.kind) {
       conditions.push(eq(schema.connections.kind, input.kind));
     }
+  }
+  if (input.expectedAuthorityGeneration !== undefined) {
+    conditions.push(eq(schema.connections.authorityGeneration, input.expectedAuthorityGeneration));
   }
   return await withConnectionSubjectRls(
     db,
@@ -11391,6 +11399,7 @@ export async function loadConnectionCredentialForBroker(
         expiresAt: row.expiresAt,
         lastRefreshAt: row.lastRefreshAt,
         version: row.version,
+        authorityGeneration: row.authorityGeneration,
         metadata: row.metadata,
       };
     },
@@ -52585,6 +52594,7 @@ export type ApplySessionTurnSettlementResult =
   | {
       action: "settled";
       events: SessionEvent[];
+      canonicalStartupMilestones: CanonicalTurnStartupMilestoneReceipt[];
       recordingMutationApplied: boolean;
     }
   | {
@@ -52650,6 +52660,156 @@ function sessionEventPayloadRecord(
   return logicalPayload && typeof logicalPayload === "object" && !Array.isArray(logicalPayload)
     ? (logicalPayload as Record<string, unknown>)
     : {};
+}
+
+export type CanonicalTurnStartupMilestoneReceipt = {
+  milestone: "queue" | "provider_dispatch" | "first_byte";
+  outcome: "completed" | "failed";
+  eventId: string;
+  durationMs: number;
+};
+
+const TURN_STARTUP_CHECKPOINTS = [
+  { milestone: "queue", outcome: "completed" },
+  { milestone: "provider_dispatch", outcome: "completed" },
+  { milestone: "first_byte", outcome: "completed" },
+  { milestone: "first_byte", outcome: "failed" },
+] as const satisfies ReadonlyArray<
+  Pick<CanonicalTurnStartupMilestoneReceipt, "milestone" | "outcome">
+>;
+
+function startupCheckpointKey(
+  checkpoint: Pick<CanonicalTurnStartupMilestoneReceipt, "milestone" | "outcome">,
+): string {
+  return `${checkpoint.milestone}:${checkpoint.outcome}`;
+}
+
+function startupMilestoneForEvent(
+  event: Pick<
+    typeof schema.sessionEvents.$inferSelect,
+    "type" | "payload" | "payloadCodecVersion" | "turnAssociation"
+  >,
+): Pick<CanonicalTurnStartupMilestoneReceipt, "milestone" | "outcome"> | null {
+  if (event.turnAssociation !== "current") return null;
+  if (event.type === "turn.started") return { milestone: "queue", outcome: "completed" };
+  if (event.type === "turn.failed") return { milestone: "first_byte", outcome: "failed" };
+  if (event.type !== "agent.model.request") return null;
+  const phase = sessionEventPayloadRecord(event.payload, event.payloadCodecVersion).phase;
+  if (phase === "started") return { milestone: "provider_dispatch", outcome: "completed" };
+  if (phase === "first_byte" || phase === "first_event") {
+    return { milestone: "first_byte", outcome: "completed" };
+  }
+  return null;
+}
+
+async function canonicalTurnStartupMilestonesForInsertedEvents(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    turnCreatedAt: Date;
+    inserted: Array<typeof schema.sessionEvents.$inferSelect>;
+    terminalTurnFailed: boolean;
+  },
+): Promise<CanonicalTurnStartupMilestoneReceipt[]> {
+  const insertedIds = new Set(input.inserted.map((event) => event.id));
+  const insertedCheckpoints = new Set(
+    input.inserted.flatMap((event) => {
+      const candidate = startupMilestoneForEvent(event);
+      return candidate ? [startupCheckpointKey(candidate)] : [];
+    }),
+  );
+  const receipts: CanonicalTurnStartupMilestoneReceipt[] = [];
+  for (const checkpoint of TURN_STARTUP_CHECKPOINTS) {
+    const { milestone, outcome } = checkpoint;
+    // A request-local transport terminal is not a logical startup failure: it
+    // may recover, or it may follow a byte during a later tool loop. Only the
+    // atomic terminal failed-turn settlement may project the exclusive failed
+    // outcome; ordinary append/replay paths keep this flag false.
+    if (outcome === "failed" && !input.terminalTurnFailed) continue;
+    if (!insertedCheckpoints.has(startupCheckpointKey(checkpoint))) continue;
+    const phaseCondition =
+      milestone === "provider_dispatch"
+        ? sql`${schema.sessionEvents.payload} ->> 'phase' = 'started'`
+        : milestone === "first_byte" && outcome === "completed"
+          ? sql`${schema.sessionEvents.payload} ->> 'phase' in ('first_byte', 'first_event')`
+          : milestone === "first_byte"
+            ? and(
+                sql`exists (
+                  select 1
+                  from session_events dispatched
+                  where dispatched.workspace_id = ${schema.sessionEvents.workspaceId}
+                    and dispatched.session_id = ${schema.sessionEvents.sessionId}
+                    and dispatched.turn_id = ${schema.sessionEvents.turnId}
+                    and dispatched.turn_association = 'current'
+                    and dispatched.type = 'agent.model.request'
+                    and dispatched.sequence < ${schema.sessionEvents.sequence}
+                    and dispatched.payload ->> 'phase' = 'started'
+                )`,
+                sql`not exists (
+                  select 1
+                  from session_events responded
+                  where responded.workspace_id = ${schema.sessionEvents.workspaceId}
+                    and responded.session_id = ${schema.sessionEvents.sessionId}
+                    and responded.turn_id = ${schema.sessionEvents.turnId}
+                    and responded.turn_association = 'current'
+                    and responded.type = 'agent.model.request'
+                    and responded.payload ->> 'phase' in ('first_byte', 'first_event')
+                )`,
+              )
+            : undefined;
+    const [canonical] = await tx
+      .select({
+        id: schema.sessionEvents.id,
+        type: schema.sessionEvents.type,
+        payload: schema.sessionEvents.payload,
+        payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+        turnAssociation: schema.sessionEvents.turnAssociation,
+        occurredAt: schema.sessionEvents.occurredAt,
+      })
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(schema.sessionEvents.turnId, input.turnId),
+          eq(schema.sessionEvents.turnAssociation, "current"),
+          eq(
+            schema.sessionEvents.type,
+            milestone === "queue"
+              ? "turn.started"
+              : milestone === "first_byte" && outcome === "failed"
+                ? "turn.failed"
+                : "agent.model.request",
+          ),
+          phaseCondition,
+        ),
+      )
+      .orderBy(asc(schema.sessionEvents.sequence))
+      .limit(1);
+    // A durable event from an earlier transaction is already the canonical
+    // checkpoint. Only the transaction that first inserts that checkpoint may
+    // return a metric receipt, which makes ordinary recovery and callback
+    // replay no-ops. The consumer's in-memory Prometheus observation happens
+    // after COMMIT and remains explicitly at-most-once across a process crash.
+    if (!canonical || !insertedIds.has(canonical.id)) continue;
+    const canonicalCheckpoint = startupMilestoneForEvent(canonical);
+    if (
+      !canonicalCheckpoint ||
+      canonicalCheckpoint.milestone !== milestone ||
+      canonicalCheckpoint.outcome !== outcome
+    ) {
+      continue;
+    }
+    receipts.push({
+      milestone,
+      outcome,
+      eventId: canonical.id,
+      durationMs: Math.max(0, canonical.occurredAt.getTime() - input.turnCreatedAt.getTime()),
+    });
+  }
+  return receipts;
 }
 
 /**
@@ -53156,6 +53316,17 @@ export async function applySessionTurnSettlement(
               .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
               .returning()
           : [];
+      const canonicalStartupMilestones = await canonicalTurnStartupMilestonesForInsertedEvents(
+        tx as unknown as Database,
+        {
+          workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          turnCreatedAt: turn.createdAt,
+          inserted,
+          terminalTurnFailed: input.turnStatus === "failed",
+        },
+      );
       const requestedEvents = inserted.filter(
         (event) => event.type === "session.humanInput.requested",
       );
@@ -53354,6 +53525,7 @@ export async function applySessionTurnSettlement(
       return {
         action: "settled" as const,
         events: [...closedTools.events, ...inserted.map(mapEvent)],
+        canonicalStartupMilestones,
         recordingMutationApplied,
       };
     });
@@ -56483,8 +56655,14 @@ export async function appendSessionEventsForTurnAttempt(
   executionGeneration: number,
   attemptId: string,
   inputs: AppendEventInput[],
-): Promise<{ events: SessionEvent[]; accepted: boolean }> {
-  if (inputs.length === 0) return { events: [], accepted: true };
+): Promise<{
+  events: SessionEvent[];
+  accepted: boolean;
+  canonicalStartupMilestones: CanonicalTurnStartupMilestoneReceipt[];
+}> {
+  if (inputs.length === 0) {
+    return { events: [], accepted: true, canonicalStartupMilestones: [] };
+  }
   const result = await mutateAndAppendSessionEventsForTurnAttempt(
     db,
     workspaceId,
@@ -56495,7 +56673,11 @@ export async function appendSessionEventsForTurnAttempt(
     inputs,
     async () => true,
   );
-  return { events: result.events, accepted: result.accepted };
+  return {
+    events: result.events,
+    accepted: result.accepted,
+    canonicalStartupMilestones: result.canonicalStartupMilestones,
+  };
 }
 
 /**
@@ -56516,6 +56698,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
   events: SessionEvent[];
   accepted: boolean;
   mutationApplied: boolean;
+  canonicalStartupMilestones: CanonicalTurnStartupMilestoneReceipt[];
 }> {
   if (inputs.length === 0) {
     throw new Error("Atomic attempt mutation requires a timeline projection event");
@@ -56539,7 +56722,12 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
           async (tx) => {
             const mutationApplied = await mutate(tx);
             if (!mutationApplied) {
-              return { events: [], accepted: false, mutationApplied: false };
+              return {
+                events: [],
+                accepted: false,
+                mutationApplied: false,
+                canonicalStartupMilestones: [],
+              };
             }
             const fence = await lockTurnAttemptWriteFenceTx(tx, {
               workspaceId,
@@ -56667,6 +56855,16 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
               .insert(schema.sessionEvents)
               .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
               .returning();
+            const canonicalStartupMilestones = fence.allowed
+              ? await canonicalTurnStartupMilestonesForInsertedEvents(tx as unknown as Database, {
+                  workspaceId,
+                  sessionId,
+                  turnId,
+                  turnCreatedAt: fence.turn!.createdAt,
+                  inserted,
+                  terminalTurnFailed: false,
+                })
+              : [];
             if (fence.allowed) {
               await projectSessionRealtimeDelegationProgressInTransaction(
                 tx as unknown as Database,
@@ -56701,6 +56899,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
               events: inserted.map(mapEvent),
               accepted: fence.allowed,
               mutationApplied: true,
+              canonicalStartupMilestones,
             };
           },
         ),
@@ -57835,6 +58034,7 @@ function projectInstallationConfig(config: Record<string, unknown>): Record<stri
 
 function mapConnectionMetadata(row: {
   id: string;
+  authorityId?: string | null;
   accountId: string;
   workspaceId: string;
   subjectId: string | null;
@@ -57857,6 +58057,7 @@ function mapConnectionMetadata(row: {
 }): ConnectionMetadataWithVerification {
   return {
     id: row.id,
+    ...(row.subjectId !== null && row.authorityId ? { authorityId: row.authorityId } : {}),
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     subjectId: row.subjectId,
@@ -58263,6 +58464,7 @@ function connectionBrokerDeps(): ConnectionBrokerDeps {
     encrypt: encryptEnvironmentValue,
     keyBytes: environmentsEncryptionKeyBytes,
     now: () => new Date(),
+    authorizeUse: resolveConnectionUseAuthority,
   };
 }
 
