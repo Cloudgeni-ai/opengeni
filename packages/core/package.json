@@ -33,6 +33,10 @@
     "./canonical-human-identities": {
       "types": "./src/canonical-human-identities.ts",
       "default": "./src/canonical-human-identities.ts"
+    },
+    "./connection-authority": {
+      "types": "./src/domain/connection-authority.ts",
+      "default": "./src/domain/connection-authority.ts"
     }
   },
   "publishConfig": {
