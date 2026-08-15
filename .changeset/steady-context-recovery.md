@@ -3,6 +3,6 @@
 "@opengeni/worker-bundle": patch
 ---
 
-Freeze bounded, content-free Company Brain context selections once per accepted
-logical turn so replacement attempts reuse the original workspace Memory
-candidates and current authorization can only shrink recovery context.
+Freeze Company Brain mode and bounded legacy instructions when a turn is
+accepted, then bind them to a content-free first-attempt selection receipt whose
+candidate and rendered-budget subsets make replacement recovery shrink-only.

@@ -167,16 +167,24 @@ charter/policy authority. A `knowledge_memories.kind = preference` row is legacy
 knowledge observation, not a preference-registry record or instruction-policy
 activation.
 
-Migration 0256 adds one content-free Company Brain selection receipt per
-accepted logical turn. The first exact attempt freezes root/child role,
-`memoryPromptMode`, company-profile inclusion, existing governance snapshot
-hashes, and at most 50 legacy workspace-Memory candidate references in the
-existing pinned/recency order. References contain identity, version, and hashes,
-never memory text. A replacement attempt reuses the same receipt, cannot admit a
-newer row, and rechecks current scope, lifecycle, validity, version, pinned state,
-and exact content hashes before loading each candidate. Revocation or drift can
-therefore only shrink recovery context. Normalized Knowledge and Task notes stay
-explicit tool reads and are not automatic prompt candidates.
+Migration 0256 freezes `memoryEnabled`, `memoryPromptMode`, and legacy workspace
+instructions when a logical turn is accepted. Instructions live only in a
+bounded immutable turn-context snapshot, with original UTF-8 byte count and an
+explicit truncation marker when a legacy value exceeds the bound. A pre-migration
+turn receives an explicit `legacy_first_claim` snapshot because acceptance-time
+truth is no longer reconstructable.
+
+The first exact attempt then creates one content-free Company Brain selection
+receipt that binds the snapshot, root/child role, company-profile inclusion,
+existing governance hashes, and at most 50 legacy workspace-Memory candidate
+references in pinned/recency order. It separately freezes the whole-entry subset
+that fit the original prompt budget. References contain identity, version, and
+hashes, never memory or instruction text. A replacement attempt cannot admit a
+newer or originally budget-omitted row, and rechecks current scope, lifecycle,
+validity, version, pinned state, and exact content hashes before loading each
+rendered candidate. Revocation or drift can therefore only shrink recovery
+context. Normalized Knowledge and Task notes stay explicit tool reads and are not
+automatic prompt candidates.
 
 At ordinary and provider-backed compaction model-request boundaries, the worker
 also emits content-free, exact-attempt contribution telemetry for mandatory

@@ -299,9 +299,11 @@ full audit data retains it. Documents and RAG evidence never become policy,
 and full preference bodies require explicit retrieval. When no structured
 governance applies, the legacy prompt bytes remain unchanged.
 
-The workspace `memoryPromptMode` is frozen by the first exact attempt in one
-content-free selection receipt keyed to the accepted logical turn. Its default
-`legacy_standing` keeps the prior prompt path. Opt-in `retrieval_only` removes
+Turn acceptance freezes `memoryEnabled`, `memoryPromptMode`, and a bounded
+projection of legacy workspace instructions in one immutable turn-context
+snapshot. The first exact attempt creates a content-free selection receipt that
+binds that snapshot to the accepted logical turn. Its default `legacy_standing`
+keeps the prior prompt path. Opt-in `retrieval_only` removes
 the broad Memory V1 working-set block and
 legacy preference-kind agent retrieval; canonical rows and human surfaces are
 unchanged. A root still receives the bounded company profile, while a child
@@ -310,9 +312,10 @@ structured preference and configured Skill descriptors. At the ordinary model
 request boundary, metadata-only telemetry records the exact attempt, existing
 governance snapshot ids, inclusion reason, authority class, root/child role,
 UTF-8 size, and estimated tokens without recording content. Replacement
-attempts reuse the receipt and its bounded legacy Memory identities; current
+attempts reuse the receipt, its bounded legacy Memory candidate identities, and
+the exact whole-entry subset that fit the original prompt budget. Current
 authorization, lifecycle, version, and content-hash revalidation may remove a
-candidate but never add a newer one.
+rendered candidate but never add a newer or originally budget-omitted one.
 
 Approval, capacity wait, worker recovery, and Pause/Resume create newer
 attempts for the **same logical turn**, so they must replay the original policy

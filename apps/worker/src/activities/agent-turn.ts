@@ -5795,9 +5795,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }),
         ]);
       if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
-      const workspaceAgentInstructions = workspace.agentInstructions;
       const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
       const contextSelection = await resolveCompanyBrainContextSelection(db, governanceClaims);
+      const workspaceAgentInstructions = contextSelection.legacyWorkspaceInstructions;
       const memoryPromptMode = contextSelection.receipt.memoryPromptMode;
       assertWorkspaceHumanInputAllowed(agentHumanInputEnabled, "resume", humanInputResume !== null);
       const companyProfileIncluded = contextSelection.receipt.companyProfileIncluded;

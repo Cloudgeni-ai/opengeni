@@ -15,6 +15,7 @@ import {
   nestedPostgresSqlState,
   resolveCompanyBrainContextSelection,
   saveWorkspaceMemory,
+  transitionSessionVisibility,
   withSessionRlsActorContext,
   withWorkspaceRls,
   dbSql,
@@ -55,6 +56,7 @@ type Attempt = {
 async function fixture(
   options: {
     child?: boolean;
+    privateRoot?: boolean;
     mode?: "legacy_standing" | "retrieval_only";
   } = {},
 ) {
@@ -104,6 +106,16 @@ async function fixture(
         }),
       )
     : null;
+  if (options.privateRoot) {
+    await transitionSessionVisibility(client.db, {
+      workspaceId: grant.workspaceId,
+      sessionId: root.id,
+      actorSubjectId: ownerSubjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: `context-private-${suffix}`,
+    });
+  }
   return { grant, ownerSubjectId, root, child };
 }
 
@@ -114,6 +126,7 @@ async function seedAttempt(input: {
   ownerSubjectId: string;
   turnId?: string;
   generation?: number;
+  source?: "user" | "compaction";
 }): Promise<Attempt> {
   if (!shared) throw new Error("test database unavailable");
   const turnId = input.turnId ?? crypto.randomUUID();
@@ -141,7 +154,7 @@ async function seedAttempt(input: {
           initiating_human_subject_id
         ) values (
           ${turnId}, ${input.accountId}, ${input.workspaceId}, ${input.sessionId},
-          ${crypto.randomUUID()}, ${`context-selection-${turnId}`}, 'running', 'user', 1,
+          ${crypto.randomUUID()}, ${`context-selection-${turnId}`}, 'running', ${input.source ?? "user"}, 1,
           'context selection fixture', 'test-model', 'medium', 'none', ${generation},
           'subject', ${input.ownerSubjectId}, '{}'::jsonb, ${input.ownerSubjectId}
         )
@@ -225,6 +238,10 @@ describe("accepted-turn Company Brain context selection", () => {
     expect(sql).toContain("octet_length(value::text) > 16384");
     expect(sql).toContain("FORCE ROW LEVEL SECURITY");
     expect(sql).toContain("session_visibility_isolation");
+    expect(sql).toContain("company_brain_turn_context_snapshots");
+    expect(sql).toContain("session_turns_capture_company_brain_context_snapshot");
+    expect(sql).toContain("legacy workspace instructions truncated; original UTF-8 bytes=");
+    expect(sql).toContain("rendered_memory_selections");
     expect(sql).toContain("ALTER FUNCTION %1$I.company_brain_context_get_or_create_selection");
     expect(sql).not.toContain("memory.text'\n");
     expect(sql).not.toContain("task_notes note");
@@ -238,6 +255,81 @@ describe("accepted-turn Company Brain context selection", () => {
       expect(installed?.function_schema).toBe(installed?.current_schema);
     }
   });
+
+  test("freezes mode and bounded legacy workspace instructions when the turn is accepted", async () => {
+    if (!shared || !client) return;
+    const f = await fixture();
+    const acceptedInstructions = `Accepted instructions ${"🧠".repeat(40_000)}`;
+    await shared.admin`
+      update workspaces set settings = ${shared.admin.json({
+        memoryEnabled: true,
+        memoryPromptMode: "legacy_standing",
+      })}::jsonb, agent_instructions = ${acceptedInstructions}
+      where id = ${f.grant.workspaceId}
+    `;
+    const attempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.root.id,
+      ownerSubjectId: f.ownerSubjectId,
+    });
+    await shared.admin`
+      update workspaces set settings = ${shared.admin.json({
+        memoryEnabled: false,
+        memoryPromptMode: "retrieval_only",
+      })}::jsonb, agent_instructions = 'Changed after acceptance'
+      where id = ${f.grant.workspaceId}
+    `;
+    await prepareSnapshots(attempt);
+    const selected = await resolve(attempt);
+    expect(selected.receipt).toMatchObject({
+      memoryEnabled: true,
+      memoryPromptMode: "legacy_standing",
+      turnContextSnapshotSource: "accepted_turn",
+      legacyWorkspaceInstructionsOriginalUtf8Bytes: Buffer.byteLength(acceptedInstructions, "utf8"),
+      legacyWorkspaceInstructionsTruncated: true,
+    });
+    expect(selected.legacyWorkspaceInstructions).toStartWith("Accepted instructions");
+    expect(selected.legacyWorkspaceInstructions).toContain(
+      "legacy workspace instructions truncated; original UTF-8 bytes=",
+    );
+    expect(Buffer.byteLength(selected.legacyWorkspaceInstructions!, "utf8")).toBeLessThanOrEqual(
+      131_072,
+    );
+    expect(selected.legacyWorkspaceInstructions).not.toContain("Changed after acceptance");
+  }, 180_000);
+
+  test.each(["user", "compaction"] as const)(
+    "recovery reuses accepted legacy workspace instructions for %s turns",
+    async (source) => {
+      if (!shared || !client) return;
+      const f = await fixture();
+      await shared.admin`
+        update workspaces set agent_instructions = ${`accepted-${source}`}
+        where id = ${f.grant.workspaceId}
+      `;
+      const firstAttempt = await seedAttempt({
+        accountId: f.grant.accountId,
+        workspaceId: f.grant.workspaceId,
+        sessionId: f.root.id,
+        ownerSubjectId: f.ownerSubjectId,
+        source,
+      });
+      await prepareSnapshots(firstAttempt);
+      const first = await resolve(firstAttempt);
+      await shared.admin`
+        update workspaces set agent_instructions = ${`changed-${source}`}
+        where id = ${f.grant.workspaceId}
+      `;
+      const recovery = await seedAttempt({ ...firstAttempt, generation: 2, source });
+      await prepareSnapshots(recovery);
+      const replay = await resolve(recovery);
+      expect(replay.receipt.turnContextSnapshotId).toBe(first.receipt.turnContextSnapshotId);
+      expect(replay.receipt.turnContextSnapshotHash).toBe(first.receipt.turnContextSnapshotHash);
+      expect(replay.legacyWorkspaceInstructions).toBe(`accepted-${source}`);
+    },
+    180_000,
+  );
 
   test("reuses one logical-turn selection across attempt replacement and shrinks on revocation or hash drift", async () => {
     if (!shared || !client) return;
@@ -274,6 +366,7 @@ describe("accepted-turn Company Brain context selection", () => {
       memoryPromptMode: "legacy_standing",
       companyProfileIncluded: true,
       selectedMemoryCount: 2,
+      renderedMemoryCount: 2,
       visibleMemoryCount: 2,
       omittedMemoryCount: 0,
     });
@@ -347,7 +440,10 @@ describe("accepted-turn Company Brain context selection", () => {
     expect(shrunk.receipt.id).toBe(first.receipt.id);
     expect(shrunk.receipt).toMatchObject({
       selectedMemoryCount: 2,
+      renderedMemoryCount: 2,
       visibleMemoryCount: 0,
+      budgetOmittedMemoryCount: 0,
+      authorizationOmittedMemoryCount: 2,
       omittedMemoryCount: 2,
     });
     expect(shrunk.workspaceMemory).toContain("currently empty");
@@ -420,6 +516,15 @@ describe("accepted-turn Company Brain context selection", () => {
           app.begin(async (sql) => {
             await sql`select set_config('opengeni.account_id', ${f.grant.accountId}, true)`;
             await sql`select set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true)`;
+            await sql`select * from company_brain_turn_context_snapshots limit 1`;
+          }),
+        "42501",
+      );
+      await expectSqlState(
+        () =>
+          app.begin(async (sql) => {
+            await sql`select set_config('opengeni.account_id', ${f.grant.accountId}, true)`;
+            await sql`select set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true)`;
             await sql`delete from company_brain_context_selection_receipts where false`;
           }),
         "42501",
@@ -427,6 +532,23 @@ describe("accepted-turn Company Brain context selection", () => {
     } finally {
       await app.end();
     }
+  }, 180_000);
+
+  test("derives private-session visibility from the accepted turn without ambient worker identity", async () => {
+    if (!shared || !client) return;
+    const f = await fixture({ privateRoot: true });
+    const attempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.root.id,
+      ownerSubjectId: f.ownerSubjectId,
+    });
+    await prepareSnapshots(attempt);
+    const selected = await resolveCompanyBrainContextSelection(client.db, claims(attempt));
+    expect(selected.receipt).toMatchObject({
+      rootSessionId: f.root.id,
+      turnContextSnapshotSource: "accepted_turn",
+    });
   }, 180_000);
 
   test("caps deterministic candidate order and renders only whole entries inside the standing token budget", async () => {
@@ -451,7 +573,13 @@ describe("accepted-turn Company Brain context selection", () => {
     await prepareSnapshots(attempt);
     const selected = await resolve(attempt);
     expect(selected.receipt.selectedMemoryCount).toBe(50);
-    expect(selected.receipt.visibleMemoryCount).toBe(50);
+    expect(selected.receipt.renderedMemoryCount).toBeLessThan(50);
+    expect(selected.receipt.visibleMemoryCount).toBe(selected.receipt.renderedMemoryCount);
+    expect(selected.receipt.budgetOmittedMemoryCount).toBe(
+      50 - selected.receipt.renderedMemoryCount,
+    );
+    expect(selected.receipt.authorizationOmittedMemoryCount).toBe(0);
+    expect(selected.receipt.omittedMemoryCount).toBe(selected.receipt.budgetOmittedMemoryCount);
     expect(selected.workspaceMemory).toContain("bounded-00-");
     expect(selected.workspaceMemory!.indexOf("bounded-00-")).toBeLessThan(
       selected.workspaceMemory!.indexOf("bounded-51-"),
