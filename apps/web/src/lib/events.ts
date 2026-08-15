@@ -114,6 +114,8 @@ export function failurePayloadMessage(payload: Record<string, unknown>): string 
 // long-running operation.
 const SANDBOX_OPERATION_LABELS: Record<string, string> = {
   "sandbox.provision": "Starting sandbox",
+  "repository-clone": "Preparing repository",
+  "file-resource-download": "Preparing files",
 };
 
 /** The named op on a `sandbox.operation.*` payload, or null. */
@@ -140,6 +142,16 @@ function sandboxOperationName(event: SessionEvent): string | null {
 export function eventDisplayLabel(event: SessionEvent): string {
   const opName = sandboxOperationName(event);
   if (opName && SANDBOX_OPERATION_LABELS[opName]) {
+    if (event.type === "sandbox.operation.completed") {
+      if (opName === "sandbox.provision") return "Sandbox ready";
+      if (opName === "repository-clone") return "Repository ready";
+      if (opName === "file-resource-download") return "Files ready";
+    }
+    if (event.type === "sandbox.operation.failed") {
+      if (opName === "sandbox.provision") return "Sandbox didn’t start";
+      if (opName === "repository-clone") return "Repository preparation failed";
+      if (opName === "file-resource-download") return "File preparation failed";
+    }
     return SANDBOX_OPERATION_LABELS[opName]!;
   }
   return eventLabel(event.type);
@@ -183,6 +195,9 @@ export function eventLabel(type: string): string {
     "turn.failed": "Turn failed",
     "turn.cancelled": "Turn cancelled",
     "turn.recovery.requested": "Turn recovery requested",
+    "turn.startup.phase.started": "Turn preparation started",
+    "turn.startup.phase.completed": "Turn preparation completed",
+    "turn.startup.phase.failed": "Turn preparation failed",
     "session.control.paused": "Session paused",
     "session.control.resumed": "Session resumed",
     "session.control.steer_requested": "Steer requested",

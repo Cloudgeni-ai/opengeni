@@ -2589,6 +2589,55 @@ describe("on-turn recording gate (selfhosted machines have no in-box capture plu
 });
 
 describe("lazy sandbox provisioner single-flight", () => {
+  test("closes logical provision before fallible post-establish setup", async () => {
+    const order: string[] = [];
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        order.push("box-established");
+        return "ready";
+      },
+      {
+        beforeCompleted: async (_result, settlement) => {
+          order.push(`provision-completed:${settlement.internalAttempts}`);
+          await Promise.resolve();
+          order.push("rig-and-repository-setup");
+        },
+        onCompleted: () => {
+          order.push("operation-released");
+        },
+      },
+    );
+
+    await expect(provisioner.get()).resolves.toBe("ready");
+    expect(order).toEqual([
+      "box-established",
+      "provision-completed:1",
+      "rig-and-repository-setup",
+      "operation-released",
+    ]);
+  });
+
+  test("durably starts model preparation before native runStream and binds generic dispatch to fetch", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    const runStreamOnceAt = source.indexOf("const runStreamOnce = async");
+    const modelPreparationStartedAt = source.indexOf(
+      'type: "turn.startup.phase.started"',
+      runStreamOnceAt,
+    );
+    const runtimeRunStreamAt = source.indexOf("return await runtime.runStream(", runStreamOnceAt);
+    const genericWireHookAt = source.indexOf(
+      "onModelTransportStarted: recordFallbackProviderDispatchAtWire",
+      runtimeRunStreamAt,
+    );
+
+    expect(runStreamOnceAt).toBeGreaterThan(-1);
+    expect(modelPreparationStartedAt).toBeGreaterThan(runStreamOnceAt);
+    expect(runtimeRunStreamAt).toBeGreaterThan(modelPreparationStartedAt);
+    expect(genericWireHookAt).toBeGreaterThan(runtimeRunStreamAt);
+  });
+
   test("file materialization metrics fail when any download fails softly", () => {
     expect(sandboxFileMaterializationOutcome([])).toBe("completed");
     expect(

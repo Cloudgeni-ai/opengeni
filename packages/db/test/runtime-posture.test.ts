@@ -288,6 +288,7 @@ describe("runtime database posture evaluator", () => {
         .map(([table]) => table)
         .sort();
       const personalResourceProtectedTableCount = [
+        "connection_use_once_consumption_receipts",
         "personal_resource_once_consumption_receipts",
         "scheduled_task_personal_resource_authorities",
         "scheduled_task_personal_resource_snapshots",

@@ -86,6 +86,19 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         status: item.status,
         output: item.output,
       };
+    case "startup-phase":
+      return {
+        kind: item.kind,
+        id: item.id,
+        turnId: item.turnId,
+        occurredAt: item.occurredAt,
+        phase: item.phase,
+        status: item.status,
+        startedAt: item.startedAt,
+        completedAt: item.completedAt,
+        durationMs: item.durationMs,
+        outcome: item.outcome,
+      };
     case "session-status":
       return {
         kind: item.kind,

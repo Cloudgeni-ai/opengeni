@@ -98,6 +98,35 @@ async function fixture() {
   };
 }
 
+async function insertPersonalConnectionFixture(input: {
+  scope: Awaited<ReturnType<typeof fixture>>;
+  connectionId: string;
+  providerDomain: string;
+  credentialEncrypted: string;
+  version?: number;
+}) {
+  const { scope } = input;
+  await shared!.admin.begin(async (tx) => {
+    await tx`
+      select
+        set_config('opengeni.account_id', ${scope.accountId}, true),
+        set_config('opengeni.workspace_id', ${scope.workspaceId}, true),
+        set_config('opengeni.subject_id', ${scope.actorSubjectId}, true)
+    `;
+    await tx`
+      insert into connections (
+        id, account_id, workspace_id, subject_id, provider_domain, kind,
+        credential_encrypted, status, version, created_by_subject_id, updated_by_subject_id
+      ) values (
+        ${input.connectionId}, ${scope.accountId}, ${scope.workspaceId},
+        ${scope.actorSubjectId}, ${input.providerDomain}, 'api_key',
+        ${input.credentialEncrypted}, 'active', ${input.version ?? 1},
+        ${scope.actorSubjectId}, ${scope.actorSubjectId}
+      )
+    `;
+  });
+}
+
 function directRoute(operationId = crypto.randomUUID()) {
   return {
     operationId,
@@ -452,15 +481,12 @@ describe("browser auth and network resources", () => {
     if (!available) return;
     const scope = await fixture();
     const connectionId = crypto.randomUUID();
-    await shared!.admin`
-      insert into connections (
-        id, account_id, workspace_id, subject_id, provider_domain, kind,
-        credential_encrypted, status, created_by_subject_id, updated_by_subject_id
-      ) values (
-        ${connectionId}, ${scope.accountId}, ${scope.workspaceId}, ${scope.actorSubjectId},
-        'example.com', 'api_key', 'encrypted-never-read-here', 'active',
-        ${scope.actorSubjectId}, ${scope.actorSubjectId}
-      )`;
+    await insertPersonalConnectionFixture({
+      scope,
+      connectionId,
+      providerDomain: "example.com",
+      credentialEncrypted: "encrypted-never-read-here",
+    });
     const operationId = crypto.randomUUID();
     const base = humanSiteAuth(operationId);
     const credentialAuthority = {
@@ -1278,15 +1304,13 @@ describe("browser auth and network resources", () => {
     if (!available) return;
     const scope = await fixture();
     const credentialId = crypto.randomUUID();
-    await shared!.admin`
-      insert into connections (
-        id, account_id, workspace_id, subject_id, provider_domain, kind,
-        credential_encrypted, status, version, created_by_subject_id, updated_by_subject_id
-      ) values (
-        ${credentialId}, ${scope.accountId}, ${scope.workspaceId}, ${scope.actorSubjectId},
-        'example.com', 'api_key', 'encrypted-outside-auth-run', 'active', 7,
-        ${scope.actorSubjectId}, ${scope.actorSubjectId}
-      )`;
+    await insertPersonalConnectionFixture({
+      scope,
+      connectionId: credentialId,
+      providerDomain: "example.com",
+      credentialEncrypted: "encrypted-outside-auth-run",
+      version: 7,
+    });
     const base = humanSiteAuth();
     const auth = await createSiteAuthConnection(client.db, {
       ...scope,

@@ -21,6 +21,8 @@ import type {
   MachineInputBatchItem,
   MemoryItem,
   SandboxItem,
+  StartupPhase,
+  StartupPhaseItem,
   SessionStatusItem,
   TimelineGroup,
   TimelineItem,
@@ -124,6 +126,86 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const items: TimelineItem[] = [];
   const prescan = prescanTurnAnchors(events);
   const ordered = orderTimelineEvents(events, prescan);
+  const queuedAtByTurn = new Map<string, string>();
+  const startupRecoveryRevisionByTurn = new Map<string, number>();
+  const startupPhases = new Map<string, readonly [StartupPhaseItem, string | null, number]>();
+  let startupEvent: SessionEvent;
+  let startupTurnId: string | null = null;
+  let startupAttemptId: string | null = null;
+  let startupRecoveryRevision = 0;
+
+  const settleStartupPhase = (
+    phase: StartupPhase,
+    status: StartupPhaseItem["status"],
+    duration: number | null,
+    outcome: StartupPhaseItem["outcome"],
+    mode = 0,
+    explicitStartedAt?: string,
+    explicitId?: string,
+  ): void => {
+    const key = `${startupTurnId}:${phase}`;
+    const priorState = startupPhases.get(key);
+    const prior = priorState?.[0];
+    const comparedByAttempt = priorState?.[1] && startupAttemptId;
+    const sameAttempt = comparedByAttempt
+      ? priorState[1] === startupAttemptId
+      : (priorState?.[2] ?? 0) === startupRecoveryRevision;
+    const open = prior?.status === "running" && sameAttempt ? prior : undefined;
+    const replacesPriorAttempt =
+      prior !== undefined &&
+      (comparedByAttempt ? !sameAttempt : startupRecoveryRevision > (priorState?.[2] ?? 0));
+    // A later activity attempt may replay preparation that the logical turn had
+    // already completed before the worker moved. Keep that first successful
+    // landmark; only an abandoned or failed attempt needs replacement.
+    if (replacesPriorAttempt && prior.status === "complete") return;
+    if (mode === 2 && prior && !replacesPriorAttempt) return;
+    if (mode === 1 && !open) return;
+    if (!replacesPriorAttempt && status !== "running" && open) {
+      open.status = status;
+      open.completedAt = startupEvent.occurredAt;
+      open.durationMs =
+        duration === null
+          ? elapsedDurationMs(open.startedAt, startupEvent.occurredAt)
+          : Math.max(0, duration);
+      open.outcome = outcome ?? open.outcome;
+      return;
+    }
+    const running = status === "running";
+    const durationMs = running || duration === null ? null : Math.max(0, duration);
+    const completedEpoch = Date.parse(startupEvent.occurredAt);
+    const startedAt =
+      explicitStartedAt ??
+      (!running && durationMs !== null && Number.isFinite(completedEpoch)
+        ? new Date(completedEpoch - durationMs).toISOString()
+        : startupEvent.occurredAt);
+    if (replacesPriorAttempt) {
+      Object.assign(prior, {
+        id: explicitId ?? startupEvent.id,
+        status,
+        startedAt,
+        completedAt: running ? null : startupEvent.occurredAt,
+        durationMs,
+        outcome,
+        occurredAt: startedAt,
+      } satisfies Partial<StartupPhaseItem>);
+      startupPhases.set(key, [prior, startupAttemptId, startupRecoveryRevision]);
+      return;
+    }
+    const item: StartupPhaseItem = {
+      kind: "startup-phase",
+      id: explicitId ?? startupEvent.id,
+      turnId: startupTurnId,
+      phase,
+      status,
+      startedAt,
+      completedAt: running ? null : startupEvent.occurredAt,
+      durationMs,
+      outcome,
+      occurredAt: startedAt,
+    };
+    items.push(item);
+    startupPhases.set(key, [item, startupAttemptId, startupRecoveryRevision]);
+  };
 
   const last = (): TimelineItem | undefined => items[items.length - 1];
 
@@ -138,6 +220,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const finalizeOpen = (
     turnId?: string | null,
     disposition: "complete" | "failed" | "cancelled" = "complete",
+    completedAt?: string,
   ): void => {
     for (const item of items) {
       if (
@@ -158,12 +241,47 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       if (item.kind === "sandbox" && item.status === "running") {
         item.status = disposition;
       }
+      if (item.kind === "startup-phase" && item.status === "running") {
+        item.status = disposition;
+        if (completedAt) {
+          item.completedAt = completedAt;
+          item.durationMs = elapsedDurationMs(item.startedAt, completedAt);
+        }
+      }
     }
   };
 
   for (const event of ordered) {
     const payload = asRecord(event.payload);
     const turnId = event.turnId ?? null;
+    startupEvent = event;
+    startupTurnId = turnId;
+    startupAttemptId =
+      (typeof event.turnAttemptId === "string" ? event.turnAttemptId : null) ??
+      stringValue(payload.attemptId);
+    startupRecoveryRevision = turnId ? (startupRecoveryRevisionByTurn.get(turnId) ?? 0) : 0;
+    const setupPhase = event.type.startsWith("rig.setup.")
+      ? "rig"
+      : event.type.startsWith("turn.startup.phase.")
+        ? startupPhaseFromPayload(payload.phase)
+        : null;
+    const setupStatus = event.type.endsWith(".started")
+      ? "running"
+      : event.type.endsWith(".failed")
+        ? "failed"
+        : event.type.endsWith(".completed") || event.type === "rig.setup.skipped"
+          ? "complete"
+          : null;
+    if (setupPhase && setupStatus) {
+      closeStreamingTail();
+      settleStartupPhase(
+        setupPhase,
+        setupStatus,
+        numberOrNull(payload.durationMs),
+        event.type === "rig.setup.skipped" ? "skipped" : null,
+      );
+      continue;
+    }
 
     switch (event.type) {
       case "user.message": {
@@ -452,6 +570,35 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         break;
       }
 
+      case "turn.queued": {
+        const queuedTurnId = turnId ?? (typeof payload.turnId === "string" ? payload.turnId : null);
+        if (queuedTurnId) {
+          queuedAtByTurn.set(queuedTurnId, event.occurredAt);
+        }
+        break;
+      }
+
+      case "turn.started": {
+        if (!turnId) break;
+        const queuedAt = queuedAtByTurn.get(turnId);
+        if (!queuedAt) break;
+        // Recovery starts the same logical turn again. Queue latency belongs to
+        // the first admission only, so consume the queued timestamp after its
+        // first projection instead of manufacturing another queue span.
+        queuedAtByTurn.delete(turnId);
+        closeStreamingTail();
+        settleStartupPhase(
+          "queue",
+          "complete",
+          elapsedDurationMs(queuedAt, event.occurredAt),
+          null,
+          0,
+          queuedAt,
+          `${event.id}-queue`,
+        );
+        break;
+      }
+
       case "sandbox.operation.started":
       case "sandbox.operation.completed":
       case "sandbox.operation.failed": {
@@ -463,6 +610,18 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           : event.type.endsWith(".completed")
             ? "complete"
             : "running";
+        const origin =
+          payload.origin === "created" ||
+          payload.origin === "restored" ||
+          payload.origin === "resumed"
+            ? payload.origin
+            : null;
+        const startupPhase = startupPhaseForSandboxOperation(name);
+        if (startupPhase) {
+          closeStreamingTail();
+          settleStartupPhase(startupPhase, status, numberOrNull(payload.durationMs), origin);
+          break;
+        }
         // Routine per-turn platform plumbing that runs before EVERY turn to
         // guarantee box contents survive a re-warm — NOT the agent redoing work:
         //   - repository-clone: idempotent clone check + off-manifest token re-seed;
@@ -482,13 +641,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         const existing = findOpenSandbox(items, name);
         if (existing && status !== "running") {
           existing.status = status;
-          if (
-            payload.origin === "created" ||
-            payload.origin === "restored" ||
-            payload.origin === "resumed"
-          ) {
-            existing.origin = payload.origin;
-          }
+          if (origin) existing.origin = origin;
           const message = failureMessage(payload);
           if (message) {
             existing.output = existing.output ? `${existing.output}\n${message}` : message;
@@ -504,15 +657,33 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
             name,
             command: typeof payload.command === "string" ? payload.command : null,
             output: failureMessage(payload) ?? "",
-            origin:
-              payload.origin === "created" ||
-              payload.origin === "restored" ||
-              payload.origin === "resumed"
-                ? payload.origin
-                : null,
+            origin,
             status,
             occurredAt: event.occurredAt,
           });
+        }
+        break;
+      }
+
+      case "agent.model.request": {
+        const requestPhase = typeof payload.phase === "string" ? payload.phase : null;
+        const status =
+          requestPhase === "started"
+            ? "running"
+            : requestPhase === "first_byte" || requestPhase === "first_event"
+              ? "complete"
+              : requestPhase === "failed" || requestPhase === "timed_out"
+                ? "failed"
+                : null;
+        if (status) {
+          if (status === "running") closeStreamingTail();
+          settleStartupPhase(
+            "provider_first_byte",
+            status,
+            status === "running" ? null : numberOrNull(payload.durationMs),
+            null,
+            status === "running" ? 2 : 1,
+          );
         }
         break;
       }
@@ -574,7 +745,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
 
       case "session.requiresAction": {
-        finalizeOpen(turnId);
+        finalizeOpen(turnId, "complete", event.occurredAt);
         items.push({
           kind: "notice",
           id: event.id,
@@ -641,6 +812,12 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // Recovery requests are durable control-plane evidence, not a user
         // message or proof that recovery succeeded. Live state already exposes
         // a genuinely recovering session; keep the raw event in Debug/audit.
+        if (turnId) {
+          startupRecoveryRevisionByTurn.set(
+            turnId,
+            (startupRecoveryRevisionByTurn.get(turnId) ?? 0) + 1,
+          );
+        }
         break;
       }
 
@@ -702,7 +879,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // adding a generic turn chip would falsely make it look like an
         // extra agent response.
         if (payload.maintenance === "context_compaction") {
-          finalizeOpen(turnId);
+          finalizeOpen(turnId, "complete", event.occurredAt);
           break;
         }
         // Credit exhaustion arrives as a NOMINALLY completed turn (`detail:
@@ -712,7 +889,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // session looking healthy while every future turn silently dies, so it
         // projects exactly like a failed turn plus an explicit notice.
         if (isCreditExhaustionPayload(payload)) {
-          finalizeOpen(turnId);
+          finalizeOpen(turnId, "complete", event.occurredAt);
           items.push(turnEndItem(event, "failed", CREDIT_EXHAUSTION_MESSAGE));
           items.push({
             kind: "notice",
@@ -723,7 +900,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           });
           break;
         }
-        finalizeOpen(turnId);
+        finalizeOpen(turnId, "complete", event.occurredAt);
         items.push(turnEndItem(event, "complete", null));
         break;
       }
@@ -740,7 +917,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // spent once, on the turn-level outcome. Items caught mid-flight read
         // as calm "interrupted" (same as turn.cancelled); an item that itself
         // failed keeps its own failed status from its output event.
-        finalizeOpen(turnId, "cancelled");
+        finalizeOpen(turnId, "cancelled", event.occurredAt);
         items.push(turnEndItem(event, "failed", failureText));
         if (!hadActivity) {
           items.push({
@@ -762,7 +939,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           break;
         }
         const hadActivity = hasTurnActivity(items, turnId);
-        finalizeOpen(turnId, "cancelled");
+        finalizeOpen(turnId, "cancelled", event.occurredAt);
         items.push(turnEndItem(event, "cancelled", null));
         if (!hadActivity) {
           items.push({
@@ -974,6 +1151,7 @@ function isActivityItem(item: TimelineItem): item is ActivityItem {
     case "tool-call":
     case "worker":
     case "sandbox":
+    case "startup-phase":
     case "memory":
     case "fleet-decision":
       return true;
@@ -1162,6 +1340,7 @@ function isTurnExecutionEvidence(type: string): boolean {
     type === "session.requiresAction" ||
     type === "tool.auth_needed" ||
     type === "credential.auth_needed" ||
+    type.startsWith("turn.startup.phase.") ||
     type.startsWith("rig.setup.") ||
     type === "codex.capacity.waiting" ||
     type === "codex.capacity.resumed" ||
@@ -1639,6 +1818,38 @@ function findOpenSandbox(items: TimelineItem[], name: string): SandboxItem | und
       (item): item is SandboxItem =>
         item.kind === "sandbox" && item.name === name && item.status === "running",
     );
+}
+
+function startupPhaseForSandboxOperation(name: string): StartupPhase | null {
+  return SANDBOX_STARTUP_PHASES[name] ?? null;
+}
+
+function startupPhaseFromPayload(value: unknown): StartupPhase | null {
+  return typeof value === "string" && STARTUP_PHASES.has(value as StartupPhase)
+    ? (value as StartupPhase)
+    : null;
+}
+
+const SANDBOX_STARTUP_PHASES: Record<string, StartupPhase> = {
+  "sandbox.provision": "sandbox",
+  "repository-clone": "repository",
+  "file-resource-download": "files",
+};
+const STARTUP_PHASES = new Set<StartupPhase>([
+  "queue",
+  "sandbox",
+  "rig",
+  "repository",
+  "files",
+  "tools",
+  "model_preparation",
+  "provider_first_byte",
+]);
+
+function elapsedDurationMs(startedAt: string, completedAt: string): number | null {
+  const start = Date.parse(startedAt);
+  const end = Date.parse(completedAt);
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
 }
 
 function failureMessage(payload: Record<string, unknown>): string | null {

@@ -36,7 +36,7 @@ describe("0257 governed goal revision authority migration", () => {
     const blank = await acquireBlankTestDatabase("migration-0257-dedicated-role-input");
     if (!blank) return;
     try {
-      await expect(migrate(blank.databaseUrl, "ope225_scoped")).rejects.toThrow(
+      await expect(migrate(blank.databaseUrl, "goal_revision_scoped")).rejects.toThrow(
         "Migration 0257 requires the exact application database roles",
       );
     } finally {
@@ -51,13 +51,13 @@ describe("0257 governed goal revision authority migration", () => {
       max: 1,
       onnotice: () => undefined,
     });
-    const role = `ope225_runtime_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    const role = `goal_runtime_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
     let liveRuntime: postgres.Sql | null = null;
     try {
-      await sql.unsafe(`CREATE ROLE "${role}" LOGIN PASSWORD 'ope225-runtime-password'`);
+      await sql.unsafe(`CREATE ROLE "${role}" LOGIN PASSWORD 'goal-runtime-password'`);
       const runtimeUrl = new URL(blank.databaseUrl);
       runtimeUrl.username = role;
-      runtimeUrl.password = "ope225-runtime-password";
+      runtimeUrl.password = "goal-runtime-password";
       liveRuntime = postgres(runtimeUrl.toString(), { max: 1 });
       let guardError: unknown;
       try {
