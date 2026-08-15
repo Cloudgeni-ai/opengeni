@@ -64,9 +64,10 @@ read, reindex, file, and delete the Document from any workspace they currently
 access in the same organization, and losing the origin workspace does not
 transfer or delete it. Those operations retain the original workspace, base,
 file, and chunk storage rather than copying data into the authorizing workspace.
-The document-scoped original-file metadata and download routes first authorize
-the Document in the requested workspace, then resolve only its immutable origin
-file; they do not make the origin workspace's generic file inventory portable.
+The document-scoped original-file metadata and download routes resolve the
+requested-workspace Document authority, its current owner/organization state,
+provider ACL, and the one immutable origin file in one database authority
+boundary; they do not make the origin workspace's generic file inventory portable.
 Configured/local subjects without an eligible active organization membership,
 and existing personal Documents, remain on the legacy origin-workspace lane
 instead of being guessed into a new organization-user authority.

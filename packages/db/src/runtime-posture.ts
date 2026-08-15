@@ -122,6 +122,7 @@ const PERSONAL_DOCUMENT_CAPABILITY_PREDICATE_ROUTINE =
 const PERSONAL_DOCUMENT_CAPABILITY_TABLE = "personal_document_authority_capabilities";
 const PERSONAL_DOCUMENT_AUTHORITY_ROUTINES = [
   "create_personal_document_authority(uuid, uuid, uuid)",
+  "resolve_document_original_file(uuid, uuid, text, uuid)",
   "resolve_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid)",
 ] as const;
 const VARIABLE_SET_AUTHORITY_ROUTINES = [

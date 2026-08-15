@@ -24,7 +24,7 @@ import {
 import {
   createPersonalDocumentAuthority,
   getFilesForSubject,
-  requireFileForSubject,
+  resolveDocumentOriginalFileForSubject,
   rlsContextForWorkspace,
   setSubjectRlsContext,
   withRlsContext,
@@ -1491,14 +1491,14 @@ export async function getDocumentOriginalFile(
     access: DocumentAccessFilter;
   },
 ): Promise<FileAsset | null> {
-  const document = await getDocument(db, input.workspaceId, input.documentId, input.access);
-  if (!document) return null;
-  return await requireFileForSubject(db, {
+  const subjectId = cleanString(input.access.viewerSubjectId ?? null);
+  if (!subjectId || input.access.agentOnly) return null;
+  return await resolveDocumentOriginalFileForSubject(db, {
     accountId: input.accountId,
-    workspaceId: document.workspaceId,
-    subjectId: cleanString(input.access.viewerSubjectId ?? null) ?? null,
-    fileId: document.fileId,
-  }).catch(() => null);
+    workspaceId: input.workspaceId,
+    subjectId,
+    documentId: input.documentId,
+  });
 }
 
 /**

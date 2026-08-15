@@ -553,6 +553,10 @@ describe("canonical queue commands", () => {
         .from(schema.sessions)
         .where(eq(schema.sessions.id, value.session.id));
       if (!sessionAuthority) throw new Error("Queue test session authority snapshot missing");
+      await db
+        .update(schema.sessions)
+        .set({ activeTurnId: turn!.id, status: "running" })
+        .where(eq(schema.sessions.id, value.session.id));
       await db.insert(schema.sessionTurnAttempts).values({
         id: attemptId,
         accountId: value.grant.accountId,
@@ -571,10 +575,6 @@ describe("canonical queue commands", () => {
           sessionAuthority.authorityOwnerOrganizationMembershipId,
         mcpApprovalPolicies: {},
       });
-      await db
-        .update(schema.sessions)
-        .set({ activeTurnId: turn!.id, status: "running" })
-        .where(eq(schema.sessions.id, value.session.id));
       return turn!;
     });
 

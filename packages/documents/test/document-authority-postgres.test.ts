@@ -191,14 +191,13 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
     await expect(
       getDocument(forced.db, otherOrganization.workspaceId, created.id, ownerAccess),
     ).resolves.toBeNull();
-    await expect(
-      getDocumentOriginalFile(forced.db, {
-        accountId: origin.accountId,
-        workspaceId: sibling.workspaceId,
-        documentId: created.id,
-        access: ownerAccess,
-      }),
-    ).resolves.toMatchObject({ id: file!.id, workspaceId: origin.workspaceId });
+    const originalFile = await getDocumentOriginalFile(forced.db, {
+      accountId: origin.accountId,
+      workspaceId: sibling.workspaceId,
+      documentId: created.id,
+      access: ownerAccess,
+    });
+    expect(originalFile).toMatchObject({ id: file!.id, workspaceId: origin.workspaceId });
     await expect(
       getDocumentOriginalFile(forced.db, {
         accountId: origin.accountId,
@@ -239,6 +238,18 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
       workspaceId: origin.workspaceId,
       baseId: bases[1]!.id,
     });
+    await shared!.admin`
+      update organization_user_resource_authorities
+      set status = 'revoked', generation = generation + 1, revoked_at = now(), updated_at = now()
+      where account_id = ${origin.accountId} and id = ${created.authorityId!}`;
+    await expect(
+      getDocumentOriginalFile(forced.db, {
+        accountId: origin.accountId,
+        workspaceId: sibling.workspaceId,
+        documentId: created.id,
+        access: ownerAccess,
+      }),
+    ).resolves.toBeNull();
     await deleteDocumentFromBase(forced.db, {
       accountId: origin.accountId,
       workspaceId: sibling.workspaceId,

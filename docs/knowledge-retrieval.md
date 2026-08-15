@@ -81,9 +81,9 @@ exact owner across that owner's currently accessible workspaces in the same
 organization. Losing access to the origin workspace removes its workspace
 knowledge but does not remove the owner's personal Document. Legacy personal
 Documents remain origin-workspace anchored and are never inferred into the new
-authority. Document-scoped original-file reads and downloads authorize through
-this same effective Document boundary, then resolve only the immutable origin
-file; generic file access does not become portable.
+authority. Document-scoped original-file reads and downloads atomically resolve
+this same effective Document boundary, current owner authority, provider ACL,
+and only the immutable origin file; generic file access does not become portable.
 
 Personal ownership is not an agent grant. When an exact turn attempt is
 admitted, the database freezes only ready, agent-enabled personal Documents

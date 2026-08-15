@@ -1046,6 +1046,8 @@ BEGIN
     ) IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON FUNCTION %I.create_personal_document_authority(uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.create_personal_document_authority(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.resolve_document_original_file(uuid, uuid, text, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.resolve_document_original_file(uuid, uuid, text, uuid) TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.prepare_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.prepare_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid) FROM %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.resolve_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});

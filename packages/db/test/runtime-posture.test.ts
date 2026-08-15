@@ -516,6 +516,7 @@ describe("runtime database posture evaluator", () => {
     for (const routine of posture.targetRoutines) {
       if (
         routine.name.includes("personal_document") ||
+        routine.name === "resolve_document_original_file(uuid, uuid, text, uuid)" ||
         routine.name.includes("scoped_variable_set")
       ) {
         routine.owner = "pg_database_owner";

@@ -276,7 +276,7 @@ DECLARE
   table_name text;
 BEGIN
   FOREACH table_name IN ARRAY ARRAY[
-    'documents', 'organization_memberships', 'workspace_memberships',
+    'documents', 'files', 'organization_memberships', 'workspace_memberships',
     'organization_user_resource_authorities', 'organization_user_resource_grants',
     'sessions', 'session_turns', 'session_turn_attempts', 'session_attempt_interruptions',
     'session_attempt_personal_document_admissions',
@@ -902,6 +902,159 @@ BEGIN
   $ddl$, data_schema);
 
   EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION %1$I.resolve_document_original_file(
+      p_account_id uuid,
+      p_request_workspace_id uuid,
+      p_actor_id text,
+      p_document_id uuid
+    ) RETURNS SETOF %1$I.files
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = %1$I, pg_catalog
+    AS $body$
+    DECLARE
+      document_row %1$I.documents%%ROWTYPE;
+      authority_row %1$I.organization_user_resource_authorities%%ROWTYPE;
+      owner_membership_row %1$I.organization_memberships%%ROWTYPE;
+    BEGIN
+      IF p_account_id IS DISTINCT FROM nullif(
+          pg_catalog.current_setting('opengeni.account_id', true), ''
+        )::uuid
+        OR p_request_workspace_id IS DISTINCT FROM nullif(
+          pg_catalog.current_setting('opengeni.workspace_id', true), ''
+        )::uuid
+        OR p_actor_id IS NULL
+        OR p_actor_id IS DISTINCT FROM nullif(
+          pg_catalog.current_setting('opengeni.subject_id', true), ''
+        )
+        OR p_document_id IS NULL
+      THEN
+        RAISE EXCEPTION 'document original-file scope mismatch' USING ERRCODE = '42501';
+      END IF;
+
+      INSERT INTO opengeni_private.personal_document_authority_capabilities (
+        backend_pid, transaction_id, capability_kind
+      ) VALUES (pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), 'resolve')
+      ON CONFLICT DO NOTHING;
+
+      SELECT document_value.* INTO document_row
+      FROM %1$I.documents document_value
+      WHERE document_value.id = p_document_id
+        AND document_value.account_id = p_account_id
+        AND (
+          (
+            document_value.authority_kind = 'organization'
+            AND document_value.authority_workspace_id IS NULL
+            AND document_value.authority_subject_id IS NULL
+          ) OR (
+            document_value.authority_kind = 'workspace'
+            AND document_value.authority_workspace_id = p_request_workspace_id
+            AND document_value.authority_subject_id IS NULL
+          ) OR (
+            document_value.authority_kind = 'personal'
+            AND document_value.authority_subject_id = p_actor_id
+            AND (
+              (
+                document_value.authority_id IS NULL
+                AND document_value.owner_organization_membership_id IS NULL
+                AND document_value.authority_workspace_id = p_request_workspace_id
+              ) OR (
+                document_value.authority_id IS NOT NULL
+                AND document_value.owner_organization_membership_id IS NOT NULL
+                AND document_value.authority_workspace_id IS NULL
+              )
+            )
+          )
+        )
+      FOR SHARE;
+      IF NOT FOUND THEN
+        DELETE FROM opengeni_private.personal_document_authority_capabilities
+        WHERE backend_pid = pg_catalog.pg_backend_pid()
+          AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+          AND capability_kind = 'resolve';
+        RETURN;
+      END IF;
+
+      IF document_row.authority_kind = 'personal' AND document_row.authority_id IS NOT NULL THEN
+        SELECT authority.* INTO authority_row
+        FROM %1$I.organization_user_resource_authorities authority
+        WHERE authority.id = document_row.authority_id
+          AND authority.account_id = document_row.account_id
+          AND authority.organization_membership_id
+            = document_row.owner_organization_membership_id
+          AND authority.resource_kind = 'document'
+          AND authority.resource_id = document_row.id
+          AND authority.status = 'active'
+          AND authority.revoked_at IS NULL
+        FOR SHARE;
+        IF NOT FOUND THEN
+          DELETE FROM opengeni_private.personal_document_authority_capabilities
+          WHERE backend_pid = pg_catalog.pg_backend_pid()
+            AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+            AND capability_kind = 'resolve';
+          RETURN;
+        END IF;
+
+        SELECT membership.* INTO owner_membership_row
+        FROM %1$I.organization_memberships membership
+        WHERE membership.id = authority_row.organization_membership_id
+          AND membership.account_id = authority_row.account_id
+          AND membership.subject_id = p_actor_id
+          AND membership.status = 'active'
+          AND membership.revoked_at IS NULL
+        FOR SHARE;
+        IF NOT FOUND THEN
+          DELETE FROM opengeni_private.personal_document_authority_capabilities
+          WHERE backend_pid = pg_catalog.pg_backend_pid()
+            AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+            AND capability_kind = 'resolve';
+          RETURN;
+        END IF;
+
+        IF owner_membership_row.personal_workspace_id IS DISTINCT FROM p_request_workspace_id THEN
+          PERFORM 1
+          FROM %1$I.workspace_memberships workspace_membership
+          WHERE workspace_membership.account_id = p_account_id
+            AND workspace_membership.workspace_id = p_request_workspace_id
+            AND workspace_membership.subject_id = p_actor_id
+          FOR SHARE;
+          IF NOT FOUND THEN
+            DELETE FROM opengeni_private.personal_document_authority_capabilities
+            WHERE backend_pid = pg_catalog.pg_backend_pid()
+              AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+              AND capability_kind = 'resolve';
+            RETURN;
+          END IF;
+        END IF;
+      END IF;
+
+      RETURN QUERY
+      SELECT file_value.*
+      FROM %1$I.files file_value
+      WHERE file_value.id = document_row.file_id
+        AND file_value.account_id = document_row.account_id
+        AND file_value.workspace_id = document_row.origin_workspace_id
+        AND %1$I.google_drive_file_authorized(
+          p_account_id, p_request_workspace_id, p_actor_id, file_value.id
+        )
+      FOR SHARE;
+
+      DELETE FROM opengeni_private.personal_document_authority_capabilities
+      WHERE backend_pid = pg_catalog.pg_backend_pid()
+        AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+        AND capability_kind = 'resolve';
+      RETURN;
+    EXCEPTION WHEN OTHERS THEN
+      DELETE FROM opengeni_private.personal_document_authority_capabilities
+      WHERE backend_pid = pg_catalog.pg_backend_pid()
+        AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+        AND capability_kind = 'resolve';
+      RAISE;
+    END
+    $body$;
+  $ddl$, data_schema);
+
+  EXECUTE format($ddl$
     CREATE OR REPLACE FUNCTION %1$I.admit_session_attempt_personal_documents()
     RETURNS trigger
     LANGUAGE plpgsql
@@ -1075,6 +1228,8 @@ REVOKE ALL ON FUNCTION
   prepare_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION
   resolve_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION
+  resolve_document_original_file(uuid, uuid, text, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION admit_session_attempt_personal_documents() FROM PUBLIC;
 
 DO $personal_document_runtime_grants$
@@ -1087,6 +1242,9 @@ BEGIN
       TO opengeni_app;
     GRANT EXECUTE ON FUNCTION
       resolve_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid)
+      TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION
+      resolve_document_original_file(uuid, uuid, text, uuid)
       TO opengeni_app;
     REVOKE ALL ON TABLE session_attempt_personal_document_admissions FROM opengeni_app;
     REVOKE ALL ON TABLE session_attempt_personal_document_snapshots FROM opengeni_app;

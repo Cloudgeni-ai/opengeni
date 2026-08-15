@@ -183,8 +183,9 @@ the owner across that owner's currently accessible same-organization
 workspaces. `GET /v1/workspaces/:workspaceId/documents` is the effective human
 inventory; exact reads, reindex, filing, and deletion use the same authority
 predicate while operating on the immutable origin rows. Document-scoped
-original-file metadata and signed-download routes use that predicate before
-resolving the one immutable origin file, without widening generic file access.
+original-file metadata and signed-download routes atomically resolve that
+predicate, current owner authority, provider ACL, and the one immutable origin
+file, without widening generic file access.
 Configured/local
 subjects without an eligible active organization membership and legacy private
 rows keep the workspace binding established by migration 0165.
