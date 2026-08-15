@@ -1,5 +1,27 @@
 # @opengeni/contracts
 
+## 1.1.0
+
+### Minor Changes
+
+- 9c4e0b8: Add the workspace-bot Slack App Home task inbox with exact linked-user authorization, bounded active/attention/recent task projection, convergent `views.publish` refreshes, access-revocation clearing, and canonical manifest support.
+- eeb7cb6: Add immutable personal/workspace connection authority contracts and immediate
+  pre-use revalidation helpers.
+
+### Patch Changes
+
+- 90c0c3e: Persist bounded, content-free Company Brain prompt contribution estimates on authoritative model-call facts and expose their source breakdown and coverage in Workspace Insights.
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+- d7dfc01: Add typed workspace model-access policy reads and full-replacement updates for admin settings surfaces, plus a provider-private per-model policy verdict in the authenticated catalog.
+- ffbbf4c: Add organization, workspace, and owner-private Variable Set scopes with independent metadata, plaintext-read, write, attachment, and runtime-use authority. Runtime secret materialization now revalidates the exact live attempt and personal grant immediately before ciphertext egress while audits remain value-free.
+- d34dd9a: Add revision-fenced per-command memory and CPU policies for Connected Machines, exact live runner capability gating, and lifecycle-safe Linux operation accounting without introducing default resource limits.
+- c3f0598: Materialize authorized connector attachments as exact, hash-verified sandbox files while keeping provider bytes and private download URLs out of model, Codemode, and durable event output.
+- d2f172c: Add fail-closed, metadata-only capability, exact rig-version health, exact alert-selector data-source checks, and source/claim authority fencing for scheduled incident telemetry responders before expensive retrieval.
+- 04b1a1f: Add exact-attempt, workspace-local governed Knowledge proposal/correction
+  routing and inactive instruction-policy and preference proposal adapters while
+  preserving human activation authority and immutable Knowledge provenance.
+- c056063: Project exact Integration Facet ownership so shared or externally managed bindings are read-only and direct removal reports retained owners truthfully.
+
 ## 1.0.1
 
 ### Patch Changes
