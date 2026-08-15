@@ -74,7 +74,12 @@ const GOVERNANCE_DRIFT_EXPLANATIONS: Record<WorkspaceStateGovernanceDriftStatus,
   unavailable: "The comparison is unavailable under the accepted-attempt authorization fence.",
 };
 
-type OnboardingProposalReviewSummary = PreferenceRegistryReviewSummary & { staleCount: number };
+type OnboardingProposalReviewSummary = {
+  status: "loading" | "unavailable" | "ready";
+  pendingCount: number;
+  staleCount: number;
+  partial: boolean;
+};
 
 const LOADING_PROPOSAL_REVIEW: OnboardingProposalReviewSummary = {
   status: "loading",
@@ -86,6 +91,7 @@ const LOADING_PROPOSAL_REVIEW: OnboardingProposalReviewSummary = {
 const LOADING_PREFERENCE_REVIEW: PreferenceRegistryReviewSummary = {
   status: "loading",
   pendingCount: 0,
+  conflictCount: 0,
   partial: false,
 };
 
@@ -1587,6 +1593,7 @@ export function WorkspaceStateRoute({
                   workspaceId={workspaceId}
                   companyProfileStatus={companyProfileStatus}
                   proposalReview={proposalReview}
+                  preferenceConflictCount={preferenceReview.conflictCount}
                   inventoryRefreshFailed={Boolean(error)}
                 />
                 <details

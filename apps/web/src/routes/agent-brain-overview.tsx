@@ -26,6 +26,7 @@ export type BrainAttentionInput = {
   policyRevisionPending: boolean;
   policyInventoryPartial: boolean;
   preferenceInventoryPartial: boolean;
+  preferenceConflictCount: number;
   inventoryRefreshFailed: boolean;
   knowledge:
     | { availability: "unavailable" }
@@ -65,6 +66,11 @@ export function deriveBrainAttention(input: BrainAttentionInput): string[] {
   if (input.policyRevisionPending) attention.push("An inactive policy revision needs review");
   if (input.policyInventoryPartial) attention.push("Policy review is partial");
   if (input.preferenceInventoryPartial) attention.push("Preference summaries are partially shown");
+  if (input.preferenceConflictCount > 0) {
+    attention.push(
+      `${input.preferenceConflictCount} active preference conflict${input.preferenceConflictCount === 1 ? " needs" : "s need"} review`,
+    );
+  }
   if (input.knowledge.availability === "unavailable") {
     attention.push("Knowledge review is unavailable");
   } else {
@@ -239,12 +245,14 @@ export function BrainOverview({
   workspaceId,
   companyProfileStatus,
   proposalReview,
+  preferenceConflictCount,
   inventoryRefreshFailed = false,
 }: {
   state: WorkspaceStateResponse;
   workspaceId: string;
   companyProfileStatus: { label: string; tone?: "default" | "warning" };
   proposalReview: BrainProposalReview;
+  preferenceConflictCount: number;
   inventoryRefreshFailed?: boolean;
 }) {
   const documents = documentStatus(state);
@@ -255,6 +263,7 @@ export function BrainOverview({
     policyRevisionPending: state.policy.latestRevision?.state === "inactive",
     policyInventoryPartial: state.policy.activeHeadsTruncated,
     preferenceInventoryPartial: state.preferences.truncated,
+    preferenceConflictCount,
     inventoryRefreshFailed,
     knowledge:
       state.knowledge.availability === "unavailable"

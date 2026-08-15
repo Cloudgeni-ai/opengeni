@@ -40,8 +40,20 @@ import { AgentBrainPrompt } from "./agent-brain-prompt";
 export type PreferenceRegistryReviewSummary = {
   status: "loading" | "unavailable" | "ready";
   pendingCount: number;
+  conflictCount: number;
   partial: boolean;
 };
+
+export function activePreferenceConflictCount(preferences: PreferenceRegistryRecord[]): number {
+  const conflicts = new Set<string>();
+  for (const preference of preferences) {
+    if (preference.status !== "active" || !preference.activeRevision) continue;
+    for (const conflictKey of preference.activeRevision.precedence.conflictsWith) {
+      conflicts.add(`${preference.stableKey}\u0000${conflictKey}`);
+    }
+  }
+  return conflicts.size;
+}
 
 const fieldClass =
   "rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg outline-none focus:border-brand disabled:cursor-not-allowed disabled:opacity-60";
@@ -1193,17 +1205,18 @@ export function PreferenceRegistryAdministration({
   useEffect(() => {
     if (!onReviewSummary) return;
     if (inventory.loading) {
-      onReviewSummary({ status: "loading", pendingCount: 0, partial: false });
+      onReviewSummary({ status: "loading", pendingCount: 0, conflictCount: 0, partial: false });
     } else if (inventory.error) {
-      onReviewSummary({ status: "unavailable", pendingCount: 0, partial: false });
+      onReviewSummary({ status: "unavailable", pendingCount: 0, conflictCount: 0, partial: false });
     } else if (!inventory.response) {
-      onReviewSummary({ status: "unavailable", pendingCount: 0, partial: false });
+      onReviewSummary({ status: "unavailable", pendingCount: 0, conflictCount: 0, partial: false });
     } else {
       onReviewSummary({
         status: "ready",
         pendingCount: inventory.response.preferences.filter(
           (preference) => preference.status === "proposed",
         ).length,
+        conflictCount: activePreferenceConflictCount(inventory.response.preferences),
         partial: inventory.response.preferences.length >= 100,
       });
     }

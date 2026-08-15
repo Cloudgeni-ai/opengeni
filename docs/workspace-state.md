@@ -307,7 +307,10 @@ mental model rather than a diagnostic inventory:
 3. **Needs attention** reports a clean state only after the visible company,
    policy, preference, proposal and Knowledge review authorities loaded without
    pending proposals, stale baselines, deterministic gaps, errors or partial
-   coverage. Loading dominates cached proposal inventories during refresh, and
+   coverage. Declared conflict relationships on currently active preference
+   revisions are review signals; retained historical heads on inactive or
+   superseded preferences are not current conflicts. Loading dominates cached
+   proposal inventories during refresh, and
    review summaries are keyed to the current workspace so a workspace switch
    cannot reuse another workspace's clean state. Loading or unavailable review
    authority remains explicit.
@@ -361,6 +364,12 @@ There is no instruction-policy activation/rollback UI, Memory promotion,
 Documents promotion, or general policy editor. The default overview links only
 to Documents and Memory; technical administration remains under the collapsed
 Advanced section.
+
+The committed browser acceptance opens this route through the real configured-
+principal API and non-owner PostgreSQL boundary. It verifies the attention and
+OKF export surfaces at 320, 375, 768, and desktop widths, rejects horizontal
+overflow and accessibility violations, and retains bounded screenshot evidence
+for every responsive breakpoint.
 
 ## Explicit non-goals
 

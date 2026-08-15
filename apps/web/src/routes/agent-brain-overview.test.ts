@@ -9,6 +9,7 @@ function cleanInput(): BrainAttentionInput {
     policyRevisionPending: false,
     policyInventoryPartial: false,
     preferenceInventoryPartial: false,
+    preferenceConflictCount: 0,
     inventoryRefreshFailed: false,
     knowledge: { availability: "available", gaps: [] },
     proposals: {
@@ -84,5 +85,13 @@ describe("Company Brain attention derivation", () => {
       "Policy review is partial",
       "Preference summaries are partially shown",
     ]);
+  });
+
+  test("surfaces declared conflicts from the loaded active preference authority", () => {
+    const input = cleanInput();
+    input.preferenceConflictCount = 1;
+    expect(deriveBrainAttention(input)).toEqual(["1 active preference conflict needs review"]);
+    input.preferenceConflictCount = 2;
+    expect(deriveBrainAttention(input)).toEqual(["2 active preference conflicts need review"]);
   });
 });
