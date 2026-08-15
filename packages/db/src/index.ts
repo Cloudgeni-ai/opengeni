@@ -14419,6 +14419,17 @@ export async function updateVariableSet(
   });
 }
 
+export class VariableSetAttachedError extends Error {
+  readonly name = "VariableSetAttachedError";
+
+  constructor(cause?: unknown) {
+    super(
+      "variable set remains attached to a scheduled task or active session",
+      cause === undefined ? undefined : { cause },
+    );
+  }
+}
+
 export async function deleteVariableSet(
   db: Database,
   context: VariableSetAccessContext,
@@ -14427,11 +14438,18 @@ export async function deleteVariableSet(
 ): Promise<boolean> {
   return await withRlsContext(db, context, async (scopedDb) => {
     await setSubjectRlsContext(scopedDb, context.subjectId);
-    await scopedDb.execute(sql`select mutate_scoped_variable_set(
-      ${context.accountId}::uuid, ${context.workspaceId}::uuid, ${variableSetId}::uuid,
-      'revoke', null, false, null, false, null, null,
-      ${options.allowOrganization === true}
-    )`);
+    try {
+      await scopedDb.execute(sql`select mutate_scoped_variable_set(
+        ${context.accountId}::uuid, ${context.workspaceId}::uuid, ${variableSetId}::uuid,
+        'revoke', null, false, null, false, null, null,
+        ${options.allowOrganization === true}
+      )`);
+    } catch (error) {
+      if (nestedPostgresSqlState(error) === "23503") {
+        throw new VariableSetAttachedError(error);
+      }
+      throw error;
+    }
     return true;
   });
 }

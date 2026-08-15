@@ -16,6 +16,7 @@ import {
   readVariableSetSecretAtomically,
   setVariableSetVariable,
   updateVariableSet,
+  VariableSetAttachedError,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -246,7 +247,7 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
           { allowOrganization },
         );
       } catch (error) {
-        if (error instanceof Error && error.message.includes("remains attached")) {
+        if (error instanceof VariableSetAttachedError) {
           throw new HTTPException(409, { message: error.message });
         }
         throw error;

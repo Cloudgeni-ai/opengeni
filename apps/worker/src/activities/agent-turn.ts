@@ -6636,61 +6636,69 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       });
       const effectivePolicyTools = resolvedToolPolicy.toolRefs;
       const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
-      // §7.6 connection-credential provider — load (and decrypt) the variable set via the host
-      // `sandboxSecrets` provider when bound; unset → today's local decrypt.
+      // §7.6 connection-credential provider — load (and decrypt) selected Variable Sets via the
+      // host `sandboxSecrets` provider when bound; unset → today's local decrypt. Preserve the
+      // legacy null-attachment fast path: service/legacy turns with neither a session set nor rig
+      // defaults require no initiating-human authority and perform no Variable Set work.
       const connectionScope = {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
       };
-      if (!fileAuthoritySubjectId) {
-        throw new Error("variable-set materialization requires an initiating human subject");
-      }
-      const variableSetAuthority = {
-        sessionId: input.sessionId,
-        turnId: turn.id,
-        attemptId: input.attemptId,
-        executionGeneration: turn.executionGeneration,
-        initiatingHumanSubjectId: fileAuthoritySubjectId,
-      };
-      const workspaceVariableSet = await waitForTurnOperation(
-        loadWorkspaceEnvironmentForRunWithCredentials(
-          db,
-          runSettings,
-          connectionScope,
-          session.variableSetId,
-          variableSetAuthority,
-          connectionCredentials?.sandboxSecrets,
-        ),
-        cancellationSignal,
-        undefined,
-      );
-      variableSetId = workspaceVariableSet?.id ?? "";
-      // RIG DEFAULT VARIABLE SETS (M3): decrypt the frozen rig version's default
-      // variable sets and layer them BELOW the session's own set — the session's
-      // values WIN on any key collision. Loaded through the SAME host-secrets
-      // provider path as the session set (embedded-topology parity). Precedence
-      // WITHIN the rig defaults is listed order (a later set overrides an earlier
-      // one), then the session set overrides all. STABLE-ENV INVARIANT: the rig
-      // VERSION is frozen per session, so the SET of default variable sets is
-      // fixed for the session's life — the merged manifest env is therefore stable
-      // across the session's turns (the same guarantee the session's own variable
-      // set already relies on), keeping validateNoEnvironmentDelta empty.
+      const rigDefaultVariableSetIds = rigVersion?.defaultVariableSetIds ?? [];
+      let workspaceVariableSet: Awaited<
+        ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>
+      > = null;
       const rigDefaultEnvironmentValues: Record<string, string> = {};
-      for (const rigDefaultVariableSetId of rigVersion?.defaultVariableSetIds ?? []) {
-        const rigDefaultSet = await waitForTurnOperation(
+      if (session.variableSetId !== null || rigDefaultVariableSetIds.length > 0) {
+        if (!fileAuthoritySubjectId) {
+          throw new Error("variable-set materialization requires an initiating human subject");
+        }
+        const variableSetAuthority = {
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          attemptId: input.attemptId,
+          executionGeneration: turn.executionGeneration,
+          initiatingHumanSubjectId: fileAuthoritySubjectId,
+        };
+        workspaceVariableSet = await waitForTurnOperation(
           loadWorkspaceEnvironmentForRunWithCredentials(
             db,
             runSettings,
             connectionScope,
-            rigDefaultVariableSetId,
+            session.variableSetId,
             variableSetAuthority,
             connectionCredentials?.sandboxSecrets,
           ),
           cancellationSignal,
           undefined,
         );
-        Object.assign(rigDefaultEnvironmentValues, rigDefaultSet?.values ?? {});
+        // RIG DEFAULT VARIABLE SETS (M3): decrypt the frozen rig version's default
+        // variable sets and layer them BELOW the session's own set — the session's
+        // values WIN on any key collision. Loaded through the SAME host-secrets
+        // provider path as the session set (embedded-topology parity). Precedence
+        // WITHIN the rig defaults is listed order (a later set overrides an earlier
+        // one), then the session set overrides all. STABLE-ENV INVARIANT: the rig
+        // VERSION is frozen per session, so the SET of default variable sets is
+        // fixed for the session's life — the merged manifest env is therefore stable
+        // across the session's turns (the same guarantee the session's own variable
+        // set already relies on), keeping validateNoEnvironmentDelta empty.
+        for (const rigDefaultVariableSetId of rigDefaultVariableSetIds) {
+          const rigDefaultSet = await waitForTurnOperation(
+            loadWorkspaceEnvironmentForRunWithCredentials(
+              db,
+              runSettings,
+              connectionScope,
+              rigDefaultVariableSetId,
+              variableSetAuthority,
+              connectionCredentials?.sandboxSecrets,
+            ),
+            cancellationSignal,
+            undefined,
+          );
+          Object.assign(rigDefaultEnvironmentValues, rigDefaultSet?.values ?? {});
+        }
       }
+      variableSetId = workspaceVariableSet?.id ?? "";
       // Session set wins collisions with the rig defaults (explicit precedence).
       const sandboxWorkspaceEnvironmentValues = mergeRigDefaultVariableSetEnvironment(
         rigDefaultEnvironmentValues,

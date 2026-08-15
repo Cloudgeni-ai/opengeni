@@ -22,5 +22,13 @@ describe("personal-resource direct-read authority", () => {
     expect(source).toContain("executionGeneration: turn.executionGeneration");
     expect(source).toContain("initiatingHumanSubjectId: fileAuthoritySubjectId");
     expect(source.match(/variableSetAuthority,/gu)?.length).toBe(2);
+    const selectionGuard = source.indexOf(
+      "if (session.variableSetId !== null || rigDefaultVariableSetIds.length > 0)",
+      authorize,
+    );
+    const subjectGuard = source.indexOf("if (!fileAuthoritySubjectId)", selectionGuard);
+    expect(selectionGuard).toBeGreaterThan(authorize);
+    expect(selectionGuard).toBeLessThan(variableRead);
+    expect(subjectGuard).toBeGreaterThan(selectionGuard);
   });
 });
