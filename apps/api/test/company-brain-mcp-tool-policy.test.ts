@@ -102,4 +102,31 @@ describe("Company Brain first-party MCP policy", () => {
     const denied = buildOpenGeniMcpServer(deps(), humanGrant);
     expect(registeredToolNames(denied)).toEqual([]);
   });
+
+  test("governed write tools are production-registered and permission filtered", () => {
+    const selected: FirstPartyMcpToolName[] = [
+      "knowledge_propose",
+      "knowledge_correct",
+      "task_note_promote_knowledge",
+      "instruction_policy_propose",
+      "preference_propose",
+    ];
+    const readOnly = buildOpenGeniMcpServer(
+      deps(),
+      grant(["documents:search", "workspace:read"], selected),
+    );
+    expect(registeredToolNames(readOnly)).toEqual(
+      selected.filter((name) => name !== "task_note_promote_knowledge").sort(),
+    );
+
+    const admitted = buildOpenGeniMcpServer(
+      deps(),
+      grant(["documents:search", "workspace:read", "sessions:control"], selected),
+    );
+    expect(registeredToolNames(admitted)).toEqual([...selected].sort());
+
+    const humanGrant = grant(["documents:search", "workspace:read", "sessions:control"], selected);
+    humanGrant.principalKind = "human";
+    expect(registeredToolNames(buildOpenGeniMcpServer(deps(), humanGrant))).toEqual([]);
+  });
 });

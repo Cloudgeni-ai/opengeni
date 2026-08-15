@@ -3,11 +3,14 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import {
   archiveTaskNote,
+  activateWorkspaceLearningPolicyRevision,
+  createWorkspaceLearningPolicyRevision,
   createDb,
   createSession,
   createTaskNote,
   ensureManagedAccessForUser,
   grantWorkspaceAccess,
+  getOrCreateWorkspaceLearningPolicySnapshot,
   listTaskNotes,
   nestedPostgresSqlState,
   transitionSessionVisibility,
@@ -177,9 +180,66 @@ function claims(attempt: Awaited<ReturnType<typeof seedAttempt>>) {
 }
 
 describe("task-tree notes PostgreSQL authority", () => {
+  test("denies Task-note promotion under the exact default-off learning snapshot", async () => {
+    if (!shared || !client) return;
+    const f = await fixture();
+    const attempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.root.id,
+      initiatorSubjectId: f.ownerSubjectId,
+      initiatingHumanSubjectId: f.ownerSubjectId,
+    });
+    const note = await createTaskNote(client.db, {
+      ...claims(attempt),
+      operationId: crypto.randomUUID(),
+      kind: "finding",
+      text: "This note must remain transient while learning is off.",
+      expiresInDays: 7,
+    });
+    const snapshot = await getOrCreateWorkspaceLearningPolicySnapshot(client.db, claims(attempt));
+    expect(snapshot.workspaceMode).toBe("off");
+    await expectSqlState(
+      async () =>
+        await writeCompanyBrainGovernedProposal(client!.db, {
+          attempt: claims(attempt),
+          request: {
+            kind: "promote_task_note_knowledge",
+            operationId: crypto.randomUUID(),
+            noteId: note.note.id,
+            expectedNoteVersion: 1,
+            entityType: "company",
+            normalizedKey: "transient",
+            displayName: "Transient",
+            predicateKey: "company.transient",
+            confidenceBps: 5_000,
+            reason: "Learning is disabled.",
+          },
+        }),
+      "42501",
+    );
+  });
+
   test("promotes an active rooted note into proposed workspace Knowledge with replay-safe provenance", async () => {
     if (!shared || !client) return;
     const f = await fixture();
+    const policy = await createWorkspaceLearningPolicyRevision(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      workspaceMode: "suggest",
+      actorSubjectId: f.ownerSubjectId,
+      principalKind: "human_session",
+    });
+    await activateWorkspaceLearningPolicyRevision(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      revisionId: policy.id,
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      actorSubjectId: f.ownerSubjectId,
+      principalKind: "human_session",
+      reason: "Enable governed Task-note promotion for this workspace.",
+    });
     const attempt = await seedAttempt({
       accountId: f.grant.accountId,
       workspaceId: f.grant.workspaceId,
@@ -210,6 +270,7 @@ describe("task-tree notes PostgreSQL authority", () => {
         reason: "Promote the rooted finding for human Knowledge review.",
       },
     };
+    await getOrCreateWorkspaceLearningPolicySnapshot(client.db, claims(attempt));
     const first = await writeCompanyBrainGovernedProposal(client.db, input);
     expect(first.destination).toBe("knowledge");
     expect(first.taskNoteSource).toEqual({
@@ -249,23 +310,34 @@ describe("task-tree notes PostgreSQL authority", () => {
       }),
     ).rejects.toThrow();
 
-    await expectSqlState(
-      async () =>
-        await shared!.admin`
-          insert into knowledge_claim_evidence (
-            account_id, scope_kind, scope_workspace_id, scope_subject_id, scope_key,
-            claim_id, document_version_id, task_note_id, task_note_root_session_id,
-            task_note_version, polarity, content_hash, operation_id, input_hash,
-            actor_kind, actor_subject_id, initiating_human_subject_id
-          )
-          select account_id, scope_kind, scope_workspace_id, scope_subject_id, scope_key,
-            claim_id, null, task_note_id, task_note_root_session_id,
-            task_note_version, polarity, ${"0".repeat(64)}, ${crypto.randomUUID()},
-            ${"1".repeat(64)}, actor_kind, actor_subject_id, initiating_human_subject_id
-          from knowledge_claim_evidence where id = ${first.evidenceId}
-        `,
-      "23514",
-    );
+    const app = postgres(shared.appUrl, { max: 1, prepare: false });
+    try {
+      await expectSqlState(
+        async () =>
+          await app.begin(async (sql) => {
+            await sql`select set_config('opengeni.account_id', ${f.grant.accountId}, true)`;
+            await sql`select set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true)`;
+            await sql`select set_config('opengeni.subject_id', ${f.ownerSubjectId}, true)`;
+            await sql`select set_config('opengeni.initiating_human_subject_id', ${f.ownerSubjectId}, true)`;
+            await sql`
+              insert into knowledge_claim_evidence (
+                account_id, scope_kind, scope_workspace_id, scope_subject_id, scope_key,
+                claim_id, document_version_id, task_note_id, task_note_root_session_id,
+                task_note_version, polarity, content_hash, operation_id, input_hash,
+                actor_kind, actor_subject_id, initiating_human_subject_id
+              )
+              select account_id, scope_kind, scope_workspace_id, scope_subject_id, scope_key,
+                claim_id, null, task_note_id, task_note_root_session_id,
+                task_note_version, polarity, content_hash, ${crypto.randomUUID()},
+                ${"1".repeat(64)}, actor_kind, actor_subject_id, initiating_human_subject_id
+              from knowledge_claim_evidence where id = ${first.evidenceId}
+            `;
+          }),
+        "42501",
+      );
+    } finally {
+      await app.end();
+    }
 
     await archiveTaskNote(client.db, {
       ...claims(attempt),
@@ -466,7 +538,11 @@ describe("task-tree notes PostgreSQL authority", () => {
       async () =>
         await withSessionRlsActorContext(
           { subjectId: "worker:service" },
-          async () => await createTaskNote(client!.db, { ...input, ...claims(otherTreeAttempt) }),
+          async () =>
+            await createTaskNote(client!.db, {
+              ...input,
+              ...claims(otherTreeAttempt),
+            }),
         ),
       "23505",
     );
@@ -478,7 +554,11 @@ describe("task-tree notes PostgreSQL authority", () => {
           closed_at = now() where id = ${attempt.attemptId}
       `;
     });
-    const recovery = await seedAttempt({ ...attempt, generation: 2, turnId: attempt.turnId });
+    const recovery = await seedAttempt({
+      ...attempt,
+      generation: 2,
+      turnId: attempt.turnId,
+    });
     await expectSqlState(
       async () =>
         await withSessionRlsActorContext(
@@ -501,7 +581,10 @@ describe("task-tree notes PostgreSQL authority", () => {
     });
     const createOperationId = crypto.randomUUID();
     const created = await withSessionRlsActorContext(
-      { subjectId: "worker:create", initiatingHumanSubjectId: f.ownerSubjectId },
+      {
+        subjectId: "worker:create",
+        initiatingHumanSubjectId: f.ownerSubjectId,
+      },
       async () =>
         await createTaskNote(client!.db, {
           ...claims(attempt),
@@ -519,14 +602,24 @@ describe("task-tree notes PostgreSQL authority", () => {
       reason: "The handoff is complete.",
     };
     const archived = await withSessionRlsActorContext(
-      { subjectId: "worker:archive", initiatingHumanSubjectId: f.ownerSubjectId },
+      {
+        subjectId: "worker:archive",
+        initiatingHumanSubjectId: f.ownerSubjectId,
+      },
       async () => await archiveTaskNote(client!.db, archiveInput),
     );
     const replay = await withSessionRlsActorContext(
-      { subjectId: "worker:archive", initiatingHumanSubjectId: f.ownerSubjectId },
+      {
+        subjectId: "worker:archive",
+        initiatingHumanSubjectId: f.ownerSubjectId,
+      },
       async () => await archiveTaskNote(client!.db, archiveInput),
     );
-    expect(archived.note).toMatchObject({ id: created.note.id, status: "archived", version: 2 });
+    expect(archived.note).toMatchObject({
+      id: created.note.id,
+      status: "archived",
+      version: 2,
+    });
     expect(replay).toEqual({ note: archived.note, replayed: true });
 
     const [durable] = await shared.admin<
@@ -598,7 +691,10 @@ describe("task-tree notes PostgreSQL authority", () => {
     });
     const results = await Promise.allSettled([
       withSessionRlsActorContext(
-        { subjectId: "worker:root", initiatingHumanSubjectId: f.ownerSubjectId },
+        {
+          subjectId: "worker:root",
+          initiatingHumanSubjectId: f.ownerSubjectId,
+        },
         async () =>
           await createTaskNote(client!.db, {
             ...claims(rootAttempt),
@@ -609,7 +705,10 @@ describe("task-tree notes PostgreSQL authority", () => {
           }),
       ),
       withSessionRlsActorContext(
-        { subjectId: "worker:child", initiatingHumanSubjectId: f.ownerSubjectId },
+        {
+          subjectId: "worker:child",
+          initiatingHumanSubjectId: f.ownerSubjectId,
+        },
         async () =>
           await createTaskNote(client!.db, {
             ...claims(childAttempt),

@@ -109,5 +109,8 @@ The workspace-local completion adds explicit first-party proposal tools and
 version-one active rooted Task-note promotion into proposed Knowledge. Migration
 0258 stores only exact value-free note evidence and retains the note text as the
 proposed fact value; another root, archived/expired note, or stale attempt is
-denied. This still does not add personal/organization routing, generic Memory,
-or active authority.
+denied. Its resolver additionally requires the exact accepted-attempt
+learning-policy snapshot to permit `suggest` or `automatic`, and issues a
+one-transaction evidence/claim capability that the insert trigger consumes.
+This still does not add personal/organization routing, generic Memory, or active
+authority.

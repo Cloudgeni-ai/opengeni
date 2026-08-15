@@ -32,4 +32,20 @@ describe("migration 0258 Task-note Knowledge promotion", () => {
     expect(sql).toContain("REVOKE ALL ON FUNCTION");
     expect(sql).toContain("GRANT EXECUTE ON FUNCTION");
   });
+
+  test("requires a one-shot exact-operation capability and hardens the definer path", async () => {
+    const sql = await readFile(migrationPath, "utf8");
+    expect(sql).toContain('CREATE TABLE "task_note_knowledge_promotion_capabilities"');
+    expect(sql).toContain(
+      'ALTER TABLE "task_note_knowledge_promotion_capabilities" FORCE ROW LEVEL SECURITY',
+    );
+    expect(sql).toContain("current_setting('opengeni.task_note_knowledge_promotion_capability'");
+    expect(sql).toContain("capability.evidence_operation_id = NEW.operation_id");
+    expect(sql).toContain("claim.operation_id = capability_row.claim_operation_id");
+    expect(sql).toContain("FROM workspace_learning_policy_snapshots snapshot");
+    expect(sql).toContain("effective_learning_mode NOT IN ('suggest', 'automatic')");
+    expect(sql).toContain("DELETE FROM task_note_knowledge_promotion_capabilities capability");
+    expect(sql).toContain("SET search_path = pg_catalog, %I");
+    expect(sql).toContain("resolve_task_note_knowledge_promotion_source(");
+  });
 });

@@ -70,7 +70,7 @@ Receipts expose only operation/input hashes and audit/resource IDs. They report
 is `not_applicable_proposal_only` and no authority rollback token exists.
 Rejection/revocation and the existing human-governed destination lifecycle are
 the only later rollback/review mechanisms. No selector snapshot,
-logical-turn context receipt, Task-note write, MCP/API/UI registration,
+logical-turn context receipt, generic Task-note write surface, external REST/UI,
 or automatic policy/preference activation is part of this slice.
 
 The transport-neutral learning-policy router resolves an exact
@@ -98,8 +98,12 @@ text becomes the proposed workspace Knowledge fact value. Migration
 Document-version or Task-note source shape. Task-note evidence stores only the
 note/root/version/content-hash facts; it never copies note
 text into evidence metadata. The security-definer resolver revalidates the
-current attempt and immutable initiating human, locks the note, and rejects
-another root, workspace, tenant, archived note, expired note, or stale version.
+current attempt, immutable initiating human, and exact source-specific
+learning-policy snapshot, locks the note, and rejects policy-off, another root,
+workspace, tenant, archived note, expired note, or stale version. A value-free,
+one-transaction capability binds the exact evidence/claim operations and is
+consumed by the insert trigger; the runtime role has no direct capability-table
+DML and cannot forge Task-note evidence onto another claim.
 The resulting claim is `proposed`, never approved or prompt-active. Exact retry
 reconstructs the same receipt even after the short-lived note is archived;
 changed input conflicts, and source cleanup cannot silently widen authority.

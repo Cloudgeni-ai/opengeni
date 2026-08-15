@@ -52,6 +52,7 @@ type TaskNotePromotionSource = {
   noteText: string;
   noteTextHash: string;
   noteCreatedAt: string;
+  initiatingHumanSubjectId: string;
 };
 
 type NormalizedPreferenceProposal = {
@@ -117,15 +118,20 @@ function instructionTargetKey(
   return [request.target.kind, request.target.scope, request.target.roleKey ?? "global"].join(":");
 }
 
-async function withCompanyBrainGovernedWriteAuthority<T>(
+async function withCompanyBrainGovernedWriteAuthority<T, P>(
   db: Database,
   attempt: CompanyBrainGovernedWriteAttempt,
-  fn: (db: Database, authority: AttemptAuthority) => Promise<T>,
+  prelock: (db: Database) => Promise<P>,
+  fn: (db: Database, authority: AttemptAuthority, prelocked: P) => Promise<T>,
 ): Promise<T> {
   return await withRlsContext(
     db,
     { accountId: attempt.accountId, workspaceId: attempt.workspaceId },
     async (scopedDb) => {
+      // Tree-scoped authorities own the root/current-session lock prefix. Run
+      // them before the generic current-session locks below to avoid inverting
+      // the canonical Task-note lifecycle order.
+      const prelocked = await prelock(scopedDb);
       const rows = await rawRows<{ initiating_human_subject_id: string }>(
         scopedDb,
         sql`
@@ -241,7 +247,7 @@ async function withCompanyBrainGovernedWriteAuthority<T>(
         );
       }
       await setSubjectRlsContext(scopedDb, initiatingHumanSubjectId);
-      return await fn(scopedDb, { ...attempt, initiatingHumanSubjectId });
+      return await fn(scopedDb, { ...attempt, initiatingHumanSubjectId }, prelocked);
     },
   );
 }
@@ -362,9 +368,12 @@ function receipt(
 
 async function resolveTaskNotePromotionSource(
   db: Database,
-  authority: AttemptAuthority,
+  authority: CompanyBrainGovernedWriteAttempt,
   noteId: string,
   expectedNoteVersion: 1,
+  evidenceOperationId: string,
+  claimOperationId: string,
+  actorSubjectId: string,
 ): Promise<TaskNotePromotionSource> {
   const [row] = await rawRows<{
     noteId: string;
@@ -393,15 +402,14 @@ async function resolveTaskNotePromotionSource(
         ${authority.attemptId}::uuid,
         ${authority.executionGeneration},
         ${noteId}::uuid,
-        ${expectedNoteVersion}
+        ${expectedNoteVersion},
+        ${evidenceOperationId},
+        ${claimOperationId},
+        ${actorSubjectId}
       ) source
     `,
   );
-  if (
-    !row ||
-    row.noteVersion !== 1 ||
-    row.initiatingHumanSubjectId !== authority.initiatingHumanSubjectId
-  ) {
+  if (!row || row.noteVersion !== 1) {
     throw new CompanyBrainGovernedWriteAuthorityError(
       "Task-note promotion source did not preserve exact attempt authority",
     );
@@ -413,7 +421,26 @@ async function resolveTaskNotePromotionSource(
     noteText: row.noteText,
     noteTextHash: row.noteTextHash,
     noteCreatedAt: new Date(row.noteCreatedAt).toISOString(),
+    initiatingHumanSubjectId: row.initiatingHumanSubjectId,
   };
+}
+
+async function taskNotePromotionAlreadyMaterialized(
+  db: Database,
+  accountId: string,
+  operationId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: schema.knowledgeClaimEvidence.id })
+    .from(schema.knowledgeClaimEvidence)
+    .where(
+      and(
+        eq(schema.knowledgeClaimEvidence.accountId, accountId),
+        eq(schema.knowledgeClaimEvidence.operationId, operationId),
+      ),
+    )
+    .limit(1);
+  return row !== undefined;
 }
 
 async function appendTaskNoteKnowledgeEvidence(
@@ -585,227 +612,256 @@ export async function writeCompanyBrainGovernedProposal(
   const attempt = CompanyBrainGovernedWriteAttempt.parse(rawInput.attempt);
   const request = CompanyBrainGovernedWriteRequest.parse(rawInput.request);
   const inputHash = scopedKnowledgeInputHash({ attempt, request });
-  return await withCompanyBrainGovernedWriteAuthority(db, attempt, async (scopedDb, authority) => {
-    const actor: ScopedKnowledgeActor = {
-      kind: "service",
-      subjectId: `service:company-brain-governed-write:${inputHash}`,
-      initiatingHumanSubjectId: authority.initiatingHumanSubjectId,
-    };
-    if (request.kind === "promote_task_note_knowledge") {
-      const replayed = await replayTaskNoteKnowledgePromotion(
+  const actorSubjectId = `service:company-brain-governed-write:${inputHash}`;
+  const evidenceOperationId = derivedOperationId(request.operationId, "task-note-evidence");
+  const claimOperationId = derivedOperationId(request.operationId, "task-note-claim");
+  return await withCompanyBrainGovernedWriteAuthority(
+    db,
+    attempt,
+    async (scopedDb): Promise<TaskNotePromotionSource | null> => {
+      if (request.kind !== "promote_task_note_knowledge") return null;
+      if (
+        await taskNotePromotionAlreadyMaterialized(scopedDb, attempt.accountId, evidenceOperationId)
+      ) {
+        return null;
+      }
+      return await resolveTaskNotePromotionSource(
         scopedDb,
-        authority,
-        request.operationId,
-        inputHash,
-      );
-      if (replayed) return replayed;
-      const source = await resolveTaskNotePromotionSource(
-        scopedDb,
-        authority,
+        attempt,
         request.noteId,
         request.expectedNoteVersion,
+        evidenceOperationId,
+        claimOperationId,
+        actorSubjectId,
       );
-      const entity = await upsertKnowledgeEntity(scopedDb, {
-        accountId: authority.accountId,
-        workspaceId: authority.workspaceId,
-        scope: { kind: "workspace", workspaceId: authority.workspaceId, subjectId: null },
-        operationId: derivedOperationId(request.operationId, "task-note-entity"),
-        actor,
-        entityType: request.entityType,
-        normalizedKey: request.normalizedKey,
-        displayName: request.displayName,
-      });
-      const fact = await upsertKnowledgeFact(scopedDb, {
-        accountId: authority.accountId,
-        workspaceId: authority.workspaceId,
-        operationId: derivedOperationId(request.operationId, "task-note-fact"),
-        actor,
-        subjectEntityId: entity.id,
-        predicateKey: request.predicateKey,
-        object: { kind: "text", value: source.noteText },
-      });
-      const claim = await appendKnowledgeClaim(scopedDb, {
-        accountId: authority.accountId,
-        workspaceId: authority.workspaceId,
-        operationId: derivedOperationId(request.operationId, "task-note-claim"),
-        actor,
-        factId: fact.id,
-        origin: "inferred",
-        confidenceBps: request.confidenceBps,
-        effectiveAt: source.noteCreatedAt,
-        expiresAt: null,
-        extractionMethod: "task-note-promotion-v1",
-        extractionMetadata: {
-          taskNoteId: source.noteId,
-          taskNoteRootSessionId: source.rootSessionId,
-          taskNoteVersion: source.noteVersion,
-          taskNoteTextHash: source.noteTextHash,
-        },
-      });
-      const evidence = await appendTaskNoteKnowledgeEvidence(scopedDb, {
+    },
+    async (scopedDb, authority, prelockedSource) => {
+      const actor: ScopedKnowledgeActor = {
+        kind: "service",
+        subjectId: actorSubjectId,
+        initiatingHumanSubjectId: authority.initiatingHumanSubjectId,
+      };
+      if (request.kind === "promote_task_note_knowledge") {
+        if (prelockedSource === null) {
+          const replayed = await replayTaskNoteKnowledgePromotion(
+            scopedDb,
+            authority,
+            request.operationId,
+            inputHash,
+          );
+          if (replayed) return replayed;
+          throw new CompanyBrainGovernedWriteInvalidOperationError(
+            "Task-note promotion source changed before exact authority admission",
+          );
+        }
+        const source = prelockedSource;
+        if (source.initiatingHumanSubjectId !== authority.initiatingHumanSubjectId) {
+          throw new CompanyBrainGovernedWriteAuthorityError(
+            "Task-note promotion source did not preserve exact attempt authority",
+          );
+        }
+        const entity = await upsertKnowledgeEntity(scopedDb, {
+          accountId: authority.accountId,
+          workspaceId: authority.workspaceId,
+          scope: { kind: "workspace", workspaceId: authority.workspaceId, subjectId: null },
+          operationId: derivedOperationId(request.operationId, "task-note-entity"),
+          actor,
+          entityType: request.entityType,
+          normalizedKey: request.normalizedKey,
+          displayName: request.displayName,
+        });
+        const fact = await upsertKnowledgeFact(scopedDb, {
+          accountId: authority.accountId,
+          workspaceId: authority.workspaceId,
+          operationId: derivedOperationId(request.operationId, "task-note-fact"),
+          actor,
+          subjectEntityId: entity.id,
+          predicateKey: request.predicateKey,
+          object: { kind: "text", value: source.noteText },
+        });
+        const claim = await appendKnowledgeClaim(scopedDb, {
+          accountId: authority.accountId,
+          workspaceId: authority.workspaceId,
+          operationId: claimOperationId,
+          actor,
+          factId: fact.id,
+          origin: "inferred",
+          confidenceBps: request.confidenceBps,
+          effectiveAt: source.noteCreatedAt,
+          expiresAt: null,
+          extractionMethod: "task-note-promotion-v1",
+          extractionMetadata: {
+            taskNoteId: source.noteId,
+            taskNoteRootSessionId: source.rootSessionId,
+            taskNoteVersion: source.noteVersion,
+            taskNoteTextHash: source.noteTextHash,
+          },
+        });
+        const evidence = await appendTaskNoteKnowledgeEvidence(scopedDb, {
+          authority,
+          operationId: evidenceOperationId,
+          actor,
+          claimId: claim.id,
+          source,
+        });
+        const review = await appendKnowledgeClaimReview(scopedDb, {
+          accountId: authority.accountId,
+          workspaceId: authority.workspaceId,
+          operationId: derivedOperationId(request.operationId, "guard"),
+          actor,
+          claimId: claim.id,
+          state: "proposed",
+          reason: request.reason,
+        });
+        return receipt({
+          operationId: request.operationId,
+          inputHash,
+          workspaceId: authority.workspaceId,
+          destination: "knowledge",
+          claimId: claim.id,
+          evidenceId: evidence.id,
+          relationId: null,
+          reviewId: review.id,
+          knowledgeChangeProposalId: null,
+          destinationProposalId: null,
+          destinationRevisionId: null,
+          taskNoteSource: {
+            noteId: source.noteId,
+            rootSessionId: source.rootSessionId,
+            noteVersion: source.noteVersion,
+            textHash: source.noteTextHash,
+          },
+        });
+      }
+      const evidence = await requireWorkspaceEvidence(
+        scopedDb,
         authority,
-        operationId: derivedOperationId(request.operationId, "task-note-evidence"),
-        actor,
-        claimId: claim.id,
-        source,
-      });
+        request.claimId,
+        request.evidenceId,
+        request.kind === "correct_knowledge" ? request.replacesClaimId : null,
+      );
       const review = await appendKnowledgeClaimReview(scopedDb, {
         accountId: authority.accountId,
         workspaceId: authority.workspaceId,
         operationId: derivedOperationId(request.operationId, "guard"),
         actor,
-        claimId: claim.id,
+        claimId: request.claimId,
         state: "proposed",
         reason: request.reason,
       });
-      return receipt({
-        operationId: request.operationId,
-        inputHash,
-        workspaceId: authority.workspaceId,
-        destination: "knowledge",
-        claimId: claim.id,
-        evidenceId: evidence.id,
-        relationId: null,
-        reviewId: review.id,
-        knowledgeChangeProposalId: null,
-        destinationProposalId: null,
-        destinationRevisionId: null,
-        taskNoteSource: {
-          noteId: source.noteId,
-          rootSessionId: source.rootSessionId,
-          noteVersion: source.noteVersion,
-          textHash: source.noteTextHash,
-        },
-      });
-    }
-    const evidence = await requireWorkspaceEvidence(
-      scopedDb,
-      authority,
-      request.claimId,
-      request.evidenceId,
-      request.kind === "correct_knowledge" ? request.replacesClaimId : null,
-    );
-    const review = await appendKnowledgeClaimReview(scopedDb, {
-      accountId: authority.accountId,
-      workspaceId: authority.workspaceId,
-      operationId: derivedOperationId(request.operationId, "guard"),
-      actor,
-      claimId: request.claimId,
-      state: "proposed",
-      reason: request.reason,
-    });
 
-    if (request.kind === "propose_knowledge") {
-      return receipt({
-        operationId: request.operationId,
-        inputHash,
-        workspaceId: authority.workspaceId,
-        destination: "knowledge",
-        claimId: evidence.claimId,
-        evidenceId: evidence.evidenceId,
-        relationId: null,
-        reviewId: review.id,
-        knowledgeChangeProposalId: null,
-        destinationProposalId: null,
-        destinationRevisionId: null,
-      });
-    }
+      if (request.kind === "propose_knowledge") {
+        return receipt({
+          operationId: request.operationId,
+          inputHash,
+          workspaceId: authority.workspaceId,
+          destination: "knowledge",
+          claimId: evidence.claimId,
+          evidenceId: evidence.evidenceId,
+          relationId: null,
+          reviewId: review.id,
+          knowledgeChangeProposalId: null,
+          destinationProposalId: null,
+          destinationRevisionId: null,
+        });
+      }
 
-    if (request.kind === "correct_knowledge") {
-      const relation = await linkKnowledgeClaims(scopedDb, {
+      if (request.kind === "correct_knowledge") {
+        const relation = await linkKnowledgeClaims(scopedDb, {
+          accountId: authority.accountId,
+          workspaceId: authority.workspaceId,
+          operationId: derivedOperationId(request.operationId, "knowledge-correction"),
+          actor,
+          relationType: "supersedes",
+          fromClaimId: request.claimId,
+          toClaimId: request.replacesClaimId,
+        });
+        return receipt({
+          operationId: request.operationId,
+          inputHash,
+          workspaceId: authority.workspaceId,
+          destination: "knowledge",
+          claimId: evidence.claimId,
+          evidenceId: evidence.evidenceId,
+          relationId: relation.id,
+          reviewId: review.id,
+          knowledgeChangeProposalId: null,
+          destinationProposalId: null,
+          destinationRevisionId: null,
+        });
+      }
+
+      const changeProposal = await createKnowledgeChangeProposal(scopedDb, {
         accountId: authority.accountId,
         workspaceId: authority.workspaceId,
-        operationId: derivedOperationId(request.operationId, "knowledge-correction"),
+        operationId: derivedOperationId(request.operationId, "knowledge-change-proposal"),
         actor,
-        relationType: "supersedes",
-        fromClaimId: request.claimId,
-        toClaimId: request.replacesClaimId,
+        claimId: request.claimId,
+        evidenceId: request.evidenceId,
+        targetKind:
+          request.kind === "propose_instruction_policy" ? "instruction_policy" : "preference",
+        targetScope: "workspace",
+        targetKey:
+          request.kind === "propose_instruction_policy"
+            ? instructionTargetKey(request)
+            : request.stableKey,
+        content:
+          request.kind === "propose_instruction_policy"
+            ? request.content
+            : preferenceProposalContent(request),
       });
+
+      if (request.kind === "propose_instruction_policy") {
+        const proposal = await createWorkspaceInstructionPolicyKnowledgeProposal(scopedDb, {
+          operationId: derivedOperationId(request.operationId, "instruction-proposal"),
+          accountId: authority.accountId,
+          workspaceId: authority.workspaceId,
+          ...request.target,
+          content: request.content,
+          knowledgeProposalId: changeProposal.id,
+          knowledgeProposalContentHash: changeProposal.contentHash,
+          confidenceBps: evidence.confidenceBps,
+          expectedCurrentRevisionId: request.expectedCurrentRevisionId,
+          expectedActivationVersion: request.expectedActivationVersion,
+          createdBySubjectId: actor.subjectId,
+        });
+        return receipt({
+          operationId: request.operationId,
+          inputHash,
+          workspaceId: authority.workspaceId,
+          destination: "instruction_policy",
+          claimId: evidence.claimId,
+          evidenceId: evidence.evidenceId,
+          relationId: null,
+          reviewId: review.id,
+          knowledgeChangeProposalId: changeProposal.id,
+          destinationProposalId: proposal.id,
+          destinationRevisionId: proposal.draft.id,
+        });
+      }
+
+      const proposal = await createWorkspacePreferenceProposalForAttempt(
+        scopedDb,
+        authority,
+        request,
+        changeProposal.id,
+        inputHash,
+      );
       return receipt({
         operationId: request.operationId,
         inputHash,
         workspaceId: authority.workspaceId,
-        destination: "knowledge",
-        claimId: evidence.claimId,
-        evidenceId: evidence.evidenceId,
-        relationId: relation.id,
-        reviewId: review.id,
-        knowledgeChangeProposalId: null,
-        destinationProposalId: null,
-        destinationRevisionId: null,
-      });
-    }
-
-    const changeProposal = await createKnowledgeChangeProposal(scopedDb, {
-      accountId: authority.accountId,
-      workspaceId: authority.workspaceId,
-      operationId: derivedOperationId(request.operationId, "knowledge-change-proposal"),
-      actor,
-      claimId: request.claimId,
-      evidenceId: request.evidenceId,
-      targetKind:
-        request.kind === "propose_instruction_policy" ? "instruction_policy" : "preference",
-      targetScope: "workspace",
-      targetKey:
-        request.kind === "propose_instruction_policy"
-          ? instructionTargetKey(request)
-          : request.stableKey,
-      content:
-        request.kind === "propose_instruction_policy"
-          ? request.content
-          : preferenceProposalContent(request),
-    });
-
-    if (request.kind === "propose_instruction_policy") {
-      const proposal = await createWorkspaceInstructionPolicyKnowledgeProposal(scopedDb, {
-        operationId: derivedOperationId(request.operationId, "instruction-proposal"),
-        accountId: authority.accountId,
-        workspaceId: authority.workspaceId,
-        ...request.target,
-        content: request.content,
-        knowledgeProposalId: changeProposal.id,
-        knowledgeProposalContentHash: changeProposal.contentHash,
-        confidenceBps: evidence.confidenceBps,
-        expectedCurrentRevisionId: request.expectedCurrentRevisionId,
-        expectedActivationVersion: request.expectedActivationVersion,
-        createdBySubjectId: actor.subjectId,
-      });
-      return receipt({
-        operationId: request.operationId,
-        inputHash,
-        workspaceId: authority.workspaceId,
-        destination: "instruction_policy",
+        destination: "preference",
         claimId: evidence.claimId,
         evidenceId: evidence.evidenceId,
         relationId: null,
         reviewId: review.id,
         knowledgeChangeProposalId: changeProposal.id,
-        destinationProposalId: proposal.id,
-        destinationRevisionId: proposal.draft.id,
+        destinationProposalId: proposal.preferenceId,
+        destinationRevisionId: proposal.revisionId,
       });
-    }
-
-    const proposal = await createWorkspacePreferenceProposalForAttempt(
-      scopedDb,
-      authority,
-      request,
-      changeProposal.id,
-      inputHash,
-    );
-    return receipt({
-      operationId: request.operationId,
-      inputHash,
-      workspaceId: authority.workspaceId,
-      destination: "preference",
-      claimId: evidence.claimId,
-      evidenceId: evidence.evidenceId,
-      relationId: null,
-      reviewId: review.id,
-      knowledgeChangeProposalId: changeProposal.id,
-      destinationProposalId: proposal.preferenceId,
-      destinationRevisionId: proposal.revisionId,
-    });
-  }).catch((error: unknown) => {
+    },
+  ).catch((error: unknown) => {
     if (
       error instanceof CompanyBrainGovernedWriteAuthorityError ||
       error instanceof CompanyBrainGovernedWriteInvalidOperationError

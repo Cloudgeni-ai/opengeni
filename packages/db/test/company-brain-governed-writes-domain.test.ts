@@ -25,4 +25,17 @@ describe("Company Brain governed write admission", () => {
       "interruption.state IN ('pending', 'delivered', 'acknowledged')",
     );
   });
+
+  test("acquires rooted Task-note authority before generic current-session locks", async () => {
+    const source = await readFile(sourcePath, "utf8");
+    const prelockStart = source.indexOf("const prelocked = await prelock(scopedDb)");
+    const currentSessionLockStart = source.indexOf("WITH locked_workspace AS MATERIALIZED");
+    const resolverCall = source.lastIndexOf("return await resolveTaskNotePromotionSource(");
+    expect(prelockStart).toBeGreaterThanOrEqual(0);
+    expect(currentSessionLockStart).toBeGreaterThan(prelockStart);
+    expect(resolverCall).toBeGreaterThan(currentSessionLockStart);
+    expect(
+      source.slice(resolverCall, source.indexOf("async (scopedDb, authority", resolverCall)),
+    ).toContain("resolveTaskNotePromotionSource");
+  });
 });

@@ -234,6 +234,7 @@ import {
 } from "../integrations/atlassian";
 import { AtlassianConnectionMetadata } from "@opengeni/contracts/atlassian";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
+import { registerCompanyBrainGovernedWriteTools } from "./company-brain-governed-writes";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 
 export type McpServerOptions = {
@@ -384,6 +385,20 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   task_notes_list: { sessionRequired: true, allOf: ["sessions:read"] },
   task_note_save: { sessionRequired: true, allOf: ["sessions:control"] },
   task_note_archive: { sessionRequired: true, allOf: ["sessions:control"] },
+  knowledge_propose: { sessionRequired: true, allOf: ["documents:search"] },
+  knowledge_correct: { sessionRequired: true, allOf: ["documents:search"] },
+  task_note_promote_knowledge: {
+    sessionRequired: true,
+    allOf: ["documents:search", "sessions:control"],
+  },
+  instruction_policy_propose: {
+    sessionRequired: true,
+    allOf: ["documents:search", "workspace:read"],
+  },
+  preference_propose: {
+    sessionRequired: true,
+    allOf: ["documents:search", "workspace:read"],
+  },
   sandboxes_list: { sessionRequired: true, allOf: ["sessions:read"] },
   sandbox_attach: { sessionRequired: true, allOf: ["sessions:control"] },
   sandbox_swap: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -714,6 +729,20 @@ export function buildOpenGeniMcpServer(
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerPreferenceRegistryTools(server, deps, grant, json);
     registerTaskNoteTools(server, deps, grant, sessionId, json);
+    const attempt = exactAgentAttemptClaims(grant)!;
+    registerCompanyBrainGovernedWriteTools({
+      server,
+      db: deps.db,
+      attempt: {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        ...attempt,
+      },
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+    });
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerWorkspaceArtifactTools(server, deps, grant, sessionId, json);
