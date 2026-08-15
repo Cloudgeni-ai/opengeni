@@ -12,6 +12,7 @@ import {
   getDocumentChunk,
   listDocumentBases,
   listEffectiveIndexedDocuments,
+  resolveEffectiveDocumentAccess,
   searchEffectiveKnowledge,
   searchEffectiveDocuments,
   type DocumentAccessFilter,
@@ -60,6 +61,7 @@ export function buildDocumentsMcpServer(
   documentServices: DocumentServices,
   options: {
     createdBySessionId?: string | undefined;
+    attemptId?: string | undefined;
     /** Immutable human subject whose agent is making this retrieval request. */
     initiatingSubjectId: string;
   },
@@ -71,10 +73,18 @@ export function buildDocumentsMcpServer(
   // This server is the agent retrieval surface. Agent-disabled documents are
   // never reachable. Workspace-visible documents are shared; private
   // documents are available only to the creating subject's agent.
-  const agentAccess: DocumentAccessFilter = {
-    agentOnly: true,
-    viewerSubjectId: options.initiatingSubjectId,
-  };
+  const agentAuthority =
+    options.createdBySessionId && options.attemptId
+      ? { sessionId: options.createdBySessionId, attemptId: options.attemptId }
+      : undefined;
+  const resolveAgentAccess = async (): Promise<DocumentAccessFilter> =>
+    await resolveEffectiveDocumentAccess(db, {
+      accountId,
+      workspaceId,
+      initiatingSubjectId: options.initiatingSubjectId,
+      surface: "agent",
+      agentAuthority,
+    });
 
   server.registerTool(
     "list_document_bases",
@@ -101,6 +111,7 @@ export function buildDocumentsMcpServer(
         documentServices,
         input,
         options.initiatingSubjectId,
+        agentAuthority,
       ),
   );
 
@@ -119,6 +130,7 @@ export function buildDocumentsMcpServer(
         documentServices,
         input,
         options.initiatingSubjectId,
+        agentAuthority,
       ),
   );
 
@@ -134,6 +146,7 @@ export function buildDocumentsMcpServer(
         accountId,
         workspaceId,
         initiatingSubjectId: options.initiatingSubjectId,
+        agentAuthority,
         id,
       });
       return {
@@ -173,6 +186,7 @@ export function buildDocumentsMcpServer(
                 accountId,
                 workspaceId,
                 initiatingSubjectId: options.initiatingSubjectId,
+                agentAuthority,
                 ...(parentId ? { parentId } : {}),
                 ...(topic ? { topic } : {}),
                 ...(sourceKinds ? { sourceKinds } : {}),
@@ -206,6 +220,7 @@ export function buildDocumentsMcpServer(
                 accountId,
                 workspaceId,
                 initiatingSubjectId: options.initiatingSubjectId,
+                agentAuthority,
                 ...(checkpoint ? { checkpoint } : {}),
                 ...(limit ? { limit } : {}),
               }),
@@ -225,7 +240,13 @@ export function buildDocumentsMcpServer(
       },
     },
     async ({ chunkId }) => {
-      const found = await getDocumentChunk(db, accountId, workspaceId, chunkId, agentAccess);
+      const found = await getDocumentChunk(
+        db,
+        accountId,
+        workspaceId,
+        chunkId,
+        await resolveAgentAccess(),
+      );
       return {
         content: [
           { type: "text", text: found ? JSON.stringify(found) : `chunk not found: ${chunkId}` },
@@ -244,7 +265,13 @@ export function buildDocumentsMcpServer(
       },
     },
     async ({ chunkId }) => {
-      const found = await getDocumentChunk(db, accountId, workspaceId, chunkId, agentAccess);
+      const found = await getDocumentChunk(
+        db,
+        accountId,
+        workspaceId,
+        chunkId,
+        await resolveAgentAccess(),
+      );
       return {
         content: [
           { type: "text", text: found ? JSON.stringify(found) : `chunk not found: ${chunkId}` },
@@ -367,6 +394,7 @@ async function searchContent(
     aclTags?: string[] | undefined;
   },
   initiatingSubjectId: string,
+  agentAuthority: { sessionId: string; attemptId: string } | undefined,
 ) {
   const results = await searchEffectiveDocuments(
     db,
@@ -380,6 +408,7 @@ async function searchContent(
       ...(input.sourceKinds ? { sourceKinds: input.sourceKinds } : {}),
       ...(input.aclTags ? { aclTags: input.aclTags } : {}),
       initiatingSubjectId,
+      agentAuthority,
       surface: "agent",
     },
     documentServices,
@@ -408,6 +437,7 @@ async function searchKnowledge(
     aclTags?: string[] | undefined;
   },
   initiatingSubjectId: string,
+  agentAuthority: { sessionId: string; attemptId: string } | undefined,
 ) {
   const response = await searchEffectiveKnowledge(
     db,
@@ -421,6 +451,7 @@ async function searchKnowledge(
       ...(input.sourceKinds ? { sourceKinds: input.sourceKinds } : {}),
       ...(input.aclTags ? { aclTags: input.aclTags } : {}),
       initiatingSubjectId,
+      agentAuthority,
       surface: "agent",
     },
     documentServices,

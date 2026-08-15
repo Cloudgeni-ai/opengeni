@@ -5,10 +5,10 @@ import { fileURLToPath } from "node:url";
 
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
-  "../drizzle/0260_preference_knowledge_proposal_actor_binding.sql",
+  "../drizzle/0261_preference_knowledge_proposal_actor_binding.sql",
 );
 
-describe("migration 0260 Knowledge-backed Ways adapter repair", () => {
+describe("migration 0261 Knowledge-backed Ways adapter repair", () => {
   test("replaces only the existing rolling-safe functions with exact target and actor bindings", async () => {
     const migration = await readFile(migrationPath, "utf8");
     expect(migration).toContain("-- deployment-mode: rolling");

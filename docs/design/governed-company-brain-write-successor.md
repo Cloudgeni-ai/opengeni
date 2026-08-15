@@ -84,7 +84,7 @@ proposal; its existing human lifecycle remains the only activation authority.
 An immutable workspace-local destination receipt preserves operation/input and
 preference/revision identities across later human lifecycle changes without
 claiming permission-first selector or logical-turn context-receipt ownership.
-Migration 0260 repairs the released Knowledge-backed adapter predicates without
+Migration 0261 repairs the released Knowledge-backed adapter predicates without
 changing authority: instruction targets use the canonical global/role shape,
 and the preference security-definer function binds its service actor through an
 unambiguous local variable.

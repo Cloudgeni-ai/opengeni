@@ -1,4 +1,5 @@
 -- deployment-mode: rolling
+-- Migration 0261 follows the OPE-224 Task-note authority at 0260.
 -- Repair the existing Knowledge-backed Ways adapters without changing their
 -- signatures, privileges, authority, or durable receipt contracts. Migration
 -- 0255 used an output-column-conflicting PL/pgSQL local name in preference SQL

@@ -129,6 +129,7 @@ async function seedRunningSession(
         )
       )
     `);
+    await tx.execute(sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`);
     await tx.execute(sql`
       insert into session_turns (
         id, account_id, workspace_id, session_id, trigger_event_id,
@@ -154,7 +155,6 @@ async function seedRunningSession(
         '{}'::jsonb
       )
     `);
-    await tx.execute(sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`);
   });
   return {
     ...owner,

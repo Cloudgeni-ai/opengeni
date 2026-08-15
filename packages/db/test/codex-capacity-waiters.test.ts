@@ -158,6 +158,7 @@ async function seedScenario(
         1, ${attemptId}
       )
       `);
+      await tx.execute(sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`);
       await tx.execute(sql`
         insert into session_turn_attempts (
           id, account_id, workspace_id, session_id, turn_id,
@@ -170,7 +171,6 @@ async function seedScenario(
           '{}'::jsonb
         )
       `);
-      await tx.execute(sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`);
     },
   );
   if (options.withGoal !== false) {

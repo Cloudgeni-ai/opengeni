@@ -5,14 +5,14 @@ import { fileURLToPath } from "node:url";
 
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
-  "../drizzle/0258_task_note_knowledge_promotion.sql",
+  "../drizzle/0260_task_note_knowledge_promotion.sql",
 );
 const scopedKnowledgeSchemaPath = join(
   dirname(fileURLToPath(import.meta.url)),
   "../src/scoped-knowledge-schema.ts",
 );
 
-describe("migration 0258 Task-note Knowledge promotion", () => {
+describe("migration 0260 Task-note Knowledge promotion", () => {
   test("keeps document provenance and adds exact value-free Task-note evidence", async () => {
     const sql = await readFile(migrationPath, "utf8");
     expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");

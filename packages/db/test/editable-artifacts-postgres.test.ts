@@ -1868,21 +1868,23 @@ describe("Postgres editable artifact authority", () => {
         'artifact-agent-fence', 'running', 0, 'edit artifact', 'gpt-5.6-sol',
         'medium', 'none', 1, null, 'subject', 'user:alice'
       ) returning id`;
-    await shared.admin`
-      insert into session_turn_attempts (
-        id, account_id, workspace_id, session_id, turn_id,
-        execution_generation, state, temporal_workflow_id,
-        temporal_workflow_run_id, temporal_activity_id,
-        verified_control_revision, mcp_approval_policies
-      ) values (
-        ${attemptId}, ${accountId}, ${workspaceId}, ${session.id}, ${turn!.id},
-        1, 'running', 'artifact-agent-fence', ${`run-${attemptId}`},
-        ${`activity-${attemptId}`}, 0, '{}'::jsonb
-      )`;
-    await shared.admin`
-      update session_turns set active_attempt_id = ${attemptId} where id = ${turn!.id}`;
-    await shared.admin`
-      update sessions set active_turn_id = ${turn!.id} where id = ${session.id}`;
+    await shared.admin.begin(async (tx) => {
+      await tx`
+        update sessions set active_turn_id = ${turn!.id} where id = ${session.id}`;
+      await tx`
+        update session_turns set active_attempt_id = ${attemptId} where id = ${turn!.id}`;
+      await tx`
+        insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id,
+          execution_generation, state, temporal_workflow_id,
+          temporal_workflow_run_id, temporal_activity_id,
+          verified_control_revision, mcp_approval_policies
+        ) values (
+          ${attemptId}, ${accountId}, ${workspaceId}, ${session.id}, ${turn!.id},
+          1, 'running', 'artifact-agent-fence', ${`run-${attemptId}`},
+          ${`activity-${attemptId}`}, 0, '{}'::jsonb
+        )`;
+    });
     const actor = {
       kind: "agent" as const,
       subjectId: "worker:first-party-mcp",

@@ -135,7 +135,7 @@ export const taskNoteWriteCapabilities = pgTable(
 );
 
 // Transaction-local, owner-only admission for the single Task-note evidence
-// insert materialized by a governed promotion. Migration 0258 owns its RLS,
+// insert materialized by a governed promotion. Migration 0260 owns its RLS,
 // one-shot trigger consumption, and runtime-role revocation.
 export const taskNoteKnowledgePromotionCapabilities = pgTable(
   "task_note_knowledge_promotion_capabilities",
@@ -165,7 +165,7 @@ export const taskNoteKnowledgePromotionCapabilities = pgTable(
 );
 
 // Immutable, content-free lineage for one atomic archive + replacement create.
-// Migration 0258 owns exact constraints, FORCE RLS, and lifecycle-only writes.
+// Migration 0260 owns exact constraints, FORCE RLS, and lifecycle-only writes.
 export const taskNoteReplacementReceipts = pgTable(
   "task_note_replacement_receipts",
   {

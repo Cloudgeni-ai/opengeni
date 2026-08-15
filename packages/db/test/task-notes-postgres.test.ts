@@ -147,6 +147,14 @@ async function seedAttempt(input: {
       `;
     }
     await sql`
+      update sessions set active_turn_id = ${turnId}, status = 'running'
+      where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
+    `;
+    await sql`
+      update session_turns set active_attempt_id = ${attemptId}, status = 'running'
+      where workspace_id = ${input.workspaceId} and id = ${turnId}
+    `;
+    await sql`
       insert into session_turn_attempts (
         id, account_id, workspace_id, session_id, turn_id, execution_generation,
         state, temporal_workflow_id, temporal_workflow_run_id,
@@ -156,14 +164,6 @@ async function seedAttempt(input: {
         ${turnId}, ${generation}, 'running', ${`task-note-${turnId}`},
         ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb
       )
-    `;
-    await sql`
-      update session_turns set active_attempt_id = ${attemptId}, status = 'running'
-      where workspace_id = ${input.workspaceId} and id = ${turnId}
-    `;
-    await sql`
-      update sessions set active_turn_id = ${turnId}, status = 'running'
-      where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
     `;
   });
   return { ...input, turnId, attemptId, executionGeneration: generation };

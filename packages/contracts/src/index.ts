@@ -4141,6 +4141,9 @@ export const Document = z.object({
   authorityKind: DocumentAuthorityKind,
   authorityWorkspaceId: z.string().uuid().nullable(),
   authoritySubjectId: z.string().nullable(),
+  // Opaque handle used by the owning human to issue explicit personal-scope
+  // grants. Organization/workspace and legacy anchored personal rows are null.
+  authorityId: z.string().uuid().nullable().optional(),
   visibility: DocumentVisibility,
   createdBy: z.string().nullable(),
   agentAccess: z.boolean(),

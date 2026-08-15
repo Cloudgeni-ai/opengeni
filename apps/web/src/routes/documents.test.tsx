@@ -58,7 +58,9 @@ function indexedDocument(authorityKind: DocumentAuthorityKind): IndexedDocument 
 }
 
 const listDocumentBases = mock(async () => [customBase, defaultBase]);
-const listDocuments = mock(async (_workspaceId: string, _baseId: string) => []);
+const listAccessibleDocuments = mock(async (_workspaceId: string) => [
+  indexedDocument("workspace"),
+]);
 const uploadFile = mock(async (_workspaceId: string, _request: unknown) => ({
   id: "44444444-4444-4444-8444-444444444444",
 }));
@@ -67,13 +69,18 @@ const createKnowledgeDrop = mock(
     indexedDocument(request.authorityKind ?? "workspace"),
 );
 const searchKnowledge = mock(async () => ({ results: [] }));
+const createDocumentOriginalFileDownloadUrl = mock(async () => ({
+  url: "https://storage.example.test/document",
+  expiresAt: "2026-08-15T12:00:00.000Z",
+}));
 const context = {
   client: {
     listDocumentBases,
-    listDocuments,
+    listAccessibleDocuments,
     uploadFile,
     createKnowledgeDrop,
     searchKnowledge,
+    createDocumentOriginalFileDownloadUrl,
   },
   clientConfig: { fileUploads: { enabled: true, maxSizeBytes: 10_000_000 } },
 };
@@ -105,7 +112,7 @@ afterAll(() => {
 
 beforeEach(() => {
   listDocumentBases.mockClear();
-  listDocuments.mockClear();
+  listAccessibleDocuments.mockClear();
   uploadFile.mockClear();
   createKnowledgeDrop.mockClear();
   searchKnowledge.mockClear();
@@ -210,8 +217,7 @@ describe("Documents scope-first UX", () => {
       });
       await settleRoute();
 
-      expect(listDocuments).toHaveBeenCalledWith("workspace-a", defaultBase.id);
-      expect(listDocuments).toHaveBeenCalledWith("workspace-a", customBase.id);
+      expect(listAccessibleDocuments).toHaveBeenCalledWith("workspace-a");
       expect(container.textContent).toContain(
         "Add information agents can find when it is relevant",
       );

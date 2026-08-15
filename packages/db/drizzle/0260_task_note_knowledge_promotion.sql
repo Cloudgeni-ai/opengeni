@@ -1,4 +1,5 @@
 -- deployment-mode: rolling
+-- Migration 0260 follows the released 0258 three-scope Document authority.
 -- Task notes may be promoted only into workspace-local proposed Knowledge.
 -- The evidence row retains a value-free immutable source receipt after the
 -- short-lived task tree is cleaned up; the source bytes remain in the ordinary
