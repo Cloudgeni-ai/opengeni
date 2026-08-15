@@ -64,6 +64,7 @@ pub async fn serve_op_start<P: Platform>(
 
 /// Multi-connection form of [`serve_op_start`]. `scope` is local-only and never
 /// changes the wire op id or frame subject.
+#[cfg(test)]
 pub async fn serve_op_start_scoped<P: Platform>(
     engine: &Arc<Engine>,
     platform: &Arc<P>,
@@ -71,6 +72,22 @@ pub async fn serve_op_start_scoped<P: Platform>(
     publish: FrameSink,
     request_id: String,
     start: v1::OpStart,
+) -> ControlResponse {
+    serve_op_start_scoped_with_policy(engine, platform, scope, publish, request_id, start, None)
+        .await
+}
+
+/// Policy-aware multi-connection form. The policy snapshot is part of the
+/// idempotent OpStart request; the first accepted start owns it and later
+/// duplicates attach to that same operation without re-spawning.
+pub async fn serve_op_start_scoped_with_policy<P: Platform>(
+    engine: &Arc<Engine>,
+    platform: &Arc<P>,
+    scope: &str,
+    publish: FrameSink,
+    request_id: String,
+    start: v1::OpStart,
+    resource_policy: Option<v1::OperationResourcePolicy>,
 ) -> ControlResponse {
     let mut exec = match extract_exec(&request_id, start.op) {
         Ok(exec) => exec,
@@ -111,7 +128,7 @@ pub async fn serve_op_start_scoped<P: Platform>(
         ticket,
         stdin,
         deadline,
-        || platform.spawn_exec(&exec),
+        || platform.spawn_exec_with_policy(&exec, resource_policy.as_ref()),
         frame_publisher(publish, request_id.clone()),
         |exit| wire_exit(exit).encode_to_vec(),
         |_, _| {},

@@ -2870,6 +2870,18 @@ export const organizationUserResourceGrants = pgTable(
       table.workspaceId,
       table.status,
     ),
+    activeIdentity: uniqueIndex("organization_user_resource_grants_active_identity_uq")
+      .on(
+        table.accountId,
+        table.authorityId,
+        table.workspaceId,
+        table.action,
+        table.mode,
+        table.context,
+        sql`coalesce(${table.sessionId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+        sql`coalesce(${table.authorityEpoch}, 0)`,
+      )
+      .where(sql`${table.status} = 'active'`),
     authority: foreignKey({
       name: "organization_user_resource_grants_authority_fk",
       columns: [table.authorityId, table.accountId],
@@ -5550,6 +5562,9 @@ export const sessionSystemUpdates = pgTable(
       .$type<XaiProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
+    // Private scheduled-occurrence authority linkage. Public update/event
+    // projections intentionally omit this producer identifier.
+    scheduledTaskRunId: uuid("scheduled_task_run_id"),
     // pending is visible queue truth; delivered means its exact model-memory
     // batch was durably claimed. Terminal cancellation/supersession is explicit.
     state: text("state").notNull().default("pending"),
@@ -7468,6 +7483,14 @@ export const enrollments = pgTable(
     // from every connect Hello alongside has_display.
     desktopUnavailableReason: text("desktop_unavailable_reason"),
     allowScreenControl: boolean("allow_screen_control").notNull().default(false),
+    // Optional per-connection command policy. NULL is the unrestricted default.
+    // Values remain within JavaScript's exact-integer wire range; local runner and
+    // ancestor host policy may only tighten them at execution.
+    operationMemoryMaxBytes: bigint("operation_memory_max_bytes", { mode: "number" }),
+    operationMemoryHighBytes: bigint("operation_memory_high_bytes", { mode: "number" }),
+    operationCpuMaxMillicores: bigint("operation_cpu_max_millicores", { mode: "number" }),
+    operationPolicyRevision: integer("operation_policy_revision").notNull().default(0),
+    operationPolicyUpdatedAt: timestamp("operation_policy_updated_at", { withTimezone: true }),
     status: text("status", { enum: enrollmentStatusValues }).notNull().default("active"),
     // Credential-family fence. Existing rows/migration-era bearers are generation
     // 1; every successful re-enrollment increments this atomically before a new
@@ -7545,6 +7568,26 @@ export const enrollments = pgTable(
     connectionGenerationNonnegative: check(
       "enrollments_connection_generation_chk",
       sql`${table.connectionGeneration} >= 0`,
+    ),
+    operationMemoryMaxShape: check(
+      "enrollments_operation_memory_max_shape_chk",
+      sql`${table.operationMemoryMaxBytes} is null or (${table.operationMemoryMaxBytes} > 0 and ${table.operationMemoryMaxBytes} <= 9007199254740991)`,
+    ),
+    operationMemoryHighShape: check(
+      "enrollments_operation_memory_high_shape_chk",
+      sql`${table.operationMemoryHighBytes} is null or (${table.operationMemoryHighBytes} > 0 and ${table.operationMemoryHighBytes} <= 9007199254740991)`,
+    ),
+    operationMemoryOrder: check(
+      "enrollments_operation_memory_order_chk",
+      sql`${table.operationMemoryMaxBytes} is null or ${table.operationMemoryHighBytes} is null or ${table.operationMemoryHighBytes} <= ${table.operationMemoryMaxBytes}`,
+    ),
+    operationCpuShape: check(
+      "enrollments_operation_cpu_shape_chk",
+      sql`${table.operationCpuMaxMillicores} is null or ${table.operationCpuMaxMillicores} between 1 and 4294967295`,
+    ),
+    operationPolicyRevisionNonnegative: check(
+      "enrollments_operation_policy_revision_chk",
+      sql`${table.operationPolicyRevision} >= 0`,
     ),
     agentBinarySha256Shape: check(
       "enrollments_agent_binary_sha256_chk",
@@ -7887,6 +7930,12 @@ export const scheduledTasks = pgTable(
       .$type<XaiProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
+    authorityRevision: bigint("authority_revision", { mode: "number" }).notNull().default(1),
+    // The migration-owned BEFORE INSERT/UPDATE trigger replaces this client
+    // placeholder with the canonical whole-row execution digest.
+    executionDigest: text("execution_digest")
+      .notNull()
+      .$defaultFn(() => ""),
     reusableSessionId: uuid("reusable_session_id").references(() => sessions.id, {
       onDelete: "set null",
     }),
@@ -7970,6 +8019,8 @@ export const scheduledTaskRuns = pgTable(
     taskId: uuid("task_id")
       .notNull()
       .references(() => scheduledTasks.id, { onDelete: "cascade" }),
+    taskAuthorityRevision: bigint("task_authority_revision", { mode: "number" }),
+    taskExecutionDigest: text("task_execution_digest"),
     status: text("status").notNull().default("queued"),
     triggerType: text("trigger_type").notNull(),
     scheduledAt: timestamp("scheduled_at", { withTimezone: true }),

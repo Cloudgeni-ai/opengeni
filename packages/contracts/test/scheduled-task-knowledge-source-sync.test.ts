@@ -53,6 +53,7 @@ describe("knowledge-source scheduled task contracts", () => {
       runMode: "new_session_per_run",
       overlapPolicy: "allow_concurrent",
       agentConfig: { prompt: "Run", resources: [], tools: [], metadata: {} },
+      executionDigest: "a".repeat(64),
       reusableSessionId: null,
       targetSessionId: null,
       variableSetId: null,

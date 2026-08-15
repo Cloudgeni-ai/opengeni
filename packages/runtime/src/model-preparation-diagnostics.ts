@@ -44,6 +44,7 @@ type ModelPreparationObservation = {
 };
 
 const modelPreparationObserver = new AsyncLocalStorage<ModelPreparationObservation>();
+const modelTransportStartedObserver = new AsyncLocalStorage<() => Promise<void> | void>();
 
 class ModelPreparationTraceProcessor implements TracingProcessor {
   async onTraceStart(_trace: Trace): Promise<void> {}
@@ -87,6 +88,20 @@ export function withModelPreparationObserver<T>(
         callback,
       )
     : callback();
+}
+
+/** Bind one attempt-local durable checkpoint immediately before generic model
+ * transport enters fetch. Cached provider clients are process-global, so this
+ * authority must be async-local rather than stored on the client instance. */
+export function withModelTransportStartedObserver<T>(
+  observer: (() => Promise<void> | void) | undefined,
+  callback: () => T,
+): T {
+  return observer ? modelTransportStartedObserver.run(observer, callback) : callback();
+}
+
+export async function recordModelTransportStarted(): Promise<void> {
+  await modelTransportStartedObserver.getStore()?.();
 }
 
 export function recordModelPreparationMeasurement(measurement: ModelPreparationMeasurement): void {

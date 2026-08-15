@@ -357,6 +357,7 @@ export * from "./task-notes";
 export * from "./generated-images";
 export * from "./slack-user-link-access";
 export * from "./video-generation";
+export * from "./user-resource-authority";
 export * from "./xai-subscription";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
@@ -3784,6 +3785,11 @@ export type UpdateScheduledTaskInput = Partial<{
   variableSetId: string | null;
   rigId: string | null;
   metadata: Record<string, unknown>;
+  refreshPersonalResourceAuthority: boolean;
+  clonePersonalResourceAuthorityFromRevision: number;
+  authorityUpdatedBy: TurnInitiator;
+  authorityUpdatedByContext: TurnInitiatorContext;
+  authorityUpdatedByActor: AgentSessionCreationActor | null;
 }>;
 
 export type CreatePackInstallationInput = {
@@ -7483,6 +7489,144 @@ export async function listEnabledMcpCapabilityServers(
         ...(connectionRef ? { connectionRef } : {}),
       },
     ];
+  });
+}
+
+const ecmaScriptTrimCharacters =
+  "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
+
+const registryApiKeyContractValidSql = sql<boolean>`coalesce((
+  jsonb_typeof(${schema.capabilityCatalogItems.metadata} -> 'authContract') = 'object'
+  and jsonb_typeof(${schema.capabilityCatalogItems.metadata} -> 'authContract' -> 'headerName') = 'string'
+  and (${schema.capabilityCatalogItems.metadata} -> 'authContract' ->> 'headerName')
+    ~ ${"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$"}
+  and jsonb_typeof(${schema.capabilityCatalogItems.metadata} -> 'authContract' -> 'scheme') = 'string'
+  and length(btrim(
+    ${schema.capabilityCatalogItems.metadata} -> 'authContract' ->> 'scheme',
+    ${ecmaScriptTrimCharacters}
+  )) > 0
+), false)`;
+
+/**
+ * Metadata-only projection of runnable capability MCP server ids. The query
+ * deliberately computes credential-presence booleans in PostgreSQL and never
+ * selects stored header ciphertext or connection-reference contents.
+ */
+export async function listEnabledMcpCapabilityServerIds(
+  db: Database,
+  workspaceId: string,
+): Promise<string[]> {
+  const rows = await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) =>
+      await scopedDb
+        .select({
+          installationId: schema.capabilityInstallations.id,
+          itemId: schema.capabilityCatalogItems.id,
+          itemWorkspaceId: schema.capabilityCatalogItems.workspaceId,
+          itemSource: schema.capabilityCatalogItems.source,
+          itemAuthKind: schema.capabilityCatalogItems.authKind,
+          itemAuthModel: schema.capabilityCatalogItems.authModel,
+          itemMcpProbePresent: sql<boolean>`${schema.capabilityCatalogItems.metadata} ? 'mcpProbe'`,
+          itemMcpProbeStatus: sql<
+            string | null
+          >`${schema.capabilityCatalogItems.metadata} -> 'mcpProbe' ->> 'status'`,
+          itemRegistryApiKeyContractValid: registryApiKeyContractValidSql,
+          itemMcpServerId: sql<
+            string | null
+          >`${schema.capabilityCatalogItems.metadata} ->> 'mcpServerId'`,
+          endpointPresent: sql<boolean>`coalesce(length(${schema.capabilityCatalogItems.endpointUrl}), 0) > 0`,
+          mcpConnectivityStatus: sql<
+            string | null
+          >`${schema.capabilityInstallations.metadata} -> 'mcpConnectivity' ->> 'status'`,
+          hasEncryptedHeaders: sql<boolean>`exists (
+            select 1
+            from jsonb_each_text(
+              case
+                when jsonb_typeof(${schema.capabilityInstallations.config} -> 'headersEncrypted') = 'object'
+                  then ${schema.capabilityInstallations.config} -> 'headersEncrypted'
+                else '{}'::jsonb
+              end
+            ) header
+            where length(header.value) > 0
+          )`,
+          hasConnectionRef: sql<boolean>`(
+            jsonb_typeof(${schema.capabilityInstallations.config} -> 'connectionRef') = 'object'
+            and jsonb_typeof(${schema.capabilityInstallations.config} -> 'connectionRef' -> 'providerDomain') = 'string'
+            and length(${schema.capabilityInstallations.config} -> 'connectionRef' ->> 'providerDomain') > 0
+          )`,
+        })
+        .from(schema.capabilityInstallations)
+        .innerJoin(
+          schema.capabilityCatalogItems,
+          and(
+            or(
+              eq(
+                schema.capabilityInstallations.workspaceId,
+                schema.capabilityCatalogItems.workspaceId,
+              ),
+              isNull(schema.capabilityCatalogItems.workspaceId),
+            ),
+            eq(schema.capabilityInstallations.capabilityId, schema.capabilityCatalogItems.id),
+          ),
+        )
+        .where(
+          and(
+            eq(schema.capabilityInstallations.workspaceId, workspaceId),
+            eq(schema.capabilityInstallations.kind, "mcp"),
+            eq(schema.capabilityInstallations.status, "active"),
+            eq(schema.capabilityCatalogItems.stale, false),
+            sql`(
+              ${schema.capabilityInstallations.metadata} ->> 'facetInstallationId' is null
+              or exists (
+                select 1
+                from ${schema.capabilityComponentOwners} owner
+                where owner.facet_installation_id::text = ${schema.capabilityInstallations.metadata} ->> 'facetInstallationId'
+                  and ${effectiveCapabilityOwnerSql(sql`owner.owner_kind`, sql`owner.owner_id`)}
+              )
+            )`,
+          ),
+        )
+        .orderBy(asc(schema.capabilityCatalogItems.name)),
+  );
+
+  const preferredByInstallation = new Map<string, (typeof rows)[number]>();
+  for (const row of rows) {
+    const existing = preferredByInstallation.get(row.installationId);
+    if (!existing || (existing.itemWorkspaceId === null && row.itemWorkspaceId !== null)) {
+      preferredByInstallation.set(row.installationId, row);
+    }
+  }
+
+  return [...preferredByInstallation.values()].flatMap((row) => {
+    const metadata = row.itemMcpServerId !== null ? { mcpServerId: row.itemMcpServerId } : {};
+    const trusted =
+      row.itemSource !== registryCapabilitySource ||
+      (row.itemMcpProbePresent &&
+        row.itemMcpProbeStatus === "real" &&
+        row.itemAuthKind !== null &&
+        row.itemAuthKind !== "unknown" &&
+        (row.itemAuthKind !== "api_key" || row.itemRegistryApiKeyContractValid));
+    const connectivityOk =
+      row.mcpConnectivityStatus === "ok" || row.mcpConnectivityStatus === "auth_deferred";
+    const legacyActive =
+      !trusted &&
+      row.itemSource === registryCapabilitySource &&
+      !row.itemMcpProbePresent &&
+      row.itemAuthKind !== null &&
+      row.itemAuthKind !== "unknown" &&
+      connectivityOk &&
+      (!row.itemAuthModel || row.hasEncryptedHeaders || row.hasConnectionRef);
+    if (
+      (!trusted && !legacyActive) ||
+      !row.endpointPresent ||
+      !connectivityOk ||
+      (row.itemAuthModel && !row.hasEncryptedHeaders && !row.hasConnectionRef)
+    ) {
+      return [];
+    }
+    return [mcpServerIdForCapability(row.itemId, metadata)];
   });
 }
 
@@ -13285,6 +13429,7 @@ export async function createScheduledTask(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const frozenCreator = await frozenSessionCreatorForInsert(scopedDb, input);
+      await setScheduledTaskAuthorityRlsContext(scopedDb, frozenCreator);
       const [row] = await scopedDb
         .insert(schema.scheduledTasks)
         .values({
@@ -13313,6 +13458,12 @@ export async function createScheduledTask(
       if (!row) {
         throw new Error("Failed to create scheduled task");
       }
+      await scopedDb.execute(sql`select freeze_scheduled_task_personal_resources(
+        ${row.accountId}::uuid,
+        ${row.workspaceId}::uuid,
+        ${row.id}::uuid,
+        ${row.authorityRevision}::bigint
+      )`);
       return mapScheduledTask(row);
     },
   );
@@ -13325,6 +13476,25 @@ export async function updateScheduledTask(
   input: UpdateScheduledTaskInput,
 ): Promise<ScheduledTask> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    if (
+      input.refreshPersonalResourceAuthority &&
+      input.clonePersonalResourceAuthorityFromRevision !== undefined
+    ) {
+      throw new Error("scheduled task authority refresh and clone are mutually exclusive");
+    }
+    if (input.refreshPersonalResourceAuthority) {
+      const frozenUpdater = await frozenSessionCreatorForInsert(scopedDb, {
+        workspaceId,
+        ...(input.authorityUpdatedBy ? { createdBy: input.authorityUpdatedBy } : {}),
+        ...(input.authorityUpdatedByContext
+          ? { createdByContext: input.authorityUpdatedByContext }
+          : {}),
+        ...(input.authorityUpdatedByActor !== undefined
+          ? { createdByActor: input.authorityUpdatedByActor }
+          : {}),
+      });
+      await setScheduledTaskAuthorityRlsContext(scopedDb, frozenUpdater);
+    }
     const [row] = await scopedDb
       .update(schema.scheduledTasks)
       .set({
@@ -13348,6 +13518,10 @@ export async function updateScheduledTask(
         ...(input.variableSetId !== undefined ? { variableSetId: input.variableSetId } : {}),
         ...(input.rigId !== undefined ? { rigId: input.rigId } : {}),
         ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+        ...(input.refreshPersonalResourceAuthority ||
+        input.clonePersonalResourceAuthorityFromRevision !== undefined
+          ? { authorityRevision: sql`${schema.scheduledTasks.authorityRevision} + 1` }
+          : {}),
         updatedAt: new Date(),
       })
       .where(
@@ -13359,6 +13533,22 @@ export async function updateScheduledTask(
       .returning();
     if (!row) {
       throw new Error(`Scheduled task not found: ${taskId}`);
+    }
+    if (input.refreshPersonalResourceAuthority) {
+      await scopedDb.execute(sql`select freeze_scheduled_task_personal_resources(
+        ${row.accountId}::uuid,
+        ${row.workspaceId}::uuid,
+        ${row.id}::uuid,
+        ${row.authorityRevision}::bigint
+      )`);
+    } else if (input.clonePersonalResourceAuthorityFromRevision !== undefined) {
+      await scopedDb.execute(sql`select clone_scheduled_task_personal_resource_authority(
+        ${row.accountId}::uuid,
+        ${row.workspaceId}::uuid,
+        ${row.id}::uuid,
+        ${input.clonePersonalResourceAuthorityFromRevision}::bigint,
+        ${row.authorityRevision}::bigint
+      )`);
     }
     return mapScheduledTask(row);
   });
@@ -13409,6 +13599,40 @@ export async function getScheduledTaskPersonalConnectionDelegations(
         )
       : [];
   });
+}
+
+/**
+ * Lock and project the exact mutable incident-task authority inside a caller's
+ * dispatch/claim transaction. Returning the frozen personal delegation tuple
+ * from the same row prevents a later task edit from mixing with the task
+ * snapshot used for preflight.
+ */
+export async function requireScheduledTaskIncidentAuthorityInTransaction(
+  tx: Database,
+  input: { workspaceId: string; taskId: string },
+): Promise<{
+  task: ScheduledTask;
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
+}> {
+  const [row] = await tx
+    .select()
+    .from(schema.scheduledTasks)
+    .where(
+      and(
+        eq(schema.scheduledTasks.workspaceId, input.workspaceId),
+        eq(schema.scheduledTasks.id, input.taskId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (!row) throw new Error(`Scheduled task not found: ${input.taskId}`);
+  return {
+    task: mapScheduledTask(row),
+    personalConnectionDelegations: parsedPersonalConnectionDelegations(
+      row.personalConnectionDelegations,
+      `scheduled_tasks:${input.workspaceId}:${input.taskId}`,
+    ),
+  };
 }
 
 export async function getScheduledTaskXaiProviderAccountAuthoritySnapshot(
@@ -13599,6 +13823,10 @@ export async function createScheduledTaskRun(
   input: {
     workspaceId: string;
     taskId: string;
+    /** Exact task snapshot read by the dispatching worker. */
+    taskAuthorityRevision?: number | null;
+    /** Exact task snapshot read by the dispatching worker. */
+    taskExecutionDigest?: string | null;
     triggerType: ScheduledTaskTriggerType;
     /** Stable Temporal workflow/activity producer identity for replay repair. */
     producerKey?: string | null;
@@ -13607,6 +13835,9 @@ export async function createScheduledTaskRun(
   },
 ): Promise<ScheduledTaskRun> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    if ((input.taskAuthorityRevision == null) !== (input.taskExecutionDigest == null)) {
+      throw new Error("scheduled task run execution binding is incomplete");
+    }
     const [taskRow] = await scopedDb
       .select()
       .from(schema.scheduledTasks)
@@ -13624,6 +13855,8 @@ export async function createScheduledTaskRun(
       accountId: taskRow.accountId,
       workspaceId: taskRow.workspaceId,
       taskId: input.taskId,
+      taskAuthorityRevision: input.taskAuthorityRevision ?? null,
+      taskExecutionDigest: input.taskExecutionDigest ?? null,
       triggerType: input.triggerType,
       producerKey: input.producerKey ?? null,
       scheduledAt: input.scheduledAt ?? null,
@@ -13657,8 +13890,153 @@ export async function createScheduledTaskRun(
     if (!row) {
       throw new Error("Failed to create scheduled task run");
     }
+    if (
+      input.taskAuthorityRevision != null &&
+      (row.taskAuthorityRevision !== input.taskAuthorityRevision ||
+        row.taskExecutionDigest !== input.taskExecutionDigest)
+    ) {
+      throw new Error("scheduled task run execution binding changed");
+    }
     return mapScheduledTaskRun(row);
   });
+}
+
+export type ScheduledTaskRunPersonalResourceAuthority = {
+  taskId: string;
+  taskAuthorityRevision: number;
+  executionDigest: string;
+  initiatingHumanSubjectId: string;
+  resources: Array<{
+    resourceKind: "variable_set" | "rig";
+    resourceId: string;
+    resourceVersionId: string;
+    selectionSources: string[];
+    authorityId: string;
+    authorityGeneration: number;
+    grantId: string;
+    grantGeneration: number;
+    grantMode: "once" | "session" | "always";
+  }>;
+};
+
+export async function getScheduledTaskRunPersonalResourceAuthority(
+  db: Database,
+  input: { accountId: string; workspaceId: string; runId: string },
+): Promise<ScheduledTaskRunPersonalResourceAuthority | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await rawRows<{
+        taskId: string;
+        taskAuthorityRevision: number;
+        executionDigest: string;
+        initiatingHumanSubjectId: string;
+        resourceKind: "variable_set" | "rig";
+        resourceId: string;
+        resourceVersionId: string;
+        selectionSources: string[];
+        authorityId: string;
+        authorityGeneration: number;
+        grantId: string;
+        grantGeneration: number;
+        grantMode: "once" | "session" | "always";
+      }>(
+        scopedDb,
+        sql`select
+          task_id as "taskId",
+          task_authority_revision::int as "taskAuthorityRevision",
+          execution_digest as "executionDigest",
+          initiating_human_subject_id as "initiatingHumanSubjectId",
+          resource_kind as "resourceKind",
+          resource_id as "resourceId",
+          resource_version_id as "resourceVersionId",
+          selection_sources as "selectionSources",
+          authority_id as "authorityId",
+          authority_generation::int as "authorityGeneration",
+          grant_id as "grantId",
+          grant_generation::int as "grantGeneration",
+          grant_mode as "grantMode"
+        from scheduled_task_run_personal_resource_authority(
+          ${input.accountId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.runId}::uuid
+        )`,
+      );
+      const first = rows[0];
+      if (!first) return null;
+      return {
+        taskId: first.taskId,
+        taskAuthorityRevision: Number(first.taskAuthorityRevision),
+        executionDigest: first.executionDigest,
+        initiatingHumanSubjectId: first.initiatingHumanSubjectId,
+        resources: rows.map((row) => ({
+          resourceKind: row.resourceKind,
+          resourceId: row.resourceId,
+          resourceVersionId: row.resourceVersionId,
+          selectionSources: row.selectionSources,
+          authorityId: row.authorityId,
+          authorityGeneration: Number(row.authorityGeneration),
+          grantId: row.grantId,
+          grantGeneration: Number(row.grantGeneration),
+          grantMode: row.grantMode,
+        })),
+      };
+    },
+  );
+}
+
+export async function materializeScheduledTaskReusableSessionFromRun(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    taskId: string;
+    runId: string;
+    sessionId: string;
+    sourceTaskAuthorityRevision: number;
+    sourceExecutionDigest: string;
+  },
+): Promise<number> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ authorityRevision: number }>(
+        scopedDb,
+        sql`select materialize_scheduled_task_reusable_session_from_run(
+          ${input.accountId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.taskId}::uuid,
+          ${input.runId}::uuid,
+          ${input.sessionId}::uuid,
+          ${input.sourceTaskAuthorityRevision}::bigint,
+          ${input.sourceExecutionDigest}::text
+        )::int as "authorityRevision"`,
+      );
+      if (!row) {
+        throw new Error("scheduled reusable-session materialization returned no revision");
+      }
+      return Number(row.authorityRevision);
+    },
+  );
+}
+
+async function scheduledTaskRunCausalHumanInTransaction(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; runId: string },
+): Promise<string | null> {
+  const [row] = await rawRows<{ initiatingHumanSubjectId: string }>(
+    tx,
+    sql`select initiating_human_subject_id as "initiatingHumanSubjectId"
+      from scheduled_task_run_personal_resource_authority(
+        ${input.accountId}::uuid,
+        ${input.workspaceId}::uuid,
+        ${input.runId}::uuid
+      )
+      limit 1`,
+  );
+  return row?.initiatingHumanSubjectId ?? null;
 }
 
 /** Failure settlement must not rewrite a source already committed as dispatched. */
@@ -13680,6 +14058,27 @@ export async function markScheduledTaskRunFailedIfQueued(
         ),
       );
   });
+}
+
+/** Claim-time stale-authority settlement; no model/tool/sandbox work has started. */
+export async function markScheduledTaskRunAuthorityRejectedInTransaction(
+  tx: Database,
+  input: { workspaceId: string; runId: string },
+): Promise<void> {
+  await tx
+    .update(schema.scheduledTaskRuns)
+    .set({
+      status: "failed",
+      error: "incident_responder_under_capable",
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+        eq(schema.scheduledTaskRuns.id, input.runId),
+        inArray(schema.scheduledTaskRuns.status, ["queued", "dispatched"]),
+      ),
+    );
 }
 
 export async function updateScheduledTaskRun(
@@ -15337,6 +15736,33 @@ export async function getRigVersion(
       )
       .limit(1);
     return row ? mapRigVersion(row) : null;
+  });
+}
+
+/** Metadata-only health for one exact frozen rig version. Never reads setup,
+ * variable values, credential material, or the currently active version. */
+export async function getRigVersionHealth(
+  db: Database,
+  workspaceId: string,
+  rigId: string,
+  versionId: string,
+): Promise<RigVerificationHealth | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.rigVersions)
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, workspaceId),
+          eq(schema.rigVersions.rigId, rigId),
+          eq(schema.rigVersions.id, versionId),
+        ),
+      )
+      .limit(1);
+    if (!row) return null;
+    const version = mapRigVersion(row);
+    const healthByVersion = await loadRigHealthByActiveVersion(scopedDb, workspaceId, [version]);
+    return healthByVersion.get(version.id) ?? unknownRigHealth(version);
   });
 }
 
@@ -23390,6 +23816,21 @@ async function frozenSessionCreatorForInsert(
     action: "message",
   });
   return await frozenInitiatorForCommandActor(tx, input.workspaceId, input.createdByActor);
+}
+
+async function setScheduledTaskAuthorityRlsContext(
+  tx: Database,
+  frozen: FrozenTurnInitiator,
+): Promise<void> {
+  const subjectId = frozen.initiator.subjectId.trim();
+  if (!subjectId) throw new Error("scheduled task authority writer has no subject");
+  await tx.execute(sql`select
+    set_config('opengeni.subject_id', ${subjectId}, true),
+    set_config(
+      'opengeni.initiating_human_subject_id',
+      ${frozen.initiator.kind === "subject" ? subjectId : ""},
+      true
+    )`);
 }
 
 export type SessionCreateInput = {
@@ -41331,6 +41772,13 @@ export type EnrollmentRecord = {
    *  not granted); null when capture is permitted or the machine is headless. */
   desktopUnavailableReason: string | null;
   allowScreenControl: boolean;
+  operationPolicy: {
+    memoryMaxBytes: number | null;
+    memoryHighBytes: number | null;
+    cpuMaxMillicores: number | null;
+    revision: number;
+    updatedAt: string | null;
+  };
   status: EnrollmentStatus;
   credentialGeneration: number;
   /** Exact live runner instance receiving this machine's control traffic. */
@@ -41372,6 +41820,13 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
     opStream: row.opStream,
     desktopUnavailableReason: row.desktopUnavailableReason ?? null,
     allowScreenControl: row.allowScreenControl,
+    operationPolicy: {
+      memoryMaxBytes: row.operationMemoryMaxBytes ?? null,
+      memoryHighBytes: row.operationMemoryHighBytes ?? null,
+      cpuMaxMillicores: row.operationCpuMaxMillicores ?? null,
+      revision: Number(row.operationPolicyRevision),
+      updatedAt: row.operationPolicyUpdatedAt?.toISOString() ?? null,
+    },
     status: row.status as EnrollmentStatus,
     credentialGeneration: Number(row.credentialGeneration),
     connectionInstanceId: row.connectionInstanceId ?? null,
@@ -41556,6 +42011,68 @@ export async function getLiveEnrollmentConnection(
       .limit(1);
     return row ? mapEnrollment(row) : null;
   });
+}
+
+/** Revision-fenced workspace-operator update of one Connected Machine's optional
+ * command resource policy. NULL remains unrestricted. The active-enrollment check,
+ * CAS, mutation, and audit receipt share one RLS transaction. */
+export async function updateEnrollmentOperationPolicy(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    subjectId?: string;
+    expectedRevision: number;
+    memoryMaxBytes: number | null;
+    memoryHighBytes: number | null;
+    cpuMaxMillicores?: number | null;
+  },
+): Promise<EnrollmentRecord | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const now = new Date();
+      const [row] = await scopedDb
+        .update(schema.enrollments)
+        .set({
+          operationMemoryMaxBytes: input.memoryMaxBytes,
+          operationMemoryHighBytes: input.memoryHighBytes,
+          ...(input.cpuMaxMillicores !== undefined
+            ? { operationCpuMaxMillicores: input.cpuMaxMillicores }
+            : {}),
+          operationPolicyRevision: sql`${schema.enrollments.operationPolicyRevision} + 1`,
+          operationPolicyUpdatedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.status, "active"),
+            eq(schema.enrollments.operationPolicyRevision, input.expectedRevision),
+          ),
+        )
+        .returning();
+      if (!row) return null;
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId ?? null,
+        action: "connected_machine.operation_policy.updated",
+        targetType: "enrollment",
+        targetId: input.enrollmentId,
+        metadata: {
+          revision: Number(row.operationPolicyRevision),
+          memoryMaxBytes: row.operationMemoryMaxBytes,
+          memoryHighBytes: row.operationMemoryHighBytes,
+          cpuMaxMillicores: row.operationCpuMaxMillicores,
+        },
+      });
+      return mapEnrollment(row);
+    },
+  );
 }
 
 export type EnrollmentConnectionClaim = {
@@ -45256,6 +45773,7 @@ export async function upsertSessionGoalWithEvent(
           const [existing] = await tx
             .select({
               objectiveRevision: schema.sessionGoals.objectiveRevision,
+              status: schema.sessionGoals.status,
             })
             .from(schema.sessionGoals)
             .where(
@@ -45266,9 +45784,9 @@ export async function upsertSessionGoalWithEvent(
             )
             .for("update")
             .limit(1);
-          if (existing) {
+          if (existing && existing.status !== "completed") {
             throw new SessionControlConflictError(
-              `agent goal_set is create-only; goal exists at objective revision ${existing.objectiveRevision}`,
+              `agent goal_set cannot replace a goal while it is ${existing.status} at objective revision ${existing.objectiveRevision}; use goal_update to revise it`,
             );
           }
         }
@@ -47175,6 +47693,7 @@ export type InitializeSessionStartInput = {
     successCriteria?: string | null;
     maxAutoContinuations?: number | null;
     mutationPolicy?: SessionGoalMutationPolicy;
+    createdBy?: SessionGoalCreatedBy;
   } | null;
   consumeNewSessionDraft?: {
     subjectId: string;
@@ -47182,6 +47701,8 @@ export type InitializeSessionStartInput = {
   } | null;
   /** Persist session.created only; realtime will supply the first human turn. */
   deferInitialTurn?: boolean;
+  /** Public status persisted with a deferred session start. Defaults to idle. */
+  deferredStatus?: Extract<SessionStatus, "idle" | "queued">;
 };
 
 export type InitializeSessionStartResult = {
@@ -47270,7 +47791,7 @@ export async function initializeSessionStartAtomically(
               successCriteria: input.goal.successCriteria ?? null,
               maxAutoContinuations: input.goal.maxAutoContinuations ?? null,
               mutationPolicy: input.goal.mutationPolicy ?? "preserve_intent",
-              createdBy: "api",
+              createdBy: input.goal.createdBy ?? "api",
             })
             .returning();
           if (!goal) throw new Error("Failed to create initial session goal");
@@ -47278,6 +47799,7 @@ export async function initializeSessionStartAtomically(
         }
 
         if (input.deferInitialTurn) {
+          const deferredStatus = input.deferredStatus ?? "idle";
           const [existingCreatedEvent] = await tx
             .select({ id: schema.sessionEvents.id })
             .from(schema.sessionEvents)
@@ -47306,7 +47828,7 @@ export async function initializeSessionStartAtomically(
                       type: "session.created",
                       payload: {
                         ...input.createdEventPayload,
-                        status: "idle",
+                        status: deferredStatus,
                         createdBy: creator.initiator,
                       },
                     },
@@ -47327,7 +47849,7 @@ export async function initializeSessionStartAtomically(
                               version: goal.version,
                               objectiveRevision: goal.objectiveRevision,
                               mutationPolicy: goal.mutationPolicy,
-                              actor: "api",
+                              actor: input.goal?.createdBy ?? "api",
                               replaced: false,
                             },
                           },
@@ -47341,17 +47863,18 @@ export async function initializeSessionStartAtomically(
               .returning();
             initializedNow = true;
           }
+          const deferredStatusNeedsRepair = initializedNow && session.status !== deferredStatus;
           const sessionNeedsRepair =
             session.temporalWorkflowId !== temporalWorkflowId ||
             session.lastSequence !== sequence ||
-            (initializedNow && session.status === "queued");
+            deferredStatusNeedsRepair;
           if (sessionNeedsRepair) {
             await tx
               .update(schema.sessions)
               .set({
                 temporalWorkflowId,
                 lastSequence: sequence,
-                ...(initializedNow && session.status === "queued" ? { status: "idle" } : {}),
+                ...(deferredStatusNeedsRepair ? { status: deferredStatus } : {}),
                 updatedAt: new Date(),
               })
               .where(
@@ -47786,6 +48309,7 @@ type BoundedSystemUpdate = Pick<
   | "lineage"
   | "personalConnectionDelegations"
   | "xaiProviderAccountAuthoritySnapshot"
+  | "scheduledTaskRunId"
 >;
 
 export type FrozenXaiExecutionAuthority = {
@@ -47821,6 +48345,7 @@ function systemUpdateExecutionAuthorityKey(update: BoundedSystemUpdate): string 
       `session_system_updates:${update.id}`,
     ),
     xai: frozenXaiExecutionAuthority(update),
+    scheduledTaskRunId: update.scheduledTaskRunId,
   });
 }
 
@@ -47906,6 +48431,11 @@ export type ClaimSessionWorkForAttemptInput = {
   attemptId: string;
   dispatchId: string;
   trigger: SessionWorkTrigger;
+  /** Optional worker-owned mutable-authority fence for pending machine inputs. */
+  validatePendingSystemUpdateAuthority?: (
+    tx: Database,
+    update: SessionSystemUpdate,
+  ) => Promise<{ action: "accept" } | { action: "reject"; reason: string }>;
 };
 
 export type ClaimSessionWorkForAttemptResult =
@@ -48138,7 +48668,22 @@ export async function claimSessionWorkForAttempt(
           }
           const validUpdates: typeof updates = [];
           const cancelledUpdateIds: string[] = [];
+          const authorityRejectedUpdateIds: string[] = [];
           for (const update of updates) {
+            if (input.validatePendingSystemUpdateAuthority) {
+              const validation = await input.validatePendingSystemUpdateAuthority(
+                tx as unknown as Database,
+                mapSessionSystemUpdate(update),
+              );
+              if (validation.action === "reject") {
+                await tx
+                  .update(schema.sessionSystemUpdates)
+                  .set({ state: "failed", classification: "failure" })
+                  .where(eq(schema.sessionSystemUpdates.id, update.id));
+                authorityRejectedUpdateIds.push(update.id);
+                continue;
+              }
+            }
             const payload = update.payload;
             if (payload.type === "goal_continuation") {
               const goalId = typeof payload.goalId === "string" ? payload.goalId : null;
@@ -48187,36 +48732,56 @@ export async function claimSessionWorkForAttempt(
               systemUpdateExecutionAuthorityKey(candidate),
           );
           if (deliverable.length === 0) {
-            const cancellationEvent =
-              cancelledUpdateIds.length > 0
-                ? {
-                    accountId,
-                    workspaceId,
-                    sessionId,
-                    // No receiving turn exists when every candidate was
-                    // cancelled before a model batch could be persisted.
-                    turnId: null,
-                    turnGeneration: null,
-                    turnAttemptId: null,
-                    turnAssociation: null,
-                    sequence: nextSequence,
-                    type: "system.update.cancelled" as const,
-                    payload: {
-                      updateIds: cancelledUpdateIds,
-                      count: cancelledUpdateIds.length,
-                      reason: "stale_goal_continuation",
-                    },
-                    occurredAt,
-                  }
-                : null;
+            let sequence = nextSequence - 1;
+            const cancellationEvents: SessionEventInsertWithPayload[] = [];
+            if (cancelledUpdateIds.length > 0) {
+              cancellationEvents.push({
+                accountId,
+                workspaceId,
+                sessionId,
+                // No receiving turn exists when every candidate was
+                // cancelled before a model batch could be persisted.
+                turnId: null,
+                turnGeneration: null,
+                turnAttemptId: null,
+                turnAssociation: null,
+                sequence: ++sequence,
+                type: "system.update.cancelled" as const,
+                payload: {
+                  updateIds: cancelledUpdateIds,
+                  count: cancelledUpdateIds.length,
+                  reason: "stale_goal_continuation",
+                },
+                occurredAt,
+              });
+            }
+            if (authorityRejectedUpdateIds.length > 0) {
+              cancellationEvents.push({
+                accountId,
+                workspaceId,
+                sessionId,
+                turnId: null,
+                turnGeneration: null,
+                turnAttemptId: null,
+                turnAssociation: null,
+                sequence: ++sequence,
+                type: "system.update.cancelled" as const,
+                payload: {
+                  updateIds: authorityRejectedUpdateIds,
+                  count: authorityRejectedUpdateIds.length,
+                  reason: "stale_execution_authority",
+                },
+                occurredAt,
+              });
+            }
             return {
               count: 0,
-              lastSequence: cancellationEvent ? nextSequence : nextSequence - 1,
+              lastSequence: sequence,
               triggerEventId: null,
               historyItemId: null,
               historyItem: null,
               updates: [],
-              events: cancellationEvent ? [cancellationEvent] : [],
+              events: cancellationEvents,
               event: null,
             };
           }
@@ -48285,6 +48850,25 @@ export async function claimSessionWorkForAttempt(
                 updateIds: cancelledUpdateIds,
                 count: cancelledUpdateIds.length,
                 reason: "stale_goal_continuation",
+              },
+              occurredAt,
+            });
+          }
+          if (authorityRejectedUpdateIds.length > 0) {
+            events.push({
+              accountId,
+              workspaceId,
+              sessionId,
+              turnId,
+              turnGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
+              sequence: ++sequence,
+              type: "system.update.cancelled",
+              payload: {
+                updateIds: authorityRejectedUpdateIds,
+                count: authorityRejectedUpdateIds.length,
+                reason: "stale_execution_authority",
               },
               occurredAt,
             });
@@ -49279,6 +49863,14 @@ export async function claimSessionWorkForAttempt(
             typeof goalPolicy?.sandboxBackend === "string"
               ? goalPolicy.sandboxBackend
               : (latestStarted?.sandboxBackend ?? session.sandboxBackend);
+          const scheduledTaskRunId = delivered.updates[0]?.scheduledTaskRunId ?? null;
+          const scheduledTaskCausalHuman = scheduledTaskRunId
+            ? await scheduledTaskRunCausalHumanInTransaction(tx as unknown as Database, {
+                accountId: session.accountId,
+                workspaceId,
+                runId: scheduledTaskRunId,
+              })
+            : null;
           let initiatingHumanSubjectId =
             internalInitiator.initiator.kind === "subject"
               ? internalInitiator.initiator.subjectId
@@ -49320,6 +49912,12 @@ export async function claimSessionWorkForAttempt(
               throw new Error("xAI system-update subject does not match turn provenance");
             }
             initiatingHumanSubjectId = internalXaiAuthority.subjectId;
+          }
+          if (scheduledTaskCausalHuman) {
+            if (initiatingHumanSubjectId && initiatingHumanSubjectId !== scheduledTaskCausalHuman) {
+              throw new Error("scheduled personal-resource subject does not match turn provenance");
+            }
+            initiatingHumanSubjectId = scheduledTaskCausalHuman;
           }
           await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
           const [internalTurn] = await tx
@@ -52051,6 +52649,7 @@ export type ApplySessionTurnSettlementResult =
   | {
       action: "settled";
       events: SessionEvent[];
+      canonicalStartupMilestones: CanonicalTurnStartupMilestoneReceipt[];
       recordingMutationApplied: boolean;
     }
   | {
@@ -52116,6 +52715,147 @@ function sessionEventPayloadRecord(
   return logicalPayload && typeof logicalPayload === "object" && !Array.isArray(logicalPayload)
     ? (logicalPayload as Record<string, unknown>)
     : {};
+}
+
+export type CanonicalTurnStartupMilestoneReceipt = {
+  milestone: "queue" | "provider_dispatch" | "first_byte";
+  outcome: "completed" | "failed";
+  eventId: string;
+  durationMs: number;
+};
+
+const TURN_STARTUP_CHECKPOINTS = [
+  { milestone: "queue", outcome: "completed" },
+  { milestone: "provider_dispatch", outcome: "completed" },
+  { milestone: "first_byte", outcome: "completed" },
+  { milestone: "first_byte", outcome: "failed" },
+] as const satisfies ReadonlyArray<
+  Pick<CanonicalTurnStartupMilestoneReceipt, "milestone" | "outcome">
+>;
+
+function startupCheckpointKey(
+  checkpoint: Pick<CanonicalTurnStartupMilestoneReceipt, "milestone" | "outcome">,
+): string {
+  return `${checkpoint.milestone}:${checkpoint.outcome}`;
+}
+
+function startupMilestoneForEvent(
+  event: Pick<
+    typeof schema.sessionEvents.$inferSelect,
+    "type" | "payload" | "payloadCodecVersion" | "turnAssociation"
+  >,
+): Pick<CanonicalTurnStartupMilestoneReceipt, "milestone" | "outcome"> | null {
+  if (event.turnAssociation !== "current") return null;
+  if (event.type === "turn.started") return { milestone: "queue", outcome: "completed" };
+  if (event.type !== "agent.model.request") return null;
+  const phase = sessionEventPayloadRecord(event.payload, event.payloadCodecVersion).phase;
+  if (phase === "started") return { milestone: "provider_dispatch", outcome: "completed" };
+  if (phase === "first_byte" || phase === "first_event") {
+    return { milestone: "first_byte", outcome: "completed" };
+  }
+  return phase === "completed" || phase === "failed" || phase === "timed_out"
+    ? { milestone: "first_byte", outcome: "failed" }
+    : null;
+}
+
+async function canonicalTurnStartupMilestonesForInsertedEvents(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    turnCreatedAt: Date;
+    inserted: Array<typeof schema.sessionEvents.$inferSelect>;
+  },
+): Promise<CanonicalTurnStartupMilestoneReceipt[]> {
+  const insertedIds = new Set(input.inserted.map((event) => event.id));
+  const insertedCheckpoints = new Set(
+    input.inserted.flatMap((event) => {
+      const candidate = startupMilestoneForEvent(event);
+      return candidate ? [startupCheckpointKey(candidate)] : [];
+    }),
+  );
+  const receipts: CanonicalTurnStartupMilestoneReceipt[] = [];
+  for (const checkpoint of TURN_STARTUP_CHECKPOINTS) {
+    const { milestone, outcome } = checkpoint;
+    if (!insertedCheckpoints.has(startupCheckpointKey(checkpoint))) continue;
+    const phaseCondition =
+      milestone === "provider_dispatch"
+        ? sql`${schema.sessionEvents.payload} ->> 'phase' = 'started'`
+        : milestone === "first_byte" && outcome === "completed"
+          ? sql`${schema.sessionEvents.payload} ->> 'phase' in ('first_byte', 'first_event')`
+          : milestone === "first_byte"
+            ? and(
+                sql`${schema.sessionEvents.payload} ->> 'phase' in ('completed', 'failed', 'timed_out')`,
+                sql`not exists (
+                  select 1
+                  from session_events prior
+                  where prior.workspace_id = ${schema.sessionEvents.workspaceId}
+                    and prior.session_id = ${schema.sessionEvents.sessionId}
+                    and prior.turn_id = ${schema.sessionEvents.turnId}
+                    and prior.turn_attempt_id = ${schema.sessionEvents.turnAttemptId}
+                    and prior.turn_association = 'current'
+                    and prior.type = 'agent.model.request'
+                    and prior.sequence < ${schema.sessionEvents.sequence}
+                    and (
+                      (${schema.sessionEvents.payload} ->> 'requestId') is null
+                      or (
+                        prior.payload ->> 'requestId' = ${schema.sessionEvents.payload} ->> 'requestId'
+                        and coalesce(prior.payload ->> 'transportAttempt', '') =
+                          coalesce(${schema.sessionEvents.payload} ->> 'transportAttempt', '')
+                      )
+                    )
+                    and prior.payload ->> 'phase' in ('first_byte', 'first_event')
+                )`,
+              )
+            : undefined;
+    const [canonical] = await tx
+      .select({
+        id: schema.sessionEvents.id,
+        type: schema.sessionEvents.type,
+        payload: schema.sessionEvents.payload,
+        payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+        turnAssociation: schema.sessionEvents.turnAssociation,
+        occurredAt: schema.sessionEvents.occurredAt,
+      })
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(schema.sessionEvents.turnId, input.turnId),
+          eq(schema.sessionEvents.turnAssociation, "current"),
+          eq(
+            schema.sessionEvents.type,
+            milestone === "queue" ? "turn.started" : "agent.model.request",
+          ),
+          phaseCondition,
+        ),
+      )
+      .orderBy(asc(schema.sessionEvents.sequence))
+      .limit(1);
+    // A durable event from an earlier transaction is already the canonical
+    // checkpoint. Only the transaction that first inserts that checkpoint may
+    // return a metric receipt, which makes ordinary recovery and callback
+    // replay no-ops. The consumer's in-memory Prometheus observation happens
+    // after COMMIT and remains explicitly at-most-once across a process crash.
+    if (!canonical || !insertedIds.has(canonical.id)) continue;
+    const canonicalCheckpoint = startupMilestoneForEvent(canonical);
+    if (
+      !canonicalCheckpoint ||
+      canonicalCheckpoint.milestone !== milestone ||
+      canonicalCheckpoint.outcome !== outcome
+    ) {
+      continue;
+    }
+    receipts.push({
+      milestone,
+      outcome,
+      eventId: canonical.id,
+      durationMs: Math.max(0, canonical.occurredAt.getTime() - input.turnCreatedAt.getTime()),
+    });
+  }
+  return receipts;
 }
 
 /**
@@ -52622,6 +53362,16 @@ export async function applySessionTurnSettlement(
               .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
               .returning()
           : [];
+      const canonicalStartupMilestones = await canonicalTurnStartupMilestonesForInsertedEvents(
+        tx as unknown as Database,
+        {
+          workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          turnCreatedAt: turn.createdAt,
+          inserted,
+        },
+      );
       const requestedEvents = inserted.filter(
         (event) => event.type === "session.humanInput.requested",
       );
@@ -52820,6 +53570,7 @@ export async function applySessionTurnSettlement(
       return {
         action: "settled" as const,
         events: [...closedTools.events, ...inserted.map(mapEvent)],
+        canonicalStartupMilestones,
         recordingMutationApplied,
       };
     });
@@ -55109,6 +55860,7 @@ export type AddSessionSystemUpdateInput = {
   lineage?: Record<string, unknown>;
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
+  scheduledTaskRunId?: string | null;
 } & SessionSystemUpdateInputVariant;
 
 export type AddSessionSystemUpdateResult =
@@ -55123,6 +55875,11 @@ export type AddSessionSystemUpdateResult =
       temporalWorkflowId: string | null;
       events: SessionEvent[];
     };
+
+export type PrepareSessionSystemUpdateSourceResult = {
+  /** Private, bounded, content-free source authority appended before insert. */
+  lineage?: Record<string, unknown>;
+};
 
 export async function addSessionSystemUpdate(
   db: Database,
@@ -55146,6 +55903,13 @@ export async function addSessionSystemUpdateWithSourceMutation(
     wakeEventId: string | null,
     updateId: string | null,
   ) => Promise<void>,
+  options: {
+    /** Runs under the locked session/source transaction before any update/event insert. */
+    prepareSource?: (
+      tx: Database,
+      sessionId: string,
+    ) => Promise<PrepareSessionSystemUpdateSourceResult | void>;
+  } = {},
 ): Promise<AddSessionSystemUpdateResult> {
   if (Buffer.byteLength(JSON.stringify(input.payload)) > MAX_INTERNAL_UPDATE_BYTES) {
     throw new Error(`Internal update payload exceeds ${MAX_INTERNAL_UPDATE_BYTES} bytes`);
@@ -55175,6 +55939,11 @@ export async function addSessionSystemUpdateWithSourceMutation(
           await mutateSource(tx as unknown as Database, null, null);
           return { added: false, reason: "session_cancelled" } as const;
         }
+        const prepared = await options.prepareSource?.(tx as unknown as Database, input.sessionId);
+        const lineage = {
+          ...(input.lineage ?? {}),
+          ...(prepared?.lineage ?? {}),
+        };
 
         const [inserted] = await tx
           .insert(schema.sessionSystemUpdates)
@@ -55191,11 +55960,12 @@ export async function addSessionSystemUpdateWithSourceMutation(
                   dedupeKey: input.dedupeKey,
                   summary: input.summary,
                   payload: input.payload,
-                  lineage: input.lineage ?? {},
+                  lineage,
                   personalConnectionDelegations: input.personalConnectionDelegations ?? [],
                   xaiProviderAccountAuthoritySnapshot:
                     input.xaiProviderAccountAuthoritySnapshot ??
                     WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                  scheduledTaskRunId: input.scheduledTaskRunId ?? null,
                   state: "pending",
                 },
                 "summary",
@@ -55930,8 +56700,14 @@ export async function appendSessionEventsForTurnAttempt(
   executionGeneration: number,
   attemptId: string,
   inputs: AppendEventInput[],
-): Promise<{ events: SessionEvent[]; accepted: boolean }> {
-  if (inputs.length === 0) return { events: [], accepted: true };
+): Promise<{
+  events: SessionEvent[];
+  accepted: boolean;
+  canonicalStartupMilestones: CanonicalTurnStartupMilestoneReceipt[];
+}> {
+  if (inputs.length === 0) {
+    return { events: [], accepted: true, canonicalStartupMilestones: [] };
+  }
   const result = await mutateAndAppendSessionEventsForTurnAttempt(
     db,
     workspaceId,
@@ -55942,7 +56718,11 @@ export async function appendSessionEventsForTurnAttempt(
     inputs,
     async () => true,
   );
-  return { events: result.events, accepted: result.accepted };
+  return {
+    events: result.events,
+    accepted: result.accepted,
+    canonicalStartupMilestones: result.canonicalStartupMilestones,
+  };
 }
 
 /**
@@ -55963,6 +56743,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
   events: SessionEvent[];
   accepted: boolean;
   mutationApplied: boolean;
+  canonicalStartupMilestones: CanonicalTurnStartupMilestoneReceipt[];
 }> {
   if (inputs.length === 0) {
     throw new Error("Atomic attempt mutation requires a timeline projection event");
@@ -55986,7 +56767,12 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
           async (tx) => {
             const mutationApplied = await mutate(tx);
             if (!mutationApplied) {
-              return { events: [], accepted: false, mutationApplied: false };
+              return {
+                events: [],
+                accepted: false,
+                mutationApplied: false,
+                canonicalStartupMilestones: [],
+              };
             }
             const fence = await lockTurnAttemptWriteFenceTx(tx, {
               workspaceId,
@@ -56114,6 +56900,15 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
               .insert(schema.sessionEvents)
               .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
               .returning();
+            const canonicalStartupMilestones = fence.allowed
+              ? await canonicalTurnStartupMilestonesForInsertedEvents(tx as unknown as Database, {
+                  workspaceId,
+                  sessionId,
+                  turnId,
+                  turnCreatedAt: fence.turn!.createdAt,
+                  inserted,
+                })
+              : [];
             if (fence.allowed) {
               await projectSessionRealtimeDelegationProgressInTransaction(
                 tx as unknown as Database,
@@ -56148,6 +56943,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
               events: inserted.map(mapEvent),
               accepted: fence.allowed,
               mutationApplied: true,
+              canonicalStartupMilestones,
             };
           },
         ),
@@ -56962,6 +57758,8 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
       row.personalConnectionDelegations,
       `scheduled_tasks:${row.workspaceId}:${row.id}`,
     ).map(({ serverId, providerDomain }) => ({ serverId, providerDomain })),
+    authorityRevision: row.authorityRevision,
+    executionDigest: row.executionDigest,
     reusableSessionId: existingSessionTarget ? null : row.reusableSessionId,
     targetSessionId: existingSessionTarget ? row.reusableSessionId : null,
     variableSetId: row.variableSetId,
@@ -56979,6 +57777,8 @@ function mapScheduledTaskRun(row: typeof schema.scheduledTaskRuns.$inferSelect):
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     taskId: row.taskId,
+    taskAuthorityRevision: row.taskAuthorityRevision,
+    taskExecutionDigest: row.taskExecutionDigest,
     status: row.status as ScheduledTaskRunStatus,
     triggerType: row.triggerType as ScheduledTaskTriggerType,
     scheduledAt: row.scheduledAt ? row.scheduledAt.toISOString() : null,

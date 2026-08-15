@@ -253,6 +253,62 @@ describe("SuperGrok subscription fetch", () => {
     expect(text).toContain("response.completed");
   });
 
+  test("keeps reading when the first SSE event spans multiple upstream chunks", async () => {
+    const encoder = new TextEncoder();
+    const payload = encoder.encode(
+      `data: ${JSON.stringify({
+        type: "response.created",
+        response: {
+          id: "response-fragmented",
+          status: "in_progress",
+          instructions: "x".repeat(15_000),
+        },
+      })}\n\n` +
+        `data: ${JSON.stringify({
+          type: "response.completed",
+          response: { id: "response-fragmented", output: [], usage: {} },
+        })}\n\n`,
+    );
+    const boundaries = [6_839, 8_186, 12_287, payload.byteLength];
+    const chunks = boundaries.map((end, index) => payload.slice(boundaries[index - 1] ?? 0, end));
+    let index = 0;
+    const wrapped = xaiSubscriptionFetch(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              const chunk = chunks[index++];
+              if (chunk) {
+                controller.enqueue(chunk);
+                return;
+              }
+              controller.close();
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const response = await xaiSubscriptionRequestStorage.run(
+      {
+        clientVersion: "1.0.1",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        getToken: async () => ({ accessToken: "access", userId: "user-1" }),
+        refresh: async () => ({ accessToken: "fresh", userId: "user-1" }),
+        resolveModel: (slug) => slug,
+        streamIdleTimeoutMs: 50,
+      },
+      async () =>
+        await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "supergrok/grok-4.6", input: "hello" }),
+        }),
+    );
+    const text = await response.text();
+    expect(text).toContain("response.created");
+    expect(text).toContain("response.completed");
+  });
+
   test("closes a terminal SSE response even if the upstream socket stays open", async () => {
     const wrapped = xaiSubscriptionFetch(
       async () =>

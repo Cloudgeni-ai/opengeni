@@ -13,7 +13,7 @@ describe("managed browser profile cryptography", () => {
     expect(browserProfileCryptoPolicy("darwin")).toBe("chromium_mock_keychain");
     expect(browserProfileCryptoPolicy("win32")).toBe("platform_bound");
     expect(browserLaunchArguments("linux")).toBe(
-      "--restore-last-session,--disable-background-timer-throttling,--disable-renderer-backgrounding,--password-store=basic",
+      "--restore-last-session,--disable-background-timer-throttling,--disable-renderer-backgrounding,--test-type,--password-store=basic",
     );
     expect(browserLaunchArguments("darwin")).toBe(
       "--restore-last-session,--disable-background-timer-throttling,--disable-renderer-backgrounding,--use-mock-keychain",

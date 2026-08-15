@@ -180,45 +180,102 @@ answers `ping` and publishes heartbeats outside command execution. Production
 admission has no ordinary fixed concurrency or queue-wait limit: its only
 circuit breakers are derived from host file-descriptor and process headroom and
 sit above normal workloads (including 100 concurrent command requests). Linux
-puts the supervisor and each operation in separate cgroup-v2 leaves for accounting
-and systemd-oomd selection. Before moving itself, the supervisor stamps its own leaf
-with systemd-oomd's `user.oomd_avoid=1` marker; if that preference cannot be
-established, it stays in the unit cgroup. systemd-oomd honors the marker only when
+puts the supervisor and each operation in separate cgroup-v2 memory-accounting
+leaves for lifecycle ownership and systemd-oomd selection. Startup enables only
+the memory controller: CPU stays ambient until an explicit quota needs it, while
+I/O and PID controllers remain untouched. The generated unit also sets
+`DelegateSubgroup=supervisor`, so systemd starts every supervisor generation in
+that stable leaf and can restart it after the empty service root has delegated
+controllers to operation siblings. Startup verifies this topology and reports the
+exact delegated controller subset it could use. A custom or older unit without
+the supervisor subgroup degrades explicitly to ambient unrestricted execution,
+preserving crash restart; configured operation policy fails closed on that incapable
+runner. The supervisor stamps its leaf with systemd-oomd's `user.oomd_avoid=1`
+marker. systemd-oomd honors the marker only when
 the monitored ancestor and candidate cgroup have the same owner, so host policy
 must preserve that ownership relationship. Cgroup placement alone does not change
 host-wide kernel OOM victim selection: the generated service requests a negative
 supervisor `OOMScoreAdjust`, startup reports the effective `/proc` value because an
-unprivileged user manager may clamp it, and a pre-exec hook raises commands to
-`+500` before user code can fork descendants. Work delegated over a socket to an
+unprivileged user manager may clamp it. A pre-exec hook gives commands the smallest
+valid higher OOM-score bias over the live supervisor: neutral `0` when the
+supervisor is negative, otherwise supervisor + 1. If the supervisor is already at
+the kernel maximum, no relative preference is representable and both remain 1000.
+Work delegated over a socket to an
 external privileged daemon (for example, a container build) is not a descendant
 of the command: the daemon chooses that workload's cgroup and OOM score. Operators
 must configure such delegated workloads so they are not more protected from
-global OOM selection than the supervisor. The generated systemd
-unit explicitly clears stale aggregate resource limits and enables accounting
-without a parent `MemoryHigh`; the default operation leaf has no memory maximum or
-throttle. Each operation leaf sets `memory.oom.group=1`, so a memcg OOM terminates
+global OOM selection than the supervisor. The generated fragment requests an
+unlimited service aggregate, but admin drop-ins and ancestor limits still win; the
+installer never resets them with runtime `set-property`. A verified self-update
+migrates only the byte-identical old generated unit after proving its live MainPID,
+canonical fragment, and exact ExecStart, and only on systemd 254+. Custom units are
+left untouched with an actionable diagnostic. The default operation leaf has no
+memory maximum or throttle. Each leaf sets `memory.oom.group=1`, so a memcg OOM terminates
 the complete operation instead of leaving sibling descendants with partial state.
-At spawn, the agent stops the command's process group, moves its direct
-roots, then repeatedly drains any same-group descendants still inherited in the
-supervisor leaf into the same operation leaf before resuming it. Correctness does
-not depend on synchronous stop-signal delivery: after a parent moves, future
-process descendants inherit its operation leaf. Daemon-mediated work remains
-subject to the external-daemon boundary above. This closes the post-spawn fork race. A
-same-group fork storm that keeps creating escaped descendants during this tiny
-pre-containment window is terminated only after crossing a PID breaker derived
-from that machine's process ceiling; it cannot wedge command admission forever.
-Commands therefore have the same machine resources and authority as commands
-launched by an unrestricted local agent; the OS scheduler owns contention,
-while a pathological breaker trip is loud and typed.
+Before user code executes, the agent creates the operation leaf, applies any
+explicit policy, pre-opens `cgroup.procs`, and uses an async-signal-safe pre-exec
+hook to migrate each direct process into that leaf. Linux cgroup inheritance then
+puts even an immediate `setsid` or double-fork descendant in the operation leaf.
+After spawn, the agent verifies both direct roots. Once the manager exists, any
+leaf creation, policy, pre-open, pre-exec placement, or live-root verification
+failure aborts the operation and recursively kills its cgroup; there is no racy
+post-spawn fork repair. Daemon-mediated work remains
+subject to the external-daemon boundary above. Commands therefore keep the same
+machine resources and authority as commands launched by an unrestricted local
+agent; the OS scheduler owns contention, while a containment degradation is loud.
+Normal completion, cancellation, timeout, and task abandonment all converge on the
+same cleanup: the process group is killed and reaped, then the runner removes its
+operation leaf. A teardown that races final descendant release waits for the
+kernel's `cgroup.events` `populated 0` notification; it does not retain an empty
+operation cgroup until service restart.
 
-Operators can opt into local per-operation limits with
-`OPENGENI_AGENT_OP_MEMORY_MAX` and `OPENGENI_AGENT_OP_MEMORY_HIGH`; unset is the
-authoritative unlimited default. This policy is intentionally local today: one
-physical installation may serve unrelated deployments, so a workspace must not
-silently impose a machine-global cap on the others. Any future control-plane
-setting must either be connection-scoped or owned explicitly by the machine
-operator, remain `unlimited` by default, and never constrain the supervisor leaf
-or install an implicit service-wide `MemoryHigh`.
+Workspace operators can opt into a per-enrollment command policy from the
+machine detail view or the revision-fenced SDK call:
+
+```ts
+await client.updateMachineOperationPolicy(workspaceId, enrollmentId, {
+  memoryMaxBytes: 1_073_741_824,
+  memoryHighBytes: 805_306_368,
+  cpuMaxMillicores: 1_500,
+  expectedRevision: machine.operationPolicy.revision,
+});
+```
+
+All three limits default to `null` (unrestricted). CPU is exact positive uint32
+millicores (`1000` = one CPU core). On update, omitting `cpuMaxMillicores`
+preserves its current value for older clients, `null` clears it, and a positive
+value sets it. Limits apply separately to each newly admitted exec or Git
+operation leaf; they are not an enrollment-wide aggregate, so N concurrent 1 GiB
+commands may use N GiB. An already-admitted command keeps its immutable policy.
+Each new command reads policy revision, enforcement capabilities, and exact live
+connection identity from one authoritative snapshot, even inside a cached or
+pinned multi-day turn. PTY, desktop, browser, computer-use, and filesystem-only
+operations do not perform that read and remain unchanged. Memory enforcement and
+CPU-quota enforcement are separately advertised; a configured unsupported limit
+fails command admission closed, while saving or clearing policy remains available
+for preconfiguration.
+
+The machine owner may also set a process-local ceiling with
+`OPENGENI_AGENT_OP_MEMORY_MAX`, `OPENGENI_AGENT_OP_MEMORY_HIGH`, and
+`OPENGENI_AGENT_OP_CPU_MAX_MILLICORES`. Unset (or zero for these local environment
+variables) is unrestricted. API values use `null` for unrestricted and reject
+zero. Connection, local, and ancestor policies compose by taking the tightest
+value, so a workspace can never loosen a machine-owner or OS limit. Malformed
+values, `memory.high` above an explicit `memory.max`, an unavailable delegated
+controller, or a failed per-operation policy write fail clearly instead of
+silently running the workload without the requested policy.
+CPU is an exact positive integer-millicore ratio. The
+runner preserves the inherited `cpu.max` period when exact; otherwise it minimally
+lengthens the reduced ratio to satisfy the kernel's 1 ms minimum quota and 1 s
+maximum period, so every accepted `uint32` value is representable without rounding.
+It leases `+cpu` while limited leaves exist and removes it after the final limited
+leaf is killed, empty, and removed. During that lease, the supervisor and all op
+siblings temporarily participate in hierarchical CPU scheduling; each limited
+leaf still has its own hard quota. For an explicit policy, the runner reads kernel
+files back and reports desired/local/leaf/ancestor/combined bounds. Ancestor memory
+values are shared aggregate upper bounds, not promised per-command availability
+under sibling contention; unknown or unobservable effects remain explicit rather
+than being presented as the requested number.
 
 Exec duration is unbounded by default. `timeout_ms=0` and op-stream
 `deadline_ms=0` schedule no process kill; a positive
@@ -307,12 +364,13 @@ workspace—even on a different OpenGeni deployment—adds an independent link a
 preserves all existing links. There are two enrollment paths. Both require the
 caller to hold `enrollments:manage`.
 
-The universal Machines-page one-liner securely installs or updates the binary,
-runs `opengeni-agent connect` for that deployment, and leaves the ordinary
-background service online. A same-version connection is additive and does not
-restart the process or interrupt existing commands. A real upgrade restarts once;
-subsequent connection files load live. `opengeni-agent run` is the explicit
-foreground alternative.
+The universal Machines-page one-liner securely installs or updates the runner
+installation, including a generated background-service definition when the
+release requires it, runs `opengeni-agent connect` for that deployment, and leaves
+the ordinary background service online. A same-version connection is additive and
+does not restart the process or interrupt existing commands. A real upgrade
+restarts once when activation requires it; subsequent connection files load live.
+`opengeni-agent run` is the explicit foreground alternative.
 
 Because the binary is shared, the current installer refuses to replace a newer
 installed agent with an older verified release from a lagging deployment. Set

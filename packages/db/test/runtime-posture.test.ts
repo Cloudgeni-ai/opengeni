@@ -194,6 +194,14 @@ function safePosture(): RuntimeDatabasePosture {
         update: false,
         delete: false,
       },
+      {
+        name: "scheduled_personal_resource_capabilities",
+        owner: "opengeni_migrator",
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+      },
     ],
     targetRoutines: RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
       name,
@@ -219,6 +227,13 @@ function safePosture(): RuntimeDatabasePosture {
         publicExecute: false,
         securityDefiner: true,
       },
+      {
+        name: "scheduled_personal_resource_capability_active(text)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
     ],
   };
 }
@@ -239,6 +254,11 @@ describe("runtime database posture evaluator", () => {
         .sort();
       const personalResourceProtectedTableCount = [
         "personal_resource_once_consumption_receipts",
+        "scheduled_task_personal_resource_authorities",
+        "scheduled_task_personal_resource_snapshots",
+        "scheduled_task_run_personal_resource_admissions",
+        "scheduled_task_run_personal_resource_once_receipts",
+        "scheduled_task_run_personal_resource_snapshots",
         "session_attempt_personal_resource_admissions",
         "session_attempt_personal_resource_snapshots",
       ].filter(

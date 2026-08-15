@@ -2199,6 +2199,55 @@ export type ScheduledTaskScheduleSpec =
       daysOfWeek?: ScheduledTaskDayOfWeek[] | undefined;
     };
 
+export type IncidentTelemetrySeriesMetadata = {
+  metric: string;
+  labels: string[];
+};
+
+export type IncidentTelemetryDataRoute =
+  | { kind: "mcp"; serverId: string }
+  | { kind: "first_party"; tool: FirstPartyMcpToolName }
+  | { kind: "variable_set"; variableSetName: string; variableNames: string[] }
+  | { kind: "rig_credential_hook"; credentialHookId: string };
+
+export type IncidentTelemetryPreflight = {
+  requiredResources: ResourceRef[];
+  requiredMcpServerIds: string[];
+  requiredFirstPartyMcpTools: FirstPartyMcpToolName[];
+  requiredFirstPartyMcpPermissions: Permission[];
+  requiredRig: { name: string; credentialHookIds: string[] } | null;
+  requiredVariableSetNames: string[];
+  requiredVariableNames: string[];
+  dataSource: {
+    kind: "prometheus";
+    queryPath: "/api/v1/query" | "/api/v1/query_range";
+    workspaceLabel: string;
+    alertSelectorLabels: string[];
+    route: IncidentTelemetryDataRoute;
+    requiredSeries: IncidentTelemetrySeriesMetadata[];
+    availableSeries: IncidentTelemetrySeriesMetadata[];
+  };
+};
+
+export type IncidentTelemetryPreflightInput = Omit<
+  IncidentTelemetryPreflight,
+  | "requiredResources"
+  | "requiredMcpServerIds"
+  | "requiredFirstPartyMcpTools"
+  | "requiredFirstPartyMcpPermissions"
+  | "requiredRig"
+  | "requiredVariableSetNames"
+  | "requiredVariableNames"
+> & {
+  requiredResources?: ResourceRef[] | undefined;
+  requiredMcpServerIds?: string[] | undefined;
+  requiredFirstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
+  requiredFirstPartyMcpPermissions?: Permission[] | undefined;
+  requiredRig?: { name: string; credentialHookIds?: string[] | undefined } | null | undefined;
+  requiredVariableSetNames?: string[] | undefined;
+  requiredVariableNames?: string[] | undefined;
+};
+
 export type ScheduledTaskAgentConfig = {
   prompt: string;
   resources: ResourceRef[];
@@ -2209,6 +2258,8 @@ export type ScheduledTaskAgentConfig = {
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   goal?: GoalSpec | undefined;
+  executionClass?: "incident_telemetry" | undefined;
+  incidentTelemetryPreflight?: IncidentTelemetryPreflight | undefined;
   maxNestedAgentDepth?: number | undefined;
 };
 
@@ -2265,6 +2316,8 @@ export type ScheduledTask = {
   createdBy?: TurnInitiator | undefined;
   createdByContext?: TurnInitiatorContext | undefined;
   personalConnections?: McpPersonalConnectionSummary[] | undefined;
+  authorityRevision: number;
+  executionDigest: string;
   targetSessionId: string | null;
   reusableSessionId: string | null;
   variableSetId: string | null;
@@ -3016,7 +3069,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-model-context-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-machine-resource-policy-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -3783,6 +3836,8 @@ export type ScheduledTaskAgentConfigInput = {
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   goal?: GoalSpec | undefined;
+  executionClass?: "incident_telemetry" | undefined;
+  incidentTelemetryPreflight?: IncidentTelemetryPreflightInput | undefined;
   maxNestedAgentDepth?: number | undefined;
 };
 
@@ -3883,6 +3938,8 @@ export type ScheduledTaskRun = {
   accountId: string;
   workspaceId: string;
   taskId: string;
+  taskAuthorityRevision: number | null;
+  taskExecutionDigest: string | null;
   status: ScheduledTaskRunStatus;
   triggerType: ScheduledTaskTriggerType;
   scheduledAt: string | null;
@@ -6151,6 +6208,8 @@ export type MachineRuntimeCapabilities = {
   desktop: boolean;
   opStream: boolean;
   browserBridge: boolean;
+  operationResourcePolicy: boolean;
+  operationCpuQuota: boolean;
 };
 
 export type MachineUpdateStatus =
@@ -6193,6 +6252,22 @@ export type UpdateMachineAgentResponse = {
   targetVersion: string;
 };
 
+export type MachineOperationPolicy = {
+  memoryMaxBytes: number | null;
+  memoryHighBytes: number | null;
+  cpuMaxMillicores: number | null;
+  revision: number;
+  updatedAt: string | null;
+};
+
+export type UpdateMachineOperationPolicyRequest = {
+  memoryMaxBytes: number | null;
+  memoryHighBytes: number | null;
+  /** Omitted preserves the current CPU limit for older/partial clients; null clears. */
+  cpuMaxMillicores?: number | null;
+  expectedRevision: number;
+};
+
 /** A machine as the Machines dashboard renders it (an enrolled selfhosted machine
  *  or the session's synthetic Modal group box, `isSessionGroup: true`). */
 export type MachineView = {
@@ -6221,6 +6296,9 @@ export type MachineView = {
   /** Exact build/update truth. Null means the runner predates runtime Hello
    * reporting or this is a managed-session group without a connected agent. */
   runtime: MachineRuntime | null;
+  /** Explicit per-enrollment command memory policy. Null only for managed
+   * session boxes; null limits on a real machine mean unrestricted. */
+  operationPolicy: MachineOperationPolicy | null;
   metrics: MetricSample | null;
 };
 

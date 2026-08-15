@@ -10,6 +10,9 @@ import {
   UserResourceAuthorityProjection,
   UserResourceDelegation,
   UserResourceGrantProjection,
+  IssueUserResourceGrantRequest,
+  ListUserResourceAuthoritiesQuery,
+  ListUserResourceAuthoritiesResponse,
 } from "../src";
 
 const ids = {
@@ -23,6 +26,53 @@ const ids = {
 };
 
 describe("organization tenancy foundation contracts", () => {
+  test("requires explicit user scope and durable shared-output acknowledgement", () => {
+    expect(ListUserResourceAuthoritiesQuery.safeParse({}).success).toBe(false);
+    expect(ListUserResourceAuthoritiesQuery.parse({ scope: "user" })).toEqual({ scope: "user" });
+    expect(
+      IssueUserResourceGrantRequest.parse({
+        scope: "user",
+        action: "rig.use",
+        mode: "always",
+        context: "workspace_shared",
+        workspaceSharedAcknowledged: true,
+      }),
+    ).toMatchObject({ scope: "user", workspaceSharedAcknowledged: true });
+  });
+
+  test("keeps lifecycle lists opaque", () => {
+    const result = ListUserResourceAuthoritiesResponse.parse({
+      scope: "user",
+      authorities: [
+        {
+          authorityId: ids.authority,
+          resourceKind: "rig",
+          generation: 1,
+          status: "active",
+          ownerSubjectId: "must-not-survive",
+          grants: [
+            {
+              grantId: ids.grant,
+              targetWorkspaceId: ids.workspace,
+              targetSessionId: null,
+              action: "rig.use",
+              mode: "always",
+              context: "user_private",
+              generation: 1,
+              status: "active",
+              expiresAt: null,
+              membershipId: ids.membership,
+              secret: "must-not-survive",
+            },
+          ],
+        },
+      ],
+    });
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("ownerSubjectId");
+    expect(serialized).not.toContain("membershipId");
+    expect(serialized).not.toContain("secret");
+  });
   test("names organization/workspace/user scopes without widening legacy omission", () => {
     expect(ResourceAuthorityScope.options).toEqual(["organization", "workspace", "user"]);
     expect(ResourceAuthorityListScope.options).toEqual([

@@ -30,6 +30,31 @@ receives no direct table DML. Privileged migration/operator connections can
 inspect the scaffold. No API, SDK, worker, MCP, UI, or resource DAO uses it in
 Slice A.
 
+## Common owner grant lifecycle
+
+Migration `0253_common_user_resource_authority_lifecycle.sql` activates the
+generic lifecycle only for already-existing active user-resource authorities.
+Authenticated humans must request the new surfaces with explicit `scope=user`;
+legacy omitted scope remains workspace-scoped. The server derives the active
+organization membership from the authenticated subject and never accepts an
+owner subject or membership identifier from the caller. Lists expose only
+opaque authority/grant identifiers and lifecycle fences, never owner identity,
+membership, or secret material.
+
+Issuance is idempotent for the exact active once/session/always grant identity.
+Session and authority-epoch fences come from the current target session; the
+target workspace must belong to the same organization and remain accessible to
+the owner. `workspace_shared` requires an explicit durable shared-output
+acknowledgement. Revocation is immediate and advances grant generation.
+
+For direct and scheduled personal Variable Set/Rig use, personal-workspace and
+origin-workspace columns are provenance/lifecycle facts only. Authorization is
+the active server-derived owner organization membership, same organization,
+current target-workspace access, and exact live authority/resource/grant,
+session visibility, authority epoch, generation, status, and interruption
+fences. Direct turns re-run the corrected resolver before any Rig or Variable
+Set read; sessions without personal resources take a no-op path.
+
 ## Slice B: managed-human lifecycle provisioning and first runtime projection
 
 Migration `0219_organization_tenancy_managed_human_provisioning.sql` adds the

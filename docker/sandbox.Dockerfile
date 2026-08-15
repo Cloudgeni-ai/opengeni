@@ -280,7 +280,7 @@ RUN set -eux; \
     terraform version
 
 RUN set -eux; \
-    curl -fsSL https://aka.ms/InstallAzureCLIDeb | bash; \
+    curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL https://aka.ms/InstallAzureCLIDeb | bash; \
     az version
 
 RUN set -eux; \

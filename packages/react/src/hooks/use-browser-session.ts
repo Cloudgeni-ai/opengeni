@@ -18,8 +18,6 @@ import {
 } from "../session-context";
 import { usePageLiveActivity } from "./internal";
 
-const HUMAN_BROWSER_ACTION_TIMEOUT_MS = 8_000;
-
 export type UseBrowserSessionOptions = EmbeddedBrowserInteractionClientOverride & {
   browserSessionId: string | null;
   enabled?: boolean | undefined;
@@ -412,20 +410,13 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
       if (!fence) {
         throw new Error("The browser page is not ready for input.");
       }
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), HUMAN_BROWSER_ACTION_TIMEOUT_MS);
       try {
-        const receipt = await client.actInBrowser(
-          workspaceId,
-          browserSessionId,
-          {
-            operationId,
-            ...fence,
-            observationMode: "none",
-            action,
-          },
-          { signal: controller.signal },
-        );
+        const receipt = await client.actInBrowser(workspaceId, browserSessionId, {
+          operationId,
+          ...fence,
+          observationMode: "none",
+          action,
+        });
         if (receipt.observation) {
           observationRef.current = {
             browserSessionId,
@@ -443,21 +434,14 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
         }
         return receipt;
       } catch (cause) {
-        const error = controller.signal.aborted
-          ? new Error("Browser input timed out. The page was refreshed; try again.")
-          : cause instanceof Error
-            ? cause
-            : new Error(String(cause));
+        const error = cause instanceof Error ? cause : new Error(String(cause));
         setState((current) =>
           current.browserSessionId === browserSessionId ? { ...current, error } : current,
         );
-        void refresh();
         throw error;
-      } finally {
-        clearTimeout(timeout);
       }
     },
-    [browserSessionId, client, refresh, workspaceId],
+    [browserSessionId, client, workspaceId],
   );
 
   const act = useCallback(

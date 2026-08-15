@@ -120,6 +120,7 @@ import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
+import { registerUserResourceAuthorityRoutes } from "./routes/user-resource-authorities";
 import { projectClientModel } from "./model-catalog";
 import { createTranscriptionService } from "./transcription/service";
 import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
@@ -706,6 +707,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerVideoGenerationRoutes(app, routeDeps);
   registerCanonicalHumanIdentityRoutes(app, routeDeps);
   registerOrganizationMembershipRoutes(app, routeDeps);
+  registerUserResourceAuthorityRoutes(app, routeDeps);
   registerSlackInteractionRoutes(app, routeDeps);
 
   app.notFound((c) => {
@@ -1780,6 +1782,14 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/machines\/[^/]+\/metrics\/series$/,
     label: "/v1/workspaces/:workspaceId/machines/:enrollmentId/metrics/series",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/machines\/[^/]+\/operation-policy$/,
+    label: "/v1/workspaces/:workspaceId/machines/:enrollmentId/operation-policy",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/machines\/[^/]+\/update$/,
+    label: "/v1/workspaces/:workspaceId/machines/:enrollmentId/update",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/machines$/,

@@ -37,6 +37,7 @@ import {
   type NatsRequestConnection,
   type SelfhostedRelayConfig,
   type SelfhostedOpStreamDeps,
+  type SelfhostedOperationResourcePolicy,
 } from "@opengeni/runtime/sandbox";
 import { relayConfigFromSettings } from "./routing";
 
@@ -591,6 +592,9 @@ export type RunOnSelfhostedMachine = {
   execTimeoutMs: number;
   /** Streaming transport required when execTimeoutMs is 0 (unbounded). */
   opStream?: SelfhostedOpStreamDeps;
+  operationResourcePolicy?: SelfhostedOperationResourcePolicy;
+  operationResourcePolicySupported?: boolean;
+  operationCpuQuotaSupported?: boolean;
   /**
    * Exact-attempt values for this one child process. Never persisted on the
    * enrollment or machine. The caller may supply these only after authenticating
@@ -624,6 +628,15 @@ export async function executeRunOnSelfhostedMachine(
     relay: machine.relay,
     timeoutMs: machine.controlTimeoutMs,
     execTimeoutMs: machine.execTimeoutMs,
+    ...(machine.operationResourcePolicy !== undefined
+      ? { operationResourcePolicy: machine.operationResourcePolicy }
+      : {}),
+    ...(machine.operationResourcePolicySupported !== undefined
+      ? { operationResourcePolicySupported: machine.operationResourcePolicySupported }
+      : {}),
+    ...(machine.operationCpuQuotaSupported !== undefined
+      ? { operationCpuQuotaSupported: machine.operationCpuQuotaSupported }
+      : {}),
     ...(machine.transientExecEnvironment !== undefined
       ? { transientExecEnvironment: () => machine.transientExecEnvironment! }
       : {}),
@@ -741,6 +754,10 @@ export async function runOnSandbox(
       relay: relayConfigFromSettings(services.settings),
       controlTimeoutMs: services.settings.sandboxSelfhostedControlTimeoutMs,
       execTimeoutMs: services.settings.sandboxSelfhostedExecTimeoutMs,
+      operationResourcePolicy: enrollment.operationPolicy,
+      operationResourcePolicySupported:
+        enrollment.agentCapabilities.operationResourcePolicy === true,
+      operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
       ...(options.transientExecEnvironment !== undefined
         ? { transientExecEnvironment: options.transientExecEnvironment }
         : {}),

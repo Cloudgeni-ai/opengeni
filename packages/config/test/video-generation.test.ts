@@ -3,7 +3,7 @@ import { calculateVideoGenerationCreditCostMicros, getSettings } from "../src";
 
 describe("video generation settings", () => {
   test("has bounded production-safe defaults", () => {
-    const settings = getSettings({});
+    const settings = withEnv({}, getSettings);
     expect(settings.videoGenerationPollIntervalMs).toBe(5_000);
     expect(settings.videoGenerationRecoveryDeadlineMs).toBe(2 * 60 * 60_000);
     expect(settings.videoGenerationReferenceUrlTtlSeconds).toBe(3_600);
@@ -34,7 +34,7 @@ describe("video generation settings", () => {
 
 function withEnv<T>(env: NodeJS.ProcessEnv, run: () => T): T {
   const original = process.env;
-  process.env = { ...original, ...env };
+  process.env = { ...env };
   try {
     return run();
   } finally {

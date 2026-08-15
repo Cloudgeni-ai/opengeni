@@ -234,6 +234,8 @@ import type {
   MachineMetricsSeriesResponse,
   RemoveEnrollmentRequest,
   RemoveEnrollmentResponse,
+  MachineOperationPolicy,
+  UpdateMachineOperationPolicyRequest,
   UpdateMachineAgentResponse,
   // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).
   SwapActiveSandboxRequest,
@@ -1209,6 +1211,20 @@ export class OpenGeniClient {
     return await this.requestJson<UpdateMachineAgentResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/update`,
+    );
+  }
+
+  /** Revision-fenced update of a Connected Machine's optional command memory
+   * policy. Null byte limits preserve unrestricted machine access. */
+  async updateMachineOperationPolicy(
+    workspaceId: string,
+    enrollmentId: string,
+    request: UpdateMachineOperationPolicyRequest,
+  ): Promise<MachineOperationPolicy> {
+    return await this.requestJson<MachineOperationPolicy>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/operation-policy`,
+      request,
     );
   }
 

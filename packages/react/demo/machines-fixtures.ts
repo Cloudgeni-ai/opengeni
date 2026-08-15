@@ -76,6 +76,7 @@ function machine(
     runtime: null,
     metrics: idleMetrics,
     ...overrides,
+    operationPolicy: overrides.operationPolicy ?? null,
   };
 }
 

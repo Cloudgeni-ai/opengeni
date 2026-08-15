@@ -38,6 +38,10 @@
       "types": "./src/connector-destinations.ts",
       "default": "./src/connector-destinations.ts"
     },
+    "./connector-attachments": {
+      "types": "./src/connector-attachments.ts",
+      "default": "./src/connector-attachments.ts"
+    },
     "./video-generation": {
       "types": "./src/video-generation.ts",
       "default": "./src/video-generation.ts"

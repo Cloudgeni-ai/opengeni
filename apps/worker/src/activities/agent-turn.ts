@@ -87,6 +87,7 @@ import {
   SandboxLeaseSupersededError,
   SandboxLeaseTransitionError,
   SandboxImageConflictError,
+  SandboxRigConflictError,
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
   isRetryableDatabaseTransportFailure,
@@ -102,6 +103,7 @@ import {
   completeConnectorActionExecution,
   prepareConnectorActionApproval,
   withCodexAppsRequestAuthorization,
+  resolveSessionAttemptPersonalResources,
   type AppendEventInput,
   type ActiveSandboxPointer,
   type SandboxRecord,
@@ -109,6 +111,7 @@ import {
   type CodexCredentialLeaseSelectionContext,
   type ApplySessionTurnSettlementInput,
   type ApiIntegrationRuntime,
+  type CanonicalTurnStartupMilestoneReceipt,
   type SessionAttemptQuiescenceCommit,
   type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
@@ -158,7 +161,17 @@ import {
   isMcpTransportConnectivityError,
   runOwnedSandboxSetup,
   RoutingMutationOutcomeUnknownError,
+  SandboxConfigError,
+  SandboxExactResumeInstanceUnavailableError,
+  SandboxExactResumeReplacedError,
+  SandboxExecReadinessError,
+  SandboxProviderContinuityUnavailableError,
+  SandboxProviderUnavailableError,
+  SandboxResumeIdentityMismatchError,
+  SandboxResumeIdentityUnavailableError,
+  SandboxResumeStateUnavailableError,
   WorkspaceArchiveIntegrityError,
+  classifyProviderSandboxFailure,
   sdkBackendIdForSandboxBackend,
   swapTargetEstablishability,
   type SandboxFileDownload,
@@ -180,6 +193,7 @@ import {
   type NormalizedRunCredentialMaterial,
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
+  type ConnectorAttachmentMaterializationRequest,
   createFirstPartyInteractionAttemptToolDefinitions,
   deleteRecordingArtifacts,
   stopRecording as stopRecordingOnBox,
@@ -192,6 +206,7 @@ import {
 } from "./google-drive-publication";
 import { connectionTokenResolverForTurn } from "./mcp-credentials";
 import { buildApiIntegrationServersForTurn } from "./api-integrations";
+import { materializeConnectorAttachmentsInChannel } from "./connector-attachments";
 import {
   allowedFirstPartyMcpToolsForSession,
   assertTurnExecutionPolicyMatchesConfigV1,
@@ -225,6 +240,7 @@ import {
   settingsWithWorkspaceGatewayCredential,
   withXaiSubscriptionProvider,
 } from "./capabilities";
+import { validateIncidentTelemetrySystemUpdateAuthority } from "./incident-telemetry-authority";
 import {
   CODEX_USAGE_EXHAUSTED_PCT,
   authoritativeCodexCapacityResetAt,
@@ -372,6 +388,8 @@ import {
   sandboxLeaseHolderIdForAttempt,
   maybePersistWarmWorkspaceSnapshot,
   waitForWarmSnapshot,
+  sandboxProvisionFailureStage,
+  SandboxProvisionStageError,
   SandboxWarmingTimeoutError,
   type ResumedTurnSandbox,
   type TurnSandboxLeaseHolderId,
@@ -394,6 +412,8 @@ import {
   recordModelCacheTokens,
   recordModelInputTokens,
   recordModelRequestPhase,
+  recordSandboxLogicalProvision,
+  recordSandboxProvisionAttempt,
   recordCompanyBrainContributions,
   recordSessionEventAppendLatency,
   recordSessionEventPublishLatency,
@@ -404,6 +424,8 @@ import {
   runtimeMetricsHooksForObservability,
   StreamTimingMetrics,
   turnLifecycleMetricsFor,
+  type SandboxLogicalProvisionCategory,
+  type SandboxLogicalProvisionStage,
   type TurnOutcome,
   type TurnSandboxEstablishReason,
 } from "../observability-metrics";
@@ -454,7 +476,11 @@ import { executeCodexImageGeneration } from "./codex-image-generation";
 import { imageProviderBindingHash } from "./image-generation-operation";
 import { resolveImageGenerationReferences } from "./image-generation-references";
 import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
-import { SandboxChannelAService, type ChannelASession } from "@opengeni/runtime/sandbox";
+import {
+  ChannelAPartialMutationError,
+  SandboxChannelAService,
+  type ChannelASession,
+} from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import {
   desktopCapableBackend,
@@ -1450,7 +1476,11 @@ export async function recordCompletedModelCallBeforeOwnershipFences(input: {
 type TurnEventPublisher = (
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
   immediate?: boolean,
-) => Promise<{ events: SessionEvent[]; accepted: boolean }>;
+) => Promise<{
+  events: SessionEvent[];
+  accepted: boolean;
+  canonicalStartupMilestones: CanonicalTurnStartupMilestoneReceipt[];
+}>;
 
 export type ModelResponseEventState = {
   responseCount: number;
@@ -2088,16 +2118,13 @@ export function sandboxEstablishPolicyDecision(input: {
   lazyEnabled: boolean;
   machinePrimary: boolean;
   sandboxBackend: Settings["sandboxBackend"];
-  hasInitialRunCredentialMaterial: boolean;
+  hasRunCredentialResolver: boolean;
   generatedVideoFileCount: number;
   hasSignedFileResources: boolean;
 }): { policy: "eager" | "on-demand"; reason: TurnSandboxEstablishReason } {
   if (!input.lazyEnabled) return { policy: "eager", reason: "lazy_disabled" };
   if (input.machinePrimary) return { policy: "eager", reason: "machine_primary" };
   if (input.sandboxBackend === "none") return { policy: "eager", reason: "backend_none" };
-  if (input.hasInitialRunCredentialMaterial) {
-    return { policy: "eager", reason: "initial_run_credentials" };
-  }
   if (input.generatedVideoFileCount > 0) {
     return { policy: "eager", reason: "generated_video_files" };
   }
@@ -2107,6 +2134,14 @@ export function sandboxEstablishPolicyDecision(input: {
   // path whose materialization outcome is not known yet.
   if (input.hasSignedFileResources) {
     return { policy: "eager", reason: "signed_file_resources" };
+  }
+  // Merely having a host run-credential resolver is not proof that this turn
+  // will use the sandbox. Resolve its attempt-bound material before model input
+  // so auth-needed context remains deterministic, but defer every sandbox
+  // write, lease, renewal, and cleanup action to the first-operation
+  // provisioner. The eager file paths above remain unchanged.
+  if (input.hasRunCredentialResolver) {
+    return { policy: "on-demand", reason: "initial_run_credentials_deferred" };
   }
   return { policy: "on-demand", reason: "eligible" };
 }
@@ -2555,6 +2590,29 @@ export type TurnSandboxProvisioner<T> = {
   waitForSettled(timeoutMs: number): Promise<T | null>;
 };
 
+export type SandboxLogicalProvisionFailure = {
+  category: SandboxLogicalProvisionCategory;
+  stage: SandboxLogicalProvisionStage;
+  code: string;
+  expected: boolean;
+  retryable: boolean;
+};
+
+export type TurnSandboxProvisionAttempt<T = unknown> = {
+  provisionId: string;
+  attempt: number;
+  outcome: "completed" | "retrying" | "failed";
+  durationMs: number;
+  result?: T;
+  error?: unknown;
+};
+
+export type TurnSandboxProvisionSettlement = {
+  provisionId: string;
+  internalAttempts: number;
+  durationMs: number;
+};
+
 export class TurnOperationCancelledError extends Error {
   readonly name = "TurnOperationCancelledError";
 
@@ -2652,23 +2710,234 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sandboxProvisionErrorChain(error: unknown): unknown[] {
+  const chain: unknown[] = [];
+  const seen = new Set<object>();
+  let current = error;
+  for (let depth = 0; depth < 6; depth += 1) {
+    chain.push(current);
+    if (!current || typeof current !== "object" || seen.has(current)) break;
+    seen.add(current);
+    if (current instanceof SandboxProvisionStageError) {
+      current = current.source;
+      continue;
+    }
+    const cause = Reflect.get(current, "cause");
+    if (cause === undefined || cause === current) break;
+    current = cause;
+  }
+  return chain;
+}
+
+function firstProvisionError<T>(
+  chain: readonly unknown[],
+  constructor: abstract new (...args: never[]) => T,
+): T | null {
+  return chain.find((value): value is T => value instanceof constructor) ?? null;
+}
+
+/**
+ * Closed, structural taxonomy for one logical provision failure. The classifier
+ * follows only typed wrapper/cause links and provider status/code fields; it
+ * never infers lifecycle truth from an arbitrary error message.
+ */
+export function classifySandboxLogicalProvisionFailure(
+  backend: string,
+  error: unknown,
+): SandboxLogicalProvisionFailure {
+  const chain = sandboxProvisionErrorChain(error);
+  const wrappedStage =
+    chain.map((value) => sandboxProvisionFailureStage(value)).find((stage) => stage !== null) ??
+    null;
+  const warming =
+    chain.find(
+      (value): value is SandboxWarmingTimeoutError => value instanceof SandboxWarmingTimeoutError,
+    ) ?? null;
+  if (warming) {
+    const execReadiness = warming.stage === "exec_readiness";
+    return {
+      category: execReadiness ? "exec_readiness" : "sibling_warming",
+      stage: execReadiness ? "exec_readiness" : "sibling_warming",
+      code: warming.code,
+      expected: false,
+      retryable: false,
+    };
+  }
+  const readiness = firstProvisionError(chain, SandboxExecReadinessError);
+  if (readiness) {
+    return {
+      category: "exec_readiness",
+      stage: "exec_readiness",
+      code: readiness.code,
+      expected: false,
+      retryable: false,
+    };
+  }
+  const superseded = firstProvisionError(chain, SandboxLeaseSupersededError);
+  if (superseded) {
+    return {
+      category: "lease_superseded",
+      stage: "lease_admission",
+      code: "lease_superseded",
+      expected: true,
+      retryable: true,
+    };
+  }
+  const transition = firstProvisionError(chain, SandboxLeaseTransitionError);
+  if (transition) {
+    return {
+      category: "drain_capture_wait",
+      stage: "lifecycle_wait",
+      code: transition.reason,
+      expected: true,
+      retryable: true,
+    };
+  }
+  const deadlineRotation = firstProvisionError(chain, SandboxDeadlineRotationError);
+  if (deadlineRotation) {
+    return {
+      category: "drain_capture_wait",
+      stage: "lifecycle_wait",
+      code: "provider_deadline_rotation",
+      expected: true,
+      retryable: false,
+    };
+  }
+  const recoveryBlocked = firstProvisionError(chain, SandboxLeaseRecoveryBlockedError);
+  if (recoveryBlocked) {
+    return {
+      category: "archive_recovery",
+      stage: "archive_recovery",
+      code: recoveryBlocked.code,
+      expected: false,
+      retryable: false,
+    };
+  }
+  const archive = firstProvisionError(chain, WorkspaceArchiveIntegrityError);
+  if (archive) {
+    return {
+      category: "archive_recovery",
+      stage: "archive_recovery",
+      code: archive.code,
+      expected: false,
+      retryable: archive.retryable,
+    };
+  }
+  const continuity = firstProvisionError(chain, SandboxProviderContinuityUnavailableError);
+  if (continuity) {
+    return {
+      category: "archive_recovery",
+      stage: "archive_recovery",
+      code: "provider_continuity_unavailable",
+      expected: false,
+      retryable: continuity.retryable,
+    };
+  }
+  const configuration = chain.find(
+    (value) =>
+      value instanceof SandboxConfigError ||
+      value instanceof SandboxProviderUnavailableError ||
+      value instanceof SandboxImageConflictError ||
+      value instanceof SandboxRigConflictError,
+  );
+  if (configuration) {
+    return {
+      category: "configuration",
+      stage: wrappedStage ?? "configuration",
+      code:
+        configuration instanceof SandboxImageConflictError
+          ? "image_conflict"
+          : configuration instanceof SandboxRigConflictError
+            ? "rig_conflict"
+            : configuration instanceof SandboxProviderUnavailableError
+              ? "provider_unavailable"
+              : "sandbox_config",
+      expected: false,
+      retryable: false,
+    };
+  }
+  const resumeFailure = chain.find(
+    (value) =>
+      value instanceof SandboxResumeStateUnavailableError ||
+      value instanceof SandboxResumeIdentityMismatchError ||
+      value instanceof SandboxResumeIdentityUnavailableError ||
+      value instanceof SandboxExactResumeReplacedError ||
+      value instanceof SandboxExactResumeInstanceUnavailableError,
+  );
+  if (resumeFailure) {
+    return {
+      category: "resume",
+      stage: "resume",
+      code:
+        resumeFailure instanceof SandboxResumeStateUnavailableError
+          ? "resume_state_unavailable"
+          : resumeFailure instanceof SandboxResumeIdentityMismatchError
+            ? "resume_identity_mismatch"
+            : resumeFailure instanceof SandboxResumeIdentityUnavailableError
+              ? "resume_identity_unavailable"
+              : resumeFailure instanceof SandboxExactResumeReplacedError
+                ? "exact_resume_replaced"
+                : "exact_resume_instance_unavailable",
+      expected: false,
+      retryable: false,
+    };
+  }
+  const providerFailure = classifyProviderSandboxFailure(backend, error);
+  if (providerFailure.kind === "transient_transport") {
+    return {
+      category: "provider_transport",
+      stage: wrappedStage ?? "provider_transport",
+      code: providerFailure.diagnostic,
+      expected: false,
+      // A typed transport fault is attributable, but a create outcome may be
+      // ambiguous. Classification never licenses replay on its own.
+      retryable: false,
+    };
+  }
+  if (wrappedStage) {
+    return {
+      category: wrappedStage,
+      stage: wrappedStage,
+      code: `${wrappedStage}_failed`,
+      expected: false,
+      retryable: false,
+    };
+  }
+  return {
+    category: "unknown",
+    stage: "unknown",
+    code: "unknown",
+    expected: false,
+    retryable: false,
+  };
+}
+
 export function isLazySandboxProvisionRetryable(error: unknown): boolean {
+  const chain = sandboxProvisionErrorChain(error);
   if (
-    error instanceof SandboxImageConflictError ||
-    error instanceof SandboxLeaseRecoveryBlockedError
+    chain.some(
+      (value) =>
+        value instanceof SandboxImageConflictError ||
+        value instanceof SandboxRigConflictError ||
+        value instanceof SandboxLeaseRecoveryBlockedError,
+    )
   ) {
     return false;
   }
-  if (error instanceof WorkspaceArchiveIntegrityError) {
-    return error.retryable;
+  const archive = firstProvisionError(chain, WorkspaceArchiveIntegrityError);
+  if (archive) {
+    return archive.retryable;
   }
   if (
-    error instanceof SandboxLeaseSupersededError ||
-    error instanceof SandboxLeaseTransitionError
+    chain.some(
+      (value) =>
+        value instanceof SandboxLeaseSupersededError ||
+        value instanceof SandboxLeaseTransitionError,
+    )
   ) {
     return true;
   }
-  if (error instanceof SandboxWarmingTimeoutError) {
+  if (chain.some((value) => value instanceof SandboxWarmingTimeoutError)) {
     return false;
   }
   // Provider/transport text is not durable evidence that creation never
@@ -2694,9 +2963,17 @@ export function createTurnSandboxProvisioner<T>(
     maxRetries?: number;
     backoffMs?: number;
     signal?: AbortSignal;
-    onStarted?: () => Promise<void> | void;
-    onCompleted?: (result: T) => Promise<void> | void;
-    onFailed?: (error: unknown) => Promise<void> | void;
+    provisionIdFactory?: () => string;
+    onStarted?: (
+      settlement: Pick<TurnSandboxProvisionSettlement, "provisionId">,
+    ) => Promise<void> | void;
+    onAttemptSettled?: (attempt: TurnSandboxProvisionAttempt<T>) => Promise<void> | void;
+    beforeCompleted?: (
+      result: T,
+      settlement: TurnSandboxProvisionSettlement,
+    ) => Promise<void> | void;
+    onCompleted?: (result: T, settlement: TurnSandboxProvisionSettlement) => Promise<void> | void;
+    onFailed?: (error: unknown, settlement: TurnSandboxProvisionSettlement) => Promise<void> | void;
     disposeResult?: (result: T) => Promise<void> | void;
   } = {},
 ): TurnSandboxProvisioner<T> {
@@ -2704,23 +2981,44 @@ export function createTurnSandboxProvisioner<T>(
   const backoffMs = options.backoffMs ?? 250;
   let memo: Promise<T> | null = null;
 
-  const run = async (): Promise<T> => {
-    let attempt = 0;
+  const run = async (
+    provisionId: string,
+    onAttempt: (attempt: number) => void,
+  ): Promise<{ result: T; internalAttempts: number }> => {
+    let internalAttempts = 0;
     while (true) {
+      internalAttempts += 1;
+      onAttempt(internalAttempts);
+      const startedAt = performance.now();
       try {
         throwIfTurnOperationCancelled(options.signal);
         const operation = establish();
-        return await waitForTurnOperation(operation, options.signal, options.disposeResult);
+        const result = await waitForTurnOperation(operation, options.signal, options.disposeResult);
+        await options.onAttemptSettled?.({
+          provisionId,
+          attempt: internalAttempts,
+          outcome: "completed",
+          durationMs: performance.now() - startedAt,
+          result,
+        });
+        return { result, internalAttempts };
       } catch (error) {
-        if (
+        const retrying = !(
           error instanceof TurnOperationCancelledError ||
-          attempt >= maxRetries ||
+          internalAttempts > maxRetries ||
           !isLazySandboxProvisionRetryable(error)
-        ) {
+        );
+        await options.onAttemptSettled?.({
+          provisionId,
+          attempt: internalAttempts,
+          outcome: retrying ? "retrying" : "failed",
+          durationMs: performance.now() - startedAt,
+          error,
+        });
+        if (!retrying) {
           throw error;
         }
-        attempt += 1;
-        await sleep(backoffMs * attempt);
+        await sleep(backoffMs * internalAttempts);
       }
     }
   };
@@ -2728,24 +3026,45 @@ export function createTurnSandboxProvisioner<T>(
   return {
     get(): Promise<T> {
       if (!memo) {
+        const provisionId = options.provisionIdFactory?.() ?? randomUUID();
         memo = (async () => {
+          const startedAt = performance.now();
           throwIfTurnOperationCancelled(options.signal);
-          await options.onStarted?.();
+          await options.onStarted?.({ provisionId });
           throwIfTurnOperationCancelled(options.signal);
           let result: T | undefined;
+          let internalAttempts = 0;
           let hasResult = false;
           try {
-            result = await run();
+            const runResult = await run(provisionId, (attempt) => {
+              internalAttempts = attempt;
+            });
+            result = runResult.result;
+            internalAttempts = runResult.internalAttempts;
             hasResult = true;
             throwIfTurnOperationCancelled(options.signal);
-            await options.onCompleted?.(result);
+            await options.beforeCompleted?.(result, {
+              provisionId,
+              internalAttempts,
+              durationMs: performance.now() - startedAt,
+            });
+            throwIfTurnOperationCancelled(options.signal);
+            await options.onCompleted?.(result, {
+              provisionId,
+              internalAttempts,
+              durationMs: performance.now() - startedAt,
+            });
             return result;
           } catch (error) {
             if (hasResult) {
               await options.disposeResult?.(result as T);
             }
             if (!(error instanceof TurnOperationCancelledError)) {
-              await options.onFailed?.(error);
+              await options.onFailed?.(error, {
+                provisionId,
+                internalAttempts: Math.max(1, internalAttempts),
+                durationMs: performance.now() - startedAt,
+              });
             }
             throw error;
           }
@@ -3300,7 +3619,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // Connected machines are the user's own persistence and never dirty the
       // cloud home archive. Every persistable raw-session write batch is fenced
       // against the exact current lease/provider before the provider sees it.
-      if (sandbox.established.backendId === "selfhosted") return await mutation();
+      if (sandbox.established.backendId === "selfhosted") {
+        try {
+          return await mutation();
+        } catch (error) {
+          if (error instanceof ChannelAPartialMutationError) {
+            throw new RoutingMutationOutcomeUnknownError(
+              operation,
+              `Connected Machine workspace mutation "${operation}" partially applied before a later batch item failed; the complete operation was not replayed`,
+              { cause: error },
+            );
+          }
+          throw error;
+        }
+      }
       if (!sandboxGroupId || !sandboxHolderId || !turnId || executionGeneration <= 0) {
         throw new Error("Workspace mutation attempted before exact turn sandbox admission");
       }
@@ -3324,17 +3656,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       try {
         result = await mutation();
       } catch (providerError) {
+        const partialMutation = providerError instanceof ChannelAPartialMutationError;
         try {
           await verifyWorkspaceMutationSettlement(db, {
             ...identity,
             admission,
-            outcome: "rejected",
+            outcome: partialMutation ? "resolved" : "rejected",
           });
         } catch (settlementError) {
           throw new RoutingMutationOutcomeUnknownError(
             operation,
-            `Platform workspace mutation "${operation}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
+            partialMutation
+              ? `Platform workspace mutation "${operation}" partially applied at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`
+              : `Platform workspace mutation "${operation}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
             { cause: settlementError },
+          );
+        }
+        if (partialMutation) {
+          throw new RoutingMutationOutcomeUnknownError(
+            operation,
+            `Platform workspace mutation "${operation}" partially applied before a later batch item failed; the complete operation was not replayed`,
+            { cause: providerError },
           );
         }
         throw providerError;
@@ -4193,6 +4535,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attemptId: input.attemptId,
         dispatchId,
         trigger: input.trigger,
+        validatePendingSystemUpdateAuthority: async (tx, update) =>
+          await validateIncidentTelemetrySystemUpdateAuthority({
+            db: tx,
+            settings,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            update,
+          }),
       });
       if (claim.action === "unclaimed") {
         activityStatus = "unclaimed";
@@ -4366,6 +4716,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const modelUsageDispatchId = activityContext?.info.activityId ?? dispatchId;
       const claimedModelUsageSourceKeys = new Set<string>();
       const emittedModelUsageSourceKeys = new Set<string>();
+      let startupMilestoneBackend: Settings["sandboxBackend"] = turn.sandboxBackend;
+      const recordCanonicalStartupMilestones = (
+        receipts: CanonicalTurnStartupMilestoneReceipt[],
+      ): void => {
+        for (const receipt of receipts) {
+          recordTurnStartupMilestone(observability, {
+            milestone: receipt.milestone,
+            provider: turnExecutionPolicy.providerId,
+            backend: startupMilestoneBackend,
+            outcome: receipt.outcome,
+            durationSeconds: receipt.durationMs / 1_000,
+          });
+        }
+      };
       publish = async (
         events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
         immediate = false,
@@ -4400,6 +4764,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (inputs.length > 0 && !appended.accepted) {
           throw new TurnAttemptFencedError("turn execution generation was fenced");
         }
+        recordCanonicalStartupMilestones(appended.canonicalStartupMilestones);
         if (inputs.length > 0) {
           turnLifecycleMetricsFor(observability).progress(turnId!);
         }
@@ -4496,6 +4861,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnMetricOutcome = "cancelled";
           return false;
         }
+        recordCanonicalStartupMilestones(result.canonicalStartupMilestones);
         turnLifecycleMetricsFor(observability).progress(turnId!);
         if (recordingForSettlement && preparedRecording) {
           if (result.recordingMutationApplied) {
@@ -4562,19 +4928,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       });
       turnStartedPublished = true;
       const workerPreparationStartedAt = performance.now();
-      let providerDispatchMilestoneRecorded = false;
-      const durableTurnQueuedAtMs = Date.parse(turn.createdAt);
-      const turnStartupElapsedSeconds = (): number =>
-        Number.isFinite(durableTurnQueuedAtMs)
-          ? Math.max(0, (Date.now() - durableTurnQueuedAtMs) / 1_000)
-          : 0;
-      recordTurnStartupMilestone(observability, {
-        milestone: "queue",
-        provider: turnExecutionPolicy.providerId,
-        backend: turn.sandboxBackend,
-        outcome: "completed",
-        durationSeconds: turnStartupElapsedSeconds(),
-      });
 
       // Multi-account (P1): resolve the effective Codex account for this turn
       // (session-pin > workspace active) and stamp it on the session so the
@@ -5403,6 +5756,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
 
       const runtimePreparationStartedAt = performance.now();
 
+      // Personal Rig/Variable Set authority is revalidated immediately before
+      // any direct resource read. The database function is a zero-row no-op for
+      // sessions with no personal resources, preserving the legacy workspace path.
+      await resolveSessionAttemptPersonalResources(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: fileAuthoritySubjectId,
+        attemptId: input.attemptId,
+      });
+
       // Pack-scoped runtime: enabled packs may declare the sandbox image this
       // workspace's sessions run in and skills for the sandbox skill index.
       // Resolved after turn.started so a composition conflict (two enabled
@@ -5688,31 +6051,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       let firstModelRequestPreparationStartedAt: number | null = null;
       let firstModelRequestPreparationRecorded = false;
       let firstModelRequestAuditRecorded = false;
-      let firstModelByteMilestoneRecorded = false;
       let firstModelRequestCheckpointAt: number | null = null;
       const firstModelRequestCheckpoints = new Set<string>();
-      const recordProviderDispatchMilestone = (): void => {
-        if (providerDispatchMilestoneRecorded) return;
-        providerDispatchMilestoneRecorded = true;
-        recordTurnStartupMilestone(observability, {
-          milestone: "provider_dispatch",
-          provider: turnExecutionPolicy.providerId,
-          backend: activeSandboxBackend ?? groupBoxBackend,
-          outcome: "completed",
-          durationSeconds: turnStartupElapsedSeconds(),
-        });
-      };
-      const recordFirstModelByteMilestone = (): void => {
-        if (firstModelByteMilestoneRecorded) return;
-        firstModelByteMilestoneRecorded = true;
-        recordTurnStartupMilestone(observability, {
-          milestone: "first_byte",
-          provider: turnExecutionPolicy.providerId,
-          backend: activeSandboxBackend ?? groupBoxBackend,
-          outcome: "completed",
-          durationSeconds: turnStartupElapsedSeconds(),
-        });
-      };
       const codexContext: CodexRequestContext | null =
         resolvedModel?.provider.kind === "codex-subscription"
           ? ((): CodexRequestContext => {
@@ -5772,9 +6112,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   lastCodexRequestOpaqueArtifacts = fingerprints;
                 },
                 onModelRequestDiagnostic: (event) => {
-                  if (event.phase === "first_byte") {
-                    recordFirstModelByteMilestone();
-                  }
                   if (
                     event.phase === "started" &&
                     firstModelRequestPreparationStartedAt !== null &&
@@ -5857,9 +6194,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         },
                       },
                     ]);
-                    if (shouldRecordStartedAudit) {
-                      recordProviderDispatchMilestone();
-                    }
                   } catch (error) {
                     auditOutcome = "failed";
                     throw error;
@@ -5924,9 +6258,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               }
             }
             if (event.phase === "first_event" || event.phase === "progress") {
-              if (event.phase === "first_event") {
-                recordFirstModelByteMilestone();
-              }
               modelRequestLifecycleMetricsFor(observability).event(
                 requestKey,
                 event.phase === "progress" ? event.interEventGapMs : undefined,
@@ -6001,9 +6332,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   },
                 },
               ]);
-              if (shouldRecordStartedAudit) {
-                recordProviderDispatchMilestone();
-              }
             } catch (error) {
               auditOutcome = "failed";
               throw error;
@@ -6484,6 +6812,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         runSettings.sandboxBackend === "selfhosted" && !machinePrimary
           ? settings.sandboxBackend
           : runSettings.sandboxBackend;
+      startupMilestoneBackend = activeSandboxBackend ?? groupBoxBackend;
+      const groupBoxImage = rigProviderImageSourceImage(runSettings, groupBoxBackend);
       const sandboxCreationBackend: Settings["sandboxBackend"] =
         settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
           ? groupBoxBackend
@@ -6512,6 +6842,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               cancellationSignal,
               undefined,
             );
+      const establishDecision = sandboxEstablishPolicyDecision({
+        lazyEnabled: lazyProvisionEnabled(settings),
+        machinePrimary,
+        sandboxBackend: runSettings.sandboxBackend,
+        hasRunCredentialResolver: runCredentialResolver !== null,
+        generatedVideoFileCount: requiredGeneratedVideoFiles.length,
+        hasSignedFileResources:
+          requiresSignedFileResourceDownloads(
+            runSettings,
+            activeSandboxBackend ?? groupBoxBackend,
+          ) && turnResources.some((resource) => resource.kind === "file"),
+      });
+      const establishPolicy = establishDecision.policy;
+      recordTurnSandboxEstablishPolicy(observability, {
+        policy: establishDecision.policy,
+        reason: establishDecision.reason,
+        backend: machinePrimary ? "selfhosted" : groupBoxBackend,
+      });
+      // Resolve once before model preparation so partial/auth-needed host state
+      // is available as bounded model context and reconnect UI even when an
+      // on-demand turn never provisions a box. Resolution alone performs no
+      // sandbox write or renewal; both paths reuse this exact material and the
+      // lazy path materializes it only inside its first-operation single-flight.
       const initialRunCredentialMaterial = runCredentialResolver
         ? await waitForTurnOperation(
             runCredentialResolver.resolve({
@@ -6537,27 +6890,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         cancellationSignal,
         undefined,
       );
-      const establishDecision = sandboxEstablishPolicyDecision({
-        lazyEnabled: lazyProvisionEnabled(settings),
-        machinePrimary,
-        sandboxBackend: runSettings.sandboxBackend,
-        // Resolved run credentials must be written to one exact leased sandbox
-        // before agent execution. A warm active pointer can bypass the lazy
-        // provisioner entirely, which previously skipped materialization.
-        hasInitialRunCredentialMaterial: initialRunCredentialMaterial !== null,
-        generatedVideoFileCount: requiredGeneratedVideoFiles.length,
-        hasSignedFileResources:
-          requiresSignedFileResourceDownloads(
-            runSettings,
-            activeSandboxBackend ?? groupBoxBackend,
-          ) && turnResources.some((resource) => resource.kind === "file"),
-      });
-      const establishPolicy = establishDecision.policy;
-      recordTurnSandboxEstablishPolicy(observability, {
-        policy: establishDecision.policy,
-        reason: establishDecision.reason,
-        backend: machinePrimary ? "selfhosted" : groupBoxBackend,
-      });
       // Computed exactly ONCE per turn and reused for BOTH the box manifest
       // (resumeBoxForTurn -> establishSandboxSessionFromEnvelope, below) AND the
       // agent (runtime.buildAgent, below). sandboxEnvironmentForRun mints a FRESH
@@ -6894,6 +7226,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
 
       const attachRunCredentialRenewal = async (
         credentialSession: RunCredentialCommandSession,
+        initialMaterial: NormalizedRunCredentialMaterial | null,
         initialSandbox?: ResumedTurnSandbox,
       ): Promise<void> => {
         if (!runCredentialResolver) return;
@@ -6911,7 +7244,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           return targetSandbox;
         };
 
-        if (!initialRunCredentialMaterial) {
+        if (!initialMaterial) {
           await runWorkspaceMutationForSandbox(
             requireTargetSandbox(),
             "runCredentialClear",
@@ -6979,14 +7312,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
         };
 
-        const initialExpiryMs = initialRunCredentialMaterial.expiresAt?.getTime() ?? null;
+        const initialExpiryMs = initialMaterial.expiresAt?.getTime() ?? null;
         const seed =
           initialExpiryMs !== null && initialExpiryMs <= Date.now() + RUN_CREDENTIAL_EXPIRY_LEAD_MS
             ? await runCredentialResolver.resolve({
                 purpose: "provision",
                 forceRefresh: true,
               })
-            : initialRunCredentialMaterial;
+            : initialMaterial;
         await write(seed, true);
         if (runCredentialRenewalClosed) return;
         const controller = startRunCredentialRenewalLoop({
@@ -7106,6 +7439,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 // claimed process instance.
                 connectionInstanceId: machineEnrollment?.connectionInstanceId ?? "unavailable",
                 opStream: machineOpStream,
+                operationResourcePolicy: machineEnrollment?.operationPolicy ?? {
+                  memoryMaxBytes: null,
+                  memoryHighBytes: null,
+                  cpuMaxMillicores: null,
+                  revision: 0,
+                  updatedAt: null,
+                },
+                operationResourcePolicySupported:
+                  machineEnrollment?.agentCapabilities.operationResourcePolicy === true,
+                operationCpuQuotaSupported:
+                  machineEnrollment?.agentCapabilities.operationCpuQuota === true,
                 epoch: activeSandboxPointer!.activeEpoch,
                 environment: sandboxEnvironment,
                 ...(transientCodemodeEnvironment
@@ -7204,16 +7548,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     backend: groupBoxBackend,
                     os: session.sandboxOs,
                     environment: sandboxEnvironment,
-                    // IMAGE IS SHARED STATE (B3, Modal warm-box path only): the container image
+                    // IMAGE IS SHARED STATE (B3): the container image
                     // this run resolves. The lease stamps it + conflicts on a live shared box
                     // running a DIFFERENT image (solo → durable rotation; N-holders →
-                    // SandboxImageConflictError surfaced as an actionable turn error). Prefer
-                    // the explicit Modal image ref, else the docker image. The selfhosted branch
+                    // SandboxImageConflictError surfaced as an actionable turn error). Select
+                    // the image for the actual group-box backend; a configured Modal image must
+                    // never override a Docker run. The selfhosted branch
                     // (establishSelfhostedTurnSession) NEVER passes
-                    // an image — B3 lives only on this Modal else-branch.
-                    ...((runSettings.modalImageRef ?? runSettings.dockerImage)
+                    // an image — B3 lives only on this managed-box branch.
+                    ...(groupBoxImage
                       ? {
-                          image: runSettings.modalImageRef ?? runSettings.dockerImage,
+                          image: groupBoxImage,
                         }
                       : {}),
                     // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
@@ -7583,6 +7928,44 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       ]);
       const toolPreparationStartedAt = performance.now();
       let toolPreparationOutcome: "completed" | "failed" = "completed";
+      const materializeConnectorAttachments = async (
+        request: ConnectorAttachmentMaterializationRequest,
+      ) => {
+        throwIfWorkerShuttingDown();
+        throwIfTurnCancelled();
+        let sandbox = resolvedSandbox;
+        if (!sandbox && turnSandboxProvisioner) {
+          sandbox = await turnSandboxProvisioner.get();
+        }
+        const sessionForImport = (lazyOwnedSandbox?.session ??
+          sandbox?.established.session ??
+          sdkOwnedSandboxSession) as ChannelASession | null;
+        if (!sessionForImport) {
+          throw new Error("Connector attachment sandbox is unavailable");
+        }
+        const runAs = sandboxRunAs(runSettings);
+        const channel = new SandboxChannelAService({
+          session: sessionForImport,
+          workspaceRoot: "/workspace",
+          leaseEpoch: sandbox?.leaseEpoch ?? 0,
+          emit: async (events) => {
+            await publish?.(events, true);
+          },
+          ...(runAs ? { runAs } : {}),
+        });
+        return await materializeConnectorAttachmentsInChannel(channel, request, {
+          runMutation: async (mutation) => {
+            if (sandbox && !routingOn) {
+              return await runWorkspaceMutationForSandbox(
+                sandbox,
+                "connectorAttachmentMaterialization",
+                mutation,
+              );
+            }
+            return await mutation();
+          },
+        });
+      };
       try {
         preparedTools = await waitForTurnOperation(
           runtime.prepareTools(runSettings, turnTools, {
@@ -7601,6 +7984,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...(codexAppsAuth ? { codexAppsAuth } : {}),
             resolveCredential,
             onAuthNeeded: publishToolAuthNeeded,
+            materializeConnectorAttachments,
             localMcpServers,
             onPreparationPhase: (measurement) => {
               recordTurnStartupPhase(observability, {
@@ -8297,19 +8681,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           async () => {
             throwIfWorkerShuttingDown();
             throwIfTurnCancelled();
-            const lazyGitCredentials =
-              activeSandboxBackend === "selfhosted"
-                ? undefined
-                : await mintRunGitCredentials(runSettings, turnResources, {
-                    scope: connectionScope,
-                    ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
-                    gitCredentials: connectionCredentials?.gitCredentials,
-                    authorizeGitHubTokenMint,
-                  });
-            const lazyGitTokens = lazyGitCredentials?.gitTokens;
-            const lazyCodemodeToken = sandboxCodemodeToken
-              ? await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority)
-              : undefined;
             const provisioned = await resumeBoxForTurn(
               {
                 db,
@@ -8327,9 +8698,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 backend: groupBoxBackend,
                 os: session.sandboxOs,
                 environment: sandboxEnvironment,
-                ...((runSettings.modalImageRef ?? runSettings.dockerImage)
+                ...(groupBoxImage
                   ? {
-                      image: runSettings.modalImageRef ?? runSettings.dockerImage,
+                      image: groupBoxImage,
                     }
                   : {}),
                 // The lazy acquire must enforce the same frozen rig authority
@@ -8341,80 +8712,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               lazyHolderId,
             );
             await publishSandboxLifecycleEvents(provisioned);
-            // The box is established now. Setup below has its own rig,
-            // repository, file, and phase events, so leaving sandbox.provision
-            // open across it makes the UI attribute unrelated preparation to
-            // "Starting sandbox" and destroys the causal timeline.
-            await publish?.(
-              [
-                {
-                  type: "sandbox.operation.completed",
-                  payload: {
-                    name: "sandbox.provision",
-                    ...(provisioned.established.origin
-                      ? { origin: provisioned.established.origin }
-                      : {}),
-                  },
-                },
-              ],
-              true,
-            );
-            lazySandboxEstablishmentSettled = true;
-            await attachRunCredentialRenewal(
-              provisioned.established.session as RunCredentialCommandSession,
-              provisioned,
-            );
-            const provisionedSetupSession = initialRunCredentialMaterial
-              ? withRunCredentialsSession(
-                  provisioned.established.session as object,
-                  input.sessionId,
-                )
-              : provisioned.established.session;
-            await runWorkspaceMutationForSandbox(
-              provisioned,
-              "lazyOwnedSandboxSetup",
-              async () =>
-                await runOwnedSandboxSetup(
-                  agent,
-                  provisioned.established.session as never,
-                  provisionedSetupSession as never,
-                  {
-                    settings: runSettings,
-                    environment: sandboxEnvironment,
-                    onRuntimeEvent: async (event) => {
-                      await publish?.([{ type: event.type, payload: event.payload }], true);
-                    },
-                    ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
-                    ...(lazyGitCredentials?.bindings
-                      ? {
-                          gitCredentialBindingsOverride: lazyGitCredentials.bindings,
-                        }
-                      : {}),
-                    ...(lazyCodemodeToken
-                      ? {
-                          codemodeTokenSeedOverride: lazyCodemodeToken.token,
-                        }
-                      : {}),
-                    ...(toolCancellationFenceRef.current
-                      ? {
-                          commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
-                            toolCancellationFenceRef.current,
-                          ),
-                        }
-                      : {}),
-                  },
-                ),
-            );
-            await attachCodemodeTokenRenewal(
-              provisioned.established.session as CodemodeTokenWriterSession,
-              lazyCodemodeToken?.expiresAt,
-              provisioned,
-            );
-            await attachGitCredentialRenewal(
-              provisioned.established.session as GitCredentialTokenWriterSession,
-              lazyGitCredentials,
-              provisioned,
-            );
             // Return the REAL established box (NOT a copy whose session is the routing
             // proxy). resolveActiveBackend dispatches ops to `provisioned.established.session`;
             // if that were the proxy itself, proxy.exec -> dispatch -> resolve ->
@@ -8427,22 +8724,149 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
           {
             signal: sandboxResumeSignal,
-            onStarted: async () => {
+            onStarted: async ({ provisionId }) => {
               await publish?.(
                 [
                   {
                     type: "sandbox.operation.started",
-                    payload: { name: "sandbox.provision" },
+                    payload: { name: "sandbox.provision", provisionId },
                   },
                 ],
                 true,
               );
             },
-            onCompleted: async (provisioned) => {
+            onAttemptSettled: ({ result, error, outcome, durationMs }) => {
+              const successStage =
+                result?.established.origin === "created"
+                  ? "create"
+                  : result?.established.origin === "resumed"
+                    ? "resume"
+                    : result?.established.origin === "restored"
+                      ? "archive_recovery"
+                      : "unknown";
+              const failure = error
+                ? classifySandboxLogicalProvisionFailure(groupBoxBackend, error)
+                : null;
+              recordSandboxProvisionAttempt(observability, {
+                backend: groupBoxBackend,
+                stage: failure?.stage ?? successStage,
+                category: failure?.category ?? successStage,
+                outcome,
+                durationSeconds: durationMs / 1_000,
+              });
+            },
+            beforeCompleted: async (provisioned, settlement) => {
               throwIfTurnOperationCancelled(sandboxResumeSignal);
               startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
               setupBoxSession = provisioned.established.session;
               resolvedSandbox = provisioned;
+              // This durable completion and its logical metric close at actual box
+              // establishment. Credential, rig, repository, and file preparation below
+              // must never be attributed to "Starting sandbox" or provision latency.
+              await publish?.(
+                [
+                  {
+                    type: "sandbox.operation.completed",
+                    payload: {
+                      name: "sandbox.provision",
+                      ...(provisioned.established.origin
+                        ? { origin: provisioned.established.origin }
+                        : {}),
+                      provisionId: settlement.provisionId,
+                      internalAttempts: settlement.internalAttempts,
+                    },
+                  },
+                ],
+                true,
+              );
+              const successStage =
+                provisioned.established.origin === "created"
+                  ? "create"
+                  : provisioned.established.origin === "resumed"
+                    ? "resume"
+                    : provisioned.established.origin === "restored"
+                      ? "archive_recovery"
+                      : "unknown";
+              recordSandboxLogicalProvision(observability, {
+                backend: groupBoxBackend,
+                stage: successStage,
+                category: "none",
+                outcome: "completed",
+                expected: false,
+                internalAttempts: settlement.internalAttempts,
+                durationSeconds: settlement.durationMs / 1_000,
+              });
+              lazySandboxEstablishmentSettled = true;
+
+              const lazyGitCredentials =
+                activeSandboxBackend === "selfhosted"
+                  ? undefined
+                  : await mintRunGitCredentials(runSettings, turnResources, {
+                      scope: connectionScope,
+                      ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
+                      gitCredentials: connectionCredentials?.gitCredentials,
+                      authorizeGitHubTokenMint,
+                    });
+              const lazyGitTokens = lazyGitCredentials?.gitTokens;
+              const lazyCodemodeToken = sandboxCodemodeToken
+                ? await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority)
+                : undefined;
+              await attachRunCredentialRenewal(
+                provisioned.established.session as RunCredentialCommandSession,
+                initialRunCredentialMaterial,
+                provisioned,
+              );
+              const provisionedSetupSession = initialRunCredentialMaterial
+                ? withRunCredentialsSession(
+                    provisioned.established.session as object,
+                    input.sessionId,
+                  )
+                : provisioned.established.session;
+              await runWorkspaceMutationForSandbox(
+                provisioned,
+                "lazyOwnedSandboxSetup",
+                async () =>
+                  await runOwnedSandboxSetup(
+                    agent,
+                    provisioned.established.session as never,
+                    provisionedSetupSession as never,
+                    {
+                      settings: runSettings,
+                      environment: sandboxEnvironment,
+                      onRuntimeEvent: async (event) => {
+                        await publish?.([{ type: event.type, payload: event.payload }], true);
+                      },
+                      ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
+                      ...(lazyGitCredentials?.bindings
+                        ? {
+                            gitCredentialBindingsOverride: lazyGitCredentials.bindings,
+                          }
+                        : {}),
+                      ...(lazyCodemodeToken
+                        ? {
+                            codemodeTokenSeedOverride: lazyCodemodeToken.token,
+                          }
+                        : {}),
+                      ...(toolCancellationFenceRef.current
+                        ? {
+                            commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                              toolCancellationFenceRef.current,
+                            ),
+                          }
+                        : {}),
+                    },
+                  ),
+              );
+              await attachCodemodeTokenRenewal(
+                provisioned.established.session as CodemodeTokenWriterSession,
+                lazyCodemodeToken?.expiresAt,
+                provisioned,
+              );
+              await attachGitCredentialRenewal(
+                provisioned.established.session as GitCredentialTokenWriterSession,
+                lazyGitCredentials,
+                provisioned,
+              );
               // `get()` does not release the first routed sandbox operation
               // until this hook returns. Materialize durable generated images
               // here so that operation can use their advertised paths without
@@ -8454,9 +8878,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   provisioned.established.session,
                 );
               }
+              throwIfTurnOperationCancelled(sandboxResumeSignal);
             },
-            onFailed: async (error) => {
+            onFailed: async (error, settlement) => {
               if (lazySandboxEstablishmentSettled) return;
+              const failure = classifySandboxLogicalProvisionFailure(groupBoxBackend, error);
               await publish?.(
                 [
                   {
@@ -8464,11 +8890,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     payload: {
                       name: "sandbox.provision",
                       error: error instanceof Error ? error.message : String(error),
+                      provisionId: settlement.provisionId,
+                      internalAttempts: settlement.internalAttempts,
+                      failureCategory: failure.category,
+                      failureStage: failure.stage,
+                      failureCode: failure.code,
+                      expectedTransition: failure.expected,
+                      retryable: failure.retryable,
                     },
                   },
                 ],
                 true,
               );
+              recordSandboxLogicalProvision(observability, {
+                backend: groupBoxBackend,
+                stage: failure.stage,
+                category: failure.category,
+                outcome: failure.expected ? "expected_transition" : "failed",
+                expected: failure.expected,
+                internalAttempts: settlement.internalAttempts,
+                durationSeconds: settlement.durationMs / 1_000,
+              });
             },
             disposeResult: async (provisioned) => {
               await releaseLateSandbox(provisioned);
@@ -9115,6 +9557,70 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
         throwIfWorkerShuttingDown();
         throwIfTurnCancelled();
+        const streamProvider = resolvedModel?.provider.id ?? settings.openaiProvider ?? "openai";
+        const providerPublishesNativeRequestEvents =
+          resolvedModel?.provider.kind === "codex-subscription" ||
+          resolvedModel?.provider.kind === "xai-subscription";
+        let fallbackProviderRequestStartedAt: number | null = null;
+        const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
+          if (
+            providerPublishesNativeRequestEvents ||
+            firstModelRequestPreparationRecorded ||
+            firstModelRequestPreparationStartedAt === null
+          ) {
+            return;
+          }
+          firstModelRequestPreparationRecorded = true;
+          const preparationDurationMs = Math.max(
+            0,
+            performance.now() - firstModelRequestPreparationStartedAt,
+          );
+          recordTurnStartupPhase(observability, {
+            phase: "model_request_preparation",
+            provider: turnExecutionPolicy.providerId,
+            backend: activeSandboxBackend ?? groupBoxBackend,
+            outcome: "completed",
+            durationSeconds: preparationDurationMs / 1_000,
+            count: turnTools.length,
+          });
+          const auditStartedAt = performance.now();
+          let auditOutcome: "completed" | "failed" = "completed";
+          try {
+            await publish!([
+              {
+                type: "turn.startup.phase.completed",
+                payload: {
+                  phase: "model_preparation",
+                  durationMs: Math.round(preparationDurationMs),
+                },
+              },
+              {
+                type: "agent.model.request",
+                payload: {
+                  phase: "started",
+                  provider: streamProvider,
+                  turnId: activeTurnId,
+                  attemptId: input.attemptId,
+                  dispatchId,
+                  executionGeneration,
+                },
+              },
+            ]);
+            fallbackProviderRequestStartedAt = performance.now();
+          } catch (error) {
+            auditOutcome = "failed";
+            throw error;
+          } finally {
+            recordTurnStartupPhase(observability, {
+              phase: "model_request_audit",
+              provider: turnExecutionPolicy.providerId,
+              backend: activeSandboxBackend ?? groupBoxBackend,
+              outcome: auditOutcome,
+              durationSeconds: (performance.now() - auditStartedAt) / 1_000,
+              count: turnTools.length,
+            });
+          }
+        };
         const ownedEstablished = resolvedSandbox?.established ?? lazyOwnedSandbox;
         const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
           // Eager owned sessions must settle the exact platform-setup provider
@@ -9134,6 +9640,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               // decorate setup commands so they source the active generation.
               await attachRunCredentialRenewal(
                 eagerSetupSession as RunCredentialCommandSession,
+                initialRunCredentialMaterial,
                 resolvedSandbox,
               );
               const eagerCredentialSetupSession = initialRunCredentialMaterial
@@ -9194,6 +9701,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // Escaped MCP setup timeouts are automatically recoverable only
           // before this line.
           recordCompanyBrainContributionReceiptOnce();
+          if (!firstModelRequestPreparationRecorded) {
+            await publish!([
+              {
+                type: "turn.startup.phase.started",
+                payload: { phase: "model_preparation" },
+              },
+            ]);
+            firstModelRequestPreparationStartedAt = performance.now();
+            firstModelRequestCheckpointAt = firstModelRequestPreparationStartedAt;
+          }
           const providerDispatchStartedAt = performance.now();
           let providerDispatchOutcome: "completed" | "failed" = "completed";
           try {
@@ -9273,7 +9790,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                             const pinnedCredentialSession = setupBoxSession
                               ? (setupBoxSession as RunCredentialCommandSession)
                               : credentialSession;
-                            await attachRunCredentialRenewal(pinnedCredentialSession);
+                            await attachRunCredentialRenewal(
+                              pinnedCredentialSession,
+                              initialRunCredentialMaterial,
+                            );
                           },
                         }
                       : {}),
@@ -9302,6 +9822,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   ...(measurement.count === undefined ? {} : { count: measurement.count }),
                 });
               },
+              ...(!providerPublishesNativeRequestEvents
+                ? { onModelTransportStarted: recordFallbackProviderDispatchAtWire }
+                : {}),
               ...(toolCancellationFenceRef.current
                 ? {
                     turnToolCancellationFence: toolCancellationFenceRef.current,
@@ -9331,7 +9854,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // Bounded provider label for the streaming SLIs — the resolved registry
         // provider id (or the built-in OpenAI/Azure provider), never a raw
         // user-supplied model string.
-        const streamProvider = resolvedModel?.provider.id ?? settings.openaiProvider ?? "openai";
         const streamTiming = new StreamTimingMetrics(observability, {
           provider: streamProvider,
         });
@@ -9359,80 +9881,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             count: turnTools.length,
           });
         };
-        if (!firstModelRequestPreparationRecorded) {
-          await publish!([
-            {
-              type: "turn.startup.phase.started",
-              payload: { phase: "model_preparation" },
-            },
-          ]);
-          firstModelRequestPreparationStartedAt = performance.now();
-          firstModelRequestCheckpointAt = firstModelRequestPreparationStartedAt;
-        }
-        const providerPublishesNativeRequestEvents =
-          resolvedModel?.provider.kind === "codex-subscription" ||
-          resolvedModel?.provider.kind === "xai-subscription";
-        let fallbackProviderRequestStartedAt: number | null = null;
-        const startProviderStream = async (): Promise<void> => {
-          if (
-            providerPublishesNativeRequestEvents ||
-            firstModelRequestPreparationRecorded ||
-            firstModelRequestPreparationStartedAt === null
-          ) {
-            return;
-          }
-          firstModelRequestPreparationRecorded = true;
-          const preparationDurationMs = Math.max(
-            0,
-            performance.now() - firstModelRequestPreparationStartedAt,
-          );
-          recordTurnStartupPhase(observability, {
-            phase: "model_request_preparation",
-            provider: turnExecutionPolicy.providerId,
-            backend: activeSandboxBackend ?? groupBoxBackend,
-            outcome: "completed",
-            durationSeconds: preparationDurationMs / 1_000,
-            count: turnTools.length,
-          });
-          const auditStartedAt = performance.now();
-          let auditOutcome: "completed" | "failed" = "completed";
-          try {
-            await publish!([
-              {
-                type: "turn.startup.phase.completed",
-                payload: {
-                  phase: "model_preparation",
-                  durationMs: Math.round(preparationDurationMs),
-                },
-              },
-              {
-                type: "agent.model.request",
-                payload: {
-                  phase: "started",
-                  provider: streamProvider,
-                  turnId: activeTurnId,
-                  attemptId: input.attemptId,
-                  dispatchId,
-                  executionGeneration,
-                },
-              },
-            ]);
-            recordProviderDispatchMilestone();
-            fallbackProviderRequestStartedAt = performance.now();
-          } catch (error) {
-            auditOutcome = "failed";
-            throw error;
-          } finally {
-            recordTurnStartupPhase(observability, {
-              phase: "model_request_audit",
-              provider: turnExecutionPolicy.providerId,
-              backend: activeSandboxBackend ?? groupBoxBackend,
-              outcome: auditOutcome,
-              durationSeconds: (performance.now() - auditStartedAt) / 1_000,
-              count: turnTools.length,
-            });
-          }
-        };
         const settleFallbackProviderFirstByte = async (): Promise<void> => {
           if (fallbackProviderRequestStartedAt === null) return;
           const durationMs = Math.max(0, performance.now() - fallbackProviderRequestStartedAt);
@@ -9456,14 +9904,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         let streamDone = false;
         try {
           while (true) {
-            await startProviderStream();
             const next = await nextStreamEvent(iterator, activityContext);
             recordStreamBootstrap();
             if (next.done) {
               streamDone = true;
               break;
             }
-            recordFirstModelByteMilestone();
             await settleFallbackProviderFirstByte();
             let stableToolCallIdsToClear: string[] | null = null;
             let completedCurrentToolBatch = false;

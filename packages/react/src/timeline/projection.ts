@@ -500,7 +500,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "sandbox.operation.failed": {
         const name = typeof payload.name === "string" ? payload.name : "sandbox";
         const status = event.type.endsWith(".failed")
-          ? "failed"
+          ? payload.expectedTransition === true
+            ? "cancelled"
+            : "failed"
           : event.type.endsWith(".completed")
             ? "complete"
             : "running";

@@ -421,6 +421,7 @@ function machine(overrides: Partial<MachineView>): MachineView {
     runtime: null,
     metrics: null,
     ...overrides,
+    operationPolicy: overrides.operationPolicy ?? null,
   };
 }
 function fleet(m: MachineView): MachinesResponse {

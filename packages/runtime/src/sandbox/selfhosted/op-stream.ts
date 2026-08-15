@@ -44,6 +44,7 @@ import {
   OpState,
   type ExecRequest,
   type ExecResponse,
+  type OperationResourcePolicy,
   type OpExit,
   type OpStatus,
 } from "@opengeni/agent-proto";
@@ -129,6 +130,9 @@ export interface OpStreamExecClientDeps {
   ackIntervalMs?: number;
   silenceTimeoutMs?: number;
   reconnectHoldMs?: number;
+  /** Per-connection policy snapshot attached only to OpStart. Lifecycle controls
+   * identify an already-admitted operation and must not imply a policy change. */
+  resourcePolicy?: OperationResourcePolicy;
 }
 
 /** A completed op-stream exec: the legacy-shaped response plus the healing
@@ -186,6 +190,7 @@ export class OpStreamExecClient {
       {
         requestId: crypto.randomUUID(),
         epoch: this.deps.epoch,
+        resourcePolicy: undefined,
         op: { $case: "opCancel", opCancel: { opId } },
       },
       { timeoutMs: this.deps.controlTimeoutMs },
@@ -499,9 +504,15 @@ class OpConsumer {
     op: NonNullable<ControlRequest["op"]>,
     requestId: string = crypto.randomUUID(),
   ) {
+    const resourcePolicy = op.$case === "opStart" ? this.deps.resourcePolicy : undefined;
     const res = await this.deps.controlRpc.request(
       this.deps.rpcSubject,
-      { requestId, epoch: this.deps.epoch, op },
+      {
+        requestId,
+        epoch: this.deps.epoch,
+        resourcePolicy,
+        op,
+      },
       { timeoutMs: this.deps.controlTimeoutMs },
     );
     if (res.error || !res.result) {

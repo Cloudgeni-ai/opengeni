@@ -301,6 +301,61 @@ describe("WorkspaceDock", () => {
     await rendered.unmount();
   });
 
+  test("collapsing does not overwrite the last expanded width", async () => {
+    const autoSaveId = "og.test.workspace-dock-preserve-width";
+    const storageKey = `react-resizable-panels:${autoSaveId}:primary:dock`;
+    const expandedLayout = { primary: 58, dock: 42 };
+    window.localStorage.setItem(storageKey, JSON.stringify(expandedLayout));
+
+    const renderDock = () =>
+      renderComponent(
+        <WorkspaceDock
+          autoSaveId={autoSaveId}
+          primary={<div>Chat pane</div>}
+          tabs={[{ id: "run", label: "Run", content: <div>Run content</div> }]}
+        />,
+      );
+
+    const first = await renderDock();
+    await click(first.container.querySelector('[title="Collapse"]'));
+    await flush(20);
+    expect(JSON.parse(window.localStorage.getItem(storageKey) ?? "null")).toEqual(expandedLayout);
+    await first.unmount();
+
+    const revisited = await renderDock();
+    const dock = revisited.container.querySelector<HTMLElement>('[data-panel][id="dock"]');
+    expect(dock?.style.flexGrow).toBe("42");
+    await revisited.unmount();
+    window.localStorage.removeItem(storageKey);
+  });
+
+  test("a dock restored closed reopens to its saved expanded width", async () => {
+    const autoSaveId = "og.test.workspace-dock-closed-width";
+    const storageKey = `react-resizable-panels:${autoSaveId}:primary:dock`;
+    window.localStorage.setItem(storageKey, JSON.stringify({ primary: 58, dock: 42 }));
+    const dock = (collapsed: boolean) => (
+      <WorkspaceDock
+        autoSaveId={autoSaveId}
+        primary={<div>Chat pane</div>}
+        tabs={[{ id: "run", label: "Run", content: <div>Run content</div> }]}
+        collapsed={collapsed}
+        onCollapsedChange={() => {}}
+      />
+    );
+
+    const rendered = await renderComponent(dock(true));
+    expect(
+      rendered.container.querySelector("[data-workspace-surface]")?.getAttribute("aria-hidden"),
+    ).toBe("true");
+    await rendered.rerender(dock(false));
+    expect(
+      rendered.container.querySelector<HTMLElement>('[data-panel][id="dock"]')?.style.flexGrow,
+    ).toBe("42");
+
+    await rendered.unmount();
+    window.localStorage.removeItem(storageKey);
+  });
+
   test("below the breakpoint the dock is a full-screen overlay with no resize splitter", async () => {
     await withNarrowViewport(async () => {
       const changes: boolean[] = [];

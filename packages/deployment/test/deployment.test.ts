@@ -11,6 +11,8 @@ import {
   requiredRuntimeEnvVars,
   SANDBOX_REQUIRED_ENV,
   SANDBOX_LIFECYCLE_PASSTHROUGH_ENV,
+  SANDBOX_SURFACING_PASSTHROUGH_ENV,
+  SecretDeliveryMode,
   stackPlanFor,
 } from "../src/index";
 
@@ -983,6 +985,13 @@ describe("deployment contract", () => {
         "OPENGENI_SANDBOX_WARMING_TIMEOUT_MS",
       ]),
     );
+    expect(SANDBOX_SURFACING_PASSTHROUGH_ENV).toEqual(
+      expect.arrayContaining([
+        "OPENGENI_SANDBOX_OWNERSHIP_ENABLED",
+        "OPENGENI_SANDBOX_LAZY_PROVISION",
+        "OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED",
+      ]),
+    );
     expect(EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV).toEqual([
       "OPENGENI_BROWSERBASE_API_KEY",
       "OPENGENI_KERNEL_API_KEY",
@@ -1136,6 +1145,39 @@ describe("deployment contract", () => {
     for (const key of EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV) {
       expect(absent.runtimeEnv).not.toContain(`${key}=`);
       expect(absent.missingEnvVars).not.toContain(key);
+    }
+  });
+
+  test("renders explicit sandbox rollout booleans through every deployment delivery mode", () => {
+    const rolloutKeys = [
+      "OPENGENI_SANDBOX_OWNERSHIP_ENABLED",
+      "OPENGENI_SANDBOX_LAZY_PROVISION",
+      "OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED",
+    ] as const;
+    for (const secretMode of SecretDeliveryMode.options) {
+      const contract = parseDeploymentContract({
+        ...deploymentProfiles["kubernetes-external"],
+        secrets: { mode: secretMode },
+      });
+      for (const value of ["true", "false"] as const) {
+        const artifacts = generateRuntimeArtifacts(
+          contract,
+          {},
+          Object.fromEntries(rolloutKeys.map((key) => [key, value])),
+        );
+        for (const key of rolloutKeys) {
+          expect(artifacts.runtimeEnv).toContain(`${key}=${value}`);
+          expect(artifacts.summary.runtimeEnvKeys).toContain(key);
+          expect(artifacts.missingEnvVars).not.toContain(key);
+        }
+      }
+
+      const unset = generateRuntimeArtifacts(contract, {}, {});
+      for (const key of rolloutKeys) {
+        expect(unset.runtimeEnv).not.toContain(`${key}=`);
+        expect(unset.summary.runtimeEnvKeys).not.toContain(key);
+        expect(unset.missingEnvVars).not.toContain(key);
+      }
     }
   });
 });

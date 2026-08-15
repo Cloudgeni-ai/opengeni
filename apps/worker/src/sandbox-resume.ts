@@ -189,6 +189,44 @@ export type ResumedTurnSandbox = {
   release: (options?: { workspaceWritersQuiesced?: boolean }) => Promise<void>;
 };
 
+/**
+ * Structural ownership of the provider boundary that failed while establishing
+ * a logical sandbox provision. Object errors retain their identity and receive
+ * an out-of-band stage; primitive thrown values use a typed wrapper. In both
+ * cases the source diagnostic is unchanged and the stage is never guessed from
+ * prose.
+ */
+export type SandboxProvisionFailureStage = "create" | "resume" | "archive_recovery";
+
+export class SandboxProvisionStageError extends Error {
+  readonly name = "SandboxProvisionStageError";
+
+  constructor(
+    public readonly stage: SandboxProvisionFailureStage,
+    public readonly source: unknown,
+  ) {
+    super(source instanceof Error ? source.message : String(source), { cause: source });
+  }
+}
+
+const sandboxProvisionFailureStages = new WeakMap<object, SandboxProvisionFailureStage>();
+
+export function sandboxProvisionFailureStage(error: unknown): SandboxProvisionFailureStage | null {
+  if (!error || typeof error !== "object") return null;
+  return (
+    sandboxProvisionFailureStages.get(error) ??
+    (error instanceof SandboxProvisionStageError ? error.stage : null)
+  );
+}
+
+function sandboxProvisionStageError(stage: SandboxProvisionFailureStage, error: unknown): unknown {
+  if (error && typeof error === "object") {
+    sandboxProvisionFailureStages.set(error, stage);
+    return error;
+  }
+  return new SandboxProvisionStageError(stage, error);
+}
+
 export abstract class SandboxWarmingTimeoutError extends Error {
   abstract readonly code: "sandbox_exec_readiness_timeout" | "sandbox_sibling_warming_timeout";
 
@@ -1359,7 +1397,7 @@ export async function resumeBoxForTurn(
       }
       await release();
       recordSandboxWarmingTimeout(services.sandboxMetrics, error);
-      throw error;
+      throw sandboxProvisionStageError(rematerialization ? "archive_recovery" : "create", error);
     }
   }
 
@@ -1415,7 +1453,7 @@ export async function resumeBoxForTurn(
       throwIfReleasedOrCancelled();
     } catch (error) {
       if (!isProviderSandboxNotFoundError(ids.backend, error)) {
-        throw error;
+        throw sandboxProvisionStageError("resume", error);
       }
       const marked = await markWarmLeaseInstanceLost(db, {
         accountId: ids.accountId,

@@ -119,6 +119,8 @@ function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineVi
       desktop: capability("desktop"),
       opStream: capability("opStream"),
       browserBridge: capability("browserBridge"),
+      operationResourcePolicy: capability("operationResourcePolicy"),
+      operationCpuQuota: capability("operationCpuQuota"),
     },
     update,
   };
@@ -317,6 +319,7 @@ export async function listMachines(
         lastSeenAt: null,
         connectionAuthority: connectionAuthorityFor(null, null),
         runtime: null,
+        operationPolicy: null,
         metrics: null,
       }),
     );
@@ -373,6 +376,7 @@ export async function listMachines(
         lastSeenAt: enrollment.lastSeenAt,
         connectionAuthority: connectionAuthorityFor(enrollment, liveConnection),
         runtime: runtimeFor(services.settings, enrollment),
+        operationPolicy: enrollment.operationPolicy,
         metrics: metricsRow ? metricRowToSample(metricsRow) : null,
       });
     }),
