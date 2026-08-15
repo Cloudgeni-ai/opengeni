@@ -32,7 +32,7 @@ import {
   getPackInstallation,
   getScheduledTask,
   getSessionGoal,
-  getWorkspaceEnvironmentValuesForRun,
+  getVariableSetValuesForRun,
   grantWorkspaceAccess,
   listGitHubInstallationAccessForWorkspace,
   initializeSessionStartAtomically,
@@ -9903,11 +9903,43 @@ describe("API component integration", () => {
 
     // The stored value round-trips through the operator key, proving the MCP
     // write path encrypts exactly like the REST route.
-    const stored = await getWorkspaceEnvironmentValuesForRun(
-      dbClient.db,
-      grant.workspaceId,
-      first.resource.id,
-    );
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "verify exact variable-set storage",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      variableSetId: first.resource.id,
+      subjectId: grant.subjectId,
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+    });
+    await initializeSessionStartAtomically(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      clientEventId: `initial:${session.id}`,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const claimed = await claimCreatedSessionForRun(dbClient.db, grant, session.id);
+    if (!claimed.initiatingHumanSubjectId) {
+      throw new Error("variable-set storage fixture has no initiating human");
+    }
+    const stored = await getVariableSetValuesForRun(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      variableSetId: first.resource.id,
+      authority: {
+        kind: "agent_attempt",
+        subjectId: claimed.initiatingHumanSubjectId,
+        sessionId: session.id,
+        turnId: claimed.turnId,
+        attemptId: claimed.attemptId,
+        executionGeneration: claimed.executionGeneration,
+      },
+    });
     const key = new Uint8Array(Buffer.from(environmentsTestKey, "base64"));
     expect(decryptEnvironmentValue(key, stored!.values["AZURE_CLIENT_SECRET"]!)).toBe(rotatedValue);
 
@@ -10532,6 +10564,7 @@ type ClaimedSessionAttempt = {
   turnId: string;
   attemptId: string;
   executionGeneration: number;
+  initiatingHumanSubjectId: string | null;
 };
 
 async function claimCreatedSessionForRun(
@@ -10555,6 +10588,7 @@ async function claimCreatedSessionForRun(
     turnId: claimed.turn.id,
     attemptId,
     executionGeneration: claimed.turn.executionGeneration,
+    initiatingHumanSubjectId: claimed.turn.initiatingHumanSubjectId,
   };
 }
 

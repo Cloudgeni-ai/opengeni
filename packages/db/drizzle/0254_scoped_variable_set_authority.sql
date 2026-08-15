@@ -368,25 +368,12 @@ BEGIN
         AND membership.revoked_at IS NULL
       FOR SHARE;
 
-      -- Configured-key and legacy internal callers predate organization
-      -- memberships. They may operate on organization/workspace sets only;
-      -- a NULL membership id can never match a user-owned set. A named subject
-      -- must still hold exact current workspace access. Subjectless calls are
-      -- retained solely for the deprecated internal workspace helpers.
+      -- Configured-key, delegated API-grant, and legacy internal callers may
+      -- predate organization memberships. They may operate on organization or
+      -- workspace sets only: a NULL membership id can never match a user-owned
+      -- set. Exact runtime materialization separately validates its canonical
+      -- session, turn, attempt, generation, and selected variable set.
       IF membership_id IS NULL THEN
-        IF caller_subject IS NULL THEN
-          RETURN NULL;
-        END IF;
-        PERFORM 1
-        FROM workspace_memberships workspace_membership
-        WHERE workspace_membership.account_id = p_account_id
-          AND workspace_membership.workspace_id = p_workspace_id
-          AND workspace_membership.subject_id = caller_subject
-        FOR KEY SHARE;
-        IF NOT FOUND THEN
-          RAISE EXCEPTION 'variable-set actor lacks current workspace access'
-            USING ERRCODE = '42501';
-        END IF;
         RETURN NULL;
       END IF;
 

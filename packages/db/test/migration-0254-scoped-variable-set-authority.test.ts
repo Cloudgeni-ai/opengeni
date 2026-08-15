@@ -16,6 +16,7 @@ describe("migration 0254 scoped variable-set authority", () => {
     expect(source).toContain("membership.status = 'active'");
     expect(source).toContain("membership.revoked_at IS NULL");
     expect(source).toContain("IF membership_id IS NULL THEN");
+    expect(source).toContain("a NULL membership id can never match a user-owned");
     expect(source).toContain("workspace_membership.subject_id = caller_subject");
     expect(source).toContain("RETURN NULL;");
     expect(source).not.toMatch(/p_owner|owner_subject|p_membership/iu);
