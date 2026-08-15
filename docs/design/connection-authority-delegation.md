@@ -3,7 +3,7 @@
 Status: active authority foundation. Connection-specific wire and snapshot
 contracts live in `@opengeni/contracts/connection-authority`, pure capture and
 revalidation logic lives in `@opengeni/core/connection-authority`, and migration
-`0255_connection_authority_delegation.sql` owns database authority binding, the
+`0256_connection_authority_delegation.sql` owns database authority binding, the
 owner-only grant lifecycle, generation fences, and the immediate pre-use
 resolver. The local credential broker consumes this authority when an
 accepted-work snapshot is supplied. Provider surfaces must not claim delegated

@@ -7,12 +7,12 @@ import { createDb, createSession, getConnectionMetadata } from "../src/index";
 import { migrate } from "../src/migrate";
 
 const migrationUrl = new URL(
-  "../drizzle/0255_connection_authority_delegation.sql",
+  "../drizzle/0256_connection_authority_delegation.sql",
   import.meta.url,
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
-describe("migration 0255 connection authority delegation", () => {
+describe("migration 0256 connection authority delegation", () => {
   test("binds owner authority and exposes only capability-gated pre-use resolution", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -30,10 +30,10 @@ describe("migration 0255 connection authority delegation", () => {
     const externalDatabaseUrl = process.env.OPENGENI_TEST_DATABASE_URL?.trim();
     const blank = externalDatabaseUrl
       ? { databaseUrl: externalDatabaseUrl, release: async () => undefined }
-      : await acquireBlankTestDatabase("migration-0255-connection-authority");
+      : await acquireBlankTestDatabase("migration-0256-connection-authority");
     if (!blank && requireRealDatabase) {
       throw new Error(
-        "[migration-0255-connection-authority] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+        "[migration-0256-connection-authority] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
       );
     }
     if (!blank) return;
