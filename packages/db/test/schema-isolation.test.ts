@@ -128,7 +128,9 @@ describe("embedded dedicated-schema isolation", () => {
 
     // --- EMBEDDED leg: dedicated schema via the SDK entry point.
     // Run TWICE to prove idempotency under the current_schema() guards.
-    await migrate(ADMIN_URL, "opengeni");
+    await migrate(ADMIN_URL, "opengeni", {
+      applicationDatabaseRoles: ["opengeni_app"],
+    });
     await runMigrations(ADMIN_URL, "opengeni"); // second pass via the named SDK alias — must be a clean no-op.
 
     const sql = postgres(ADMIN_URL, { max: 1 });

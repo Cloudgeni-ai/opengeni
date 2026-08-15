@@ -1,17 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readdir, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFile } from "node:fs/promises";
 import { acquireBlankTestDatabase, acquireSharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
+import { migrate } from "../src/migrate";
 
 const migrationPath = new URL(
   "../drizzle/0257_goal_revision_decisions_and_root_constraints.sql",
   import.meta.url,
 );
-const migrationName = "0257_goal_revision_decisions_and_root_constraints.sql";
-const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
-
 let shared: Awaited<ReturnType<typeof acquireSharedTestDatabase>>;
 
 beforeAll(async () => {
@@ -26,7 +22,9 @@ describe("0257 governed goal revision authority migration", () => {
   test("declares and documents the drained one-way protocol cutover", async () => {
     const source = await readFile(migrationPath, "utf8");
     expect(source.startsWith("-- deployment-mode: maintenance\n")).toBe(true);
-    expect(source.match(/all opengeni_app sessions to be stopped/g)).toHaveLength(2);
+    expect(source).toContain("opengeni.migration_application_roles");
+    expect(source.match(/all configured OpenGeni application database sessions/g)).toHaveLength(2);
+    expect(source).not.toContain("usename = 'opengeni_app'");
     expect(source).toContain('LOCK TABLE "session_goals" IN ACCESS EXCLUSIVE MODE');
     expect(source).toContain('LOCK TABLE "session_goal_revisions" IN ACCESS EXCLUSIVE MODE');
     expect(source).toContain('LOCK TABLE "session_turns" IN ACCESS EXCLUSIVE MODE');
@@ -34,34 +32,41 @@ describe("0257 governed goal revision authority migration", () => {
     expect(source).not.toContain('public."session_goals"');
   });
 
-  test("rejects a live app role with SQLSTATE 55000 and rolls the cutover back", async () => {
+  test("requires explicit application roles for a fresh dedicated schema", async () => {
+    const blank = await acquireBlankTestDatabase("migration-0257-dedicated-role-input");
+    if (!blank) return;
+    try {
+      await expect(migrate(blank.databaseUrl, "ope225_scoped")).rejects.toThrow(
+        "Migration 0257 requires the exact application database roles",
+      );
+    } finally {
+      await blank.release();
+    }
+  });
+
+  test("rejects an explicitly configured custom live role and succeeds only after drain", async () => {
     const blank = await acquireBlankTestDatabase("migration-0257-live-writer-guard");
     if (!blank) return;
-    const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
+    const sql = postgres(blank.databaseUrl, {
+      max: 1,
+      onnotice: () => undefined,
+    });
+    const role = `ope225_runtime_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    let liveRuntime: postgres.Sql | null = null;
     try {
-      await sql.unsafe(`create table schema_migrations (
-        name text primary key,
-        applied_at timestamptz not null default now()
-      )`);
-      const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
-      for (const file of files.filter((entry) => entry.localeCompare(migrationName) < 0)) {
-        await sql.unsafe(await readFile(join(migrationsDir, file), "utf8"));
-        await sql`insert into schema_migrations (name) values (${file}) on conflict do nothing`;
-      }
-
-      const source = await readFile(migrationPath, "utf8");
-      const appUrl = new URL(blank.databaseUrl);
-      appUrl.username = "opengeni_app";
-      appUrl.password = "apppw";
-      const liveApp = postgres(appUrl.toString(), { max: 1 });
+      await sql.unsafe(`CREATE ROLE "${role}" LOGIN PASSWORD 'ope225-runtime-password'`);
+      const runtimeUrl = new URL(blank.databaseUrl);
+      runtimeUrl.username = role;
+      runtimeUrl.password = "ope225-runtime-password";
+      liveRuntime = postgres(runtimeUrl.toString(), { max: 1 });
       let guardError: unknown;
       try {
-        await liveApp`select 1`;
-        await sql.unsafe(source);
+        await liveRuntime`select 1`;
+        await migrate(blank.databaseUrl, undefined, {
+          applicationDatabaseRoles: [role],
+        });
       } catch (error) {
         guardError = error;
-      } finally {
-        await liveApp.end();
       }
       expect((guardError as { code?: string } | undefined)?.code).toBe("55000");
 
@@ -81,7 +86,18 @@ describe("0257 governed goal revision authority migration", () => {
           ) as "revisionColumn"`;
       expect(rolledBack).toEqual({ goalColumn: false, revisionColumn: false });
 
-      await sql.unsafe(source);
+      const [migrationReceipt] = await sql<{ applied: boolean }[]>`
+        select exists (
+          select 1 from schema_migrations
+          where name = '0257_goal_revision_decisions_and_root_constraints.sql'
+        ) as applied`;
+      expect(migrationReceipt?.applied).toBe(false);
+
+      await liveRuntime.end();
+      liveRuntime = null;
+      await migrate(blank.databaseUrl, undefined, {
+        applicationDatabaseRoles: [role],
+      });
       const [applied] = await sql<{ goalColumn: boolean; revisionColumn: boolean }[]>`
         select
           exists (
@@ -98,6 +114,8 @@ describe("0257 governed goal revision authority migration", () => {
           ) as "revisionColumn"`;
       expect(applied).toEqual({ goalColumn: true, revisionColumn: true });
     } finally {
+      await liveRuntime?.end();
+      await sql.unsafe(`DROP ROLE IF EXISTS "${role}"`);
       await sql.end();
       await blank.release();
     }

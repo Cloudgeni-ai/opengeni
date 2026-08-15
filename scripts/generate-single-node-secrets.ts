@@ -128,6 +128,7 @@ export async function generateSingleNodeSecretFiles(
             host: databaseHost,
             database: databaseName,
           }),
+          OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES: runtimeDatabaseUser,
           OPENGENI_APP_DATABASE_USER: runtimeDatabaseUser,
           OPENGENI_APP_DATABASE_PASSWORD: runtimePassword,
         }),
