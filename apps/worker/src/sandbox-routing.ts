@@ -118,6 +118,8 @@ type TurnRoutingWiringServices = RoutingWiringServices & {
 export type RoutingWiringIds = {
   workspaceId: string;
   sessionId: string;
+  resourceAccountId?: string;
+  resourceSubjectId?: string;
   /** Canonical turn-attempt fence used to admit persistable-home mutations.
    * Omit outside a running worker attempt; mutation hooks then remain disabled. */
   workspaceMutationFence?: {
@@ -699,10 +701,21 @@ export function wrapTurnBoxWithRouting(
     defaultBackend: established.session as RoutableBackendSession,
     defaultKind: established.backendId,
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
-      const sandbox = await getSandbox(db, ids.workspaceId, sandboxId);
+      const sandbox = await getSandbox(
+        db,
+        ids.resourceAccountId && ids.resourceSubjectId
+          ? {
+              accountId: ids.resourceAccountId,
+              workspaceId: ids.workspaceId,
+              subjectId: ids.resourceSubjectId,
+            }
+          : ids.workspaceId,
+        sandboxId,
+      );
       return sandbox
         ? {
             id: sandbox.id,
+            workspaceId: sandbox.workspaceId,
             kind: sandbox.kind,
             name: sandbox.name,
             enrollmentId: sandbox.enrollmentId,
@@ -714,7 +727,13 @@ export function wrapTurnBoxWithRouting(
       if (!sandbox.enrollmentId) return null;
       const enrollment = await getLiveEnrollmentConnection(
         db,
-        ids.workspaceId,
+        ids.resourceAccountId && ids.resourceSubjectId
+          ? {
+              accountId: ids.resourceAccountId,
+              workspaceId: ids.workspaceId,
+              subjectId: ids.resourceSubjectId,
+            }
+          : sandbox.workspaceId,
         sandbox.enrollmentId,
       );
       return connectionBindingFor(services, enrollment);
@@ -898,10 +917,21 @@ export function wrapLazyTurnBoxWithRouting(
     defaultBackend: syntheticSession,
     defaultKind: "unprovisioned",
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
-      const sandbox = await getSandbox(db, ids.workspaceId, sandboxId);
+      const sandbox = await getSandbox(
+        db,
+        ids.resourceAccountId && ids.resourceSubjectId
+          ? {
+              accountId: ids.resourceAccountId,
+              workspaceId: ids.workspaceId,
+              subjectId: ids.resourceSubjectId,
+            }
+          : ids.workspaceId,
+        sandboxId,
+      );
       return sandbox
         ? {
             id: sandbox.id,
+            workspaceId: sandbox.workspaceId,
             kind: sandbox.kind,
             name: sandbox.name,
             enrollmentId: sandbox.enrollmentId,
@@ -913,7 +943,13 @@ export function wrapLazyTurnBoxWithRouting(
       if (!sandbox.enrollmentId) return null;
       const enrollment = await getLiveEnrollmentConnection(
         db,
-        ids.workspaceId,
+        ids.resourceAccountId && ids.resourceSubjectId
+          ? {
+              accountId: ids.resourceAccountId,
+              workspaceId: ids.workspaceId,
+              subjectId: ids.resourceSubjectId,
+            }
+          : sandbox.workspaceId,
         sandbox.enrollmentId,
       );
       return connectionBindingFor(services, enrollment);

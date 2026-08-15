@@ -241,17 +241,33 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = authorization.grant;
     requirePermission(grant, "enrollments:manage");
     assertSelfhostedEnabled();
-    const parsed = DeviceEnrollmentApproveRequest.safeParse(await c.req.json().catch(() => null));
+    const rawBody = await c.req.json().catch(() => null);
+    const parsed = DeviceEnrollmentApproveRequest.safeParse(rawBody);
     if (!parsed.success) {
       throw new HTTPException(400, {
         message: "invalid device-approve request",
       });
     }
     const body = parsed.data;
+    const scopeWasExplicit =
+      typeof rawBody === "object" &&
+      rawBody !== null &&
+      Object.prototype.hasOwnProperty.call(rawBody, "scope");
+    // Managed browser humans get the personal default. Legacy/delegated
+    // principals predate organization-user ownership and retain the compatible
+    // workspace default when the caller omitted scope; an explicit scope is
+    // never silently rewritten.
+    const effectiveScope =
+      scopeWasExplicit ||
+      (grant.principalKind === "human_session" &&
+        authorization.contextIntegrity &&
+        grant.metadata?.delegated !== true)
+        ? body.scope
+        : undefined;
     const allowOrganization =
-      body.scope === "organization" &&
+      effectiveScope === "organization" &&
       authorization.accountGrant?.permissions.includes("account:admin") === true;
-    if (body.scope === "organization" && !allowOrganization) {
+    if (effectiveScope === "organization" && !allowOrganization) {
       throw new HTTPException(403, {
         message: "missing permission: account:admin",
       });
@@ -261,7 +277,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
       {
         accountId: grant.accountId,
         workspaceId,
-        scope: body.scope,
+        ...(effectiveScope ? { scope: effectiveScope } : {}),
         allowOrganization,
         userCode: body.userCode,
         allowScreenControl: body.allowScreenControl,

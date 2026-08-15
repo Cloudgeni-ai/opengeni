@@ -25,8 +25,8 @@ import {
 import {
   advanceEnrollmentAgentUpdate,
   beginEnrollmentAgentUpdate,
-  getEnrollment,
   getLiveEnrollmentConnection,
+  listEnrollments,
   readMachineMetricsSeries,
   requireSession,
   updateEnrollmentOperationPolicy,
@@ -65,6 +65,19 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   }
 
+  async function requireScopedEnrollment(
+    grant: Awaited<ReturnType<typeof requireAccessGrant>>,
+    enrollmentId: string,
+  ) {
+    const enrollment = (await listEnrollments(db, grant, { status: "active" })).find(
+      (candidate) => candidate.id === enrollmentId,
+    );
+    if (!enrollment) {
+      throw new HTTPException(404, { message: "machine not found in this access scope" });
+    }
+    return enrollment;
+  }
+
   // ── GET /workspaces/:ws/machines (the dashboard list) ───────────────────────
   app.get("/v1/workspaces/:workspaceId/machines", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -88,21 +101,16 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // ── GET /workspaces/:ws/machines/:enrollmentId/metrics/series ───────────────
   app.get("/v1/workspaces/:workspaceId/machines/:enrollmentId/metrics/series", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
     // Validate the machine belongs to this workspace (RLS already scopes the read,
     // but a clear 404 beats an empty series for an unknown/cross-workspace id).
-    const enrollment = await getEnrollment(db, workspaceId, enrollmentId);
-    if (!enrollment || enrollment.status !== "active") {
-      throw new HTTPException(404, {
-        message: "machine not found in this workspace",
-      });
-    }
+    const enrollment = await requireScopedEnrollment(grant, enrollmentId);
     const windowMs = SERIES_WINDOWS_MS[c.req.query("window") ?? ""] ?? DEFAULT_SERIES_WINDOW_MS;
     const since = new Date(Date.now() - windowMs);
     const rows = await readMachineMetricsSeries(db, {
-      workspaceId,
+      workspaceId: enrollment.workspaceId,
       enrollmentId,
       since,
     });
@@ -136,15 +144,10 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     const body = parsed.data;
-    const current = await getEnrollment(db, workspaceId, enrollmentId);
-    if (!current || current.status !== "active") {
-      throw new HTTPException(404, {
-        message: "machine not found in this workspace",
-      });
-    }
+    const current = await requireScopedEnrollment(grant, enrollmentId);
     const updated = await updateEnrollmentOperationPolicy(db, {
       accountId: grant.accountId,
-      workspaceId,
+      workspaceId: current.workspaceId,
       enrollmentId,
       subjectId: grant.subjectId,
       expectedRevision: body.expectedRevision,
@@ -169,7 +172,13 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:manage");
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
-    const live = await getLiveEnrollmentConnection(db, workspaceId, enrollmentId);
+    const visibleEnrollment = await requireScopedEnrollment(grant, enrollmentId);
+    const originWorkspaceId = visibleEnrollment.workspaceId;
+    const live = await getLiveEnrollmentConnection(
+      db,
+      visibleEnrollment.scope === "user" ? grant : originWorkspaceId,
+      enrollmentId,
+    );
     if (!live?.connectionInstanceId || !live.agentVersion) {
       throw new HTTPException(409, {
         message: "machine has no authoritative live agent build",
@@ -200,7 +209,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!reusableRequest) {
       const reserved = await beginEnrollmentAgentUpdate(db, {
         accountId: grant.accountId,
-        workspaceId,
+        workspaceId: originWorkspaceId,
         enrollmentId,
         connectionInstanceId: live.connectionInstanceId,
         connectionGeneration: live.connectionGeneration,
@@ -235,7 +244,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       },
     };
     let response = await rpc.request(
-      subjectFor(workspaceId, enrollmentId, live.connectionInstanceId),
+      subjectFor(originWorkspaceId, enrollmentId, live.connectionInstanceId),
       request,
       { timeoutMs: 10_000 },
     );
@@ -243,7 +252,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     // the agent returns the same acceptance and never starts a second update.
     if (response.error?.code === ErrorCode.ERROR_CODE_TIMEOUT) {
       response = await rpc.request(
-        subjectFor(workspaceId, enrollmentId, live.connectionInstanceId),
+        subjectFor(originWorkspaceId, enrollmentId, live.connectionInstanceId),
         request,
         { timeoutMs: 10_000 },
       );
@@ -254,7 +263,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (response.error.code !== ErrorCode.ERROR_CODE_TIMEOUT) {
         await advanceEnrollmentAgentUpdate(db, {
           accountId: grant.accountId,
-          workspaceId,
+          workspaceId: originWorkspaceId,
           enrollmentId,
           connectionInstanceId: live.connectionInstanceId,
           connectionGeneration: live.connectionGeneration,
@@ -278,7 +287,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     ) {
       await advanceEnrollmentAgentUpdate(db, {
         accountId: grant.accountId,
-        workspaceId,
+        workspaceId: originWorkspaceId,
         enrollmentId,
         connectionInstanceId: live.connectionInstanceId,
         connectionGeneration: live.connectionGeneration,

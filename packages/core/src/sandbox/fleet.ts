@@ -16,6 +16,7 @@ import {
   getEnrollment,
   getLiveEnrollmentConnection,
   getSandbox,
+  listEnrollments,
   listSandboxes,
   readActiveSandbox,
   readLease,
@@ -254,6 +255,9 @@ export async function listFleet(
   ctx: FleetContext,
 ): Promise<FleetListResult> {
   const { db } = services;
+  const resourceAccess = ctx.subjectId
+    ? { accountId: ctx.accountId, workspaceId: ctx.workspaceId, subjectId: ctx.subjectId }
+    : ctx.workspaceId;
   const pointer = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId)) ?? {
     activeSandboxId: null,
     activeEpoch: 0,
@@ -321,12 +325,44 @@ export async function listFleet(
 
   // The workspace's first-class selfhosted sandboxes (enrolled machines). Probe
   // each for liveness; a missing enrollment is offline.
-  const sandboxes = await listSandboxes(db, ctx.workspaceId);
+  const legacySandboxes = await listSandboxes(db, ctx.workspaceId);
+  const enrollments = await listEnrollments(
+    db,
+    ctx.subjectId
+      ? { accountId: ctx.accountId, workspaceId: ctx.workspaceId, subjectId: ctx.subjectId }
+      : ctx.workspaceId,
+    { status: "active" },
+  );
+  const enrollmentById = new Map(enrollments.map((enrollment) => [enrollment.id, enrollment]));
+  const scopedSandboxes: SandboxRecord[] = enrollments.flatMap((enrollment) =>
+    enrollment.sandboxId
+      ? [
+          {
+            id: enrollment.sandboxId,
+            accountId: enrollment.accountId,
+            workspaceId: enrollment.workspaceId,
+            kind: "selfhosted" as const,
+            name: enrollment.sandboxName ?? `${enrollment.os} machine`,
+            enrollmentId: enrollment.id,
+            createdAt: enrollment.createdAt,
+            updatedAt: enrollment.updatedAt,
+          },
+        ]
+      : [],
+  );
+  const sandboxes = [
+    ...legacySandboxes.filter(
+      (sandbox) => !scopedSandboxes.some((scoped) => scoped.id === sandbox.id),
+    ),
+    ...scopedSandboxes,
+  ];
   for (const sandbox of sandboxes) {
     if (sandbox.kind !== "selfhosted" || !sandbox.enrollmentId) {
       continue;
     }
-    const enrollment = await getEnrollment(db, ctx.workspaceId, sandbox.enrollmentId);
+    const enrollment =
+      enrollmentById.get(sandbox.enrollmentId) ??
+      (await getEnrollment(db, resourceAccess, sandbox.enrollmentId));
     if (!enrollment || enrollment.status !== "active") {
       // Revoked enrollments remain durable audit/history records, but they are
       // intentionally absent from the normal attach/run picker.
@@ -334,11 +370,11 @@ export async function listFleet(
     }
     const liveConnection = await getLiveEnrollmentConnection(
       db,
-      ctx.workspaceId,
+      resourceAccess,
       sandbox.enrollmentId,
     );
     const probe = enrollment
-      ? await probeEnrollment(services, ctx.workspaceId, enrollment, liveConnection)
+      ? await probeEnrollment(services, sandbox.workspaceId, enrollment, liveConnection)
       : {
           liveness: "offline" as FleetLiveness,
           consented: false,
@@ -456,7 +492,9 @@ async function resolveTarget(
     }
     const enrollment = await getLiveEnrollmentConnection(
       services.db,
-      ctx.workspaceId,
+      ctx.subjectId
+        ? { accountId: ctx.accountId, workspaceId: ctx.workspaceId, subjectId: ctx.subjectId }
+        : sandbox.workspaceId,
       sandbox.enrollmentId,
     );
     if (!enrollment) {
@@ -466,7 +504,7 @@ async function resolveTarget(
         code: "offline_enrollment",
       };
     }
-    const probe = await probeEnrollment(services, ctx.workspaceId, enrollment, enrollment);
+    const probe = await probeEnrollment(services, sandbox.workspaceId, enrollment, enrollment);
     if (probe.liveness !== "online") {
       return {
         ok: false,
@@ -758,7 +796,13 @@ export async function runOnSandbox(
   op: RunOnOp,
   options: RunOnOptions = {},
 ): Promise<RunOnResult> {
-  const sandbox = await getSandbox(services.db, ctx.workspaceId, target);
+  const sandbox = await getSandbox(
+    services.db,
+    ctx.subjectId
+      ? { accountId: ctx.accountId, workspaceId: ctx.workspaceId, subjectId: ctx.subjectId }
+      : ctx.workspaceId,
+    target,
+  );
   if (!sandbox) {
     return {
       target,
@@ -778,7 +822,9 @@ export async function runOnSandbox(
   }
   const enrollment = await getLiveEnrollmentConnection(
     services.db,
-    ctx.workspaceId,
+    ctx.subjectId
+      ? { accountId: ctx.accountId, workspaceId: ctx.workspaceId, subjectId: ctx.subjectId }
+      : sandbox.workspaceId,
     sandbox.enrollmentId,
   );
   if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
@@ -793,7 +839,7 @@ export async function runOnSandbox(
 
   const result = await executeRunOnSelfhostedMachine(
     {
-      workspaceId: ctx.workspaceId,
+      workspaceId: sandbox.workspaceId,
       agentId: sandbox.enrollmentId,
       connectionInstanceId: enrollment.connectionInstanceId,
       controlRpc: controlRpc(services.bus),

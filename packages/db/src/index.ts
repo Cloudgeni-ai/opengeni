@@ -42146,9 +42146,16 @@ export async function createEnrollment(
 
 export async function getEnrollment(
   db: Database,
-  workspaceId: string,
+  access: string | { accountId: string; workspaceId: string; subjectId: string },
   enrollmentId: string,
 ): Promise<EnrollmentRecord | null> {
+  if (typeof access !== "string") {
+    return (
+      (await listEnrollments(db, access)).find((enrollment) => enrollment.id === enrollmentId) ??
+      null
+    );
+  }
+  const workspaceId = access;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
@@ -42169,9 +42176,27 @@ export async function getEnrollment(
  * snapshot and never reinterpret lease time using an API host's wall clock. */
 export async function getLiveEnrollmentConnection(
   db: Database,
-  workspaceId: string,
+  access: string | { accountId: string; workspaceId: string; subjectId: string },
   enrollmentId: string,
 ): Promise<EnrollmentRecord | null> {
+  if (typeof access !== "string") {
+    return await withRlsContext(db, access, async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, access.subjectId);
+      const [row] = await rawRows<{ value: EnrollmentRecord }>(
+        scopedDb,
+        sql`select value from list_scoped_enrollments(
+          ${access.accountId}::uuid, ${access.workspaceId}::uuid, null, 'active'
+        ) value
+        where value->>'id' = ${enrollmentId}
+          and nullif(value->>'connectionInstanceId', '') is not null
+          and nullif(value->>'connectionLeaseExpiresAt', '')::timestamptz
+            > clock_timestamp()
+        limit 1`,
+      );
+      return row?.value ?? null;
+    });
+  }
+  const workspaceId = access;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
@@ -42807,36 +42832,36 @@ export async function removeEnrollment(
       }
 
       if (machine) {
-        const activePointers = await scopedDb.execute<{
-          session_id: string;
+        const activePointers = await rawRows<{
+          sessionId: string;
           title: string | null;
-          active_turn_id: string | null;
-          sandbox_backend: string;
-        }>(sql`
-          select id as session_id, title, active_turn_id, sandbox_backend
-          from sessions
-          where workspace_id = ${input.workspaceId}
-            and active_sandbox_id = ${machine.id}
-          order by created_at asc, id asc
-          for no key update
-        `);
+          activeTurnId: string | null;
+          sandboxBackend: string;
+        }>(
+          scopedDb,
+          sql`
+          select session_id as "sessionId", title,
+            active_turn_id as "activeTurnId", sandbox_backend as "sandboxBackend"
+          from list_scoped_machine_dependent_sessions(
+            ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${machine.id}::uuid
+          )
+        `,
+        );
         dependentSessions.push(
-          ...activePointers.map((pointer: { session_id: string; title: string | null }) => ({
-            id: pointer.session_id,
+          ...activePointers.map((pointer) => ({
+            id: pointer.sessionId,
             title: pointer.title?.trim() || null,
           })),
         );
 
-        const activePointerTurn = activePointers.find(
-          (pointer: { active_turn_id: string | null }) => pointer.active_turn_id !== null,
-        );
+        const activePointerTurn = activePointers.find((pointer) => pointer.activeTurnId !== null);
         if (activePointerTurn) {
           const result: MachineRemovalResult = {
             ...baseResult,
             outcome: "blocked",
             removed: false,
             code: "active_commands",
-            message: `Machine is selected by session ${activePointerTurn.title?.trim() || activePointerTurn.session_id} while it has an active turn.`,
+            message: `Machine is selected by session ${activePointerTurn.title?.trim() || activePointerTurn.sessionId} while it has an active turn.`,
             action: "Wait for or stop the active turn, then retry removal.",
           };
           await scopedDb.insert(schema.machineRemovalOperations).values({
@@ -42857,56 +42882,8 @@ export async function removeEnrollment(
             targetId: enrollment.id,
             metadata: {
               code: result.code,
-              sessionId: activePointerTurn.session_id,
-              turnId: activePointerTurn.active_turn_id,
-              message: result.message,
-            },
-          });
-          return result;
-        }
-
-        const [activeGroup] = await scopedDb.execute<{
-          session_id: string;
-          title: string | null;
-        }>(sql`
-          select id as session_id, title
-          from sessions
-          where workspace_id = ${input.workspaceId}
-            and sandbox_group_id = ${machine.id}
-            and active_turn_id is not null
-            and status not in ('completed', 'failed', 'cancelled')
-          order by created_at asc, id asc
-          limit 1
-          for no key update
-        `);
-        if (activeGroup) {
-          const result: MachineRemovalResult = {
-            ...baseResult,
-            outcome: "blocked",
-            removed: false,
-            code: "active_commands",
-            message: `Machine hosts active session ${activeGroup.title?.trim() || activeGroup.session_id}.`,
-            action: "Stop or move the active session, then retry removal.",
-          };
-          await scopedDb.insert(schema.machineRemovalOperations).values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            enrollmentId: enrollment.id,
-            operationKey,
-            requestFingerprint,
-            outcome: result.outcome,
-            result,
-          });
-          await scopedDb.insert(schema.auditEvents).values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: input.subjectId ?? null,
-            action: "connected_machine.removal_blocked",
-            targetType: "enrollment",
-            targetId: enrollment.id,
-            metadata: {
-              code: result.code,
-              sessionId: activeGroup.session_id,
+              sessionId: activePointerTurn.sessionId,
+              turnId: activePointerTurn.activeTurnId,
               message: result.message,
             },
           });
@@ -42988,31 +42965,24 @@ export async function removeEnrollment(
         // atomically and make a machine-primary session explicitly compute-less;
         // its durable messages/history remain intact. A managed sandbox can be
         // selected later without inventing a fake migration of machine files.
-        const detached = await scopedDb.execute<{
-          session_id: string;
+        const detached = await rawRows<{
+          sessionId: string;
           title: string | null;
-        }>(sql`
-          update sessions
-          set active_sandbox_id = null,
-              active_epoch = active_epoch + 1,
-              sandbox_backend = case
-                when sandbox_backend = 'selfhosted' then 'none'
-                else sandbox_backend
-              end,
-              updated_at = now()
-          where workspace_id = ${input.workspaceId}
-            and (
-              active_sandbox_id = ${machine.id}
-              or (sandbox_group_id = ${machine.id} and sandbox_backend = 'selfhosted')
-            )
-          returning id as session_id, title
-        `);
+        }>(
+          scopedDb,
+          sql`
+          select session_id as "sessionId", title
+          from detach_scoped_machine_dependent_sessions(
+            ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${machine.id}::uuid
+          )
+        `,
+        );
         const dependentIds = new Set(dependentSessions.map((session) => session.id));
         for (const session of detached) {
-          if (dependentIds.has(session.session_id)) continue;
-          dependentIds.add(session.session_id);
+          if (dependentIds.has(session.sessionId)) continue;
+          dependentIds.add(session.sessionId);
           dependentSessions.push({
-            id: session.session_id,
+            id: session.sessionId,
             title: session.title?.trim() || null,
           });
         }
@@ -43025,7 +42995,7 @@ export async function removeEnrollment(
             targetType: "enrollment",
             targetId: enrollment.id,
             metadata: {
-              sessionIds: detached.map((session: { session_id: string }) => session.session_id),
+              sessionIds: detached.map((session) => session.sessionId),
               replacementBackend: "none",
             },
           });
@@ -44164,7 +44134,7 @@ export async function approveDeviceEnrollmentRequest(
       const { enrollment, sandbox } = await finalizeEnrollmentInScope(scopedDb, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
-        scope: input.scope ?? "user",
+        ...(input.scope ? { scope: input.scope } : {}),
         allowOrganization: input.allowOrganization === true,
         pubkey: pending.pubkey,
         hasDisplay: pending.canOfferDisplay,

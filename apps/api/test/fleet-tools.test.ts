@@ -29,6 +29,8 @@ import {
   createEnrollment,
   createSandbox,
   createSession,
+  getEnrollment,
+  getLiveEnrollmentConnection,
   claimEnrollmentConnection,
   readActiveSandbox,
   type Database,
@@ -87,7 +89,10 @@ function busWithAgent(opts: {
       if (op?.$case === "ping") {
         res = {
           requestId: req.requestId,
-          result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
+          result: {
+            $case: "ping",
+            ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" },
+          },
         };
       } else if (op?.$case === "exec") {
         const joined = op.exec.command.join(" ");
@@ -150,7 +155,10 @@ function busWithAgent(opts: {
   return bus;
 }
 
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
+async function freshWorkspace(): Promise<{
+  accountId: string;
+  workspaceId: string;
+}> {
   const [a] = await admin<
     { id: string }[]
   >`insert into managed_accounts (name) values ('acct') returning id`;
@@ -164,7 +172,11 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
 /** Seed a session (Modal group box) + an enrolled selfhosted machine + its sandbox
  *  record, and return the fleet context for the session. */
 async function seedFleet(
-  opts: { online?: boolean; hostname?: string; sandboxBackend?: "modal" | "none" } = {},
+  opts: {
+    online?: boolean;
+    hostname?: string;
+    sandboxBackend?: "modal" | "none";
+  } = {},
 ) {
   const { accountId, workspaceId } = await freshWorkspace();
   const session = await createSession(db, {
@@ -221,7 +233,15 @@ async function seedFleet(
       hostname: opts.hostname,
     }) as never,
   };
-  return { ctx, services, session, enrollment, sandbox, accountId, workspaceId };
+  return {
+    ctx,
+    services,
+    session,
+    enrollment,
+    sandbox,
+    accountId,
+    workspaceId,
+  };
 }
 
 beforeAll(async () => {
@@ -247,9 +267,136 @@ afterAll(async () => {
 }, 180_000);
 
 describe("M7 fleet service — list / attach / swap / run_on / provision", () => {
+  test("a personal Connected Machine remains operational from another authorized workspace", async () => {
+    if (!available) return;
+    const subjectId = `human:${crypto.randomUUID()}`;
+    const [account] = await admin<Array<{ id: string }>>`
+      insert into managed_accounts (name) values (${`cross-workspace-${crypto.randomUUID()}`})
+      returning id
+    `;
+    const workspaces = await Promise.all(
+      ["personal", "origin", "target"].map(async (name) => {
+        const [workspace] = await admin<Array<{ id: string }>>`
+          insert into workspaces (account_id, name) values (${account!.id}, ${name})
+          returning id
+        `;
+        return workspace!;
+      }),
+    );
+    const [personalWorkspace, originWorkspace, targetWorkspace] = workspaces;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id) values
+        (${personalWorkspace!.id}, ${account!.id}),
+        (${originWorkspace!.id}, ${account!.id}),
+        (${targetWorkspace!.id}, ${account!.id})
+    `;
+    await admin`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id, authorization_revision
+      ) values (${account!.id}, ${subjectId}, 'active', ${personalWorkspace!.id}, 1)
+    `;
+    await admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id) values
+        (${account!.id}, ${originWorkspace!.id}, ${subjectId}),
+        (${account!.id}, ${targetWorkspace!.id}, ${subjectId})
+    `;
+    const machine = await admin.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${account!.id}, true),
+        set_config('opengeni.workspace_id', ${originWorkspace!.id}, true),
+        set_config('opengeni.subject_id', ${subjectId}, true),
+        set_config('opengeni.initiating_human_subject_id', ${subjectId}, true)`;
+      const [row] = await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
+        select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+        from finalize_scoped_enrollment(
+          ${account!.id}::uuid, ${originWorkspace!.id}::uuid, 'user',
+          ${`ed25519:${crypto.randomUUID()}`}, true, true, 'linux', 'x86_64',
+          'Personal laptop', false
+        )
+      `;
+      return row!;
+    });
+    const connectionInstanceId = CONNECTION_INSTANCE_ID;
+    const enrollment = await getEnrollment(db, originWorkspace!.id, machine.enrollmentId);
+    expect(enrollment).not.toBeNull();
+    expect(
+      (
+        await claimEnrollmentConnection(db, {
+          workspaceId: originWorkspace!.id,
+          enrollmentId: machine.enrollmentId,
+          credentialGeneration: enrollment!.credentialGeneration,
+          connectionInstanceId,
+          leaseMs: 60_000,
+        })
+      ).claimed,
+    ).toBe(true);
+    await admin`update enrollments set last_seen_at = now() where id = ${machine.enrollmentId}`;
+    const session = await createSession(db, {
+      accountId: account!.id,
+      workspaceId: targetWorkspace!.id,
+      initialMessage: "use my personal laptop",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId },
+      subjectId,
+    });
+    const ctx: FleetContext = {
+      accountId: account!.id,
+      workspaceId: targetWorkspace!.id,
+      subjectId,
+      sessionId: session.id,
+      sessionBackend: "none",
+      sessionGroupId: session.sandboxGroupId,
+    };
+    const services: FleetServices = {
+      db,
+      settings,
+      bus: busWithAgent({
+        workspaceId: originWorkspace!.id,
+        agentId: machine.enrollmentId,
+        online: true,
+        hostname: "personal-cross-workspace",
+      }) as never,
+    };
+
+    expect(
+      (
+        await getLiveEnrollmentConnection(
+          db,
+          {
+            accountId: account!.id,
+            workspaceId: targetWorkspace!.id,
+            subjectId,
+          },
+          machine.enrollmentId,
+        )
+      )?.connectionInstanceId,
+    ).toBe(connectionInstanceId);
+    const listed = await listFleet(services, ctx);
+    expect(listed.sandboxes[0]?.liveness).toBe("online");
+    expect(listed.sandboxes.map((sandbox) => sandbox.id)).toEqual([machine.sandboxId]);
+    const swapped = await swapActiveSandbox(services, ctx, machine.sandboxId);
+    expect(swapped).toMatchObject({
+      swapped: true,
+      activeSandboxId: machine.sandboxId,
+    });
+    const executed = await runOnSandbox(services, ctx, machine.sandboxId, {
+      kind: "exec",
+      cmd: "hostname",
+    });
+    expect(executed).toMatchObject({
+      ok: true,
+      stdout: "personal-cross-workspace\n",
+    });
+  }, 60_000);
+
   test("a backend:none session lists and attaches an owned Connected Machine without inventing a home box", async () => {
     if (!available) return;
-    const { ctx, services, sandbox } = await seedFleet({ sandboxBackend: "none" });
+    const { ctx, services, sandbox } = await seedFleet({
+      sandboxBackend: "none",
+    });
 
     const before = await listFleet(services, ctx);
     expect(before.activeSandboxId).toBeNull();
@@ -271,7 +418,9 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
 
   test("sandboxes_list: the session Modal box + the enrolled machine, each with liveness + active marker", async () => {
     if (!available) return;
-    const { ctx, services, session, sandbox } = await seedFleet({ hostname: "vm-list" });
+    const { ctx, services, session, sandbox } = await seedFleet({
+      hostname: "vm-list",
+    });
     const result = await listFleet(services, ctx);
 
     // Default pointer (null) → the group box is active.
@@ -500,7 +649,9 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
 
   test("run_on: a one-off exec routes to a specific machine WITHOUT moving the active pointer", async () => {
     if (!available) return;
-    const { ctx, services, sandbox } = await seedFleet({ hostname: "runon-vm" });
+    const { ctx, services, sandbox } = await seedFleet({
+      hostname: "runon-vm",
+    });
     const before = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))!;
 
     const exec = await runOnSandbox(services, ctx, sandbox.id, {
@@ -537,7 +688,10 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     if (!available) return;
     const { ctx, services } = await seedFleet();
     // The group id is not a first-class sandbox row → not found as a run_on target.
-    const r = await runOnSandbox(services, ctx, ctx.sessionGroupId, { kind: "exec", cmd: "true" });
+    const r = await runOnSandbox(services, ctx, ctx.sessionGroupId, {
+      kind: "exec",
+      cmd: "true",
+    });
     expect(r.ok).toBe(false);
   }, 60_000);
 
@@ -552,7 +706,10 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       expect(self.verificationUri).toContain("/device");
     }
 
-    const modal = await provisionSandbox(services, ctx, { kind: "modal", name: "extra-box" });
+    const modal = await provisionSandbox(services, ctx, {
+      kind: "modal",
+      name: "extra-box",
+    });
     expect(modal.kind).toBe("modal");
     if (modal.kind === "modal") {
       expect(modal.sandbox.kind).toBe("modal");
@@ -576,7 +733,10 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(before.activeSandboxId).toBeNull();
 
     // Provision a first-class Modal sibling (a real sandboxes row, not the group box).
-    const provisioned = await provisionSandbox(services, ctx, { kind: "modal", name: "sibling" });
+    const provisioned = await provisionSandbox(services, ctx, {
+      kind: "modal",
+      name: "sibling",
+    });
     expect(provisioned.kind).toBe("modal");
     const siblingId = provisioned.kind === "modal" ? provisioned.sandbox.id : "";
 

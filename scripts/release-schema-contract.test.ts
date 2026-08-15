@@ -297,7 +297,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0257_scoped_connected_machines_and_rigs.sql",
       ),
     ).toMatchObject({
-      sha256: "828689ef63a23f3e6986ea3d897f9a27bd0cce137147334632dacc008f2945ce",
+      sha256: "95f474c906bf317e2c0b6f66a3432b28942ff3a31fe25d1be65ce41753f87ba7",
       deploymentMode: "rolling",
     });
     const migrations = new Map(

@@ -7538,6 +7538,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 {
                   workspaceId: input.workspaceId,
                   sessionId: input.sessionId,
+                  resourceAccountId: input.accountId,
+                  ...(fileAuthoritySubjectId ? { resourceSubjectId: fileAuthoritySubjectId } : {}),
                   environment: sandboxEnvironment,
                   ...(transientCodemodeEnvironment
                     ? { transientExecEnvironment: transientCodemodeEnvironment }
@@ -7692,6 +7694,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 {
                   workspaceId: input.workspaceId,
                   sessionId: input.sessionId,
+                  resourceAccountId: input.accountId,
+                  ...(fileAuthoritySubjectId ? { resourceSubjectId: fileAuthoritySubjectId } : {}),
                   environment: sandboxEnvironment,
                   ...(transientCodemodeEnvironment
                     ? { transientExecEnvironment: transientCodemodeEnvironment }
@@ -8987,6 +8991,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           {
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
+            resourceAccountId: input.accountId,
+            ...(fileAuthoritySubjectId ? { resourceSubjectId: fileAuthoritySubjectId } : {}),
             environment: sandboxEnvironment,
             ...(transientCodemodeEnvironment
               ? { transientExecEnvironment: transientCodemodeEnvironment }

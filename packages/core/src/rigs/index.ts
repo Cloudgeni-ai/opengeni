@@ -21,7 +21,6 @@ import {
   createRigChange,
   createRigVersion,
   createRigVersionForChangePromotion,
-  deleteRigIfNoActiveSessions,
   getRig,
   getRigByName,
   getRigChange,
@@ -33,7 +32,6 @@ import {
   revokeScopedRig,
   RigActiveVersionChangedError,
   RigChangeTransitionError,
-  updateRig,
   updateScopedRig,
   type Database,
 } from "@opengeni/db";
@@ -176,7 +174,6 @@ export async function createRigForApi(
   payload: CreateRigRequest,
   options: { allowOrganization?: boolean } = {},
 ): Promise<Rig> {
-  const workspaceId = grant.workspaceId;
   const name = trimmedRigName(payload.name);
   assertUniqueCheckNames(payload.checks);
   await assertVariableSetsExist(
@@ -197,7 +194,7 @@ export async function createRigForApi(
   const createdBy = rigActorForGrant(grant);
   const rig = await createRig(deps.db, {
     accountId: grant.accountId,
-    workspaceId,
+    workspaceId: grant.workspaceId,
     scope: payload.scope,
     subjectId: grant.subjectId,
     allowOrganization: options.allowOrganization === true,
@@ -229,7 +226,6 @@ export async function updateRigForApi(
   payload: UpdateRigRequest,
   options: { allowOrganization?: boolean } = {},
 ): Promise<Rig> {
-  const workspaceId = rig.workspaceId;
   const name = payload.name !== undefined ? trimmedRigName(payload.name) : undefined;
   if (name !== undefined && name !== rig.name) {
     const existing = await getRigByName(deps.db, grant, name, rig.scope);

@@ -739,7 +739,7 @@ export function buildOpenGeniMcpServer(
     registerFleetTools(server, deps, grant, sessionId, json);
   }
   if (can("enrollments:manage") && deps.settings.sandboxSelfhostedEnabled) {
-    registerConnectedMachineTools(server, deps, grant, json);
+    registerConnectedMachineTools(server, deps, grant, sessionId, json);
   }
   registerRigTools(server, deps, grant, can, sessionId, json);
   registerSlackBotTools(server, deps, grant, sessionId, json);
@@ -3376,13 +3376,17 @@ function registerFleetTools(
   // call-time via the shared helper (same context the user-authenticated swap
   // REST route builds). Throws when the session has no box (backend:none) — the
   // fleet is only meaningful for a session that runs in a sandbox.
-  const fleetContext = async (): Promise<FleetContext> =>
-    await buildFleetContextForSession(deps, {
+  const fleetContext = async (): Promise<FleetContext> => {
+    const actor = exactAgentAttemptClaims(grant)
+      ? await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId)
+      : null;
+    return await buildFleetContextForSession(deps, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId,
-      subjectId: grant.subjectId,
+      ...(actor?.initiatingHumanSubjectId ? { subjectId: actor.initiatingHumanSubjectId } : {}),
     });
+  };
 
   const oneOffCodemodeEnvironment = async (
     op: RunOnOp,
@@ -3497,6 +3501,7 @@ function registerConnectedMachineTools(
   server: McpServer,
   deps: ApiRouteDeps,
   grant: AccessGrant,
+  sessionId: string | null,
   json: JsonResult,
 ): void {
   server.registerTool(
@@ -3511,7 +3516,16 @@ function registerConnectedMachineTools(
       },
     },
     async ({ enrollmentId, expectedUpdatedAt, idempotencyKey }) => {
-      const enrollment = (await listEnrollments(deps.db, grant, { status: "active" })).find(
+      const resourceGrant =
+        sessionId && exactAgentAttemptClaims(grant)
+          ? {
+              ...grant,
+              subjectId:
+                (await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId))
+                  .initiatingHumanSubjectId ?? grant.subjectId,
+            }
+          : grant;
+      const enrollment = (await listEnrollments(deps.db, resourceGrant, { status: "active" })).find(
         (candidate) => candidate.id === enrollmentId,
       );
       if (!enrollment) {
@@ -3526,7 +3540,7 @@ function registerConnectedMachineTools(
         enrollmentId,
         operationKey: idempotencyKey?.trim() || randomUUID(),
         ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}),
-        subjectId: grant.subjectId,
+        subjectId: resourceGrant.subjectId,
       });
       if (!result) {
         throw new Error("machine enrollment not found in this workspace");
@@ -3570,8 +3584,15 @@ function registerRigTools(
   sessionId: string | null,
   json: JsonResult,
 ): void {
+  const resourceGrant = async (): Promise<AccessGrant> => {
+    if (!sessionId || exactAgentAttemptClaims(grant) === null) return grant;
+    const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
+    return actor.initiatingHumanSubjectId
+      ? { ...grant, subjectId: actor.initiatingHumanSubjectId }
+      : grant;
+  };
   const requireMutableRig = async (rigId: string) => {
-    const rig = await requireRigForApi(deps.db, grant, rigId);
+    const rig = await requireRigForApi(deps.db, await resourceGrant(), rigId);
     if (rig.scope === "organization") {
       throw new Error(
         "Organization rig mutation requires account-admin authority through the authenticated REST surface.",
@@ -3586,7 +3607,7 @@ function registerRigTools(
         description: "List workspace rigs and their active versions.",
         inputSchema: {},
       },
-      async () => json({ rigs: await listRigs(deps.db, grant) }),
+      async () => json({ rigs: await listRigs(deps.db, await resourceGrant()) }),
     );
 
     server.registerTool(
@@ -3601,7 +3622,7 @@ function registerRigTools(
         },
       },
       async ({ rigId, versionLimit, changeLimit }) => {
-        const rig = await requireRigForApi(deps.db, grant, rigId);
+        const rig = await requireRigForApi(deps.db, await resourceGrant(), rigId);
         const [versions, changes] = await Promise.all([
           listRigVersionMonitoringSummaries(
             deps.db,
@@ -3633,9 +3654,10 @@ function registerRigTools(
       },
       async ({ rigId, command, note }) => {
         const rig = await requireMutableRig(rigId);
+        const originGrant = { ...(await resourceGrant()), workspaceId: rig.workspaceId };
         const change = await proposeRigChangeForApi(
           { db: deps.db },
-          grant,
+          originGrant,
           rig,
           {
             kind: "setup_append",
@@ -3643,11 +3665,11 @@ function registerRigTools(
           },
           sessionId ? { proposedBy: `session:${sessionId}` } : {},
         );
-        const verifying = await beginMcpRigVerificationAttempt(deps, grant.workspaceId, change.id);
+        const verifying = await beginMcpRigVerificationAttempt(deps, rig.workspaceId, change.id);
         const attempt = verificationAttempt(verifying);
         try {
           await deps.workflowClient.startRigVerification({
-            workspaceId: grant.workspaceId,
+            workspaceId: rig.workspaceId,
             changeId: change.id,
             workflowId: `rig-verification-change-${change.id}-attempt-${attempt}`,
           });
@@ -3714,16 +3736,12 @@ function registerRigTools(
       async ({ rigId, changeId }) => {
         const rig = await requireMutableRig(rigId);
         if (changeId) {
-          const change = await requireRigChangeForApi(deps.db, grant.workspaceId, rig.id, changeId);
-          const verifying = await beginMcpRigVerificationAttempt(
-            deps,
-            grant.workspaceId,
-            change.id,
-          );
+          const change = await requireRigChangeForApi(deps.db, rig.workspaceId, rig.id, changeId);
+          const verifying = await beginMcpRigVerificationAttempt(deps, rig.workspaceId, change.id);
           const attempt = verificationAttempt(verifying);
           try {
             await deps.workflowClient.startRigVerification({
-              workspaceId: grant.workspaceId,
+              workspaceId: rig.workspaceId,
               changeId: change.id,
               workflowId: `rig-verification-change-${change.id}-attempt-${attempt}`,
             });
@@ -3782,7 +3800,7 @@ function registerRigTools(
           throw new Error("rig has no active version");
         }
         await deps.workflowClient.startRigVerification({
-          workspaceId: grant.workspaceId,
+          workspaceId: rig.workspaceId,
           versionId: rig.activeVersion.id,
           workflowId: `rig-verification-version-${rig.activeVersion.id}-${crypto.randomUUID()}`,
         });
@@ -3820,10 +3838,11 @@ function registerRigTools(
       },
       async ({ rigId, changeId }) => {
         const rig = await requireMutableRig(rigId);
-        const change = await requireRigChangeForApi(deps.db, grant.workspaceId, rig.id, changeId);
+        const change = await requireRigChangeForApi(deps.db, rig.workspaceId, rig.id, changeId);
+        const originGrant = { ...(await resourceGrant()), workspaceId: rig.workspaceId };
         const promoted = await promoteVerifiedDefinitionEditChangeForApi(
           { db: deps.db },
-          grant,
+          originGrant,
           rig,
           change,
         );

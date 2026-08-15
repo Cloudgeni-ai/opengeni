@@ -161,7 +161,7 @@ BEGIN
     'rigs', 'rig_versions', 'rig_changes', 'enrollments', 'sandboxes',
     'organization_memberships', 'workspace_memberships',
     'organization_user_resource_authorities', 'organization_user_resource_grants',
-    'sessions', 'session_turns', 'session_turn_attempts',
+    'sessions', 'workspace_session_activity_revisions', 'session_turns', 'session_turn_attempts',
     'session_attempt_interruptions', 'session_attempt_personal_resource_admissions',
     'session_attempt_personal_resource_snapshots',
     'personal_resource_once_consumption_receipts'
@@ -173,7 +173,8 @@ BEGIN
     );
   END LOOP;
   FOREACH table_name IN ARRAY ARRAY[
-    'rigs', 'rig_versions', 'enrollments', 'sandboxes',
+    'rigs', 'rig_versions', 'enrollments', 'sandboxes', 'sessions',
+    'workspace_session_activity_revisions',
     'organization_user_resource_authorities', 'organization_user_resource_grants'
   ] LOOP
     EXECUTE format(
@@ -1276,6 +1277,158 @@ REVOKE ALL ON FUNCTION assert_session_attempt_personal_machine(
   uuid, uuid, uuid, uuid, uuid, integer, uuid
 ) FROM PUBLIC;
 
+CREATE OR REPLACE FUNCTION list_scoped_machine_dependent_sessions(
+  p_account_id uuid,
+  p_origin_workspace_id uuid,
+  p_sandbox_id uuid
+) RETURNS TABLE(
+  session_id uuid,
+  title text,
+  active_turn_id uuid,
+  sandbox_backend text
+)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+BEGIN
+  IF p_account_id IS DISTINCT FROM nullif(
+      pg_catalog.current_setting('opengeni.account_id', true), '')::uuid
+    OR p_origin_workspace_id IS DISTINCT FROM nullif(
+      pg_catalog.current_setting('opengeni.workspace_id', true), '')::uuid
+  THEN RAISE EXCEPTION 'machine removal scope mismatch' USING ERRCODE = '42501'; END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM sandboxes sandbox
+    WHERE sandbox.id = p_sandbox_id AND sandbox.account_id = p_account_id
+      AND sandbox.workspace_id = p_origin_workspace_id
+      AND sandbox.kind = 'selfhosted' AND sandbox.enrollment_id IS NOT NULL
+  ) THEN RAISE EXCEPTION 'machine sandbox not found' USING ERRCODE = '42501'; END IF;
+  INSERT INTO opengeni_private.scoped_compute_capabilities(
+    backend_pid, transaction_id, capability_kind
+  ) VALUES (pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), 'read')
+  ON CONFLICT DO NOTHING;
+  RETURN QUERY
+    SELECT session.id, session.title, session.active_turn_id, session.sandbox_backend
+    FROM sessions session
+    WHERE session.account_id = p_account_id
+      AND (session.active_sandbox_id = p_sandbox_id
+        OR session.sandbox_group_id = p_sandbox_id)
+    ORDER BY session.created_at, session.id
+    FOR NO KEY UPDATE;
+  DELETE FROM opengeni_private.scoped_compute_capabilities
+  WHERE backend_pid = pg_catalog.pg_backend_pid()
+    AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+    AND capability_kind = 'read';
+EXCEPTION WHEN OTHERS THEN
+  DELETE FROM opengeni_private.scoped_compute_capabilities
+  WHERE backend_pid = pg_catalog.pg_backend_pid()
+    AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned();
+  RAISE;
+END
+$$;
+REVOKE ALL ON FUNCTION list_scoped_machine_dependent_sessions(uuid, uuid, uuid)
+  FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION detach_scoped_machine_dependent_sessions(
+  p_account_id uuid,
+  p_origin_workspace_id uuid,
+  p_sandbox_id uuid
+) RETURNS TABLE(session_id uuid, title text)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+DECLARE
+  dependent_workspace_id uuid;
+  detached_record record;
+  next_activity_revision bigint;
+BEGIN
+  IF p_account_id IS DISTINCT FROM nullif(
+      pg_catalog.current_setting('opengeni.account_id', true), '')::uuid
+    OR p_origin_workspace_id IS DISTINCT FROM nullif(
+      pg_catalog.current_setting('opengeni.workspace_id', true), '')::uuid
+  THEN RAISE EXCEPTION 'machine removal scope mismatch' USING ERRCODE = '42501'; END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM sandboxes sandbox
+    WHERE sandbox.id = p_sandbox_id AND sandbox.account_id = p_account_id
+      AND sandbox.workspace_id = p_origin_workspace_id
+      AND sandbox.kind = 'selfhosted' AND sandbox.enrollment_id IS NOT NULL
+  ) THEN RAISE EXCEPTION 'machine sandbox not found' USING ERRCODE = '42501'; END IF;
+  INSERT INTO opengeni_private.scoped_compute_capabilities(
+    backend_pid, transaction_id, capability_kind
+  ) VALUES (pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), 'write')
+  ON CONFLICT DO NOTHING;
+  IF EXISTS (
+    SELECT 1 FROM sessions session
+    WHERE session.account_id = p_account_id
+      AND (session.active_sandbox_id = p_sandbox_id
+        OR session.sandbox_group_id = p_sandbox_id)
+      AND session.active_turn_id IS NOT NULL
+  ) THEN RAISE EXCEPTION 'machine still has active dependent sessions'
+    USING ERRCODE = '55000'; END IF;
+  FOR dependent_workspace_id IN
+    SELECT DISTINCT session.workspace_id
+    FROM sessions session
+    WHERE session.account_id = p_account_id
+      AND (session.active_sandbox_id = p_sandbox_id
+        OR (session.sandbox_group_id = p_sandbox_id
+          AND session.sandbox_backend = 'selfhosted'))
+    ORDER BY session.workspace_id
+  LOOP
+    PERFORM pg_catalog.set_config('opengeni.session_activity_gate_state', 'open', true);
+    PERFORM pg_catalog.set_config(
+      'opengeni.session_activity_gate_workspace_id', dependent_workspace_id::text, true
+    );
+    FOR detached_record IN
+      UPDATE sessions session
+      SET active_sandbox_id = NULL,
+          active_epoch = session.active_epoch + 1,
+          sandbox_backend = CASE
+            WHEN session.sandbox_backend = 'selfhosted' THEN 'none'
+            ELSE session.sandbox_backend
+          END,
+          updated_at = clock_timestamp()
+      WHERE session.account_id = p_account_id
+        AND session.workspace_id = dependent_workspace_id
+        AND (session.active_sandbox_id = p_sandbox_id
+          OR (session.sandbox_group_id = p_sandbox_id
+            AND session.sandbox_backend = 'selfhosted'))
+      RETURNING session.id, session.title
+    LOOP
+      session_id := detached_record.id;
+      title := detached_record.title;
+      RETURN NEXT;
+    END LOOP;
+    PERFORM pg_catalog.set_config('opengeni.session_activity_gate_state', 'finalizing', true);
+    UPDATE workspace_session_activity_revisions counter
+    SET revision = counter.revision + 1
+    WHERE counter.workspace_id = dependent_workspace_id
+      AND EXISTS (
+        SELECT 1 FROM sessions pending
+        WHERE pending.workspace_id = dependent_workspace_id
+          AND pending.activity_revision_pending_xid
+            = pg_catalog.pg_current_xact_id()::text::bigint
+      )
+    RETURNING counter.revision INTO next_activity_revision;
+    UPDATE sessions pending
+    SET activity_revision = next_activity_revision,
+        activity_revision_pending_xid = NULL
+    WHERE pending.workspace_id = dependent_workspace_id
+      AND pending.activity_revision_pending_xid
+        = pg_catalog.pg_current_xact_id()::text::bigint;
+  END LOOP;
+  PERFORM pg_catalog.set_config('opengeni.session_activity_gate_state', 'open', true);
+  PERFORM pg_catalog.set_config(
+    'opengeni.session_activity_gate_workspace_id', p_origin_workspace_id::text, true
+  );
+  DELETE FROM opengeni_private.scoped_compute_capabilities
+  WHERE backend_pid = pg_catalog.pg_backend_pid()
+    AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+    AND capability_kind = 'write';
+EXCEPTION WHEN OTHERS THEN
+  DELETE FROM opengeni_private.scoped_compute_capabilities
+  WHERE backend_pid = pg_catalog.pg_backend_pid()
+    AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned();
+  RAISE;
+END
+$$;
+REVOKE ALL ON FUNCTION detach_scoped_machine_dependent_sessions(uuid, uuid, uuid)
+  FROM PUBLIC;
+
 DO $grants$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
@@ -1302,6 +1455,10 @@ BEGIN
     GRANT EXECUTE ON FUNCTION assert_session_attempt_personal_machine(
       uuid, uuid, uuid, uuid, uuid, integer, uuid
     ) TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION list_scoped_machine_dependent_sessions(uuid, uuid, uuid)
+      TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION detach_scoped_machine_dependent_sessions(uuid, uuid, uuid)
+      TO opengeni_app;
     REVOKE ALL ON TABLE opengeni_private.scoped_compute_capabilities FROM opengeni_app;
     REVOKE ALL ON TABLE session_attempt_connected_machine_authorizations
       FROM opengeni_app;

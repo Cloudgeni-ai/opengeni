@@ -36,6 +36,7 @@ import type {
  *  `@opengeni/db`'s `SandboxRecord`; structural so the leaf does not import DB). */
 export interface RoutableSandbox {
   id: string;
+  workspaceId: string;
   kind: "modal" | "selfhosted" | string;
   name: string;
   /** For a selfhosted sandbox this is its enrollment id (== the agent id the

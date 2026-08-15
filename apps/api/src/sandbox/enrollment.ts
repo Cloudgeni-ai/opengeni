@@ -193,7 +193,7 @@ export async function approveDeviceEnrollment(
   input: {
     accountId: string;
     workspaceId: string;
-    scope: "organization" | "workspace" | "user";
+    scope?: "organization" | "workspace" | "user";
     allowOrganization?: boolean;
     userCode: string;
     allowScreenControl: boolean;
@@ -219,7 +219,7 @@ export async function approveDeviceEnrollment(
   const result = await approveDeviceEnrollmentRequest(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
-    scope: input.scope,
+    ...(input.scope ? { scope: input.scope } : {}),
     allowOrganization: input.allowOrganization === true,
     requestId: pending.id,
     allowScreenControl: input.allowScreenControl,

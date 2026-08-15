@@ -6,6 +6,7 @@ import {
   createRig,
   createRigChange,
   createRigVersion,
+  createSession,
   getRigChange,
   updateRigChangeStatus,
   type DbClient,
@@ -52,6 +53,105 @@ afterAll(async () => {
 }, 180_000);
 
 describe("rig MCP tools", () => {
+  test("a worker-signed attempt resolves personal rigs through its frozen initiating human", async () => {
+    if (!available) return;
+    const subjectId = `human:${crypto.randomUUID()}`;
+    const [personalWorkspace] = await shared!.admin<Array<{ id: string }>>`
+      insert into workspaces (account_id, name)
+      values (${accountId}, 'MCP personal workspace') returning id
+    `;
+    const [targetWorkspace] = await shared!.admin<Array<{ id: string }>>`
+      insert into workspaces (account_id, name)
+      values (${accountId}, 'MCP target workspace') returning id
+    `;
+    await shared!.admin`
+      insert into workspace_inference_controls (workspace_id, account_id) values
+        (${personalWorkspace!.id}, ${accountId}), (${targetWorkspace!.id}, ${accountId})
+    `;
+    await shared!.admin`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id, authorization_revision
+      ) values (${accountId}, ${subjectId}, 'active', ${personalWorkspace!.id}, 1)
+    `;
+    await shared!.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id) values
+        (${accountId}, ${workspaceId}, ${subjectId}),
+        (${accountId}, ${targetWorkspace!.id}, ${subjectId})
+    `;
+    const personalRig = await createRig(client.db, {
+      accountId,
+      workspaceId,
+      scope: "user",
+      subjectId,
+      name: `personal-mcp-${crypto.randomUUID()}`,
+      createdBy: subjectId,
+      initialVersion: { setupScript: "true", changelog: "personal" },
+    });
+    const session = await createSession(client.db, {
+      accountId,
+      workspaceId: targetWorkspace!.id,
+      initialMessage: "list my personal rigs",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId },
+      subjectId,
+      firstPartyMcpPermissions: ["rigs:use"],
+      firstPartyMcpTools: ["rig_list"],
+    });
+    const executionGeneration = 1;
+    const [turn] = await shared!.admin<Array<{ id: string }>>`
+      insert into session_turns (
+        account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+        status, position, prompt, model, reasoning_effort, sandbox_backend,
+        execution_generation, initiator_kind, initiator_subject_id,
+        initiating_human_subject_id, initiator_context
+      ) values (
+        ${accountId}, ${targetWorkspace!.id}, ${session.id}, gen_random_uuid(),
+        ${`rig-mcp-${crypto.randomUUID()}`}, 'running', 0, 'list personal rigs',
+        'gpt-test', 'medium', 'none', ${executionGeneration}, 'subject', ${subjectId},
+        ${subjectId}, '{"accepted":true}'::jsonb
+      ) returning id
+    `;
+    const attemptId = crypto.randomUUID();
+    await shared!.admin`
+      insert into session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+        verified_control_revision, mcp_approval_policies
+      ) values (
+        ${attemptId}, ${accountId}, ${targetWorkspace!.id}, ${session.id}, ${turn!.id},
+        ${executionGeneration}, 'running', 'rig-mcp', ${`run-${attemptId}`},
+        ${`activity-${attemptId}`}, 0, '{}'::jsonb
+      )
+    `;
+    await shared!.admin`
+      update session_turns set active_attempt_id = ${attemptId} where id = ${turn!.id}
+    `;
+    await shared!.admin`
+      update sessions set active_turn_id = ${turn!.id} where id = ${session.id}
+    `;
+    const agentGrant: AccessGrant = {
+      accountId,
+      workspaceId: targetWorkspace!.id,
+      subjectId: "worker:first-party-mcp",
+      principalKind: "agent_attempt",
+      permissions: ["rigs:use"],
+      metadata: {
+        sessionId: session.id,
+        turnId: turn!.id,
+        attemptId,
+        executionGeneration,
+        firstPartyMcpTools: ["rig_list"],
+      },
+    };
+    const server = buildOpenGeniMcpServer(deps(new FakeWorkflowClient()), agentGrant);
+    const listed = await callMcpTool<{ rigs: Array<{ id: string }> }>(server, "rig_list", {});
+    expect(listed.rigs.map((rig) => rig.id)).toContain(personalRig.id);
+  }, 60_000);
+
   test("rig_list and rig_get are available under rigs:use", async () => {
     if (!available) return;
     const workflow = new FakeWorkflowClient();
@@ -69,20 +169,23 @@ describe("rig MCP tools", () => {
 
     const listed = await callMcpTool<{ rigs: Array<{ id: string }> }>(server, "rig_list", {});
     expect(listed.rigs.some((candidate) => candidate.id === rig.id)).toBe(true);
-    const got = await callMcpTool<{ rig: { id: string }; versions: unknown[]; changes: unknown[] }>(
-      server,
-      "rig_get",
-      { rigId: rig.id },
-    );
+    const got = await callMcpTool<{
+      rig: { id: string };
+      versions: unknown[];
+      changes: unknown[];
+    }>(server, "rig_get", { rigId: rig.id });
     expect(got.rig.id).toBe(rig.id);
     expect(got.versions.length).toBeGreaterThanOrEqual(1);
     expect(Array.isArray(got.changes)).toBe(true);
 
-    const clamped = await callMcpTool<{ versions: unknown[]; changes: unknown[] }>(
-      server,
-      "rig_get",
-      { rigId: rig.id, versionLimit: 1_000, changeLimit: 1_000 },
-    );
+    const clamped = await callMcpTool<{
+      versions: unknown[];
+      changes: unknown[];
+    }>(server, "rig_get", {
+      rigId: rig.id,
+      versionLimit: 1_000,
+      changeLimit: 1_000,
+    });
     expect(clamped.versions).toHaveLength(1);
     expect(clamped.changes).toHaveLength(0);
   });
@@ -100,7 +203,10 @@ describe("rig MCP tools", () => {
     });
     const server = buildOpenGeniMcpServer(
       deps(workflow),
-      grant(["rigs:use"], { sessionId, firstPartyMcpTools: ["rig_propose_change"] }),
+      grant(["rigs:use"], {
+        sessionId,
+        firstPartyMcpTools: ["rig_propose_change"],
+      }),
     );
     const proposed = await callMcpTool<{
       change: { id: string; status: string };
@@ -290,7 +396,9 @@ async function callMcpTool<T = unknown>(
     server as {
       _registeredTools?: Record<
         string,
-        { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> }
+        {
+          handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown>;
+        }
       >;
     }
   )._registeredTools?.[name];

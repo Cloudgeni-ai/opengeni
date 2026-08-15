@@ -336,7 +336,7 @@ export async function listMachines(
 
   // The workspace's enrolled selfhosted machines. One bulk metrics read joined
   // onto the machines (no N+1). Each machine is probed for liveness.
-  const [legacySandboxes, enrollments, metricsByEnrollment] = await Promise.all([
+  const [legacySandboxes, enrollments] = await Promise.all([
     listSandboxes(db, workspaceId),
     listEnrollments(
       db,
@@ -349,8 +349,14 @@ export async function listMachines(
         : workspaceId,
       { status: "active" },
     ),
-    readMachineMetricsLatestForWorkspace(db, workspaceId),
   ]);
+  const metricsByEnrollment = new Map<string, MachineMetricsRow>();
+  for (const originWorkspaceId of new Set(enrollments.map((entry) => entry.workspaceId))) {
+    const originMetrics = await readMachineMetricsLatestForWorkspace(db, originWorkspaceId);
+    for (const [enrollmentId, metrics] of originMetrics) {
+      metricsByEnrollment.set(enrollmentId, metrics);
+    }
+  }
   const scopedSandboxes = enrollments.flatMap((enrollment) =>
     enrollment.sandboxId
       ? [
@@ -389,10 +395,25 @@ export async function listMachines(
         enrollment.connectionLeaseExpiresAt &&
         Date.parse(enrollment.connectionLeaseExpiresAt) > Date.now()
           ? Promise.resolve(enrollment)
-          : getLiveEnrollmentConnection(db, enrollment.workspaceId, enrollment.id),
-        readLease(db, workspaceId, sandbox.id),
+          : getLiveEnrollmentConnection(
+              db,
+              input.accountId && input.subjectId
+                ? {
+                    accountId: input.accountId,
+                    workspaceId,
+                    subjectId: input.subjectId,
+                  }
+                : enrollment.workspaceId,
+              enrollment.id,
+            ),
+        readLease(db, enrollment.workspaceId, sandbox.id),
       ]);
-      const probe = await probeEnrollment(services, workspaceId, enrollment, liveConnection);
+      const probe = await probeEnrollment(
+        services,
+        enrollment.workspaceId,
+        enrollment,
+        liveConnection,
+      );
       const state = machineStateFor(probe.state, probe.hasDisplay);
 
       // sharedSessionCount = the lease refcount for this machine's group. The
