@@ -7,6 +7,7 @@ import { createDb, createSession } from "../src";
 import { migrate } from "../src/migrate";
 
 const migrationName = "0249_personal_resource_delegation_authority_correction.sql";
+const commonAuthorityMigrationName = "0253_common_user_resource_authority_lifecycle.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 const migration0241Url = new URL(
   "../drizzle/0241_atomic_personal_resource_delegation.sql",
@@ -143,9 +144,9 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           applied_at timestamptz not null default now()
         )
       `);
-      await sql`insert into schema_migrations (name) values (${migrationName})`;
+      await sql`insert into schema_migrations (name) values (${migrationName}), (${commonAuthorityMigrationName})`;
       await migrate(databaseUrl);
-      await sql`delete from schema_migrations where name = ${migrationName}`;
+      await sql`delete from schema_migrations where name in (${migrationName}, ${commonAuthorityMigrationName})`;
 
       const ids = await createFixture(sql, databaseUrl, {
         target: "personal",

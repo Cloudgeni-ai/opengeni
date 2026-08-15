@@ -357,6 +357,7 @@ export * from "./task-notes";
 export * from "./generated-images";
 export * from "./slack-user-link-access";
 export * from "./video-generation";
+export * from "./user-resource-authority";
 export * from "./xai-subscription";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
