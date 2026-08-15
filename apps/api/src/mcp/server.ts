@@ -4472,6 +4472,11 @@ function registerVariableSetTools(
   sessionId: string | null,
   json: JsonResult,
 ): void {
+  const variableSetAccess = {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
+  };
   const registerListTool = (name: string, description: string): void => {
     server.registerTool(
       name,
@@ -4480,7 +4485,7 @@ function registerVariableSetTools(
         inputSchema: {},
       },
       async () => {
-        const variableSets = await listVariableSets(deps.db, grant.workspaceId);
+        const variableSets = await listVariableSets(deps.db, variableSetAccess);
         return json({ variableSets, environments: variableSets });
       },
     );
@@ -4522,14 +4527,14 @@ function registerVariableSetTools(
       let created = false;
       let variableSet =
         targetId !== undefined
-          ? await getVariableSet(deps.db, grant.workspaceId, targetId)
-          : await getVariableSetByName(deps.db, grant.workspaceId, trimmedVariableSetName!);
+          ? await getVariableSet(deps.db, variableSetAccess, targetId)
+          : await getVariableSetByName(deps.db, variableSetAccess, trimmedVariableSetName!);
       if (!variableSet && targetId !== undefined) {
         throw new Error("variable set/environment not found");
       }
       if (!variableSet) {
         if (
-          (await countVariableSets(deps.db, grant.workspaceId)) >= MAX_ENVIRONMENTS_PER_WORKSPACE
+          (await countVariableSets(deps.db, variableSetAccess)) >= MAX_ENVIRONMENTS_PER_WORKSPACE
         ) {
           throw new Error(
             `a workspace supports at most ${MAX_ENVIRONMENTS_PER_WORKSPACE} variable sets`,
@@ -4558,6 +4563,7 @@ function registerVariableSetTools(
       const metadata = await setVariableSetVariable(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
         variableSetId: variableSet.id,
         name: parsedName.data,
         valueEncrypted: encryptVariableSetValue(key, value),

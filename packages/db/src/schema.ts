@@ -639,10 +639,9 @@ export const workspaceVariableSets = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    workspaceName: uniqueIndex("workspace_variable_sets_workspace_name_idx").on(
-      table.workspaceId,
-      table.name,
-    ),
+    workspaceName: uniqueIndex("workspace_variable_sets_workspace_name_active_idx")
+      .on(table.workspaceId, table.name)
+      .where(sql`${table.authorityScope} = 'workspace' and ${table.status} = 'active'`),
     workspaceCreated: index("workspace_variable_sets_workspace_created_idx").on(
       table.workspaceId,
       table.createdAt,

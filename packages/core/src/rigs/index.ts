@@ -143,7 +143,7 @@ function assertUniqueCheckNames(checks: ReadonlyArray<{ name: string }> | undefi
 // cross-workspace id indistinguishable from a missing one, so both map to 422.
 async function assertVariableSetsExist(
   db: Database,
-  workspaceId: string,
+  access: { accountId: string; workspaceId: string; subjectId: string },
   ids: ReadonlyArray<string> | undefined,
 ): Promise<void> {
   if (!ids || ids.length === 0) {
@@ -151,7 +151,7 @@ async function assertVariableSetsExist(
   }
   const unique = [...new Set(ids)];
   for (const id of unique) {
-    const variableSet = await getVariableSet(db, workspaceId, id);
+    const variableSet = await getVariableSet(db, access, id);
     if (!variableSet) {
       throw new HTTPException(422, { message: `unknown defaultVariableSetId: ${id}` });
     }
@@ -166,7 +166,7 @@ export async function createRigForApi(
   const workspaceId = grant.workspaceId;
   const name = trimmedRigName(payload.name);
   assertUniqueCheckNames(payload.checks);
-  await assertVariableSetsExist(deps.db, workspaceId, payload.defaultVariableSetIds);
+  await assertVariableSetsExist(deps.db, grant, payload.defaultVariableSetIds);
   if ((await countRigs(deps.db, workspaceId)) >= MAX_RIGS_PER_WORKSPACE) {
     throw new HTTPException(422, {
       message: `a workspace supports at most ${MAX_RIGS_PER_WORKSPACE} rigs`,
@@ -255,7 +255,7 @@ export async function proposeRigChangeForApi(
     assertUniqueCheckNames(request.payload.checks);
     await assertVariableSetsExist(
       deps.db,
-      workspaceId,
+      grant,
       request.payload.defaultVariableSetIds ?? undefined,
     );
   }
@@ -478,11 +478,7 @@ export async function createRigVersionForApi(
     throw new HTTPException(422, { message: "rig has no active version" });
   }
   assertUniqueCheckNames(payload.checks);
-  await assertVariableSetsExist(
-    deps.db,
-    grant.workspaceId,
-    payload.defaultVariableSetIds ?? undefined,
-  );
+  await assertVariableSetsExist(deps.db, grant, payload.defaultVariableSetIds ?? undefined);
   const base = rig.activeVersion;
   const version = await createRigVersion(
     deps.db,

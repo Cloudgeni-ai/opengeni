@@ -6642,12 +6642,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         accountId: input.accountId,
         workspaceId: input.workspaceId,
       };
+      if (!fileAuthoritySubjectId) {
+        throw new Error("variable-set materialization requires an initiating human subject");
+      }
+      const variableSetAuthority = {
+        sessionId: input.sessionId,
+        turnId: turn.id,
+        attemptId: input.attemptId,
+        executionGeneration: turn.executionGeneration,
+        initiatingHumanSubjectId: fileAuthoritySubjectId,
+      };
       const workspaceVariableSet = await waitForTurnOperation(
         loadWorkspaceEnvironmentForRunWithCredentials(
           db,
           runSettings,
           connectionScope,
           session.variableSetId,
+          variableSetAuthority,
           connectionCredentials?.sandboxSecrets,
         ),
         cancellationSignal,
@@ -6672,6 +6683,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             runSettings,
             connectionScope,
             rigDefaultVariableSetId,
+            variableSetAuthority,
             connectionCredentials?.sandboxSecrets,
           ),
           cancellationSignal,

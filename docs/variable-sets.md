@@ -1,13 +1,19 @@
-# Workspace Variable Sets
+# Scoped Variable Sets
 
-A workspace owns named **variable-sets**: sets of variables whose values are secret. A variable set is **attached** to runnable things — a session (at creation only), a scheduled task, or a capability pack installation that declares it uses one — and its values are injected into the sandbox at materialization time for runs whose session carries the attachment.
+Variable sets are named encrypted secret collections with one explicit owner scope:
+
+- **Organization:** discoverable from every workspace in the organization; mutation requires `account:admin`.
+- **Workspace:** discoverable only in the origin workspace. This is the default and preserves legacy `/environments` behavior.
+- **Only me:** owned by the authenticated active organization member, private by default, and discoverable from any workspace that member currently accesses.
+
+A variable set is attached to runnable things — a session (at creation only), a scheduled task, or a capability pack installation that declares it uses one — and its values are injected only after exact runtime authority is revalidated.
 
 ## Invariants
 
 1. **Plaintext has one explicit read boundary.** Generic workspace, session, event, capability, installation, list, and variable-set metadata responses remain value-free. One dedicated REST route and one live-session MCP tool return exactly one configured value, and only when the caller holds both the resource permission and literal `secrets:read`.
 2. **No attachment, no injection.** A run whose session has `variableSetId = null` gets exactly the pre-existing behavior: the deployment env allowlist, git identity, and run-scoped GitHub auth. Nothing more. (This injection describes a **managed sandbox**; a Connected Machine session is not injected this way — see [Env injection is a managed-sandbox concept](#env-injection-is-a-managed-sandbox-concept).)
-3. **Agents cannot change their own attachment or self-escalate.** The current worker default includes `variable-sets:use` and `variable-sets:manage`, so an agent can manage sets and attach one when it creates a child session, but neither legacy permission implies `secrets:read`. A session only holds a different first-party permission set when its creator explicitly grants one at creation (`firstPartyMcpPermissions`, capped by the creating grant), and there is no attach-after-create operation.
-4. **Workspace isolation.** Both tables are protected by the same forced row-level-security policy as every other workspace table.
+3. **Attachment and use are separate.** `variable-sets:attach` changes a runnable attachment; `variable-sets:use` authorizes runtime use. Neither implies metadata, write, or plaintext-read authority.
+4. **Capability-only storage boundary.** The runtime role has no direct DML on variable-set or ciphertext tables. Security-definer routines enforce organization/workspace/user visibility and mutation rules under forced RLS.
 5. **Encryption at rest.** Values are AES-256-GCM encrypted with an operator key (`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`) held outside Postgres. A database dump alone does not reveal values.
 6. **No content rewriting.** If an authorized agent echoes a configured value into model history, events, tool results, errors, memory, or UI-visible OpenGeni data, that content remains exact. Public or third-party telemetry uses a sink-local, closed schema and never writes back over canonical OpenGeni data.
 
@@ -40,14 +46,16 @@ openssl rand -base64 32   # generate OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY
 | `variable-sets:list`   | List variable-set containers and metadata.                             |
 | `variable-sets:read`   | Read one variable-set container and metadata.                          |
 | `variable-sets:write`  | Create, rename, or delete variable-set containers.                     |
+| `variable-sets:attach` | Attach or detach a variable set on a runnable resource.                 |
 | `variable-sets:use`    | Attach and inject variable sets; never reveal plaintext by itself.     |
 | `secrets:list`         | List configured secret names, versions, and timestamps.                |
 | `secrets:read`         | Retrieve one exact plaintext configured secret through a dedicated operation. |
 | `secrets:write`        | Create, rotate, or delete configured secret values.                    |
 
-The deprecated `variable-sets:manage`, `environments:use`, and
-`environments:manage` permissions retain their metadata/write behavior, but
-none implies `secrets:read`. `workspace:admin` likewise does not imply
+No variable-set permission implies another. The deprecated
+`variable-sets:manage`, `environments:use`, and `environments:manage`
+permissions remain accepted only where explicitly checked; they do not expand
+into the granular permissions. `workspace:admin` likewise does not imply
 `secrets:read`; plaintext authority must be present literally on the grant.
 The rollout migration adds the six granular permissions, including
 `secrets:read`, only to existing human workspace-admin memberships. It does not
@@ -67,7 +75,7 @@ it for the same reason.
 | Method and path                                                                   | Permission(s)                                    | Notes                                                                                                                        |
 | --------------------------------------------------------------------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
 | `GET /v1/workspaces/:workspaceId/variable-sets`                                   | `variable-sets:list` + `secrets:list`            | Variable sets with variable metadata, never plaintext values.                                                                |
-| `POST /v1/workspaces/:workspaceId/variable-sets`                                  | `variable-sets:write`; plus `secrets:write` when initial values are present | Create with optional initial variables. 409 on duplicate name. Caps: 25 variable-sets/workspace, 100 variables/variable set. |
+| `POST /v1/workspaces/:workspaceId/variable-sets`                                  | `variable-sets:write`; plus `secrets:write` when initial values are present; organization scope also requires `account:admin` | Create with `scope: organization | workspace | user` (omission defaults to workspace). 409 on duplicate active name within the owner scope. |
 | `GET /v1/workspaces/:workspaceId/variable-sets/:variableSetId`                    | `variable-sets:read` + `secrets:list`            | Metadata only.                                                                                                               |
 | `GET /v1/workspaces/:workspaceId/variable-sets/:variableSetId/variables/:name`    | `variable-sets:read` + literal `secrets:read`    | Return one exact plaintext value and metadata; read and metadata-only audit commit atomically.                               |
 | `PATCH /v1/workspaces/:workspaceId/variable-sets/:variableSetId`                  | `variable-sets:write`                            | Rename / description.                                                                                                        |

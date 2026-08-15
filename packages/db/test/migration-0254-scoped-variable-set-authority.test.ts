@@ -24,5 +24,21 @@ describe("migration 0254 scoped variable-set authority", () => {
     );
     expect(source).toContain('ADD COLUMN "generation" bigint NOT NULL DEFAULT 1');
     expect(source).toContain("ADD COLUMN \"status\" text NOT NULL DEFAULT 'active'");
+    expect(source).toContain("variable_set_authority_capabilities");
+    expect(source).toContain("list_scoped_variable_sets");
+    expect(source).toContain("mutate_scoped_variable_set");
+    expect(source).toContain("read_scoped_variable_set_secret");
+    expect(source).toContain("materialize_scoped_variable_set_for_attempt");
+    expect(source).toContain("materialize_scoped_variable_set_for_session");
+    expect(source).toContain("resolve_session_attempt_personal_resources");
+    expect(source).toContain("variable_set.materialized");
+    expect(source).toContain("metadata_codec_version");
+    expect(source).toContain(
+      "REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLE workspace_variable_sets",
+    );
+    expect(source).toContain(
+      "REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLE workspace_variable_set_variables",
+    );
+    expect(source).not.toMatch(/value_encrypted[^\n]*audit_events/iu);
   });
 });

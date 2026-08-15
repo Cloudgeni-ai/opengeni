@@ -114,7 +114,16 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
 
   const variableSets = await Promise.all(
     [...variableSetIds].map(
-      async (id) => await getVariableSet(input.db, input.task.workspaceId, id),
+      async (id) =>
+        await getVariableSet(
+          input.db,
+          {
+            accountId: input.task.accountId,
+            workspaceId: input.task.workspaceId,
+            subjectId: input.task.createdBy.subjectId,
+          },
+          id,
+        ),
     ),
   );
   if (variableSets.some((variableSet) => variableSet === null)) {

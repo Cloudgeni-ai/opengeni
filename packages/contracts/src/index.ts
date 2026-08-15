@@ -1106,7 +1106,11 @@ export const IssueUserResourceGrantRequest = z
       });
     }
     if (value.mode === "always" && value.sessionId) {
-      context.addIssue({ code: "custom", path: ["sessionId"], message: "always is unbound" });
+      context.addIssue({
+        code: "custom",
+        path: ["sessionId"],
+        message: "always is unbound",
+      });
     }
     if (value.mode !== "always" && !value.sessionId) {
       context.addIssue({
@@ -3242,8 +3246,14 @@ export type GitCredentials = {
 export type SandboxSecretsRequest = {
   accountId: string;
   workspaceId: string;
-  // The variable set the run's session declares (null = unattached;
-  // the provider, like the self-mint path, returns null values for it).
+  // Exact live attempt authority. Hosts MUST revalidate this tuple, the
+  // session's selected resource identity, and any personal-resource grant
+  // immediately before returning plaintext.
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  initiatingHumanSubjectId: string;
   variableSetId: string;
 };
 
@@ -3252,8 +3262,17 @@ export type SandboxSecrets = {
   // `environmentsEncryptionKeyBytes` decrypt. Same shape the self-mint path
   // produces (plaintext name→value).
   values: Record<string, string>;
-  // workspace-scope cross-check echo: the workspace the provider scoped these secrets to.
+  // Exact scope/resource echoes are mandatory so a host routing bug cannot
+  // inject a sibling tenant, resource, or stale attempt's plaintext.
+  accountId: string;
   workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  variableSetId: string;
+  scope: VariableSetScope;
+  generation: number;
   // Optional variableSet metadata; when omitted the activity uses the
   // variableSetId as both id and name (the local decrypt carries the row's
   // id/name/description, but only `id` is load-bearing downstream).
