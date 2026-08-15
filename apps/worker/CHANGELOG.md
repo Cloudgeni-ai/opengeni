@@ -1,5 +1,53 @@
 # @opengeni/worker-bundle
 
+## 0.20.4
+
+### Patch Changes
+
+- 90c0c3e: Persist bounded, content-free Company Brain prompt contribution estimates on authoritative model-call facts and expose their source breakdown and coverage in Workspace Insights.
+- e98daf6: Measure physical MCP tool calls by bounded structural outcome and lock the existing provider-declared error path with an HTTP-200 SDK/durability regression.
+- ec00479: Add provider-free Google Drive release-readiness receipts, configurable persisted sync budgets, bounded request retry and timeout handling, and scoped sync health telemetry, dashboards, and alerts.
+- 1ab8023: Deduplicate scheduled alert deliveries onto one atomic responder session per scheduled task and canonical alert occurrence while preserving separate roots for distinct tasks and reopened occurrences.
+- 79f57b5: Close terminal SuperGrok SSE streams deterministically; abort any accepted stream after a configurable interval without a complete valid event; and expose metadata-only durable lifecycle audits, bounded metrics, dashboard panels, and timeout alerting without replaying partial work.
+- c3f0598: Materialize authorized connector attachments as exact, hash-verified sandbox files while keeping provider bytes and private download URLs out of model, Codemode, and durable event output.
+- d2f172c: Add fail-closed, metadata-only capability, exact rig-version health, exact alert-selector data-source checks, and source/claim authority fencing for scheduled incident telemetry responders before expensive retrieval.
+- Updated dependencies [79f57b5]
+- Updated dependencies [a551666]
+- Updated dependencies [31231dc]
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [4d1ed07]
+- Updated dependencies [ce3b370]
+- Updated dependencies [e98daf6]
+- Updated dependencies [b2af2df]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ec00479]
+- Updated dependencies [3843825]
+- Updated dependencies [1ab8023]
+- Updated dependencies [d34dd9a]
+- Updated dependencies [79f57b5]
+- Updated dependencies [886682d]
+- Updated dependencies [234a5e7]
+- Updated dependencies [c3f0598]
+- Updated dependencies [79f57b5]
+- Updated dependencies [d2f172c]
+- Updated dependencies [c056063]
+  - @opengeni/codemode@0.4.5
+  - @opengeni/capabilities@0.2.1
+  - @opengeni/db@1.0.2
+  - @opengeni/observability@0.7.8
+  - @opengeni/contracts@1.1.0
+  - @opengeni/core@1.0.2
+  - @opengeni/agent-proto@0.5.1
+  - @opengeni/config@0.16.5
+  - @opengeni/events@0.3.113
+  - @opengeni/runtime@1.0.2
+  - @opengeni/xai-subscription@0.1.1
+  - @opengeni/documents@0.5.42
+  - @opengeni/github@0.4.60
+  - @opengeni/storage@0.2.97
+
 ## 0.20.3
 
 ### Patch Changes
