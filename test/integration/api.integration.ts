@@ -936,12 +936,30 @@ describe("API component integration", () => {
       replay: boolean;
     }>(mcp, "goal_update", {
       text: "keep CI green on main",
-      progressNote: "fixed two flaky tests",
+      changeKind: "refinement",
+      rationale: "clarifies the existing CI objective without redirecting it",
+      expectedObjectiveRevision: 1,
       idempotencyKey: crypto.randomUUID(),
     });
     expect(updated.version).toBe(2);
     expect(updated.operationId).toBeTruthy();
     expect(updated.replay).toBe(false);
+
+    const progress = await callMcpTool<{
+      version: number;
+      objectiveRevision: number;
+      operationId: string;
+      replay: boolean;
+    }>(mcp, "goal_progress", {
+      progressNote: "fixed two flaky tests",
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(progress).toMatchObject({
+      version: 2,
+      objectiveRevision: 2,
+      replay: false,
+    });
+    expect(progress.operationId).toBeTruthy();
 
     const pausedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_pause", {
       rationale: "waiting on upstream fix",
@@ -982,6 +1000,9 @@ describe("API component integration", () => {
     await expect(
       callMcpTool(mcp, "goal_update", {
         text: "also too late",
+        changeKind: "replacement",
+        rationale: "attempting to replace a completed objective must remain forbidden",
+        expectedObjectiveRevision: 3,
         idempotencyKey: crypto.randomUUID(),
       }),
     ).rejects.toThrow("completed");
