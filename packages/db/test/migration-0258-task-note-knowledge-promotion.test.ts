@@ -42,6 +42,10 @@ describe("migration 0258 Task-note Knowledge promotion", () => {
     expect(sql).toContain("current_setting('opengeni.task_note_knowledge_promotion_capability'");
     expect(sql).toContain("capability.evidence_operation_id = NEW.operation_id");
     expect(sql).toContain("claim.operation_id = capability_row.claim_operation_id");
+    expect(sql).toContain("JOIN knowledge_facts fact");
+    expect(sql).toContain("fact.object_value = pg_catalog.to_jsonb(note_row.text)");
+    expect(sql).toContain("claim.extraction_method = 'task-note-promotion-v1'");
+    expect(sql).toContain("claim.extraction_metadata = pg_catalog.jsonb_build_object(");
     expect(sql).toContain("FROM workspace_learning_policy_snapshots snapshot");
     expect(sql).toContain("effective_learning_mode NOT IN ('suggest', 'automatic')");
     expect(sql).toContain("DELETE FROM task_note_knowledge_promotion_capabilities capability");

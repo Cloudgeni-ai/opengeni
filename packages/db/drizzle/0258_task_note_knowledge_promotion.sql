@@ -142,6 +142,10 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM knowledge_claims claim
+    JOIN knowledge_facts fact
+      ON fact.account_id = claim.account_id
+      AND fact.id = claim.fact_id
+      AND fact.scope_key = claim.scope_key
     WHERE claim.id = NEW.claim_id
       AND claim.account_id = NEW.account_id
       AND claim.scope_kind = 'workspace'
@@ -151,8 +155,24 @@ BEGIN
       AND claim.actor_kind = NEW.actor_kind
       AND claim.actor_subject_id = capability_row.actor_subject_id
       AND claim.initiating_human_subject_id = capability_row.initiating_human_subject_id
+      AND claim.extraction_method = 'task-note-promotion-v1'
+      AND claim.extraction_metadata = pg_catalog.jsonb_build_object(
+        'taskNoteId', note_row.id,
+        'taskNoteRootSessionId', note_row.root_session_id,
+        'taskNoteVersion', note_row.version,
+        'taskNoteTextHash', note_row.text_hash
+      )
+      AND fact.scope_kind = 'workspace'
+      AND fact.scope_workspace_id = NEW.scope_workspace_id
+      AND fact.scope_subject_id IS NULL
+      AND fact.object_kind = 'text'
+      AND fact.object_entity_id IS NULL
+      AND fact.object_value = pg_catalog.to_jsonb(note_row.text)
+      AND fact.actor_kind = NEW.actor_kind
+      AND fact.actor_subject_id = capability_row.actor_subject_id
+      AND fact.initiating_human_subject_id = capability_row.initiating_human_subject_id
   ) THEN
-    RAISE EXCEPTION 'Task-note Knowledge evidence claim is outside the admitted promotion lineage'
+    RAISE EXCEPTION 'Task-note Knowledge evidence claim/fact is outside the admitted promotion lineage'
       USING ERRCODE = '42501';
   END IF;
   DELETE FROM task_note_knowledge_promotion_capabilities capability

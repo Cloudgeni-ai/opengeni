@@ -224,7 +224,8 @@ bypassing human-only policy/preference lifecycle. Canonical:
 `0255_company_brain_governed_write_proposals.sql`. Migration 0258 adds exact
 active rooted Task-note to proposed workspace Knowledge promotion: evidence is
 one Document version or one immutable value-free Task-note source receipt, the
-note text becomes the proposed fact only, retries converge after note archival,
+note text becomes the proposed fact only, the one-shot database capability
+verifies that exact claim-to-fact binding, retries converge after note archival,
 and another root/tenant/stale attempt fails closed. The explicit MCP tools remain
 proposal-only and learning-policy gated; see
 [`company-brain-write-routing.md`](company-brain-write-routing.md).

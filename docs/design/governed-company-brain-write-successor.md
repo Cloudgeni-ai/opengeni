@@ -112,5 +112,8 @@ proposed fact value; another root, archived/expired note, or stale attempt is
 denied. Its resolver additionally requires the exact accepted-attempt
 learning-policy snapshot to permit `suggest` or `automatic`, and issues a
 one-transaction evidence/claim capability that the insert trigger consumes.
+The same trigger follows the admitted claim to its fact and requires the exact
+note text plus the version-one source identity, so direct runtime DML cannot
+attach Task-note provenance to unrelated content.
 This still does not add personal/organization routing, generic Memory, or active
 authority.

@@ -310,6 +310,11 @@ describe("task-tree notes PostgreSQL authority", () => {
       }),
     ).rejects.toThrow();
 
+    const forgedEvidenceOperationId = crypto.randomUUID();
+    const forgedClaimOperationId = crypto.randomUUID();
+    const forgedFactOperationId = crypto.randomUUID();
+    const forgedActorSubjectId = `service:forged-task-note-promotion:${crypto.randomUUID()}`;
+    const forgedFactText = "This unrelated statement was never present in the Task note.";
     const app = postgres(shared.appUrl, { max: 1, prepare: false });
     try {
       await expectSqlState(
@@ -331,6 +336,99 @@ describe("task-tree notes PostgreSQL authority", () => {
                 task_note_version, polarity, content_hash, ${crypto.randomUUID()},
                 ${"1".repeat(64)}, actor_kind, actor_subject_id, initiating_human_subject_id
               from knowledge_claim_evidence where id = ${first.evidenceId}
+            `;
+          }),
+        "42501",
+      );
+      await expectSqlState(
+        async () =>
+          await app.begin(async (sql) => {
+            await sql`select set_config('opengeni.account_id', ${f.grant.accountId}, true)`;
+            await sql`select set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true)`;
+            await sql`select set_config('opengeni.subject_id', ${f.ownerSubjectId}, true)`;
+            await sql`select set_config('opengeni.initiating_human_subject_id', ${f.ownerSubjectId}, true)`;
+            const [source] = await sql<
+              {
+                note_id: string;
+                root_session_id: string;
+                note_version: number;
+                note_text_hash: string;
+              }[]
+            >`
+              select note_id, root_session_id, note_version, note_text_hash
+              from resolve_task_note_knowledge_promotion_source(
+                ${attempt.accountId}::uuid,
+                ${attempt.workspaceId}::uuid,
+                ${attempt.sessionId}::uuid,
+                ${attempt.turnId}::uuid,
+                ${attempt.attemptId}::uuid,
+                ${attempt.executionGeneration}::integer,
+                ${note.note.id}::uuid,
+                1,
+                ${forgedEvidenceOperationId}::text,
+                ${forgedClaimOperationId}::text,
+                ${forgedActorSubjectId}::text
+              )
+            `;
+            if (!source) throw new Error("expected a Task-note promotion source");
+            const [forgedFact] = await sql<{ id: string }[]>`
+              insert into knowledge_facts (
+                account_id, scope_kind, scope_workspace_id, scope_subject_id, scope_key,
+                subject_entity_id, predicate_key, object_kind, object_entity_id, object_value,
+                object_hash, operation_id, input_hash, actor_kind, actor_subject_id,
+                initiating_human_subject_id
+              )
+              select fact.account_id, fact.scope_kind, fact.scope_workspace_id,
+                fact.scope_subject_id, fact.scope_key, fact.subject_entity_id,
+                'company.forged-task-note-fact', 'text', null,
+                pg_catalog.to_jsonb(${forgedFactText}::text),
+                encode(sha256(convert_to(${forgedFactText}, 'UTF8')), 'hex'),
+                ${forgedFactOperationId}, ${"2".repeat(64)}, 'service',
+                ${forgedActorSubjectId}, ${f.ownerSubjectId}
+              from knowledge_claim_evidence evidence
+              join knowledge_claims claim on claim.id = evidence.claim_id
+              join knowledge_facts fact on fact.id = claim.fact_id
+              where evidence.id = ${first.evidenceId}
+              returning id
+            `;
+            if (!forgedFact) throw new Error("expected a forged fact fixture");
+            const [forgedClaim] = await sql<{ id: string }[]>`
+              insert into knowledge_claims (
+                account_id, scope_kind, scope_workspace_id, scope_subject_id, scope_key,
+                fact_id, origin, confidence_bps, effective_at, expires_at,
+                extraction_method, extraction_metadata, model_provider, model_name,
+                model_version, operation_id, input_hash, actor_kind, actor_subject_id,
+                initiating_human_subject_id
+              ) values (
+                ${f.grant.accountId}, 'workspace', ${f.grant.workspaceId}, null,
+                ${`workspace:${f.grant.workspaceId}:-`}, ${forgedFact.id}, 'inferred',
+                8500, now(), null, 'task-note-promotion-v1',
+                pg_catalog.jsonb_build_object(
+                  'taskNoteId', ${source.note_id}::uuid,
+                  'taskNoteRootSessionId', ${source.root_session_id}::uuid,
+                  'taskNoteVersion', ${source.note_version}::integer,
+                  'taskNoteTextHash', ${source.note_text_hash}::text
+                ),
+                null, null, null, ${forgedClaimOperationId}, ${"3".repeat(64)},
+                'service', ${forgedActorSubjectId}, ${f.ownerSubjectId}
+              ) returning id
+            `;
+            if (!forgedClaim) throw new Error("expected a forged claim fixture");
+            await sql`
+              insert into knowledge_claim_evidence (
+                account_id, scope_kind, scope_workspace_id, scope_subject_id, scope_key,
+                claim_id, document_version_id, task_note_id, task_note_root_session_id,
+                task_note_version, polarity, document_chunk_id, chunk_index, locator,
+                quote_hash, content_hash, operation_id, input_hash, actor_kind,
+                actor_subject_id, initiating_human_subject_id
+              ) values (
+                ${f.grant.accountId}, 'workspace', ${f.grant.workspaceId}, null,
+                ${`workspace:${f.grant.workspaceId}:-`}, ${forgedClaim.id}, null,
+                ${source.note_id}, ${source.root_session_id}, ${source.note_version},
+                'supports', null, null, null, null, ${source.note_text_hash},
+                ${forgedEvidenceOperationId}, ${"4".repeat(64)}, 'service',
+                ${forgedActorSubjectId}, ${f.ownerSubjectId}
+              )
             `;
           }),
         "42501",
