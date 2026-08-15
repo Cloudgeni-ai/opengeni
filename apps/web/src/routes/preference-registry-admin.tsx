@@ -37,6 +37,12 @@ import {
 } from "./workspace-state-loader";
 import { AgentBrainPrompt } from "./agent-brain-prompt";
 
+export type PreferenceRegistryReviewSummary = {
+  status: "loading" | "unavailable" | "ready";
+  pendingCount: number;
+  partial: boolean;
+};
+
 const fieldClass =
   "rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg outline-none focus:border-brand disabled:cursor-not-allowed disabled:opacity-60";
 const secondaryButtonClass =
@@ -1154,10 +1160,12 @@ export function PreferenceRegistryAdministration({
   workspaceId,
   onWorkspaceStateReload,
   compact = false,
+  onReviewSummary,
 }: {
   workspaceId: string;
   onWorkspaceStateReload: () => Promise<void>;
   compact?: boolean;
+  onReviewSummary?: (summary: PreferenceRegistryReviewSummary) => void;
 }) {
   const context = useAppContext();
   const { client } = context;
@@ -1181,6 +1189,23 @@ export function PreferenceRegistryAdministration({
   const inventory = usePreferenceRegistryInventory(client, workspaceId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [manualDetailRefreshVersion, setManualDetailRefreshVersion] = useState(0);
+
+  useEffect(() => {
+    if (!onReviewSummary) return;
+    if (inventory.error) {
+      onReviewSummary({ status: "unavailable", pendingCount: 0, partial: false });
+    } else if (!inventory.response) {
+      onReviewSummary({ status: "loading", pendingCount: 0, partial: false });
+    } else {
+      onReviewSummary({
+        status: "ready",
+        pendingCount: inventory.response.preferences.filter(
+          (preference) => preference.status === "proposed",
+        ).length,
+        partial: inventory.response.preferences.length >= 100,
+      });
+    }
+  }, [inventory.error, inventory.response, onReviewSummary]);
 
   useEffect(() => {
     setSelectedId(null);

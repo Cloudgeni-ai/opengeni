@@ -297,15 +297,19 @@ renders loading, empty, permission-unavailable, error/retry, partial-coverage,
 freshness, and accepted-attempt governance states. The default page is a compact
 mental model rather than a diagnostic inventory:
 
-1. **Always known** lists company profile and goals, workspace instructions, and
-   preference summaries. Company profile status comes from the dedicated
-   organization authority; **Manage** opens an agent-assisted prompt, with the
-   versioned manual editor and history kept under a disclosure. Preferences show
-   only the active summary count and explain that full instructions are fetched
-   when needed.
-2. **Available when needed** links to Documents and Memory with a single status
-   line for each. Documents summarize indexing health; Memory summarizes the
-   newest authorized sample.
+1. **Always followed** lists the company profile and workspace instructions that
+   apply directly. Company profile status comes from the dedicated organization
+   authority; **Manage** opens an agent-assisted prompt, with the versioned manual
+   editor and history kept under a disclosure.
+2. **Available when needed** lists preference/guide descriptors, Documents and
+   Memory. Full guidance content remains on demand; Documents summarize indexing
+   health and Memory summarizes the newest authorized sample.
+3. **Needs attention** reports a clean state only after the visible company,
+   policy, preference, proposal and Knowledge review authorities loaded without
+   pending proposals, stale baselines, deterministic gaps, errors or partial
+   coverage. Loading or unavailable review authority remains explicit.
+4. **Recent changes** presents the newest bounded timestamps from visible
+   authorities.
 
 Hashes, provenance, authority table names, truncation mechanics, accepted-
 attempt drift, onboarding drafts, and lifecycle controls do not appear in the

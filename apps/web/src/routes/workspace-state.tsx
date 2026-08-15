@@ -22,7 +22,7 @@ import {
   CircleAlertIcon,
   Clock3Icon,
 } from "lucide-react";
-import { type FormEvent, type ReactNode, useEffect, useState } from "react";
+import { type FormEvent, type ReactNode, useCallback, useEffect, useState } from "react";
 
 import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { ContentPage } from "@/components/ui/content-layout";
@@ -30,7 +30,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 
-import { BrainOverview } from "./agent-brain-overview";
+import { BrainOverview, type BrainProposalReview } from "./agent-brain-overview";
 import { AgentBrainPrompt } from "./agent-brain-prompt";
 import { CompanyBrainExportButton } from "./company-brain-export";
 import {
@@ -38,7 +38,10 @@ import {
   useWorkspaceInstructionPolicyOnboardingProposals,
   useWorkspaceStateInventory,
 } from "./workspace-state-loader";
-import { PreferenceRegistryAdministration } from "./preference-registry-admin";
+import {
+  PreferenceRegistryAdministration,
+  type PreferenceRegistryReviewSummary,
+} from "./preference-registry-admin";
 
 const GAP_LABELS: Record<WorkspaceStateGapCode, string> = {
   no_document_bases: "No document bases are configured.",
@@ -69,6 +72,15 @@ const GOVERNANCE_DRIFT_EXPLANATIONS: Record<WorkspaceStateGovernanceDriftStatus,
   missing: "The accepted attempt has no immutable snapshot row for this authority.",
   truncated: "A snapshot or current preference bound prevents an exact equality claim.",
   unavailable: "The comparison is unavailable under the accepted-attempt authorization fence.",
+};
+
+type OnboardingProposalReviewSummary = PreferenceRegistryReviewSummary & { staleCount: number };
+
+const LOADING_PROPOSAL_REVIEW: OnboardingProposalReviewSummary = {
+  status: "loading",
+  pendingCount: 0,
+  staleCount: 0,
+  partial: false,
 };
 
 function comparisonHash(value: string | null): ReactNode {
@@ -552,10 +564,12 @@ export function OnboardingProposalInventory({
   state,
   workspaceId,
   onWorkspaceStateReload,
+  onReviewSummary,
 }: {
   state: WorkspaceStateResponse;
   workspaceId: string;
   onWorkspaceStateReload: () => Promise<void>;
+  onReviewSummary?: (summary: OnboardingProposalReviewSummary) => void;
 }) {
   const context = useAppContext();
   const { client } = context;
@@ -571,6 +585,48 @@ export function OnboardingProposalInventory({
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [createdProposalId, setCreatedProposalId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!onReviewSummary) return;
+    if (proposals.error) {
+      onReviewSummary({ status: "unavailable", pendingCount: 0, staleCount: 0, partial: false });
+      return;
+    }
+    if (!proposals.response) {
+      onReviewSummary(LOADING_PROPOSAL_REVIEW);
+      return;
+    }
+    let staleCount = 0;
+    let baselineCoveragePartial = false;
+    for (const proposal of proposals.response.proposals) {
+      const head = state.policy.activeHeads.find(
+        (candidate) =>
+          candidate.kind === proposal.kind &&
+          candidate.scope === proposal.scope &&
+          candidate.roleKey === proposal.roleKey,
+      );
+      if (!head && state.policy.activeHeadsTruncated) {
+        baselineCoveragePartial = true;
+      } else if (
+        (head?.revisionId ?? null) !== (proposal.baseline?.revisionId ?? null) ||
+        (head?.activationVersion ?? 0) !== (proposal.baseline?.activationVersion ?? 0)
+      ) {
+        staleCount += 1;
+      }
+    }
+    onReviewSummary({
+      status: "ready",
+      pendingCount: proposals.response.proposals.length,
+      staleCount,
+      partial: proposals.response.truncated || baselineCoveragePartial,
+    });
+  }, [
+    onReviewSummary,
+    proposals.error,
+    proposals.response,
+    state.policy.activeHeads,
+    state.policy.activeHeadsTruncated,
+  ]);
 
   const effectiveScope: WorkspaceInstructionPolicyScope = kind === "charter" ? "global" : scope;
   const normalizedRoleKey =
@@ -1333,6 +1389,19 @@ export function WorkspaceStateRoute({
   const [attemptInput, setAttemptInput] = useState("");
   const [attemptId, setAttemptId] = useState<string | undefined>();
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [preferenceReview, setPreferenceReview] = useState<PreferenceRegistryReviewSummary>({
+    status: "loading",
+    pendingCount: 0,
+    partial: false,
+  });
+  const [onboardingReview, setOnboardingReview] =
+    useState<OnboardingProposalReviewSummary>(LOADING_PROPOSAL_REVIEW);
+  const updatePreferenceReview = useCallback((summary: PreferenceRegistryReviewSummary) => {
+    setPreferenceReview(summary);
+  }, []);
+  const updateOnboardingReview = useCallback((summary: OnboardingProposalReviewSummary) => {
+    setOnboardingReview(summary);
+  }, []);
   const companyProfile = useCompanyProfileInventory(client, workspaceId);
   const { state, error, loading, reload } = useWorkspaceStateInventory(
     client,
@@ -1354,6 +1423,39 @@ export function WorkspaceStateRoute({
       : companyProfile.response?.current
         ? { label: "Configured" }
         : { label: "Not configured" };
+  const activatedProfileProposalIds = new Set(
+    companyProfile.response?.activationEvents.flatMap((event) =>
+      event.newRevision ? [event.newRevision.id] : [],
+    ) ?? [],
+  );
+  const pendingProfileProposalCount =
+    companyProfile.response?.revisions.filter(
+      (revision) => revision.intent === "proposal" && !activatedProfileProposalIds.has(revision.id),
+    ).length ?? 0;
+  const profileProposalStatus = companyProfile.error
+    ? "unavailable"
+    : companyProfile.response
+      ? "ready"
+      : "loading";
+  const proposalStatuses = [
+    profileProposalStatus,
+    preferenceReview.status,
+    onboardingReview.status,
+  ];
+  const proposalReview: BrainProposalReview = {
+    status: proposalStatuses.includes("unavailable")
+      ? "unavailable"
+      : proposalStatuses.includes("loading")
+        ? "loading"
+        : "ready",
+    pendingCount:
+      pendingProfileProposalCount + preferenceReview.pendingCount + onboardingReview.pendingCount,
+    staleCount: onboardingReview.staleCount,
+    partial:
+      (companyProfile.response?.revisions.length ?? 0) >= 50 ||
+      preferenceReview.partial ||
+      onboardingReview.partial,
+  };
 
   return (
     <ContentPage width="standard">
@@ -1443,6 +1545,8 @@ export function WorkspaceStateRoute({
                   state={state}
                   workspaceId={workspaceId}
                   companyProfileStatus={companyProfileStatus}
+                  proposalReview={proposalReview}
+                  inventoryRefreshFailed={Boolean(error)}
                 />
                 <details
                   id="brain-diagnostics"
@@ -1465,11 +1569,13 @@ export function WorkspaceStateRoute({
                     <PreferenceRegistryAdministration
                       workspaceId={workspaceId}
                       onWorkspaceStateReload={reload}
+                      onReviewSummary={updatePreferenceReview}
                     />
                     <OnboardingProposalInventory
                       state={state}
                       workspaceId={workspaceId}
                       onWorkspaceStateReload={reload}
+                      onReviewSummary={updateOnboardingReview}
                     />
                     <AttemptGovernanceInventory
                       state={state}

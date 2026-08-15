@@ -339,6 +339,7 @@ function controlForLabel<T extends HTMLInputElement | HTMLTextAreaElement | HTML
 
 describe("structured preference Workspace State administration", () => {
   test("shows descriptors, on-demand content boundaries, versions, provenance, and audit history", async () => {
+    const onReviewSummary = mock(() => undefined);
     const container = document.createElement("div");
     const root = createRoot(container);
     try {
@@ -347,6 +348,7 @@ describe("structured preference Workspace State administration", () => {
           <PreferenceRegistryAdministration
             workspaceId={workspaceId}
             onWorkspaceStateReload={async () => undefined}
+            onReviewSummary={onReviewSummary}
           />,
         ),
       );
@@ -371,6 +373,11 @@ describe("structured preference Workspace State administration", () => {
       expect(container.textContent).toContain("Immutable lifecycle audit");
       expect(container.textContent).toContain("Clarify the descriptor");
       expect(container.textContent).toContain("Actor: user:admin");
+      expect(onReviewSummary).toHaveBeenLastCalledWith({
+        status: "ready",
+        pendingCount: 0,
+        partial: false,
+      });
     } finally {
       await act(async () => root.unmount());
     }

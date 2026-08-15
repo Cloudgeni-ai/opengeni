@@ -1,4 +1,4 @@
-import type { WorkspaceStateResponse } from "@opengeni/sdk";
+import type { WorkspaceStateGapCode, WorkspaceStateResponse } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
 import {
   ArrowRightIcon,
@@ -12,6 +12,87 @@ import {
   SlidersHorizontalIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
+
+export type BrainProposalReview = {
+  status: "loading" | "unavailable" | "ready";
+  pendingCount: number;
+  staleCount: number;
+  partial: boolean;
+};
+
+export type BrainAttentionInput = {
+  companyProfileStatus: { label: string; tone?: "default" | "warning" };
+  workspaceInstructionsMissing: boolean;
+  policyRevisionPending: boolean;
+  policyInventoryPartial: boolean;
+  preferenceInventoryPartial: boolean;
+  inventoryRefreshFailed: boolean;
+  knowledge:
+    | { availability: "unavailable" }
+    | {
+        availability: "available";
+        gaps: Array<{ code: WorkspaceStateGapCode; relatedCount: number | null }>;
+      };
+  proposals: BrainProposalReview;
+};
+
+const GAP_ATTENTION_LABELS: Record<WorkspaceStateGapCode, string> = {
+  no_document_bases: "No document sources are configured",
+  no_visible_documents: "No documents are visible",
+  failed_documents: "Some documents failed indexing",
+  processing_documents: "Some documents are still processing",
+  missing_topic_coverage: "Some ready documents have no topics",
+  no_memory_records: "No learned memory is visible",
+  pending_memory_review: "Some learned memories await review",
+  partial_inventory: "Knowledge review is partial",
+};
+
+function counted(label: string, count: number | null): string {
+  return count && count > 0 ? `${label} (${count})` : label;
+}
+
+export function deriveBrainAttention(input: BrainAttentionInput): string[] {
+  const attention: string[] = [];
+  if (input.inventoryRefreshFailed) attention.push("Company Brain refresh failed");
+  if (input.companyProfileStatus.tone === "warning") {
+    attention.push("Company profile review is unavailable");
+  } else if (input.companyProfileStatus.label === "Loading…") {
+    attention.push("Company profile review is still loading");
+  } else if (input.companyProfileStatus.label === "Not configured") {
+    attention.push("Company profile is not set");
+  }
+  if (input.workspaceInstructionsMissing) attention.push("Workspace instructions are not set");
+  if (input.policyRevisionPending) attention.push("An inactive policy revision needs review");
+  if (input.policyInventoryPartial) attention.push("Policy review is partial");
+  if (input.preferenceInventoryPartial) attention.push("Preference summaries are partially shown");
+  if (input.knowledge.availability === "unavailable") {
+    attention.push("Knowledge review is unavailable");
+  } else {
+    attention.push(
+      ...input.knowledge.gaps.map((gap) =>
+        counted(GAP_ATTENTION_LABELS[gap.code], gap.relatedCount),
+      ),
+    );
+  }
+  if (input.proposals.status === "unavailable") {
+    attention.push("Proposal review is unavailable");
+  } else if (input.proposals.status === "loading") {
+    attention.push("Proposal review is still loading");
+  } else {
+    if (input.proposals.pendingCount > 0) {
+      attention.push(
+        `${input.proposals.pendingCount} proposal${input.proposals.pendingCount === 1 ? "" : "s"} await review`,
+      );
+    }
+    if (input.proposals.staleCount > 0) {
+      attention.push(
+        `${input.proposals.staleCount} proposal${input.proposals.staleCount === 1 ? " has" : "s have"} a stale baseline`,
+      );
+    }
+    if (input.proposals.partial) attention.push("Proposal review is partial");
+  }
+  return [...new Set(attention)];
+}
 
 function SummaryGroup(props: { title: string; children: ReactNode }) {
   return (
@@ -157,19 +238,30 @@ export function BrainOverview({
   state,
   workspaceId,
   companyProfileStatus,
+  proposalReview,
+  inventoryRefreshFailed = false,
 }: {
   state: WorkspaceStateResponse;
   workspaceId: string;
   companyProfileStatus: { label: string; tone?: "default" | "warning" };
+  proposalReview: BrainProposalReview;
+  inventoryRefreshFailed?: boolean;
 }) {
   const documents = documentStatus(state);
   const memory = memoryStatus(state);
-  const attention: string[] = [];
-  if (companyProfileStatus.label === "Not configured") attention.push("Company profile is not set");
-  if (workspaceInstructionStatus(state) === "Not set")
-    attention.push("Workspace instructions are not set");
-  if (documents.tone === "warning") attention.push(documents.status);
-  if (state.preferences.truncated) attention.push("Preference summaries are partially shown");
+  const attention = deriveBrainAttention({
+    companyProfileStatus,
+    workspaceInstructionsMissing: workspaceInstructionStatus(state) === "Not set",
+    policyRevisionPending: state.policy.latestRevision?.state === "inactive",
+    policyInventoryPartial: state.policy.activeHeadsTruncated,
+    preferenceInventoryPartial: state.preferences.truncated,
+    inventoryRefreshFailed,
+    knowledge:
+      state.knowledge.availability === "unavailable"
+        ? { availability: "unavailable" }
+        : { availability: "available", gaps: state.knowledge.gaps },
+    proposals: proposalReview,
+  });
   const recentChanges = [
     ...state.policy.activeHeads.map((head) => ({ label: "Rules", at: head.activatedAt })),
     ...(state.knowledge.availability === "available" && state.knowledge.latestDocumentUpdatedAt
@@ -252,9 +344,9 @@ export function BrainOverview({
         {attention.length === 0 ? (
           <SummaryRow
             icon={<CheckCircle2Icon className="size-4" />}
-            title="No review needed"
+            title="No visible review signals"
             status="Up to date"
-            description="No visible proposals, indexing problems, or partial projections need attention."
+            description="The loaded review authorities show no proposals, gaps, stale baselines, or partial projections."
           />
         ) : (
           attention.map((item) => (

@@ -133,6 +133,7 @@ const state = {
 describe("Workspace State onboarding proposals", () => {
   test("creates only an inactive draft against the exact displayed baseline", async () => {
     const reloadWorkspaceState = mock(async () => undefined);
+    const onReviewSummary = mock(() => undefined);
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -143,6 +144,7 @@ describe("Workspace State onboarding proposals", () => {
             state={state}
             workspaceId={workspaceId}
             onWorkspaceStateReload={reloadWorkspaceState}
+            onReviewSummary={onReviewSummary}
           />,
         );
         await Promise.resolve();
@@ -153,6 +155,12 @@ describe("Workspace State onboarding proposals", () => {
 
       expect(container.textContent).toContain("Proposals never activate themselves");
       expect(container.textContent).toContain("No onboarding proposals exist yet.");
+      expect(onReviewSummary).toHaveBeenLastCalledWith({
+        status: "ready",
+        pendingCount: 0,
+        staleCount: 0,
+        partial: false,
+      });
 
       const selects = container.querySelectorAll<HTMLSelectElement>("select");
       await act(async () => {

@@ -129,6 +129,12 @@ describe("Company Brain authority surface", () => {
       route.indexOf('id="brain-diagnostics"'),
     );
     expect(route).toContain("createWorkspaceInstructionPolicyOnboardingProposal");
+    expect(route).toContain("onReviewSummary={updatePreferenceReview}");
+    expect(route).toContain("onReviewSummary={updateOnboardingReview}");
+    expect(overview).toContain("deriveBrainAttention");
+    expect(overview).toContain("Proposal review is still loading");
+    expect(overview).toContain("Some learned memories await review");
+    expect(overview).not.toContain("No review needed");
     for (const required of [
       "dedicated organization/workspace/personal registry",
       "not ordinary Memory",

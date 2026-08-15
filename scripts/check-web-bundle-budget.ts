@@ -25,8 +25,11 @@ const budgets = {
   // more shared-chunk boundary in both graphs. Revision-fenced Connected Machine
   // command policy adds its memory/CPU fields to the shared session contract;
   // governed goal revision paging, rejection, and rollback add the matching SDK
-  // methods to that same direct-session graph.
-  // Keep tight headroom above the measured production graph.
+  // methods to that same direct-session graph. Browser acceptance builds also
+  // embed a configured VITE_API_BASE_URL; the supported loopback form adds up
+  // to 18 raw bytes relative to the same-origin build. Keep a narrow full-KiB
+  // envelope above that configured graph instead of a platform/config-specific
+  // one-byte margin. Gzip retains more than 3.5 KiB of independent headroom.
   initialRaw: 1448 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
@@ -34,7 +37,7 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 1990 * kib,
+  directSessionRaw: 1991 * kib,
   directSessionGzip: 554 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
