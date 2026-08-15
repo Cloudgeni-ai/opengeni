@@ -9,6 +9,18 @@
       "tools": []
     },
     {
+      "kind": "startup-phase",
+      "id": "00000000-0000-4000-8000-000000000503-queue",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000010",
+      "occurredAt": "2026-01-02T14:00:02.000Z",
+      "phase": "queue",
+      "status": "complete",
+      "startedAt": "2026-01-02T14:00:02.000Z",
+      "completedAt": "2026-01-02T14:00:03.000Z",
+      "durationMs": 1000,
+      "outcome": null
+    },
+    {
       "kind": "agent-message",
       "id": "00000000-0000-4000-8000-000000000504",
       "turnId": "aaaaaaaa-0000-4000-8000-000000000010",
@@ -51,10 +63,33 @@
       "kind": "turn",
       "id": "turn-aaaaaaaa-0000-4000-8000-000000000010",
       "outcome": "complete",
-      "startedAt": "2026-01-02T14:00:04.000Z",
+      "startedAt": "2026-01-02T14:00:02.000Z",
       "endedAt": "2026-01-02T14:00:11.000Z",
-      "groupCount": 2,
+      "groupCount": 3,
       "groups": [
+        {
+          "kind": "activity",
+          "id": "activity-00000000-0000-4000-8000-000000000503-queue",
+          "itemCount": 1,
+          "itemKinds": {
+            "startup-phase": 1
+          },
+          "outcome": "complete",
+          "items": [
+            {
+              "kind": "startup-phase",
+              "id": "00000000-0000-4000-8000-000000000503-queue",
+              "turnId": "aaaaaaaa-0000-4000-8000-000000000010",
+              "occurredAt": "2026-01-02T14:00:02.000Z",
+              "phase": "queue",
+              "status": "complete",
+              "startedAt": "2026-01-02T14:00:02.000Z",
+              "completedAt": "2026-01-02T14:00:03.000Z",
+              "durationMs": 1000,
+              "outcome": null
+            }
+          ]
+        },
         {
           "kind": "item",
           "item": {
@@ -94,16 +129,18 @@
     "itemKinds": {
       "agent-message": 1,
       "sandbox": 1,
+      "startup-phase": 1,
       "turn-end": 1,
       "user-message": 1
     },
     "groupKinds": {
-      "activity": 1,
+      "activity": 2,
       "item": 2,
       "turn": 1
     },
     "activityItemKinds": {
-      "sandbox": 1
+      "sandbox": 1,
+      "startup-phase": 1
     },
     "turnOutcomes": {
       "complete": 1

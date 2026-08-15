@@ -192,6 +192,12 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
     insert into workspaces (account_id, name) values (${account!.id}, 'fiken ws') returning id`;
   await shared!
     .admin`insert into workspace_inference_controls (workspace_id, account_id) values (${workspace!.id}, ${account!.id})`;
+  await shared!.admin`
+    insert into organization_memberships (
+      account_id, subject_id, status, personal_workspace_id
+    ) values (
+      ${account!.id}, 'subject-a', 'active', ${workspace!.id}
+    )`;
   for (const subjectId of ["subject-a", "subject-b"]) {
     await shared!.admin`
       insert into workspace_memberships (

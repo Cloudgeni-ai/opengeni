@@ -97,6 +97,12 @@ const USER_RESOURCE_LIFECYCLE_ROUTINES = [
   "revoke_self_user_resource_grant(uuid, uuid)",
   "authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid)",
 ] as const;
+const CONNECTION_AUTHORITY_ROUTINES = [
+  "list_self_connection_authorities(uuid)",
+  "issue_self_connection_use_grant(uuid, uuid, uuid, text, text, uuid, boolean)",
+  "revoke_self_connection_use_grant(uuid, uuid)",
+  "resolve_connection_use_authority(uuid, uuid, uuid, jsonb)",
+] as const;
 const SCHEDULED_PERSONAL_RESOURCE_ROUTINES = [
   "freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint)",
   "clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint)",
@@ -150,6 +156,7 @@ const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   FORK_SESSION_CONTENT_ROUTINE,
   PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
   ...USER_RESOURCE_LIFECYCLE_ROUTINES,
+  ...CONNECTION_AUTHORITY_ROUTINES,
   ...SCHEDULED_PERSONAL_RESOURCE_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
@@ -186,6 +193,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
   PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE,
   ...VARIABLE_SET_AUTHORITY_ROUTINES,
+  ...CONNECTION_AUTHORITY_ROUTINES,
   ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
   ...TASK_NOTE_CAPABILITY_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
@@ -259,6 +267,7 @@ export const FORCE_RLS_TABLES = [
   "computer_session_associations",
   "computer_sessions",
   "connection_disconnect_operations",
+  "connection_use_once_consumption_receipts",
   "connections",
   "connector_action_policies",
   "connector_action_requests",
@@ -743,6 +752,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "canonical_human_identity_subjects",
   "canonical_human_login_bindings",
   "company_brain_preference_proposal_receipts",
+  "connection_use_once_consumption_receipts",
   "editable_artifact_live_tickets",
   "editable_artifact_scope_authorization_heads",
   "host_export_config",

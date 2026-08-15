@@ -2,8 +2,85 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 
 const SCRAPE_IDENTITY = "and on(namespace, release, environment, component, instance)";
+const DEPLOYMENT_SCOPE =
+  "namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}";
 
 describe("turn-capacity Prometheus alerts", () => {
+  test("alerts on cumulative queue, provider-dispatch, and first-byte p95 SLOs", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    for (const [name, milestone] of [
+      ["OpenGeniTurnStartupQueueP95High", "queue"],
+      ["OpenGeniTurnStartupProviderDispatchP95High", "provider_dispatch"],
+      ["OpenGeniTurnStartupFirstByteP95High", "first_byte"],
+    ] as const) {
+      const expression = alertExpression(template, name);
+      expect(expression).toContain("opengeni_turn_startup_milestone_duration_seconds_bucket");
+      expect(expression).toContain(`milestone="${milestone}"`);
+      expect(expression).toContain("histogram_quantile(");
+      expect(expression).toContain("turnStartupMinSamples");
+      for (const selector of metricSelectors(expression)) {
+        expect(selector).toContain(DEPLOYMENT_SCOPE);
+      }
+      expect(expression).not.toContain("sessionId");
+      expect(expression).not.toContain("turnId");
+    }
+  });
+
+  test("renders disjoint startup alert scopes for separate releases and environments", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const expression = alertExpression(template, "OpenGeniTurnStartupFirstByteP95High");
+    const production = renderDeploymentScope(expression, {
+      namespace: "opengeni-shared",
+      release: "release-a",
+      environment: "production",
+    });
+    const staging = renderDeploymentScope(expression, {
+      namespace: "opengeni-shared",
+      release: "release-b",
+      environment: "staging",
+    });
+
+    expect(production).toContain(
+      'namespace="opengeni-shared",release="release-a",environment="production"',
+    );
+    expect(production).not.toContain('release="release-b"');
+    expect(staging).toContain(
+      'namespace="opengeni-shared",release="release-b",environment="staging"',
+    );
+    expect(staging).not.toContain('environment="production"');
+  });
+
+  test("alerts when bounded logical turns terminate failed without first-byte availability", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const availability = alertExpression(template, "OpenGeniTurnStartupFirstByteAvailabilityLow");
+    const latency = alertExpression(template, "OpenGeniTurnStartupFirstByteP95High");
+
+    expect(availability).toContain("opengeni_turn_startup_milestone_duration_seconds_count");
+    expect(availability).toContain('milestone="first_byte",outcome="completed"');
+    expect(availability).toContain('milestone="first_byte",outcome="failed"');
+    expect(availability).toContain('outcome=~"completed|failed"');
+    expect(availability).not.toContain("opengeni_model_request_phases_total");
+    expect(availability).toContain("or on(provider)");
+    expect(availability).toContain("0 * sum by (provider)");
+    expect(availability).toContain("turnStartupFirstByteAvailabilityRatio");
+    expect(availability).toContain("turnStartupMinSamples");
+    for (const selector of metricSelectors(availability)) {
+      expect(selector).toContain(DEPLOYMENT_SCOPE);
+    }
+    expect(latency).toContain('milestone="first_byte",outcome="completed"');
+    expect(latency).not.toContain('outcome="failed"');
+    expect(latency).not.toContain("opengeni_model_request_phases_total");
+  });
+
   test("alerts on actual SuperGrok valid-event idle timeout terminals", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
@@ -69,4 +146,20 @@ function alertExpression(template: string, alertName: string): string {
     throw new Error(`Missing expression boundaries for ${alertName}`);
   }
   return template.slice(expressionStart + "          expr: |\n".length, expressionEnd);
+}
+
+function metricSelectors(expression: string): string[] {
+  return [...expression.matchAll(/opengeni_[a-zA-Z0-9_:]+\{([^\n]*)\}/g)].map(
+    (match) => match[1] ?? "",
+  );
+}
+
+function renderDeploymentScope(
+  expression: string,
+  scope: { namespace: string; release: string; environment: string },
+): string {
+  return expression
+    .replaceAll("{{ .Release.Namespace | quote }}", JSON.stringify(scope.namespace))
+    .replaceAll("{{ .Release.Name | quote }}", JSON.stringify(scope.release))
+    .replaceAll("{{ $environment | quote }}", JSON.stringify(scope.environment));
 }

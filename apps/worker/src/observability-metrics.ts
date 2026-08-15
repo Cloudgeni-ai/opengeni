@@ -1057,6 +1057,7 @@ export type TurnStartupPhase =
   | "stream_bootstrap";
 
 export type TurnStartupOutcome = "completed" | "failed";
+export type TurnStartupMilestone = "queue" | "provider_dispatch" | "first_byte";
 export type TurnStartupCache = "hit" | "miss" | "disabled" | "none";
 export type TurnStartupCountBucket = "0" | "1" | "2-5" | "6-20" | "21+" | "unknown";
 export type TurnSandboxEstablishPolicy = "eager" | "on-demand";
@@ -1096,6 +1097,14 @@ export type SandboxProvisionAttemptOutcome = "completed" | "retrying" | "failed"
 
 const TURN_STARTUP_PHASE_BUCKETS = [
   0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120,
+];
+const TURN_STARTUP_MILESTONE_BUCKETS = [
+  ...TURN_STARTUP_PHASE_BUCKETS,
+  300,
+  600,
+  1_800,
+  3_600,
+  7_200,
 ];
 
 export function turnStartupCountBucket(count: number | null): TurnStartupCountBucket {
@@ -1275,6 +1284,36 @@ export function recordTurnWorkerPreparationTotal(
     help: "Worker preparation from the durable turn-start boundary until entering the runtime; lazy SDK request preparation and model-request audit are separate phases.",
     buckets: TURN_STARTUP_PHASE_BUCKETS,
     labels: {
+      provider: input.provider,
+      backend: input.backend,
+      outcome: input.outcome,
+    },
+    value: Math.max(0, input.durationSeconds),
+  });
+}
+
+/**
+ * Measure cumulative user-visible startup latency from the durable turn queue
+ * timestamp to a bounded milestone. Unlike the per-phase histogram above,
+ * these samples are end-to-end and can therefore back real queue/dispatch/TTFB
+ * SLOs without adding turn or session identifiers to Prometheus.
+ */
+export function recordTurnStartupMilestone(
+  observability: Observability,
+  input: {
+    milestone: TurnStartupMilestone;
+    provider: string;
+    backend: string;
+    outcome: TurnStartupOutcome;
+    durationSeconds: number;
+  },
+): void {
+  observability.observeHistogram({
+    name: "opengeni_turn_startup_milestone_duration_seconds",
+    help: "Cumulative seconds from durable turn queueing to a bounded startup milestone.",
+    buckets: TURN_STARTUP_MILESTONE_BUCKETS,
+    labels: {
+      milestone: input.milestone,
       provider: input.provider,
       backend: input.backend,
       outcome: input.outcome,

@@ -1,10 +1,4 @@
-import {
-  ArrowRightIcon,
-  BotIcon,
-  BrainCircuitIcon,
-  BrainIcon,
-  SquareTerminalIcon,
-} from "lucide-react";
+import { ArrowRightIcon, BotIcon, BrainCircuitIcon } from "lucide-react";
 import { lazy, Suspense, useLayoutEffect, useRef } from "react";
 import { jsx as rowJsx, jsxs as rowJsxs } from "react/jsx-runtime";
 import { Markdown } from "../components/markdown";
@@ -16,9 +10,10 @@ import type { RetainedArtifactLoader, RetainedScreenshotLoader, ToolRegistry } f
 import { useSeenActivityIds } from "./seen-activity-ids";
 import { BodyNote, PayloadBlock, ActivityDisclosure, ToolCallTruncationProvider } from "./shared";
 import { toolDisplayName } from "./tool-display-name";
-import type { ActivityItem, MemoryItem, ReasoningItem, SandboxItem, WorkerItem } from "./types";
+import type { ActivityItem, MemoryItem, WorkerItem } from "./types";
 
 const LazyFleetDecisionRow = lazy(() => import("./fleet-decision-row"));
+const LazyPlatformActivityRow = lazy(() => import("./platform-activity-row"));
 
 /* ----------------------------------------------------------------------------
    Activity rail
@@ -157,7 +152,23 @@ function renderActivity(
 ) {
   switch (item.kind) {
     case "reasoning":
-      return <ReasoningRow item={item} />;
+    case "sandbox":
+    case "startup-phase":
+      return (
+        <Suspense fallback={null}>
+          <LazyPlatformActivityRow
+            item={item}
+            d={ActivityDisclosure}
+            p={PayloadBlock}
+            t={toolDisplayName}
+            b={BotIcon}
+            m={Markdown}
+            r={truncate}
+            j={rowJsx}
+            s={rowJsxs}
+          />
+        </Suspense>
+      );
     case "tool-call": {
       const Renderer = toolRegistry.resolve(item);
       return (
@@ -172,8 +183,6 @@ function renderActivity(
     }
     case "worker":
       return <WorkerRow item={item} onOpenSession={onOpenSession} />;
-    case "sandbox":
-      return <SandboxRow item={item} />;
     case "memory":
       return <MemoryRow item={item} onMemoryClick={onMemoryClick} />;
     case "fleet-decision":
@@ -191,32 +200,6 @@ function renderActivity(
     default:
       return assertNever(item);
   }
-}
-
-function ReasoningRow({ item }: { item: ReasoningItem }) {
-  // Reasoning recedes: a dimmer, lighter-weight title so action rows lead and
-  // thought rows sit a half-step back in the hierarchy. Body uses the same
-  // GFM markdown path as agent messages — Codex reasoning often carries
-  // headings/lists/bold that were previously shown as raw plaintext.
-  return (
-    <ActivityDisclosure
-      icon={<BrainIcon className="size-3.5" />}
-      iconTone="muted"
-      title={
-        item.streaming ? (
-          "Thinking"
-        ) : (
-          <span className="font-normal italic text-og-fg-subtle">Thought</span>
-        )
-      }
-      running={item.streaming}
-      preview={truncate(item.text, 110)}
-    >
-      <div className="text-og-base leading-6 text-og-fg-muted [&_strong]:text-og-fg-muted">
-        <Markdown streaming={item.streaming}>{item.text}</Markdown>
-      </div>
-    </ActivityDisclosure>
-  );
 }
 
 /**
@@ -313,44 +296,6 @@ function MemoryRow({
           <ArrowRightIcon className="size-3.5 transition-transform duration-150 group-hover/memlink:translate-x-0.5" />
         </button>
       ) : null}
-    </ActivityDisclosure>
-  );
-}
-
-/**
- * A human title for a sandbox operation row. Named platform operations (the lazy
- * `sandbox.provision` first-establish that now runs mid-turn) read as calm,
- * status-aware English instead of a raw op id — the box coming up should look
- * like "Starting sandbox", never an unexplained long-running command. Unnamed /
- * unknown ops fall back to the generic id-to-words {@link toolDisplayName}.
- */
-function sandboxRowTitle(item: SandboxItem): string {
-  if (item.name === "sandbox.provision") {
-    if (item.status === "failed") return "Sandbox didn’t start";
-    if (item.status === "running") return "Starting sandbox";
-    if (item.origin === "resumed") return "Sandbox reattached";
-    if (item.origin === "restored") return "Sandbox restored";
-    if (item.origin === "created") return "Sandbox created";
-    return "Sandbox ready";
-  }
-  return toolDisplayName(item.name);
-}
-
-function SandboxRow({ item }: { item: SandboxItem }) {
-  return (
-    <ActivityDisclosure
-      icon={<SquareTerminalIcon className="size-3.5" />}
-      iconTone={
-        item.status === "failed" ? "failed" : item.status === "running" ? "running" : "muted"
-      }
-      title={sandboxRowTitle(item)}
-      running={item.status === "running"}
-      failed={item.status === "failed"}
-      cancelled={item.status === "cancelled"}
-      preview={item.command ?? undefined}
-    >
-      {item.command ? <PayloadBlock label="Command" value={item.command} /> : null}
-      {item.output ? <PayloadBlock label="Output" value={item.output} /> : null}
     </ActivityDisclosure>
   );
 }
