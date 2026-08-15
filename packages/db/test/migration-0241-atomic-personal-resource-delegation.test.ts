@@ -391,9 +391,13 @@ describe("migration 0241 atomic personal-resource delegation", () => {
           `;
         const [variableSets] = await app<Array<{ count: number }>>`
             select count(*)::int as count
-            from workspace_variable_sets
-            where account_id = ${ids.account}
-              and workspace_id = ${ids.targetWorkspace}
+            from list_scoped_variable_sets(
+              ${ids.account}::uuid,
+              ${ids.targetWorkspace}::uuid,
+              null,
+              ${`target-${order}`},
+              null
+            )
           `;
         expect(variableSets?.count).toBe(1);
         await expect(
