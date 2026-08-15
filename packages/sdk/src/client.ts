@@ -3548,8 +3548,8 @@ export class OpenGeniClient {
   }
 
   /** Permission-filtered Company Brain package with authorized guidance bodies. */
-  async getCompanyBrain(workspaceId: string): Promise<CompanyBrainOkfPackage> {
-    return await this.requestJson<CompanyBrainOkfPackage>(
+  getCompanyBrain(workspaceId: string): Promise<CompanyBrainOkfPackage> {
+    return this.requestJson<CompanyBrainOkfPackage>(
       "GET",
       `/v1/workspaces/${workspaceId}/company-brain`,
     );
@@ -3561,12 +3561,11 @@ export class OpenGeniClient {
       "GET",
       `/v1/workspaces/${workspaceId}/company-brain/export`,
     );
-    const disposition = response.headers.get("content-disposition") ?? "";
-    const filename = /filename="([^"]+)"/u.exec(disposition)?.[1] ?? "company-brain.okf.md";
+    const headers = response.headers;
     return {
       content: await response.text(),
-      contentType: response.headers.get("content-type") ?? "text/markdown; charset=utf-8",
-      filename,
+      contentType: headers.get("content-type") ?? "text/markdown",
+      filename: headers.get("content-disposition")?.split('"')[1] ?? "company-brain.okf.md",
     };
   }
 

@@ -25,8 +25,7 @@ const budgets = {
   // more shared-chunk boundary in both graphs. Revision-fenced Connected Machine
   // command policy adds its memory/CPU fields to the shared session contract;
   // governed goal revision paging, rejection, and rollback add the matching SDK
-  // methods to that same direct-session graph. The Company Brain surface and
-  // three-scope document authority share a bounded amount of that route graph.
+  // methods to that same direct-session graph.
   // Keep tight headroom above the measured production graph.
   initialRaw: 1448 * kib,
   initialGzip: 400 * kib,
@@ -35,7 +34,7 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 1991 * kib,
+  directSessionRaw: 1990 * kib,
   directSessionGzip: 554 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
