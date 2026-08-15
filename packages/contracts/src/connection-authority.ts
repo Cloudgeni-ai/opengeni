@@ -104,6 +104,31 @@ export type IssueConnectionUseGrantRequest = z.infer<typeof IssueConnectionUseGr
 
 export const RevokeConnectionUseGrantQuery = z.object({ scope: z.literal("user") }).strict();
 
+export const ConnectionUseGrantMutationResponse = z
+  .object({
+    scope: z.literal("user"),
+    grant: ConnectionAuthorityGrant,
+  })
+  .strict();
+export type ConnectionUseGrantMutationResponse = z.infer<typeof ConnectionUseGrantMutationResponse>;
+
+export const ConnectionUseGrantRevocationResponse = z
+  .object({
+    scope: z.literal("user"),
+    grant: z
+      .object({
+        grantId: z.string().uuid(),
+        generation: z.number().int().positive(),
+        status: z.literal("revoked"),
+        revokedAt: z.string().datetime(),
+      })
+      .strict(),
+  })
+  .strict();
+export type ConnectionUseGrantRevocationResponse = z.infer<
+  typeof ConnectionUseGrantRevocationResponse
+>;
+
 export const ConnectionAuthoritySelectionSource = z.enum([
   "explicit_workspace",
   "legacy_workspace_omission",

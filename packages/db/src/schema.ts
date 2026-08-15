@@ -968,6 +968,17 @@ export const connections = pgTable(
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     createdBySubjectId: text("created_by_subject_id"),
     updatedBySubjectId: text("updated_by_subject_id"),
+    // Explicit execution authority. Workspace rows have no member authority;
+    // user rows bind one immutable organization membership and common resource
+    // authority. Public metadata projections intentionally omit these fields.
+    authorityScope: text("authority_scope").notNull().default("workspace"),
+    authorityId: uuid("authority_id"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    originWorkspaceId: uuid("origin_workspace_id"),
+    // Separate from credential version: refresh may rotate token material
+    // without invalidating already accepted work, while reconnect/disconnect
+    // and identity/status transitions advance this generation.
+    authorityGeneration: bigint("authority_generation", { mode: "number" }).notNull().default(1),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -986,6 +997,92 @@ export const connections = pgTable(
     workspaceExpires: index("connections_workspace_expires_idx").on(
       table.workspaceId,
       table.expiresAt,
+    ),
+    authorityIdentity: uniqueIndex("connections_authority_identity_uq")
+      .on(table.accountId, table.authorityId)
+      .where(sql`${table.authorityId} is not null`),
+    ownerAuthority: index("connections_owner_authority_idx")
+      .on(
+        table.accountId,
+        table.ownerOrganizationMembershipId,
+        table.status,
+        table.updatedAt,
+        table.id,
+      )
+      .where(sql`${table.authorityScope} = 'user'`),
+    authorityScopeValid: check(
+      "connections_authority_scope_check",
+      sql`${table.authorityScope} in ('workspace', 'user')`,
+    ),
+    authorityShapeValid: check(
+      "connections_authority_shape_check",
+      sql`(
+          ${table.authorityScope} = 'workspace'
+          and ${table.subjectId} is null
+          and ${table.authorityId} is null
+          and ${table.ownerOrganizationMembershipId} is null
+          and ${table.originWorkspaceId} = ${table.workspaceId}
+        ) or (
+          ${table.authorityScope} = 'user'
+          and ${table.subjectId} is not null
+          and ${table.authorityId} is not null
+          and ${table.ownerOrganizationMembershipId} is not null
+          and ${table.originWorkspaceId} is not null
+        )`,
+    ),
+    authorityGenerationValid: check(
+      "connections_authority_generation_check",
+      sql`${table.authorityGeneration} > 0`,
+    ),
+    authority: foreignKey({
+      name: "connections_authority_fk",
+      columns: [table.authorityId, table.accountId, table.ownerOrganizationMembershipId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+        organizationUserResourceAuthorities.organizationMembershipId,
+      ],
+    }).onDelete("restrict"),
+    // Migration 0255 owns the same-organization origin FK because Drizzle
+    // cannot express PostgreSQL's column-subset SET NULL action.
+  }),
+);
+
+export const connectionUseOnceConsumptionReceipts = pgTable(
+  "connection_use_once_consumption_receipts",
+  {
+    grantId: uuid("grant_id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    authorityId: uuid("authority_id").notNull(),
+    authorityGeneration: bigint("authority_generation", { mode: "number" }).notNull(),
+    grantGeneration: bigint("grant_generation", { mode: "number" }).notNull(),
+    acceptedWorkKind: text("accepted_work_kind").notNull(),
+    acceptedWorkId: uuid("accepted_work_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    authority: foreignKey({
+      name: "connection_once_receipts_authority_fk",
+      columns: [table.authorityId, table.accountId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+      ],
+    }).onDelete("cascade"),
+    grant: foreignKey({
+      name: "connection_once_receipts_grant_fk",
+      columns: [table.grantId, table.accountId],
+      foreignColumns: [organizationUserResourceGrants.id, organizationUserResourceGrants.accountId],
+    }).onDelete("cascade"),
+    generationValid: check(
+      "connection_once_receipts_generation_check",
+      sql`${table.authorityGeneration} > 0 and ${table.grantGeneration} > 0`,
+    ),
+    acceptedWorkKindValid: check(
+      "connection_once_receipts_work_kind_check",
+      sql`${table.acceptedWorkKind} in ('turn', 'scheduled_task')`,
     ),
   }),
 );

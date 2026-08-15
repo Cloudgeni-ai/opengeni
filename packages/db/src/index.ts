@@ -359,6 +359,7 @@ export * from "./generated-images";
 export * from "./slack-user-link-access";
 export * from "./video-generation";
 export * from "./user-resource-authority";
+export * from "./connection-authority";
 export * from "./xai-subscription";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
@@ -457,6 +458,7 @@ import {
   type ConnectionCredentialForBroker,
   type ConnectionTokenResolverOptions,
 } from "./connection-token-resolver";
+import { resolveConnectionUseAuthority } from "./connection-authority";
 import { resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./xai-subscription";
 
 function parsedPersonalConnectionDelegations(
@@ -7991,6 +7993,7 @@ async function updateConnectionInScope(
       ? {
           credentialEncrypted: input.credentialEncrypted,
           version: sql`${schema.connections.version} + 1`,
+          authorityGeneration: sql`${schema.connections.authorityGeneration} + 1`,
           lastError: null,
         }
       : {}),
@@ -11304,6 +11307,7 @@ export async function loadConnectionCredentialForBroker(
     kind?: ConnectionKind;
     subjectId?: string | null;
     allowSubjectOwned?: boolean;
+    expectedAuthorityGeneration?: number;
   },
 ): Promise<ConnectionCredentialForBroker | null> {
   if (input.allowSubjectOwned && !input.subjectId) {
@@ -11331,6 +11335,9 @@ export async function loadConnectionCredentialForBroker(
     if (input.kind) {
       conditions.push(eq(schema.connections.kind, input.kind));
     }
+  }
+  if (input.expectedAuthorityGeneration !== undefined) {
+    conditions.push(eq(schema.connections.authorityGeneration, input.expectedAuthorityGeneration));
   }
   return await withConnectionSubjectRls(
     db,
@@ -11390,6 +11397,7 @@ export async function loadConnectionCredentialForBroker(
         expiresAt: row.expiresAt,
         lastRefreshAt: row.lastRefreshAt,
         version: row.version,
+        authorityGeneration: row.authorityGeneration,
         metadata: row.metadata,
       };
     },
@@ -58452,6 +58460,7 @@ function connectionBrokerDeps(): ConnectionBrokerDeps {
     encrypt: encryptEnvironmentValue,
     keyBytes: environmentsEncryptionKeyBytes,
     now: () => new Date(),
+    authorizeUse: resolveConnectionUseAuthority,
   };
 }
 
