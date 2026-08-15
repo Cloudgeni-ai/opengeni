@@ -1192,10 +1192,12 @@ export function PreferenceRegistryAdministration({
 
   useEffect(() => {
     if (!onReviewSummary) return;
-    if (inventory.error) {
+    if (inventory.loading) {
+      onReviewSummary({ status: "loading", pendingCount: 0, partial: false });
+    } else if (inventory.error) {
       onReviewSummary({ status: "unavailable", pendingCount: 0, partial: false });
     } else if (!inventory.response) {
-      onReviewSummary({ status: "loading", pendingCount: 0, partial: false });
+      onReviewSummary({ status: "unavailable", pendingCount: 0, partial: false });
     } else {
       onReviewSummary({
         status: "ready",
@@ -1205,7 +1207,7 @@ export function PreferenceRegistryAdministration({
         partial: inventory.response.preferences.length >= 100,
       });
     }
-  }, [inventory.error, inventory.response, onReviewSummary]);
+  }, [inventory.error, inventory.loading, inventory.response, onReviewSummary]);
 
   useEffect(() => {
     setSelectedId(null);

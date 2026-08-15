@@ -29,7 +29,10 @@ const budgets = {
   // embed a configured VITE_API_BASE_URL; the supported loopback form adds up
   // to 18 raw bytes relative to the same-origin build. Keep a narrow full-KiB
   // envelope above that configured graph instead of a platform/config-specific
-  // one-byte margin. Gzip retains more than 3.5 KiB of independent headroom.
+  // one-byte margin. Hosted Linux produces a slightly larger gzip graph than
+  // macOS for identical sources: the measured configured Linux graph is
+  // 567,928 bytes. The 558 KiB envelope leaves 3,464 bytes of Linux headroom
+  // while preserving a narrow regression fence.
   initialRaw: 1448 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
@@ -38,7 +41,7 @@ const budgets = {
   initialFileGzip: 77 * kib,
   initialFiles: 17,
   directSessionRaw: 1991 * kib,
-  directSessionGzip: 554 * kib,
+  directSessionGzip: 558 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

@@ -78,6 +78,14 @@ mock.module("@/context", () => ({
 
 const { OnboardingProposalInventory } = await import("./workspace-state");
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 beforeAll(() => {
   GlobalRegistrator.register();
   (
@@ -131,6 +139,58 @@ const state = {
 } satisfies WorkspaceStateResponse;
 
 describe("Workspace State onboarding proposals", () => {
+  test("reports loading while cached onboarding proposal evidence refreshes", async () => {
+    const onReviewSummary = mock(() => undefined);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          <OnboardingProposalInventory
+            state={state}
+            workspaceId={workspaceId}
+            onWorkspaceStateReload={async () => undefined}
+            onReviewSummary={onReviewSummary}
+          />,
+        );
+      });
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(onReviewSummary).toHaveBeenLastCalledWith({
+        status: "ready",
+        pendingCount: 0,
+        staleCount: 0,
+        partial: false,
+      });
+
+      const pending = deferred<{ proposals: []; truncated: false }>();
+      listProposals.mockImplementationOnce(async () => await pending.promise);
+      const refresh = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Refresh",
+      );
+      expect(refresh).toBeDefined();
+      await act(async () => {
+        refresh!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await Promise.resolve();
+      });
+      expect(onReviewSummary).toHaveBeenLastCalledWith({
+        status: "loading",
+        pendingCount: 0,
+        staleCount: 0,
+        partial: false,
+      });
+
+      await act(async () => pending.resolve({ proposals: [], truncated: false }));
+      expect(onReviewSummary).toHaveBeenLastCalledWith({
+        status: "ready",
+        pendingCount: 0,
+        staleCount: 0,
+        partial: false,
+      });
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
   test("creates only an inactive draft against the exact displayed baseline", async () => {
     const reloadWorkspaceState = mock(async () => undefined);
     const onReviewSummary = mock(() => undefined);

@@ -307,7 +307,10 @@ mental model rather than a diagnostic inventory:
 3. **Needs attention** reports a clean state only after the visible company,
    policy, preference, proposal and Knowledge review authorities loaded without
    pending proposals, stale baselines, deterministic gaps, errors or partial
-   coverage. Loading or unavailable review authority remains explicit.
+   coverage. Loading dominates cached proposal inventories during refresh, and
+   review summaries are keyed to the current workspace so a workspace switch
+   cannot reuse another workspace's clean state. Loading or unavailable review
+   authority remains explicit.
 4. **Recent changes** presents the newest bounded timestamps from visible
    authorities.
 

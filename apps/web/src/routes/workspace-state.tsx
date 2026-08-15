@@ -22,7 +22,7 @@ import {
   CircleAlertIcon,
   Clock3Icon,
 } from "lucide-react";
-import { type FormEvent, type ReactNode, useCallback, useEffect, useState } from "react";
+import { type FormEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { ContentPage } from "@/components/ui/content-layout";
@@ -82,6 +82,25 @@ const LOADING_PROPOSAL_REVIEW: OnboardingProposalReviewSummary = {
   staleCount: 0,
   partial: false,
 };
+
+const LOADING_PREFERENCE_REVIEW: PreferenceRegistryReviewSummary = {
+  status: "loading",
+  pendingCount: 0,
+  partial: false,
+};
+
+type WorkspaceReviewSummary<T> = {
+  workspaceId: string;
+  summary: T;
+};
+
+export function reviewSummaryForWorkspace<T>(
+  workspaceId: string,
+  review: WorkspaceReviewSummary<T>,
+  loading: T,
+): T {
+  return review.workspaceId === workspaceId ? review.summary : loading;
+}
 
 function comparisonHash(value: string | null): ReactNode {
   return value ? <code className="break-all text-2xs">sha256:{value}</code> : "Unavailable";
@@ -588,12 +607,12 @@ export function OnboardingProposalInventory({
 
   useEffect(() => {
     if (!onReviewSummary) return;
-    if (proposals.error) {
-      onReviewSummary({ status: "unavailable", pendingCount: 0, staleCount: 0, partial: false });
+    if (proposals.loading) {
+      onReviewSummary(LOADING_PROPOSAL_REVIEW);
       return;
     }
-    if (!proposals.response) {
-      onReviewSummary(LOADING_PROPOSAL_REVIEW);
+    if (proposals.error || !proposals.response) {
+      onReviewSummary({ status: "unavailable", pendingCount: 0, staleCount: 0, partial: false });
       return;
     }
     let staleCount = 0;
@@ -623,6 +642,7 @@ export function OnboardingProposalInventory({
   }, [
     onReviewSummary,
     proposals.error,
+    proposals.loading,
     proposals.response,
     state.policy.activeHeads,
     state.policy.activeHeadsTruncated,
@@ -1389,19 +1409,38 @@ export function WorkspaceStateRoute({
   const [attemptInput, setAttemptInput] = useState("");
   const [attemptId, setAttemptId] = useState<string | undefined>();
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
-  const [preferenceReview, setPreferenceReview] = useState<PreferenceRegistryReviewSummary>({
-    status: "loading",
-    pendingCount: 0,
-    partial: false,
-  });
-  const [onboardingReview, setOnboardingReview] =
-    useState<OnboardingProposalReviewSummary>(LOADING_PROPOSAL_REVIEW);
-  const updatePreferenceReview = useCallback((summary: PreferenceRegistryReviewSummary) => {
-    setPreferenceReview(summary);
-  }, []);
-  const updateOnboardingReview = useCallback((summary: OnboardingProposalReviewSummary) => {
-    setOnboardingReview(summary);
-  }, []);
+  const activeWorkspaceId = useRef(workspaceId);
+  activeWorkspaceId.current = workspaceId;
+  const [storedPreferenceReview, setStoredPreferenceReview] = useState<
+    WorkspaceReviewSummary<PreferenceRegistryReviewSummary>
+  >(() => ({ workspaceId, summary: LOADING_PREFERENCE_REVIEW }));
+  const [storedOnboardingReview, setStoredOnboardingReview] = useState<
+    WorkspaceReviewSummary<OnboardingProposalReviewSummary>
+  >(() => ({ workspaceId, summary: LOADING_PROPOSAL_REVIEW }));
+  const updatePreferenceReview = useCallback(
+    (summary: PreferenceRegistryReviewSummary) => {
+      if (activeWorkspaceId.current !== workspaceId) return;
+      setStoredPreferenceReview({ workspaceId, summary });
+    },
+    [workspaceId],
+  );
+  const updateOnboardingReview = useCallback(
+    (summary: OnboardingProposalReviewSummary) => {
+      if (activeWorkspaceId.current !== workspaceId) return;
+      setStoredOnboardingReview({ workspaceId, summary });
+    },
+    [workspaceId],
+  );
+  const preferenceReview = reviewSummaryForWorkspace(
+    workspaceId,
+    storedPreferenceReview,
+    LOADING_PREFERENCE_REVIEW,
+  );
+  const onboardingReview = reviewSummaryForWorkspace(
+    workspaceId,
+    storedOnboardingReview,
+    LOADING_PROPOSAL_REVIEW,
+  );
   const companyProfile = useCompanyProfileInventory(client, workspaceId);
   const { state, error, loading, reload } = useWorkspaceStateInventory(
     client,
@@ -1432,11 +1471,13 @@ export function WorkspaceStateRoute({
     companyProfile.response?.revisions.filter(
       (revision) => revision.intent === "proposal" && !activatedProfileProposalIds.has(revision.id),
     ).length ?? 0;
-  const profileProposalStatus = companyProfile.error
-    ? "unavailable"
-    : companyProfile.response
-      ? "ready"
-      : "loading";
+  const profileProposalStatus = companyProfile.loading
+    ? "loading"
+    : companyProfile.error
+      ? "unavailable"
+      : companyProfile.response
+        ? "ready"
+        : "unavailable";
   const proposalStatuses = [
     profileProposalStatus,
     preferenceReview.status,
