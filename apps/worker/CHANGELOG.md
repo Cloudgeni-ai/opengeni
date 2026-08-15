@@ -1,5 +1,12 @@
 # @opengeni/worker-bundle
 
+## 0.20.5
+
+### Patch Changes
+
+- Updated dependencies [a77e804]
+  - @opengeni/capabilities@0.2.2
+
 ## 0.20.4
 
 ### Patch Changes

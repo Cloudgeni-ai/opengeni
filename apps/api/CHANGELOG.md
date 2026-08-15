@@ -1,5 +1,12 @@
 # @opengeni/api-router
 
+## 0.31.1
+
+### Patch Changes
+
+- Updated dependencies [a77e804]
+  - @opengeni/capabilities@0.2.2
+
 ## 0.31.0
 
 ### Minor Changes

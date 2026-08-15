@@ -1,5 +1,11 @@
 # @opengeni/capabilities
 
+## 0.2.2
+
+### Patch Changes
+
+- a77e804: Publish the Gmail integration visibility fix with product release 0.23.7.
+
 ## 0.2.1
 
 ### Patch Changes
