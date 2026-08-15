@@ -73,21 +73,6 @@ const WORKER_FAILURE_MESSAGE_MAX_UTF8_BYTES = 1_024;
 const LANDMARK_ONLY_TOOL_LEAVES = new Set(["memory_save", "memory_correct"]);
 const TIMELINE_ANNOTATION_ANSI_SEQUENCE = new RegExp("\\u001B\\[[0-?]*[ -/]*[@-~]", "g");
 
-type StartupPhaseProjectionIdentity = {
-  attemptId: string | null;
-  recoveryRevision: number;
-};
-
-type StartupPhaseProjectionInput = {
-  id: string;
-  turnId: string | null;
-  phase: StartupPhase;
-  status: StartupPhaseItem["status"];
-  occurredAt: string;
-  durationMs: number | null;
-  outcome: StartupPhaseItem["outcome"];
-};
-
 function safeTimelineAnnotationJson(value: unknown): string {
   try {
     return JSON.stringify(value) ?? "";
@@ -143,7 +128,84 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const ordered = orderTimelineEvents(events, prescan);
   const queuedAtByTurn = new Map<string, string>();
   const startupRecoveryRevisionByTurn = new Map<string, number>();
-  const startupPhaseIdentities = new WeakMap<StartupPhaseItem, StartupPhaseProjectionIdentity>();
+  const startupPhases = new Map<string, readonly [StartupPhaseItem, string | null, number]>();
+  let startupEvent: SessionEvent;
+  let startupTurnId: string | null = null;
+  let startupAttemptId: string | null = null;
+  let startupRecoveryRevision = 0;
+
+  const settleStartupPhase = (
+    phase: StartupPhase,
+    status: StartupPhaseItem["status"],
+    duration: number | null,
+    outcome: StartupPhaseItem["outcome"],
+    mode = 0,
+    explicitStartedAt?: string,
+    explicitId?: string,
+  ): void => {
+    const key = `${startupTurnId}:${phase}`;
+    const priorState = startupPhases.get(key);
+    const prior = priorState?.[0];
+    const comparedByAttempt = priorState?.[1] && startupAttemptId;
+    const sameAttempt = comparedByAttempt
+      ? priorState[1] === startupAttemptId
+      : (priorState?.[2] ?? 0) === startupRecoveryRevision;
+    const open = prior?.status === "running" && sameAttempt ? prior : undefined;
+    const replacesPriorAttempt =
+      prior !== undefined &&
+      (comparedByAttempt ? !sameAttempt : startupRecoveryRevision > (priorState?.[2] ?? 0));
+    // A later activity attempt may replay preparation that the logical turn had
+    // already completed before the worker moved. Keep that first successful
+    // landmark; only an abandoned or failed attempt needs replacement.
+    if (replacesPriorAttempt && prior.status === "complete") return;
+    if (mode === 2 && prior && !replacesPriorAttempt) return;
+    if (mode === 1 && !open) return;
+    if (!replacesPriorAttempt && status !== "running" && open) {
+      open.status = status;
+      open.completedAt = startupEvent.occurredAt;
+      open.durationMs =
+        duration === null
+          ? elapsedDurationMs(open.startedAt, startupEvent.occurredAt)
+          : Math.max(0, duration);
+      open.outcome = outcome ?? open.outcome;
+      return;
+    }
+    const running = status === "running";
+    const durationMs = running || duration === null ? null : Math.max(0, duration);
+    const completedEpoch = Date.parse(startupEvent.occurredAt);
+    const startedAt =
+      explicitStartedAt ??
+      (!running && durationMs !== null && Number.isFinite(completedEpoch)
+        ? new Date(completedEpoch - durationMs).toISOString()
+        : startupEvent.occurredAt);
+    if (replacesPriorAttempt) {
+      Object.assign(prior, {
+        id: explicitId ?? startupEvent.id,
+        status,
+        startedAt,
+        completedAt: running ? null : startupEvent.occurredAt,
+        durationMs,
+        outcome,
+        occurredAt: startedAt,
+      } satisfies Partial<StartupPhaseItem>);
+      startupPhases.set(key, [prior, startupAttemptId, startupRecoveryRevision]);
+      return;
+    }
+    const item: StartupPhaseItem = {
+      kind: "startup-phase",
+      id: explicitId ?? startupEvent.id,
+      turnId: startupTurnId,
+      phase,
+      status,
+      startedAt,
+      completedAt: running ? null : startupEvent.occurredAt,
+      durationMs,
+      outcome,
+      occurredAt: startedAt,
+    };
+    items.push(item);
+    startupPhases.set(key, [item, startupAttemptId, startupRecoveryRevision]);
+  };
 
   const last = (): TimelineItem | undefined => items[items.length - 1];
 
@@ -192,15 +254,34 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   for (const event of ordered) {
     const payload = asRecord(event.payload);
     const turnId = event.turnId ?? null;
-    const startupPhaseIdentity: StartupPhaseProjectionIdentity = {
-      attemptId:
-        (typeof event.turnAttemptId === "string" ? event.turnAttemptId : null) ??
-        stringValue(payload.attemptId),
-      recoveryRevision: turnId ? (startupRecoveryRevisionByTurn.get(turnId) ?? 0) : 0,
-    };
-    const settleStartupPhase = (input: StartupPhaseProjectionInput): void => {
-      settleOrPushStartupPhase(items, input, startupPhaseIdentity, startupPhaseIdentities);
-    };
+    startupEvent = event;
+    startupTurnId = turnId;
+    startupAttemptId =
+      (typeof event.turnAttemptId === "string" ? event.turnAttemptId : null) ??
+      stringValue(payload.attemptId);
+    startupRecoveryRevision = turnId ? (startupRecoveryRevisionByTurn.get(turnId) ?? 0) : 0;
+    const setupPhase = event.type.startsWith("rig.setup.")
+      ? "rig"
+      : event.type.startsWith("turn.startup.phase.")
+        ? startupPhaseFromPayload(payload.phase)
+        : null;
+    const setupStatus = event.type.endsWith(".started")
+      ? "running"
+      : event.type.endsWith(".failed")
+        ? "failed"
+        : event.type.endsWith(".completed") || event.type === "rig.setup.skipped"
+          ? "complete"
+          : null;
+    if (setupPhase && setupStatus) {
+      closeStreamingTail();
+      settleStartupPhase(
+        setupPhase,
+        setupStatus,
+        numberOrNull(payload.durationMs),
+        event.type === "rig.setup.skipped" ? "skipped" : null,
+      );
+      continue;
+    }
 
     switch (event.type) {
       case "user.message": {
@@ -506,18 +587,15 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // first projection instead of manufacturing another queue span.
         queuedAtByTurn.delete(turnId);
         closeStreamingTail();
-        items.push({
-          kind: "startup-phase",
-          id: `${event.id}-queue`,
-          turnId,
-          phase: "queue",
-          status: "complete",
-          startedAt: queuedAt,
-          completedAt: event.occurredAt,
-          durationMs: elapsedDurationMs(queuedAt, event.occurredAt),
-          outcome: null,
-          occurredAt: queuedAt,
-        });
+        settleStartupPhase(
+          "queue",
+          "complete",
+          elapsedDurationMs(queuedAt, event.occurredAt),
+          null,
+          0,
+          queuedAt,
+          `${event.id}-queue`,
+        );
         break;
       }
 
@@ -532,23 +610,16 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           : event.type.endsWith(".completed")
             ? "complete"
             : "running";
+        const origin =
+          payload.origin === "created" ||
+          payload.origin === "restored" ||
+          payload.origin === "resumed"
+            ? payload.origin
+            : null;
         const startupPhase = startupPhaseForSandboxOperation(name);
         if (startupPhase) {
           closeStreamingTail();
-          settleStartupPhase({
-            id: event.id,
-            turnId,
-            phase: startupPhase,
-            status,
-            occurredAt: event.occurredAt,
-            durationMs: numberOrNull(payload.durationMs),
-            outcome:
-              payload.origin === "created" ||
-              payload.origin === "restored" ||
-              payload.origin === "resumed"
-                ? payload.origin
-                : null,
-          });
+          settleStartupPhase(startupPhase, status, numberOrNull(payload.durationMs), origin);
           break;
         }
         // Routine per-turn platform plumbing that runs before EVERY turn to
@@ -570,13 +641,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         const existing = findOpenSandbox(items, name);
         if (existing && status !== "running") {
           existing.status = status;
-          if (
-            payload.origin === "created" ||
-            payload.origin === "restored" ||
-            payload.origin === "resumed"
-          ) {
-            existing.origin = payload.origin;
-          }
+          if (origin) existing.origin = origin;
           const message = failureMessage(payload);
           if (message) {
             existing.output = existing.output ? `${existing.output}\n${message}` : message;
@@ -592,12 +657,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
             name,
             command: typeof payload.command === "string" ? payload.command : null,
             output: failureMessage(payload) ?? "",
-            origin:
-              payload.origin === "created" ||
-              payload.origin === "restored" ||
-              payload.origin === "resumed"
-                ? payload.origin
-                : null,
+            origin,
             status,
             occurredAt: event.occurredAt,
           });
@@ -605,105 +665,25 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         break;
       }
 
-      case "rig.setup.started":
-      case "rig.setup.completed":
-      case "rig.setup.skipped":
-      case "rig.setup.failed": {
-        closeStreamingTail();
-        settleStartupPhase({
-          id: event.id,
-          turnId,
-          phase: "rig",
-          status:
-            event.type === "rig.setup.started"
-              ? "running"
-              : event.type === "rig.setup.failed"
-                ? "failed"
-                : "complete",
-          occurredAt: event.occurredAt,
-          durationMs: numberOrNull(payload.durationMs),
-          outcome: event.type === "rig.setup.skipped" ? "skipped" : null,
-        });
-        break;
-      }
-
-      case "turn.startup.phase.started":
-      case "turn.startup.phase.completed":
-      case "turn.startup.phase.failed": {
-        const phase = startupPhaseFromPayload(payload.phase);
-        if (!phase) break;
-        closeStreamingTail();
-        settleStartupPhase({
-          id: event.id,
-          turnId,
-          phase,
-          status:
-            event.type === "turn.startup.phase.started"
-              ? "running"
-              : event.type === "turn.startup.phase.failed"
-                ? "failed"
-                : "complete",
-          occurredAt: event.occurredAt,
-          durationMs: numberOrNull(payload.durationMs),
-          outcome: null,
-        });
-        break;
-      }
-
       case "agent.model.request": {
         const requestPhase = typeof payload.phase === "string" ? payload.phase : null;
-        const existingProviderWait = findStartupPhase(items, "provider_first_byte", turnId);
-        const openProviderWait = findOpenStartupPhase(
-          items,
-          "provider_first_byte",
-          turnId,
-          startupPhaseIdentity,
-          startupPhaseIdentities,
-        );
-        const replacesPriorAttempt =
-          existingProviderWait !== undefined &&
-          isStartupPhaseRecoveryReplacement(
-            existingProviderWait,
-            startupPhaseIdentity,
-            startupPhaseIdentities,
+        const status =
+          requestPhase === "started"
+            ? "running"
+            : requestPhase === "first_byte" || requestPhase === "first_event"
+              ? "complete"
+              : requestPhase === "failed" || requestPhase === "timed_out"
+                ? "failed"
+                : null;
+        if (status) {
+          if (status === "running") closeStreamingTail();
+          settleStartupPhase(
+            "provider_first_byte",
+            status,
+            status === "running" ? null : numberOrNull(payload.durationMs),
+            null,
+            status === "running" ? 2 : 1,
           );
-        if (requestPhase === "started" && (!existingProviderWait || replacesPriorAttempt)) {
-          closeStreamingTail();
-          settleStartupPhase({
-            id: event.id,
-            turnId,
-            phase: "provider_first_byte",
-            status: "running",
-            occurredAt: event.occurredAt,
-            durationMs: null,
-            outcome: null,
-          });
-        } else if (
-          openProviderWait &&
-          (requestPhase === "first_byte" || requestPhase === "first_event")
-        ) {
-          settleStartupPhase({
-            id: event.id,
-            turnId,
-            phase: "provider_first_byte",
-            status: "complete",
-            occurredAt: event.occurredAt,
-            durationMs: numberOrNull(payload.durationMs),
-            outcome: null,
-          });
-        } else if (
-          openProviderWait &&
-          (requestPhase === "failed" || requestPhase === "timed_out")
-        ) {
-          settleStartupPhase({
-            id: event.id,
-            turnId,
-            phase: "provider_first_byte",
-            status: "failed",
-            occurredAt: event.occurredAt,
-            durationMs: numberOrNull(payload.durationMs),
-            outcome: null,
-          });
         }
         break;
       }
@@ -1841,167 +1821,30 @@ function findOpenSandbox(items: TimelineItem[], name: string): SandboxItem | und
 }
 
 function startupPhaseForSandboxOperation(name: string): StartupPhase | null {
-  if (name === "sandbox.provision") return "sandbox";
-  if (name === "repository-clone") return "repository";
-  if (name === "file-resource-download") return "files";
-  return null;
+  return SANDBOX_STARTUP_PHASES[name] ?? null;
 }
 
 function startupPhaseFromPayload(value: unknown): StartupPhase | null {
-  switch (value) {
-    case "queue":
-    case "sandbox":
-    case "rig":
-    case "repository":
-    case "files":
-    case "tools":
-    case "model_preparation":
-    case "provider_first_byte":
-      return value;
-    default:
-      return null;
-  }
+  return typeof value === "string" && STARTUP_PHASES.has(value as StartupPhase)
+    ? (value as StartupPhase)
+    : null;
 }
 
-function findStartupPhase(
-  items: TimelineItem[],
-  phase: StartupPhase,
-  turnId: string | null,
-): StartupPhaseItem | undefined {
-  return [...items]
-    .reverse()
-    .find(
-      (item): item is StartupPhaseItem =>
-        item.kind === "startup-phase" && item.phase === phase && item.turnId === turnId,
-    );
-}
-
-function findOpenStartupPhase(
-  items: TimelineItem[],
-  phase: StartupPhase,
-  turnId: string | null,
-  identity: StartupPhaseProjectionIdentity,
-  identities: WeakMap<StartupPhaseItem, StartupPhaseProjectionIdentity>,
-): StartupPhaseItem | undefined {
-  return [...items]
-    .reverse()
-    .find(
-      (item): item is StartupPhaseItem =>
-        item.kind === "startup-phase" &&
-        item.phase === phase &&
-        item.turnId === turnId &&
-        item.status === "running" &&
-        startupPhaseIdentityMatches(identities.get(item), identity),
-    );
-}
-
-function startupPhaseIdentityMatches(
-  prior: StartupPhaseProjectionIdentity | undefined,
-  next: StartupPhaseProjectionIdentity,
-): boolean {
-  if (prior?.attemptId && next.attemptId) {
-    return prior.attemptId === next.attemptId;
-  }
-  return (prior?.recoveryRevision ?? 0) === next.recoveryRevision;
-}
-
-function isStartupPhaseRecoveryReplacement(
-  priorItem: StartupPhaseItem,
-  next: StartupPhaseProjectionIdentity,
-  identities: WeakMap<StartupPhaseItem, StartupPhaseProjectionIdentity>,
-): boolean {
-  const prior = identities.get(priorItem);
-  if (prior?.attemptId && next.attemptId) {
-    return prior.attemptId !== next.attemptId;
-  }
-  return next.recoveryRevision > (prior?.recoveryRevision ?? 0);
-}
-
-function settleOrPushStartupPhase(
-  items: TimelineItem[],
-  input: StartupPhaseProjectionInput,
-  identity: StartupPhaseProjectionIdentity,
-  identities: WeakMap<StartupPhaseItem, StartupPhaseProjectionIdentity>,
-): void {
-  const open = findOpenStartupPhase(items, input.phase, input.turnId, identity, identities);
-  const prior = findStartupPhase(items, input.phase, input.turnId);
-  const replacesPriorAttempt =
-    prior !== undefined && isStartupPhaseRecoveryReplacement(prior, identity, identities);
-  // A later activity attempt may replay preparation that the logical turn had
-  // already completed before the worker moved. Keep that first successful
-  // landmark; only an abandoned or failed attempt needs replacement.
-  if (replacesPriorAttempt && prior.status === "complete") {
-    return;
-  }
-  if (replacesPriorAttempt && (input.status === "running" || !open)) {
-    const durationMs = input.durationMs === null ? null : Math.max(0, input.durationMs);
-    const completedEpoch = Date.parse(input.occurredAt);
-    const startedAt =
-      input.status === "running"
-        ? input.occurredAt
-        : durationMs !== null && Number.isFinite(completedEpoch)
-          ? new Date(completedEpoch - durationMs).toISOString()
-          : input.occurredAt;
-    Object.assign(prior, {
-      id: input.id,
-      status: input.status,
-      startedAt,
-      completedAt: input.status === "running" ? null : input.occurredAt,
-      durationMs: input.status === "running" ? null : durationMs,
-      outcome: input.outcome,
-      occurredAt: startedAt,
-    } satisfies Partial<StartupPhaseItem>);
-    identities.set(prior, identity);
-    return;
-  }
-  if (input.status !== "running" && open) {
-    open.status = input.status;
-    open.completedAt = input.occurredAt;
-    open.durationMs =
-      input.durationMs === null
-        ? elapsedDurationMs(open.startedAt, input.occurredAt)
-        : Math.max(0, input.durationMs);
-    open.outcome = input.outcome ?? open.outcome;
-    return;
-  }
-  if (input.status === "running") {
-    const item: StartupPhaseItem = {
-      kind: "startup-phase",
-      id: input.id,
-      turnId: input.turnId,
-      phase: input.phase,
-      status: "running",
-      startedAt: input.occurredAt,
-      completedAt: null,
-      durationMs: null,
-      outcome: input.outcome,
-      occurredAt: input.occurredAt,
-    };
-    items.push(item);
-    identities.set(item, identity);
-    return;
-  }
-  const durationMs = input.durationMs === null ? null : Math.max(0, input.durationMs);
-  const completedEpoch = Date.parse(input.occurredAt);
-  const startedAt =
-    durationMs !== null && Number.isFinite(completedEpoch)
-      ? new Date(completedEpoch - durationMs).toISOString()
-      : input.occurredAt;
-  const item: StartupPhaseItem = {
-    kind: "startup-phase",
-    id: input.id,
-    turnId: input.turnId,
-    phase: input.phase,
-    status: input.status,
-    startedAt,
-    completedAt: input.occurredAt,
-    durationMs,
-    outcome: input.outcome,
-    occurredAt: startedAt,
-  };
-  items.push(item);
-  identities.set(item, identity);
-}
+const SANDBOX_STARTUP_PHASES: Record<string, StartupPhase> = {
+  "sandbox.provision": "sandbox",
+  "repository-clone": "repository",
+  "file-resource-download": "files",
+};
+const STARTUP_PHASES = new Set<StartupPhase>([
+  "queue",
+  "sandbox",
+  "rig",
+  "repository",
+  "files",
+  "tools",
+  "model_preparation",
+  "provider_first_byte",
+]);
 
 function elapsedDurationMs(startedAt: string, completedAt: string): number | null {
   const start = Date.parse(startedAt);
