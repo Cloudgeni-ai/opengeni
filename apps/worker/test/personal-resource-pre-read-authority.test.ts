@@ -8,7 +8,7 @@ describe("personal-resource direct-read authority", () => {
       "utf8",
     );
     const authorize = source.indexOf("await resolveSessionAttemptPersonalResources(db");
-    const rigRead = source.indexOf("await getRigVersion(db", authorize);
+    const rigRead = source.indexOf("await materializeRigVersionForAttempt(db", authorize);
     const variableRead = source.indexOf(
       "loadWorkspaceEnvironmentForRunWithCredentials(",
       authorize,

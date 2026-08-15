@@ -14718,6 +14718,9 @@ function mapRig(
     id: row.id,
     accountId: row.accountId,
     workspaceId: row.workspaceId,
+    scope: row.authorityScope as Rig["scope"],
+    generation: Number(row.generation),
+    status: row.status as Rig["status"],
     name: row.name,
     description: row.description,
     createdBy: row.createdBy,
@@ -14909,12 +14912,43 @@ export async function createRig(
   input: {
     accountId: string;
     workspaceId: string;
+    scope?: Rig["scope"];
+    subjectId?: string;
+    allowOrganization?: boolean;
     name: string;
     description?: string | null;
     createdBy?: string | null;
     initialVersion?: RigVersionContentInput;
   },
 ): Promise<Rig> {
+  if (input.scope !== undefined || input.subjectId !== undefined) {
+    return await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) => {
+        if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
+        const content = input.initialVersion ?? {};
+        const [row] = await rawRows<{ value: Rig }>(
+          scopedDb,
+          sql`select create_scoped_rig(
+            ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+            ${input.scope ?? "workspace"}, ${input.name}, ${input.description ?? null},
+            ${input.createdBy ?? null}, ${JSON.stringify({
+              image: content.image ?? null,
+              setupScript: content.setupScript ?? null,
+              checks: content.checks ?? [],
+              credentialHooks: content.credentialHooks ?? [],
+              defaultVariableSetIds: content.defaultVariableSetIds ?? [],
+              changelog: content.changelog ?? null,
+              createdBy: content.createdBy ?? input.createdBy ?? null,
+            })}::jsonb, ${input.allowOrganization === true}
+          ) as value`,
+        );
+        if (!row) throw new Error("Failed to create scoped rig");
+        return row.value;
+      },
+    );
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -14959,7 +14993,26 @@ export async function createRig(
   );
 }
 
-export async function listRigs(db: Database, workspaceId: string): Promise<Rig[]> {
+export type RigAccessContext = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+};
+
+export async function listRigs(db: Database, access: string | RigAccessContext): Promise<Rig[]> {
+  if (typeof access !== "string") {
+    return await withRlsContext(db, access, async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, access.subjectId);
+      const rows = await rawRows<{ value: Rig }>(
+        scopedDb,
+        sql`select value from list_scoped_rigs(
+          ${access.accountId}::uuid, ${access.workspaceId}::uuid, null, null, null
+        ) value`,
+      );
+      return rows.map((row) => row.value);
+    });
+  }
+  const workspaceId = access;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
       .select()
@@ -15004,9 +15057,23 @@ export async function listRigs(db: Database, workspaceId: string): Promise<Rig[]
 
 export async function getRig(
   db: Database,
-  workspaceId: string,
+  access: string | RigAccessContext,
   rigId: string,
 ): Promise<Rig | null> {
+  if (typeof access !== "string") {
+    return await withRlsContext(db, access, async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, access.subjectId);
+      const [row] = await rawRows<{ value: Rig }>(
+        scopedDb,
+        sql`select value from list_scoped_rigs(
+          ${access.accountId}::uuid, ${access.workspaceId}::uuid,
+          ${rigId}::uuid, null, null
+        ) value`,
+      );
+      return row?.value ?? null;
+    });
+  }
+  const workspaceId = access;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
@@ -15039,9 +15106,24 @@ export async function getRig(
 
 export async function getRigByName(
   db: Database,
-  workspaceId: string,
+  access: string | RigAccessContext,
   name: string,
+  scope?: Rig["scope"],
 ): Promise<Rig | null> {
+  if (typeof access !== "string") {
+    return await withRlsContext(db, access, async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, access.subjectId);
+      const [row] = await rawRows<{ value: Rig }>(
+        scopedDb,
+        sql`select value from list_scoped_rigs(
+          ${access.accountId}::uuid, ${access.workspaceId}::uuid,
+          null, ${name}, ${scope ?? null}
+        ) value`,
+      );
+      return row?.value ?? null;
+    });
+  }
+  const workspaceId = access;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
@@ -15164,6 +15246,47 @@ export async function deleteRigIfNoActiveSessions(
       .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
       .returning({ id: schema.rigs.id });
     return { deleted: rows.length > 0, activeSessionCount };
+  });
+}
+
+export async function updateScopedRig(
+  db: Database,
+  access: RigAccessContext,
+  rigId: string,
+  input: {
+    name?: string;
+    description?: string | null;
+    allowOrganization?: boolean;
+  },
+): Promise<Rig> {
+  return await withRlsContext(db, access, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, access.subjectId);
+    const [row] = await rawRows<{ value: Rig | null }>(
+      scopedDb,
+      sql`select mutate_scoped_rig(
+        ${access.accountId}::uuid, ${access.workspaceId}::uuid, ${rigId}::uuid,
+        'update', ${input.name ?? null}, ${input.name !== undefined},
+        ${input.description ?? null}, ${input.description !== undefined},
+        ${input.allowOrganization === true}
+      ) as value`,
+    );
+    if (!row?.value) throw new Error(`Rig not found: ${rigId}`);
+    return row.value;
+  });
+}
+
+export async function revokeScopedRig(
+  db: Database,
+  access: RigAccessContext,
+  rigId: string,
+  options: { allowOrganization?: boolean } = {},
+): Promise<void> {
+  await withRlsContext(db, access, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, access.subjectId);
+    await scopedDb.execute(sql`select mutate_scoped_rig(
+      ${access.accountId}::uuid, ${access.workspaceId}::uuid, ${rigId}::uuid,
+      'revoke', null, false, null, false, ${options.allowOrganization === true}
+    )`);
   });
 }
 
@@ -15374,7 +15497,24 @@ export async function setSessionChannel(
   });
 }
 
-export async function countRigs(db: Database, workspaceId: string): Promise<number> {
+export async function countRigs(
+  db: Database,
+  access: string | RigAccessContext,
+  scope: Rig["scope"] = "workspace",
+): Promise<number> {
+  if (typeof access !== "string") {
+    return await withRlsContext(db, access, async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, access.subjectId);
+      const [row] = await rawRows<{ count: number }>(
+        scopedDb,
+        sql`select count_scoped_rigs(
+          ${access.accountId}::uuid, ${access.workspaceId}::uuid, ${scope}
+        ) as count`,
+      );
+      return Number(row?.count ?? 0);
+    });
+  }
+  const workspaceId = access;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [{ count } = { count: 0 }] = await scopedDb
       .select({ count: sql<number>`count(*)::int` })
@@ -15716,6 +15856,39 @@ export async function getRigVersion(
       )
       .limit(1);
     return row ? mapRigVersion(row) : null;
+  });
+}
+
+export async function materializeRigVersionForAttempt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string | null;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+  },
+): Promise<{ rigName: string; version: RigVersion } | null> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    if (input.subjectId) {
+      await setSubjectRlsContext(scopedDb, input.subjectId);
+      await scopedDb.execute(sql`select set_config(
+        'opengeni.initiating_human_subject_id', ${input.subjectId}, true
+      )`);
+    }
+    const [row] = await rawRows<{
+      value: { rigName: string; version: RigVersion } | null;
+    }>(
+      scopedDb,
+      sql`select materialize_scoped_rig_version_for_attempt(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+        ${input.sessionId}::uuid, ${input.turnId}::uuid,
+        ${input.attemptId}::uuid, ${input.executionGeneration}::integer
+      ) as value`,
+    );
+    return row?.value ?? null;
   });
 }
 
@@ -41756,6 +41929,10 @@ export type EnrollmentRecord = {
   id: string;
   accountId: string;
   workspaceId: string;
+  scope: "organization" | "workspace" | "user";
+  generation: number;
+  sandboxId?: string | null;
+  sandboxName?: string | null;
   pubkey: string;
   exposure: EnrollmentExposure;
   hasDisplay: boolean;
@@ -41806,6 +41983,10 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
     id: row.id,
     accountId: row.accountId,
     workspaceId: row.workspaceId,
+    scope: row.authorityScope as EnrollmentRecord["scope"],
+    generation: Number(row.generation),
+    sandboxId: null,
+    sandboxName: null,
     pubkey: row.pubkey,
     exposure: row.exposure as EnrollmentExposure,
     hasDisplay: row.hasDisplay,
@@ -41874,6 +42055,8 @@ export type SandboxRecord = {
   kind: SandboxKind;
   name: string;
   enrollmentId: string | null;
+  scope?: "organization" | "workspace" | "user";
+  generation?: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -41886,6 +42069,8 @@ function mapSandbox(row: typeof schema.sandboxes.$inferSelect): SandboxRecord {
     kind: row.kind as SandboxKind,
     name: row.name,
     enrollmentId: row.enrollmentId ?? null,
+    scope: "workspace",
+    generation: 1,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -41932,6 +42117,7 @@ export async function createEnrollment(
         })
         .onConflictDoUpdate({
           target: [schema.enrollments.workspaceId, schema.enrollments.pubkey],
+          targetWhere: sql`authority_scope = 'workspace'`,
           set: {
             exposure: input.exposure ?? "whole-machine",
             hasDisplay: input.hasDisplay ?? false,
@@ -42002,6 +42188,37 @@ export async function getLiveEnrollmentConnection(
       )
       .limit(1);
     return row ? mapEnrollment(row) : null;
+  });
+}
+
+export async function assertPersonalMachineForAttempt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    enrollmentId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, input.subjectId);
+    await scopedDb.execute(sql`select set_config(
+      'opengeni.initiating_human_subject_id', ${input.subjectId}, true
+    )`);
+    const [row] = await rawRows<{ authorized: boolean }>(
+      scopedDb,
+      sql`select assert_session_attempt_personal_machine(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+        ${input.sessionId}::uuid, ${input.turnId}::uuid,
+        ${input.attemptId}::uuid, ${input.executionGeneration}::integer,
+        ${input.enrollmentId}::uuid
+      ) as authorized`,
+    );
+    return row?.authorized === true;
   });
 }
 
@@ -42291,9 +42508,23 @@ export async function releaseEnrollmentConnection(
 // (omit for all; 'active' for the Machines dashboard's live list).
 export async function listEnrollments(
   db: Database,
-  workspaceId: string,
+  access: string | { accountId: string; workspaceId: string; subjectId: string },
   options: { status?: EnrollmentStatus } = {},
 ): Promise<EnrollmentRecord[]> {
+  if (typeof access !== "string") {
+    return await withRlsContext(db, access, async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, access.subjectId);
+      const rows = await rawRows<{ value: EnrollmentRecord }>(
+        scopedDb,
+        sql`select value from list_scoped_enrollments(
+          ${access.accountId}::uuid, ${access.workspaceId}::uuid, null,
+          ${options.status ?? "active"}
+        ) value`,
+      );
+      return rows.map((row) => row.value);
+    });
+  }
+  const workspaceId = access;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const where = options.status
       ? and(
@@ -42804,7 +43035,12 @@ export async function removeEnrollment(
       const now = new Date();
       const [updated] = await scopedDb
         .update(schema.enrollments)
-        .set({ status: "revoked", revokedAt: now, updatedAt: now })
+        .set({
+          status: "revoked",
+          revokedAt: now,
+          generation: sql`${schema.enrollments.generation} + 1`,
+          updatedAt: now,
+        })
         .where(
           and(
             eq(schema.enrollments.workspaceId, input.workspaceId),
@@ -42909,7 +43145,12 @@ export async function revokeEnrollmentByGeneration(
     }
     const updated = await scopedDb
       .update(schema.enrollments)
-      .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
+      .set({
+        status: "revoked",
+        revokedAt: new Date(),
+        generation: sql`${schema.enrollments.generation} + 1`,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(schema.enrollments.workspaceId, input.workspaceId),
@@ -43661,6 +43902,8 @@ async function finalizeEnrollmentInScope(
   input: {
     accountId: string;
     workspaceId: string;
+    scope?: EnrollmentRecord["scope"];
+    allowOrganization?: boolean;
     pubkey: string;
     hasDisplay: boolean;
     allowScreenControl: boolean;
@@ -43670,6 +43913,37 @@ async function finalizeEnrollmentInScope(
     now: Date;
   },
 ): Promise<{ enrollment: EnrollmentRecord; sandbox: SandboxRecord }> {
+  if (input.scope !== undefined) {
+    const [created] = await rawRows<{
+      enrollmentId: string;
+      sandboxId: string;
+    }>(
+      scopedDb,
+      sql`select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+        from finalize_scoped_enrollment(
+          ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.scope},
+          ${input.pubkey}, ${input.hasDisplay}, ${input.allowScreenControl},
+          ${input.os}, ${input.arch}, ${input.sandboxName},
+          ${input.allowOrganization === true}
+        )`,
+    );
+    if (!created) throw new Error("Failed to finalize scoped enrollment");
+    const [enrollmentRow] = await scopedDb
+      .select()
+      .from(schema.enrollments)
+      .where(eq(schema.enrollments.id, created.enrollmentId))
+      .limit(1);
+    const [sandboxRow] = await scopedDb
+      .select()
+      .from(schema.sandboxes)
+      .where(eq(schema.sandboxes.id, created.sandboxId))
+      .limit(1);
+    if (!enrollmentRow || !sandboxRow) throw new Error("Scoped enrollment finalize lost rows");
+    return {
+      enrollment: mapEnrollment(enrollmentRow),
+      sandbox: mapSandbox(sandboxRow),
+    };
+  }
   // createEnrollment (idempotent upsert) — whole-machine is mandatory; display +
   // screen-control come from the agent's offer + the consenting decision. We inline
   // the insert here (rather than calling createEnrollment, which opens its OWN
@@ -43689,6 +43963,7 @@ async function finalizeEnrollmentInScope(
     })
     .onConflictDoUpdate({
       target: [schema.enrollments.workspaceId, schema.enrollments.pubkey],
+      targetWhere: sql`authority_scope = 'workspace'`,
       set: {
         exposure: "whole-machine",
         hasDisplay: input.hasDisplay,
@@ -43799,6 +44074,8 @@ export async function approveDeviceEnrollmentRequest(
   input: {
     accountId: string;
     workspaceId: string;
+    scope?: EnrollmentRecord["scope"];
+    allowOrganization?: boolean;
     requestId: string;
     allowScreenControl: boolean;
     approvedBySubjectId: string;
@@ -43817,6 +44094,7 @@ export async function approveDeviceEnrollmentRequest(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.approvedBySubjectId);
       // Re-read FOR UPDATE under the txn so a concurrent approve / expiry can't race.
       const [pending] = await scopedDb
         .select()
@@ -43886,6 +44164,8 @@ export async function approveDeviceEnrollmentRequest(
       const { enrollment, sandbox } = await finalizeEnrollmentInScope(scopedDb, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
+        scope: input.scope ?? "user",
+        allowOrganization: input.allowOrganization === true,
         pubkey: pending.pubkey,
         hasDisplay: pending.canOfferDisplay,
         allowScreenControl: input.allowScreenControl,
@@ -44025,9 +44305,22 @@ export async function createSandbox(
 
 export async function getSandbox(
   db: Database,
-  workspaceId: string,
+  access: string | { accountId: string; workspaceId: string; subjectId: string },
   sandboxId: string,
 ): Promise<SandboxRecord | null> {
+  if (typeof access !== "string") {
+    return await withRlsContext(db, access, async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, access.subjectId);
+      const [row] = await rawRows<{ value: SandboxRecord | null }>(
+        scopedDb,
+        sql`select get_scoped_sandbox(
+          ${access.accountId}::uuid, ${access.workspaceId}::uuid, ${sandboxId}::uuid
+        ) as value`,
+      );
+      return row?.value ?? null;
+    });
+  }
+  const workspaceId = access;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
@@ -44143,6 +44436,7 @@ export async function setActiveSandbox(
     sessionId: string;
     targetSandboxId: string | null;
     expectedEpoch: number;
+    subjectId?: string;
     // The session's working directory to write alongside the pointer. OMITTED
     // (undefined) ⇒ the column is left UNCHANGED (a plain swap/attach never touches
     // it); a string sets it; null clears it back to the default. Per-session
@@ -44155,33 +44449,47 @@ export async function setActiveSandbox(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       if (input.targetSandboxId !== null) {
-        const [target] = await scopedDb.execute<{
-          kind: string;
-          enrollment_id: string | null;
-        }>(sql`
+        if (input.subjectId) {
+          await setSubjectRlsContext(scopedDb, input.subjectId);
+          const [authorization] = await rawRows<{ authorized: boolean }>(
+            scopedDb,
+            sql`select authorize_scoped_sandbox_attach(
+              ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+              ${input.targetSandboxId}::uuid
+            ) as authorized`,
+          );
+          if (authorization?.authorized !== true) {
+            return { swapped: false, pointer: null };
+          }
+        } else {
+          const [target] = await scopedDb.execute<{
+            kind: string;
+            enrollment_id: string | null;
+          }>(sql`
           select kind, enrollment_id
           from sandboxes
           where workspace_id = ${input.workspaceId} and id = ${input.targetSandboxId}
           for share
         `);
-        if (!target) {
-          return { swapped: false, pointer: null };
-        }
-        if (target.kind === "selfhosted") {
-          // SHARE conflicts with removeEnrollment's UPDATE lock. If removal
-          // wins first, this read observes revoked; if attach wins first,
-          // removal observes the committed pointer and blocks safely.
-          if (!target.enrollment_id) {
+          if (!target) {
             return { swapped: false, pointer: null };
           }
-          const [enrollment] = await scopedDb.execute<{ status: string }>(sql`
+          if (target.kind === "selfhosted") {
+            // SHARE conflicts with removeEnrollment's UPDATE lock. If removal
+            // wins first, this read observes revoked; if attach wins first,
+            // removal observes the committed pointer and blocks safely.
+            if (!target.enrollment_id) {
+              return { swapped: false, pointer: null };
+            }
+            const [enrollment] = await scopedDb.execute<{ status: string }>(sql`
             select status
             from enrollments
             where workspace_id = ${input.workspaceId} and id = ${target.enrollment_id}
             for share
           `);
-          if (!enrollment || enrollment.status !== "active") {
-            return { swapped: false, pointer: null };
+            if (!enrollment || enrollment.status !== "active") {
+              return { swapped: false, pointer: null };
+            }
           }
         }
       }

@@ -59,6 +59,7 @@ export type FleetReadinessHold = {
 export type FleetContext = {
   accountId: string;
   workspaceId: string;
+  subjectId?: string;
   /** The calling session (the pointer the attach/swap mutates + whose group box
    *  is the default fleet member). */
   sessionId: string;
@@ -80,12 +81,18 @@ export type FleetContext = {
  */
 export async function buildFleetContextForSession(
   deps: { db: Database },
-  ctx: { accountId: string; workspaceId: string; sessionId: string },
+  ctx: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    subjectId?: string;
+  },
 ): Promise<FleetContext> {
   const session = await requireSession(deps.db, ctx.workspaceId, ctx.sessionId);
   return {
     accountId: ctx.accountId,
     workspaceId: ctx.workspaceId,
+    ...(ctx.subjectId ? { subjectId: ctx.subjectId } : {}),
     sessionId: ctx.sessionId,
     sessionBackend: session.sandboxBackend,
     sessionGroupId: session.sandboxGroupId,
@@ -194,7 +201,11 @@ async function probeEnrollment(
   workspaceId: string,
   enrollment: EnrollmentRecord,
   liveConnection: EnrollmentRecord | null = enrollment,
-): Promise<{ liveness: FleetLiveness; consented: boolean; hasDisplay: boolean }> {
+): Promise<{
+  liveness: FleetLiveness;
+  consented: boolean;
+  hasDisplay: boolean;
+}> {
   const { settings, bus } = services;
   let probeResponded = false;
   if (liveConnection?.connectionInstanceId) {
@@ -224,7 +235,11 @@ async function probeEnrollment(
     },
     probeResponded,
   });
-  return { liveness: state.state, consented: state.consented, hasDisplay: state.hasDisplay };
+  return {
+    liveness: state.state,
+    consented: state.consented,
+    hasDisplay: state.hasDisplay,
+  };
 }
 
 /**
@@ -324,7 +339,11 @@ export async function listFleet(
     );
     const probe = enrollment
       ? await probeEnrollment(services, ctx.workspaceId, enrollment, liveConnection)
-      : { liveness: "offline" as FleetLiveness, consented: false, hasDisplay: false };
+      : {
+          liveness: "offline" as FleetLiveness,
+          consented: false,
+          hasDisplay: false,
+        };
     entries.push({
       id: sandbox.id,
       kind: "selfhosted",
@@ -391,7 +410,17 @@ async function resolveTarget(
     }
     return { ok: true, targetSandboxId: null };
   }
-  const sandbox = await getSandbox(services.db, ctx.workspaceId, target);
+  const sandbox = await getSandbox(
+    services.db,
+    ctx.subjectId
+      ? {
+          accountId: ctx.accountId,
+          workspaceId: ctx.workspaceId,
+          subjectId: ctx.subjectId,
+        }
+      : ctx.workspaceId,
+    target,
+  );
   if (!sandbox) {
     return {
       ok: false,
@@ -411,7 +440,11 @@ async function resolveTarget(
     isSessionGroup: false,
   });
   if (!establishable.ok) {
-    return { ok: false, reason: establishable.reason, code: establishable.code };
+    return {
+      ok: false,
+      reason: establishable.reason,
+      code: establishable.code,
+    };
   }
   if (sandbox.kind === "selfhosted") {
     if (!sandbox.enrollmentId) {
@@ -526,6 +559,7 @@ export async function swapActiveSandbox(
         sessionId: ctx.sessionId,
         targetSandboxId: resolved.targetSandboxId,
         expectedEpoch: pointer.activeEpoch,
+        ...(ctx.subjectId ? { subjectId: ctx.subjectId } : {}),
         ...(workingDir !== undefined ? { workingDir } : {}),
       });
       if (result.swapped && result.pointer) {
@@ -632,7 +666,9 @@ export async function executeRunOnSelfhostedMachine(
       ? { operationResourcePolicy: machine.operationResourcePolicy }
       : {}),
     ...(machine.operationResourcePolicySupported !== undefined
-      ? { operationResourcePolicySupported: machine.operationResourcePolicySupported }
+      ? {
+          operationResourcePolicySupported: machine.operationResourcePolicySupported,
+        }
       : {}),
     ...(machine.operationCpuQuotaSupported !== undefined
       ? { operationCpuQuotaSupported: machine.operationCpuQuotaSupported }
@@ -665,7 +701,9 @@ export async function executeRunOnSelfhostedMachine(
         timedOut,
         deadlineMs,
         ...(timedOut
-          ? { reason: `command exceeded the ${deadlineMs} ms execution deadline` }
+          ? {
+              reason: `command exceeded the ${deadlineMs} ms execution deadline`,
+            }
           : !hasTerminalExit
             ? { reason: "machine returned no terminal exit code" }
             : {}),
@@ -673,9 +711,17 @@ export async function executeRunOnSelfhostedMachine(
     }
     if (op.kind === "read") {
       const bytes = await session.readFile({ path: op.path });
-      return { target, kind: "read", ok: true, content: new TextDecoder().decode(bytes) };
+      return {
+        target,
+        kind: "read",
+        ok: true,
+        content: new TextDecoder().decode(bytes),
+      };
     }
-    const bytesWritten = await session.writeFile({ path: op.path, content: op.content });
+    const bytesWritten = await session.writeFile({
+      path: op.path,
+      content: op.content,
+    });
     return { target, kind: "write", ok: true, bytesWritten };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);

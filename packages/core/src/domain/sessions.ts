@@ -1479,7 +1479,7 @@ export async function createSessionForRequestWithOutcome(
   let frozenRigId: string | null = null;
   let frozenRigVersionId: string | null = null;
   if (requestedRigId) {
-    const rig = await getRig(db, workspaceId, requestedRigId);
+    const rig = await getRig(db, grant, requestedRigId);
     if (!rig || !rig.activeVersion) {
       if (payload.rigId) {
         throw new HTTPException(422, {
@@ -1857,7 +1857,7 @@ export async function createSessionForRequestWithOutcome(
     settings.sandboxOwnershipEnabled &&
     settings.sandboxSelfhostedEnabled
   ) {
-    const targetSandbox = await getSandbox(db, workspaceId, payload.targetSandboxId);
+    const targetSandbox = await getSandbox(db, grant, payload.targetSandboxId);
     if (targetSandbox?.kind === "selfhosted") {
       machineHomeBackend = "selfhosted";
       if (targetSandbox.enrollmentId) {

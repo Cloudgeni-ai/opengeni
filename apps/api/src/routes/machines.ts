@@ -68,12 +68,20 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // ── GET /workspaces/:ws/machines (the dashboard list) ───────────────────────
   app.get("/v1/workspaces/:workspaceId/machines", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
     assertSelfhostedEnabled();
     // sessionId is OPTIONAL: present → an in-session view (synthetic group box +
     // active pointer); absent → the pure workspace dashboard.
     const sessionId = c.req.query("sessionId") ?? null;
-    const response = await listMachines({ db, settings, bus }, { workspaceId, sessionId });
+    const response = await listMachines(
+      { db, settings, bus },
+      {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        sessionId,
+      },
+    );
     return c.json(MachinesResponse.parse(response));
   });
 
@@ -87,11 +95,17 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     // but a clear 404 beats an empty series for an unknown/cross-workspace id).
     const enrollment = await getEnrollment(db, workspaceId, enrollmentId);
     if (!enrollment || enrollment.status !== "active") {
-      throw new HTTPException(404, { message: "machine not found in this workspace" });
+      throw new HTTPException(404, {
+        message: "machine not found in this workspace",
+      });
     }
     const windowMs = SERIES_WINDOWS_MS[c.req.query("window") ?? ""] ?? DEFAULT_SERIES_WINDOW_MS;
     const since = new Date(Date.now() - windowMs);
-    const rows = await readMachineMetricsSeries(db, { workspaceId, enrollmentId, since });
+    const rows = await readMachineMetricsSeries(db, {
+      workspaceId,
+      enrollmentId,
+      since,
+    });
     return c.json(
       MachineMetricsSeriesResponse.parse({
         samples: rows.map(metricRowToSample),
@@ -111,16 +125,22 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     try {
       json = await c.req.json();
     } catch {
-      throw new HTTPException(400, { message: "operation policy body must be valid JSON" });
+      throw new HTTPException(400, {
+        message: "operation policy body must be valid JSON",
+      });
     }
     const parsed = UpdateMachineOperationPolicyRequest.safeParse(json);
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid machine operation policy" });
+      throw new HTTPException(400, {
+        message: "invalid machine operation policy",
+      });
     }
     const body = parsed.data;
     const current = await getEnrollment(db, workspaceId, enrollmentId);
     if (!current || current.status !== "active") {
-      throw new HTTPException(404, { message: "machine not found in this workspace" });
+      throw new HTTPException(404, {
+        message: "machine not found in this workspace",
+      });
     }
     const updated = await updateEnrollmentOperationPolicy(db, {
       accountId: grant.accountId,
@@ -151,7 +171,9 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     const enrollmentId = c.req.param("enrollmentId");
     const live = await getLiveEnrollmentConnection(db, workspaceId, enrollmentId);
     if (!live?.connectionInstanceId || !live.agentVersion) {
-      throw new HTTPException(409, { message: "machine has no authoritative live agent build" });
+      throw new HTTPException(409, {
+        message: "machine has no authoritative live agent build",
+      });
     }
     const channel = live.agentUpdateChannel ?? "stable";
     const targetVersion =
@@ -170,7 +192,9 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       live.agentVersion === targetVersion &&
       live.agentUpdate?.status !== "failed"
     ) {
-      throw new HTTPException(409, { message: "machine already runs the promoted version" });
+      throw new HTTPException(409, {
+        message: "machine already runs the promoted version",
+      });
     }
     const operationId = reusableRequest?.operationId ?? crypto.randomUUID();
     if (!reusableRequest) {
@@ -264,7 +288,9 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
         retryable: true,
         rolledBack: false,
       });
-      throw new HTTPException(502, { message: "agent returned an invalid update response" });
+      throw new HTTPException(502, {
+        message: "agent returned an invalid update response",
+      });
     } else {
       await advanceEnrollmentAgentUpdate(db, {
         accountId: grant.accountId,
@@ -277,7 +303,11 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     return c.json(
-      UpdateMachineAgentResponse.parse({ operationId, accepted: true, targetVersion }),
+      UpdateMachineAgentResponse.parse({
+        operationId,
+        accepted: true,
+        targetVersion,
+      }),
       202,
     );
   });
@@ -298,6 +328,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceId,
       sessionId,
+      subjectId: grant.subjectId,
     });
     const result = await swapActiveSandbox(
       {

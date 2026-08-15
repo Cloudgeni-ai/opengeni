@@ -88,6 +88,16 @@ exact initiating subject. It never follows the subject to another workspace;
 activated common-authority Documents always require the admitted grant
 snapshot.
 
+Migration `0257_scoped_connected_machines_and_rigs.sql` activates the same explicit
+organization/workspace/user ownership for Rigs and Connected Machines. Human
+machine approval defaults to user scope. Physical workspace ids remain provenance
+and transport-routing facts, not personal authority boundaries: an owner's user
+resources remain visible in every same-organization workspace they can access.
+Personal machine attachment is owner-only, and exact machine use is separately
+admitted and revalidated against a `connected_machine.use` grant. Workspace access
+loss removes workspace resources immediately without deleting the user's resources;
+cross-organization visibility remains impossible.
+
 ## Slice B: managed-human lifecycle provisioning and first runtime projection
 
 Migration `0219_organization_tenancy_managed_human_provisioning.sql` adds the

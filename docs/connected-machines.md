@@ -2,9 +2,21 @@
 
 A **Connected Machine** is one of a session's compute targets — your own
 computer (a laptop, a workstation, a CI box, even a macOS machine) connected to
-a workspace and driven by the agent directly. It is a **first-class, co-equal
+an organization, workspace, or organization user and driven by the agent directly. It is a **first-class, co-equal
 primary compute target**, not a backend variant layered on top of a managed
 box.
+
+Human device-flow approval defaults to user ownership. A user-owned machine follows
+its owner across same-organization workspaces they can currently access; workspace
+ownership limits it to the approving workspace, and organization ownership requires
+account-admin approval. Only the owner may attach a user machine. Using it from an
+exact agent attempt additionally requires an explicit `connected_machine.use` grant
+for that session visibility/context. Once/session/always grants use the common
+personal-resource lifecycle; every operation revalidates the exact attempt, owner
+membership revision, target-workspace access, authority epoch, resource/grant
+generation, interruption state, and current machine selection immediately before
+the machine transport is used. Revocation advances the machine and common authority
+generation and invalidates existing grants.
 
 This guide is embedder-facing: it shows how to create a session on a machine,
 discover the enrolled machines and their metrics, swap a session's active
@@ -20,13 +32,13 @@ client. The matching UI ships in
 
 ## The two compute targets
 
-| | Managed Sandbox | Connected Machine |
-| --- | --- | --- |
-| Ownership | platform-owned, ephemeral | user-owned, persistent |
-| Provisioning | platform provisions + tears down | platform **attaches** to what's already there |
-| Repos | cloned into `/workspace` | **not cloned** — the machine uses its own git auth |
-| Working dir | `/workspace` (virtual root) | a real host path you pass per session |
-| Backend enum | `docker`/`modal`/`local`/… | `selfhosted` |
+|              | Managed Sandbox                  | Connected Machine                                  |
+| ------------ | -------------------------------- | -------------------------------------------------- |
+| Ownership    | platform-owned, ephemeral        | user-owned, persistent                             |
+| Provisioning | platform provisions + tears down | platform **attaches** to what's already there      |
+| Repos        | cloned into `/workspace`         | **not cloned** — the machine uses its own git auth |
+| Working dir  | `/workspace` (virtual root)      | a real host path you pass per session              |
+| Backend enum | `docker`/`modal`/`local`/…       | `selfhosted`                                       |
 
 The model that follows from this: a machine-bound session has **no phantom Modal
 "home box"**, **no OpenGeni Git token is distributed to the machine** (it uses
@@ -88,7 +100,9 @@ const client = new OpenGeniClient({ baseUrl, apiKey });
 
 // Pick a machine from the workspace fleet…
 const { machines } = await client.listMachines(workspaceId);
-const box = machines.find((m) => m.kind === "selfhosted" && m.state === "online");
+const box = machines.find(
+  (m) => m.kind === "selfhosted" && m.state === "online",
+);
 
 // …and run the session on it.
 const session = await client.createSession(workspaceId, {
@@ -142,20 +156,25 @@ Each `MachineView` carries the fields a dashboard needs:
 
 ```ts
 type MachineView = {
-  sandboxId: string;            // the id you pass as targetSandboxId / swap target
-  enrollmentId: string | null;  // the enrollment id for metrics + revoke
+  sandboxId: string; // the id you pass as targetSandboxId / swap target
+  enrollmentId: string | null; // the enrollment id for metrics + revoke
   name: string;
   kind: "modal" | "selfhosted";
-  state:                        // derived liveness + consent/display/enrollment state
-    | "online" | "reconnecting" | "offline"
-    | "consent_required" | "display_unavailable" | "enrolling";
-  active: boolean;              // is this the session's active sandbox?
-  isSessionGroup: boolean;      // the synthetic Modal group box (not a real machine)
+  state:
+    // derived liveness + consent/display/enrollment state
+    | "online"
+    | "reconnecting"
+    | "offline"
+    | "consent_required"
+    | "display_unavailable"
+    | "enrolling";
+  active: boolean; // is this the session's active sandbox?
+  isSessionGroup: boolean; // the synthetic Modal group box (not a real machine)
   os: string;
   arch: string;
   hasDisplay: boolean;
   allowScreenControl: boolean;
-  sharedSessionCount: number;   // live sessions sharing this whole-machine lease
+  sharedSessionCount: number; // live sessions sharing this whole-machine lease
   lastSeenAt: string | null;
   metrics: MetricSample | null; // latest point-in-time sample
 };
@@ -393,10 +412,12 @@ Mint a short-TTL enroll token and hand it to the machine's installer. The token
 is **secret** — surface it once with a copy-now warning; it cannot be re-read.
 
 ```ts
-const { token, expiresAt, expiresInSeconds } =
-  await client.mintEnrollToken(workspaceId, {
+const { token, expiresAt, expiresInSeconds } = await client.mintEnrollToken(
+  workspaceId,
+  {
     allowScreenControl: false, // bake screen-control consent into the token
-  });
+  },
+);
 // Run on the machine (the installer dials OpenGeni and exchanges the token for
 // its own long-lived agent credentials — the token exchange happens on the
 // machine, not through this client):

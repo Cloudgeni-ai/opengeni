@@ -64,6 +64,7 @@ import {
   listScheduledTasks,
   listSessionEventPage,
   listSessionDiscoverySummaries,
+  listEnrollments,
   projectEffectiveControlForRelatedAccess,
   projectSessionForRelatedAccess,
   type SessionDiscoveryCursor,
@@ -2860,7 +2861,11 @@ function registerTaskNoteTools(
     if (!resolved || resolved.sessionId !== sessionId) {
       throw new Error("Exact signed task-note attempt authority is required.");
     }
-    return { accountId: grant.accountId, workspaceId: grant.workspaceId, ...resolved };
+    return {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      ...resolved,
+    };
   };
   const authorize = async () => {
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
@@ -2894,7 +2899,13 @@ function registerTaskNoteTools(
     },
     async ({ includeArchived, limit }) => {
       await authorize();
-      return json(await listTaskNotes(deps.db, { ...attemptClaims(), includeArchived, limit }));
+      return json(
+        await listTaskNotes(deps.db, {
+          ...attemptClaims(),
+          includeArchived,
+          limit,
+        }),
+      );
     },
   );
 
@@ -3370,6 +3381,7 @@ function registerFleetTools(
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId,
+      subjectId: grant.subjectId,
     });
 
   const oneOffCodemodeEnvironment = async (
@@ -3499,9 +3511,18 @@ function registerConnectedMachineTools(
       },
     },
     async ({ enrollmentId, expectedUpdatedAt, idempotencyKey }) => {
+      const enrollment = (await listEnrollments(deps.db, grant, { status: "active" })).find(
+        (candidate) => candidate.id === enrollmentId,
+      );
+      if (!enrollment) {
+        throw new Error("machine enrollment not found in this access scope");
+      }
+      if (enrollment.scope === "organization" && !grant.permissions.includes("account:admin")) {
+        throw new Error("missing permission: account:admin");
+      }
       const result = await removeEnrollment(deps.db, {
         accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
+        workspaceId: enrollment.workspaceId,
         enrollmentId,
         operationKey: idempotencyKey?.trim() || randomUUID(),
         ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}),
@@ -3549,6 +3570,15 @@ function registerRigTools(
   sessionId: string | null,
   json: JsonResult,
 ): void {
+  const requireMutableRig = async (rigId: string) => {
+    const rig = await requireRigForApi(deps.db, grant, rigId);
+    if (rig.scope === "organization") {
+      throw new Error(
+        "Organization rig mutation requires account-admin authority through the authenticated REST surface.",
+      );
+    }
+    return rig;
+  };
   if (can("rigs:use")) {
     server.registerTool(
       "rig_list",
@@ -3556,7 +3586,7 @@ function registerRigTools(
         description: "List workspace rigs and their active versions.",
         inputSchema: {},
       },
-      async () => json({ rigs: await listRigs(deps.db, grant.workspaceId) }),
+      async () => json({ rigs: await listRigs(deps.db, grant) }),
     );
 
     server.registerTool(
@@ -3571,17 +3601,17 @@ function registerRigTools(
         },
       },
       async ({ rigId, versionLimit, changeLimit }) => {
-        const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
+        const rig = await requireRigForApi(deps.db, grant, rigId);
         const [versions, changes] = await Promise.all([
           listRigVersionMonitoringSummaries(
             deps.db,
-            grant.workspaceId,
+            rig.workspaceId,
             rig.id,
             boundedRigHistoryLimit(versionLimit),
           ),
           listRigChangeMonitoringSummaries(
             deps.db,
-            grant.workspaceId,
+            rig.workspaceId,
             rig.id,
             boundedRigHistoryLimit(changeLimit),
           ),
@@ -3602,7 +3632,7 @@ function registerRigTools(
         },
       },
       async ({ rigId, command, note }) => {
-        const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
+        const rig = await requireMutableRig(rigId);
         const change = await proposeRigChangeForApi(
           { db: deps.db },
           grant,
@@ -3682,7 +3712,7 @@ function registerRigTools(
         },
       },
       async ({ rigId, changeId }) => {
-        const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
+        const rig = await requireMutableRig(rigId);
         if (changeId) {
           const change = await requireRigChangeForApi(deps.db, grant.workspaceId, rig.id, changeId);
           const verifying = await beginMcpRigVerificationAttempt(
@@ -3789,7 +3819,7 @@ function registerRigTools(
         },
       },
       async ({ rigId, changeId }) => {
-        const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
+        const rig = await requireMutableRig(rigId);
         const change = await requireRigChangeForApi(deps.db, grant.workspaceId, rig.id, changeId);
         const promoted = await promoteVerifiedDefinitionEditChangeForApi(
           { db: deps.db },
@@ -4242,7 +4272,11 @@ function registerWorkspaceOrchestrationTools(
               },
               relatedResources: [
                 { type: "session", id: targetSessionId },
-                { type: "session_event", id: accepted.id, state: accepted.type },
+                {
+                  type: "session_event",
+                  id: accepted.id,
+                  state: accepted.type,
+                },
               ],
               timestamp: accepted.occurredAt,
               idempotency: { status: replay ? "replayed" : "applied" },

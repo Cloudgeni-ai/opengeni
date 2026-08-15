@@ -6,8 +6,7 @@ import {
   claimSessionWorkForAttempt,
   applyCreditDebitUpToBalance,
   getBillingBalance,
-  getRigName,
-  getRigVersion,
+  materializeRigVersionForAttempt,
   getSandbox,
   getFilesForSubject,
   readActiveSandbox,
@@ -93,6 +92,7 @@ import {
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
   getLiveEnrollmentConnection,
+  assertPersonalMachineForAttempt,
   abandonRecordingForTurnAttempt,
   commitSessionAttemptQuiescence,
   getOrCreateCompanyProfileSnapshot,
@@ -5782,17 +5782,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // branch that is byte-for-byte today's turn. Both ids are frozen together;
       // a defensive null (e.g. a since-deleted rig FK-nulled the columns) simply
       // runs the turn rig-less.
-      const rigVersion =
+      const rigMaterialization =
         session.rigId && session.rigVersionId
-          ? await getRigVersion(db, input.workspaceId, session.rigId, session.rigVersionId)
+          ? await materializeRigVersionForAttempt(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: fileAuthoritySubjectId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              attemptId: input.attemptId,
+              executionGeneration: turn.executionGeneration,
+            })
           : null;
+      const rigVersion = rigMaterialization?.version ?? null;
       // Rig display name for the doctrine block + setup events/errors (only on a
       // rig-bound turn; null-safe fallback keeps the turn alive if the rig row is
       // gone). Loaded once here alongside the version.
-      const rigName =
-        rigVersion && session.rigId
-          ? ((await getRigName(db, input.workspaceId, session.rigId)) ?? "rig")
-          : null;
+      const rigName = rigVersion ? (rigMaterialization?.rigName ?? "rig") : null;
       // Telemetry: stamp the frozen rig binding (empty for a rig-less turn).
       rigId = session.rigId ?? "";
       rigVersionId = session.rigVersionId ?? "";
@@ -6791,7 +6797,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sessionId: input.sessionId,
           },
           activeSandboxPointer,
-          (sandboxId) => getSandbox(db, input.workspaceId, sandboxId),
+          (sandboxId) =>
+            getSandbox(
+              db,
+              fileAuthoritySubjectId
+                ? {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    subjectId: fileAuthoritySubjectId,
+                  }
+                : input.workspaceId,
+              sandboxId,
+            ),
           publish
             ? async (events) => {
                 await publish!(events);
@@ -7425,6 +7442,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // backend back to the deployment default cloud backend so swap-away / flag-off
           // degrade to a genuine cloud box exactly like today (home=modal did).
           if (machinePrimary) {
+            if (activeSandboxRecord!.scope === "user") {
+              if (!fileAuthoritySubjectId) {
+                throw new Error("personal machine use requires an initiating human subject");
+              }
+              const authorized = await assertPersonalMachineForAttempt(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                subjectId: fileAuthoritySubjectId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                attemptId: input.attemptId,
+                executionGeneration: turn.executionGeneration,
+                enrollmentId: activeSandboxRecord!.enrollmentId!,
+              });
+              if (!authorized) {
+                throw new Error("personal Connected Machine use was not admitted for this turn");
+              }
+            }
             // STAGE D D1-lite: the active sandbox is a connected machine, so DO NOT
             // establish OR lease the managed home box. The active-sandbox pointer is
             // the machine route's own epoch fence; the managed-home lease separately
@@ -7436,7 +7471,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // one indexed lookup, and the flag off keeps this path byte-identical.
             const machineEnrollment = await getLiveEnrollmentConnection(
               db,
-              input.workspaceId,
+              activeSandboxRecord!.workspaceId,
               activeSandboxRecord!.enrollmentId!,
             );
             const machineOpStream =
@@ -7451,7 +7486,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 opJournal,
               },
               {
-                workspaceId: input.workspaceId,
+                workspaceId: activeSandboxRecord!.workspaceId,
                 agentId: activeSandboxRecord!.enrollmentId!,
                 // An offline machine must not fail turn admission. Bind an
                 // intentionally unserved token so the model receives the normal

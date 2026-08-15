@@ -1073,6 +1073,21 @@ BEGIN
       EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.workspace_variable_set_variables FROM %I', ${literal(schema)}, ${literal(role)});
     END IF;
     IF to_regprocedure(
+      format('%I.create_scoped_rig(uuid,uuid,text,text,text,text,jsonb,boolean)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.create_scoped_rig(uuid, uuid, text, text, text, text, jsonb, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_scoped_rigs(uuid, uuid, uuid, text, text) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.count_scoped_rigs(uuid, uuid, text) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.mutate_scoped_rig(uuid, uuid, uuid, text, text, boolean, text, boolean, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.finalize_scoped_enrollment(uuid, uuid, text, text, boolean, boolean, text, text, text, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_scoped_enrollments(uuid, uuid, uuid, text) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.get_scoped_sandbox(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.authorize_scoped_sandbox_attach(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.materialize_scoped_rig_version_for_attempt(uuid, uuid, uuid, uuid, uuid, integer) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.assert_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.session_attempt_connected_machine_authorizations FROM %I', ${literal(schema)}, ${literal(role)});
+    END IF;
+    IF to_regprocedure(
       format(
         '%I.freeze_scheduled_task_personal_resources(uuid,uuid,uuid,bigint)',
         ${literal(schema)}
@@ -1202,6 +1217,17 @@ BEGIN
       );
       EXECUTE format(
         'REVOKE ALL PRIVILEGES ON TABLE opengeni_private.variable_set_authority_capabilities FROM %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.scoped_compute_capability_active(text)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION opengeni_private.scoped_compute_capability_active(text) FROM PUBLIC;
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.scoped_compute_capability_active(text) TO %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON TABLE opengeni_private.scoped_compute_capabilities FROM %I',
         ${literal(role)}
       );
     END IF;
