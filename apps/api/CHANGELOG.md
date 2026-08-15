@@ -1,5 +1,66 @@
 # @opengeni/api-router
 
+## 0.31.0
+
+### Minor Changes
+
+- 9c4e0b8: Add the workspace-bot Slack App Home task inbox with exact linked-user authorization, bounded active/attention/recent task projection, convergent `views.publish` refreshes, access-revocation clearing, and canonical manifest support.
+
+### Patch Changes
+
+- a551666: Fix local Gmail provider OAuth callbacks, Google scope equivalence, stable
+  Discovery compilation, and installed API integration visibility in session
+  tool selection.
+- 4d1ed07: Preserve complete bounded lazy-search tool schemas across durable model history, expose Linux desktop application launch when the image supports it, suppress the managed Chrome sandbox warning, label Computer sessions as Desktops in the UI, and keep AnyDoc available in headed desktop sandboxes.
+- a186330: Import supported Slack images for exact shared-conversation private handoffs only after the immutable shared-task policy is revalidated immediately before file access.
+- e9e1016: Allow agent `goal_set` to replace completed goals while continuing to protect
+  active and paused goal intent.
+- ec00479: Add provider-free Google Drive release-readiness receipts, configurable persisted sync budgets, bounded request retry and timeout handling, and scoped sync health telemetry, dashboards, and alerts.
+- ffbbf4c: Add organization, workspace, and owner-private Variable Set scopes with independent metadata, plaintext-read, write, attachment, and runtime-use authority. Runtime secret materialization now revalidates the exact live attempt and personal grant immediately before ciphertext egress while audits remain value-free.
+- 234a5e7: Replay exact completed Integration facet configure receipts before mutable instance, Connection, or provider validation while preserving request conflicts and exact-subject isolation.
+- c056063: Project exact Integration Facet ownership so shared or externally managed bindings are read-only and direct removal reports retained owners truthfully.
+- Updated dependencies [79f57b5]
+- Updated dependencies [a551666]
+- Updated dependencies [31231dc]
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [4d1ed07]
+- Updated dependencies [ce3b370]
+- Updated dependencies [e98daf6]
+- Updated dependencies [b2af2df]
+- Updated dependencies [e9e1016]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ec00479]
+- Updated dependencies [ffbbf4c]
+- Updated dependencies [3843825]
+- Updated dependencies [1ab8023]
+- Updated dependencies [d34dd9a]
+- Updated dependencies [79f57b5]
+- Updated dependencies [eeb7cb6]
+- Updated dependencies [886682d]
+- Updated dependencies [234a5e7]
+- Updated dependencies [c3f0598]
+- Updated dependencies [79f57b5]
+- Updated dependencies [d2f172c]
+- Updated dependencies [04b1a1f]
+- Updated dependencies [c056063]
+  - @opengeni/codemode@0.4.5
+  - @opengeni/capabilities@0.2.1
+  - @opengeni/db@1.0.2
+  - @opengeni/observability@0.7.8
+  - @opengeni/contracts@1.1.0
+  - @opengeni/core@1.1.0
+  - @opengeni/agent-proto@0.5.1
+  - @opengeni/config@0.16.5
+  - @opengeni/events@0.3.113
+  - @opengeni/runtime@1.0.2
+  - @opengeni/xai-subscription@0.1.1
+  - @opengeni/documents@0.5.42
+  - @opengeni/artifact-tool@0.2.11
+  - @opengeni/github@0.4.60
+  - @opengeni/storage@0.2.97
+
 ## 0.30.3
 
 ### Patch Changes
