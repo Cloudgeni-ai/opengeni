@@ -591,7 +591,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         "activity-cross-workspace-version",
       );
 
-      const [snapshot] = await app<
+      const [snapshot] = await admin<
         Array<{
           resourceVersionId: string;
           originWorkspaceId: string;
