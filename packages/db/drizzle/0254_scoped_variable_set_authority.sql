@@ -355,19 +355,40 @@ BEGIN
         OR p_workspace_id IS DISTINCT FROM nullif(
           pg_catalog.current_setting('opengeni.workspace_id', true), ''
         )::uuid
-        OR caller_subject IS NULL
       THEN
         RAISE EXCEPTION 'variable-set actor scope mismatch' USING ERRCODE = '42501';
       END IF;
 
       SELECT membership.id, membership.personal_workspace_id
-        INTO STRICT membership_id, personal_workspace_id
+        INTO membership_id, personal_workspace_id
       FROM organization_memberships membership
       WHERE membership.account_id = p_account_id
         AND membership.subject_id = caller_subject
         AND membership.status = 'active'
         AND membership.revoked_at IS NULL
       FOR SHARE;
+
+      -- Configured-key and legacy internal callers predate organization
+      -- memberships. They may operate on organization/workspace sets only;
+      -- a NULL membership id can never match a user-owned set. A named subject
+      -- must still hold exact current workspace access. Subjectless calls are
+      -- retained solely for the deprecated internal workspace helpers.
+      IF membership_id IS NULL THEN
+        IF caller_subject IS NULL THEN
+          RETURN NULL;
+        END IF;
+        PERFORM 1
+        FROM workspace_memberships workspace_membership
+        WHERE workspace_membership.account_id = p_account_id
+          AND workspace_membership.workspace_id = p_workspace_id
+          AND workspace_membership.subject_id = caller_subject
+        FOR KEY SHARE;
+        IF NOT FOUND THEN
+          RAISE EXCEPTION 'variable-set actor lacks current workspace access'
+            USING ERRCODE = '42501';
+        END IF;
+        RETURN NULL;
+      END IF;
 
       IF personal_workspace_id IS DISTINCT FROM p_workspace_id THEN
         PERFORM 1
