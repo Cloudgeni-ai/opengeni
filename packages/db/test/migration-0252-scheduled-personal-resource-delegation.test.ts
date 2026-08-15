@@ -134,7 +134,9 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
     const schema = `scheduled_personal_${crypto.randomUUID().replaceAll("-", "")}`.slice(0, 40);
     const sql = postgres(blank.databaseUrl, { max: 2, prepare: false });
     try {
-      await migrate(blank.databaseUrl, schema);
+      await migrate(blank.databaseUrl, schema, {
+        applicationDatabaseRoles: ["opengeni_app"],
+      });
       const [installed] = await sql.unsafe<
         {
           taskColumn: boolean;
