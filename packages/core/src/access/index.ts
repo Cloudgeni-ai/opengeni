@@ -172,35 +172,10 @@ export function hasPermission(permissions: Permission[], permission: Permission)
   if (permission === "secrets:read") {
     return permissions.includes("secrets:read");
   }
-  const aliases: Partial<Record<Permission, Permission[]>> = {
-    "variable-sets:use": ["environments:use" as Permission],
-    "variable-sets:manage": ["environments:manage" as Permission],
-    "variable-sets:list": [
-      "variable-sets:use",
-      "variable-sets:manage",
-      "environments:use" as Permission,
-      "environments:manage" as Permission,
-    ],
-    "variable-sets:read": [
-      "variable-sets:use",
-      "variable-sets:manage",
-      "environments:use" as Permission,
-      "environments:manage" as Permission,
-    ],
-    "variable-sets:write": ["variable-sets:manage", "environments:manage" as Permission],
-    "secrets:list": [
-      "variable-sets:use",
-      "variable-sets:manage",
-      "environments:use" as Permission,
-      "environments:manage" as Permission,
-    ],
-    "secrets:write": ["variable-sets:manage", "environments:manage" as Permission],
-  };
-  return (
-    permissions.includes(permission) ||
-    (aliases[permission]?.some((alias) => permissions.includes(alias)) ?? false) ||
-    permissions.includes("workspace:admin")
-  );
+  // Variable-set metadata, plaintext read, write/rotation, attachment, and
+  // runtime use are independent capabilities. Deprecated broad permissions
+  // remain parseable but do not imply any of the exact permissions.
+  return permissions.includes(permission) || permissions.includes("workspace:admin");
 }
 
 async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext | null> {

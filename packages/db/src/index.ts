@@ -1110,6 +1110,7 @@ export const allWorkspacePermissions: Permission[] = [
   "variable-sets:read",
   "variable-sets:write",
   "variable-sets:manage",
+  "variable-sets:attach",
   "variable-sets:use",
   "secrets:list",
   "secrets:read",
@@ -1148,6 +1149,7 @@ export const managedPersonalWorkspacePermissions: Permission[] = [
   "variable-sets:read",
   "variable-sets:write",
   "variable-sets:manage",
+  "variable-sets:attach",
   "variable-sets:use",
   "secrets:list",
   "secrets:read",
@@ -14186,53 +14188,44 @@ export async function createVariableSet(
   input: {
     accountId: string;
     workspaceId: string;
+    scope?: VariableSet["scope"];
+    subjectId?: string;
+    allowOrganization?: boolean;
     name: string;
     description?: string | null;
     variables?: Array<{ name: string; valueEncrypted: string }>;
   },
 ): Promise<VariableSet> {
-  // withRlsContext wraps the callback in one transaction, so the variableSet
-  // row and all initial variables commit or roll back together.
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
+      const [created] = await rawRows<{ variableSetId: string }>(
+        scopedDb,
+        sql`select variable_set_id as "variableSetId"
+          from create_scoped_variable_set(
+            ${input.accountId}::uuid,
+            ${input.workspaceId}::uuid,
+            ${input.scope ?? "workspace"},
+            ${input.name},
+            ${input.description ?? null},
+            ${JSON.stringify(input.variables ?? [])}::jsonb,
+            ${input.allowOrganization === true}
+          )`,
+      );
+      if (!created) throw new Error("Failed to create variable set");
       const [row] = await scopedDb
-        .insert(schema.workspaceVariableSets)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          name: input.name,
-          description: input.description ?? null,
-        })
-        .returning();
+        .select()
+        .from(schema.workspaceVariableSets)
+        .where(eq(schema.workspaceVariableSets.id, created.variableSetId))
+        .limit(1);
       if (!row) {
         throw new Error("Failed to create variable set");
       }
-      const variables = input.variables ?? [];
-      if (variables.length === 0) {
-        return mapVariableSet(row, []);
-      }
-      const inserted = await scopedDb
-        .insert(schema.workspaceVariableSetVariables)
-        .values(
-          variables.map((variable) => ({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            variableSetId: row.id,
-            name: variable.name,
-            valueEncrypted: variable.valueEncrypted,
-          })),
-        )
-        .returning({
-          name: schema.workspaceVariableSetVariables.name,
-          version: schema.workspaceVariableSetVariables.version,
-          createdAt: schema.workspaceVariableSetVariables.createdAt,
-          updatedAt: schema.workspaceVariableSetVariables.updatedAt,
-        });
       return mapVariableSet(
         row,
-        inserted.map(mapVariableSetVariableMetadata).sort((a, b) => a.name.localeCompare(b.name)),
+        await listVariableSetVariableMetadata(scopedDb, input.workspaceId, row.id),
       );
     },
   );
@@ -22408,6 +22401,9 @@ function mapVariableSet(
     id: row.id,
     accountId: row.accountId,
     workspaceId: row.workspaceId,
+    scope: row.authorityScope as VariableSet["scope"],
+    generation: Number(row.generation),
+    status: row.status as VariableSet["status"],
     name: row.name,
     description: row.description,
     variables,

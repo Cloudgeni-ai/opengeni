@@ -725,6 +725,7 @@ export const Permission = z.enum([
   "variable-sets:read",
   "variable-sets:write",
   "variable-sets:manage",
+  "variable-sets:attach",
   "variable-sets:use",
   "secrets:list",
   "secrets:read",
@@ -782,8 +783,12 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
   // tools resolve an already-installed workspace principal. Credentials stay
   // inside the broker and remain subject to each tool's own authorization.
   "connections:read",
+  "variable-sets:list",
+  "variable-sets:write",
+  "variable-sets:attach",
   "variable-sets:use",
-  "variable-sets:manage",
+  "secrets:list",
+  "secrets:write",
   "rigs:use",
   "github:use",
   "artifacts:read",
@@ -6375,10 +6380,16 @@ export const VariableSetSecret = z.object({
 });
 export type VariableSetSecret = z.infer<typeof VariableSetSecret>;
 
+export const VariableSetScope = z.enum(["organization", "workspace", "user"]);
+export type VariableSetScope = z.infer<typeof VariableSetScope>;
+
 export const VariableSet = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
+  scope: VariableSetScope,
+  generation: z.number().int().positive(),
+  status: z.enum(["active", "revoked"]),
   name: z.string(),
   description: z.string().nullable(),
   variables: z.array(VariableSetVariableMetadata),
@@ -6392,6 +6403,8 @@ export const WorkspaceEnvironment = VariableSet;
 export type WorkspaceEnvironment = VariableSet;
 
 export const CreateVariableSetRequest = z.object({
+  // Omitted remains the legacy workspace-owned creation path.
+  scope: VariableSetScope.default("workspace"),
   name: z.string().min(1).max(120),
   description: z.string().max(2000).optional(),
   variables: z

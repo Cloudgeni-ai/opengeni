@@ -4538,6 +4538,8 @@ function registerVariableSetTools(
         variableSet = await createVariableSet(deps.db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
+          scope: "workspace",
+          subjectId: grant.subjectId,
           name: trimmedVariableSetName!,
         });
         created = true;
@@ -5013,7 +5015,8 @@ function registerGitHubConnectTool(
 }
 
 // Defense-in-depth for invariant "agents cannot self-attach": the worker's
-// first-party delegated token never carries variable-sets:use, so sandboxed
+// first-party delegated token must carry both exact attachment and use
+// permissions, so a token narrowed to only one cannot attach a variable set.
 // agents calling these MCP tools cannot attach a variable set.
 // Explicit detach (variableSetId: null) is also an attachment change and is
 // blocked the same way.
@@ -5021,7 +5024,11 @@ function requireVariableSetsUseForMcpAttachment(
   grant: AccessGrant,
   variableSetId: string | null | undefined,
 ): void {
-  if (variableSetId !== undefined && !hasPermission(grant.permissions, "variable-sets:use")) {
+  if (variableSetId === undefined) return;
+  if (!hasPermission(grant.permissions, "variable-sets:attach")) {
+    throw new Error("missing permission: variable-sets:attach");
+  }
+  if (variableSetId !== null && !hasPermission(grant.permissions, "variable-sets:use")) {
     throw new Error("missing permission: variable-sets:use");
   }
 }

@@ -625,13 +625,16 @@ export const workspaceVariableSets = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     description: text("description"),
-    // Migration 0230 is schema-only: all shipped CRUD continues to omit these
-    // fields and therefore remains workspace-scoped. A later activation slice
-    // must provide the complete owner authority and runtime protocol.
+    // Omitted creation remains workspace-owned. User ownership is anchored to
+    // the common organization-user resource authority; organization ownership
+    // has no member owner and is administered through account authority.
     authorityScope: text("authority_scope").notNull().default("workspace"),
     authorityId: uuid("authority_id"),
     ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
     originWorkspaceId: uuid("origin_workspace_id"),
+    generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    status: text("status").notNull().default("active"),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -647,7 +650,7 @@ export const workspaceVariableSets = pgTable(
     authorityShape: check(
       "workspace_variable_sets_authority_shape_check",
       sql`(
-          ${table.authorityScope} = 'workspace'
+          ${table.authorityScope} in ('organization', 'workspace')
           and ${table.authorityId} is null
           and ${table.ownerOrganizationMembershipId} is null
         ) or (
@@ -658,7 +661,20 @@ export const workspaceVariableSets = pgTable(
     ),
     authorityScopeValid: check(
       "workspace_variable_sets_authority_scope_check",
-      sql`${table.authorityScope} in ('workspace', 'user')`,
+      sql`${table.authorityScope} in ('organization', 'workspace', 'user')`,
+    ),
+    generationValid: check(
+      "workspace_variable_sets_generation_check",
+      sql`${table.generation} > 0`,
+    ),
+    statusValid: check(
+      "workspace_variable_sets_status_check",
+      sql`${table.status} in ('active', 'revoked')`,
+    ),
+    revocationValid: check(
+      "workspace_variable_sets_revocation_check",
+      sql`(${table.status} = 'revoked' and ${table.revokedAt} is not null)
+        or (${table.status} = 'active' and ${table.revokedAt} is null)`,
     ),
     authority: foreignKey({
       name: "workspace_variable_sets_authority_fk",

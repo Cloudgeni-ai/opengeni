@@ -21,7 +21,12 @@ import {
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant, requireLiteralPermission, requirePermission } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  requireLiteralPermission,
+  requirePermission,
+} from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   assertAllowedVariableSetVariableName,
@@ -50,10 +55,17 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
 
     app.post(`${prefix}`, async (c) => {
       const workspaceId = c.req.param("workspaceId")!;
-      const grant = await requireAccessGrant(c, deps, workspaceId);
+      const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+      const grant = authorization.grant;
       requirePermission(grant, "variable-sets:write");
       const key = requireVariableSetEncryption(settings);
       const payload = CreateVariableSetRequest.parse(await c.req.json());
+      if (
+        payload.scope === "organization" &&
+        authorization.accountGrant?.permissions.includes("account:admin") !== true
+      ) {
+        throw new HTTPException(403, { message: "missing permission: account:admin" });
+      }
       if (payload.variables.length > 0) {
         requirePermission(grant, "secrets:write");
       }
@@ -88,6 +100,9 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
       const created = await createVariableSet(db, {
         accountId: grant.accountId,
         workspaceId,
+        scope: payload.scope,
+        subjectId: grant.subjectId,
+        allowOrganization: payload.scope === "organization",
         name,
         description: payload.description ?? null,
         variables: payload.variables.map((variable) => ({

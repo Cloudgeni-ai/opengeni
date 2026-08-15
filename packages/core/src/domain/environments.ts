@@ -97,6 +97,7 @@ export async function validateVariableSetAttachment(
 ): Promise<VariableSet> {
   requireVariableSetEncryption(deps.settings);
   if (!options.preauthorized) {
+    requirePermission(grant, "variable-sets:attach");
     requirePermission(grant, "variable-sets:use");
   }
   const variableSet = await getVariableSet(deps.db, workspaceId, variableSetId);
