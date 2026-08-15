@@ -42248,6 +42248,54 @@ export async function assertPersonalMachineForAttempt(
   });
 }
 
+/** Resolve one personal Connected Machine's live runner only after the exact
+ * accepted attempt and its immutable snapshot/current grant pass pre-use in the
+ * same transaction and PostgreSQL snapshot. This is the last DB boundary used
+ * immediately before a worker or one-off provider dispatch. */
+export async function resolvePersonalMachineConnectionForAttempt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    enrollmentId: string;
+    requireActiveSandbox?: boolean;
+  },
+): Promise<EnrollmentRecord | null> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, input.subjectId);
+    await scopedDb.execute(sql`select set_config(
+      'opengeni.initiating_human_subject_id', ${input.subjectId}, true
+    )`);
+    const [row] = await rawRows<{ value: EnrollmentRecord }>(
+      scopedDb,
+      sql`select enrollment.value
+        from (
+          select assert_session_attempt_personal_machine(
+            ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+            ${input.sessionId}::uuid, ${input.turnId}::uuid,
+            ${input.attemptId}::uuid, ${input.executionGeneration}::integer,
+            ${input.enrollmentId}::uuid, ${input.requireActiveSandbox !== false}
+          ) as authorized
+        ) authority
+        cross join lateral list_scoped_enrollments(
+          ${input.accountId}::uuid, ${input.workspaceId}::uuid, null, 'active'
+        ) enrollment(value)
+        where authority.authorized
+          and enrollment.value->>'id' = ${input.enrollmentId}
+          and nullif(enrollment.value->>'connectionInstanceId', '') is not null
+          and nullif(enrollment.value->>'connectionLeaseExpiresAt', '')::timestamptz
+            > clock_timestamp()
+        limit 1`,
+    );
+    return row?.value ?? null;
+  });
+}
+
 export async function authorizePersonalMachineForAttempt(
   db: Database,
   input: {

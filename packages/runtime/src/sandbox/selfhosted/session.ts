@@ -300,6 +300,9 @@ export interface SelfhostedOperationResourcePolicy {
 /** Exact command-admission snapshot. A worker resolves this immediately before
  * every exec/Git admission; retries and already-started operations retain it. */
 export interface SelfhostedOperationAdmission {
+  /** Workspace segment of the physical agent/relay route. Personal machines may
+   * originate in a different same-organization workspace than the session. */
+  workspaceId?: string;
   connectionInstanceId: string;
   opStream?: SelfhostedOpStreamDeps;
   operationResourcePolicy: {
@@ -315,7 +318,11 @@ export interface SelfhostedOperationAdmission {
 }
 
 export interface SelfhostedSessionDeps {
+  /** Authorization/session workspace. */
   workspaceId: string;
+  /** Physical control-plane workspace. Defaults to workspaceId for legacy and
+   * workspace-owned routes. */
+  controlWorkspaceId?: string;
   agentId: string;
   /** Exact live daemon process claimed for this enrollment. Production builders
    *  require it; direct transport tests may omit it for the legacy subject shape. */
@@ -353,9 +360,9 @@ export interface SelfhostedSessionDeps {
   operationResourcePolicySupported?: boolean;
   /** Exact live CPU enforcement capability paired with the same snapshot. */
   operationCpuQuotaSupported?: boolean;
-  /** Re-read only for newly admitted exec/Git. It must return connection identity,
-   * policy revision, capabilities, and op-stream state from one authoritative
-   * snapshot. PTY/desktop/browser/computer/fs operations never invoke it. */
+  /** Re-read immediately before every provider operation. It must return
+   * connection identity, policy revision, capabilities, op-stream state, and
+   * any caller-owned live authority from one authoritative snapshot. */
   resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
   /** The clock the bounded control-op retry loop drives (sleep + jitter). Injected
    *  so tests are deterministic; defaults to a real timer + `Math.random()`. */
@@ -434,6 +441,7 @@ export interface SelfhostedSessionState {
 export class SelfhostedSession {
   readonly backendId = "selfhosted" as const;
   readonly workspaceId: string;
+  readonly controlWorkspaceId: string;
   readonly agentId: string;
   private readonly controlRpc: ControlRpc;
   private readonly relay: SelfhostedRelayConfig;
@@ -499,6 +507,7 @@ export class SelfhostedSession {
 
   constructor(deps: SelfhostedSessionDeps) {
     this.workspaceId = deps.workspaceId;
+    this.controlWorkspaceId = deps.controlWorkspaceId ?? deps.workspaceId;
     this.agentId = deps.agentId;
     this.controlRpc = deps.controlRpc;
     this.relay = deps.relay;
@@ -508,7 +517,7 @@ export class SelfhostedSession {
     this.execTimeoutMs = deps.execTimeoutMs;
     this.retryClock = deps.retryClock ?? defaultSelfhostedRetryClock;
     this.onOp = deps.onOp;
-    this.subject = subjectFor(deps.workspaceId, deps.agentId, deps.connectionInstanceId);
+    this.subject = subjectFor(this.controlWorkspaceId, deps.agentId, deps.connectionInstanceId);
     this.workingDir = deps.workingDir ?? "";
     this.transientExecEnvironment = deps.transientExecEnvironment;
     this.resourcePolicy = normalizeOperationResourcePolicy(deps.operationResourcePolicy);
@@ -598,22 +607,24 @@ export class SelfhostedSession {
     }
   }
 
-  private async admitCommand(): Promise<{
+  private async admitOperation(commandPolicy: boolean): Promise<{
     connectionInstanceId: string | undefined;
     subject: string;
     resourcePolicy: OperationResourcePolicy | undefined;
     opStream: SelfhostedOpStreamDeps | undefined;
   }> {
     if (!this.resolveOperationAdmission) {
-      this.assertResourcePolicySupported(
-        this.resourcePolicy,
-        this.resourcePolicySupported,
-        this.operationCpuQuotaSupported,
-      );
+      if (commandPolicy) {
+        this.assertResourcePolicySupported(
+          this.resourcePolicy,
+          this.resourcePolicySupported,
+          this.operationCpuQuotaSupported,
+        );
+      }
       return {
         connectionInstanceId: this.connectionInstanceId,
         subject: this.subject,
-        resourcePolicy: this.resourcePolicy,
+        resourcePolicy: commandPolicy ? this.resourcePolicy : undefined,
         opStream: this.defaultOpStream,
       };
     }
@@ -629,17 +640,27 @@ export class SelfhostedSession {
       });
     }
     const resourcePolicy = normalizeOperationResourcePolicy(resolved.operationResourcePolicy);
-    this.assertResourcePolicySupported(
-      resourcePolicy,
-      resolved.operationResourcePolicySupported,
-      resolved.operationCpuQuotaSupported,
-    );
+    if (commandPolicy) {
+      this.assertResourcePolicySupported(
+        resourcePolicy,
+        resolved.operationResourcePolicySupported,
+        resolved.operationCpuQuotaSupported,
+      );
+    }
     return {
       connectionInstanceId: resolved.connectionInstanceId,
-      subject: subjectFor(this.workspaceId, this.agentId, resolved.connectionInstanceId),
-      resourcePolicy,
+      subject: subjectFor(
+        resolved.workspaceId ?? this.controlWorkspaceId,
+        this.agentId,
+        resolved.connectionInstanceId,
+      ),
+      resourcePolicy: commandPolicy ? resourcePolicy : undefined,
       opStream: resolved.opStream,
     };
+  }
+
+  private async admitCommand(): Promise<Awaited<ReturnType<SelfhostedSession["admitOperation"]>>> {
+    return await this.admitOperation(true);
   }
 
   private opStreamClientFor(
@@ -704,15 +725,19 @@ export class SelfhostedSession {
     admittedCommand?: Awaited<ReturnType<SelfhostedSession["admitCommand"]>>,
   ): Promise<NonNullable<ControlResponse["result"]>> {
     const opKind = op.$case;
-    const commandAdmission =
-      opKind === "exec" || opKind === "git"
-        ? (admittedCommand ?? (await this.admitCommand()))
-        : undefined;
+    // This is the last shared boundary before every request/reply provider
+    // operation. Even a cached routed or pinned session must re-resolve its live
+    // authority here; an already-admitted exec/Git threads its exact snapshot so
+    // the op-stream and legacy paths cannot disagree.
+    const commandOperation = opKind === "exec" || opKind === "git";
+    let operationAdmission = admittedCommand ?? (await this.admitOperation(commandOperation));
     const startedAt = Date.now();
     let drainingRetries = 0;
     let timeoutRetries = 0;
     let neverSentRetries = 0;
     for (;;) {
+      const commandAdmission =
+        opKind === "exec" || opKind === "git" ? operationAdmission : undefined;
       const resourcePolicy = commandAdmission?.resourcePolicy;
       const req: ControlRequest = {
         requestId: crypto.randomUUID(),
@@ -720,7 +745,7 @@ export class SelfhostedSession {
         resourcePolicy,
         op,
       };
-      const res = await this.controlRpc.request(commandAdmission?.subject ?? this.subject, req, {
+      const res = await this.controlRpc.request(operationAdmission.subject, req, {
         timeoutMs,
       });
       if (!res.error && res.result) {
@@ -790,6 +815,10 @@ export class SelfhostedSession {
         throw error;
       }
       await this.retryClock.sleep(decision.delayMs);
+      // Every physical retry is a new provider dispatch. The retry policy has
+      // already proven it safe (never-sent/draining, or read-only timeout), so
+      // revalidate live authority without ever replaying an ambiguous mutation.
+      operationAdmission = await this.admitOperation(commandOperation);
       // Advance the counter for the class that was retried (separate budgets).
       if (error.neverSent) {
         neverSentRetries += 1;
@@ -1028,7 +1057,10 @@ export class SelfhostedSession {
     if (!mediaType) {
       throw new Error(`selfhosted view_image: unsupported image format for ${args.path}`);
     }
-    return { type: "image", image: { data: Uint8Array.from(bytes), mediaType } };
+    return {
+      type: "image",
+      image: { data: Uint8Array.from(bytes), mediaType },
+    };
   }
 
   /** SDK skills/filesystem `pathExists`: whether a path exists on the machine. */
@@ -1065,6 +1097,10 @@ export class SelfhostedSession {
    *  sandbox can still present managed-only manifest entries here; they remain
    *  intentionally unstaged on the user-owned machine. */
   async materializeEntry(_args: { path: string; entry: unknown; runAs?: string }): Promise<void> {
+    // There is deliberately no provider write for BYO compute, but the model's
+    // materialization operation must still fail closed when a cached personal
+    // route lost its exact-attempt authority.
+    await this.admitOperation(false);
     return;
   }
 
@@ -1275,7 +1311,10 @@ export class SelfhostedSession {
    *  XTEST (Linux) and CONSENT-GATES it — an unconsented call never touches the OS
    *  and surfaces the mapped control error (ERROR_CODE_CONSENT_REQUIRED) via `call()`. */
   async desktopInput(event: DesktopInputRequest["event"]): Promise<void> {
-    const result = await this.call({ $case: "desktopInput", desktopInput: { event } });
+    const result = await this.call({
+      $case: "desktopInput",
+      desktopInput: { event },
+    });
     if (result.$case !== "desktopInput") {
       throw new Error(`selfhosted desktopInput: unexpected result ${result.$case}`);
     }
@@ -1297,7 +1336,10 @@ export class SelfhostedSession {
     nativeWidth: number;
     nativeHeight: number;
   }> {
-    const result = await this.call({ $case: "desktopScreenshot", desktopScreenshot: {} });
+    const result = await this.call({
+      $case: "desktopScreenshot",
+      desktopScreenshot: {},
+    });
     if (result.$case !== "desktopScreenshot") {
       throw new Error(`selfhosted screenshot: unexpected result ${result.$case}`);
     }
@@ -1366,13 +1408,16 @@ export class SelfhostedSession {
    *  The wire `nonce` is a uint64 (a numeric string), so the default is a random
    *  numeric value — NOT a UUID (which would fail proto uint64 encoding). */
   async ping(nonce = randomNonce()): Promise<boolean> {
+    const admission = await this.admitOperation(false);
     const req: ControlRequest = {
       requestId: crypto.randomUUID(),
       epoch: this.epoch,
       resourcePolicy: undefined,
       op: { $case: "ping", ping: { nonce } },
     };
-    const res = await this.controlRpc.request(this.subject, req, { timeoutMs: this.timeoutMs });
+    const res = await this.controlRpc.request(admission.subject, req, {
+      timeoutMs: this.timeoutMs,
+    });
     return !res.error && res.result?.$case === "ping";
   }
 
@@ -1441,12 +1486,12 @@ export class SelfhostedSession {
       channel = result.ptyOpen.channel;
     }
     if (channel) return this.relayEndpoint(channel);
-    const channelId = channelKey(this.workspaceId, this.agentId, port);
+    const channelId = channelKey(this.controlWorkspaceId, this.agentId, port);
     const tls = this.relay.tls ?? true;
     // The routing key the relay pairs producer↔consumer by — IDENTICAL to the
     // agent's `ChannelKey::query`, including the stream-instance channel id.
     const routingQuery =
-      `ws=${encodeURIComponent(this.workspaceId)}` +
+      `ws=${encodeURIComponent(this.controlWorkspaceId)}` +
       `&agent=${encodeURIComponent(this.agentId)}` +
       `&port=${port}` +
       `&channel=${encodeURIComponent(channelId)}`;
@@ -1501,6 +1546,7 @@ export class SelfhostedSandboxClient {
   readonly backendId = "selfhosted" as const;
   readonly supportsDefaultOptions = false;
   private readonly workspaceId: string;
+  private readonly controlWorkspaceId: string | undefined;
   private readonly relay: SelfhostedRelayConfig;
   private readonly controlRpcFactory: () => ControlRpc;
   private readonly defaultAgentId: string | undefined;
@@ -1524,6 +1570,7 @@ export class SelfhostedSandboxClient {
 
   constructor(opts: {
     workspaceId: string;
+    controlWorkspaceId?: string;
     relay: SelfhostedRelayConfig;
     /** Lazily build the ControlRpc (defaults to NatsControlRpc in the provider). */
     controlRpcFactory: () => ControlRpc;
@@ -1563,6 +1610,7 @@ export class SelfhostedSandboxClient {
     opStream?: SelfhostedOpStreamDeps;
   }) {
     this.workspaceId = opts.workspaceId;
+    this.controlWorkspaceId = opts.controlWorkspaceId;
     this.relay = opts.relay;
     this.controlRpcFactory = opts.controlRpcFactory;
     this.defaultAgentId = opts.agentId;
@@ -1592,6 +1640,9 @@ export class SelfhostedSandboxClient {
   private bind(agentId: string): SelfhostedSession {
     return new SelfhostedSession({
       workspaceId: this.workspaceId,
+      ...(this.controlWorkspaceId !== undefined
+        ? { controlWorkspaceId: this.controlWorkspaceId }
+        : {}),
       agentId,
       ...(this.connectionInstanceId !== undefined
         ? { connectionInstanceId: this.connectionInstanceId }
@@ -1606,7 +1657,9 @@ export class SelfhostedSandboxClient {
         ? { operationResourcePolicy: this.operationResourcePolicy }
         : {}),
       ...(this.operationResourcePolicySupported !== undefined
-        ? { operationResourcePolicySupported: this.operationResourcePolicySupported }
+        ? {
+            operationResourcePolicySupported: this.operationResourcePolicySupported,
+          }
         : {}),
       ...(this.operationCpuQuotaSupported !== undefined
         ? { operationCpuQuotaSupported: this.operationCpuQuotaSupported }
@@ -1678,8 +1731,10 @@ export class SelfhostedSandboxClient {
  * same SelfhostedSandboxClient/resume pair).
  */
 export interface SelfhostedSessionBuild {
-  /** The workspace the machine's control-plane subject is scoped to. */
+  /** Authorization/session workspace. */
   workspaceId: string;
+  /** Physical machine-origin workspace used in agent and relay routes. */
+  controlWorkspaceId?: string;
   /** The enrollment id == the agent id the exact process subject addresses. */
   agentId: string;
   /** Exact daemon instance holding the enrollment's live connection lease. */
@@ -1711,7 +1766,7 @@ export interface SelfhostedSessionBuild {
   operationResourcePolicySupported?: boolean;
   /** Exact live CPU enforcement capability paired with the initial snapshot. */
   operationCpuQuotaSupported?: boolean;
-  /** Live command-only admission resolver; see SelfhostedSessionDeps. */
+  /** Live last-boundary operation admission resolver; see SelfhostedSessionDeps. */
   resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
   /** The per-op observer (out-of-band telemetry). Absent ⇒ no-op. */
   onOp?: SelfhostedOpObserver;
@@ -1741,6 +1796,9 @@ export async function buildSelfhostedBackendSession(
 ): Promise<{ client: SelfhostedSandboxClient; session: SelfhostedSession }> {
   const client = new SelfhostedSandboxClient({
     workspaceId: deps.workspaceId,
+    ...(deps.controlWorkspaceId !== undefined
+      ? { controlWorkspaceId: deps.controlWorkspaceId }
+      : {}),
     relay: deps.relay,
     controlRpcFactory: deps.controlRpcFactory,
     agentId: deps.agentId,
@@ -1753,7 +1811,9 @@ export async function buildSelfhostedBackendSession(
       ? { operationResourcePolicy: deps.operationResourcePolicy }
       : {}),
     ...(deps.operationResourcePolicySupported !== undefined
-      ? { operationResourcePolicySupported: deps.operationResourcePolicySupported }
+      ? {
+          operationResourcePolicySupported: deps.operationResourcePolicySupported,
+        }
       : {}),
     ...(deps.operationCpuQuotaSupported !== undefined
       ? { operationCpuQuotaSupported: deps.operationCpuQuotaSupported }

@@ -18,7 +18,6 @@ import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/confi
 import {
   advanceWorkspaceGenerationForRetainedProcess,
   advanceWorkspaceGeneration,
-  assertPersonalMachineForAttempt,
   getRetainedProcess,
   retainWorkspaceMutationProcess,
   retainedProcessSettlementIdentity,
@@ -30,6 +29,7 @@ import {
   markWarmLeaseInstanceLost,
   readLease,
   readActiveSandbox,
+  resolvePersonalMachineConnectionForAttempt,
   SandboxRetainedProcessPromotionFencedError,
   type Database,
   type EnrollmentRecord,
@@ -737,18 +737,7 @@ export function wrapTurnBoxWithRouting(
     controlRpcFactory: controlRpcFactory(bus),
     resolveSelfhostedConnection: async (sandbox) => {
       if (!sandbox.enrollmentId) return null;
-      if (!(await assertRoutedPersonalMachineForAttempt(db, ids, sandbox))) return null;
-      const enrollment = await getLiveEnrollmentConnection(
-        db,
-        ids.resourceAccountId && ids.resourceSubjectId
-          ? {
-              accountId: ids.resourceAccountId,
-              workspaceId: ids.workspaceId,
-              subjectId: ids.resourceSubjectId,
-            }
-          : sandbox.workspaceId,
-        sandbox.enrollmentId,
-      );
+      const enrollment = await resolveRoutedMachineConnection(db, ids, sandbox);
       return connectionBindingFor(services, enrollment);
     },
     relay: relayConfigFromSettings(settings),
@@ -955,18 +944,7 @@ export function wrapLazyTurnBoxWithRouting(
     controlRpcFactory: controlRpcFactory(bus),
     resolveSelfhostedConnection: async (sandbox) => {
       if (!sandbox.enrollmentId) return null;
-      if (!(await assertRoutedPersonalMachineForAttempt(db, ids, sandbox))) return null;
-      const enrollment = await getLiveEnrollmentConnection(
-        db,
-        ids.resourceAccountId && ids.resourceSubjectId
-          ? {
-              accountId: ids.resourceAccountId,
-              workspaceId: ids.workspaceId,
-              subjectId: ids.resourceSubjectId,
-            }
-          : sandbox.workspaceId,
-        sandbox.enrollmentId,
-      );
+      const enrollment = await resolveRoutedMachineConnection(db, ids, sandbox);
       return connectionBindingFor(services, enrollment);
     },
     relay: relayConfigFromSettings(settings),
@@ -1079,7 +1057,10 @@ export function wrapLazyTurnBoxWithRouting(
 }
 
 export type SelfhostedTurnSessionArgs = {
+  /** Authorization/session workspace. */
   workspaceId: string;
+  /** Physical machine-origin workspace used in control-plane routing. */
+  controlWorkspaceId?: string;
   /** The target machine's enrollment id == the agent subject id. */
   agentId: string;
   /** Exact daemon process currently leased for the enrollment. */
@@ -1102,6 +1083,11 @@ export type SelfhostedTurnSessionArgs = {
   transientExecEnvironment?: () => Readonly<Record<string, string>>;
   /** The session working directory (per-session pointer). Null ⇒ workspace_root. */
   workingDir: string | null;
+  /** Present only for a user-owned machine. Every provider operation rechecks
+   * this frozen accepted-attempt authority immediately before dispatch. */
+  personalMachineAttempt?: NonNullable<RoutingWiringIds["personalMachineAttempt"]> & {
+    sessionId: string;
+  };
 };
 
 /**
@@ -1151,6 +1137,7 @@ function connectionBindingFor(
   if (!enrollment?.connectionInstanceId) return null;
   const opStream = opStreamDepsFor(services, enrollment.opStream === true);
   return {
+    workspaceId: enrollment.workspaceId,
     connectionInstanceId: enrollment.connectionInstanceId,
     ...(opStream !== undefined ? { opStream } : {}),
     operationResourcePolicy: enrollment.operationPolicy,
@@ -1163,15 +1150,28 @@ function connectionBindingFor(
  * initiating human, exact current attempt, immutable authorization snapshot,
  * and current visibility-keyed grant immediately before each routed operation
  * resolves a live control-plane connection. */
-async function assertRoutedPersonalMachineForAttempt(
+async function resolveRoutedMachineConnection(
   db: Database,
   ids: RoutingWiringIds,
   sandbox: RoutableSandbox,
-): Promise<boolean> {
-  if (sandbox.scope !== "user") return true;
+): Promise<EnrollmentRecord | null> {
+  if (!sandbox.enrollmentId) return null;
+  if (sandbox.scope !== "user") {
+    return await getLiveEnrollmentConnection(
+      db,
+      ids.resourceAccountId && ids.resourceSubjectId
+        ? {
+            accountId: ids.resourceAccountId,
+            workspaceId: ids.workspaceId,
+            subjectId: ids.resourceSubjectId,
+          }
+        : sandbox.workspaceId,
+      sandbox.enrollmentId,
+    );
+  }
   const authority = ids.personalMachineAttempt;
-  if (!authority || !sandbox.enrollmentId) return false;
-  return await assertPersonalMachineForAttempt(db, {
+  if (!authority) return null;
+  return await resolvePersonalMachineConnectionForAttempt(db, {
     accountId: authority.accountId,
     workspaceId: ids.workspaceId,
     subjectId: authority.subjectId,
@@ -1193,6 +1193,9 @@ export async function establishSelfhostedTurnSession(
   const opStream = opStreamDepsFor(services, args.opStream);
   const { client, session } = await buildSelfhostedBackendSession({
     workspaceId: args.workspaceId,
+    ...(args.controlWorkspaceId !== undefined
+      ? { controlWorkspaceId: args.controlWorkspaceId }
+      : {}),
     agentId: args.agentId,
     connectionInstanceId: args.connectionInstanceId,
     relay: relayConfigFromSettings(settings),
@@ -1211,7 +1214,19 @@ export async function establishSelfhostedTurnSession(
     operationResourcePolicySupported: args.operationResourcePolicySupported,
     operationCpuQuotaSupported: args.operationCpuQuotaSupported,
     resolveOperationAdmission: async () => {
-      const enrollment = await getLiveEnrollmentConnection(db, args.workspaceId, args.agentId);
+      const enrollment = args.personalMachineAttempt
+        ? await resolvePersonalMachineConnectionForAttempt(db, {
+            accountId: args.personalMachineAttempt.accountId,
+            workspaceId: args.workspaceId,
+            subjectId: args.personalMachineAttempt.subjectId,
+            sessionId: args.personalMachineAttempt.sessionId,
+            turnId: args.personalMachineAttempt.turnId,
+            attemptId: args.personalMachineAttempt.attemptId,
+            executionGeneration: args.personalMachineAttempt.executionGeneration,
+            enrollmentId: args.agentId,
+            requireActiveSandbox: true,
+          })
+        : await getLiveEnrollmentConnection(db, args.workspaceId, args.agentId);
       return connectionBindingFor(services, enrollment);
     },
     // Meter every control op (out-of-band telemetry) — no-op when unwired.

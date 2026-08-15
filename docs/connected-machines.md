@@ -268,13 +268,18 @@ preserves its current value for older clients, `null` clears it, and a positive
 value sets it. Limits apply separately to each newly admitted exec or Git
 operation leaf; they are not an enrollment-wide aggregate, so N concurrent 1 GiB
 commands may use N GiB. An already-admitted command keeps its immutable policy.
-Each new command reads policy revision, enforcement capabilities, and exact live
-connection identity from one authoritative snapshot, even inside a cached or
-pinned multi-day turn. PTY, desktop, browser, computer-use, and filesystem-only
-operations do not perform that read and remain unchanged. Memory enforcement and
-CPU-quota enforcement are separately advertised; a configured unsupported limit
-fails command admission closed, while saving or clearing policy remains available
-for preconfiguration.
+Every provider operation revalidates its exact live connection and any
+caller-owned personal-machine authority at the last boundary before dispatch,
+even inside a cached, swapped, or pinned multi-day turn. For a personal machine,
+that same PostgreSQL snapshot verifies the accepted attempt, immutable admission
+snapshot, current visibility-keyed grant, membership/generation fences, and the
+runner connection. One-off `run_on` exec/read/write uses the same boundary after
+creating its attempt snapshot, so a concurrent revoke cannot reach the provider.
+Exec and Git additionally read the policy revision and enforcement capabilities
+from that authoritative admission. Memory enforcement and CPU-quota enforcement
+are separately advertised; a configured unsupported limit fails command
+admission closed, while saving or clearing policy remains available for
+preconfiguration.
 
 The machine owner may also set a process-local ceiling with
 `OPENGENI_AGENT_OP_MEMORY_MAX`, `OPENGENI_AGENT_OP_MEMORY_HIGH`, and

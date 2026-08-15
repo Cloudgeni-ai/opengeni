@@ -5,6 +5,15 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
+-- Freeze the active data schema into every SECURITY DEFINER routine created by
+-- this migration. Standalone installs resolve to public; embedded installs
+-- resolve to their dedicated schema. pg_temp remains explicitly last.
+SELECT pg_catalog.set_config(
+  'search_path',
+  pg_catalog.format('%I, pg_catalog, pg_temp', pg_catalog.current_schema()),
+  true
+);
+
 ALTER TABLE rigs
   ADD COLUMN generation bigint NOT NULL DEFAULT 1,
   ADD COLUMN status text NOT NULL DEFAULT 'active',
@@ -106,8 +115,25 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
 $$;
 REVOKE ALL ON FUNCTION opengeni_private.scoped_compute_capability_active(text) FROM PUBLIC;
 
+-- RLS can also run under a supported non-bypass structural owner (for example
+-- the workspace activity initializer), not only opengeni_app. PostgreSQL checks
+-- every policy function's EXECUTE ACL before it can short-circuit a false owner
+-- branch, so policies use this public, value-free guard rather than exposing the
+-- private predicate itself. The caller supplies current_user from the policy;
+-- even a direct spoof can only observe a same-transaction capability that the
+-- caller cannot mint because the private table remains inaccessible.
+CREATE OR REPLACE FUNCTION scoped_compute_policy_capability_active(
+  p_actor text, p_expected_owner text, p_capability_kind text DEFAULT NULL
+) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path FROM CURRENT AS $$
+  SELECT p_actor = p_expected_owner
+    AND opengeni_private.scoped_compute_capability_active(p_capability_kind)
+$$;
+GRANT EXECUTE ON FUNCTION scoped_compute_policy_capability_active(text, text, text)
+  TO PUBLIC;
+
 CREATE OR REPLACE FUNCTION sync_personal_enrollment_authority() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 BEGIN
   IF NEW.authority_scope <> 'user' OR (
     NEW.generation = OLD.generation AND NEW.status = OLD.status
@@ -168,7 +194,7 @@ BEGIN
   ] LOOP
     EXECUTE format(
       'CREATE POLICY scoped_compute_capability_read ON %I.%I FOR SELECT USING '
-      || '(current_user = %L AND opengeni_private.scoped_compute_capability_active())',
+      || '(scoped_compute_policy_capability_active(current_user, %L, NULL))',
       data_schema, table_name, migration_owner
     );
   END LOOP;
@@ -179,14 +205,14 @@ BEGIN
   ] LOOP
     EXECUTE format(
       'CREATE POLICY scoped_compute_capability_insert ON %I.%I FOR INSERT WITH CHECK '
-      || '(current_user = %L AND opengeni_private.scoped_compute_capability_active(''write''))',
+      || '(scoped_compute_policy_capability_active(current_user, %L, ''write''))',
       data_schema, table_name, migration_owner
     );
     EXECUTE format(
       'CREATE POLICY scoped_compute_capability_update ON %I.%I FOR UPDATE USING '
-      || '(current_user = %L AND opengeni_private.scoped_compute_capability_active(''write'')) '
-      || 'WITH CHECK (current_user = %L AND '
-      || 'opengeni_private.scoped_compute_capability_active(''write''))',
+      || '(scoped_compute_policy_capability_active(current_user, %L, ''write'')) '
+      || 'WITH CHECK (scoped_compute_policy_capability_active('
+      || 'current_user, %L, ''write''))',
       data_schema, table_name, migration_owner, migration_owner
     );
   END LOOP;
@@ -197,7 +223,7 @@ CREATE OR REPLACE FUNCTION scoped_compute_actor_membership(
   p_account_id uuid,
   p_workspace_id uuid
 ) RETURNS uuid
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
   caller_subject text := nullif(pg_catalog.current_setting('opengeni.subject_id', true), '');
   membership_id uuid;
@@ -235,7 +261,7 @@ $$;
 REVOKE ALL ON FUNCTION scoped_compute_actor_membership(uuid, uuid) FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION scoped_rig_json(p_rig_id uuid) RETURNS jsonb
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path FROM CURRENT AS $$
   SELECT pg_catalog.jsonb_build_object(
     'id', rig.id, 'accountId', rig.account_id, 'workspaceId', rig.workspace_id,
     'scope', rig.authority_scope, 'generation', rig.generation, 'status', rig.status,
@@ -273,7 +299,7 @@ CREATE OR REPLACE FUNCTION list_scoped_rigs(
   p_name text DEFAULT NULL,
   p_scope text DEFAULT NULL
 ) RETURNS SETOF jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
   actor_membership_id uuid;
   rig_row record;
@@ -321,7 +347,7 @@ REVOKE ALL ON FUNCTION list_scoped_rigs(uuid, uuid, uuid, text, text) FROM PUBLI
 CREATE OR REPLACE FUNCTION count_scoped_rigs(
   p_account_id uuid, p_workspace_id uuid, p_scope text
 ) RETURNS integer
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE actor_membership_id uuid; result_count integer;
 BEGIN
   INSERT INTO opengeni_private.scoped_compute_capabilities(
@@ -363,7 +389,7 @@ CREATE OR REPLACE FUNCTION create_scoped_rig(
   p_initial_version jsonb,
   p_allow_organization boolean DEFAULT false
 ) RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
   owner_membership organization_memberships%ROWTYPE;
   caller_subject text := nullif(pg_catalog.current_setting('opengeni.subject_id', true), '');
@@ -457,7 +483,7 @@ CREATE OR REPLACE FUNCTION mutate_scoped_rig(
   p_description text DEFAULT NULL, p_description_present boolean DEFAULT false,
   p_allow_organization boolean DEFAULT false
 ) RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
   actor_membership_id uuid;
   rig_row rigs%ROWTYPE;
@@ -533,7 +559,7 @@ CREATE OR REPLACE FUNCTION finalize_scoped_enrollment(
   p_has_display boolean, p_allow_screen_control boolean, p_os text, p_arch text,
   p_sandbox_name text, p_allow_organization boolean DEFAULT false
 ) RETURNS TABLE(enrollment_id uuid, sandbox_id uuid)
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
   caller_subject text := nullif(pg_catalog.current_setting('opengeni.subject_id', true), '');
   owner_membership organization_memberships%ROWTYPE;
@@ -647,7 +673,7 @@ CREATE OR REPLACE FUNCTION list_scoped_enrollments(
   p_account_id uuid, p_workspace_id uuid, p_enrollment_id uuid DEFAULT NULL,
   p_status text DEFAULT 'active'
 ) RETURNS SETOF jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE actor_membership_id uuid; enrollment_row record;
 BEGIN
   INSERT INTO opengeni_private.scoped_compute_capabilities(
@@ -728,7 +754,7 @@ REVOKE ALL ON FUNCTION list_scoped_enrollments(uuid, uuid, uuid, text) FROM PUBL
 CREATE OR REPLACE FUNCTION get_scoped_sandbox(
   p_account_id uuid, p_workspace_id uuid, p_sandbox_id uuid
 ) RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE actor_membership_id uuid; result jsonb;
 BEGIN
   INSERT INTO opengeni_private.scoped_compute_capabilities(
@@ -775,7 +801,7 @@ REVOKE ALL ON FUNCTION get_scoped_sandbox(uuid, uuid, uuid) FROM PUBLIC;
 CREATE OR REPLACE FUNCTION authorize_scoped_sandbox_attach(
   p_account_id uuid, p_workspace_id uuid, p_sandbox_id uuid
 ) RETURNS boolean
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
   actor_membership_id uuid;
   sandbox_row sandboxes%ROWTYPE;
@@ -822,7 +848,7 @@ CREATE OR REPLACE FUNCTION materialize_scoped_rig_version_for_attempt(
   p_account_id uuid, p_workspace_id uuid, p_session_id uuid, p_turn_id uuid,
   p_attempt_id uuid, p_execution_generation integer
 ) RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
   session_row sessions%ROWTYPE;
   rig_row rigs%ROWTYPE;
@@ -980,7 +1006,7 @@ CREATE POLICY scoped_compute_capability_insert
   WITH CHECK (opengeni_private.scoped_compute_capability_active('write'));
 
 CREATE OR REPLACE FUNCTION admit_session_attempt_personal_machine() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
   session_row sessions%ROWTYPE;
   turn_row session_turns%ROWTYPE;
@@ -1130,7 +1156,7 @@ CREATE OR REPLACE FUNCTION authorize_session_attempt_personal_machine(
   p_account_id uuid, p_workspace_id uuid, p_session_id uuid, p_turn_id uuid,
   p_attempt_id uuid, p_execution_generation integer, p_enrollment_id uuid
 ) RETURNS boolean
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
   session_row sessions%ROWTYPE;
   turn_row session_turns%ROWTYPE;
@@ -1306,7 +1332,7 @@ CREATE OR REPLACE FUNCTION assert_session_attempt_personal_machine(
   p_attempt_id uuid, p_execution_generation integer, p_enrollment_id uuid,
   p_require_active_sandbox boolean
 ) RETURNS boolean
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
   authorization_row session_attempt_connected_machine_authorizations%ROWTYPE;
   caller_subject text := coalesce(
@@ -1475,7 +1501,7 @@ CREATE OR REPLACE FUNCTION list_scoped_machine_dependent_sessions(
   active_turn_id uuid,
   sandbox_backend text
 )
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 BEGIN
   IF p_account_id IS DISTINCT FROM nullif(
       pg_catalog.current_setting('opengeni.account_id', true), '')::uuid
@@ -1519,7 +1545,7 @@ CREATE OR REPLACE FUNCTION detach_scoped_machine_dependent_sessions(
   p_origin_workspace_id uuid,
   p_sandbox_id uuid
 ) RETURNS TABLE(session_id uuid, title text)
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
   dependent_workspace_id uuid;
   detached_record record;
@@ -1620,6 +1646,12 @@ REVOKE ALL ON FUNCTION detach_scoped_machine_dependent_sessions(uuid, uuid, uuid
 DO $grants$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    -- Policies on ordinary runtime-visible tables call this predicate. EXECUTE
+    -- only exposes false unless a same-transaction SECURITY DEFINER lifecycle
+    -- inserted the unforgeable private capability row; the app role retains no
+    -- table access to mint one.
+    GRANT EXECUTE ON FUNCTION opengeni_private.scoped_compute_capability_active(text)
+      TO opengeni_app;
     GRANT EXECUTE ON FUNCTION list_scoped_rigs(uuid, uuid, uuid, text, text)
       TO opengeni_app;
     GRANT EXECUTE ON FUNCTION count_scoped_rigs(uuid, uuid, text) TO opengeni_app;

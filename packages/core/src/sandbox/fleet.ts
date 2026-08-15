@@ -21,6 +21,7 @@ import {
   listSandboxes,
   readActiveSandbox,
   readLease,
+  resolvePersonalMachineConnectionForAttempt,
   requireSession,
   setActiveSandbox,
   type Database,
@@ -39,6 +40,7 @@ import {
   type NatsRequestConnection,
   type SelfhostedRelayConfig,
   type SelfhostedOpStreamDeps,
+  type SelfhostedOperationAdmission,
   type SelfhostedOperationResourcePolicy,
 } from "@opengeni/runtime/sandbox";
 import { relayConfigFromSettings } from "./routing";
@@ -265,7 +267,11 @@ export async function listFleet(
 ): Promise<FleetListResult> {
   const { db } = services;
   const resourceAccess = ctx.subjectId
-    ? { accountId: ctx.accountId, workspaceId: ctx.workspaceId, subjectId: ctx.subjectId }
+    ? {
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        subjectId: ctx.subjectId,
+      }
     : ctx.workspaceId;
   const pointer = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId)) ?? {
     activeSandboxId: null,
@@ -338,7 +344,11 @@ export async function listFleet(
   const enrollments = await listEnrollments(
     db,
     ctx.subjectId
-      ? { accountId: ctx.accountId, workspaceId: ctx.workspaceId, subjectId: ctx.subjectId }
+      ? {
+          accountId: ctx.accountId,
+          workspaceId: ctx.workspaceId,
+          subjectId: ctx.subjectId,
+        }
       : ctx.workspaceId,
     { status: "active" },
   );
@@ -502,7 +512,11 @@ async function resolveTarget(
     const enrollment = await getLiveEnrollmentConnection(
       services.db,
       ctx.subjectId
-        ? { accountId: ctx.accountId, workspaceId: ctx.workspaceId, subjectId: ctx.subjectId }
+        ? {
+            accountId: ctx.accountId,
+            workspaceId: ctx.workspaceId,
+            subjectId: ctx.subjectId,
+          }
         : sandbox.workspaceId,
       sandbox.enrollmentId,
     );
@@ -677,6 +691,9 @@ export type RunOnSelfhostedMachine = {
   operationResourcePolicy?: SelfhostedOperationResourcePolicy;
   operationResourcePolicySupported?: boolean;
   operationCpuQuotaSupported?: boolean;
+  /** Last-boundary authority/connection resolver invoked before every physical
+   * provider operation. */
+  resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
   /**
    * Exact-attempt values for this one child process. Never persisted on the
    * enrollment or machine. The caller may supply these only after authenticating
@@ -688,6 +705,31 @@ export type RunOnSelfhostedMachine = {
 export type RunOnOptions = {
   transientExecEnvironment?: Readonly<Record<string, string>>;
 };
+
+function runOnOperationAdmission(
+  services: FleetServices,
+  enrollment: EnrollmentRecord | null,
+): SelfhostedOperationAdmission | null {
+  if (!enrollment?.connectionInstanceId) return null;
+  const opStream =
+    services.settings.agentOpStreamEnabled === true &&
+    enrollment.opStream === true &&
+    services.bus?.getOpStreamConnection
+      ? {
+          transport: new NatsOpStreamTransport(
+            async () => services.bus?.getOpStreamConnection?.() ?? null,
+          ),
+        }
+      : undefined;
+  return {
+    workspaceId: enrollment.workspaceId,
+    connectionInstanceId: enrollment.connectionInstanceId,
+    ...(opStream ? { opStream } : {}),
+    operationResourcePolicy: enrollment.operationPolicy,
+    operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
+    operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
+  };
+}
 
 /**
  * Execute the one-off machine operation once the workspace/enrollment lookup has
@@ -720,6 +762,9 @@ export async function executeRunOnSelfhostedMachine(
       : {}),
     ...(machine.operationCpuQuotaSupported !== undefined
       ? { operationCpuQuotaSupported: machine.operationCpuQuotaSupported }
+      : {}),
+    ...(machine.resolveOperationAdmission !== undefined
+      ? { resolveOperationAdmission: machine.resolveOperationAdmission }
       : {}),
     ...(machine.transientExecEnvironment !== undefined
       ? { transientExecEnvironment: () => machine.transientExecEnvironment! }
@@ -809,7 +854,11 @@ export async function runOnSandbox(
   const sandbox = await getSandbox(
     services.db,
     ctx.subjectId
-      ? { accountId: ctx.accountId, workspaceId: ctx.workspaceId, subjectId: ctx.subjectId }
+      ? {
+          accountId: ctx.accountId,
+          workspaceId: ctx.workspaceId,
+          subjectId: ctx.subjectId,
+        }
       : ctx.workspaceId,
     target,
   );
@@ -874,7 +923,11 @@ export async function runOnSandbox(
   const enrollment = await getLiveEnrollmentConnection(
     services.db,
     ctx.subjectId
-      ? { accountId: ctx.accountId, workspaceId: ctx.workspaceId, subjectId: ctx.subjectId }
+      ? {
+          accountId: ctx.accountId,
+          workspaceId: ctx.workspaceId,
+          subjectId: ctx.subjectId,
+        }
       : sandbox.workspaceId,
     sandbox.enrollmentId,
   );
@@ -887,6 +940,37 @@ export async function runOnSandbox(
       reason: `sandbox ${target} is not enrolled/active`,
     };
   }
+  const resolveOperationAdmission = async (): Promise<SelfhostedOperationAdmission | null> => {
+    try {
+      const current =
+        sandbox.scope === "user" && ctx.subjectId && ctx.attemptAuthority
+          ? await resolvePersonalMachineConnectionForAttempt(services.db, {
+              accountId: ctx.accountId,
+              workspaceId: ctx.workspaceId,
+              subjectId: ctx.subjectId,
+              sessionId: ctx.sessionId,
+              turnId: ctx.attemptAuthority.turnId,
+              attemptId: ctx.attemptAuthority.attemptId,
+              executionGeneration: ctx.attemptAuthority.executionGeneration,
+              enrollmentId: sandbox.enrollmentId!,
+              requireActiveSandbox: false,
+            })
+          : await getLiveEnrollmentConnection(
+              services.db,
+              ctx.subjectId
+                ? {
+                    accountId: ctx.accountId,
+                    workspaceId: ctx.workspaceId,
+                    subjectId: ctx.subjectId,
+                  }
+                : sandbox.workspaceId,
+              sandbox.enrollmentId!,
+            );
+      return runOnOperationAdmission(services, current);
+    } catch {
+      return null;
+    }
+  };
 
   const result = await executeRunOnSelfhostedMachine(
     {
@@ -901,6 +985,7 @@ export async function runOnSandbox(
       operationResourcePolicySupported:
         enrollment.agentCapabilities.operationResourcePolicy === true,
       operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
+      resolveOperationAdmission,
       ...(options.transientExecEnvironment !== undefined
         ? { transientExecEnvironment: options.transientExecEnvironment }
         : {}),

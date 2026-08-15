@@ -7486,7 +7486,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 opJournal,
               },
               {
-                workspaceId: activeSandboxRecord!.workspaceId,
+                workspaceId: input.workspaceId,
+                controlWorkspaceId: activeSandboxRecord!.workspaceId,
                 agentId: activeSandboxRecord!.enrollmentId!,
                 // An offline machine must not fail turn admission. Bind an
                 // intentionally unserved token so the model receives the normal
@@ -7505,6 +7506,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   machineEnrollment?.agentCapabilities.operationResourcePolicy === true,
                 operationCpuQuotaSupported:
                   machineEnrollment?.agentCapabilities.operationCpuQuota === true,
+                ...(activeSandboxRecord!.scope === "user" && fileAuthoritySubjectId
+                  ? {
+                      personalMachineAttempt: {
+                        accountId: input.accountId,
+                        subjectId: fileAuthoritySubjectId,
+                        sessionId: input.sessionId,
+                        turnId: turn.id,
+                        attemptId: input.attemptId,
+                        executionGeneration,
+                      },
+                    }
+                  : {}),
                 epoch: activeSandboxPointer!.activeEpoch,
                 environment: sandboxEnvironment,
                 ...(transientCodemodeEnvironment
@@ -7590,7 +7603,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // no lease row, no provider box, no warm-meter interval.
           } else {
             await publish!(
-              [{ type: "sandbox.operation.started", payload: { name: "sandbox.provision" } }],
+              [
+                {
+                  type: "sandbox.operation.started",
+                  payload: { name: "sandbox.provision" },
+                },
+              ],
               true,
             );
             try {
@@ -9917,7 +9935,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 });
               },
               ...(!providerPublishesNativeRequestEvents
-                ? { onModelTransportStarted: recordFallbackProviderDispatchAtWire }
+                ? {
+                    onModelTransportStarted: recordFallbackProviderDispatchAtWire,
+                  }
                 : {}),
               ...(toolCancellationFenceRef.current
                 ? {
