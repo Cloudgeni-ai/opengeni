@@ -1,0 +1,21 @@
+import { describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
+
+describe("personal-resource direct-read authority", () => {
+  test("revalidates before Rig and Variable Set reads and documents the no-op path", async () => {
+    const source = await readFile(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+      "utf8",
+    );
+    const authorize = source.indexOf("await resolveSessionAttemptPersonalResources(db");
+    const rigRead = source.indexOf("await getRigVersion(db", authorize);
+    const variableRead = source.indexOf(
+      "loadWorkspaceEnvironmentForRunWithCredentials(",
+      authorize,
+    );
+    expect(authorize).toBeGreaterThan(0);
+    expect(authorize).toBeLessThan(rigRead);
+    expect(authorize).toBeLessThan(variableRead);
+    expect(source.slice(authorize - 240, authorize)).toContain("zero-row no-op");
+  });
+});

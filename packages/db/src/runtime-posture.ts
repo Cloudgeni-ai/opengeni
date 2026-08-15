@@ -74,6 +74,12 @@ const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
 ] as const;
 const PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE =
   "resolve_session_attempt_personal_resources(uuid, uuid, uuid)";
+const USER_RESOURCE_LIFECYCLE_ROUTINES = [
+  "list_self_user_resource_authorities(uuid)",
+  "issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, boolean)",
+  "revoke_self_user_resource_grant(uuid, uuid)",
+  "authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid)",
+] as const;
 const SCHEDULED_PERSONAL_RESOURCE_ROUTINES = [
   "freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint)",
   "clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint)",
@@ -113,6 +119,7 @@ const FORK_SESSION_CONTENT_ROUTINE =
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   FORK_SESSION_CONTENT_ROUTINE,
   PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
+  ...USER_RESOURCE_LIFECYCLE_ROUTINES,
   ...SCHEDULED_PERSONAL_RESOURCE_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,

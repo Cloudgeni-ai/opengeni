@@ -2870,6 +2870,18 @@ export const organizationUserResourceGrants = pgTable(
       table.workspaceId,
       table.status,
     ),
+    activeIdentity: uniqueIndex("organization_user_resource_grants_active_identity_uq")
+      .on(
+        table.accountId,
+        table.authorityId,
+        table.workspaceId,
+        table.action,
+        table.mode,
+        table.context,
+        sql`coalesce(${table.sessionId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+        sql`coalesce(${table.authorityEpoch}, 0)`,
+      )
+      .where(sql`${table.status} = 'active'`),
     authority: foreignKey({
       name: "organization_user_resource_grants_authority_fk",
       columns: [table.authorityId, table.accountId],

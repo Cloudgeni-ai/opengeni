@@ -103,6 +103,7 @@ import {
   completeConnectorActionExecution,
   prepareConnectorActionApproval,
   withCodexAppsRequestAuthorization,
+  resolveSessionAttemptPersonalResources,
   type AppendEventInput,
   type ActiveSandboxPointer,
   type SandboxRecord,
@@ -5731,6 +5732,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
 
       const runtimePreparationStartedAt = performance.now();
+
+      // Personal Rig/Variable Set authority is revalidated immediately before
+      // any direct resource read. The database function is a zero-row no-op for
+      // sessions with no personal resources, preserving the legacy workspace path.
+      await resolveSessionAttemptPersonalResources(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: fileAuthoritySubjectId,
+        attemptId: input.attemptId,
+      });
 
       // Pack-scoped runtime: enabled packs may declare the sandbox image this
       // workspace's sessions run in and skills for the sandbox skill index.

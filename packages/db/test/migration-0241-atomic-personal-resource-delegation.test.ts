@@ -533,10 +533,12 @@ describe("migration 0241 atomic personal-resource delegation", () => {
     }
   }, 180_000);
 
-  test("rejects cross-workspace rig versions at admission and resolution", async () => {
+  test("admits an exact rig version regardless of workspace provenance", async () => {
     let admin: postgres.Sql | undefined;
     let app: postgres.Sql | undefined;
-    const blank = await acquireMigrationTestDatabase("migration-0241-rig-version-workspace-fence");
+    const blank = await acquireMigrationTestDatabase(
+      "migration-0241-rig-version-workspace-provenance",
+    );
     if (!blank) return;
 
     const appPassword = "apppw";
@@ -580,45 +582,43 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         set rig_version_id = ${mismatchedVersion!.id}
         where id = ${ids.session}
       `;
-      await expect(
-        insertAttempt(
-          app,
-          ids,
-          ids.attemptA,
-          "workflow-mismatched-admission",
-          "run-mismatched-admission",
-          "activity-mismatched-admission",
-        ),
-      ).rejects.toThrow("personal resource identity changed during admission");
-
-      await admin`
-        update rig_versions
-        set active = false
-        where id = ${mismatchedVersion!.id}
-      `;
-      await admin`
-        update rig_versions
-        set active = true
-        where id = ${ids.rigVersion}
-      `;
-      await app`
-        update sessions
-        set rig_version_id = ${ids.rigVersion}
-        where id = ${ids.session}
-      `;
       await insertAttempt(
         app,
         ids,
         ids.attemptA,
-        "workflow-valid-admission",
-        "run-valid-admission",
-        "activity-valid-admission",
+        "workflow-cross-workspace-version",
+        "run-cross-workspace-version",
+        "activity-cross-workspace-version",
       );
-      await admin`
-        update session_attempt_personal_resource_snapshots
-        set resource_version_id = ${mismatchedVersion!.id}
+
+      const [snapshot] = await admin<
+        Array<{
+          resourceVersionId: string;
+          originWorkspaceId: string;
+          authorityId: string;
+          grantId: string;
+        }>
+      >`
+        select resource_version_id as "resourceVersionId",
+          origin_workspace_id as "originWorkspaceId",
+          authority_id as "authorityId", grant_id as "grantId"
+        from session_attempt_personal_resource_snapshots
         where attempt_id = ${ids.attemptA}
           and resource_kind = 'rig'
+          and resource_id = ${ids.rig}
+      `;
+      expect(snapshot).toEqual({
+        resourceVersionId: mismatchedVersion!.id,
+        originWorkspaceId: ids.personalWorkspace,
+        authorityId: expect.any(String),
+        grantId: expect.any(String),
+      });
+
+      await admin`
+        update organization_user_resource_grants
+        set status = 'revoked', revoked_at = clock_timestamp(),
+          generation = generation + 1, updated_at = clock_timestamp()
+        where id = ${snapshot!.grantId}
       `;
       await expect(
         Promise.resolve(
