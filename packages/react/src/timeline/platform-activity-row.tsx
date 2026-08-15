@@ -76,7 +76,7 @@ export default function PlatformActivityRow({
 
 function brainIcon(j: RowJsx, s: RowJsxs) {
   return lucideIcon(j, s, "brain", [
-    j("path", { d: "M12 18V5" }, "spine"),
+    j("path", { d: "M 12 18V5" }, "spine"),
     j("path", { d: "M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4" }, "center"),
     j("path", { d: "M17.598 6.5A3 3 0 1 0 12 5a3 3 0 1 0-5.598 1.5" }, "top"),
     j("path", { d: "M17.997 5.125a4 4 0 0 1 2.526 5.77" }, "upper-right"),
