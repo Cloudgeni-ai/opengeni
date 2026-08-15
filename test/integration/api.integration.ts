@@ -985,6 +985,16 @@ describe("API component integration", () => {
         idempotencyKey: crypto.randomUUID(),
       }),
     ).rejects.toThrow("completed");
+    const replacementGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_set", {
+      text: "ship the next main pipeline improvement",
+      successCriteria: "the next improvement is verified on main",
+    });
+    expect(replacementGoal).toMatchObject({
+      outcome: "updated",
+      changed: true,
+      resource: { state: "active" },
+      facts: { replaced: true },
+    });
 
     const events = await listSessionEvents(dbClient.db, baseGrant.workspaceId, session.id);
     expect(
@@ -996,10 +1006,13 @@ describe("API component integration", () => {
       "goal.paused",
       "goal.updated",
       "goal.completed",
+      "goal.set",
     ]);
-    expect((await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id))?.status).toBe(
-      "completed",
-    );
+    expect(await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id)).toMatchObject({
+      status: "active",
+      text: "ship the next main pipeline improvement",
+      evidence: null,
+    });
   });
 
   test("managed email/password auth bootstraps account access and workspace API keys", async () => {

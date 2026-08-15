@@ -2334,7 +2334,7 @@ function registerGoalTools(
     "goal_set",
     {
       description:
-        "Create a goal when this session has none. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an existing goal, use goal_update with its objective revision, a change kind, and rationale.",
+        "Create a goal when this session has none, or replace a completed goal with a new one. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
       inputSchema: {
         text: goalText,
         successCriteria: successCriteriaSchema.optional(),
@@ -2345,9 +2345,9 @@ function registerGoalTools(
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
-      if (existing) {
+      if (existing && existing.status !== "completed") {
         throw new Error(
-          `this session already has a goal at objective revision ${existing.objectiveRevision}; use goal_update to revise it`,
+          `this session's goal is ${existing.status} at objective revision ${existing.objectiveRevision}; use goal_update to revise it`,
         );
       }
       const callerTurnId =
