@@ -7820,26 +7820,75 @@ describe("API component integration", () => {
       variableSetName: environment.name,
     });
     expect(JSON.stringify(events)).not.toContain("session-secret-abcdef");
+  });
 
-    // Attached live sessions block Variable Set deletion; terminal ones no longer do.
-    const blockedDelete = await app.request(
-      workspacePath(workspaceId, `/environments/${environment.id}`),
-      { method: "DELETE" },
-    );
-    expect(blockedDelete.status).toBe(409);
-    expect(await blockedDelete.text()).toContain("active session");
-    await setSessionStatus(dbClient.db, workspaceId, session.id, "failed", null);
-    const allowedDelete = await app.request(
-      workspacePath(workspaceId, `/environments/${environment.id}`),
-      { method: "DELETE" },
-    );
-    expect(allowedDelete.status).toBe(200);
-    const retainedAttachment = await app.request(
-      workspacePath(workspaceId, `/sessions/${session.id}`),
-    );
-    expect(
-      ((await retainedAttachment.json()) as { environmentId: string | null }).environmentId,
-    ).toBe(environment.id);
+  test("preserves active Variable Set deletion fences and clears terminal attachments", async () => {
+    workflow = new FakeWorkflowClient();
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        environmentsEncryptionKey: environmentsTestKey,
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+
+    const createAttachedSession = async (status: SessionStatus) => {
+      const environment = await createTestEnvironment(app, workspaceId, {});
+      const response = await app.request(workspacePath(workspaceId, "/sessions"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          initialMessage: `deletion fence ${status}`,
+          environmentId: environment.id,
+        }),
+      });
+      expect(response.status).toBe(202);
+      const session = (await response.json()) as {
+        id: string;
+        environmentId: string | null;
+      };
+      if (status !== "queued") {
+        await setSessionStatus(dbClient.db, workspaceId, session.id, status, null);
+      }
+      return { environment, session };
+    };
+
+    for (const status of ["queued", "running", "requires_action"] as const) {
+      const { environment, session } = await createAttachedSession(status);
+      const blocked = await app.request(
+        workspacePath(workspaceId, `/environments/${environment.id}`),
+        { method: "DELETE" },
+      );
+      expect(blocked.status).toBe(409);
+      expect(await blocked.text()).toContain("active session");
+      const retained = await app.request(workspacePath(workspaceId, `/sessions/${session.id}`));
+      expect(((await retained.json()) as { environmentId: string | null }).environmentId).toBe(
+        environment.id,
+      );
+
+      await setSessionStatus(dbClient.db, workspaceId, session.id, "cancelled", null);
+      const cleanup = await app.request(
+        workspacePath(workspaceId, `/environments/${environment.id}`),
+        { method: "DELETE" },
+      );
+      expect(cleanup.status).toBe(200);
+    }
+
+    for (const status of ["idle", "failed", "cancelled"] as const) {
+      const { environment, session } = await createAttachedSession(status);
+      const allowed = await app.request(
+        workspacePath(workspaceId, `/environments/${environment.id}`),
+        { method: "DELETE" },
+      );
+      expect(allowed.status).toBe(200);
+      const detached = await app.request(workspacePath(workspaceId, `/sessions/${session.id}`));
+      expect(
+        ((await detached.json()) as { environmentId: string | null }).environmentId,
+      ).toBeNull();
+    }
   });
 
   test("enforces environment permissions for management and attachment", async () => {

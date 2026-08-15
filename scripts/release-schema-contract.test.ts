@@ -261,7 +261,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0254_scoped_variable_set_authority.sql",
       ),
     ).toMatchObject({
-      sha256: "a8e8eaeb285485235142437053fc1116636428154e4eb2a6619924a12c29df7c",
+      sha256: "b7bdd37e5a2ddad29e0b6c5d27498a85aaaa747192080537dca5ede357e43fa8",
       deploymentMode: "rolling",
     });
     const migrations = new Map(

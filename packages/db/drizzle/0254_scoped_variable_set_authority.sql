@@ -688,17 +688,11 @@ BEGIN
         FROM sessions session_value
         WHERE session_value.account_id = p_account_id
           AND session_value.variable_set_id = variable_set_row.id
-          AND session_value.status IN (
-            'queued', 'running', 'idle', 'requires_action', 'recovering', 'waiting_capacity'
-          );
+          AND session_value.status IN ('queued', 'running', 'requires_action');
         IF attached_tasks > 0 OR attached_sessions > 0 THEN
           RAISE EXCEPTION 'variable set remains attached to %% scheduled tasks and %% sessions',
             attached_tasks, attached_sessions USING ERRCODE = '23503';
         END IF;
-        UPDATE workspace_variable_sets
-        SET status = 'revoked', revoked_at = clock_timestamp(),
-            generation = generation + 1, updated_at = clock_timestamp()
-        WHERE id = variable_set_row.id;
         IF variable_set_row.authority_scope = 'user' THEN
           UPDATE organization_user_resource_authorities
           SET status = 'revoked', revoked_at = clock_timestamp(),
@@ -713,6 +707,8 @@ BEGIN
             AND authority_id = variable_set_row.authority_id
             AND status = 'active';
         END IF;
+        DELETE FROM workspace_variable_sets
+        WHERE id = variable_set_row.id;
       END IF;
 
       variable_set_row.id := p_variable_set_id;

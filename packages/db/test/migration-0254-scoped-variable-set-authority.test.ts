@@ -37,6 +37,10 @@ describe("migration 0254 scoped variable-set authority", () => {
     expect(source).toContain("resolve_session_attempt_personal_resources");
     expect(source).toContain("variable_set.materialized");
     expect(source).toContain("metadata_codec_version");
+    expect(source).toContain("session_value.status IN ('queued', 'running', 'requires_action')");
+    expect(source).toContain(
+      "DELETE FROM workspace_variable_sets\n        WHERE id = variable_set_row.id",
+    );
     expect(source).toContain(
       "REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLE workspace_variable_sets",
     );
