@@ -176,23 +176,23 @@ spec:
           expr: |
             (
               (
-                sum by (provider) (increase(opengeni_model_request_phases_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="first_byte"}[15m]))
+                sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="completed"}[15m]))
                 or on(provider)
-                0 * sum by (provider) (increase(opengeni_model_request_phases_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="terminal"}[15m]))
+                0 * sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="failed"}[15m]))
               )
               /
-              clamp_min(sum by (provider) (increase(opengeni_model_request_phases_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="terminal"}[15m])), 1)
+              clamp_min(sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome=~"completed|failed"}[15m])), 1)
             ) < {{ $turnStartupFirstByteAvailabilityRatio }}
             and on(provider)
-            sum by (provider) (increase(opengeni_model_request_phases_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="terminal"}[15m])) >= {{ $turnStartupMinSamples }}
+            sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome=~"completed|failed"}[15m])) >= {{ $turnStartupMinSamples }}
             and on(provider)
-            sum by (provider) (increase(opengeni_model_request_phases_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="terminal",outcome=~"failed|timed_out"}[15m])) > 0
+            sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="failed"}[15m])) > 0
           for: 15m
           labels:
             severity: warning
           annotations:
             summary: OpenGeni first-byte availability is below {{ $turnStartupFirstByteAvailabilityRatio }} for {{ "{{ $labels.provider }}" }}
-            description: Instrumented terminal attempts outnumber first-byte evidence while failures or timeouts are present. Successful first-byte latency remains a separate SLO; inspect terminal outcomes and provider transport diagnostics rather than treating missing bytes as fast latency samples.
+            description: Canonical durable provider requests terminated before a first byte, including failed or timed-out transports. Successful first-byte latency remains a separate SLO; inspect provider transport diagnostics rather than treating missing bytes as fast latency samples.
         - alert: OpenGeniSuperGrokResponseStreamIdleTimeout
           expr: |
             sum(increase(opengeni_model_request_phases_total{provider="supergrok-subscription",phase="terminal",outcome="timed_out"}[15m])) > 0

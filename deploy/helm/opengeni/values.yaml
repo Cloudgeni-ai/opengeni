@@ -1090,8 +1090,8 @@ observability:
     turnStartupQueueP95Seconds: 5
     turnStartupProviderDispatchP95Seconds: 60
     turnStartupFirstByteP95Seconds: 120
-    # Instrumented provider attempts that reach a first response byte divided
-    # by terminal attempts over the alert window. Failures/timeouts before a
+    # Canonical durable first-byte completions divided by completed plus failed
+    # first-byte milestones over the alert window. Failures/timeouts before a
     # byte reduce availability instead of disappearing from latency quantiles.
     turnStartupFirstByteAvailabilityRatio: 0.95
     turnStartupMinSamples: 5

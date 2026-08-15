@@ -18,7 +18,8 @@ is hardcoded. The Turn Startup dashboard additionally requires one exact
 `$namespace`, `$environment`, and `$release` selection so a shared Prometheus
 cannot combine separate OpenGeni deployments. Its first-byte latency quantiles
 contain successful samples only; the adjacent availability panel separately
-shows instrumented provider attempts that terminate without a first byte.
+shows canonical durable provider requests that terminate without a first byte
+across generic and subscription transports.
 
 The dashboards offer 30-day views, but a selector cannot manufacture retained
 history. The production example's 30-day time limit plus 80 GB size limit does

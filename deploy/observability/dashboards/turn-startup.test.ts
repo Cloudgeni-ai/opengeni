@@ -11,7 +11,7 @@ describe("turn startup dashboard", () => {
     expect(titles).toContain("Worker preparation p50 / p95 / p99");
     expect(titles).toContain("Selected startup phase p50 / p95 / p99");
     expect(titles).toContain("End-to-end startup milestones p50 / p95 / p99");
-    expect(titles).toContain("First-byte availability and terminal pressure");
+    expect(titles).toContain("First-byte availability and pre-byte failure pressure");
     expect(titles).toContain("Platform preparation vs provider think time (p95)");
     expect(dashboard.time?.from).toBe("now-7d");
 
@@ -88,7 +88,7 @@ describe("turn startup dashboard", () => {
       (panel) => panel.title === "End-to-end startup milestones p50 / p95 / p99",
     );
     const availability = dashboard.panels.find(
-      (panel) => panel.title === "First-byte availability and terminal pressure",
+      (panel) => panel.title === "First-byte availability and pre-byte failure pressure",
     );
     const latencyExpressions = (latency?.targets ?? []).map((target) => target.expr).join("\n");
     const availabilityExpressions = (availability?.targets ?? [])
@@ -98,10 +98,13 @@ describe("turn startup dashboard", () => {
     expect(latencyExpressions).toContain("opengeni_turn_startup_milestone_duration_seconds_bucket");
     expect(latencyExpressions).toContain('outcome="completed"');
     expect(latencyExpressions).not.toContain("opengeni_model_request_phases_total");
-    expect(availabilityExpressions).toContain("opengeni_model_request_phases_total");
-    expect(availabilityExpressions).toContain('phase="first_byte"');
-    expect(availabilityExpressions).toContain('phase="terminal"');
-    expect(availabilityExpressions).toContain('outcome=~"failed|timed_out"');
+    expect(availabilityExpressions).toContain(
+      "opengeni_turn_startup_milestone_duration_seconds_count",
+    );
+    expect(availabilityExpressions).toContain('milestone="first_byte",outcome="completed"');
+    expect(availabilityExpressions).toContain('milestone="first_byte",outcome="failed"');
+    expect(availabilityExpressions).toContain('outcome=~"completed|failed"');
+    expect(availabilityExpressions).not.toContain("opengeni_model_request_phases_total");
     expect(availabilityExpressions).toContain("or on(provider)");
     expect(availabilityExpressions).toContain("0 * sum by (provider)");
   });

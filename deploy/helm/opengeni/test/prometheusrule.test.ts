@@ -64,10 +64,11 @@ describe("turn-capacity Prometheus alerts", () => {
     const availability = alertExpression(template, "OpenGeniTurnStartupFirstByteAvailabilityLow");
     const latency = alertExpression(template, "OpenGeniTurnStartupFirstByteP95High");
 
-    expect(availability).toContain("opengeni_model_request_phases_total");
-    expect(availability).toContain('phase="first_byte"');
-    expect(availability).toContain('phase="terminal"');
-    expect(availability).toContain('outcome=~"failed|timed_out"');
+    expect(availability).toContain("opengeni_turn_startup_milestone_duration_seconds_count");
+    expect(availability).toContain('milestone="first_byte",outcome="completed"');
+    expect(availability).toContain('milestone="first_byte",outcome="failed"');
+    expect(availability).toContain('outcome=~"completed|failed"');
+    expect(availability).not.toContain("opengeni_model_request_phases_total");
     expect(availability).toContain("or on(provider)");
     expect(availability).toContain("0 * sum by (provider)");
     expect(availability).toContain("turnStartupFirstByteAvailabilityRatio");
@@ -76,6 +77,7 @@ describe("turn-capacity Prometheus alerts", () => {
       expect(selector).toContain(DEPLOYMENT_SCOPE);
     }
     expect(latency).toContain('milestone="first_byte",outcome="completed"');
+    expect(latency).not.toContain('outcome="failed"');
     expect(latency).not.toContain("opengeni_model_request_phases_total");
   });
 

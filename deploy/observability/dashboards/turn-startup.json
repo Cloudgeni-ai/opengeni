@@ -369,8 +369,8 @@
     {
       "id": 10,
       "type": "timeseries",
-      "title": "First-byte availability and terminal pressure",
-      "description": "For instrumented subscription transports, first-byte availability is first-byte phases divided by terminal attempts. A failure after a byte contributes to both counts, so only attempts that terminate without a byte lower availability. The bounded failed/timed_out terminal ratios remain separate diagnostics.",
+      "title": "First-byte availability and pre-byte failure pressure",
+      "description": "Across generic and subscription providers, canonical durable first-byte completions are divided by completed plus failed first-byte milestones. Failed milestones are terminal provider requests with no earlier first byte, including failed or timed-out transports. Successful latency remains a separate distribution.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
@@ -387,15 +387,15 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "clamp_max((sum by (provider) (rate(opengeni_model_request_phases_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",phase=\"first_byte\"}[$__rate_interval])) or on(provider) 0 * sum by (provider) (rate(opengeni_model_request_phases_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",phase=\"terminal\"}[$__rate_interval]))) / clamp_min(sum by (provider) (rate(opengeni_model_request_phases_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",phase=\"terminal\"}[$__rate_interval])), 0.000000001), 1)",
+          "expr": "clamp_max((sum by (provider) (rate(opengeni_turn_startup_milestone_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",backend=~\"$backend\",milestone=\"first_byte\",outcome=\"completed\"}[$__rate_interval])) or on(provider) 0 * sum by (provider) (rate(opengeni_turn_startup_milestone_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",backend=~\"$backend\",milestone=\"first_byte\",outcome=\"failed\"}[$__rate_interval]))) / clamp_min(sum by (provider) (rate(opengeni_turn_startup_milestone_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",backend=~\"$backend\",milestone=\"first_byte\",outcome=~\"completed|failed\"}[$__rate_interval])), 0.000000001), 1)",
           "legendFormat": "{{provider}} first-byte availability",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "B",
-          "expr": "sum by (provider, outcome) (rate(opengeni_model_request_phases_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",phase=\"terminal\",outcome=~\"failed|timed_out\"}[$__rate_interval])) / ignoring(outcome) group_left clamp_min(sum by (provider) (rate(opengeni_model_request_phases_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",phase=\"terminal\"}[$__rate_interval])), 0.000000001)",
-          "legendFormat": "{{provider}} terminal {{outcome}} ratio",
+          "expr": "sum by (provider) (rate(opengeni_turn_startup_milestone_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",backend=~\"$backend\",milestone=\"first_byte\",outcome=\"failed\"}[$__rate_interval])) / clamp_min(sum by (provider) (rate(opengeni_turn_startup_milestone_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",backend=~\"$backend\",milestone=\"first_byte\",outcome=~\"completed|failed\"}[$__rate_interval])), 0.000000001)",
+          "legendFormat": "{{provider}} pre-byte failure ratio",
           "editorMode": "code",
           "range": true
         }
