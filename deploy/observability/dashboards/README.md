@@ -1,6 +1,6 @@
 # OpenGeni Grafana dashboards
 
-Dashboards-as-code for the OpenGeni control plane. Five boards, each answering a
+Dashboards-as-code for the OpenGeni control plane. Six boards, each answering a
 different "manage and fix problems as soon as they arise" question:
 
 | File | Board | Answers |
@@ -9,11 +9,23 @@ different "manage and fix problems as soon as they arise" question:
 | `connected-machines.json` | **OpenGeni · Connected Machines** | Are Connected Machine control ops healthy — op outcomes, healed faults (the leading indicator), op latency, the fault taxonomy, and the payload wall? |
 | `worker-fleet.json` | **OpenGeni · Worker Fleet** | Is the fleet keeping up — turns inflight/queued, worker memory vs. limit, HPA replicas, sandbox leases, and whether compaction is firing against context pressure? |
 | `sandbox-health.json` | **OpenGeni · Sandbox Health** | Are provider operations, creates, lease recovery, checkpoint GC, deadline rotation, draining, and retained-process reconciliation healthy? |
+| `turn-startup.json` | **OpenGeni · Turn Startup** | Where does queue-to-first-byte time go — worker queue, sandbox/rig/repository/file/tool/model preparation, provider dispatch, or provider response? |
 | `google-drive-sync.json` | **OpenGeni · Google Drive Sync** | Are scheduled Drive runs succeeding within their persisted quotas, or failing on provider retry, reconnect, and explicit resource limits? |
 
-All five are theme-agnostic, tagged `opengeni` + `observability`, and carry a
+All six are theme-agnostic, tagged `opengeni` + `observability`, and carry a
 `$datasource` template variable — pick your Prometheus datasource on import; no UID
-is hardcoded.
+is hardcoded. The Turn Startup dashboard additionally requires one exact
+`$namespace`, `$environment`, and `$release` selection so a shared Prometheus
+cannot combine separate OpenGeni deployments. Its first-byte latency quantiles
+contain successful samples only; the adjacent availability panel separately
+shows canonical durable logical turns that terminate failed without a first byte
+across generic and subscription transports.
+
+The dashboards offer 30-day views, but a selector cannot manufacture retained
+history. The production example's 30-day time limit plus 80 GB size limit does
+not guarantee 30 days: Prometheus applies whichever limit is reached first.
+Size local storage from measured ingestion or use remote write before relying
+on the full window.
 
 ## Importing
 
@@ -73,6 +85,9 @@ App series used here (non-exhaustive): `opengeni_stream_ttft_seconds`,
 `opengeni_model_input_tokens`, `opengeni_context_compactions_total`,
 `opengeni_machine_op_*`, `opengeni_turns_*`, `opengeni_sandbox_leases`,
 `opengeni_sandbox_operations_total`, `opengeni_sandbox_operation_duration_seconds`,
+`opengeni_turn_startup_phase_duration_seconds`,
+`opengeni_turn_worker_preparation_duration_seconds`,
+`opengeni_turn_startup_milestone_duration_seconds`,
 `opengeni_sandbox_inventory_refresh_timestamp_seconds`,
 `opengeni_sandbox_checkpoint_artifacts`, `opengeni_sandbox_rotation_backlog`,
 `opengeni_sandbox_leases_expired_draining`, `opengeni_retained_processes_*`,

@@ -9437,6 +9437,12 @@ export const SessionEventType = z.enum([
   "turn.superseded",
   "turn.recovery.requested",
   "turn.capacity_waiting",
+  // Compact, attempt-fenced user-visible worker preparation checkpoints. The
+  // payload phase is a closed enum and terminal events carry durationMs; no
+  // session-specific value is ever promoted into Prometheus labels.
+  "turn.startup.phase.started",
+  "turn.startup.phase.completed",
+  "turn.startup.phase.failed",
   "agent.message.delta",
   "agent.message.completed",
   "agent.reasoning.delta",
