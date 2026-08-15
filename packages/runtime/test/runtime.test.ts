@@ -3291,6 +3291,19 @@ describe("runtime event normalization", () => {
     expect(instructions).toContain("Ship the durable goal boundary");
     expect(instructions).toContain("Semantic changes are proposals until a user applies them");
     expect(instructions).toContain("opengeni__goal_progress");
+
+    const completedInstructions = appendSessionGoal("base", {
+      state: "completed",
+      goalId: "11111111-1111-4111-8111-111111111111",
+      objectiveRevision: 8,
+      text: "Ship the durable goal boundary",
+      successCriteria: "Recovery sees revision seven",
+      mutationPolicy: "review_changes",
+      capturedAt,
+    });
+    expect(completedInstructions).toContain("remains as historical context");
+    expect(completedInstructions).toContain("create it with opengeni__goal_set");
+    expect(completedInstructions).toContain("goal_update cannot revise a completed goal");
   });
 
   // ── generic programmatic-tool-calling (codemode) substrate directive ──────

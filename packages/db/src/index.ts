@@ -45773,6 +45773,7 @@ export async function upsertSessionGoalWithEvent(
           const [existing] = await tx
             .select({
               objectiveRevision: schema.sessionGoals.objectiveRevision,
+              status: schema.sessionGoals.status,
             })
             .from(schema.sessionGoals)
             .where(
@@ -45783,9 +45784,9 @@ export async function upsertSessionGoalWithEvent(
             )
             .for("update")
             .limit(1);
-          if (existing) {
+          if (existing && existing.status !== "completed") {
             throw new SessionControlConflictError(
-              `agent goal_set is create-only; goal exists at objective revision ${existing.objectiveRevision}`,
+              `agent goal_set cannot replace a goal while it is ${existing.status} at objective revision ${existing.objectiveRevision}; use goal_update to revise it`,
             );
           }
         }

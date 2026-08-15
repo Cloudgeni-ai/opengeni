@@ -1737,6 +1737,9 @@ export function appendSessionInstructions(composed: string, sessionInstructions?
  */
 export function appendSessionGoal(composed: string, snapshot?: SessionGoalSnapshot): string {
   if (!snapshot || snapshot.state === "none") return composed;
+  if (snapshot.state === "completed") {
+    return `${composed} Previous session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status completed): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}. This goal is complete and remains as historical context. If the user provides a new long-running objective, create it with opengeni__goal_set; goal_update cannot revise a completed goal.`;
+  }
   const policy =
     snapshot.mutationPolicy === "review_changes"
       ? "Semantic changes are proposals until a user applies them."

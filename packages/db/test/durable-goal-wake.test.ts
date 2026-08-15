@@ -232,7 +232,7 @@ async function counts(ctx: GoalFixture) {
 }
 
 describe("durable active-goal wake", () => {
-  test("the locked agent goal_set path is create-only while API redirect remains available", async () => {
+  test("agent goal_set rejects live goals and replaces completed goals", async () => {
     const ctx = await runningGoalFixture();
     await expect(
       upsertSessionGoalWithEvent(client.db, {
@@ -243,11 +243,33 @@ describe("durable active-goal wake", () => {
         createdBy: "agent",
         actor: "agent",
       }),
-    ).rejects.toThrow("agent goal_set is create-only");
+    ).rejects.toThrow("agent goal_set cannot replace a goal while it is active");
     expect(
       (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
         ?.text,
     ).toBe("Finish the durable wake proof");
+
+    await setSessionGoalStatusWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
+      status: "completed",
+      evidence: "The original objective is done",
+      event: { type: "goal.completed", evidence: "The original objective is done" },
+    });
+    const replacement = await upsertSessionGoalWithEvent(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      text: "Pursue the next durable objective",
+      createdBy: "agent",
+      actor: "agent",
+    });
+    expect(replacement.replaced).toBe(true);
+    expect(replacement.goal).toMatchObject({
+      status: "active",
+      text: "Pursue the next durable objective",
+      evidence: null,
+      objectiveRevision: 2,
+    });
+    expect(replacement.events.map((event) => event.type)).toEqual(["goal.set"]);
   });
 
   test("accepted turns freeze exact goal or no-goal authority and recovery reuses it", async () => {
