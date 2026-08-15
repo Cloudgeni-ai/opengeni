@@ -7,6 +7,10 @@ const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
   "../drizzle/0258_task_note_knowledge_promotion.sql",
 );
+const scopedKnowledgeSchemaPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "../src/scoped-knowledge-schema.ts",
+);
 
 describe("migration 0258 Task-note Knowledge promotion", () => {
   test("keeps document provenance and adds exact value-free Task-note evidence", async () => {
@@ -51,5 +55,26 @@ describe("migration 0258 Task-note Knowledge promotion", () => {
     expect(sql).toContain("DELETE FROM task_note_knowledge_promotion_capabilities capability");
     expect(sql).toContain("SET search_path = pg_catalog, %I");
     expect(sql).toContain("resolve_task_note_knowledge_promotion_source(");
+  });
+
+  test("keeps Drizzle aligned with the two nullable-source partial identities", async () => {
+    const schema = await readFile(scopedKnowledgeSchemaPath, "utf8");
+    expect(schema).toContain("knowledge_claim_evidence_document_natural_identity_uq");
+    expect(schema).toContain("knowledge_claim_evidence_task_note_natural_identity_uq");
+    expect(schema).toContain(".where(sql`${table.documentVersionId} is not null`)");
+    expect(schema).toContain(".where(sql`${table.taskNoteId} is not null`)");
+    expect(schema).not.toContain('uniqueIndex("knowledge_claim_evidence_natural_identity_uq")');
+  });
+
+  test("adds one immutable content-free atomic replacement receipt and exact lifecycle function", async () => {
+    const sql = await readFile(migrationPath, "utf8");
+    expect(sql).toContain('CREATE TABLE "task_note_replacement_receipts"');
+    expect(sql).not.toMatch(/task_note_replacement_receipts[\s\S]{0,2500}"(?:text|content)"/i);
+    expect(sql).toContain('ALTER TABLE "task_note_replacement_receipts" FORCE ROW LEVEL SECURITY');
+    expect(sql).toContain("Task-note replacement receipts are immutable");
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION replace_task_note_for_attempt(");
+    expect(sql).toContain("receipt_row.input_hash IS DISTINCT FROM calculated_input_hash");
+    expect(sql).toContain("SET search_path = pg_catalog, %I");
+    expect(sql).toContain("GRANT EXECUTE ON FUNCTION %I.replace_task_note_for_attempt(");
   });
 });

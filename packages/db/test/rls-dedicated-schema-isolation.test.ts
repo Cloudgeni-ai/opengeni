@@ -785,6 +785,67 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       update: false,
       delete: false,
     });
+
+    const [replacementRoutine] = await admin<
+      Array<{
+        arguments: string;
+        securityDefiner: boolean;
+        appExecute: boolean;
+        publicExecute: boolean;
+        settings: string[] | null;
+      }>
+    >`
+      SELECT
+        pg_catalog.oidvectortypes(procedure.proargtypes) AS arguments,
+        procedure.prosecdef AS "securityDefiner",
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') AS "appExecute",
+        exists (
+          SELECT 1 FROM aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+        ) AS "publicExecute",
+        procedure.proconfig AS settings
+      FROM pg_proc procedure
+      JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+      WHERE namespace.nspname = ${SCHEMA}
+        AND procedure.proname = 'replace_task_note_for_attempt'`;
+    expect(replacementRoutine).toEqual({
+      arguments:
+        "uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, integer, text, text, integer, text",
+      securityDefiner: true,
+      appExecute: true,
+      publicExecute: false,
+      settings: [`search_path=pg_catalog, ${SCHEMA}`],
+    });
+
+    const [replacementReceiptTable] = await admin<
+      Array<{
+        rlsEnabled: boolean;
+        rlsForced: boolean;
+        select: boolean;
+        insert: boolean;
+        update: boolean;
+        delete: boolean;
+      }>
+    >`
+      SELECT
+        relation.relrowsecurity AS "rlsEnabled",
+        relation.relforcerowsecurity AS "rlsForced",
+        has_table_privilege('opengeni_app', relation.oid, 'SELECT') AS select,
+        has_table_privilege('opengeni_app', relation.oid, 'INSERT') AS insert,
+        has_table_privilege('opengeni_app', relation.oid, 'UPDATE') AS update,
+        has_table_privilege('opengeni_app', relation.oid, 'DELETE') AS delete
+      FROM pg_class relation
+      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      WHERE namespace.nspname = ${SCHEMA}
+        AND relation.relname = 'task_note_replacement_receipts'`;
+    expect(replacementReceiptTable).toEqual({
+      rlsEnabled: true,
+      rlsForced: true,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    });
   });
 
   test("the restricted runtime role can perform Better Auth table DML", async () => {

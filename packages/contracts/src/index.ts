@@ -818,6 +818,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "task_notes_list",
   "task_note_save",
   "task_note_archive",
+  "task_note_replace",
   "knowledge_propose",
   "knowledge_correct",
   "task_note_promote_knowledge",

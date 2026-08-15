@@ -139,6 +139,7 @@ const TASK_NOTE_CAPABILITY_ROUTINES = [
   "create_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, integer)",
   "archive_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text)",
   "list_task_notes_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, boolean, integer)",
+  "replace_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, integer, text, text, integer, text)",
   "resolve_task_note_knowledge_promotion_source(uuid, uuid, uuid, uuid, uuid, integer, uuid, integer, text, text, text)",
 ] as const;
 const TRANSITION_SESSION_VISIBILITY_ROUTINE =
@@ -186,6 +187,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE,
   ...VARIABLE_SET_AUTHORITY_ROUTINES,
   ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
+  ...TASK_NOTE_CAPABILITY_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
@@ -419,6 +421,7 @@ export const FORCE_RLS_TABLES = [
   "social_posts",
   "task_note_events",
   "task_note_knowledge_promotion_capabilities",
+  "task_note_replacement_receipts",
   "task_note_write_capabilities",
   "task_notes",
   "temporal_schedule_cleanup_outbox",
@@ -762,6 +765,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "session_visibility_write_capabilities",
   "task_note_events",
   "task_note_knowledge_promotion_capabilities",
+  "task_note_replacement_receipts",
   "task_note_write_capabilities",
   "task_notes",
   "workspace_variable_set_variables",

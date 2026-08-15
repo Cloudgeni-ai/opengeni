@@ -13,6 +13,7 @@ import {
   getOrCreateWorkspaceLearningPolicySnapshot,
   listTaskNotes,
   nestedPostgresSqlState,
+  replaceTaskNote,
   transitionSessionVisibility,
   writeCompanyBrainGovernedProposal,
   withSessionRlsActorContext,
@@ -337,6 +338,15 @@ describe("task-tree notes PostgreSQL authority", () => {
                 ${"1".repeat(64)}, actor_kind, actor_subject_id, initiating_human_subject_id
               from knowledge_claim_evidence where id = ${first.evidenceId}
             `;
+          }),
+        "42501",
+      );
+      await expectSqlState(
+        async () =>
+          await app.begin(async (sql) => {
+            await sql`select set_config('opengeni.account_id', ${f.grant.accountId}, true)`;
+            await sql`select set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true)`;
+            await sql`select * from task_note_replacement_receipts limit 1`;
           }),
         "42501",
       );
@@ -743,6 +753,171 @@ describe("task-tree notes PostgreSQL authority", () => {
       archived_by_attempt_id: attempt.attemptId,
       event_count: 2,
     });
+  });
+
+  test("atomically replaces and reverts an exact note with immutable replay-safe lineage", async () => {
+    if (!shared || !client) return;
+    const f = await fixture();
+    const attempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.root.id,
+      initiatorSubjectId: f.ownerSubjectId,
+      initiatingHumanSubjectId: f.ownerSubjectId,
+    });
+    const original = await createTaskNote(client.db, {
+      ...claims(attempt),
+      operationId: crypto.randomUUID(),
+      kind: "finding",
+      text: "The rollout begins on Monday.",
+      expiresInDays: 7,
+    });
+    const operationId = crypto.randomUUID();
+    const input = {
+      ...claims(attempt),
+      operationId,
+      replacedNoteId: original.note.id,
+      expectedReplacedVersion: 1,
+      replacementKind: "decision" as const,
+      replacementText: "The rollout begins on Tuesday.",
+      replacementExpiresInDays: 5,
+      reason: "Correct the rollout day while retaining the original note.",
+    };
+    const first = await replaceTaskNote(client.db, input);
+    const retry = await replaceTaskNote(client.db, input);
+    expect(first).toMatchObject({
+      operationId,
+      inputHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+      replaces: { noteId: original.note.id, archivedVersion: 2 },
+      replacement: {
+        rootSessionId: f.root.id,
+        kind: "decision",
+        text: "The rollout begins on Tuesday.",
+        status: "active",
+        version: 1,
+      },
+      replayed: false,
+    });
+    expect(retry).toEqual({ ...first, replayed: true });
+    await expectSqlState(
+      async () =>
+        await replaceTaskNote(client!.db, {
+          ...input,
+          replacementText: "A changed retry must not overwrite lineage.",
+        }),
+      "23505",
+    );
+    await expectSqlState(
+      async () => await replaceTaskNote(client!.db, { ...input, operationId: crypto.randomUUID() }),
+      "40001",
+    );
+
+    const reverted = await replaceTaskNote(client.db, {
+      ...claims(attempt),
+      operationId: crypto.randomUUID(),
+      replacedNoteId: first.replacement.id,
+      expectedReplacedVersion: 1,
+      replacementKind: original.note.kind,
+      replacementText: original.note.text,
+      replacementExpiresInDays: 7,
+      reason: "Revert the correction using the retained immutable original.",
+    });
+    expect(reverted).toMatchObject({
+      replaces: { noteId: first.replacement.id, archivedVersion: 2 },
+      replacement: {
+        rootSessionId: f.root.id,
+        kind: original.note.kind,
+        text: original.note.text,
+        status: "active",
+        version: 1,
+      },
+    });
+
+    const stored = await shared.admin<Array<{ id: string; status: string; version: number }>>`
+      select id, status, version from task_notes
+      where workspace_id = ${f.grant.workspaceId}
+        and id in (${original.note.id}, ${first.replacement.id}, ${reverted.replacement.id})
+    `;
+    expect(stored).toContainEqual({ id: original.note.id, status: "archived", version: 2 });
+    expect(stored).toContainEqual({ id: first.replacement.id, status: "archived", version: 2 });
+    expect(stored).toContainEqual({ id: reverted.replacement.id, status: "active", version: 1 });
+    const [receipt] = await shared.admin<
+      Array<{ receipt_count: number; text_column_count: number }>
+    >`
+      select
+        (select count(*)::int from task_note_replacement_receipts
+          where workspace_id = ${f.grant.workspaceId} and root_session_id = ${f.root.id})
+          as receipt_count,
+        (select count(*)::int from information_schema.columns
+          where table_schema = current_schema()
+            and table_name = 'task_note_replacement_receipts'
+            and column_name in ('text', 'content', 'note_text', 'replacement_text'))
+          as text_column_count
+    `;
+    expect(receipt).toEqual({ receipt_count: 2, text_column_count: 0 });
+
+    await shared.admin.begin(async (sql) => {
+      await sql`select set_config('opengeni.session_inference_claim', '1', true)`;
+      await sql`
+        update session_turn_attempts set state = 'closed', outcome = 'interrupted_recoverable',
+          closed_at = now() where id = ${attempt.attemptId}
+      `;
+    });
+    const recovery = await seedAttempt({ ...attempt, generation: 2, turnId: attempt.turnId });
+    await expectSqlState(
+      async () => await replaceTaskNote(client!.db, { ...input, ...claims(recovery) }),
+      "23505",
+    );
+  });
+
+  test("serializes competing replacements so only one successor can become active", async () => {
+    if (!shared || !client) return;
+    const f = await fixture();
+    const attempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.root.id,
+      initiatorSubjectId: f.ownerSubjectId,
+      initiatingHumanSubjectId: f.ownerSubjectId,
+    });
+    const original = await createTaskNote(client.db, {
+      ...claims(attempt),
+      operationId: crypto.randomUUID(),
+      kind: "ownership",
+      text: "One agent owns the deployment check.",
+      expiresInDays: 1,
+    });
+    const results = await Promise.allSettled(
+      ["Agent A owns the deployment check.", "Agent B owns the deployment check."].map(
+        async (replacementText) =>
+          await replaceTaskNote(client!.db, {
+            ...claims(attempt),
+            operationId: crypto.randomUUID(),
+            replacedNoteId: original.note.id,
+            expectedReplacedVersion: 1,
+            replacementKind: "ownership",
+            replacementText,
+            replacementExpiresInDays: 1,
+            reason: "Resolve the ownership record atomically.",
+          }),
+      ),
+    );
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((result) => result.status === "rejected");
+    expect(rejected?.status).toBe("rejected");
+    expect(nestedPostgresSqlState((rejected as PromiseRejectedResult).reason)).toBe("40001");
+    const [durable] = await shared.admin<
+      Array<{ receipt_count: number; active_successor_count: number }>
+    >`
+      select
+        (select count(*)::int from task_note_replacement_receipts
+          where workspace_id = ${f.grant.workspaceId}
+            and replaced_note_id = ${original.note.id}) as receipt_count,
+        (select count(*)::int from task_notes
+          where workspace_id = ${f.grant.workspaceId} and root_session_id = ${f.root.id}
+            and id <> ${original.note.id} and status = 'active') as active_successor_count
+    `;
+    expect(durable).toEqual({ receipt_count: 1, active_successor_count: 1 });
   });
 
   test("serializes sibling creates at the 500-active-note boundary", async () => {

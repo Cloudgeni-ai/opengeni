@@ -163,3 +163,47 @@ export const taskNoteKnowledgePromotionCapabilities = pgTable(
     ),
   }),
 );
+
+// Immutable, content-free lineage for one atomic archive + replacement create.
+// Migration 0258 owns exact constraints, FORCE RLS, and lifecycle-only writes.
+export const taskNoteReplacementReceipts = pgTable(
+  "task_note_replacement_receipts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    rootSessionId: uuid("root_session_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    inputHash: text("input_hash").notNull(),
+    replacedNoteId: uuid("replaced_note_id").notNull(),
+    replacedNoteVersion: integer("replaced_note_version").notNull(),
+    replacementNoteId: uuid("replacement_note_id").notNull(),
+    replacementNoteVersion: integer("replacement_note_version").notNull(),
+    archiveOperationId: uuid("archive_operation_id").notNull(),
+    createOperationId: uuid("create_operation_id").notNull(),
+    actorKind: text("actor_kind").notNull(),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    initiatingHumanSubjectId: text("initiating_human_subject_id"),
+    actorSessionId: uuid("actor_session_id").notNull(),
+    actorTurnId: uuid("actor_turn_id").notNull(),
+    actorAttemptId: uuid("actor_attempt_id").notNull(),
+    actorExecutionGeneration: integer("actor_execution_generation").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceOperation: uniqueIndex("task_note_replacement_receipts_workspace_operation_uq").on(
+      table.workspaceId,
+      table.operationId,
+    ),
+    workspaceReplacement: uniqueIndex("task_note_replacement_receipts_workspace_replacement_uq").on(
+      table.workspaceId,
+      table.replacementNoteId,
+    ),
+    rootTimeline: index("task_note_replacement_receipts_root_timeline_idx").on(
+      table.workspaceId,
+      table.rootSessionId,
+      table.createdAt,
+      table.id,
+    ),
+  }),
+);

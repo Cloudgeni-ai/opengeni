@@ -87,6 +87,7 @@ describe("Company Brain first-party MCP policy", () => {
       "task_notes_list",
       "task_note_save",
       "task_note_archive",
+      "task_note_replace",
     ];
     const readOnly = buildOpenGeniMcpServer(deps(), grant(["sessions:read"], selected));
     expect(registeredToolNames(readOnly)).toEqual(["task_notes_list"]);

@@ -12,7 +12,7 @@ notes plus governed Knowledge and Ways-of-working proposals.
 | --- | --- | --- | --- | --- |
 | Knowledge | Sourced company facts and evidence | Documents/scoped-knowledge authority | Permission-first `knowledge_search`/`get`/`browse`; never prompt-injected | Workspace-local claim proposal/correction plus rooted Task-note promotion implemented as append-only review/relation evidence |
 | Ways of working | Human-authoritative policy and preferences | Existing instruction-policy and preference-registry heads | Bounded descriptors by default; full bodies on demand | Workspace-local Knowledge-backed inactive proposal adapters implemented; activation remains human-only |
-| Task notes | Short-lived technical coordination inside one root session tree | Exact accepted turn/attempt plus root-session visibility | Explicit `task_notes_list`; never prompt-injected | Implemented by migration 0239 |
+| Task notes | Short-lived technical coordination inside one root session tree | Exact accepted turn/attempt plus root-session visibility | Explicit `task_notes_list`; never prompt-injected | Create/list/archive implemented by migration 0239; atomic correction/revert lineage by migration 0258 |
 | Durable agent learning | Reusable technical knowledge beyond one task tree | Existing Memory/governed-learning authorities | Existing retrieval rules | Routing/promotion remains later work |
 
 The router must preserve the selected destination's provenance and may propose
@@ -124,7 +124,9 @@ The remote first-party MCP surface is:
 - `task_note_save`: one 4,096-UTF-8-byte note, a caller operation UUID, and an
   expiry from one through 30 days;
 - `task_note_archive`: an optimistic version-1 archive with a separate bounded
-  reason and operation UUID.
+  reason and operation UUID; and
+- `task_note_replace`: atomically archive one exact active version-1 note and
+  create a fresh linked version-1 replacement, with one top-level operation UUID.
 
 There are at most 500 active, unexpired notes per root tree. Mutation locks the
 root session in canonical session order, so concurrent sibling agents cannot
@@ -134,19 +136,19 @@ job may physically clean expired rows without changing their runtime semantics.
 
 ## Authority and visibility
 
-All three tables use FORCE RLS for exact account/workspace isolation. Notes and
-events also use a RESTRICTIVE root-session visibility policy. The lifecycle
-functions recheck both the addressed session and root using the immutable human
-authority frozen on the accepted logical turn. The worker identity is transport
-only. Pure service turns retain explicit service provenance and never acquire a
-manufactured human identity.
+The note, event, write-capability, and replacement-receipt tables use FORCE RLS
+for exact account/workspace isolation. Notes and events also use a RESTRICTIVE
+root-session visibility policy. The lifecycle functions recheck both the
+addressed session and root using the immutable human authority frozen on the
+accepted logical turn. The worker identity is transport only. Pure service turns
+retain explicit service provenance and never acquire a manufactured human identity.
 
-Create, list, and archive accept the exact account, workspace, session, turn,
-attempt UUID, and execution generation from the worker-signed MCP grant. They
-lock and verify the active turn and attempt and reject pending interruption.
+Create, list, archive, and replace accept the exact account, workspace, session,
+turn, attempt UUID, and execution generation from the worker-signed MCP grant.
+They lock and verify the active turn and attempt and reject pending interruption.
 The application role has function execution only: direct table DML and direct
-selects are not part of the runtime contract. One-transaction capabilities
-fence the internal row/event mutations.
+selects are not part of the runtime contract. One-transaction capabilities fence
+the internal row/event mutations.
 
 Create and archive each preserve an immutable operation/input receipt. The
 input hash binds tenant, root tree, source session, logical turn, attempt,
@@ -156,16 +158,25 @@ attempt-bound: ordinary side-effecting tool recovery records an ambiguous call
 as outcome-unknown and does not invoke it again on a successor attempt. A new
 attempt therefore cannot claim a predecessor's note operation as its own.
 
-Archiving is the only ordinary mutation. It advances version 1 to 2 and writes
-separate archive actor/attempt/operation fields plus an append-only event; the
-original creation receipt is never overwritten. Note text is immutable.
+Archiving is the only in-place note mutation. It advances version 1 to 2 and
+writes separate archive actor/attempt/operation fields plus an append-only event;
+the original creation receipt is never overwritten. Note text is immutable.
+Correction therefore uses `task_note_replace`: one transaction archives the old
+note and creates a new immutable note, then records a content-free receipt linking
+both IDs and derived lifecycle operations. Exact retry returns that same lineage;
+changed input, another tree/attempt, or a stale old version fails closed. Undo is
+the same explicit operation in reverse: replace the correction with a fresh note
+whose body is copied from the retained archived original. History is never edited
+or reactivated, and failure of either half rolls back the entire replacement.
 
 ## Deployment and deferred work
 
-Migration `0239_task_tree_notes.sql` is rolling and additive. It does not
-activate organization or personal cross-workspace reads, change goal behavior,
-inject prompt context, or replace any Knowledge, policy, preference, Memory, or
-learning authority.
+Migrations `0239_task_tree_notes.sql` and
+`0258_task_note_knowledge_promotion.sql` are rolling and additive. Migration 0258
+also adds immutable replacement receipts and the exact replacement lifecycle
+function. Neither activates organization or personal cross-workspace reads,
+changes goal behavior, injects prompt context, or replaces any Knowledge,
+policy, preference, Memory, or learning authority.
 
 Still required outside this workspace-local slice:
 
