@@ -8,6 +8,7 @@ import { describe, expect, test } from "bun:test";
 import type { Tool } from "@openai/agents";
 import { shell } from "@openai/agents/sandbox";
 import { ErrorCode, type ControlRequest } from "@opengeni/agent-proto";
+import type { ControlRpc } from "../src/sandbox/selfhosted/control-rpc";
 import type { SelfhostedOpObservation } from "../src/sandbox/selfhosted/op-observer";
 import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
 import { SelfhostedSession } from "../src/sandbox/selfhosted/session";
@@ -509,7 +510,7 @@ describe("op-stream exec (fake runner)", () => {
     expect(result.exitCode).toBe(0);
   });
 
-  test("op-stream fallback retains one authoritative command admission", async () => {
+  test("op-stream fallback takes a fresh authoritative command admission", async () => {
     const transport = new InMemoryOpStreamTransport();
     transport.available = false;
     const { MockAgentResponder } = await import("../src/sandbox/selfhosted/testing");
@@ -548,12 +549,132 @@ describe("op-stream exec (fake runner)", () => {
     const result = await session.exec({ cmd: "echo legacy" });
 
     expect(result.exitCode).toBe(0);
-    expect(admissionReads).toBe(1);
+    expect(admissionReads).toBe(2);
     expect(responder.requests).toHaveLength(1);
     expect(responder.requests[0]?.subject).toContain("connection.admitted-instance.rpc");
     expect(responder.requests[0]?.req.resourcePolicy).toEqual({
       memoryMaxBytes: "134217728",
     });
+  });
+
+  test("revocation after a refused OpStart fences the proven-unstarted retry", async () => {
+    const transport = new InMemoryOpStreamTransport();
+    const runner = new FakeOpRunner({ transport, workspaceId: WORKSPACE, agentId: AGENT });
+    runner.script("call_retry_revoke:0", {
+      frames: [{ channel: "stdout", bytes: "must-not-run" }],
+      drainingStarts: 1,
+    });
+    let authorized = true;
+    let startDispatches = 0;
+    const rpc: ControlRpc = {
+      request: async (subject, request, opts) => {
+        const response = await runner.request(subject, request, opts);
+        if (request.op?.$case === "opStart") {
+          startDispatches += 1;
+          if (response.error?.code === ErrorCode.ERROR_CODE_DRAINING) authorized = false;
+        }
+        return response;
+      },
+    };
+    const session = new SelfhostedSession({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: "connection-1",
+      controlRpc: rpc,
+      relay: { host: "relay.test" },
+      timeoutMs: 2_000,
+      execTimeoutMs: 5_000,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      resolveOperationAdmission: async () =>
+        authorized
+          ? {
+              connectionInstanceId: "connection-1",
+              operationResourcePolicy: {
+                memoryMaxBytes: null,
+                memoryHighBytes: null,
+                cpuMaxMillicores: null,
+                revision: 1,
+              },
+              operationResourcePolicySupported: true,
+              operationCpuQuotaSupported: true,
+              opStream: { transport },
+            }
+          : null,
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+
+    await expect(
+      runWithToolCallCorrelation("call_retry_revoke", () => session.exec({ cmd: "must-not-run" })),
+    ).rejects.toThrow(/authoritative live runner connection/iu);
+    expect(startDispatches).toBe(1);
+    expect(runner.runs.has("call_retry_revoke:0")).toBe(false);
+  });
+
+  test("revocation after an OpStart downgrade fences legacy fallback dispatch", async () => {
+    const transport = new InMemoryOpStreamTransport();
+    const { MockAgentResponder } = await import("../src/sandbox/selfhosted/testing");
+    const fallback = new MockAgentResponder();
+    const runner = new FakeOpRunner({
+      transport,
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      fallback,
+    });
+    runner.script("call_fallback_revoke:0", {
+      frames: [],
+      startError: {
+        code: ErrorCode.ERROR_CODE_PROTOCOL,
+        message: "old runner",
+        retryable: false,
+        detail: {},
+      },
+    });
+    let authorized = true;
+    let startDispatches = 0;
+    const rpc: ControlRpc = {
+      request: async (subject, request, opts) => {
+        const response = await runner.request(subject, request, opts);
+        if (request.op?.$case === "opStart") {
+          startDispatches += 1;
+          authorized = false;
+        }
+        return response;
+      },
+    };
+    const session = new SelfhostedSession({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: "connection-1",
+      controlRpc: rpc,
+      relay: { host: "relay.test" },
+      timeoutMs: 2_000,
+      execTimeoutMs: 5_000,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      resolveOperationAdmission: async () =>
+        authorized
+          ? {
+              connectionInstanceId: "connection-1",
+              operationResourcePolicy: {
+                memoryMaxBytes: null,
+                memoryHighBytes: null,
+                cpuMaxMillicores: null,
+                revision: 1,
+              },
+              operationResourcePolicySupported: true,
+              operationCpuQuotaSupported: true,
+              opStream: { transport },
+            }
+          : null,
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+
+    await expect(
+      runWithToolCallCorrelation("call_fallback_revoke", () =>
+        session.exec({ cmd: "must-not-run" }),
+      ),
+    ).rejects.toThrow(/authoritative live runner connection/iu);
+    expect(startDispatches).toBe(1);
+    expect(fallback.requests).toHaveLength(0);
   });
 
   test("unbounded exec never degrades to legacy when the stream is unavailable", async () => {

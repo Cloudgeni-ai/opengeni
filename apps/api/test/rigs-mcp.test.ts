@@ -101,6 +101,17 @@ describe("rig MCP tools", () => {
       firstPartyMcpPermissions: ["rigs:use"],
       firstPartyMcpTools: ["rig_list"],
     });
+    const [sessionAuthority] = await shared!.admin<
+      Array<{
+        authorityEpoch: number;
+        visibility: "user_private" | "workspace_shared";
+        ownerOrganizationMembershipId: string | null;
+      }>
+    >`
+      select authority_epoch as "authorityEpoch", visibility,
+        owner_organization_membership_id as "ownerOrganizationMembershipId"
+      from sessions where id = ${session.id}
+    `;
     const executionGeneration = 1;
     const [turn] = await shared!.admin<Array<{ id: string }>>`
       insert into session_turns (
@@ -116,23 +127,32 @@ describe("rig MCP tools", () => {
       ) returning id
     `;
     const attemptId = crypto.randomUUID();
-    await shared!.admin`
-      insert into session_turn_attempts (
-        id, account_id, workspace_id, session_id, turn_id, execution_generation,
-        state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
-        verified_control_revision, mcp_approval_policies
-      ) values (
-        ${attemptId}, ${accountId}, ${targetWorkspace!.id}, ${session.id}, ${turn!.id},
-        ${executionGeneration}, 'running', 'rig-mcp', ${`run-${attemptId}`},
-        ${`activity-${attemptId}`}, 0, '{}'::jsonb
-      )
-    `;
-    await shared!.admin`
-      update session_turns set active_attempt_id = ${attemptId} where id = ${turn!.id}
-    `;
-    await shared!.admin`
-      update sessions set active_turn_id = ${turn!.id} where id = ${session.id}
-    `;
+    await shared!.admin.begin(async (tx) => {
+      await tx.unsafe("set local opengeni.session_inference_claim = '1'");
+      await tx`
+        update sessions set active_turn_id = ${turn!.id}, status = 'running'
+        where id = ${session.id}
+      `;
+      await tx`
+        update session_turns set active_attempt_id = ${attemptId}, status = 'running'
+        where id = ${turn!.id}
+      `;
+      await tx`
+        insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id, execution_generation,
+          state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+          verified_control_revision, authority_epoch, authority_visibility,
+          authority_owner_organization_membership_id, mcp_approval_policies,
+          connector_action_policies
+        ) values (
+          ${attemptId}, ${accountId}, ${targetWorkspace!.id}, ${session.id}, ${turn!.id},
+          ${executionGeneration}, 'running', 'rig-mcp', ${`run-${attemptId}`},
+          ${`activity-${attemptId}`}, 0, ${sessionAuthority!.authorityEpoch},
+          ${sessionAuthority!.visibility}, ${sessionAuthority!.ownerOrganizationMembershipId},
+          '{}'::jsonb, '[]'::jsonb
+        )
+      `;
+    });
     const agentGrant: AccessGrant = {
       accountId,
       workspaceId: targetWorkspace!.id,

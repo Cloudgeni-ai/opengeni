@@ -88,7 +88,7 @@ exact initiating subject. It never follows the subject to another workspace;
 activated common-authority Documents always require the admitted grant
 snapshot.
 
-Migration `0257_scoped_connected_machines_and_rigs.sql` activates the same explicit
+Migration `0261_scoped_connected_machines_and_rigs.sql` activates the same explicit
 organization/workspace/user ownership for Rigs and Connected Machines. Human
 machine approval defaults to user scope. Physical workspace ids remain provenance
 and transport-routing facts, not personal authority boundaries: an owner's user

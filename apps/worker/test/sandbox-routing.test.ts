@@ -384,6 +384,103 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     });
   }, 60_000);
 
+  test("organization-scoped cross-workspace primary routes its first operation through the origin", async () => {
+    if (!available) return;
+    const subjectId = `human:${crypto.randomUUID()}`;
+    const [account] = await admin<Array<{ id: string }>>`
+      insert into managed_accounts (name) values (${`org-primary-${crypto.randomUUID()}`})
+      returning id
+    `;
+    const [originWorkspace] = await admin<Array<{ id: string }>>`
+      insert into workspaces (account_id, name)
+      values (${account!.id}, 'organization machine origin') returning id
+    `;
+    const [targetWorkspace] = await admin<Array<{ id: string }>>`
+      insert into workspaces (account_id, name)
+      values (${account!.id}, 'organization machine target') returning id
+    `;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id) values
+        (${originWorkspace!.id}, ${account!.id}),
+        (${targetWorkspace!.id}, ${account!.id})
+    `;
+    await admin`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id, authorization_revision
+      ) values (${account!.id}, ${subjectId}, 'active', ${originWorkspace!.id}, 1)
+    `;
+    await admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${account!.id}, ${targetWorkspace!.id}, ${subjectId})
+    `;
+    const machine = await admin.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${account!.id}, true),
+        set_config('opengeni.workspace_id', ${originWorkspace!.id}, true),
+        set_config('opengeni.subject_id', ${subjectId}, true)`;
+      const [row] = await tx<Array<{ enrollmentId: string }>>`
+        select enrollment_id as "enrollmentId"
+        from finalize_scoped_enrollment(
+          ${account!.id}::uuid, ${originWorkspace!.id}::uuid, 'organization',
+          ${`ed25519:${crypto.randomUUID()}`}, true, true, 'linux', 'x86_64',
+          'Organization route machine', true
+        )
+      `;
+      return row!;
+    });
+    const [machineCredential] = await admin<Array<{ credentialGeneration: number }>>`
+      select credential_generation as "credentialGeneration"
+      from enrollments
+      where id = ${machine.enrollmentId} and authority_scope = 'organization'
+    `;
+    const connectionInstanceId = await claimTestConnection({
+      workspaceId: originWorkspace!.id,
+      enrollmentId: machine.enrollmentId,
+      credentialGeneration: machineCredential!.credentialGeneration,
+    });
+    let providerRequests = 0;
+    const bus = busWithAgent(
+      originWorkspace!.id,
+      machine.enrollmentId,
+      connectionInstanceId,
+      "organization-route-machine",
+      () => {
+        providerRequests += 1;
+      },
+    ) as never;
+    const established = await establishSelfhostedTurnSession(
+      { db, settings, bus, opJournal: testOpJournal },
+      {
+        workspaceId: targetWorkspace!.id,
+        controlWorkspaceId: originWorkspace!.id,
+        agentId: machine.enrollmentId,
+        connectionInstanceId,
+        opStream: false,
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 0,
+          updatedAt: null,
+        },
+        operationResourcePolicySupported: false,
+        operationCpuQuotaSupported: false,
+        epoch: 0,
+        environment: {},
+        workingDir: null,
+      },
+    );
+
+    expect(
+      (
+        (await (established.session as { exec(args: unknown): Promise<unknown> }).exec({
+          cmd: "hostname",
+        })) as { stdout: string }
+      ).stdout.trim(),
+    ).toBe("organization-route-machine");
+    expect(providerRequests).toBe(1);
+  }, 60_000);
+
   test("revocation fences both cached swapped and pinned personal-machine sessions before dispatch", async () => {
     if (!available) return;
     const subjectId = `human:${crypto.randomUUID()}`;

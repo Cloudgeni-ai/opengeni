@@ -1226,7 +1226,11 @@ export async function establishSelfhostedTurnSession(
             enrollmentId: args.agentId,
             requireActiveSandbox: true,
           })
-        : await getLiveEnrollmentConnection(db, args.workspaceId, args.agentId);
+        : await getLiveEnrollmentConnection(
+            db,
+            args.controlWorkspaceId ?? args.workspaceId,
+            args.agentId,
+          );
       return connectionBindingFor(services, enrollment);
     },
     // Meter every control op (out-of-band telemetry) — no-op when unwired.

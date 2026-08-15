@@ -275,6 +275,12 @@ that same PostgreSQL snapshot verifies the accepted attempt, immutable admission
 snapshot, current visibility-keyed grant, membership/generation fences, and the
 runner connection. One-off `run_on` exec/read/write uses the same boundary after
 creating its attempt snapshot, so a concurrent revoke cannot reach the provider.
+Organization- and user-scoped machines used from another same-organization
+workspace retain the machine's origin workspace for their physical control and
+relay route; the session workspace remains the authorization target. A refused
+op-stream `OpStart` may be retried only after a fresh live admission proves the
+exact route and policy are still current, and a proven-unstarted downgrade to
+legacy request/reply takes another fresh admission immediately before dispatch.
 Exec and Git additionally read the policy revision and enforcement capabilities
 from that authoritative admission. Memory enforcement and CPU-quota enforcement
 are separately advertised; a configured unsupported limit fails command

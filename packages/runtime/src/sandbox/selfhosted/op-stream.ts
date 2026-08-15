@@ -133,6 +133,10 @@ export interface OpStreamExecClientDeps {
   /** Per-connection policy snapshot attached only to OpStart. Lifecycle controls
    * identify an already-admitted operation and must not imply a policy change. */
   resourcePolicy?: OperationResourcePolicy;
+  /** Revalidate the exact live route/authority immediately before a retry of an
+   * OpStart that the protocol proved never began. An already-accepted or
+   * outcome-ambiguous operation never calls this hook. */
+  revalidateBeforeStartRetry?: () => void | Promise<void>;
 }
 
 /** A completed op-stream exec: the legacy-shaped response plus the healing
@@ -465,6 +469,7 @@ class OpConsumer {
           await this.deps.retryClock.sleep(
             selfhostedRetryBackoffMs(drainingRetries, this.deps.retryClock.jitter()),
           );
+          await this.deps.revalidateBeforeStartRetry?.();
           drainingRetries += 1;
           continue;
         }
@@ -472,6 +477,7 @@ class OpConsumer {
           await this.deps.retryClock.sleep(
             selfhostedRetryBackoffMs(blipRetries, this.deps.retryClock.jitter()),
           );
+          await this.deps.revalidateBeforeStartRetry?.();
           blipRetries += 1;
           continue;
         }

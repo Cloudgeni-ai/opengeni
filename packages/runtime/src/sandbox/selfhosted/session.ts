@@ -663,6 +663,34 @@ export class SelfhostedSession {
     return await this.admitOperation(true);
   }
 
+  /** A proven-unstarted op-stream retry may reuse its stable op id, but it must
+   * not reuse mutable authorization or silently retarget the command. Require a
+   * fresh admission for the exact same physical route and effective policy;
+   * callers can start a later operation against a newly resolved route. */
+  private async revalidateCommandAdmission(
+    expected: Awaited<ReturnType<SelfhostedSession["admitCommand"]>>,
+  ): Promise<void> {
+    const current = await this.admitCommand();
+    const samePolicy =
+      current.resourcePolicy?.memoryMaxBytes === expected.resourcePolicy?.memoryMaxBytes &&
+      current.resourcePolicy?.memoryHighBytes === expected.resourcePolicy?.memoryHighBytes &&
+      current.resourcePolicy?.cpuMaxMillicores === expected.resourcePolicy?.cpuMaxMillicores;
+    if (
+      current.subject !== expected.subject ||
+      current.connectionInstanceId !== expected.connectionInstanceId ||
+      Boolean(current.opStream) !== Boolean(expected.opStream) ||
+      !samePolicy
+    ) {
+      throw new SelfhostedControlError({
+        message: "The Connected Machine route or operation policy changed before dispatch.",
+        code: ErrorCode.ERROR_CODE_FENCED,
+        reason: null,
+        retryable: true,
+        fenced: true,
+      });
+    }
+  }
+
   private opStreamClientFor(
     admission: Awaited<ReturnType<SelfhostedSession["admitCommand"]>>,
   ): OpStreamExecClient | undefined {
@@ -690,6 +718,12 @@ export class SelfhostedSession {
       retryClock: this.retryClock,
       ...(admission.resourcePolicy !== undefined
         ? { resourcePolicy: admission.resourcePolicy }
+        : {}),
+      ...(this.resolveOperationAdmission !== undefined
+        ? {
+            revalidateBeforeStartRetry: async () =>
+              await this.revalidateCommandAdmission(admission),
+          }
         : {}),
       ...(stream.journal !== undefined ? { journal: stream.journal } : {}),
       ...(stream.windowBytes !== undefined ? { windowBytes: stream.windowBytes } : {}),
@@ -875,6 +909,7 @@ export class SelfhostedSession {
       timeoutMs: executionTimeoutMs,
     };
     const opStreamClient = this.opStreamClientFor(admission);
+    let legacyAdmission = admission;
     if (opStreamClient) {
       try {
         return await this.execViaOpStream(opStreamClient, execReq, executionTimeoutMs);
@@ -889,12 +924,18 @@ export class SelfhostedSession {
         if (executionTimeoutMs === 0) {
           throw unboundedExecRequiresOpStream(error);
         }
+        // A runner refusal or unavailable stream proves the START never
+        // executed, but time elapsed after the first admission. Re-read live
+        // authority at the final boundary before the distinct legacy provider
+        // dispatch. The ordinary no-op-stream path retains its single immediate
+        // admission below.
+        legacyAdmission = await this.admitCommand();
       }
     }
     if (executionTimeoutMs === 0) {
       throw unboundedExecRequiresOpStream();
     }
-    return this.execLegacy(execReq, executionTimeoutMs, admission);
+    return this.execLegacy(execReq, executionTimeoutMs, legacyAdmission);
   }
 
   /** The legacy monolithic exec request/reply — the permanent fallback wire
