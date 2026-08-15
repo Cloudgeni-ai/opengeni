@@ -471,33 +471,39 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         model: "codex/gpt-5.6-sol",
         sandboxBackend: "modal",
       });
-      await sql`
-        insert into session_turns (
-          id, account_id, workspace_id, session_id, trigger_event_id,
-          temporal_workflow_id, status, position, prompt, model,
-          reasoning_effort, sandbox_backend
-        ) values (
-          ${turnId}, ${account!.id}, ${workspace!.id}, ${sessionId}, ${crypto.randomUUID()},
-          'ordinary-workflow', 'running', 1, 'ordinary attempt', 'codex/gpt-5.6-sol',
-          'low', 'modal'
-        )
-      `;
-      await sql`
-        insert into session_turn_attempts (
-          id, account_id, workspace_id, session_id, turn_id, execution_generation,
-          state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
-          verified_control_revision, mcp_approval_policies
-        ) values (
-          ${attemptId}, ${account!.id}, ${workspace!.id}, ${sessionId}, ${turnId}, 0,
-          'running', 'ordinary-workflow', 'ordinary-run', 'ordinary-activity', 0,
-          '{}'::jsonb
-        )
-      `;
-      await sql`
-        update session_turns
-        set active_attempt_id = ${attemptId}
-        where id = ${turnId}
-      `;
+      await sql.begin(async (tx) => {
+        await tx.unsafe("set local opengeni.session_inference_claim = '1'");
+        await tx`
+          insert into session_turns (
+            id, account_id, workspace_id, session_id, trigger_event_id,
+            temporal_workflow_id, status, position, prompt, model,
+            reasoning_effort, sandbox_backend, execution_generation
+          ) values (
+            ${turnId}, ${account!.id}, ${workspace!.id}, ${sessionId}, ${crypto.randomUUID()},
+            'ordinary-workflow', 'running', 1, 'ordinary attempt', 'codex/gpt-5.6-sol',
+            'low', 'modal', 1
+          )
+        `;
+        await tx`
+          update sessions set active_turn_id = ${turnId}, status = 'running'
+          where id = ${sessionId}
+        `;
+        await tx`
+          update session_turns set active_attempt_id = ${attemptId}
+          where id = ${turnId}
+        `;
+        await tx`
+          insert into session_turn_attempts (
+            id, account_id, workspace_id, session_id, turn_id, execution_generation,
+            state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+            verified_control_revision, mcp_approval_policies
+          ) values (
+            ${attemptId}, ${account!.id}, ${workspace!.id}, ${sessionId}, ${turnId}, 1,
+            'running', 'ordinary-workflow', 'ordinary-run', 'ordinary-activity', 0,
+            '{}'::jsonb
+          )
+        `;
+      });
 
       const [attempt] = await sql<
         Array<{
@@ -516,7 +522,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       expect(attempt).toEqual({
         authorityOwnerOrganizationMembershipId: null,
         authorityVisibility: "workspace_shared",
-        executionGeneration: 0,
+        executionGeneration: 1,
       });
 
       for (const table of [
@@ -908,40 +914,50 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       });
       const exactAttemptError =
         "personal-resource admission requires the exact current uninterrupted attempt";
-
-      await expect(
-        insertAttemptWithLifecycle(
-          sql,
-          ids,
-          ids.attemptA,
-          "workflow-inactive-pointer",
-          "run-inactive-pointer",
-          "activity-inactive-pointer",
-          { sessionActiveTurnId: null },
-        ),
-      ).rejects.toThrow(exactAttemptError);
-      await expect(
-        insertAttemptWithLifecycle(
-          sql,
-          ids,
-          ids.attemptA,
-          "workflow-stale-generation",
-          "run-stale-generation",
-          "activity-stale-generation",
-          { turnExecutionGeneration: 2 },
-        ),
-      ).rejects.toThrow(exactAttemptError);
-      await expect(
-        insertAttemptWithLifecycle(
-          sql,
-          ids,
-          ids.attemptA,
-          "workflow-stale-status",
-          "run-stale-status",
-          "activity-stale-status",
-          { turnStatus: "completed" },
-        ),
-      ).rejects.toThrow(exactAttemptError);
+      await sql`
+        alter table session_turn_attempts
+        disable trigger session_attempt_personal_document_admission
+      `;
+      try {
+        await expect(
+          insertAttemptWithLifecycle(
+            sql,
+            ids,
+            ids.attemptA,
+            "workflow-inactive-pointer",
+            "run-inactive-pointer",
+            "activity-inactive-pointer",
+            { sessionActiveTurnId: null },
+          ),
+        ).rejects.toThrow(exactAttemptError);
+        await expect(
+          insertAttemptWithLifecycle(
+            sql,
+            ids,
+            ids.attemptA,
+            "workflow-stale-generation",
+            "run-stale-generation",
+            "activity-stale-generation",
+            { turnExecutionGeneration: 2 },
+          ),
+        ).rejects.toThrow(exactAttemptError);
+        await expect(
+          insertAttemptWithLifecycle(
+            sql,
+            ids,
+            ids.attemptA,
+            "workflow-stale-status",
+            "run-stale-status",
+            "activity-stale-status",
+            { turnStatus: "completed" },
+          ),
+        ).rejects.toThrow(exactAttemptError);
+      } finally {
+        await sql`
+          alter table session_turn_attempts
+          enable trigger session_attempt_personal_document_admission
+        `;
+      }
 
       const [unconsumedGrant] = await sql<Array<{ status: string }>>`
         select status from organization_user_resource_grants

@@ -161,23 +161,29 @@ async function seedAttempt(input: {
       `;
     }
     await sql`
-      insert into session_turn_attempts (
-        id, account_id, workspace_id, session_id, turn_id, execution_generation,
-        state, temporal_workflow_id, temporal_workflow_run_id,
-        temporal_activity_id, verified_control_revision, mcp_approval_policies
-      ) values (
-        ${attemptId}, ${input.accountId}, ${input.workspaceId}, ${input.sessionId},
-        ${turnId}, ${generation}, 'running', ${`context-selection-${turnId}`},
-        ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb
-      )
+      update sessions set active_turn_id = ${turnId}, status = 'running'
+      where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
     `;
     await sql`
       update session_turns set active_attempt_id = ${attemptId}, status = 'running'
       where workspace_id = ${input.workspaceId} and id = ${turnId}
     `;
     await sql`
-      update sessions set active_turn_id = ${turnId}, status = 'running'
-      where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
+      insert into session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id,
+        temporal_activity_id, verified_control_revision, authority_epoch,
+        authority_visibility, authority_owner_organization_membership_id,
+        mcp_approval_policies
+      ) values (
+        ${attemptId}, ${input.accountId}, ${input.workspaceId}, ${input.sessionId},
+        ${turnId}, ${generation}, 'running', ${`context-selection-${turnId}`},
+        ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0,
+        (select authority_epoch from sessions where id = ${input.sessionId}),
+        (select visibility from sessions where id = ${input.sessionId}),
+        (select owner_organization_membership_id from sessions where id = ${input.sessionId}),
+        '{}'::jsonb
+      )
     `;
   });
   return { ...input, turnId, attemptId, executionGeneration: generation };

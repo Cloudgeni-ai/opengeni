@@ -105,14 +105,25 @@ describe("migration 0249 personal-resource delegation authority correction", () 
       await migrate(databaseUrl);
       const nonRunningStatuses = ["requires_action", "recovering", "waiting_capacity"] as const;
 
-      for (const status of nonRunningStatuses) {
-        const ids = await createFixture(sql, databaseUrl, {
-          target: "ordinary",
-          workspaceMembership: true,
-        });
-        await expect(insertAttempt(sql, ids, ids.attemptId, status)).rejects.toThrow(
-          "personal-resource admission requires the exact current uninterrupted attempt",
-        );
+      await sql`
+        alter table session_turn_attempts
+        disable trigger session_attempt_personal_document_admission
+      `;
+      try {
+        for (const status of nonRunningStatuses) {
+          const ids = await createFixture(sql, databaseUrl, {
+            target: "ordinary",
+            workspaceMembership: true,
+          });
+          await expect(insertAttempt(sql, ids, ids.attemptId, status)).rejects.toThrow(
+            "personal-resource admission requires the exact current uninterrupted attempt",
+          );
+        }
+      } finally {
+        await sql`
+          alter table session_turn_attempts
+          enable trigger session_attempt_personal_document_admission
+        `;
       }
 
       const ids = await createFixture(sql, databaseUrl, {

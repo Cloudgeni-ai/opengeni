@@ -116,26 +116,27 @@ async function seedTurn(ws: Workspace, position = 1): Promise<string> {
       insert into session_turns (
         id, account_id, workspace_id, session_id, trigger_event_id,
         temporal_workflow_id, status, position, prompt, model,
-        reasoning_effort, sandbox_backend, active_attempt_id
+        reasoning_effort, sandbox_backend, execution_generation, active_attempt_id
       ) values (
         ${turnId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${crypto.randomUUID()},
-        'wf', 'running', ${position}, 'test', 'codex/gpt-5.6-sol', 'low', 'modal', ${attemptId}
+        'wf', 'running', ${position}, 'test', 'codex/gpt-5.6-sol', 'low', 'modal', 1,
+        ${attemptId}
       )
       `);
+      await transaction.execute(
+        sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`,
+      );
       await transaction.execute(sql`
         insert into session_turn_attempts (
           id, account_id, workspace_id, session_id, turn_id, execution_generation,
           state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
           verified_control_revision, mcp_approval_policies
         ) values (
-          ${attemptId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${turnId}, 0,
+          ${attemptId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${turnId}, 1,
           'running', 'wf', ${`run:${attemptId}`}, ${`activity:${attemptId}`}, 0,
           '{}'::jsonb
         )
       `);
-      await transaction.execute(
-        sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`,
-      );
     },
   );
   return turnId;

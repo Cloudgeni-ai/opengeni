@@ -4435,6 +4435,12 @@ export const documents = pgTable(
     authorityKind: text("authority_kind").notNull().default("workspace"),
     authorityWorkspaceId: uuid("authority_workspace_id"),
     authoritySubjectId: text("authority_subject_id"),
+    // Activated personal documents follow their organization membership across
+    // workspaces. Legacy personal rows retain a null authority id and their
+    // original workspace anchor; originWorkspaceId is provenance only.
+    authorityId: uuid("authority_id"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    originWorkspaceId: uuid("origin_workspace_id").notNull(),
     // Per-document access controls. visibility 'private' restricts human reads to
     // created_by (a grant subject id, not a uuid); agent_access=false hides the
     // document from agent retrieval surfaces (docs MCP) while humans keep REST.
@@ -4493,15 +4499,28 @@ export const documents = pgTable(
       columns: [table.authorityWorkspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
     }).onDelete("restrict"),
+    userAuthority: foreignKey({
+      name: "documents_user_authority_fk",
+      columns: [table.authorityId, table.accountId, table.ownerOrganizationMembershipId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+        organizationUserResourceAuthorities.organizationMembershipId,
+      ],
+    }).onDelete("restrict"),
     authorityState: check(
       "documents_authority_chk",
-      sql`(${table.authorityKind} = 'organization' and ${table.authorityWorkspaceId} is null and ${table.authoritySubjectId} is null)
-        or (${table.authorityKind} = 'workspace' and ${table.authorityWorkspaceId} = ${table.workspaceId} and ${table.authoritySubjectId} is null)
-        or (${table.authorityKind} = 'personal' and ${table.authorityWorkspaceId} = ${table.workspaceId} and nullif(btrim(${table.authoritySubjectId}), '') is not null and octet_length(convert_to(${table.authoritySubjectId}, 'UTF8')) <= 1024 and ${table.authoritySubjectId} = ${table.createdBy})`,
+      sql`(${table.authorityKind} = 'organization' and ${table.authorityWorkspaceId} is null and ${table.authoritySubjectId} is null and ${table.authorityId} is null and ${table.ownerOrganizationMembershipId} is null)
+        or (${table.authorityKind} = 'workspace' and ${table.authorityWorkspaceId} = ${table.workspaceId} and ${table.authoritySubjectId} is null and ${table.authorityId} is null and ${table.ownerOrganizationMembershipId} is null)
+        or (${table.authorityKind} = 'personal' and nullif(btrim(${table.authoritySubjectId}), '') is not null and octet_length(convert_to(${table.authoritySubjectId}, 'UTF8')) <= 1024 and ${table.authoritySubjectId} = ${table.createdBy} and ((${table.authorityWorkspaceId} = ${table.workspaceId} and ${table.authorityId} is null and ${table.ownerOrganizationMembershipId} is null) or (${table.authorityWorkspaceId} is null and ${table.authorityId} is not null and ${table.ownerOrganizationMembershipId} is not null)))`,
     ),
     authorityVisibility: check(
       "documents_authority_visibility_chk",
       sql`(${table.authorityKind} = 'personal') = (${table.visibility} = 'private')`,
+    ),
+    originWorkspace: check(
+      "documents_origin_workspace_chk",
+      sql`${table.originWorkspaceId} = ${table.workspaceId}`,
     ),
     visibilityState: check(
       "documents_visibility_chk",
@@ -4557,6 +4576,8 @@ export const documentChunks = pgTable(
     authorityKind: text("authority_kind").notNull().default("workspace"),
     authorityWorkspaceId: uuid("authority_workspace_id"),
     authoritySubjectId: text("authority_subject_id"),
+    authorityId: uuid("authority_id"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
     embedding: vector("embedding").notNull(),
     embeddingModel: text("embedding_model").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4579,11 +4600,20 @@ export const documentChunks = pgTable(
       columns: [table.authorityWorkspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
     }).onDelete("restrict"),
+    userAuthority: foreignKey({
+      name: "document_chunks_user_authority_fk",
+      columns: [table.authorityId, table.accountId, table.ownerOrganizationMembershipId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+        organizationUserResourceAuthorities.organizationMembershipId,
+      ],
+    }).onDelete("restrict"),
     authorityState: check(
       "document_chunks_authority_chk",
-      sql`(${table.authorityKind} = 'organization' and ${table.authorityWorkspaceId} is null and ${table.authoritySubjectId} is null)
-        or (${table.authorityKind} = 'workspace' and ${table.authorityWorkspaceId} = ${table.workspaceId} and ${table.authoritySubjectId} is null)
-        or (${table.authorityKind} = 'personal' and ${table.authorityWorkspaceId} = ${table.workspaceId} and nullif(btrim(${table.authoritySubjectId}), '') is not null and octet_length(convert_to(${table.authoritySubjectId}, 'UTF8')) <= 1024)`,
+      sql`(${table.authorityKind} = 'organization' and ${table.authorityWorkspaceId} is null and ${table.authoritySubjectId} is null and ${table.authorityId} is null and ${table.ownerOrganizationMembershipId} is null)
+        or (${table.authorityKind} = 'workspace' and ${table.authorityWorkspaceId} = ${table.workspaceId} and ${table.authoritySubjectId} is null and ${table.authorityId} is null and ${table.ownerOrganizationMembershipId} is null)
+        or (${table.authorityKind} = 'personal' and nullif(btrim(${table.authoritySubjectId}), '') is not null and octet_length(convert_to(${table.authoritySubjectId}, 'UTF8')) <= 1024 and ((${table.authorityWorkspaceId} = ${table.workspaceId} and ${table.authorityId} is null and ${table.ownerOrganizationMembershipId} is null) or (${table.authorityWorkspaceId} is null and ${table.authorityId} is not null and ${table.ownerOrganizationMembershipId} is not null)))`,
     ),
   }),
 );
