@@ -45,7 +45,7 @@ let sequence = 0;
 function event(
   type: string,
   payload: unknown,
-  options: { turnId?: string | null } = {},
+  options: { turnId?: string | null; turnAttemptId?: string | null } = {},
 ): SessionEvent {
   sequence += 1;
   return {
@@ -57,6 +57,7 @@ function event(
     payload,
     occurredAt: new Date(1718000000000 + sequence * 1000).toISOString(),
     turnId: options.turnId === undefined ? "turn-1" : options.turnId,
+    ...(options.turnAttemptId === undefined ? {} : { turnAttemptId: options.turnAttemptId }),
   };
 }
 
@@ -64,7 +65,7 @@ function eventAt(
   sequenceNumber: number,
   type: string,
   payload: unknown,
-  options: { turnId?: string | null } = {},
+  options: { turnId?: string | null; turnAttemptId?: string | null } = {},
 ): SessionEvent {
   return {
     id: `evt-${sequenceNumber}`,
@@ -75,6 +76,7 @@ function eventAt(
     payload,
     occurredAt: new Date(1718000000000 + sequenceNumber * 1000).toISOString(),
     turnId: options.turnId === undefined ? "turn-1" : options.turnId,
+    ...(options.turnAttemptId === undefined ? {} : { turnAttemptId: options.turnAttemptId }),
   };
 }
 
@@ -1529,6 +1531,161 @@ describe("buildTimeline", () => {
     expect(phases.every((phase) => phase.status === "complete")).toBe(true);
     expect(phases.find((phase) => phase.phase === "tools")?.durationMs).toBe(350);
     expect(phases.find((phase) => phase.phase === "provider_first_byte")?.durationMs).toBe(1_250);
+  });
+
+  test("recovery replaces an abandoned startup attempt without leaving a stale duplicate", () => {
+    reset();
+    const turnId = "turn-recovered-tools";
+    const firstAttemptId = "11111111-1111-4111-8111-111111111111";
+    const recoveredAttemptId = "22222222-2222-4222-8222-222222222222";
+    const firstStarted = event(
+      "turn.startup.phase.started",
+      { phase: "tools" },
+      { turnId, turnAttemptId: firstAttemptId },
+    );
+    const recoveryRequested = event(
+      "turn.recovery.requested",
+      { reason: "worker_shutdown" },
+      { turnId, turnAttemptId: firstAttemptId },
+    );
+    const recoveredTurnStarted = event(
+      "turn.started",
+      { triggerEventId: "prompt-recovery" },
+      { turnId, turnAttemptId: recoveredAttemptId },
+    );
+    const recoveredStarted = event(
+      "turn.startup.phase.started",
+      { phase: "tools" },
+      { turnId, turnAttemptId: recoveredAttemptId },
+    );
+    const recoveredCompleted = event(
+      "turn.startup.phase.completed",
+      { phase: "tools", durationMs: 650 },
+      { turnId, turnAttemptId: recoveredAttemptId },
+    );
+
+    const phases = buildTimeline([
+      firstStarted,
+      recoveryRequested,
+      recoveredTurnStarted,
+      recoveredStarted,
+      recoveredCompleted,
+    ]).filter(
+      (item): item is StartupPhaseItem => item.kind === "startup-phase" && item.phase === "tools",
+    );
+
+    expect(phases).toHaveLength(1);
+    expect(phases[0]).toMatchObject({
+      id: recoveredStarted.id,
+      status: "complete",
+      startedAt: recoveredStarted.occurredAt,
+      completedAt: recoveredCompleted.occurredAt,
+      durationMs: 650,
+    });
+  });
+
+  test("a successful recovered provider attempt replaces the earlier failed wait", () => {
+    reset();
+    const turnId = "turn-recovered-provider";
+    const firstAttemptId = "33333333-3333-4333-8333-333333333333";
+    const recoveredAttemptId = "44444444-4444-4444-8444-444444444444";
+    const firstStarted = event(
+      "agent.model.request",
+      { phase: "started", attemptId: firstAttemptId },
+      { turnId, turnAttemptId: firstAttemptId },
+    );
+    const firstFailed = event(
+      "agent.model.request",
+      { phase: "failed", attemptId: firstAttemptId, durationMs: 900 },
+      { turnId, turnAttemptId: firstAttemptId },
+    );
+    const recoveryRequested = event(
+      "turn.recovery.requested",
+      { reason: "provider_recovery" },
+      { turnId, turnAttemptId: firstAttemptId },
+    );
+    const recoveredStarted = event(
+      "agent.model.request",
+      { phase: "started", attemptId: recoveredAttemptId },
+      { turnId, turnAttemptId: recoveredAttemptId },
+    );
+    const recoveredFirstByte = event(
+      "agent.model.request",
+      { phase: "first_byte", attemptId: recoveredAttemptId, durationMs: 425 },
+      { turnId, turnAttemptId: recoveredAttemptId },
+    );
+
+    const phases = buildTimeline([
+      firstStarted,
+      firstFailed,
+      recoveryRequested,
+      recoveredStarted,
+      recoveredFirstByte,
+    ]).filter(
+      (item): item is StartupPhaseItem =>
+        item.kind === "startup-phase" && item.phase === "provider_first_byte",
+    );
+
+    expect(phases).toHaveLength(1);
+    expect(phases[0]).toMatchObject({
+      id: recoveredStarted.id,
+      status: "complete",
+      startedAt: recoveredStarted.occurredAt,
+      completedAt: recoveredFirstByte.occurredAt,
+      durationMs: 425,
+    });
+  });
+
+  test("recovery preserves a provider first byte already completed by the logical turn", () => {
+    reset();
+    const turnId = "turn-provider-already-started";
+    const firstAttemptId = "55555555-5555-4555-8555-555555555555";
+    const recoveredAttemptId = "66666666-6666-4666-8666-666666666666";
+    const firstStarted = event(
+      "agent.model.request",
+      { phase: "started", attemptId: firstAttemptId },
+      { turnId, turnAttemptId: firstAttemptId },
+    );
+    const firstByte = event(
+      "agent.model.request",
+      { phase: "first_byte", attemptId: firstAttemptId, durationMs: 300 },
+      { turnId, turnAttemptId: firstAttemptId },
+    );
+    const recoveryRequested = event(
+      "turn.recovery.requested",
+      { reason: "worker_shutdown" },
+      { turnId, turnAttemptId: firstAttemptId },
+    );
+    const recoveredStarted = event(
+      "agent.model.request",
+      { phase: "started", attemptId: recoveredAttemptId },
+      { turnId, turnAttemptId: recoveredAttemptId },
+    );
+    const recoveredFirstByte = event(
+      "agent.model.request",
+      { phase: "first_byte", attemptId: recoveredAttemptId, durationMs: 700 },
+      { turnId, turnAttemptId: recoveredAttemptId },
+    );
+
+    const phases = buildTimeline([
+      firstStarted,
+      firstByte,
+      recoveryRequested,
+      recoveredStarted,
+      recoveredFirstByte,
+    ]).filter(
+      (item): item is StartupPhaseItem =>
+        item.kind === "startup-phase" && item.phase === "provider_first_byte",
+    );
+
+    expect(phases).toHaveLength(1);
+    expect(phases[0]).toMatchObject({
+      id: firstStarted.id,
+      status: "complete",
+      startedAt: firstStarted.occurredAt,
+      completedAt: firstByte.occurredAt,
+      durationMs: 300,
+    });
   });
 
   test("a lazy chat-only path never claims that a sandbox was started", () => {
