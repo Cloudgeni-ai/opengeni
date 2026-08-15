@@ -29,6 +29,7 @@ import {
   getSessionByCreateIdempotencyKey,
   getVariableSet,
   initializeSessionStartAtomically,
+  materializeScheduledTaskReusableSessionFromRun,
   markScheduledTaskRunFailedIfQueued,
   recordKnowledgeSourceSyncWake,
   recordUsageEvent,
@@ -96,6 +97,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         const run = await createScheduledTaskRun(db, {
           workspaceId: task.workspaceId,
           taskId: task.id,
+          taskAuthorityRevision: task.authorityRevision,
+          taskExecutionDigest: task.executionDigest,
           triggerType: input.triggerType,
           producerKey:
             input.producerKey ??
@@ -264,6 +267,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         let run = await createScheduledTaskRun(dispatchDb, {
           workspaceId: task.workspaceId,
           taskId: task.id,
+          taskAuthorityRevision: task.authorityRevision,
+          taskExecutionDigest: task.executionDigest,
           triggerType: input.triggerType,
           producerKey:
             input.producerKey ??
@@ -565,15 +570,21 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               workflowId = workflowIdForSession(session.id);
               await setTemporalWorkflowId(dispatchDb, task.workspaceId, session.id, workflowId);
               if (task.runMode === "reusable_session") {
-                await updateScheduledTask(dispatchDb, task.workspaceId, task.id, {
-                  reusableSessionId: session.id,
-                  ...(runPersonalResourceAuthority
-                    ? {
-                        clonePersonalResourceAuthorityFromRevision:
-                          runPersonalResourceAuthority.taskAuthorityRevision,
-                      }
-                    : {}),
-                });
+                if (runPersonalResourceAuthority) {
+                  await materializeScheduledTaskReusableSessionFromRun(dispatchDb, {
+                    accountId: task.accountId,
+                    workspaceId: task.workspaceId,
+                    taskId: task.id,
+                    runId: run.id,
+                    sessionId: session.id,
+                    sourceTaskAuthorityRevision: runPersonalResourceAuthority.taskAuthorityRevision,
+                    sourceExecutionDigest: runPersonalResourceAuthority.executionDigest,
+                  });
+                } else {
+                  await updateScheduledTask(dispatchDb, task.workspaceId, task.id, {
+                    reusableSessionId: session.id,
+                  });
+                }
               }
               if (sessionCreated) {
                 const createdEvents: Parameters<typeof appendSessionEvents>[3] = [

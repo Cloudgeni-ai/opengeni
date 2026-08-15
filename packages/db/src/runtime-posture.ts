@@ -77,6 +77,7 @@ const PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE =
 const SCHEDULED_PERSONAL_RESOURCE_ROUTINES = [
   "freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint)",
   "clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint)",
+  "materialize_scheduled_task_reusable_session_from_run(uuid, uuid, uuid, uuid, uuid, bigint, text)",
   "scheduled_task_run_personal_resource_authority(uuid, uuid, uuid)",
 ] as const;
 const PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE =

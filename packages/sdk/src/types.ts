@@ -2313,6 +2313,8 @@ export type ScheduledTask = {
   createdBy?: TurnInitiator | undefined;
   createdByContext?: TurnInitiatorContext | undefined;
   personalConnections?: McpPersonalConnectionSummary[] | undefined;
+  authorityRevision: number;
+  executionDigest: string;
   targetSessionId: string | null;
   reusableSessionId: string | null;
   variableSetId: string | null;
@@ -3933,6 +3935,8 @@ export type ScheduledTaskRun = {
   accountId: string;
   workspaceId: string;
   taskId: string;
+  taskAuthorityRevision: number | null;
+  taskExecutionDigest: string | null;
   status: ScheduledTaskRunStatus;
   triggerType: ScheduledTaskTriggerType;
   scheduledAt: string | null;

@@ -1032,6 +1032,15 @@ BEGIN
         ${literal(role)}
       );
       EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.materialize_scheduled_task_reusable_session_from_run(uuid, uuid, uuid, uuid, uuid, bigint, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.materialize_scheduled_task_reusable_session_from_run(uuid, uuid, uuid, uuid, uuid, bigint, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
         'REVOKE ALL ON FUNCTION %I.scheduled_task_run_personal_resource_authority(uuid, uuid, uuid) FROM PUBLIC',
         ${literal(schema)}
       );

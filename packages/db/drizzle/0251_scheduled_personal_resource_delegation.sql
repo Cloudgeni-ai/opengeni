@@ -12,8 +12,24 @@ ALTER TABLE "scheduled_tasks"
   ADD COLUMN "authority_revision" bigint NOT NULL DEFAULT 1;
 
 ALTER TABLE "scheduled_tasks"
+  ADD COLUMN "execution_digest" text;
+
+ALTER TABLE "scheduled_tasks"
   ADD CONSTRAINT "scheduled_tasks_authority_revision_chk"
-    CHECK ("authority_revision" > 0);
+    CHECK ("authority_revision" > 0),
+  ADD CONSTRAINT "scheduled_tasks_execution_digest_chk"
+    CHECK ("execution_digest" ~ '^[0-9a-f]{64}$') NOT VALID;
+
+ALTER TABLE "scheduled_task_runs"
+  ADD COLUMN "task_authority_revision" bigint,
+  ADD COLUMN "task_execution_digest" text,
+  ADD CONSTRAINT "scheduled_task_runs_execution_binding_chk" CHECK (
+    ("task_authority_revision" IS NULL AND "task_execution_digest" IS NULL)
+    OR (
+      "task_authority_revision" > 0
+      AND "task_execution_digest" ~ '^[0-9a-f]{64}$'
+    )
+  );
 
 ALTER TABLE "session_system_updates"
   ADD COLUMN "scheduled_task_run_id" uuid;
@@ -66,6 +82,85 @@ REVOKE ALL ON FUNCTION
   opengeni_private.scheduled_personal_resource_capability_active(text)
   FROM PUBLIC;
 
+CREATE OR REPLACE FUNCTION scheduled_task_execution_state(
+  p_task scheduled_tasks
+)
+RETURNS jsonb
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, pg_temp
+AS $scheduled_task_execution_state$
+  -- Administrative presentation/lifecycle fields and the binding bookkeeping
+  -- itself are the only exclusions. Every current and future task column is
+  -- execution-affecting by default until a migration explicitly proves and
+  -- adds a narrow administrative exception here.
+  SELECT pg_catalog.to_jsonb(p_task) - ARRAY[
+    'name',
+    'status',
+    'updated_at',
+    'authority_revision',
+    'execution_digest'
+  ]::text[]
+$scheduled_task_execution_state$;
+
+CREATE OR REPLACE FUNCTION scheduled_task_execution_digest(
+  p_task scheduled_tasks
+)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, pg_temp
+AS $scheduled_task_execution_digest$
+  SELECT pg_catalog.encode(
+    pg_catalog.sha256(pg_catalog.convert_to(
+      (
+        pg_catalog.to_jsonb(p_task) - ARRAY[
+          'name',
+          'status',
+          'updated_at',
+          'authority_revision',
+          'execution_digest'
+        ]::text[]
+      )::text,
+      'UTF8'
+    )),
+    'hex'
+  )
+$scheduled_task_execution_digest$;
+
+CREATE OR REPLACE FUNCTION set_scheduled_task_execution_digest()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $set_scheduled_task_execution_digest$
+BEGIN
+  NEW.execution_digest := pg_catalog.encode(
+    pg_catalog.sha256(pg_catalog.convert_to(
+      (
+        pg_catalog.to_jsonb(NEW) - ARRAY[
+          'name',
+          'status',
+          'updated_at',
+          'authority_revision',
+          'execution_digest'
+        ]::text[]
+      )::text,
+      'UTF8'
+    )),
+    'hex'
+  );
+  RETURN NEW;
+END
+$set_scheduled_task_execution_digest$;
+
+UPDATE scheduled_tasks task
+SET execution_digest = scheduled_task_execution_digest(task);
+
+ALTER TABLE "scheduled_tasks"
+  ALTER COLUMN "execution_digest" SET NOT NULL,
+  VALIDATE CONSTRAINT "scheduled_tasks_execution_digest_chk";
+
 CREATE TABLE "scheduled_task_personal_resource_authorities" (
   "task_id" uuid NOT NULL REFERENCES "scheduled_tasks"("id") ON DELETE CASCADE,
   "task_authority_revision" bigint NOT NULL,
@@ -77,6 +172,7 @@ CREATE TABLE "scheduled_task_personal_resource_authorities" (
   "target_session_id" uuid,
   "session_visibility" text NOT NULL,
   "session_authority_epoch" integer,
+  "execution_digest" text NOT NULL,
   "resource_count" integer NOT NULL,
   "created_at" timestamptz NOT NULL DEFAULT clock_timestamp(),
   CONSTRAINT "scheduled_task_personal_resource_authorities_pk" PRIMARY KEY (
@@ -99,6 +195,9 @@ CREATE TABLE "scheduled_task_personal_resource_authorities" (
   ),
   CONSTRAINT "scheduled_task_personal_resource_authorities_subject_chk" CHECK (
     length(btrim("initiating_human_subject_id")) BETWEEN 1 AND 1024
+  ),
+  CONSTRAINT "scheduled_task_personal_resource_authorities_digest_chk" CHECK (
+    "execution_digest" ~ '^[0-9a-f]{64}$'
   )
 );
 
@@ -186,6 +285,7 @@ CREATE TABLE "scheduled_task_run_personal_resource_admissions" (
   "target_session_id" uuid,
   "session_visibility" text NOT NULL,
   "session_authority_epoch" integer,
+  "execution_digest" text NOT NULL,
   "resource_count" integer NOT NULL,
   "admitted_at" timestamptz NOT NULL DEFAULT clock_timestamp(),
   CONSTRAINT "scheduled_task_run_personal_resource_admissions_task_fk"
@@ -200,6 +300,9 @@ CREATE TABLE "scheduled_task_run_personal_resource_admissions" (
     "task_authority_revision" > 0
     AND "membership_authorization_revision" > 0
     AND "resource_count" > 0
+  ),
+  CONSTRAINT "scheduled_task_run_personal_resource_admissions_digest_chk" CHECK (
+    "execution_digest" ~ '^[0-9a-f]{64}$'
   )
 );
 
@@ -357,6 +460,20 @@ BEGIN
         || 'FOR INSERT WITH CHECK (current_user = %L AND '
         || 'opengeni_private.scheduled_personal_resource_capability_active())',
       data_schema, table_name, migration_owner
+    );
+  END LOOP;
+
+  FOREACH table_name IN ARRAY ARRAY[
+    'scheduled_task_run_personal_resource_admissions',
+    'scheduled_task_run_personal_resource_snapshots'
+  ] LOOP
+    EXECUTE format(
+      'CREATE POLICY scheduled_personal_resource_run_rebind_update ON %I.%I '
+        || 'FOR UPDATE USING (current_user = %L AND '
+        || 'opengeni_private.scheduled_personal_resource_capability_active(''run_admit'')) '
+        || 'WITH CHECK (current_user = %L AND '
+        || 'opengeni_private.scheduled_personal_resource_capability_active(''run_admit''))',
+      data_schema, table_name, migration_owner, migration_owner
     );
   END LOOP;
 
@@ -533,11 +650,12 @@ BEGIN
     task_id, task_authority_revision, account_id, workspace_id,
     initiating_human_subject_id, owner_organization_membership_id,
     membership_authorization_revision, target_session_id, session_visibility,
-    session_authority_epoch, resource_count
+    session_authority_epoch, execution_digest, resource_count
   ) VALUES (
     p_task_id, p_task_authority_revision, p_account_id, p_workspace_id,
     initiating_subject, member_row.id, member_row.authorization_revision,
-    target_session, target_visibility, target_epoch, resource_total
+    target_session, target_visibility, target_epoch, task_row.execution_digest,
+    resource_total
   );
 
   FOR resource_row IN
@@ -691,6 +809,7 @@ SET search_path = pg_catalog, pg_temp
 AS $clone_scheduled_task_personal_resource_authority$
 DECLARE
   source_authority record;
+  target_execution_digest text;
   copied_count integer;
 BEGIN
   IF p_account_id IS DISTINCT FROM nullif(current_setting('opengeni.account_id', true), '')::uuid
@@ -714,7 +833,7 @@ BEGIN
   ) VALUES (pg_backend_pid(), pg_current_xact_id(), 'task_write')
   ON CONFLICT DO NOTHING;
 
-  PERFORM 1
+  SELECT task.execution_digest INTO target_execution_digest
   FROM scheduled_tasks task
   WHERE task.id = p_task_id
     AND task.account_id = p_account_id
@@ -744,7 +863,7 @@ BEGIN
     task_id, task_authority_revision, account_id, workspace_id,
     initiating_human_subject_id, owner_organization_membership_id,
     membership_authorization_revision, target_session_id, session_visibility,
-    session_authority_epoch, resource_count
+    session_authority_epoch, execution_digest, resource_count
   ) VALUES (
     source_authority.task_id, p_target_task_authority_revision,
     source_authority.account_id, source_authority.workspace_id,
@@ -752,7 +871,8 @@ BEGIN
     source_authority.owner_organization_membership_id,
     source_authority.membership_authorization_revision,
     source_authority.target_session_id, source_authority.session_visibility,
-    source_authority.session_authority_epoch, source_authority.resource_count
+    source_authority.session_authority_epoch, target_execution_digest,
+    source_authority.resource_count
   );
 
   INSERT INTO scheduled_task_personal_resource_snapshots (
@@ -797,6 +917,181 @@ EXCEPTION WHEN OTHERS THEN
 END
 $clone_scheduled_task_personal_resource_authority$;
 
+CREATE OR REPLACE FUNCTION materialize_scheduled_task_reusable_session_from_run(
+  p_account_id uuid,
+  p_workspace_id uuid,
+  p_task_id uuid,
+  p_run_id uuid,
+  p_session_id uuid,
+  p_source_task_authority_revision bigint,
+  p_source_execution_digest text
+)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $materialize_scheduled_task_reusable_session_from_run$
+DECLARE
+  task_row record;
+  admission_row record;
+  target_revision bigint;
+  target_execution_digest text;
+  copied_count integer;
+  affected integer;
+BEGIN
+  IF p_account_id IS DISTINCT FROM nullif(current_setting('opengeni.account_id', true), '')::uuid
+    OR p_workspace_id IS DISTINCT FROM nullif(
+      current_setting('opengeni.workspace_id', true), ''
+    )::uuid
+  THEN
+    RAISE EXCEPTION 'scheduled reusable-session materialization scope mismatch'
+      USING ERRCODE = '42501';
+  END IF;
+  IF p_source_task_authority_revision <= 0
+    OR p_source_execution_digest !~ '^[0-9a-f]{64}$'
+  THEN
+    RAISE EXCEPTION 'scheduled reusable-session source binding is invalid'
+      USING ERRCODE = '22023';
+  END IF;
+
+  INSERT INTO opengeni_private.scheduled_personal_resource_capabilities (
+    backend_pid, transaction_id, capability_kind
+  ) VALUES (pg_backend_pid(), pg_current_xact_id(), 'run_admit')
+  ON CONFLICT DO NOTHING;
+
+  SELECT admission.* INTO admission_row
+  FROM scheduled_task_run_personal_resource_admissions admission
+  WHERE admission.run_id = p_run_id
+    AND admission.task_id = p_task_id
+    AND admission.account_id = p_account_id
+    AND admission.workspace_id = p_workspace_id
+    AND admission.task_authority_revision = p_source_task_authority_revision
+    AND admission.execution_digest = p_source_execution_digest
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'scheduled reusable-session admission binding changed'
+      USING ERRCODE = '40001';
+  END IF;
+
+  PERFORM 1
+  FROM scheduled_task_runs run
+  WHERE run.id = p_run_id
+    AND run.task_id = p_task_id
+    AND run.account_id = p_account_id
+    AND run.workspace_id = p_workspace_id
+    AND run.status = 'queued'
+    AND run.task_authority_revision = p_source_task_authority_revision
+    AND run.task_execution_digest = p_source_execution_digest
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'scheduled reusable-session run binding changed'
+      USING ERRCODE = '40001';
+  END IF;
+
+  PERFORM 1
+  FROM sessions session_value
+  WHERE session_value.id = p_session_id
+    AND session_value.account_id = p_account_id
+    AND session_value.workspace_id = p_workspace_id
+    AND session_value.status <> 'cancelled'
+  FOR SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'scheduled reusable-session target is unavailable'
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT task.* INTO task_row
+  FROM scheduled_tasks task
+  WHERE task.id = p_task_id
+    AND task.account_id = p_account_id
+    AND task.workspace_id = p_workspace_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'scheduled reusable-session task is unavailable'
+      USING ERRCODE = '40001';
+  END IF;
+  IF task_row.status <> 'active'
+    OR task_row.run_mode <> 'reusable_session'
+    OR task_row.reusable_session_id IS NOT NULL
+    OR task_row.authority_revision IS DISTINCT FROM p_source_task_authority_revision
+    OR task_row.execution_digest IS DISTINCT FROM p_source_execution_digest
+  THEN
+    RAISE EXCEPTION 'scheduled reusable-session task changed before materialization'
+      USING ERRCODE = '40001';
+  END IF;
+
+  UPDATE scheduled_tasks task
+  SET reusable_session_id = p_session_id,
+    authority_revision = task.authority_revision + 1,
+    updated_at = clock_timestamp()
+  WHERE task.id = p_task_id
+    AND task.account_id = p_account_id
+    AND task.workspace_id = p_workspace_id
+  RETURNING task.authority_revision, task.execution_digest
+  INTO STRICT target_revision, target_execution_digest;
+
+  SELECT clone_scheduled_task_personal_resource_authority(
+    p_account_id,
+    p_workspace_id,
+    p_task_id,
+    p_source_task_authority_revision,
+    target_revision
+  ) INTO copied_count;
+  IF copied_count <> admission_row.resource_count THEN
+    RAISE EXCEPTION 'scheduled reusable-session authority clone is incomplete'
+      USING ERRCODE = '42501';
+  END IF;
+
+  UPDATE scheduled_task_run_personal_resource_snapshots snapshot
+  SET task_authority_revision = target_revision
+  WHERE snapshot.run_id = p_run_id
+    AND snapshot.task_id = p_task_id
+    AND snapshot.task_authority_revision = p_source_task_authority_revision;
+  GET DIAGNOSTICS affected = ROW_COUNT;
+  IF affected <> admission_row.resource_count THEN
+    RAISE EXCEPTION 'scheduled reusable-session run snapshot rebind is incomplete'
+      USING ERRCODE = '42501';
+  END IF;
+
+  UPDATE scheduled_task_run_personal_resource_admissions admission
+  SET task_authority_revision = target_revision,
+    execution_digest = target_execution_digest
+  WHERE admission.run_id = p_run_id
+    AND admission.task_authority_revision = p_source_task_authority_revision
+    AND admission.execution_digest = p_source_execution_digest;
+  GET DIAGNOSTICS affected = ROW_COUNT;
+  IF affected <> 1 THEN
+    RAISE EXCEPTION 'scheduled reusable-session run admission rebind failed'
+      USING ERRCODE = '42501';
+  END IF;
+
+  UPDATE scheduled_task_runs run
+  SET task_authority_revision = target_revision,
+    task_execution_digest = target_execution_digest,
+    updated_at = clock_timestamp()
+  WHERE run.id = p_run_id
+    AND run.task_authority_revision = p_source_task_authority_revision
+    AND run.task_execution_digest = p_source_execution_digest;
+  GET DIAGNOSTICS affected = ROW_COUNT;
+  IF affected <> 1 THEN
+    RAISE EXCEPTION 'scheduled reusable-session run row rebind failed'
+      USING ERRCODE = '42501';
+  END IF;
+
+  DELETE FROM opengeni_private.scheduled_personal_resource_capabilities
+  WHERE backend_pid = pg_backend_pid()
+    AND transaction_id = pg_current_xact_id_if_assigned()
+    AND capability_kind = 'run_admit';
+  RETURN target_revision;
+EXCEPTION WHEN OTHERS THEN
+  DELETE FROM opengeni_private.scheduled_personal_resource_capabilities
+  WHERE backend_pid = pg_backend_pid()
+    AND transaction_id = pg_current_xact_id_if_assigned()
+    AND capability_kind = 'run_admit';
+  RAISE;
+END
+$materialize_scheduled_task_reusable_session_from_run$;
+
 CREATE OR REPLACE FUNCTION fence_scheduled_task_personal_resource_execution_update()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -816,24 +1111,23 @@ BEGIN
       USING ERRCODE = '22023';
   END IF;
 
-  -- Name, status, and timestamps do not affect execution. Every mutable field
-  -- that changes when/how/where the task executes or which instructions and
-  -- authority snapshots it carries is fenced here, including the worker-owned
-  -- reusable-session materialization pointer.
-  execution_changed :=
-    NEW.schedule IS DISTINCT FROM OLD.schedule
-    OR NEW.temporal_schedule_id IS DISTINCT FROM OLD.temporal_schedule_id
-    OR NEW.run_mode IS DISTINCT FROM OLD.run_mode
-    OR NEW.overlap_policy IS DISTINCT FROM OLD.overlap_policy
-    OR NEW.action IS DISTINCT FROM OLD.action
-    OR NEW.agent_config IS DISTINCT FROM OLD.agent_config
-    OR NEW.personal_connection_delegations IS DISTINCT FROM OLD.personal_connection_delegations
-    OR NEW.xai_provider_account_authority_snapshot IS DISTINCT FROM
-      OLD.xai_provider_account_authority_snapshot
-    OR NEW.reusable_session_id IS DISTINCT FROM OLD.reusable_session_id
-    OR NEW.variable_set_id IS DISTINCT FROM OLD.variable_set_id
-    OR NEW.rig_id IS DISTINCT FROM OLD.rig_id
-    OR NEW.metadata IS DISTINCT FROM OLD.metadata;
+  execution_changed := (
+    pg_catalog.to_jsonb(NEW) - ARRAY[
+      'name',
+      'status',
+      'updated_at',
+      'authority_revision',
+      'execution_digest'
+    ]::text[]
+  ) IS DISTINCT FROM (
+    pg_catalog.to_jsonb(OLD) - ARRAY[
+      'name',
+      'status',
+      'updated_at',
+      'authority_revision',
+      'execution_digest'
+    ]::text[]
+  );
 
   IF NOT execution_changed THEN
     RETURN NEW;
@@ -890,6 +1184,7 @@ DECLARE
   authority_row record;
   once_snapshot record;
   selected_personal_count integer;
+  has_authority boolean := false;
   invalid_count integer;
   affected integer;
 BEGIN
@@ -898,10 +1193,18 @@ BEGIN
   WHERE task.id = NEW.task_id
     AND task.account_id = NEW.account_id
     AND task.workspace_id = NEW.workspace_id
-  FOR SHARE;
+  FOR UPDATE;
 
-  IF task_row.status <> 'active' THEN
-    RAISE EXCEPTION 'scheduled task is not active' USING ERRCODE = '55000';
+  IF (NEW.task_authority_revision IS NULL) <> (NEW.task_execution_digest IS NULL) THEN
+    RAISE EXCEPTION 'scheduled task run execution binding is incomplete'
+      USING ERRCODE = '22023';
+  END IF;
+  IF NEW.task_authority_revision IS NOT NULL AND (
+    NEW.task_authority_revision IS DISTINCT FROM task_row.authority_revision
+    OR NEW.task_execution_digest IS DISTINCT FROM task_row.execution_digest
+  ) THEN
+    RAISE EXCEPTION 'scheduled task changed after worker read'
+      USING ERRCODE = '40001';
   END IF;
 
   INSERT INTO opengeni_private.scheduled_personal_resource_capabilities (
@@ -913,7 +1216,8 @@ BEGIN
   FROM scheduled_task_personal_resource_authorities authority
   WHERE authority.task_id = NEW.task_id
     AND authority.task_authority_revision = task_row.authority_revision;
-  IF NOT FOUND THEN
+  has_authority := FOUND;
+  IF NOT has_authority THEN
     SELECT count(*)::integer INTO selected_personal_count
     FROM (
       SELECT variable_set.id
@@ -944,15 +1248,38 @@ BEGIN
       WHERE rig.id = task_row.rig_id
         AND rig.account_id = task_row.account_id
     ) selected;
-    IF selected_personal_count <> 0 THEN
-      RAISE EXCEPTION 'scheduled personal-resource task has no authority snapshot'
-        USING ERRCODE = '42501';
+    IF selected_personal_count = 0 THEN
+      DELETE FROM opengeni_private.scheduled_personal_resource_capabilities
+      WHERE backend_pid = pg_backend_pid()
+        AND transaction_id = pg_current_xact_id_if_assigned()
+        AND capability_kind = 'run_admit';
+      RETURN NEW;
     END IF;
-    DELETE FROM opengeni_private.scheduled_personal_resource_capabilities
-    WHERE backend_pid = pg_backend_pid()
-      AND transaction_id = pg_current_xact_id_if_assigned()
-      AND capability_kind = 'run_admit';
-    RETURN NEW;
+  END IF;
+
+  -- Ordinary run-history rows remain writable for paused tasks. The active
+  -- fence applies only when this insert would admit personal-resource
+  -- authority, and is checked while holding the task row lock before any
+  -- admission/snapshot/once-consumption write.
+  IF task_row.status <> 'active' THEN
+    RAISE EXCEPTION 'scheduled task is not active' USING ERRCODE = '55000';
+  END IF;
+
+  IF NOT has_authority THEN
+    RAISE EXCEPTION 'scheduled personal-resource task has no authority snapshot'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NEW.task_authority_revision IS NULL THEN
+    RAISE EXCEPTION 'scheduled personal-resource run requires an execution binding'
+      USING ERRCODE = '42501';
+  END IF;
+  IF authority_row.execution_digest IS DISTINCT FROM task_row.execution_digest
+    OR authority_row.task_authority_revision IS DISTINCT FROM NEW.task_authority_revision
+    OR authority_row.execution_digest IS DISTINCT FROM NEW.task_execution_digest
+  THEN
+    RAISE EXCEPTION 'scheduled personal-resource execution binding mismatch'
+      USING ERRCODE = '42501';
   END IF;
 
   SELECT count(*)::integer INTO invalid_count
@@ -1055,7 +1382,7 @@ BEGIN
     run_id, task_id, task_authority_revision, account_id, workspace_id,
     initiating_human_subject_id, owner_organization_membership_id,
     membership_authorization_revision, target_session_id, session_visibility,
-    session_authority_epoch, resource_count
+    session_authority_epoch, execution_digest, resource_count
   ) VALUES (
     NEW.id, authority_row.task_id, authority_row.task_authority_revision,
     authority_row.account_id, authority_row.workspace_id,
@@ -1063,7 +1390,7 @@ BEGIN
     authority_row.owner_organization_membership_id,
     authority_row.membership_authorization_revision, authority_row.target_session_id,
     authority_row.session_visibility, authority_row.session_authority_epoch,
-    authority_row.resource_count
+    authority_row.execution_digest, authority_row.resource_count
   );
 
   INSERT INTO scheduled_task_run_personal_resource_snapshots (
@@ -1288,6 +1615,7 @@ BEGIN
     AND task.workspace_id = admission_row.workspace_id
     AND task.status = 'active'
     AND task.authority_revision = admission_row.task_authority_revision
+    AND task.execution_digest = admission_row.execution_digest
   FOR SHARE;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'scheduled task authority revision changed before attempt admission'
@@ -1337,6 +1665,10 @@ CREATE TRIGGER scheduled_task_personal_resource_execution_revision
 BEFORE UPDATE ON "scheduled_tasks"
 FOR EACH ROW EXECUTE FUNCTION fence_scheduled_task_personal_resource_execution_update();
 
+CREATE TRIGGER zz_scheduled_task_execution_digest
+BEFORE INSERT OR UPDATE ON "scheduled_tasks"
+FOR EACH ROW EXECUTE FUNCTION set_scheduled_task_execution_digest();
+
 CREATE TRIGGER scheduled_task_run_personal_resource_admission
 AFTER INSERT ON "scheduled_task_runs"
 FOR EACH ROW EXECUTE FUNCTION admit_scheduled_task_run_personal_resources();
@@ -1357,6 +1689,7 @@ CREATE OR REPLACE FUNCTION scheduled_task_run_personal_resource_authority(
 RETURNS TABLE (
   task_id uuid,
   task_authority_revision bigint,
+  execution_digest text,
   initiating_human_subject_id text,
   resource_kind text,
   resource_id uuid,
@@ -1386,7 +1719,7 @@ BEGIN
   ON CONFLICT DO NOTHING;
   RETURN QUERY
   SELECT admission.task_id, admission.task_authority_revision,
-    admission.initiating_human_subject_id, snapshot.resource_kind,
+    admission.execution_digest, admission.initiating_human_subject_id, snapshot.resource_kind,
     snapshot.resource_id, snapshot.resource_version_id, snapshot.selection_sources,
     snapshot.authority_id, snapshot.authority_generation, snapshot.grant_id,
     snapshot.grant_generation, snapshot.grant_mode
@@ -1412,6 +1745,21 @@ DECLARE
   data_schema text := current_schema();
 BEGIN
   EXECUTE format(
+    'ALTER FUNCTION %1$I.scheduled_task_execution_state(%1$I.scheduled_tasks) '
+      || 'SET search_path = pg_catalog, %1$I, pg_temp',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %1$I.scheduled_task_execution_digest(%1$I.scheduled_tasks) '
+      || 'SET search_path = pg_catalog, %1$I, pg_temp',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %1$I.set_scheduled_task_execution_digest() '
+      || 'SET search_path = pg_catalog, %1$I, pg_temp',
+    data_schema
+  );
+  EXECUTE format(
     'ALTER FUNCTION %1$I.freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint) '
       || 'SET search_path = pg_catalog, %1$I, pg_temp',
     data_schema
@@ -1419,6 +1767,12 @@ BEGIN
   EXECUTE format(
     'ALTER FUNCTION %1$I.clone_scheduled_task_personal_resource_authority('
       || 'uuid, uuid, uuid, bigint, bigint) SET search_path = pg_catalog, %1$I, pg_temp',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %1$I.materialize_scheduled_task_reusable_session_from_run('
+      || 'uuid, uuid, uuid, uuid, uuid, bigint, text) '
+      || 'SET search_path = pg_catalog, %1$I, pg_temp',
     data_schema
   );
   EXECUTE format(
@@ -1449,10 +1803,16 @@ BEGIN
 END
 $scheduled_personal_resource_search_path$;
 
+REVOKE ALL ON FUNCTION scheduled_task_execution_state(scheduled_tasks) FROM PUBLIC;
+REVOKE ALL ON FUNCTION scheduled_task_execution_digest(scheduled_tasks) FROM PUBLIC;
+REVOKE ALL ON FUNCTION set_scheduled_task_execution_digest() FROM PUBLIC;
 REVOKE ALL ON FUNCTION freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint)
   FROM PUBLIC;
 REVOKE ALL ON FUNCTION clone_scheduled_task_personal_resource_authority(
   uuid, uuid, uuid, bigint, bigint
+) FROM PUBLIC;
+REVOKE ALL ON FUNCTION materialize_scheduled_task_reusable_session_from_run(
+  uuid, uuid, uuid, uuid, uuid, bigint, text
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fence_scheduled_task_personal_resource_execution_update() FROM PUBLIC;
 REVOKE ALL ON FUNCTION scheduled_task_run_personal_resource_authority(uuid, uuid, uuid)
@@ -1475,6 +1835,10 @@ BEGIN
     GRANT EXECUTE ON FUNCTION
       clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint)
       TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION
+      materialize_scheduled_task_reusable_session_from_run(
+        uuid, uuid, uuid, uuid, uuid, bigint, text
+      ) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION
       scheduled_task_run_personal_resource_authority(uuid, uuid, uuid)
       TO opengeni_app;

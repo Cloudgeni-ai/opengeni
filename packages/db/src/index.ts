@@ -13822,6 +13822,10 @@ export async function createScheduledTaskRun(
   input: {
     workspaceId: string;
     taskId: string;
+    /** Exact task snapshot read by the dispatching worker. */
+    taskAuthorityRevision?: number | null;
+    /** Exact task snapshot read by the dispatching worker. */
+    taskExecutionDigest?: string | null;
     triggerType: ScheduledTaskTriggerType;
     /** Stable Temporal workflow/activity producer identity for replay repair. */
     producerKey?: string | null;
@@ -13830,6 +13834,9 @@ export async function createScheduledTaskRun(
   },
 ): Promise<ScheduledTaskRun> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    if ((input.taskAuthorityRevision == null) !== (input.taskExecutionDigest == null)) {
+      throw new Error("scheduled task run execution binding is incomplete");
+    }
     const [taskRow] = await scopedDb
       .select()
       .from(schema.scheduledTasks)
@@ -13847,6 +13854,8 @@ export async function createScheduledTaskRun(
       accountId: taskRow.accountId,
       workspaceId: taskRow.workspaceId,
       taskId: input.taskId,
+      taskAuthorityRevision: input.taskAuthorityRevision ?? null,
+      taskExecutionDigest: input.taskExecutionDigest ?? null,
       triggerType: input.triggerType,
       producerKey: input.producerKey ?? null,
       scheduledAt: input.scheduledAt ?? null,
@@ -13880,6 +13889,13 @@ export async function createScheduledTaskRun(
     if (!row) {
       throw new Error("Failed to create scheduled task run");
     }
+    if (
+      input.taskAuthorityRevision != null &&
+      (row.taskAuthorityRevision !== input.taskAuthorityRevision ||
+        row.taskExecutionDigest !== input.taskExecutionDigest)
+    ) {
+      throw new Error("scheduled task run execution binding changed");
+    }
     return mapScheduledTaskRun(row);
   });
 }
@@ -13887,6 +13903,7 @@ export async function createScheduledTaskRun(
 export type ScheduledTaskRunPersonalResourceAuthority = {
   taskId: string;
   taskAuthorityRevision: number;
+  executionDigest: string;
   initiatingHumanSubjectId: string;
   resources: Array<{
     resourceKind: "variable_set" | "rig";
@@ -13912,6 +13929,7 @@ export async function getScheduledTaskRunPersonalResourceAuthority(
       const rows = await rawRows<{
         taskId: string;
         taskAuthorityRevision: number;
+        executionDigest: string;
         initiatingHumanSubjectId: string;
         resourceKind: "variable_set" | "rig";
         resourceId: string;
@@ -13927,6 +13945,7 @@ export async function getScheduledTaskRunPersonalResourceAuthority(
         sql`select
           task_id as "taskId",
           task_authority_revision::int as "taskAuthorityRevision",
+          execution_digest as "executionDigest",
           initiating_human_subject_id as "initiatingHumanSubjectId",
           resource_kind as "resourceKind",
           resource_id as "resourceId",
@@ -13948,6 +13967,7 @@ export async function getScheduledTaskRunPersonalResourceAuthority(
       return {
         taskId: first.taskId,
         taskAuthorityRevision: Number(first.taskAuthorityRevision),
+        executionDigest: first.executionDigest,
         initiatingHumanSubjectId: first.initiatingHumanSubjectId,
         resources: rows.map((row) => ({
           resourceKind: row.resourceKind,
@@ -13961,6 +13981,42 @@ export async function getScheduledTaskRunPersonalResourceAuthority(
           grantMode: row.grantMode,
         })),
       };
+    },
+  );
+}
+
+export async function materializeScheduledTaskReusableSessionFromRun(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    taskId: string;
+    runId: string;
+    sessionId: string;
+    sourceTaskAuthorityRevision: number;
+    sourceExecutionDigest: string;
+  },
+): Promise<number> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ authorityRevision: number }>(
+        scopedDb,
+        sql`select materialize_scheduled_task_reusable_session_from_run(
+          ${input.accountId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.taskId}::uuid,
+          ${input.runId}::uuid,
+          ${input.sessionId}::uuid,
+          ${input.sourceTaskAuthorityRevision}::bigint,
+          ${input.sourceExecutionDigest}::text
+        )::int as "authorityRevision"`,
+      );
+      if (!row) {
+        throw new Error("scheduled reusable-session materialization returned no revision");
+      }
+      return Number(row.authorityRevision);
     },
   );
 }
@@ -57446,6 +57502,7 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
       `scheduled_tasks:${row.workspaceId}:${row.id}`,
     ).map(({ serverId, providerDomain }) => ({ serverId, providerDomain })),
     authorityRevision: row.authorityRevision,
+    executionDigest: row.executionDigest,
     reusableSessionId: existingSessionTarget ? null : row.reusableSessionId,
     targetSessionId: existingSessionTarget ? row.reusableSessionId : null,
     variableSetId: row.variableSetId,
@@ -57463,6 +57520,8 @@ function mapScheduledTaskRun(row: typeof schema.scheduledTaskRuns.$inferSelect):
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     taskId: row.taskId,
+    taskAuthorityRevision: row.taskAuthorityRevision,
+    taskExecutionDigest: row.taskExecutionDigest,
     status: row.status as ScheduledTaskRunStatus,
     triggerType: row.triggerType as ScheduledTaskTriggerType,
     scheduledAt: row.scheduledAt ? row.scheduledAt.toISOString() : null,
