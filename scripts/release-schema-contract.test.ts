@@ -286,7 +286,7 @@ describe("release schema contract", () => {
     ).toEqual([
       {
         path: "0258_task_note_knowledge_promotion.sql",
-        sha256: "ca399faca6fc873a400666f6fd54244c688032cbee392cf4233803af19fb7254",
+        sha256: "cedc1d250a153c4ca13efc2bf7795ff695f19e208a7d09779a11d261d57dd031",
         deploymentMode: "rolling",
       },
     ]);
@@ -416,8 +416,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0258_task_note_knowledge_promotion.sql")) {
         return includesActivation
-          ? "778fef339ad9c442b7a91a758a95c7f07a300a231bd915cbe3449244685f3bc6"
-          : "0c1eeef8334779f6ac9afb15441b315b709a7fffa2ab70af7320af0069f6c41b";
+          ? "5d461040d2a61427804cfc4156f36ecf4b564ad0879af499fa1a2b83028122f8"
+          : "642363f7b515272e2c4cffc3c360402977d7e254d4378a369708b4a199919a77";
       }
       if (migrations.has("0255_company_brain_governed_write_proposals.sql")) {
         return includesActivation

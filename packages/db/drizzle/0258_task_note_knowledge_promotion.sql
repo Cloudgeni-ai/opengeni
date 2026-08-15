@@ -139,6 +139,15 @@ ALTER TABLE "task_note_knowledge_promotion_capabilities" ENABLE ROW LEVEL SECURI
 ALTER TABLE "task_note_knowledge_promotion_capabilities" FORCE ROW LEVEL SECURITY;
 ALTER TABLE "task_note_replacement_receipts" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "task_note_replacement_receipts" FORCE ROW LEVEL SECURITY;
+CREATE POLICY session_visibility_isolation ON "task_note_replacement_receipts"
+  AS RESTRICTIVE
+  FOR ALL
+  USING (session_reference_visible(
+    "account_id", "workspace_id", "actor_session_id"
+  ))
+  WITH CHECK (session_reference_visible(
+    "account_id", "workspace_id", "actor_session_id"
+  ));
 
 DO $promotion_capability_policy$
 DECLARE
