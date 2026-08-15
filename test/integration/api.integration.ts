@@ -7856,7 +7856,13 @@ describe("API component integration", () => {
       return { environment, session };
     };
 
-    for (const status of ["queued", "running", "requires_action"] as const) {
+    for (const status of [
+      "queued",
+      "running",
+      "requires_action",
+      "recovering",
+      "waiting_capacity",
+    ] as const) {
       const { environment, session } = await createAttachedSession(status);
       const blocked = await app.request(
         workspacePath(workspaceId, `/environments/${environment.id}`),

@@ -84,7 +84,9 @@ describe("migration 0254 scoped variable-set authority", () => {
     expect(source).toContain("resolve_session_attempt_personal_resources");
     expect(source).toContain("variable_set.materialized");
     expect(source).toContain("metadata_codec_version");
-    expect(source).toContain("'queued', 'running', 'requires_action'");
+    expect(source).toContain(
+      "'queued', 'running', 'requires_action', 'recovering', 'waiting_capacity'",
+    );
     expect(source).toContain(
       "DELETE FROM workspace_variable_sets\n        WHERE id = variable_set_row.id",
     );
