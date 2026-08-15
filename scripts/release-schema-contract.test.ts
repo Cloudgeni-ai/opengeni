@@ -286,7 +286,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0258_three_scope_document_knowledge_authority.sql",
       ),
     ).toMatchObject({
-      sha256: "7999e1a24f5b83e435ef752104ad852f5a38a3caf7527708f081bf206c7e1af1",
+      sha256: "6a3f416d02cefad012c8e94d614a9c4f8afd69f8c96fe3afd32da985e67df155",
       deploymentMode: "rolling",
     });
     const migrations = new Map(
@@ -295,8 +295,8 @@ describe("release schema contract", () => {
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0258_three_scope_document_knowledge_authority.sql")) {
         return includesActivation
-          ? "09533537da780479907ac20f4713a4bcd482f39469d7b466a494adbd4c49c123"
-          : "795c49910c52c2c660456ca61479f844241ea1a06b5d33af6bb7b8056c14dd1e";
+          ? "ad41066f4807c0d1adc52fa1b9160299ce66bae958af551283716baa11a36b09"
+          : "604f061cbff948b26b4058dde544a5e402b08e6766b81c0600f005c722d56707";
       }
       if (migrations.has("0255_company_brain_governed_write_proposals.sql")) {
         return includesActivation
@@ -420,8 +420,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0258_three_scope_document_knowledge_authority.sql")) {
         return includesActivation
-          ? "09533537da780479907ac20f4713a4bcd482f39469d7b466a494adbd4c49c123"
-          : "795c49910c52c2c660456ca61479f844241ea1a06b5d33af6bb7b8056c14dd1e";
+          ? "ad41066f4807c0d1adc52fa1b9160299ce66bae958af551283716baa11a36b09"
+          : "604f061cbff948b26b4058dde544a5e402b08e6766b81c0600f005c722d56707";
       }
       if (migrations.has("0255_company_brain_governed_write_proposals.sql")) {
         return includesActivation
