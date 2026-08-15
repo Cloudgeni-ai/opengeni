@@ -71,8 +71,19 @@ is `not_applicable_proposal_only` and no authority rollback token exists.
 Rejection/revocation and the existing human-governed destination lifecycle are
 the only later rollback/review mechanisms. No selector snapshot,
 logical-turn context receipt, Task-note write, MCP/API/UI registration,
-workspace-learning-policy integration, or automatic policy/preference
-activation is part of this slice.
+or automatic policy/preference activation is part of this slice.
+
+The transport-neutral learning-policy router resolves an exact
+`scoped-knowledge-evidence/<evidenceId>` source from the immutable policy
+snapshot owned by the accepted attempt. Callers cannot supply another source
+key to select a more permissive override. `off` produces no destination write;
+`suggest` creates the existing inactive proposal; and `automatic` creates the
+same auditable proposal while requesting activation at the destination-owned
+lifecycle boundary. Its receipt explicitly reports that activation has not
+occurred. Mandatory instruction policy and preferences therefore remain
+inactive until their existing authority accepts them, even in automatic mode.
+The public receipt exposes only the effective source-specific decision and
+snapshot identity/hash, not the snapshot's other source overrides.
 
 ## Root-task-tree notes
 
@@ -136,7 +147,6 @@ learning authority.
 Still required for the complete write-router architecture:
 
 - durable agent-learning routing and promotion;
-- destination-choice integration with the workspace learning policy;
 - an explicitly reviewed API/tool surface for the governed proposal contract;
 - bounded expiry cleanup and user-facing Advanced/search/export surfaces.
 

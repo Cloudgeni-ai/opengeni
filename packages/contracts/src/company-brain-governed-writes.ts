@@ -11,6 +11,7 @@ import {
   WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
   WorkspaceInstructionPolicyTarget,
 } from "./workspace-instruction-policies";
+import { WorkspaceLearningPolicyEffectiveMode } from "./workspace-learning-policy";
 
 const boundedReason = z.string().trim().min(1).max(4_096);
 const operationId = z.string().uuid();
@@ -145,3 +146,31 @@ export const CompanyBrainGovernedWriteReceipt = z.object({
   }),
 });
 export type CompanyBrainGovernedWriteReceipt = z.infer<typeof CompanyBrainGovernedWriteReceipt>;
+
+/**
+ * Policy routing is deliberately separate from destination admission. The
+ * immutable accepted-attempt snapshot decides whether derived evidence may
+ * create a proposal; the destination still owns activation and rollback.
+ */
+export const CompanyBrainLearningPolicyDecision = z.enum([
+  "blocked",
+  "proposal_created",
+  "activation_requested",
+]);
+export type CompanyBrainLearningPolicyDecision = z.infer<typeof CompanyBrainLearningPolicyDecision>;
+
+export const CompanyBrainLearningPolicyRouteReceipt = z.object({
+  operationId,
+  workspaceId: z.string().uuid(),
+  effectivePolicy: WorkspaceLearningPolicyEffectiveMode,
+  decision: CompanyBrainLearningPolicyDecision,
+  write: CompanyBrainGovernedWriteReceipt.nullable(),
+  activation: z.object({
+    requested: z.boolean(),
+    activated: z.literal(false),
+    boundary: z.enum(["policy_off", "human_review", "destination_authority"]),
+  }),
+});
+export type CompanyBrainLearningPolicyRouteReceipt = z.infer<
+  typeof CompanyBrainLearningPolicyRouteReceipt
+>;

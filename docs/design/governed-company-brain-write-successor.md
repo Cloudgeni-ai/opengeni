@@ -92,3 +92,18 @@ claiming permission-first selector or logical-turn context-receipt ownership.
 - workspace-learning-policy routing decisions;
 - MCP/API/UI/export surfaces;
 - deployment, release, provider, cloud, or production mutation.
+
+## Follow-on learning-policy decision seam
+
+The successor's proposal writer is now wrapped by a transport-neutral policy
+router for derived scoped-Knowledge evidence. It loads the immutable
+accepted-attempt learning-policy snapshot, derives the only legal source key
+from the exact evidence id, and then resolves `off | suggest | automatic`.
+`off` cannot reach the proposal writer. `suggest` creates the existing inactive
+proposal. `automatic` creates that proposal and reports an activation request
+for the destination authority, while truthfully retaining `activated=false`;
+it does not bypass the human-only instruction/preference lifecycle. The
+source-specific receipt omits unrelated source overrides.
+
+This follow-on does not change the bounded successor's destination or scope
+matrix and does not add a public tool, Task-note promotion, or active authority.

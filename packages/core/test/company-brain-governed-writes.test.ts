@@ -2,9 +2,13 @@ import { describe, expect, test } from "bun:test";
 import type {
   CompanyBrainGovernedWriteReceipt,
   CompanyBrainGovernedWriteRequest,
+  WorkspaceLearningPolicySnapshot,
 } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
-import { createCompanyBrainGovernedWriteRouter } from "../src/domain/company-brain-governed-writes";
+import {
+  createCompanyBrainGovernedWriteRouter,
+  createCompanyBrainLearningPolicyRouter,
+} from "../src/domain/company-brain-governed-writes";
 
 const ACCOUNT_ID = "00000000-0000-4000-8000-000000000101";
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000102";
@@ -162,5 +166,121 @@ describe("Company Brain governed write router", () => {
     ]) {
       await expect(router.write({ attempt, request })).rejects.toThrow();
     }
+  });
+});
+
+function policySnapshot(
+  mode: "off" | "suggest" | "automatic",
+  overrides: WorkspaceLearningPolicySnapshot["sourceOverrides"] = [],
+): WorkspaceLearningPolicySnapshot {
+  return {
+    id: "00000000-0000-4000-8000-000000000201",
+    accountId: ACCOUNT_ID,
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    turnId: TURN_ID,
+    attemptId: ATTEMPT_ID,
+    executionGeneration: 3,
+    revision: null,
+    activationVersion: 0,
+    activatedAt: null,
+    workspaceMode: mode,
+    sourceOverrides: overrides,
+    snapshotHash: "b".repeat(64),
+    createdAt: "2026-08-15T00:00:00.000Z",
+  };
+}
+
+describe("Company Brain learning-policy router", () => {
+  const request: CompanyBrainGovernedWriteRequest = {
+    kind: "propose_knowledge",
+    operationId: OPERATION_ID,
+    claimId: CLAIM_ID,
+    evidenceId: EVIDENCE_ID,
+    reason: "Route derived evidence through the frozen workspace policy.",
+  };
+
+  test("off prevents durable destination writes", async () => {
+    let writes = 0;
+    const router = createCompanyBrainLearningPolicyRouter({
+      db: {} as Database,
+      async learningPolicySnapshot() {
+        return policySnapshot("off");
+      },
+      async authority() {
+        writes += 1;
+        return receiptFor(request);
+      },
+    });
+    const result = await router.write({ attempt, request });
+    expect(result.decision).toBe("blocked");
+    expect(result.write).toBeNull();
+    expect(result.activation).toEqual({
+      requested: false,
+      activated: false,
+      boundary: "policy_off",
+    });
+    expect(writes).toBe(0);
+  });
+
+  test("suggest creates an inactive proposal for human review", async () => {
+    const router = createCompanyBrainLearningPolicyRouter({
+      db: {} as Database,
+      async learningPolicySnapshot() {
+        return policySnapshot("suggest");
+      },
+      async authority() {
+        return receiptFor(request);
+      },
+    });
+    const result = await router.write({ attempt, request });
+    expect(result.decision).toBe("proposal_created");
+    expect(result.write?.outcome).toBe("proposed");
+    expect(result.activation.boundary).toBe("human_review");
+  });
+
+  test("automatic requests destination activation without bypassing its lifecycle", async () => {
+    const router = createCompanyBrainLearningPolicyRouter({
+      db: {} as Database,
+      async learningPolicySnapshot() {
+        return policySnapshot("automatic");
+      },
+      async authority() {
+        return receiptFor(request);
+      },
+    });
+    const result = await router.write({ attempt, request });
+    expect(result.decision).toBe("activation_requested");
+    expect(result.activation).toEqual({
+      requested: true,
+      activated: false,
+      boundary: "destination_authority",
+    });
+    expect(result.write?.effectiveBoundary).toBe("human_review_required");
+  });
+
+  test("exact evidence identity owns source overrides", async () => {
+    const router = createCompanyBrainLearningPolicyRouter({
+      db: {} as Database,
+      async learningPolicySnapshot() {
+        return policySnapshot("automatic", [
+          { kind: "scoped-knowledge-evidence", id: EVIDENCE_ID, mode: "off" },
+          {
+            kind: "scoped-knowledge-evidence",
+            id: "00000000-0000-4000-8000-000000000299",
+            mode: "automatic",
+          },
+        ]);
+      },
+      async authority() {
+        throw new Error("evidence-specific off override must prevent a write");
+      },
+    });
+    const result = await router.write({ attempt, request });
+    expect(result.decision).toBe("blocked");
+    expect(result.effectivePolicy.source).toEqual({
+      kind: "scoped-knowledge-evidence",
+      id: EVIDENCE_ID,
+    });
   });
 });

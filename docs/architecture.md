@@ -213,7 +213,11 @@ adds an immutable destination receipt so later human activation, rejection, or
 supersession cannot rewrite replay identity. Human-governed destination
 lifecycle remains the only activation authority. This slice owns no selector or
 logical-turn context receipt, personal/organization activation, MCP/API/UI
-surface, learning-policy choice, or rollback token. Canonical:
+surface, or rollback token. A transport-neutral follow-on resolves the exact
+evidence source against the immutable accepted-attempt workspace-learning
+snapshot before this writer: `off` blocks, `suggest` proposes, and `automatic`
+requests destination-owned activation without claiming it occurred or
+bypassing human-only policy/preference lifecycle. Canonical:
 `packages/contracts/src/company-brain-governed-writes.ts`,
 `packages/core/src/domain/company-brain-governed-writes.ts`,
 `packages/db/src/company-brain-governed-writes.ts`, and migration
