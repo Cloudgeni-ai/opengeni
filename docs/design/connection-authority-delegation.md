@@ -5,6 +5,13 @@ blocked on a stable OPE-200 foundation containing migration 0254. Migration
 `0255_connection_authority_delegation.sql` is reserved but must not be created
 or registered before that base is supplied.
 
+The current foundation is intentionally inert: connection-specific wire and
+snapshot contracts live in `@opengeni/contracts/connection-authority`, pure
+capture/revalidation logic lives in `@opengeni/core/connection-authority`, and
+unregistered API-owner plus worker provider-use guards are covered by focused
+tests. Route registration, database resolution, credential-broker integration,
+and provider invocation wiring remain deferred to the coordinated base.
+
 ## Authority model
 
 - A workspace connection has `subject_id IS NULL`, belongs to the exact target

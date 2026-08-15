@@ -10,6 +10,7 @@ import {
   ConnectionAuthorityEnvelope,
   ConnectionUseAttribution,
   ConnectionUseAuthoritySnapshot,
+  type ConnectionUseAuthorizationResult,
   type ConnectionAuthoritySelectionSource,
   type ConnectionUseDenialReason,
   type ConnectionUseSelectionSource,
@@ -168,11 +169,7 @@ export type LiveConnectionUseState = {
   } | null;
 };
 
-export type ConnectionUseRevalidationResult =
-  | { status: "authorized"; attribution: ConnectionUseAttribution }
-  | { status: "denied"; reason: ConnectionUseDenialReason };
-
-function denied(reason: ConnectionUseDenialReason): ConnectionUseRevalidationResult {
+function denied(reason: ConnectionUseDenialReason): ConnectionUseAuthorizationResult {
   return { status: "denied", reason };
 }
 
@@ -185,7 +182,7 @@ export function revalidateConnectionUseAuthority(input: {
   snapshot: ConnectionUseAuthoritySnapshot;
   live: LiveConnectionUseState;
   now?: Date;
-}): ConnectionUseRevalidationResult {
+}): ConnectionUseAuthorizationResult {
   const snapshot = ConnectionUseAuthoritySnapshot.parse(input.snapshot);
   const live = input.live;
   const now = input.now ?? new Date();

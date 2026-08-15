@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { ConnectionKind, SessionTenancyVisibility, UserResourceDelegation } from "./index";
+import {
+  ConnectionKind,
+  SessionTenancyVisibility,
+  UserResourceAuthorityGrant,
+  UserResourceDelegation,
+  UserResourceLifecycleGrantMode,
+} from "./index";
 
 /** The only generic grant action that authorizes use of a connection. */
 export const ConnectionUseAction = z.literal("connection.use");
@@ -41,6 +47,62 @@ export const ConnectionAuthorityEnvelope = z
     }
   });
 export type ConnectionAuthorityEnvelope = z.infer<typeof ConnectionAuthorityEnvelope>;
+
+export const ConnectionAuthorityGrant = UserResourceAuthorityGrant.extend({
+  action: ConnectionUseAction,
+}).strict();
+export type ConnectionAuthorityGrant = z.infer<typeof ConnectionAuthorityGrant>;
+
+/** Owner-only opaque projection; connection identity and owner metadata stay server-side. */
+export const ConnectionAuthoritySummary = z
+  .object({
+    authorityId: z.string().uuid(),
+    generation: z.number().int().positive(),
+    status: z.enum(["active", "retained", "revoked"]),
+    grants: z.array(ConnectionAuthorityGrant),
+  })
+  .strict();
+export type ConnectionAuthoritySummary = z.infer<typeof ConnectionAuthoritySummary>;
+
+export const ListConnectionAuthoritiesQuery = z.object({ scope: z.literal("user") }).strict();
+export const ListConnectionAuthoritiesResponse = z
+  .object({
+    scope: z.literal("user"),
+    authorities: z.array(ConnectionAuthoritySummary),
+  })
+  .strict();
+
+export const IssueConnectionUseGrantRequest = z
+  .object({
+    scope: z.literal("user"),
+    mode: UserResourceLifecycleGrantMode,
+    context: SessionTenancyVisibility,
+    sessionId: z.string().uuid().nullable().optional(),
+    workspaceSharedAcknowledged: z.boolean().default(false),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.context === "workspace_shared" && !value.workspaceSharedAcknowledged) {
+      context.addIssue({
+        code: "custom",
+        path: ["workspaceSharedAcknowledged"],
+        message: "workspace_shared requires durable shared-output acknowledgement",
+      });
+    }
+    if (value.mode === "always" && value.sessionId) {
+      context.addIssue({ code: "custom", path: ["sessionId"], message: "always is unbound" });
+    }
+    if (value.mode !== "always" && !value.sessionId) {
+      context.addIssue({
+        code: "custom",
+        path: ["sessionId"],
+        message: "once/session require a target session",
+      });
+    }
+  });
+export type IssueConnectionUseGrantRequest = z.infer<typeof IssueConnectionUseGrantRequest>;
+
+export const RevokeConnectionUseGrantQuery = z.object({ scope: z.literal("user") }).strict();
 
 export const ConnectionAuthoritySelectionSource = z.enum([
   "explicit_workspace",
@@ -269,3 +331,9 @@ export const ConnectionUseAuditFact = ConnectionUseAttributionFields.extend({
   }
 });
 export type ConnectionUseAuditFact = z.infer<typeof ConnectionUseAuditFact>;
+
+export const ConnectionUseAuthorizationResult = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("authorized"), attribution: ConnectionUseAttribution }).strict(),
+  z.object({ status: z.literal("denied"), reason: ConnectionUseDenialReason }).strict(),
+]);
+export type ConnectionUseAuthorizationResult = z.infer<typeof ConnectionUseAuthorizationResult>;

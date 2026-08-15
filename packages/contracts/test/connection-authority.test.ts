@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   ConnectionAuthorityEnvelope,
+  IssueConnectionUseGrantRequest,
+  ListConnectionAuthoritiesResponse,
   ConnectionUseAttribution,
   ConnectionUseAuthoritySnapshot,
 } from "../src/connection-authority";
@@ -41,6 +43,56 @@ describe("connection authority contracts", () => {
     expect(
       ConnectionAuthorityEnvelope.parse({ scope: "user", userDelegation: delegation }),
     ).toEqual({ scope: "user", userDelegation: delegation });
+  });
+
+  test("keeps owner lifecycle input and output opaque and connection-specific", () => {
+    expect(
+      IssueConnectionUseGrantRequest.safeParse({
+        scope: "user",
+        mode: "always",
+        context: "user_private",
+        ownerSubjectId: "user:mallory",
+        action: "provider.admin",
+      }).success,
+    ).toBe(false);
+    const clean = {
+      scope: "user" as const,
+      authorities: [
+        {
+          authorityId: id("1"),
+          generation: 1,
+          status: "active" as const,
+          grants: [
+            {
+              grantId: id("2"),
+              targetWorkspaceId: id("4"),
+              targetSessionId: null,
+              action: "connection.use" as const,
+              mode: "always" as const,
+              context: "user_private" as const,
+              generation: 1,
+              status: "active" as const,
+              expiresAt: null,
+            },
+          ],
+        },
+      ],
+    };
+    expect(
+      ListConnectionAuthoritiesResponse.safeParse({
+        ...clean,
+        scope: "user",
+        authorities: [
+          {
+            ...clean.authorities[0],
+            authorityId: id("1"),
+            ownerSubjectId: "must-not-survive",
+            connectionId: id("8"),
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(ListConnectionAuthoritiesResponse.parse(clean)).toEqual(clean);
   });
 
   test("freezes exact personal owner, scope, generation, and delegation provenance", () => {
