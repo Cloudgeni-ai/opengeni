@@ -294,7 +294,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0260_task_note_knowledge_promotion.sql",
       ),
     ).toMatchObject({
-      sha256: "11522882f32b8012c9d63e893f0c61920fd092437ed8531d3082894b80f5566f",
+      sha256: "27317b17a565e14c7508d5cb6bde6822596fd4c3e6a7d2ca4e2fe0dd687511e7",
       deploymentMode: "rolling",
     });
     const migrations = new Map(
@@ -428,8 +428,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0260_task_note_knowledge_promotion.sql")) {
         return includesActivation
-          ? "7b71f0197d92afaf4da8821fac11fe5c9d06d6ee38b95b3ab8a571a219c997fc"
-          : "5e60f0396be543936e85555d1d85cb6225a822a89c82f2b7175e02cdf78108a4";
+          ? "9215d4b59e41895ba0e76f96a4446a7f19bf4c81daacdb2c8c51cbc81b8af52f"
+          : "7e5bd09849982dbd592fc934f719649dc0de65c51a159e3b2ba3e3cf1de908b8";
       }
       if (migrations.has("0258_three_scope_document_knowledge_authority.sql")) {
         return includesActivation

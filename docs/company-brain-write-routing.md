@@ -103,7 +103,10 @@ learning-policy snapshot, locks the note, and rejects policy-off, another root,
 workspace, tenant, archived note, expired note, or stale version. A value-free,
 one-transaction capability binds the exact evidence/claim operations and is
 consumed by the insert trigger; the runtime role has no direct capability-table
-DML and cannot forge Task-note evidence onto another claim.
+DML and cannot forge Task-note evidence onto another claim. Every migration
+0260 definer path pins `pg_catalog`, the deployment target schema, then
+`pg_temp`, so caller-created temporary relations cannot shadow durable
+authority relations.
 The resulting claim is `proposed`, never approved or prompt-active. Exact retry
 reconstructs the same receipt even after the short-lived note is archived;
 changed input conflicts, and source cleanup cannot silently widen authority.

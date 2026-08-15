@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
@@ -509,6 +510,117 @@ describe("task-tree notes PostgreSQL authority", () => {
             await sql`select set_config('opengeni.account_id', ${f.grant.accountId}, true)`;
             await sql`select set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true)`;
             await sql`update task_notes set status = 'archived' where false`;
+          }),
+        "42501",
+      );
+    } finally {
+      await app.end();
+    }
+  });
+
+  test("definer paths ignore caller temporary authority relations and keep durable tables closed", async () => {
+    if (!shared || !client) return;
+    const f = await fixture();
+    const policy = await createWorkspaceLearningPolicyRevision(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      workspaceMode: "suggest",
+      actorSubjectId: f.ownerSubjectId,
+      principalKind: "human_session",
+    });
+    await activateWorkspaceLearningPolicyRevision(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      revisionId: policy.id,
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      actorSubjectId: f.ownerSubjectId,
+      principalKind: "human_session",
+      reason: "Exercise the exact Task-note promotion authority under TEMP shadowing.",
+    });
+    const attempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.root.id,
+      initiatorSubjectId: f.ownerSubjectId,
+      initiatingHumanSubjectId: f.ownerSubjectId,
+    });
+    await getOrCreateWorkspaceLearningPolicySnapshot(client.db, claims(attempt));
+    const note = await createTaskNote(client.db, {
+      ...claims(attempt),
+      operationId: crypto.randomUUID(),
+      kind: "decision",
+      text: "Durable provenance must win over caller temporary relations.",
+      expiresInDays: 7,
+    });
+    const app = postgres(shared.appUrl, { max: 1, prepare: false });
+    let observedSource:
+      | {
+          note_id: string;
+          root_session_id: string;
+          note_version: number;
+          note_text: string;
+          note_text_hash: string;
+        }
+      | undefined;
+    try {
+      await expect(
+        app.begin(async (sql) => {
+          await sql`select set_config('opengeni.account_id', ${f.grant.accountId}, true)`;
+          await sql`select set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true)`;
+          await sql`select set_config('opengeni.subject_id', ${f.ownerSubjectId}, true)`;
+          await sql`select set_config('opengeni.initiating_human_subject_id', ${f.ownerSubjectId}, true)`;
+          await sql.unsafe("create temporary table task_notes (trap text) on commit drop");
+          await sql.unsafe(
+            "create temporary table workspace_learning_policy_snapshots (trap text) on commit drop",
+          );
+          await sql.unsafe(
+            "create temporary table task_note_knowledge_promotion_capabilities (trap text) on commit drop",
+          );
+          [observedSource] = await sql<
+            {
+              note_id: string;
+              root_session_id: string;
+              note_version: number;
+              note_text: string;
+              note_text_hash: string;
+            }[]
+          >`
+            select note_id, root_session_id, note_version, note_text, note_text_hash
+            from resolve_task_note_knowledge_promotion_source(
+              ${attempt.accountId}::uuid,
+              ${attempt.workspaceId}::uuid,
+              ${attempt.sessionId}::uuid,
+              ${attempt.turnId}::uuid,
+              ${attempt.attemptId}::uuid,
+              ${attempt.executionGeneration}::integer,
+              ${note.note.id}::uuid,
+              1,
+              ${crypto.randomUUID()}::text,
+              ${crypto.randomUUID()}::text,
+              ${`service:temp-shadow-regression:${crypto.randomUUID()}`}::text
+            )
+          `;
+          throw new Error("rollback temp-shadow provenance probe");
+        }),
+      ).rejects.toThrow("rollback temp-shadow provenance probe");
+      expect(observedSource).toMatchObject({
+        note_id: note.note.id,
+        root_session_id: f.root.id,
+        note_version: 1,
+        note_text: note.note.text,
+        note_text_hash: createHash("sha256").update(note.note.text, "utf8").digest("hex"),
+      });
+
+      await expectSqlState(
+        async () =>
+          await app.begin(async (sql) => {
+            await sql`select set_config('opengeni.account_id', ${f.grant.accountId}, true)`;
+            await sql`select set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true)`;
+            await sql.unsafe(
+              "create temporary table task_note_replacement_receipts (trap text) on commit drop",
+            );
+            await sql`insert into public.task_note_replacement_receipts default values`;
           }),
         "42501",
       );
