@@ -3377,7 +3377,8 @@ function registerFleetTools(
   // REST route builds). Throws when the session has no box (backend:none) — the
   // fleet is only meaningful for a session that runs in a sandbox.
   const fleetContext = async (): Promise<FleetContext> => {
-    const actor = exactAgentAttemptClaims(grant)
+    const claims = exactAgentAttemptClaims(grant);
+    const actor = claims
       ? await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId)
       : null;
     return await buildFleetContextForSession(deps, {
@@ -3385,6 +3386,16 @@ function registerFleetTools(
       workspaceId: grant.workspaceId,
       sessionId,
       ...(actor?.initiatingHumanSubjectId ? { subjectId: actor.initiatingHumanSubjectId } : {}),
+      ...(actor?.initiatingHumanSubjectId && claims
+        ? {
+            attemptAuthority: {
+              turnId: claims.turnId,
+              attemptId: claims.attemptId,
+              executionGeneration: claims.executionGeneration,
+              initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
+            },
+          }
+        : {}),
     });
   };
 

@@ -39,6 +39,9 @@ export interface RoutableSandbox {
   workspaceId: string;
   kind: "modal" | "selfhosted" | string;
   name: string;
+  /** Authority scope projected by the DB resolver. Worker routes use this to
+   * reassert an exact attempt's personal-machine grant immediately before use. */
+  scope?: "organization" | "workspace" | "user";
   /** For a selfhosted sandbox this is its enrollment id (== the agent id the
    *  exact generation-fenced control-plane subject addresses). Null for modal. */
   enrollmentId: string | null;

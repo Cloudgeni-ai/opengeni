@@ -522,6 +522,7 @@ describe("runtime database posture evaluator", () => {
         routine.name.includes("scoped_rig") ||
         routine.name.includes("scoped_enrollment") ||
         routine.name.includes("scoped_sandbox") ||
+        routine.name.includes("scoped_machine_dependent_sessions") ||
         routine.name.includes("personal_machine")
       ) {
         routine.owner = "pg_database_owner";

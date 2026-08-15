@@ -56,10 +56,12 @@ Bun/Node/`ogtool`. It reaches the same journal/executor as model MCP; the machin
 still owns every ordinary credential and ambient environment.
 
 This authority follows the session's **active** execution path. The fleet
-`run_on` tool is a separate API-side, one-off route to a non-active machine; it
-does not impersonate the worker's exact turn/attempt and therefore does not
-inject Codemode credentials. Swap the session to that machine, or create the
-session there, before running Codemode on it.
+`run_on` tool is a separate API-side, one-off route to a non-active machine. An
+agent call still authorizes and snapshots the frozen initiating human's exact
+accepted attempt and revalidates its visibility-keyed grant immediately before
+dispatch; it does not change the active pointer or inject Codemode credentials.
+Swap the session to that machine, or create the session there, before running
+Codemode on it.
 
 For source development, build or run the complete host-native runtime with:
 
@@ -316,6 +318,8 @@ backpressure nor a reply-size failure changes the machine's heartbeat state.
 
 The agent-facing `run_on` MCP tool is intentionally a one-off side channel to a
 specific enrolled machine and never changes the session's active route. Its
+personal-machine path requires the same exact accepted-attempt authorization
+and current `connected_machine.use` grant as an active route. Its
 `exec` receipt reports the exact `exitCode`, typed `timedOut`, and effective
 `deadlineMs` (`0` means none). A process killed at an explicitly configured
 deadline, or a response with no terminal

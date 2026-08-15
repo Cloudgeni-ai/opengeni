@@ -42227,6 +42227,7 @@ export async function assertPersonalMachineForAttempt(
     attemptId: string;
     executionGeneration: number;
     enrollmentId: string;
+    requireActiveSandbox?: boolean;
   },
 ): Promise<boolean> {
   return await withRlsContext(db, input, async (scopedDb) => {
@@ -42240,7 +42241,44 @@ export async function assertPersonalMachineForAttempt(
         ${input.accountId}::uuid, ${input.workspaceId}::uuid,
         ${input.sessionId}::uuid, ${input.turnId}::uuid,
         ${input.attemptId}::uuid, ${input.executionGeneration}::integer,
+        ${input.enrollmentId}::uuid, ${input.requireActiveSandbox !== false}
+      ) as authorized`,
+    );
+    return row?.authorized === true;
+  });
+}
+
+export async function authorizePersonalMachineForAttempt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    enrollmentId: string;
+    requireActiveSandbox?: boolean;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, input.subjectId);
+    await scopedDb.execute(sql`select set_config(
+      'opengeni.initiating_human_subject_id', ${input.subjectId}, true
+    )`);
+    const [row] = await rawRows<{ authorized: boolean }>(
+      scopedDb,
+      sql`select authorize_session_attempt_personal_machine(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+        ${input.sessionId}::uuid, ${input.turnId}::uuid,
+        ${input.attemptId}::uuid, ${input.executionGeneration}::integer,
         ${input.enrollmentId}::uuid
+      ) and assert_session_attempt_personal_machine(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+        ${input.sessionId}::uuid, ${input.turnId}::uuid,
+        ${input.attemptId}::uuid, ${input.executionGeneration}::integer,
+        ${input.enrollmentId}::uuid, ${input.requireActiveSandbox !== false}
       ) as authorized`,
     );
     return row?.authorized === true;
@@ -44407,6 +44445,12 @@ export async function setActiveSandbox(
     targetSandboxId: string | null;
     expectedEpoch: number;
     subjectId?: string;
+    personalMachineAttempt?: {
+      turnId: string;
+      attemptId: string;
+      executionGeneration: number;
+      initiatingHumanSubjectId: string;
+    };
     // The session's working directory to write alongside the pointer. OMITTED
     // (undefined) ⇒ the column is left UNCHANGED (a plain swap/attach never touches
     // it); a string sets it; null clears it back to the default. Per-session
@@ -44418,9 +44462,16 @@ export async function setActiveSandbox(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      let personalEnrollmentId: string | null = null;
       if (input.targetSandboxId !== null) {
         if (input.subjectId) {
           await setSubjectRlsContext(scopedDb, input.subjectId);
+          if (input.personalMachineAttempt) {
+            await scopedDb.execute(sql`select set_config(
+              'opengeni.initiating_human_subject_id',
+              ${input.personalMachineAttempt.initiatingHumanSubjectId}, true
+            )`);
+          }
           const [authorization] = await rawRows<{ authorized: boolean }>(
             scopedDb,
             sql`select authorize_scoped_sandbox_attach(
@@ -44430,6 +44481,48 @@ export async function setActiveSandbox(
           );
           if (authorization?.authorized !== true) {
             return { swapped: false, pointer: null };
+          }
+          const [target] = await rawRows<{
+            value: { scope?: string; enrollmentId?: string | null } | null;
+          }>(
+            scopedDb,
+            sql`select get_scoped_sandbox(
+              ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+              ${input.targetSandboxId}::uuid
+            ) as value`,
+          );
+          if (!target?.value) {
+            return { swapped: false, pointer: null };
+          }
+          if (target.value.scope === "user") {
+            if (!target.value.enrollmentId) {
+              return { swapped: false, pointer: null };
+            }
+            personalEnrollmentId = target.value.enrollmentId;
+            if (input.personalMachineAttempt) {
+              const [admission] = await rawRows<{ authorized: boolean }>(
+                scopedDb,
+                sql`select authorize_session_attempt_personal_machine(
+                  ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+                  ${input.sessionId}::uuid, ${input.personalMachineAttempt.turnId}::uuid,
+                  ${input.personalMachineAttempt.attemptId}::uuid,
+                  ${input.personalMachineAttempt.executionGeneration}::integer,
+                  ${personalEnrollmentId}::uuid
+                ) as authorized`,
+              );
+              if (admission?.authorized !== true) {
+                return { swapped: false, pointer: null };
+              }
+            } else {
+              const [session] = await scopedDb.execute<{ active_turn_id: string | null }>(sql`
+                select active_turn_id from sessions
+                where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
+                for no key update
+              `);
+              if (!session || session.active_turn_id !== null) {
+                return { swapped: false, pointer: null };
+              }
+            }
           }
         } else {
           const [target] = await scopedDb.execute<{
@@ -44480,6 +44573,21 @@ export async function setActiveSandbox(
       const row = rows[0];
       if (!row) {
         return { swapped: false, pointer: null };
+      }
+      if (personalEnrollmentId && input.personalMachineAttempt) {
+        const [preUse] = await rawRows<{ authorized: boolean }>(
+          scopedDb,
+          sql`select assert_session_attempt_personal_machine(
+            ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+            ${input.sessionId}::uuid, ${input.personalMachineAttempt.turnId}::uuid,
+            ${input.personalMachineAttempt.attemptId}::uuid,
+            ${input.personalMachineAttempt.executionGeneration}::integer,
+            ${personalEnrollmentId}::uuid, true
+          ) as authorized`,
+        );
+        if (preUse?.authorized !== true) {
+          throw new Error("personal Connected Machine authority was not live after attach");
+        }
       }
       return {
         swapped: true,

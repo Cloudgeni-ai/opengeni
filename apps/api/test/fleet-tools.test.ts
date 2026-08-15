@@ -342,6 +342,69 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       createdBy: { kind: "subject", subjectId },
       subjectId,
     });
+    const [machineAuthority] = await admin<Array<{ id: string }>>`
+      select id from organization_user_resource_authorities
+      where account_id = ${account!.id} and resource_kind = 'connected_machine'
+        and resource_id = ${machine.enrollmentId}
+    `;
+    const [sessionAuthority] = await admin<
+      Array<{ authorityEpoch: number; visibility: "user_private" | "workspace_shared" }>
+    >`
+      select authority_epoch as "authorityEpoch", visibility
+      from sessions where id = ${session.id}
+    `;
+    await admin.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${account!.id}, true),
+        set_config('opengeni.workspace_id', ${targetWorkspace!.id}, true),
+        set_config('opengeni.subject_id', ${subjectId}, true)`;
+      await tx`
+        select grant_id from issue_self_user_resource_grant(
+          ${account!.id}::uuid, ${machineAuthority!.id}::uuid,
+          ${targetWorkspace!.id}::uuid, 'connected_machine.use', 'session',
+          ${sessionAuthority!.visibility}, ${session.id}::uuid, true
+        )
+      `;
+    });
+    const executionGeneration = 1;
+    const [turn] = await admin<Array<{ id: string }>>`
+      insert into session_turns (
+        account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+        status, position, prompt, model, reasoning_effort, sandbox_backend,
+        execution_generation, initiator_kind, initiator_subject_id,
+        initiating_human_subject_id
+      ) values (
+        ${account!.id}, ${targetWorkspace!.id}, ${session.id}, gen_random_uuid(),
+        ${`fleet-${crypto.randomUUID()}`}, 'running', 0, 'use personal machine',
+        'gpt-test', 'medium', 'none', ${executionGeneration}, 'subject', ${subjectId},
+        ${subjectId}
+      ) returning id
+    `;
+    const attemptId = crypto.randomUUID();
+    await admin.begin(async (tx) => {
+      await tx.unsafe("set local opengeni.session_inference_claim = '1'");
+      await tx`
+        update sessions set active_turn_id = ${turn!.id}, status = 'running'
+        where id = ${session.id}
+      `;
+      await tx`
+        update session_turns set active_attempt_id = ${attemptId}, status = 'running'
+        where id = ${turn!.id}
+      `;
+      await tx`
+        insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id, execution_generation,
+          state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+          verified_control_revision, authority_epoch, authority_visibility,
+          mcp_approval_policies, connector_action_policies
+        ) values (
+          ${attemptId}, ${account!.id}, ${targetWorkspace!.id}, ${session.id}, ${turn!.id},
+          ${executionGeneration}, 'running', 'fleet-workflow', ${`run-${attemptId}`},
+          ${`activity-${attemptId}`}, 0, ${sessionAuthority!.authorityEpoch},
+          ${sessionAuthority!.visibility}, '{}'::jsonb, '[]'::jsonb
+        )
+      `;
+    });
     const ctx: FleetContext = {
       accountId: account!.id,
       workspaceId: targetWorkspace!.id,
@@ -349,6 +412,12 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       sessionId: session.id,
       sessionBackend: "none",
       sessionGroupId: session.sandboxGroupId,
+      attemptAuthority: {
+        turnId: turn!.id,
+        attemptId,
+        executionGeneration,
+        initiatingHumanSubjectId: subjectId,
+      },
     };
     const services: FleetServices = {
       db,
@@ -360,6 +429,25 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
         hostname: "personal-cross-workspace",
       }) as never,
     };
+    const withoutAttempt: FleetContext = {
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      subjectId: ctx.subjectId,
+      sessionId: ctx.sessionId,
+      sessionBackend: ctx.sessionBackend,
+      sessionGroupId: ctx.sessionGroupId,
+    };
+    expect(
+      (
+        await runOnSandbox(services, withoutAttempt, machine.sandboxId, {
+          kind: "exec",
+          cmd: "hostname",
+        })
+      ).ok,
+    ).toBe(false);
+    expect((await swapActiveSandbox(services, withoutAttempt, machine.sandboxId)).swapped).toBe(
+      false,
+    );
 
     expect(
       (

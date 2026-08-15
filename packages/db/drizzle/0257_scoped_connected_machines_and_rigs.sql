@@ -930,7 +930,7 @@ REVOKE ALL ON FUNCTION materialize_scoped_rig_version_for_attempt(
 ) FROM PUBLIC;
 
 CREATE TABLE session_attempt_connected_machine_authorizations (
-  attempt_id uuid PRIMARY KEY REFERENCES session_turn_attempts(id) ON DELETE CASCADE,
+  attempt_id uuid NOT NULL REFERENCES session_turn_attempts(id) ON DELETE CASCADE,
   account_id uuid NOT NULL,
   workspace_id uuid NOT NULL,
   session_id uuid NOT NULL,
@@ -950,6 +950,7 @@ CREATE TABLE session_attempt_connected_machine_authorizations (
   grant_generation bigint NOT NULL,
   grant_mode text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (attempt_id, enrollment_id),
   CONSTRAINT session_attempt_connected_machine_attempt_fk FOREIGN KEY (
     account_id, workspace_id, session_id, turn_id, attempt_id
   ) REFERENCES session_turn_attempts(
@@ -1125,9 +1126,185 @@ AFTER INSERT ON session_turn_attempts FOR EACH ROW
 EXECUTE FUNCTION admit_session_attempt_personal_machine();
 REVOKE ALL ON FUNCTION admit_session_attempt_personal_machine() FROM PUBLIC;
 
-CREATE OR REPLACE FUNCTION assert_session_attempt_personal_machine(
+CREATE OR REPLACE FUNCTION authorize_session_attempt_personal_machine(
   p_account_id uuid, p_workspace_id uuid, p_session_id uuid, p_turn_id uuid,
   p_attempt_id uuid, p_execution_generation integer, p_enrollment_id uuid
+) RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
+DECLARE
+  session_row sessions%ROWTYPE;
+  turn_row session_turns%ROWTYPE;
+  attempt_row session_turn_attempts%ROWTYPE;
+  enrollment_row enrollments%ROWTYPE;
+  sandbox_row sandboxes%ROWTYPE;
+  member_row organization_memberships%ROWTYPE;
+  authority_row organization_user_resource_authorities%ROWTYPE;
+  grant_row organization_user_resource_grants%ROWTYPE;
+  authorization_row session_attempt_connected_machine_authorizations%ROWTYPE;
+  initiating_subject text;
+  caller_subject text := coalesce(
+    nullif(pg_catalog.current_setting('opengeni.initiating_human_subject_id', true), ''),
+    nullif(pg_catalog.current_setting('opengeni.subject_id', true), '')
+  );
+  affected integer;
+BEGIN
+  IF p_account_id IS DISTINCT FROM nullif(
+      pg_catalog.current_setting('opengeni.account_id', true), '')::uuid
+    OR p_workspace_id IS DISTINCT FROM nullif(
+      pg_catalog.current_setting('opengeni.workspace_id', true), '')::uuid
+  THEN RAISE EXCEPTION 'machine runtime scope mismatch' USING ERRCODE = '42501'; END IF;
+  INSERT INTO opengeni_private.scoped_compute_capabilities(
+    backend_pid, transaction_id, capability_kind
+  ) VALUES (pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), 'write')
+  ON CONFLICT DO NOTHING;
+  SELECT session_value.* INTO STRICT session_row FROM sessions session_value
+  WHERE session_value.id = p_session_id AND session_value.account_id = p_account_id
+    AND session_value.workspace_id = p_workspace_id FOR SHARE;
+  SELECT turn_value.* INTO STRICT turn_row FROM session_turns turn_value
+  WHERE turn_value.id = p_turn_id AND turn_value.account_id = p_account_id
+    AND turn_value.workspace_id = p_workspace_id
+    AND turn_value.session_id = p_session_id FOR SHARE;
+  SELECT attempt_value.* INTO STRICT attempt_row FROM session_turn_attempts attempt_value
+  WHERE attempt_value.id = p_attempt_id AND attempt_value.account_id = p_account_id
+    AND attempt_value.workspace_id = p_workspace_id
+    AND attempt_value.session_id = p_session_id
+    AND attempt_value.turn_id = p_turn_id FOR SHARE;
+  IF attempt_row.execution_generation IS DISTINCT FROM p_execution_generation
+    OR attempt_row.state NOT IN ('claimed', 'running')
+    OR attempt_row.closed_at IS NOT NULL OR attempt_row.quiesced_at IS NOT NULL
+    OR session_row.active_turn_id IS DISTINCT FROM p_turn_id
+    OR turn_row.active_attempt_id IS DISTINCT FROM p_attempt_id
+    OR turn_row.execution_generation IS DISTINCT FROM p_execution_generation
+    OR attempt_row.authority_visibility IS DISTINCT FROM session_row.visibility
+    OR attempt_row.authority_epoch IS DISTINCT FROM session_row.authority_epoch
+    OR EXISTS (
+      SELECT 1 FROM session_attempt_interruptions interruption
+      WHERE interruption.attempt_id = p_attempt_id
+        AND interruption.account_id = p_account_id
+        AND interruption.workspace_id = p_workspace_id
+        AND interruption.state IN ('pending', 'delivered', 'acknowledged')
+    )
+  THEN RAISE EXCEPTION 'personal machine requires exact current attempt authority'
+    USING ERRCODE = '42501'; END IF;
+  initiating_subject := coalesce(
+    nullif(btrim(turn_row.initiating_human_subject_id), ''),
+    CASE WHEN turn_row.initiator_kind = 'subject'
+      THEN nullif(btrim(turn_row.initiator_subject_id), '') END
+  );
+  IF caller_subject IS DISTINCT FROM initiating_subject THEN
+    RAISE EXCEPTION 'personal machine caller is not the frozen initiating human'
+      USING ERRCODE = '42501';
+  END IF;
+  SELECT enrollment.* INTO STRICT enrollment_row FROM enrollments enrollment
+  WHERE enrollment.id = p_enrollment_id AND enrollment.account_id = p_account_id
+    AND enrollment.authority_scope = 'user' AND enrollment.status = 'active'
+    AND enrollment.revoked_at IS NULL FOR SHARE;
+  SELECT sandbox.* INTO STRICT sandbox_row FROM sandboxes sandbox
+  WHERE sandbox.account_id = p_account_id AND sandbox.enrollment_id = p_enrollment_id
+    AND sandbox.kind = 'selfhosted' ORDER BY sandbox.created_at, sandbox.id LIMIT 1 FOR SHARE;
+  SELECT membership.* INTO STRICT member_row FROM organization_memberships membership
+  WHERE membership.account_id = p_account_id AND membership.subject_id = initiating_subject
+    AND membership.status = 'active' AND membership.revoked_at IS NULL FOR SHARE;
+  IF member_row.id IS DISTINCT FROM enrollment_row.owner_organization_membership_id THEN
+    RAISE EXCEPTION 'only the personal machine owner may use it'
+      USING ERRCODE = '42501';
+  END IF;
+  IF member_row.personal_workspace_id IS DISTINCT FROM p_workspace_id THEN
+    PERFORM 1 FROM workspace_memberships workspace_membership
+    WHERE workspace_membership.account_id = p_account_id
+      AND workspace_membership.workspace_id = p_workspace_id
+      AND workspace_membership.subject_id = initiating_subject FOR KEY SHARE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'machine owner lacks target workspace access'
+      USING ERRCODE = '42501'; END IF;
+  END IF;
+  SELECT authority.* INTO STRICT authority_row
+  FROM organization_user_resource_authorities authority
+  WHERE authority.id = enrollment_row.authority_id AND authority.account_id = p_account_id
+    AND authority.organization_membership_id = member_row.id
+    AND authority.resource_kind = 'connected_machine'
+    AND authority.resource_id = enrollment_row.id
+    AND authority.generation = enrollment_row.generation
+    AND authority.status = 'active' AND authority.revoked_at IS NULL FOR SHARE;
+  SELECT authorization_value.* INTO authorization_row
+  FROM session_attempt_connected_machine_authorizations authorization_value
+  WHERE authorization_value.attempt_id = p_attempt_id
+    AND authorization_value.enrollment_id = p_enrollment_id FOR SHARE;
+  IF authorization_row.attempt_id IS NOT NULL THEN
+    DELETE FROM opengeni_private.scoped_compute_capabilities
+    WHERE backend_pid = pg_catalog.pg_backend_pid()
+      AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+      AND capability_kind = 'write';
+    RETURN true;
+  END IF;
+  SELECT grant_value.* INTO grant_row FROM organization_user_resource_grants grant_value
+  WHERE grant_value.account_id = p_account_id
+    AND grant_value.authority_id = authority_row.id
+    AND grant_value.owner_organization_membership_id = member_row.id
+    AND grant_value.workspace_id = p_workspace_id
+    AND grant_value.action = 'connected_machine.use'
+    AND grant_value.context = session_row.visibility AND grant_value.status = 'active'
+    AND (grant_value.expires_at IS NULL OR grant_value.expires_at > clock_timestamp())
+    AND ((grant_value.mode IN ('once', 'session')
+        AND grant_value.session_id = p_session_id
+        AND grant_value.authority_epoch = session_row.authority_epoch)
+      OR (grant_value.mode = 'always' AND grant_value.session_id IS NULL
+        AND grant_value.authority_epoch IS NULL))
+  ORDER BY CASE grant_value.mode WHEN 'once' THEN 1 WHEN 'session' THEN 2 ELSE 3 END,
+    grant_value.generation DESC, grant_value.id LIMIT 1 FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'personal machine use requires explicit grant'
+    USING ERRCODE = '42501'; END IF;
+  INSERT INTO session_attempt_connected_machine_authorizations(
+    attempt_id, account_id, workspace_id, session_id, turn_id, execution_generation,
+    initiating_human_subject_id, owner_organization_membership_id,
+    membership_authorization_revision, enrollment_id, sandbox_id, authority_id,
+    authority_generation, enrollment_generation, session_visibility,
+    session_authority_epoch, grant_id, grant_generation, grant_mode
+  ) VALUES (
+    p_attempt_id, p_account_id, p_workspace_id, p_session_id, p_turn_id,
+    p_execution_generation, initiating_subject, member_row.id,
+    member_row.authorization_revision, enrollment_row.id, sandbox_row.id,
+    authority_row.id, authority_row.generation, enrollment_row.generation,
+    session_row.visibility, session_row.authority_epoch,
+    grant_row.id, grant_row.generation, grant_row.mode
+  ) ON CONFLICT (attempt_id, enrollment_id) DO NOTHING;
+  GET DIAGNOSTICS affected = ROW_COUNT;
+  IF affected = 1 AND grant_row.mode = 'once' THEN
+    UPDATE organization_user_resource_grants SET status = 'consumed',
+      updated_at = clock_timestamp()
+    WHERE id = grant_row.id AND account_id = p_account_id
+      AND generation = grant_row.generation AND status = 'active';
+    GET DIAGNOSTICS affected = ROW_COUNT;
+    IF affected <> 1 THEN RAISE EXCEPTION 'once machine grant lost first-use race'
+      USING ERRCODE = '40001'; END IF;
+    INSERT INTO personal_resource_once_consumption_receipts(
+      grant_id, account_id, attempt_id, workspace_id, session_id, turn_id,
+      execution_generation, authority_id, authority_generation, grant_generation
+    ) VALUES (
+      grant_row.id, p_account_id, p_attempt_id, p_workspace_id, p_session_id,
+      p_turn_id, p_execution_generation, authority_row.id,
+      authority_row.generation, grant_row.generation
+    );
+  END IF;
+  DELETE FROM opengeni_private.scoped_compute_capabilities
+  WHERE backend_pid = pg_catalog.pg_backend_pid()
+    AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+    AND capability_kind = 'write';
+  RETURN true;
+EXCEPTION WHEN OTHERS THEN
+  DELETE FROM opengeni_private.scoped_compute_capabilities
+  WHERE backend_pid = pg_catalog.pg_backend_pid()
+    AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned();
+  RAISE;
+END
+$$;
+REVOKE ALL ON FUNCTION authorize_session_attempt_personal_machine(
+  uuid, uuid, uuid, uuid, uuid, integer, uuid
+) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION assert_session_attempt_personal_machine(
+  p_account_id uuid, p_workspace_id uuid, p_session_id uuid, p_turn_id uuid,
+  p_attempt_id uuid, p_execution_generation integer, p_enrollment_id uuid,
+  p_require_active_sandbox boolean
 ) RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_catalog AS $$
 DECLARE
@@ -1173,11 +1350,13 @@ BEGIN
         AND attempt.turn_id = turn_value.id AND attempt.session_id = session_value.id
         AND attempt.account_id = session_value.account_id
         AND attempt.workspace_id = session_value.workspace_id
-      JOIN sandboxes sandbox ON sandbox.id = session_value.active_sandbox_id
+      JOIN sandboxes sandbox ON sandbox.id = authorization_row.sandbox_id
+        AND sandbox.account_id = session_value.account_id
       WHERE session_value.id = p_session_id AND session_value.account_id = p_account_id
         AND session_value.workspace_id = p_workspace_id
         AND session_value.active_turn_id = p_turn_id
-        AND session_value.active_sandbox_id = authorization_row.sandbox_id
+        AND (NOT p_require_active_sandbox
+          OR session_value.active_sandbox_id = authorization_row.sandbox_id)
         AND session_value.visibility = authorization_row.session_visibility
         AND session_value.authority_epoch = authorization_row.session_authority_epoch
         AND turn_value.active_attempt_id = p_attempt_id
@@ -1235,16 +1414,25 @@ BEGIN
       WHERE grant_value.id = authorization_row.grant_id
         AND grant_value.account_id = p_account_id
         AND grant_value.authority_id = authorization_row.authority_id
+        AND grant_value.owner_organization_membership_id
+          = authorization_row.owner_organization_membership_id
+        AND grant_value.workspace_id = p_workspace_id
         AND grant_value.generation = authorization_row.grant_generation
         AND grant_value.action = 'connected_machine.use'
         AND grant_value.context = authorization_row.session_visibility
+        AND grant_value.mode = authorization_row.grant_mode
         AND (grant_value.expires_at IS NULL OR grant_value.expires_at > clock_timestamp())
         AND ((authorization_row.grant_mode = 'once' AND grant_value.status = 'consumed'
+          AND grant_value.session_id = p_session_id
+          AND grant_value.authority_epoch = authorization_row.session_authority_epoch
           AND EXISTS (SELECT 1 FROM personal_resource_once_consumption_receipts receipt
             WHERE receipt.grant_id = grant_value.id AND receipt.attempt_id = p_attempt_id
               AND receipt.account_id = p_account_id))
-          OR (authorization_row.grant_mode IN ('session','always')
-            AND grant_value.status = 'active'))
+          OR (authorization_row.grant_mode = 'session' AND grant_value.status = 'active'
+            AND grant_value.session_id = p_session_id
+            AND grant_value.authority_epoch = authorization_row.session_authority_epoch)
+          OR (authorization_row.grant_mode = 'always' AND grant_value.status = 'active'
+            AND grant_value.session_id IS NULL AND grant_value.authority_epoch IS NULL))
     )
   THEN RAISE EXCEPTION 'personal machine authority is no longer live'
     USING ERRCODE = '42501'; END IF;
@@ -1274,7 +1462,7 @@ EXCEPTION WHEN OTHERS THEN
 END
 $$;
 REVOKE ALL ON FUNCTION assert_session_attempt_personal_machine(
-  uuid, uuid, uuid, uuid, uuid, integer, uuid
+  uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean
 ) FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION list_scoped_machine_dependent_sessions(
@@ -1452,8 +1640,11 @@ BEGIN
     GRANT EXECUTE ON FUNCTION materialize_scoped_rig_version_for_attempt(
       uuid, uuid, uuid, uuid, uuid, integer
     ) TO opengeni_app;
-    GRANT EXECUTE ON FUNCTION assert_session_attempt_personal_machine(
+    GRANT EXECUTE ON FUNCTION authorize_session_attempt_personal_machine(
       uuid, uuid, uuid, uuid, uuid, integer, uuid
+    ) TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION assert_session_attempt_personal_machine(
+      uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean
     ) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION list_scoped_machine_dependent_sessions(uuid, uuid, uuid)
       TO opengeni_app;
@@ -1473,5 +1664,5 @@ COMMENT ON COLUMN rigs.authority_scope IS
 COMMENT ON COLUMN enrollments.authority_scope IS
   'Connected Machine owner scope; human approval defaults to organization+user.';
 COMMENT ON FUNCTION assert_session_attempt_personal_machine(
-  uuid, uuid, uuid, uuid, uuid, integer, uuid
+  uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean
 ) IS 'Revalidates exact personal-machine owner, membership, grant, session authority, and generation immediately before machine use.';

@@ -37,7 +37,9 @@ describe("migration 0257 scoped Connected Machines and Rigs", () => {
     expect(source).toContain("connected_machine.use");
     expect(source).toContain("session_attempt_connected_machine_authorizations");
     expect(source).toContain("resolve_session_attempt_personal_resources");
+    expect(source).toContain("authorize_session_attempt_personal_machine");
     expect(source).toContain("assert_session_attempt_personal_machine");
+    expect(source).toContain("p_require_active_sandbox boolean");
     expect(source).toContain("membership.authorization_revision");
     expect(source).toContain("grant_value.generation = authorization_row.grant_generation");
     expect(source).toContain("session_value.authority_epoch");
@@ -166,6 +168,17 @@ describe("migration 0257 scoped Connected Machines and Rigs", () => {
         `;
         return row!;
       });
+      const sideMachine = await asActor(app, ownerA, async (tx) => {
+        const [row] = await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
+          select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+          from finalize_scoped_enrollment(
+            ${ownerA.accountId}::uuid, ${ownerA.workspaceId}::uuid, 'user',
+            ${`side-pubkey-${crypto.randomUUID()}`}, true, false, 'linux', 'x86_64',
+            'Owner side machine', false
+          )
+        `;
+        return row!;
+      });
       const listMachines = async (actor: Actor) =>
         await asActor(
           app!,
@@ -177,9 +190,9 @@ describe("migration 0257 scoped Connected Machines and Rigs", () => {
             ) value
           `,
         );
-      expect((await listMachines(ownerB)).map((row) => row.value.id)).toEqual([
-        machine.enrollmentId,
-      ]);
+      expect(new Set((await listMachines(ownerB)).map((row) => row.value.id))).toEqual(
+        new Set([machine.enrollmentId, sideMachine.enrollmentId]),
+      );
       expect(await listMachines(otherB)).toHaveLength(0);
       expect(
         await asActor(app, ownerB, async (tx) => {
@@ -197,6 +210,11 @@ describe("migration 0257 scoped Connected Machines and Rigs", () => {
         select id from organization_user_resource_authorities
         where account_id = ${account!.id} and organization_membership_id = ${ownerMembership!.id}
           and resource_kind = 'connected_machine' and resource_id = ${machine.enrollmentId}
+      `;
+      const [sideMachineAuthority] = await admin<Array<{ id: string }>>`
+        select id from organization_user_resource_authorities
+        where account_id = ${account!.id} and organization_membership_id = ${ownerMembership!.id}
+          and resource_kind = 'connected_machine' and resource_id = ${sideMachine.enrollmentId}
       `;
       const session = await createSession(db.db, {
         requestedSessionId: crypto.randomUUID(),
@@ -294,12 +312,91 @@ describe("migration 0257 scoped Connected Machines and Rigs", () => {
             select assert_session_attempt_personal_machine(
               ${account!.id}::uuid, ${workspaceB.id}::uuid, ${session.id}::uuid,
               ${turn!.id}::uuid, ${attemptId}::uuid, 1,
-              ${machine.enrollmentId}::uuid
+              ${machine.enrollmentId}::uuid, true
             ) as allowed
           `;
           return row!.allowed;
         }),
       ).toBe(true);
+      const authorizeSideMachine = async () =>
+        await asActor(app!, ownerB, async (tx) => {
+          const [row] = await tx<Array<{ allowed: boolean }>>`
+            select authorize_session_attempt_personal_machine(
+              ${account!.id}::uuid, ${workspaceB.id}::uuid, ${session.id}::uuid,
+              ${turn!.id}::uuid, ${attemptId}::uuid, 1,
+              ${sideMachine.enrollmentId}::uuid
+            ) as allowed
+          `;
+          return row!.allowed;
+        });
+      const assertSideMachine = async (workspace = ownerB) =>
+        await asActor(app!, workspace, async (tx) => {
+          const [row] = await tx<Array<{ allowed: boolean }>>`
+            select assert_session_attempt_personal_machine(
+              ${account!.id}::uuid, ${workspace.workspaceId}::uuid, ${session.id}::uuid,
+              ${turn!.id}::uuid, ${attemptId}::uuid, 1,
+              ${sideMachine.enrollmentId}::uuid, false
+            ) as allowed
+          `;
+          return row!.allowed;
+        });
+      await expect(authorizeSideMachine()).rejects.toThrow(/explicit grant/iu);
+      await asActor(app, ownerB, async (tx) => {
+        await tx`
+          select grant_id from issue_self_user_resource_grant(
+            ${account!.id}::uuid, ${sideMachineAuthority!.id}::uuid,
+            ${workspaceB.id}::uuid, 'connected_machine.use', 'always',
+            'user_private', null, true
+          )
+        `;
+      });
+      await expect(authorizeSideMachine()).rejects.toThrow(/explicit grant/iu);
+      await asActor(app, ownerA, async (tx) => {
+        await tx`
+          select grant_id from issue_self_user_resource_grant(
+            ${account!.id}::uuid, ${sideMachineAuthority!.id}::uuid,
+            ${workspaceA.id}::uuid, 'connected_machine.use', 'always',
+            'workspace_shared', null, true
+          )
+        `;
+      });
+      await expect(authorizeSideMachine()).rejects.toThrow(/explicit grant/iu);
+      await asActor(app, ownerB, async (tx) => {
+        await tx`
+          select grant_id from issue_self_user_resource_grant(
+            ${account!.id}::uuid, ${sideMachineAuthority!.id}::uuid,
+            ${workspaceB.id}::uuid, 'connected_machine.use', 'session',
+            'workspace_shared', ${session.id}::uuid, true
+          )
+        `;
+      });
+      expect(await authorizeSideMachine()).toBe(true);
+      expect(await assertSideMachine()).toBe(true);
+      const [sideAuthorization] = await admin<Array<{ grantId: string; grantGeneration: number }>>`
+        select grant_id as "grantId", grant_generation as "grantGeneration"
+        from session_attempt_connected_machine_authorizations
+        where attempt_id = ${attemptId} and enrollment_id = ${sideMachine.enrollmentId}
+      `;
+      await admin`
+        update organization_user_resource_grants
+        set generation = generation + 1 where id = ${sideAuthorization!.grantId}
+      `;
+      await expect(assertSideMachine()).rejects.toThrow(/no longer live/iu);
+      await admin`
+        update organization_user_resource_grants
+        set generation = ${sideAuthorization!.grantGeneration}, status = 'active'
+        where id = ${sideAuthorization!.grantId}
+      `;
+      await admin`
+        update organization_user_resource_grants
+        set status = 'revoked', revoked_at = now() where id = ${sideAuthorization!.grantId}
+      `;
+      await expect(assertSideMachine()).rejects.toThrow(/no longer live/iu);
+      await admin`
+        update organization_user_resource_grants
+        set status = 'active', revoked_at = null where id = ${sideAuthorization!.grantId}
+      `;
+      await expect(assertSideMachine(ownerA)).resolves.toBe(false);
       await expect(
         asActor(
           app,
@@ -327,7 +424,7 @@ describe("migration 0257 scoped Connected Machines and Rigs", () => {
               select assert_session_attempt_personal_machine(
                 ${account!.id}::uuid, ${workspaceB.id}::uuid, ${session.id}::uuid,
                 ${turn!.id}::uuid, ${attemptId}::uuid, 1,
-                ${machine.enrollmentId}::uuid
+                ${machine.enrollmentId}::uuid, true
               )
             `,
         ),

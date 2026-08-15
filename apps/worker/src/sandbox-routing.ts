@@ -18,6 +18,7 @@ import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/confi
 import {
   advanceWorkspaceGenerationForRetainedProcess,
   advanceWorkspaceGeneration,
+  assertPersonalMachineForAttempt,
   getRetainedProcess,
   retainWorkspaceMutationProcess,
   retainedProcessSettlementIdentity,
@@ -120,6 +121,16 @@ export type RoutingWiringIds = {
   sessionId: string;
   resourceAccountId?: string;
   resourceSubjectId?: string;
+  /** Frozen initiating-human authority for personal Connected Machine use.
+   * Every routed operation reasserts this exact accepted attempt before the
+   * control-plane connection is resolved. */
+  personalMachineAttempt?: {
+    accountId: string;
+    subjectId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+  };
   /** Canonical turn-attempt fence used to admit persistable-home mutations.
    * Omit outside a running worker attempt; mutation hooks then remain disabled. */
   workspaceMutationFence?: {
@@ -718,6 +729,7 @@ export function wrapTurnBoxWithRouting(
             workspaceId: sandbox.workspaceId,
             kind: sandbox.kind,
             name: sandbox.name,
+            ...(sandbox.scope ? { scope: sandbox.scope } : {}),
             enrollmentId: sandbox.enrollmentId,
           }
         : null;
@@ -725,6 +737,7 @@ export function wrapTurnBoxWithRouting(
     controlRpcFactory: controlRpcFactory(bus),
     resolveSelfhostedConnection: async (sandbox) => {
       if (!sandbox.enrollmentId) return null;
+      if (!(await assertRoutedPersonalMachineForAttempt(db, ids, sandbox))) return null;
       const enrollment = await getLiveEnrollmentConnection(
         db,
         ids.resourceAccountId && ids.resourceSubjectId
@@ -934,6 +947,7 @@ export function wrapLazyTurnBoxWithRouting(
             workspaceId: sandbox.workspaceId,
             kind: sandbox.kind,
             name: sandbox.name,
+            ...(sandbox.scope ? { scope: sandbox.scope } : {}),
             enrollmentId: sandbox.enrollmentId,
           }
         : null;
@@ -941,6 +955,7 @@ export function wrapLazyTurnBoxWithRouting(
     controlRpcFactory: controlRpcFactory(bus),
     resolveSelfhostedConnection: async (sandbox) => {
       if (!sandbox.enrollmentId) return null;
+      if (!(await assertRoutedPersonalMachineForAttempt(db, ids, sandbox))) return null;
       const enrollment = await getLiveEnrollmentConnection(
         db,
         ids.resourceAccountId && ids.resourceSubjectId
@@ -1142,6 +1157,31 @@ function connectionBindingFor(
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
     operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
   };
+}
+
+/** Personal-machine discovery is not execution authority. Recheck the frozen
+ * initiating human, exact current attempt, immutable authorization snapshot,
+ * and current visibility-keyed grant immediately before each routed operation
+ * resolves a live control-plane connection. */
+async function assertRoutedPersonalMachineForAttempt(
+  db: Database,
+  ids: RoutingWiringIds,
+  sandbox: RoutableSandbox,
+): Promise<boolean> {
+  if (sandbox.scope !== "user") return true;
+  const authority = ids.personalMachineAttempt;
+  if (!authority || !sandbox.enrollmentId) return false;
+  return await assertPersonalMachineForAttempt(db, {
+    accountId: authority.accountId,
+    workspaceId: ids.workspaceId,
+    subjectId: authority.subjectId,
+    sessionId: ids.sessionId,
+    turnId: authority.turnId,
+    attemptId: authority.attemptId,
+    executionGeneration: authority.executionGeneration,
+    enrollmentId: sandbox.enrollmentId,
+    requireActiveSandbox: true,
+  });
 }
 
 export async function establishSelfhostedTurnSession(

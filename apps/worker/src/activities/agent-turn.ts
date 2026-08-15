@@ -7540,6 +7540,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   sessionId: input.sessionId,
                   resourceAccountId: input.accountId,
                   ...(fileAuthoritySubjectId ? { resourceSubjectId: fileAuthoritySubjectId } : {}),
+                  ...(fileAuthoritySubjectId
+                    ? {
+                        personalMachineAttempt: {
+                          accountId: input.accountId,
+                          subjectId: fileAuthoritySubjectId,
+                          turnId: turn.id,
+                          attemptId: input.attemptId,
+                          executionGeneration,
+                        },
+                      }
+                    : {}),
                   environment: sandboxEnvironment,
                   ...(transientCodemodeEnvironment
                     ? { transientExecEnvironment: transientCodemodeEnvironment }
@@ -7696,6 +7707,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   sessionId: input.sessionId,
                   resourceAccountId: input.accountId,
                   ...(fileAuthoritySubjectId ? { resourceSubjectId: fileAuthoritySubjectId } : {}),
+                  ...(fileAuthoritySubjectId
+                    ? {
+                        personalMachineAttempt: {
+                          accountId: input.accountId,
+                          subjectId: fileAuthoritySubjectId,
+                          turnId: turn.id,
+                          attemptId: input.attemptId,
+                          executionGeneration,
+                        },
+                      }
+                    : {}),
                   environment: sandboxEnvironment,
                   ...(transientCodemodeEnvironment
                     ? { transientExecEnvironment: transientCodemodeEnvironment }
@@ -8993,6 +9015,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sessionId: input.sessionId,
             resourceAccountId: input.accountId,
             ...(fileAuthoritySubjectId ? { resourceSubjectId: fileAuthoritySubjectId } : {}),
+            ...(fileAuthoritySubjectId
+              ? {
+                  personalMachineAttempt: {
+                    accountId: input.accountId,
+                    subjectId: fileAuthoritySubjectId,
+                    turnId: turn.id,
+                    attemptId: input.attemptId,
+                    executionGeneration,
+                  },
+                }
+              : {}),
             environment: sandboxEnvironment,
             ...(transientCodemodeEnvironment
               ? { transientExecEnvironment: transientCodemodeEnvironment }

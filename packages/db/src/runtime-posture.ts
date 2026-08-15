@@ -146,7 +146,10 @@ const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
   "get_scoped_sandbox(uuid, uuid, uuid)",
   "authorize_scoped_sandbox_attach(uuid, uuid, uuid)",
   "materialize_scoped_rig_version_for_attempt(uuid, uuid, uuid, uuid, uuid, integer)",
-  "assert_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
+  "authorize_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
+  "assert_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean)",
+  "list_scoped_machine_dependent_sessions(uuid, uuid, uuid)",
+  "detach_scoped_machine_dependent_sessions(uuid, uuid, uuid)",
 ] as const;
 const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
   "ensure_canonical_human_identity(text, text)",

@@ -13,6 +13,7 @@
 
 import type { Settings } from "@opengeni/config";
 import {
+  authorizePersonalMachineForAttempt,
   getEnrollment,
   getLiveEnrollmentConnection,
   getSandbox,
@@ -61,6 +62,12 @@ export type FleetContext = {
   accountId: string;
   workspaceId: string;
   subjectId?: string;
+  attemptAuthority?: {
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    initiatingHumanSubjectId: string;
+  };
   /** The calling session (the pointer the attach/swap mutates + whose group box
    *  is the default fleet member). */
   sessionId: string;
@@ -87,6 +94,7 @@ export async function buildFleetContextForSession(
     workspaceId: string;
     sessionId: string;
     subjectId?: string;
+    attemptAuthority?: FleetContext["attemptAuthority"];
   },
 ): Promise<FleetContext> {
   const session = await requireSession(deps.db, ctx.workspaceId, ctx.sessionId);
@@ -94,6 +102,7 @@ export async function buildFleetContextForSession(
     accountId: ctx.accountId,
     workspaceId: ctx.workspaceId,
     ...(ctx.subjectId ? { subjectId: ctx.subjectId } : {}),
+    ...(ctx.attemptAuthority ? { attemptAuthority: ctx.attemptAuthority } : {}),
     sessionId: ctx.sessionId,
     sessionBackend: session.sandboxBackend,
     sessionGroupId: session.sandboxGroupId,
@@ -598,6 +607,7 @@ export async function swapActiveSandbox(
         targetSandboxId: resolved.targetSandboxId,
         expectedEpoch: pointer.activeEpoch,
         ...(ctx.subjectId ? { subjectId: ctx.subjectId } : {}),
+        ...(ctx.attemptAuthority ? { personalMachineAttempt: ctx.attemptAuthority } : {}),
         ...(workingDir !== undefined ? { workingDir } : {}),
       });
       if (result.swapped && result.pointer) {
@@ -819,6 +829,47 @@ export async function runOnSandbox(
       ok: false,
       reason: `run_on routes one-off ops to enrolled selfhosted machines; ${sandbox.kind} targets are reached via the active sandbox (swap to it first)`,
     };
+  }
+  if (sandbox.scope === "user") {
+    if (!ctx.subjectId || !ctx.attemptAuthority) {
+      return {
+        target,
+        targetName: sandbox.name,
+        kind: op.kind,
+        ok: false,
+        reason: "personal Connected Machine use requires an exact admitted agent attempt",
+      };
+    }
+    try {
+      const authorized = await authorizePersonalMachineForAttempt(services.db, {
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        subjectId: ctx.subjectId,
+        sessionId: ctx.sessionId,
+        turnId: ctx.attemptAuthority.turnId,
+        attemptId: ctx.attemptAuthority.attemptId,
+        executionGeneration: ctx.attemptAuthority.executionGeneration,
+        enrollmentId: sandbox.enrollmentId,
+        requireActiveSandbox: false,
+      });
+      if (!authorized) {
+        return {
+          target,
+          targetName: sandbox.name,
+          kind: op.kind,
+          ok: false,
+          reason: "personal Connected Machine authority was not admitted for this attempt",
+        };
+      }
+    } catch {
+      return {
+        target,
+        targetName: sandbox.name,
+        kind: op.kind,
+        ok: false,
+        reason: "personal Connected Machine authority is not live for this attempt",
+      };
+    }
   }
   const enrollment = await getLiveEnrollmentConnection(
     services.db,
