@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- OPE-198: activate generic owner-only user-resource grant lifecycle and
+-- Activate generic owner-only user-resource grant lifecycle and
 -- correct direct/scheduled personal-resource authority so workspace location
 -- and origin are provenance/lifecycle facts, never ownership authority.
 

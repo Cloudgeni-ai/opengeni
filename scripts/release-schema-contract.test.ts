@@ -252,7 +252,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0253_common_user_resource_authority_lifecycle.sql",
       ),
     ).toMatchObject({
-      sha256: "90b45a8f3f52b094c4ed516b4df95ee71eef3b7a49cfef488d4d71f680507c82",
+      sha256: "cfcffb54e01c41927aeed024a1ba610bac45ac3d5271a7c1b147f4beb28c2428",
       deploymentMode: "rolling",
     });
     const migrations = new Map(

@@ -401,7 +401,7 @@ describe("migration 0218 organization tenancy foundation", () => {
             workspace_id, session_id, action, mode, context, authority_epoch
           ) values (
             ${personal.accountId}, ${authority!.id}, ${otherMembership!.id},
-            ${personal.workspaceId}, ${session.id}, 'resource.use', 'session',
+            ${personal.workspaceId}, ${session.id}, 'resource.use.invalid-owner', 'session',
             'workspace_shared', 1
           )
         `,
