@@ -1,15 +1,25 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
+import type { CompanyBrainOkfPackage } from "../src/company-brain";
 
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
 
 describe("Company Brain SDK", () => {
   test("maps JSON inspection and Markdown export to authenticated GET routes", async () => {
     const requests: Request[] = [];
-    const payload = {
+    const payload: CompanyBrainOkfPackage = {
       kind: "opengeni.company_brain.okf",
       schemaVersion: 1,
       workspaceId: WORKSPACE_ID,
+      generatedAt: "2026-08-15T12:00:00.000Z",
+      permissions: { guidance: "available", knowledge: "unavailable" },
+      guidance: { entries: [], truncated: false, truncationReasons: [] },
+      knowledge: {
+        availability: "unavailable",
+        reason: "missing_permission",
+        requiredPermission: "documents:search",
+      },
+      omissions: ["inaccessible_knowledge"],
     };
     const client = new OpenGeniClient({
       baseUrl: "https://api.example.test",

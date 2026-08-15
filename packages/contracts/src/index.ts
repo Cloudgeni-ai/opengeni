@@ -13507,6 +13507,7 @@ export * from "./codex-fleet-policy";
 export * from "./xai-provider-account-authority";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
+export * from "./company-brain";
 export * from "./workspace-learning-policy";
 export * from "./workspace-state";
 export * from "./preference-registry";
