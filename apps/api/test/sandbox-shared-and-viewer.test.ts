@@ -664,7 +664,8 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       permissions: [
         "sessions:create",
         "sessions:read",
-        "environments:use",
+        "variable-sets:attach",
+        "variable-sets:use",
       ] as AccessGrant["permissions"],
     };
     const b = await createSessionForRequest(deps(bus), g, workspaceId, {
@@ -686,7 +687,8 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       permissions: [
         "sessions:create",
         "sessions:read",
-        "environments:use",
+        "variable-sets:attach",
+        "variable-sets:use",
       ] as AccessGrant["permissions"],
     };
     const a = await createSessionForRequest(deps(bus), g0, workspaceId, {
@@ -699,7 +701,8 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       permissions: [
         "sessions:create",
         "sessions:read",
-        "environments:use",
+        "variable-sets:attach",
+        "variable-sets:use",
       ] as AccessGrant["permissions"],
     };
     const b = await createSessionForRequest(deps(bus), g1, workspaceId, {
@@ -723,7 +726,8 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       permissions: [
         "sessions:create",
         "sessions:read",
-        "environments:use",
+        "variable-sets:attach",
+        "variable-sets:use",
       ] as AccessGrant["permissions"],
     };
     await expect(
@@ -749,7 +753,8 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       permissions: [
         "sessions:create",
         "sessions:read",
-        "environments:use",
+        "variable-sets:attach",
+        "variable-sets:use",
       ] as AccessGrant["permissions"],
     };
     await expect(
@@ -789,7 +794,8 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       permissions: [
         "sessions:create",
         "sessions:read",
-        "environments:use",
+        "variable-sets:attach",
+        "variable-sets:use",
       ] as AccessGrant["permissions"],
     };
     // A joiner matching EITHER member must reject: the group is mixed, so no
@@ -825,7 +831,8 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       permissions: [
         "sessions:create",
         "sessions:read",
-        "environments:use",
+        "variable-sets:attach",
+        "variable-sets:use",
       ] as AccessGrant["permissions"],
     };
     // Env-carrying child, sandbox OMITTED: with no box there is no shared box
