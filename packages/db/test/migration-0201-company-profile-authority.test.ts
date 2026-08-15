@@ -57,36 +57,38 @@ async function seedAttempt(input: {
 }) {
   const turnId = crypto.randomUUID();
   const attemptId = crypto.randomUUID();
-  await shared!.admin`
-    insert into session_turns (
-      id, account_id, workspace_id, session_id, trigger_event_id,
-      temporal_workflow_id, status, source, position, prompt, model,
-      reasoning_effort, sandbox_backend, execution_generation,
-      initiator_kind, initiator_subject_id, initiator_context,
-      initiating_human_subject_id, created_at
-    ) values (
-      ${turnId}, ${input.accountId}, ${input.workspaceId}, ${input.sessionId},
-      ${crypto.randomUUID()}, ${`company-profile-${turnId}`}, 'running', 'user', 1,
-      'company profile snapshot fixture', 'test-model', 'medium', 'none', 1,
-      'subject', 'human:profile-admin', ${shared!.admin.json({ source: "test" })},
-      'human:profile-admin', ${input.acceptedAt ?? new Date()}
-    )
-  `;
-  await shared!.admin`
-    insert into session_turn_attempts (
-      id, account_id, workspace_id, session_id, turn_id, execution_generation,
-      state, temporal_workflow_id, temporal_workflow_run_id,
-      temporal_activity_id, verified_control_revision, mcp_approval_policies
-    ) values (
-      ${attemptId}, ${input.accountId}, ${input.workspaceId}, ${input.sessionId},
-      ${turnId}, 1, 'running', ${`company-profile-${turnId}`},
-      ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb
-    )
-  `;
-  await shared!
-    .admin`update session_turns set active_attempt_id = ${attemptId} where id = ${turnId}`;
-  await shared!
-    .admin`update sessions set active_turn_id = ${turnId}, status = 'running' where id = ${input.sessionId}`;
+  await shared!.admin.begin(async (tx) => {
+    await tx`
+      insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id,
+        temporal_workflow_id, status, source, position, prompt, model,
+        reasoning_effort, sandbox_backend, execution_generation,
+        initiator_kind, initiator_subject_id, initiator_context,
+        initiating_human_subject_id, created_at
+      ) values (
+        ${turnId}, ${input.accountId}, ${input.workspaceId}, ${input.sessionId},
+        ${crypto.randomUUID()}, ${`company-profile-${turnId}`}, 'running', 'user', 1,
+        'company profile snapshot fixture', 'test-model', 'medium', 'none', 1,
+        'subject', 'human:profile-admin', ${shared!.admin.json({ source: "test" })},
+        'human:profile-admin', ${input.acceptedAt ?? new Date()}
+      )
+    `;
+    await tx`
+      update sessions set active_turn_id = ${turnId}, status = 'running'
+      where id = ${input.sessionId}`;
+    await tx`update session_turns set active_attempt_id = ${attemptId} where id = ${turnId}`;
+    await tx`
+      insert into session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id,
+        temporal_activity_id, verified_control_revision, mcp_approval_policies
+      ) values (
+        ${attemptId}, ${input.accountId}, ${input.workspaceId}, ${input.sessionId},
+        ${turnId}, 1, 'running', ${`company-profile-${turnId}`},
+        ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb
+      )
+    `;
+  });
   return { ...input, turnId, attemptId, executionGeneration: 1 };
 }
 
