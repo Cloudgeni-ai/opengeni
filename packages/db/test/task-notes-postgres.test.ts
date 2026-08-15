@@ -489,6 +489,240 @@ describe("task-tree notes PostgreSQL authority", () => {
     ).rejects.toThrow("different immutable input");
   });
 
+  test("atomically promotes exact Task-note bytes into inactive Ways proposals with archival replay", async () => {
+    if (!shared || !client) return;
+    const f = await fixture();
+    const policy = await createWorkspaceLearningPolicyRevision(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      workspaceMode: "suggest",
+      actorSubjectId: f.ownerSubjectId,
+      principalKind: "human_session",
+    });
+    await activateWorkspaceLearningPolicyRevision(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      revisionId: policy.id,
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      actorSubjectId: f.ownerSubjectId,
+      principalKind: "human_session",
+      reason: "Allow rooted notes to become reviewable Ways proposals.",
+    });
+    const attempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.root.id,
+      initiatorSubjectId: f.ownerSubjectId,
+      initiatingHumanSubjectId: f.ownerSubjectId,
+    });
+    await getOrCreateWorkspaceLearningPolicySnapshot(client.db, claims(attempt));
+
+    const preferenceText = "For implementation work, use Linear as the source of truth.";
+    const preferenceNote = await createTaskNote(client.db, {
+      ...claims(attempt),
+      operationId: crypto.randomUUID(),
+      kind: "decision",
+      text: preferenceText,
+      expiresInDays: 7,
+    });
+    const preferenceInput = {
+      attempt: claims(attempt),
+      request: {
+        kind: "promote_task_note_preference" as const,
+        operationId: crypto.randomUUID(),
+        noteId: preferenceNote.note.id,
+        expectedNoteVersion: 1 as const,
+        entityType: "ways-of-working",
+        normalizedKey: "implementation-linear",
+        displayName: "Implementation issue tracking",
+        predicateKey: "ways.implementation-tracker",
+        confidenceBps: 9_000,
+        stableKey: `implementation.linear.${crypto.randomUUID().replaceAll("-", "")}`,
+        title: "Use Linear for implementation",
+        description: "Tracks the preferred implementation workflow.",
+        precedenceRank: 10,
+        conflictStrategy: "override" as const,
+        conflictsWith: [],
+        expiresAt: null,
+        reason: "Promote the exact rooted decision for human review.",
+      },
+    };
+    const [preferenceFirst, preferenceConcurrent] = await Promise.all([
+      writeCompanyBrainGovernedProposal(client.db, preferenceInput),
+      writeCompanyBrainGovernedProposal(client.db, preferenceInput),
+    ]);
+    expect(preferenceConcurrent).toEqual(preferenceFirst);
+    expect(preferenceFirst).toMatchObject({
+      destination: "preference",
+      outcome: "proposed",
+      effectiveBoundary: "human_review_required",
+      taskNoteSource: {
+        noteId: preferenceNote.note.id,
+        rootSessionId: f.root.id,
+        noteVersion: 1,
+      },
+    });
+
+    const instructionText = "Never place secret values in public logs.";
+    const instructionNote = await createTaskNote(client.db, {
+      ...claims(attempt),
+      operationId: crypto.randomUUID(),
+      kind: "decision",
+      text: instructionText,
+      expiresInDays: 7,
+    });
+    const instructionInput = {
+      attempt: claims(attempt),
+      request: {
+        kind: "promote_task_note_instruction_policy" as const,
+        operationId: crypto.randomUUID(),
+        noteId: instructionNote.note.id,
+        expectedNoteVersion: 1 as const,
+        entityType: "ways-of-working",
+        normalizedKey: "public-log-secrets",
+        displayName: "Public log secret handling",
+        predicateKey: "ways.security.public-logs",
+        confidenceBps: 9_500,
+        target: { kind: "policy" as const, scope: "global" as const, roleKey: null },
+        expectedCurrentRevisionId: null,
+        expectedActivationVersion: 0,
+        reason: "Promote the exact rooted security decision for human review.",
+      },
+    };
+    const instructionFirst = await writeCompanyBrainGovernedProposal(client.db, instructionInput);
+    expect(instructionFirst).toMatchObject({
+      destination: "instruction_policy",
+      outcome: "proposed",
+      effectiveBoundary: "human_review_required",
+      taskNoteSource: {
+        noteId: instructionNote.note.id,
+        rootSessionId: f.root.id,
+        noteVersion: 1,
+      },
+    });
+
+    const unrelatedRoot = await withSessionRlsActorContext(
+      { subjectId: f.ownerSubjectId },
+      async () =>
+        await createSession(client!.db, {
+          accountId: f.grant.accountId,
+          workspaceId: f.grant.workspaceId,
+          initialMessage: "unrelated Ways promotion",
+          resources: [],
+          metadata: {},
+          model: "test-model",
+          sandboxBackend: "none",
+          createdBy: { kind: "subject", subjectId: f.ownerSubjectId },
+          createdByContext: {},
+        }),
+    );
+    const unrelatedAttempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: unrelatedRoot.id,
+      initiatorSubjectId: f.ownerSubjectId,
+      initiatingHumanSubjectId: f.ownerSubjectId,
+    });
+    await expect(
+      writeCompanyBrainGovernedProposal(client.db, {
+        attempt: claims(unrelatedAttempt),
+        request: { ...instructionInput.request, operationId: crypto.randomUUID() },
+      }),
+    ).rejects.toThrow();
+
+    await archiveTaskNote(client.db, {
+      ...claims(attempt),
+      operationId: crypto.randomUUID(),
+      noteId: preferenceNote.note.id,
+      expectedVersion: 1,
+      reason: "Preference proposal is durably recorded.",
+    });
+    await archiveTaskNote(client.db, {
+      ...claims(attempt),
+      operationId: crypto.randomUUID(),
+      noteId: instructionNote.note.id,
+      expectedVersion: 1,
+      reason: "Instruction proposal is durably recorded.",
+    });
+    expect(await writeCompanyBrainGovernedProposal(client.db, preferenceInput)).toEqual(
+      preferenceFirst,
+    );
+    expect(await writeCompanyBrainGovernedProposal(client.db, instructionInput)).toEqual(
+      instructionFirst,
+    );
+    await expect(
+      writeCompanyBrainGovernedProposal(client.db, {
+        ...preferenceInput,
+        request: { ...preferenceInput.request, title: "Different immutable input" },
+      }),
+    ).rejects.toThrow("different immutable input");
+
+    const [preferenceStored] = await shared.admin<
+      {
+        status: string;
+        active_revision_id: string | null;
+        content: string;
+        knowledge_content: string;
+        event_count: number;
+      }[]
+    >`
+      select preference.status, preference.active_revision_id, revision.content,
+        change.content as knowledge_content,
+        (select count(*)::int from preference_registry_events event
+          where event.preference_id = preference.id) as event_count
+      from preference_registry_preferences preference
+      join preference_registry_revisions revision
+        on revision.id = ${preferenceFirst.destinationRevisionId}
+      join company_brain_preference_proposal_receipts receipt
+        on receipt.preference_id = preference.id
+      join knowledge_change_proposals change
+        on change.id = receipt.knowledge_proposal_id
+      where preference.id = ${preferenceFirst.destinationProposalId}
+    `;
+    expect(preferenceStored).toEqual({
+      status: "proposed",
+      active_revision_id: null,
+      content: preferenceText,
+      knowledge_content: expect.stringContaining(`"content":"${preferenceText}"`),
+      event_count: 1,
+    });
+
+    const [instructionStored] = await shared.admin<
+      {
+        status: string;
+        content: string;
+        knowledge_content: string;
+        active_head_count: number;
+        activation_event_count: number;
+      }[]
+    >`
+      select proposal.status, revision.content, change.content as knowledge_content,
+        (select count(*)::int from workspace_instruction_policy_heads head
+          where head.workspace_id = proposal.workspace_id and head.kind = proposal.kind
+            and head.scope = proposal.scope
+            and coalesce(head.role_key, '') = coalesce(proposal.role_key, '')) as active_head_count,
+        (select count(*)::int from workspace_instruction_policy_activation_events event
+          where event.workspace_id = proposal.workspace_id and event.kind = proposal.kind
+            and event.scope = proposal.scope
+            and coalesce(event.role_key, '') = coalesce(proposal.role_key, ''))
+          as activation_event_count
+      from workspace_instruction_policy_onboarding_proposals proposal
+      join workspace_instruction_policy_revisions revision
+        on revision.id = proposal.draft_revision_id
+      join knowledge_change_proposals change
+        on change.id = proposal.source_id::uuid
+      where proposal.id = ${instructionFirst.destinationProposalId}
+    `;
+    expect(instructionStored).toEqual({
+      status: "proposed",
+      content: instructionText,
+      knowledge_content: instructionText,
+      active_head_count: 0,
+      activation_event_count: 0,
+    });
+  });
+
   test("gives the runtime role lifecycle functions but no direct table access", async () => {
     if (!shared) return;
     const f = await fixture();
@@ -512,6 +746,21 @@ describe("task-tree notes PostgreSQL authority", () => {
           }),
         "42501",
       );
+      for (const table of [
+        "company_brain_preference_proposal_receipts",
+        "workspace_instruction_policy_activation_events",
+        "preference_registry_events",
+      ]) {
+        await expectSqlState(
+          async () =>
+            await app.begin(async (sql) => {
+              await sql`select set_config('opengeni.account_id', ${f.grant.accountId}, true)`;
+              await sql`select set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true)`;
+              await sql.unsafe(`update ${table} set account_id = account_id where false`);
+            }),
+          "42501",
+        );
+      }
     } finally {
       await app.end();
     }

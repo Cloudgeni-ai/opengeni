@@ -77,10 +77,17 @@ export function createCompanyBrainLearningPolicyRouter(
       });
       const effectivePolicy = resolveWorkspaceLearningPolicyEffectiveMode(policySnapshot, {
         kind:
-          request.kind === "promote_task_note_knowledge"
+          request.kind === "promote_task_note_knowledge" ||
+          request.kind === "promote_task_note_instruction_policy" ||
+          request.kind === "promote_task_note_preference"
             ? "task-note"
             : "scoped-knowledge-evidence",
-        id: request.kind === "promote_task_note_knowledge" ? request.noteId : request.evidenceId,
+        id:
+          request.kind === "promote_task_note_knowledge" ||
+          request.kind === "promote_task_note_instruction_policy" ||
+          request.kind === "promote_task_note_preference"
+            ? request.noteId
+            : request.evidenceId,
       });
       if (effectivePolicy.mode === "off") {
         return CompanyBrainLearningPolicyRouteReceipt.parse({

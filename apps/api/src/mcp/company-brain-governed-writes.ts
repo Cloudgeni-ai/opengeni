@@ -22,6 +22,27 @@ const evidence = {
   claimId: z.string().uuid(),
   evidenceId: z.string().uuid(),
 };
+const taskNotePromotion = {
+  operationId: z.string().uuid(),
+  noteId: z.string().uuid(),
+  expectedNoteVersion: z.literal(1),
+  entityType: z
+    .string()
+    .trim()
+    .min(1)
+    .max(96)
+    .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+  normalizedKey: z.string().trim().min(1).max(512),
+  displayName: z.string().trim().min(1).max(512),
+  predicateKey: z
+    .string()
+    .trim()
+    .min(1)
+    .max(128)
+    .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+  confidenceBps: z.number().int().min(0).max(10_000),
+  reason,
+};
 
 export type RegisterCompanyBrainGovernedWriteToolsInput = {
   server: McpServer;
@@ -83,27 +104,7 @@ export function registerCompanyBrainGovernedWriteTools(
     {
       description:
         "Promote one still-active note from this exact root task tree into a normalized workspace Knowledge proposal. The immutable note bytes remain source evidence; this never activates the claim or widens it to personal/organization scope.",
-      inputSchema: {
-        operationId: z.string().uuid(),
-        noteId: z.string().uuid(),
-        expectedNoteVersion: z.literal(1),
-        entityType: z
-          .string()
-          .trim()
-          .min(1)
-          .max(96)
-          .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
-        normalizedKey: z.string().trim().min(1).max(512),
-        displayName: z.string().trim().min(1).max(512),
-        predicateKey: z
-          .string()
-          .trim()
-          .min(1)
-          .max(128)
-          .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
-        confidenceBps: z.number().int().min(0).max(10_000),
-        reason,
-      },
+      inputSchema: taskNotePromotion,
     },
     async (request) => {
       await input.authorize();
@@ -111,6 +112,63 @@ export function registerCompanyBrainGovernedWriteTools(
         await router.write({
           attempt: input.attempt,
           request: { kind: "promote_task_note_knowledge", ...request },
+        }),
+      );
+    },
+  );
+
+  input.server.registerTool(
+    "task_note_promote_instruction_policy",
+    {
+      description:
+        "Atomically promote one still-active note from this exact root task tree into an inactive workspace instruction-policy draft. The note bytes remain exact evidence and draft content; this never activates mandatory behavior or widens scope.",
+      inputSchema: {
+        ...taskNotePromotion,
+        target: WorkspaceInstructionPolicyTarget,
+        expectedCurrentRevisionId: z.string().uuid().nullable(),
+        expectedActivationVersion: z.number().int().nonnegative(),
+      },
+    },
+    async (request) => {
+      await input.authorize();
+      return input.json(
+        await router.write({
+          attempt: input.attempt,
+          request: { kind: "promote_task_note_instruction_policy", ...request },
+        }),
+      );
+    },
+  );
+
+  input.server.registerTool(
+    "task_note_promote_preference",
+    {
+      description:
+        "Atomically promote one still-active note from this exact root task tree into an inactive workspace preference proposal. The note bytes remain exact evidence and full proposal content; this never activates behavior or widens scope.",
+      inputSchema: {
+        ...taskNotePromotion,
+        stableKey: z.string().trim().min(1).max(PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS),
+        title: z.string().trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
+        description: z
+          .string()
+          .trim()
+          .min(1)
+          .max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
+        precedenceRank: z.number().int().min(-1_000).max(1_000).optional().default(0),
+        conflictStrategy: z
+          .enum(["override", "merge", "reject", "inform"])
+          .optional()
+          .default("override"),
+        conflictsWith: z.array(z.string().min(1)).max(32).optional().default([]),
+        expiresAt: z.string().datetime({ offset: true }).nullable().optional().default(null),
+      },
+    },
+    async (request) => {
+      await input.authorize();
+      return input.json(
+        await router.write({
+          attempt: input.attempt,
+          request: { kind: "promote_task_note_preference", ...request },
         }),
       );
     },

@@ -68,6 +68,8 @@ describe("Company Brain governed write tools", () => {
       "knowledge_propose",
       "knowledge_correct",
       "task_note_promote_knowledge",
+      "task_note_promote_instruction_policy",
+      "task_note_promote_preference",
       "instruction_policy_propose",
       "preference_propose",
     ]);
@@ -78,7 +80,26 @@ describe("Company Brain governed write tools", () => {
       evidenceId: EVIDENCE_ID,
       reason: "Propose this evidence-backed fact.",
     });
-    expect(authorizations).toBe(1);
+    const taskNoteOperationId = "00000000-0000-4000-8000-000000000112";
+    await handlers.get("task_note_promote_preference")!({
+      operationId: taskNoteOperationId,
+      noteId: "00000000-0000-4000-8000-000000000113",
+      expectedNoteVersion: 1,
+      entityType: "working_method",
+      normalizedKey: "support-tone",
+      displayName: "Support tone",
+      predicateKey: "ways.preference",
+      confidenceBps: 8_000,
+      stableKey: "support.tone",
+      title: "Support tone",
+      description: "Suggested tone for support replies.",
+      precedenceRank: 0,
+      conflictStrategy: "override",
+      conflictsWith: [],
+      expiresAt: null,
+      reason: "Promote the exact note into an inactive preference.",
+    });
+    expect(authorizations).toBe(2);
     expect(writes).toEqual([
       {
         attempt: ATTEMPT,
@@ -88,6 +109,28 @@ describe("Company Brain governed write tools", () => {
           claimId: CLAIM_ID,
           evidenceId: EVIDENCE_ID,
           reason: "Propose this evidence-backed fact.",
+        },
+      },
+      {
+        attempt: ATTEMPT,
+        request: {
+          kind: "promote_task_note_preference",
+          operationId: taskNoteOperationId,
+          noteId: "00000000-0000-4000-8000-000000000113",
+          expectedNoteVersion: 1,
+          entityType: "working_method",
+          normalizedKey: "support-tone",
+          displayName: "Support tone",
+          predicateKey: "ways.preference",
+          confidenceBps: 8_000,
+          stableKey: "support.tone",
+          title: "Support tone",
+          description: "Suggested tone for support replies.",
+          precedenceRank: 0,
+          conflictStrategy: "override",
+          conflictsWith: [],
+          expiresAt: null,
+          reason: "Promote the exact note into an inactive preference.",
         },
       },
     ]);

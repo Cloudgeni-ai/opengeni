@@ -290,6 +290,15 @@ describe("release schema contract", () => {
         deploymentMode: "rolling",
       },
     ]);
+    expect(
+      completeSourceContract.migrations.filter((migration) => migration.path.startsWith("0260_")),
+    ).toEqual([
+      {
+        path: "0260_preference_knowledge_proposal_actor_binding.sql",
+        sha256: "edb942ea956d91a47240107c250ec7b1cfe071eae6efa357139b9b8c4500048a",
+        deploymentMode: "rolling",
+      },
+    ]);
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
@@ -414,6 +423,11 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
+      if (migrations.has("0260_preference_knowledge_proposal_actor_binding.sql")) {
+        return includesActivation
+          ? "bb3791d81183417b0e0ec2b8fca611e9db557dba4669020814a1efac526ed335"
+          : "1dacab9300bb732e187c0aa2adf013900d773d5cde96c2078319eac40739308e";
+      }
       if (migrations.has("0258_task_note_knowledge_promotion.sql")) {
         return includesActivation
           ? "778fef339ad9c442b7a91a758a95c7f07a300a231bd915cbe3449244685f3bc6"
@@ -755,7 +769,8 @@ describe("release schema contract", () => {
         (migrations.has("0245_model_context_contribution_facts.sql") ? 1 : 0) +
         (migrations.has("0246_integration_personal_instance_authority.sql") ? 1 : 0) +
         (migrations.has("0255_company_brain_governed_write_proposals.sql") ? 1 : 0) +
-        (migrations.has("0258_task_note_knowledge_promotion.sql") ? 1 : 0),
+        (migrations.has("0258_task_note_knowledge_promotion.sql") ? 1 : 0) +
+        (migrations.has("0260_preference_knowledge_proposal_actor_binding.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -787,15 +802,17 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0258_task_note_knowledge_promotion.sql")
-        ? "0258_task_note_knowledge_promotion.sql"
-        : migrations.has("0255_company_brain_governed_write_proposals.sql")
-          ? "0255_company_brain_governed_write_proposals.sql"
-          : migrations.has("0248_terraform_stacks_component_resolution_fence.sql")
-            ? "0248_terraform_stacks_component_resolution_fence.sql"
-            : migrations.has("0247_terraform_stacks_provenance_repair.sql")
-              ? "0247_terraform_stacks_provenance_repair.sql"
-              : latestCompatibleMigration,
+      migrations.has("0260_preference_knowledge_proposal_actor_binding.sql")
+        ? "0260_preference_knowledge_proposal_actor_binding.sql"
+        : migrations.has("0258_task_note_knowledge_promotion.sql")
+          ? "0258_task_note_knowledge_promotion.sql"
+          : migrations.has("0255_company_brain_governed_write_proposals.sql")
+            ? "0255_company_brain_governed_write_proposals.sql"
+            : migrations.has("0248_terraform_stacks_component_resolution_fence.sql")
+              ? "0248_terraform_stacks_component_resolution_fence.sql"
+              : migrations.has("0247_terraform_stacks_provenance_repair.sql")
+                ? "0247_terraform_stacks_provenance_repair.sql"
+                : latestCompatibleMigration,
     );
     expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
       sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",

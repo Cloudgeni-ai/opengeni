@@ -90,6 +90,85 @@ export const PromoteTaskNoteKnowledgeRequest = z
   .strict();
 export type PromoteTaskNoteKnowledgeRequest = z.infer<typeof PromoteTaskNoteKnowledgeRequest>;
 
+/**
+ * Promote the exact immutable Task-note bytes into an inactive mandatory-rule
+ * draft. The caller selects only the governed target and active-head baseline;
+ * it cannot replace the source content or activate the draft.
+ */
+export const PromoteTaskNoteInstructionPolicyRequest = z
+  .strictObject({
+    kind: z.literal("promote_task_note_instruction_policy"),
+    operationId,
+    noteId: z.string().uuid(),
+    expectedNoteVersion: z.literal(1),
+    entityType: z
+      .string()
+      .trim()
+      .min(1)
+      .max(96)
+      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+    normalizedKey: z.string().trim().min(1).max(512),
+    displayName: z.string().trim().min(1).max(512),
+    predicateKey: z
+      .string()
+      .trim()
+      .min(1)
+      .max(128)
+      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+    confidenceBps: z.number().int().min(0).max(10_000),
+    target: WorkspaceInstructionPolicyTarget,
+    expectedCurrentRevisionId: z.string().uuid().nullable(),
+    expectedActivationVersion: z.number().int().nonnegative(),
+    reason: boundedReason,
+  })
+  .superRefine((value, context) => {
+    const target = WorkspaceInstructionPolicyTarget.safeParse(value.target);
+    if (!target.success) {
+      for (const issue of target.error.issues) {
+        context.addIssue({ ...issue, path: ["target", ...issue.path] });
+      }
+    }
+  });
+export type PromoteTaskNoteInstructionPolicyRequest = z.infer<
+  typeof PromoteTaskNoteInstructionPolicyRequest
+>;
+
+/**
+ * Promote the exact immutable Task-note bytes into an inactive workspace
+ * preference proposal. Descriptor metadata is caller-supplied and bounded,
+ * while the full proposal content always comes from the admitted note.
+ */
+export const PromoteTaskNotePreferenceRequest = z.strictObject({
+  kind: z.literal("promote_task_note_preference"),
+  operationId,
+  noteId: z.string().uuid(),
+  expectedNoteVersion: z.literal(1),
+  entityType: z
+    .string()
+    .trim()
+    .min(1)
+    .max(96)
+    .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+  normalizedKey: z.string().trim().min(1).max(512),
+  displayName: z.string().trim().min(1).max(512),
+  predicateKey: z
+    .string()
+    .trim()
+    .min(1)
+    .max(128)
+    .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+  confidenceBps: z.number().int().min(0).max(10_000),
+  stableKey: PreferenceRegistryStableKey.max(PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS),
+  title: z.string().trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
+  description: z.string().trim().min(1).max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
+  precedenceRank: z.number().int().min(-1_000).max(1_000).default(0),
+  conflictStrategy: PreferenceRegistryConflictStrategy.default("override"),
+  conflictsWith: z.array(PreferenceRegistryStableKey).max(32).default([]),
+  expiresAt: z.string().datetime({ offset: true }).nullable().default(null),
+  reason: boundedReason,
+});
+export type PromoteTaskNotePreferenceRequest = z.infer<typeof PromoteTaskNotePreferenceRequest>;
+
 export const ProposeWorkspaceInstructionPolicyRequest = z
   .strictObject({
     kind: z.literal("propose_instruction_policy"),
@@ -145,6 +224,8 @@ export const CompanyBrainGovernedWriteRequest = z.discriminatedUnion("kind", [
   ProposeWorkspaceKnowledgeClaimRequest,
   CorrectWorkspaceKnowledgeClaimRequest,
   PromoteTaskNoteKnowledgeRequest,
+  PromoteTaskNoteInstructionPolicyRequest,
+  PromoteTaskNotePreferenceRequest,
   ProposeWorkspaceInstructionPolicyRequest,
   ProposeWorkspacePreferenceRequest,
 ]);

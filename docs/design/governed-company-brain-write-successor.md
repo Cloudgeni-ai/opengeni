@@ -54,14 +54,18 @@ Rejected or superseded concepts:
 
 ## Implemented bounded successor
 
-The successor accepts only existing canonical workspace claim/evidence IDs. It
-does not ingest free-form text or register a model-facing tool. Four explicit
+The evidence-backed successor accepts only existing canonical workspace
+claim/evidence IDs. The rooted Task-note path separately admits exact immutable
+note bytes and never accepts caller replacement content. Seven explicit
 operations are supported:
 
 1. propose a Knowledge claim;
 2. propose a correction through an immutable `supersedes` relation;
 3. propose an inactive workspace instruction charter/policy revision; and
-4. propose an inactive workspace preference revision.
+4. propose an inactive workspace preference revision;
+5. promote an active rooted Task note into proposed workspace Knowledge;
+6. atomically promote one into an inactive instruction-policy draft; and
+7. atomically promote one into an inactive workspace preference.
 
 Admission locks the exact current session, turn, attempt, and execution
 generation; derives the immutable initiating human; and rejects pending live
@@ -80,12 +84,16 @@ proposal; its existing human lifecycle remains the only activation authority.
 An immutable workspace-local destination receipt preserves operation/input and
 preference/revision identities across later human lifecycle changes without
 claiming permission-first selector or logical-turn context-receipt ownership.
+Migration 0260 repairs the released Knowledge-backed adapter predicates without
+changing authority: instruction targets use the canonical global/role shape,
+and the preference security-definer function binds its service actor through an
+unambiguous local variable.
 
 ## Explicit exclusions
 
 - permission-first selector, accepted-boundary snapshot, recovery reuse, and
   logical-turn context-receipt ownership;
-- Task-note storage or retrieval beyond the existing explicit note tools;
+- automatic Task-note discovery or prompt injection;
 - generic `memory_save`, generic durable learning, or Memory promotion;
 - personal or cross-workspace organization activation;
 - implicit policy/preference activation or correction;
@@ -115,5 +123,10 @@ one-transaction evidence/claim capability that the insert trigger consumes.
 The same trigger follows the admitted claim to its fact and requires the exact
 note text plus the version-one source identity, so direct runtime DML cannot
 attach Task-note provenance to unrelated content.
+The direct instruction/preference promotion tools then materialize the exact
+fact bytes into the existing inactive destination in that same outer
+transaction. Their inputs select bounded target/descriptor metadata but contain
+no content field. Concurrent exact retries converge, archived-note replay uses
+immutable Knowledge lineage, and another task tree or changed input is denied.
 This still does not add personal/organization routing, generic Memory, or active
 authority.

@@ -393,6 +393,14 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
     sessionRequired: true,
     allOf: ["documents:search", "sessions:control"],
   },
+  task_note_promote_instruction_policy: {
+    sessionRequired: true,
+    allOf: ["documents:search", "sessions:control", "workspace:read"],
+  },
+  task_note_promote_preference: {
+    sessionRequired: true,
+    allOf: ["documents:search", "sessions:control", "workspace:read"],
+  },
   instruction_policy_propose: {
     sessionRequired: true,
     allOf: ["documents:search", "workspace:read"],

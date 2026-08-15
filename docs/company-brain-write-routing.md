@@ -11,7 +11,7 @@ notes plus governed Knowledge and Ways-of-working proposals.
 | Destination | Purpose | Authority | Model access | Current status |
 | --- | --- | --- | --- | --- |
 | Knowledge | Sourced company facts and evidence | Documents/scoped-knowledge authority | Permission-first `knowledge_search`/`get`/`browse`; never prompt-injected | Workspace-local claim proposal/correction plus rooted Task-note promotion implemented as append-only review/relation evidence |
-| Ways of working | Human-authoritative policy and preferences | Existing instruction-policy and preference-registry heads | Bounded descriptors by default; full bodies on demand | Workspace-local Knowledge-backed inactive proposal adapters implemented; activation remains human-only |
+| Ways of working | Human-authoritative policy and preferences | Existing instruction-policy and preference-registry heads | Bounded descriptors by default; full bodies on demand | Workspace-local Knowledge-backed inactive proposal adapters plus atomic rooted Task-note promotion implemented; activation remains human-only |
 | Task notes | Short-lived technical coordination inside one root session tree | Exact accepted turn/attempt plus root-session visibility | Explicit `task_notes_list`; never prompt-injected | Create/list/archive implemented by migration 0239; atomic correction/revert lineage by migration 0258 |
 | Durable agent learning | Reusable technical knowledge beyond one task tree | Existing Memory/governed-learning authorities | Existing retrieval rules | Routing/promotion remains later work |
 
@@ -29,9 +29,14 @@ notes do not widen those scopes.
 - propose a correction by linking one replacement claim to a different replaced
   claim with `supersedes`, then appending a proposed review;
 - materialize an exact Knowledge change proposal as an inactive instruction
-  charter/policy draft against an exact active-head baseline; or
+  charter/policy draft against an exact active-head baseline;
 - materialize an exact Knowledge change proposal as an inactive workspace
-  preference with `knowledge_proposal` provenance and `untrusted_proposal` trust.
+  preference with `knowledge_proposal` provenance and `untrusted_proposal` trust;
+- promote an exact rooted Task note into proposed workspace Knowledge;
+- atomically promote an exact rooted Task note through proposed Knowledge into
+  an inactive instruction-policy draft; or
+- atomically promote an exact rooted Task note through proposed Knowledge into
+  an inactive workspace preference.
 
 The request carries an operation UUID plus the exact account, workspace,
 session, turn, attempt, and execution generation. One transaction locks and
@@ -43,7 +48,7 @@ active authority are not valid inputs.
 Every route first appends one `proposed` Knowledge review using a deterministic
 sub-operation UUID. Its immutable input hash binds the complete request and
 exact attempt through a content-free service actor identity. This common guard
-makes the top-level operation UUID idempotent across all four destinations: an
+makes the top-level operation UUID idempotent across every explicit operation: an
 exact retry reconstructs the same receipt, while changed destination, content,
 attempt, generation, evidence, or reason conflicts. Corrections add an immutable
 relation; Ways-of-working routes add an immutable Knowledge change proposal and
@@ -64,6 +69,12 @@ ID, workspace scope, target, and content hash match the exact immutable
 `knowledge_change_proposals` row. Existing onboarding validation is unchanged.
 The same migration adds the immutable FORCE-RLS preference destination receipt
 and an exact-attempt security-definer proposal writer.
+Migration `0260_preference_knowledge_proposal_actor_binding.sql` is the rolling
+repair that makes both existing Knowledge-backed adapters executable against
+their canonical constraints: instruction change proposals retain the exact
+`global | role` target shape, and the preference security-definer writer uses
+an unambiguous local actor binding. It changes no privilege, authority, or
+receipt shape.
 
 Receipts expose only operation/input hashes and audit/resource IDs. They report
 `human_review_required`; because the write is proposal-only, immediate rollback
@@ -87,9 +98,10 @@ snapshot identity/hash, not the snapshot's other source overrides.
 
 The first-party proposal surface is intentionally explicit:
 `knowledge_propose`, `knowledge_correct`, `task_note_promote_knowledge`,
+`task_note_promote_instruction_policy`, `task_note_promote_preference`,
 `instruction_policy_propose`, and `preference_propose`. The signed host supplies
-the exact attempt tuple. Tool input cannot select scope, active authority, a
-different learning-policy source, or replacement evidence bytes.
+the exact attempt tuple. Tool input cannot select authority scope, active
+authority, a different learning-policy source, or replacement evidence bytes.
 
 `task_note_promote_knowledge` accepts an active, unexpired version-one note from
 the exact caller's root tree plus normalized entity/predicate metadata. The note
@@ -107,6 +119,15 @@ DML and cannot forge Task-note evidence onto another claim.
 The resulting claim is `proposed`, never approved or prompt-active. Exact retry
 reconstructs the same receipt even after the short-lived note is archived;
 changed input conflicts, and source cleanup cannot silently widen authority.
+
+The two direct Task-note-to-Ways tools use the same rooted source admission and
+first materialize that exact note text as proposed workspace Knowledge. In the
+same outer transaction they pass those unchanged bytes to the selected inactive
+destination adapter. Callers supply bounded descriptor/target metadata but no
+replacement content. Exact concurrent retries converge, archival replay reads
+the immutable fact/evidence lineage rather than the expired note row, and a
+different root or changed input fails closed. Neither path activates a head or
+injects the result into a prompt.
 
 ## Root-task-tree notes
 
@@ -171,8 +192,9 @@ or reactivated, and failure of either half rolls back the entire replacement.
 
 ## Deployment and deferred work
 
-Migrations `0239_task_tree_notes.sql` and
-`0258_task_note_knowledge_promotion.sql` are rolling and additive. Migration 0258
+Migrations `0239_task_tree_notes.sql`,
+`0258_task_note_knowledge_promotion.sql`, and
+`0260_preference_knowledge_proposal_actor_binding.sql` are rolling. Migration 0258
 also adds immutable replacement receipts and the exact replacement lifecycle
 function. Neither activates organization or personal cross-workspace reads,
 changes goal behavior, injects prompt context, or replaces any Knowledge,
@@ -194,4 +216,6 @@ Canonical implementation: `packages/contracts/src/task-notes.ts`,
 `packages/db/src/company-brain-governed-writes.ts`,
 `packages/core/src/domain/company-brain-governed-writes.ts`, plus migration
 `0255_company_brain_governed_write_proposals.sql` for governed proposals and
-`0258_task_note_knowledge_promotion.sql` for exact Task-note evidence.
+`0258_task_note_knowledge_promotion.sql` for exact Task-note evidence, with
+`0260_preference_knowledge_proposal_actor_binding.sql` repairing the two
+Knowledge-backed Ways adapter predicates.

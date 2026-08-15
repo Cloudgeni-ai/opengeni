@@ -2473,6 +2473,8 @@ export type FirstPartyMcpToolName =
   | "knowledge_propose"
   | "knowledge_correct"
   | "task_note_promote_knowledge"
+  | "task_note_promote_instruction_policy"
+  | "task_note_promote_preference"
   | "instruction_policy_propose"
   | "preference_propose"
   | "sandboxes_list"

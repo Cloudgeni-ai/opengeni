@@ -202,12 +202,15 @@ Knowledge, Memory, preference, policy, or goal authority. See
 [`company-brain-write-routing.md`](company-brain-write-routing.md).
 
 Governed Company Brain writes use a separate explicit, proposal-only router;
-they do not promote task notes or expose a generic `memory_save`. Four
-workspace-local destinations are admitted: propose an existing scoped-Knowledge
+they do not expose a generic `memory_save`. Workspace-local operations may
+propose an existing scoped-Knowledge
 claim with exact evidence, propose a correction through an immutable
 `supersedes` relation, materialize an exact Knowledge change proposal as an
 inactive instruction-policy draft, or materialize it as an inactive untrusted
-workspace preference. One transaction locks and revalidates the exact active
+workspace preference. An active rooted Task note may also be promoted into
+proposed Knowledge alone or, atomically, onward into either inactive Ways
+destination; its exact note bytes become both the proposed fact and destination
+content, never caller-supplied replacement bytes. One transaction locks and revalidates the exact active
 session, turn, attempt, execution generation, immutable initiating human, and
 fresh interruption state. A common immutable Knowledge review binds the full
 input hash and operation UUID across all destinations; exact retry reconstructs
@@ -234,6 +237,10 @@ and another root/tenant/stale attempt fails closed. It also adds the atomic
 replacement receipt without making Task notes authoritative. The explicit
 proposal MCP tools remain proposal-only and learning-policy gated; see
 [`company-brain-write-routing.md`](company-brain-write-routing.md).
+Migration 0260 is a rolling function-only repair for the two released
+Knowledge-backed Ways adapters: canonical global/role instruction target
+projection and an unambiguous preference service-actor binding. It changes no
+runtime privilege, destination lifecycle, or receipt authority.
 
 Workspace decision publication to Slack retains the pure Memory policy/projection boundary, then atomically binds eligible changes to an immutable workspace-admin destination revision and durable outbox. A security-definer `SKIP LOCKED` claim path records append-only attempt/receipt history, retries transient Slack failures, terminally fails or cancels unsafe work, and reuses the existing verified-bot post-operation idempotency fence. The Capabilities UI selects only active non-shared bot-member channels; delivery revalidates that exact live membership/archive/Slack-Connect boundary after the post claim and immediately before the provider call, making destination drift a no-post immutable cancellation receipt. The UI exposes bounded review/retry/history state. A narrow post-persistence adapter consumes matching immutable durable-learning attempt/receipt outcomes without owning router or learning-policy authority. Slack receives only bounded summaries and authoritative application links; canonical Memory and learning ledgers never derive authority from Slack. See [`memory-slack-publication.md`](memory-slack-publication.md).
 
@@ -1227,7 +1234,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | NATS / event bus / auth-callout                                             | `packages/events/src/index.ts`, `packages/events/src/nats-jwt.ts`                                                                                                                                                                                           | —                                                                                  |
 | Object storage                                                              | `packages/storage/src/index.ts`                                                                                                                                                                                                                             | —                                                                                  |
 | Documents / RAG / agent Knowledge retrieval                                 | `packages/documents/src/index.ts`, `apps/api/src/routes/documents.ts`, `apps/api/src/mcp/documents.ts`, `packages/contracts/src/knowledge.ts`                                                                                                                | [`knowledge-retrieval.md`](knowledge-retrieval.md), [`scoped-knowledge.md`](scoped-knowledge.md) |
-| Company Brain routing / root-task-tree notes / governed workspace proposals  | Task notes: `packages/contracts/src/task-notes.ts`, `packages/db/src/task-notes.ts`, `packages/db/drizzle/0239_task_tree_notes.sql`, `apps/api/src/mcp/server.ts`. Governed proposals/promotion: `packages/contracts/src/company-brain-governed-writes.ts`, `packages/core/src/domain/company-brain-governed-writes.ts`, `packages/db/src/company-brain-governed-writes.ts`, `packages/db/drizzle/0255_company_brain_governed_write_proposals.sql`, `packages/db/drizzle/0258_task_note_knowledge_promotion.sql` | [`company-brain-write-routing.md`](company-brain-write-routing.md)                 |
+| Company Brain routing / root-task-tree notes / governed workspace proposals  | Task notes: `packages/contracts/src/task-notes.ts`, `packages/db/src/task-notes.ts`, `packages/db/drizzle/0239_task_tree_notes.sql`, `apps/api/src/mcp/server.ts`. Governed proposals/promotion: `packages/contracts/src/company-brain-governed-writes.ts`, `packages/core/src/domain/company-brain-governed-writes.ts`, `packages/db/src/company-brain-governed-writes.ts`, `packages/db/drizzle/0255_company_brain_governed_write_proposals.sql`, `packages/db/drizzle/0258_task_note_knowledge_promotion.sql`, `packages/db/drizzle/0260_preference_knowledge_proposal_actor_binding.sql` | [`company-brain-write-routing.md`](company-brain-write-routing.md)                 |
 | GitHub App                                                                  | `packages/github/src/index.ts`, `apps/api/src/routes/github.ts`                                                                                                                                                                                             | —                                                                                  |
 | The published SDK/React surface                                             | `packages/sdk/src/index.ts`, `packages/react/src/index.ts`                                                                                                                                                                                                  | `.changeset/config.json`                                                           |
 | Public realtime controller / React composer experience                     | `packages/sdk/src/realtime.ts`, `packages/react/src/realtime.ts`, `packages/react/src/realtime/`; `apps/web` is consumer-only                                                                                                                               | `packages/sdk/README.md`, `packages/react/README.md`                               |

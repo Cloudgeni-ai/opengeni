@@ -109,6 +109,8 @@ describe("Company Brain first-party MCP policy", () => {
       "knowledge_propose",
       "knowledge_correct",
       "task_note_promote_knowledge",
+      "task_note_promote_instruction_policy",
+      "task_note_promote_preference",
       "instruction_policy_propose",
       "preference_propose",
     ];
@@ -117,7 +119,7 @@ describe("Company Brain first-party MCP policy", () => {
       grant(["documents:search", "workspace:read"], selected),
     );
     expect(registeredToolNames(readOnly)).toEqual(
-      selected.filter((name) => name !== "task_note_promote_knowledge").sort(),
+      selected.filter((name) => !name.startsWith("task_note_promote_")).sort(),
     );
 
     const admitted = buildOpenGeniMcpServer(
