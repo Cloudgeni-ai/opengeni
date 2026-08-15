@@ -165,6 +165,42 @@ describe("migration 0258 three-scope Document/Knowledge authority", () => {
       const [base] = await admin<Array<{ id: string }>>`
         insert into document_bases (account_id, workspace_id, name)
         values (${account!.id}, ${workspaceA.id}, 'personal') returning id`;
+      const [legacyFile] = await admin<Array<{ id: string }>>`
+        insert into files (
+          account_id, workspace_id, status, filename, safe_filename, content_type,
+          size_bytes, bucket, object_key
+        ) values (
+          ${account!.id}, ${workspaceA.id}, 'ready', 'legacy-personal.txt',
+          'legacy-personal.txt', 'text/plain', 8, 'test',
+          ${`documents/${crypto.randomUUID()}`}
+        ) returning id`;
+      const [legacyDocument] = await admin<
+        Array<{
+          authorityKind: string;
+          authorityWorkspaceId: string | null;
+          authoritySubjectId: string | null;
+          authorityId: string | null;
+          visibility: string;
+        }>
+      >`
+        insert into documents (
+          id, account_id, workspace_id, base_id, file_id, status, title,
+          created_by, visibility, agent_access
+        ) values (
+          ${legacyDocumentId}, ${account!.id}, ${workspaceA.id}, ${base!.id},
+          ${legacyFile!.id}, 'ready', 'legacy personal evidence', ${legacySubject},
+          'private', true
+        ) returning authority_kind as "authorityKind",
+          authority_workspace_id as "authorityWorkspaceId",
+          authority_subject_id as "authoritySubjectId", authority_id as "authorityId",
+          visibility`;
+      expect(legacyDocument).toEqual({
+        authorityKind: "personal",
+        authorityWorkspaceId: workspaceA.id,
+        authoritySubjectId: legacySubject,
+        authorityId: null,
+        visibility: "private",
+      });
       const documentId = crypto.randomUUID();
       const [authority] = await withScope(app, ownerA, async (tx) => {
         const [created] = await tx<

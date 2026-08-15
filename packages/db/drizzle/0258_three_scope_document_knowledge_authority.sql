@@ -1090,6 +1090,16 @@ BEGIN
       ) THEN
         RAISE EXCEPTION 'document authority is immutable';
       END IF;
+      IF NEW.authority_kind IS NULL OR (
+        NEW.authority_kind = 'workspace'
+        AND NEW.authority_workspace_id IS NULL
+        AND NEW.visibility = 'private'
+      ) THEN
+        NEW.authority_kind := CASE
+          WHEN NEW.visibility = 'private' THEN 'personal'
+          ELSE 'workspace'
+        END;
+      END IF;
       NEW.origin_workspace_id := NEW.workspace_id;
       CASE NEW.authority_kind
         WHEN 'organization' THEN

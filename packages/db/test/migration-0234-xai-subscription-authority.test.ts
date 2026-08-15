@@ -171,6 +171,7 @@ async function seedSessionTurn(
           'xAI persistence fixture', 'test-model', 'medium', 'none',
           ${executionGeneration}, ${attemptId}, ${JSON.stringify(authoritySnapshot)}::jsonb
         )`);
+      await tx.execute(sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`);
       await tx.execute(sql`
         insert into session_turn_attempts (
           id, account_id, workspace_id, session_id, turn_id,
@@ -182,7 +183,6 @@ async function seedSessionTurn(
           ${executionGeneration}, 'running', ${workflowId}, ${`run-${attemptId}`},
           ${`activity-${attemptId}`}, 0, '{}'::jsonb
         )`);
-      await tx.execute(sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`);
     },
   );
   return { sessionId, turnId, attemptId, workflowId };
