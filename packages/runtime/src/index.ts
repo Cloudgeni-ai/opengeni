@@ -262,6 +262,7 @@ import {
   withModelPreparationClientDiagnostics,
   withModelPreparationObserver,
   withModelPreparationSessionDiagnostics,
+  withModelTransportStartedObserver,
   type ModelPreparationMeasurement,
   type ModelPreparationPhase,
 } from "./model-preparation-diagnostics";
@@ -5741,6 +5742,8 @@ export type RunAgentStreamOptions = {
   signal?: AbortSignal;
   /** Nonblocking phase measurements for request preparation before provider I/O. */
   onModelPreparationPhase?: (measurement: ModelPreparationMeasurement) => void;
+  /** Awaited at the generic provider's literal pre-fetch boundary. */
+  onModelTransportStarted?: () => Promise<void> | void;
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
@@ -6089,17 +6092,19 @@ export async function runAgentStream(
       session: withModelPreparationSessionDiagnostics(agentSession),
       ...(sessionState ? { sessionState } : {}),
     } as SandboxRunConfig;
-    return await withModelPreparationObserver(overrides.onModelPreparationPhase, () => {
-      recordModelPreparationManifestInventory(
-        "sandbox_agent_manifest_inventory",
-        (agent as { defaultManifest?: Manifest }).defaultManifest,
-      );
-      recordModelPreparationManifestInventory(
-        "sandbox_session_manifest_inventory",
-        (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
-      );
-      return runScopedRunner(settings, agent).run(agent, prepared.input, ownedRunOptions);
-    });
+    return await withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
+      withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
+        recordModelPreparationManifestInventory(
+          "sandbox_agent_manifest_inventory",
+          (agent as { defaultManifest?: Manifest }).defaultManifest,
+        );
+        recordModelPreparationManifestInventory(
+          "sandbox_session_manifest_inventory",
+          (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
+        );
+        return runScopedRunner(settings, agent).run(agent, prepared.input, ownedRunOptions);
+      }),
+    );
   }
 
   const rawClient = overrides.sandboxClient ?? createSandboxClient(settings, environment);
@@ -6230,13 +6235,15 @@ export async function runAgentStream(
       ...(sandboxSessionState ? { sessionState: sandboxSessionState } : {}),
     } as SandboxRunConfig;
   }
-  return await withModelPreparationObserver(overrides.onModelPreparationPhase, () => {
-    recordModelPreparationManifestInventory(
-      "sandbox_agent_manifest_inventory",
-      (agent as { defaultManifest?: Manifest }).defaultManifest,
-    );
-    return runScopedRunner(settings, agent).run(agent, prepared.input, runOptions);
-  });
+  return await withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
+    withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
+      recordModelPreparationManifestInventory(
+        "sandbox_agent_manifest_inventory",
+        (agent as { defaultManifest?: Manifest }).defaultManifest,
+      );
+      return runScopedRunner(settings, agent).run(agent, prepared.input, runOptions);
+    }),
+  );
 }
 
 function appendSandboxFileDownloadFailureNote(

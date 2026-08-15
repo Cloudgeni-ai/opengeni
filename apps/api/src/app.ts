@@ -121,6 +121,7 @@ import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
 import { registerUserResourceAuthorityRoutes } from "./routes/user-resource-authorities";
+import { registerConnectionAuthorityRoutes } from "./routes/connection-authorities";
 import { projectClientModel } from "./model-catalog";
 import { createTranscriptionService } from "./transcription/service";
 import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
@@ -708,6 +709,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerCanonicalHumanIdentityRoutes(app, routeDeps);
   registerOrganizationMembershipRoutes(app, routeDeps);
   registerUserResourceAuthorityRoutes(app, routeDeps);
+  registerConnectionAuthorityRoutes(app, routeDeps);
   registerSlackInteractionRoutes(app, routeDeps);
 
   app.notFound((c) => {

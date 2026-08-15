@@ -139,6 +139,7 @@ describe("release schema contract", () => {
       "0252_scheduled_personal_resource_delegation.sql",
       "0253_common_user_resource_authority_lifecycle.sql",
       "0254_scoped_variable_set_authority.sql",
+      "0256_connection_authority_delegation.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -279,6 +280,14 @@ describe("release schema contract", () => {
     ).toMatchObject({
       sha256: "457f7ae4bdaaf6f65bc5245f5f3c0ee7b28de94aafce284bb80bfbb4fb690da4",
       deploymentMode: "maintenance",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0256_connection_authority_delegation.sql",
+      ),
+    ).toMatchObject({
+      sha256: "669f96626b41fc0cf8c82914d1e39183925af1717510032fc70950ee7040ff84",
+      deploymentMode: "rolling",
     });
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),

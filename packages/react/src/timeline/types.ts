@@ -159,6 +159,31 @@ export type SandboxItem = {
   occurredAt: string;
 };
 
+export type StartupPhase =
+  | "queue"
+  | "sandbox"
+  | "rig"
+  | "repository"
+  | "files"
+  | "tools"
+  | "model_preparation"
+  | "provider_first_byte";
+
+/** A compact user-visible critical-path span reconstructed from durable events. */
+export type StartupPhaseItem = {
+  kind: "startup-phase";
+  id: string;
+  turnId: string | null;
+  phase: StartupPhase;
+  status: "running" | "complete" | "failed" | "cancelled";
+  startedAt: string;
+  completedAt: string | null;
+  durationMs: number | null;
+  /** Sandbox origin and rig marker outcomes refine the settled label only. */
+  outcome: "created" | "restored" | "resumed" | "skipped" | null;
+  occurredAt: string;
+};
+
 /**
  * A first-party workspace-memory write the agent made mid-turn — a `memory.saved`
  * (it committed a new preference / fact / procedure / decision / history) or a
@@ -381,6 +406,7 @@ export type TimelineItem =
   | WorkerItem
   | WorkerCompletionItem
   | SandboxItem
+  | StartupPhaseItem
   | SessionStatusItem
   | GoalItem
   | NoticeItem
@@ -397,6 +423,7 @@ export type ActivityItem =
   | ToolCallItem
   | WorkerItem
   | SandboxItem
+  | StartupPhaseItem
   | MemoryItem
   | FleetDecisionItem;
 

@@ -14,6 +14,7 @@ import {
   appendSessionEventsForTurnAttempt,
   sessionSubject,
   type AppendEventInput,
+  type CanonicalTurnStartupMilestoneReceipt,
   type Database,
 } from "@opengeni/db";
 import {
@@ -633,7 +634,11 @@ export async function appendAndPublishTurnEventsFenced(
   attemptId: string,
   events: AppendEventInput[],
   observe?: AppendPublishObserver,
-): Promise<{ events: SessionEvent[]; accepted: boolean }> {
+): Promise<{
+  events: SessionEvent[];
+  accepted: boolean;
+  canonicalStartupMilestones: CanonicalTurnStartupMilestoneReceipt[];
+}> {
   const appendStartedAt = performance.now();
   const result = await appendSessionEventsForTurnAttempt(
     db,
