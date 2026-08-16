@@ -23,9 +23,16 @@ const budgets = {
   // live media renderers and browser/computer controls remain lazy. Workspace
   // channels and the "For you" rail entry add always-loaded rail code and one
   // more shared-chunk boundary in both graphs. Revision-fenced Connected Machine
-  // command policy adds its memory/CPU fields to the shared session contract.
-  // Versioned package metadata pushes the release graph just above 553 KiB;
-  // keep one KiB of measured headroom without relaxing the other graph limits.
+  // command policy adds its memory/CPU fields to the shared session contract;
+  // governed goal revision paging, rejection, and rollback add the matching SDK
+  // methods to that same direct-session graph. Browser acceptance builds also
+  // embed a configured VITE_API_BASE_URL; the supported loopback form adds up
+  // to 18 raw bytes relative to the same-origin build. Keep a narrow full-KiB
+  // envelope above that configured graph instead of a platform/config-specific
+  // one-byte margin. Hosted Linux produces a slightly larger gzip graph than
+  // macOS for identical sources: the measured configured Linux graph is
+  // 567,928 bytes. The 558 KiB envelope leaves 3,464 bytes of Linux headroom
+  // while preserving a narrow regression fence.
   initialRaw: 1448 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
@@ -33,8 +40,8 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 1990 * kib,
-  directSessionGzip: 554 * kib,
+  directSessionRaw: 1991 * kib,
+  directSessionGzip: 558 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

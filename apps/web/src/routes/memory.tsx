@@ -36,7 +36,7 @@ export function MemoryRoute({
           className="mt-6 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
         >
           <ArrowLeftIcon className="size-3" />
-          Back to Agent Brain
+          Back to Company Brain
         </Link>
       ) : null}
       <MemoryPane

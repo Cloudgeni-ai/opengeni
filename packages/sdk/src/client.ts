@@ -440,6 +440,7 @@ import type {
   WorkspaceStateGetOptions,
   WorkspaceStateResponse,
 } from "./workspace-state";
+import type { CompanyBrainOkfDownload, CompanyBrainOkfPackage } from "./company-brain";
 import type {
   ActivatePreferenceRegistryRevisionRequest,
   ChangePreferenceRegistryScopeRequest,
@@ -3544,6 +3545,28 @@ export class OpenGeniClient {
       "GET",
       `/v1/workspaces/${workspaceId}/workspace-state/export${query}`,
     );
+  }
+
+  /** Permission-filtered Company Brain package with authorized guidance bodies. */
+  getCompanyBrain(workspaceId: string): Promise<CompanyBrainOkfPackage> {
+    return this.requestJson<CompanyBrainOkfPackage>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/company-brain`,
+    );
+  }
+
+  /** Download the deterministic Markdown/YAML Company Brain package. */
+  async exportCompanyBrainOkf(workspaceId: string): Promise<CompanyBrainOkfDownload> {
+    const response = await this.requestResponse(
+      "GET",
+      `/v1/workspaces/${workspaceId}/company-brain/export`,
+    );
+    const headers = response.headers;
+    return {
+      content: await response.text(),
+      contentType: headers.get("content-type") ?? "text/markdown",
+      filename: headers.get("content-disposition")?.split('"')[1] ?? "company-brain.okf.md",
+    };
   }
 
   async updateWorkspace(workspaceId: string, request: UpdateWorkspaceRequest): Promise<Workspace> {

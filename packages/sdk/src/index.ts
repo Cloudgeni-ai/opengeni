@@ -225,6 +225,7 @@ export type {
   WorkspaceStateResponse,
   WorkspaceStateSourceKindCounts,
 } from "./workspace-state";
+export type { CompanyBrainOkfDownload, CompanyBrainOkfPackage } from "./company-brain";
 export type {
   MemorySlackImportance,
   MemorySlackPublication,
