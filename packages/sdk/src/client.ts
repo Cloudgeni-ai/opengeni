@@ -227,6 +227,17 @@ import type {
   KnowledgeMemorySearchRequest,
   ListApiKeysResponse,
   ListManagedOrganizationMembershipsResponse,
+  ListOrganizationInvitationsPageResponse,
+  ListOrganizationMembersResponse,
+  AcceptOrganizationInvitationRequest,
+  AcceptOrganizationInvitationResponse,
+  CreateOrganizationInvitationRequest,
+  OrganizationInvitation,
+  OrganizationMember,
+  OrganizationRetentionPolicy,
+  RevokeOrganizationInvitationRequest,
+  UpdateOrganizationMemberRequest,
+  UpdateOrganizationRetentionPolicyRequest,
   ListPacksResponse,
   // Bring-your-own-compute: the Machines dashboard + per-machine metrics (M10).
   MachinesResponse,
@@ -3457,6 +3468,108 @@ export class OpenGeniClient {
     return await this.requestJson<ListManagedOrganizationMembershipsResponse>(
       "GET",
       "/v1/organization-memberships",
+    );
+  }
+
+  /** Pending and historical invitations addressed to the current managed human. */
+  async listOrganizationInvitations(
+    options: { cursor?: string; limit?: number } = {},
+  ): Promise<ListOrganizationInvitationsPageResponse> {
+    const query = new URLSearchParams();
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return await this.requestJson<ListOrganizationInvitationsPageResponse>(
+      "GET",
+      `/v1/organization-invitations${suffix}`,
+    );
+  }
+
+  /** Admin-only deterministic page of invitations for one organization. */
+  async listOrganizationInvitationsForOrganization(
+    organizationId: string,
+    options: { cursor?: string; limit?: number } = {},
+  ): Promise<ListOrganizationInvitationsPageResponse> {
+    const query = new URLSearchParams();
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return await this.requestJson<ListOrganizationInvitationsPageResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/invitations${suffix}`,
+    );
+  }
+
+  async createOrganizationInvitation(
+    organizationId: string,
+    request: CreateOrganizationInvitationRequest,
+  ): Promise<OrganizationInvitation> {
+    return await this.requestJson<OrganizationInvitation>(
+      "POST",
+      `/v1/organizations/${organizationId}/invitations`,
+      request,
+    );
+  }
+
+  async acceptOrganizationInvitation(
+    invitationId: string,
+    request: AcceptOrganizationInvitationRequest,
+  ): Promise<AcceptOrganizationInvitationResponse> {
+    return await this.requestJson<AcceptOrganizationInvitationResponse>(
+      "POST",
+      `/v1/organization-invitations/${invitationId}/accept`,
+      request,
+    );
+  }
+
+  async revokeOrganizationInvitation(
+    organizationId: string,
+    invitationId: string,
+    request: RevokeOrganizationInvitationRequest,
+  ): Promise<OrganizationInvitation> {
+    return await this.requestJson<OrganizationInvitation>(
+      "POST",
+      `/v1/organizations/${organizationId}/invitations/${invitationId}/revoke`,
+      request,
+    );
+  }
+
+  async listOrganizationMembers(organizationId: string): Promise<ListOrganizationMembersResponse> {
+    return await this.requestJson<ListOrganizationMembersResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/members`,
+    );
+  }
+
+  async updateOrganizationMember(
+    organizationId: string,
+    membershipId: string,
+    request: UpdateOrganizationMemberRequest,
+  ): Promise<OrganizationMember> {
+    return await this.requestJson<OrganizationMember>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/members/${membershipId}`,
+      request,
+    );
+  }
+
+  async getOrganizationRetentionPolicy(
+    organizationId: string,
+  ): Promise<OrganizationRetentionPolicy> {
+    return await this.requestJson<OrganizationRetentionPolicy>(
+      "GET",
+      `/v1/organizations/${organizationId}/retention-policy`,
+    );
+  }
+
+  async updateOrganizationRetentionPolicy(
+    organizationId: string,
+    request: UpdateOrganizationRetentionPolicyRequest,
+  ): Promise<OrganizationRetentionPolicy> {
+    return await this.requestJson<OrganizationRetentionPolicy>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/retention-policy`,
+      request,
     );
   }
 

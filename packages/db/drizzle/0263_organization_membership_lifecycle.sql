@@ -1,0 +1,1203 @@
+-- deployment-mode: rolling
+-- Organization invitation, role, suspension, reactivation, offboarding and
+-- retention-policy authority. Provider email delivery and retention deletion
+-- remain outside this database lifecycle.
+
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '10min';
+
+ALTER TABLE "organization_memberships"
+  ADD COLUMN "role" text NOT NULL DEFAULT 'member';
+
+UPDATE "organization_memberships" membership
+SET role = 'owner'
+FROM "managed_accounts" account
+WHERE account.id = membership.account_id
+  AND account.external_source = 'better-auth:user'
+  AND membership.subject_id = 'user:' || account.external_id;
+
+ALTER TABLE "organization_memberships"
+  ADD CONSTRAINT "organization_memberships_role_check"
+  CHECK ("role" IN ('owner', 'admin', 'member')) NOT VALID;
+ALTER TABLE "organization_memberships"
+  VALIDATE CONSTRAINT "organization_memberships_role_check";
+
+ALTER TABLE "organization_user_retention_policies"
+  DROP CONSTRAINT "organization_user_retention_policies_duration_check";
+ALTER TABLE "organization_user_retention_policies"
+  ADD CONSTRAINT "organization_user_retention_policies_duration_check" CHECK (
+    ("mode" = 'retain' AND "retention_days" IS NULL)
+    OR (
+      "mode" = 'delete_after'
+      AND "retention_days" BETWEEN 30 AND 90
+    )
+  ) NOT VALID;
+ALTER TABLE "organization_user_retention_policies"
+  VALIDATE CONSTRAINT "organization_user_retention_policies_duration_check";
+
+-- The pre-existing managed-human provisioner creates the one organization
+-- whose external identity is the same human but predates roles. Preserve that
+-- seamless bootstrap without teaching the general invitation path to infer
+-- authority from provenance: only this exact self-organization INSERT is
+-- promoted, and later role changes remain explicit lifecycle commands.
+CREATE OR REPLACE FUNCTION opengeni_private.assign_managed_self_organization_owner()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM managed_accounts account
+    WHERE account.id = NEW.account_id
+      AND account.external_source = 'better-auth:user'
+      AND NEW.subject_id = 'user:' || account.external_id
+  ) THEN
+    NEW.role := 'owner';
+  END IF;
+  RETURN NEW;
+END
+$body$;
+CREATE TRIGGER organization_memberships_assign_managed_self_owner
+  BEFORE INSERT ON organization_memberships
+  FOR EACH ROW EXECUTE FUNCTION opengeni_private.assign_managed_self_organization_owner();
+
+CREATE TABLE "organization_membership_invitations" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
+  "target_subject_id" text NOT NULL,
+  "target_email" text NOT NULL,
+  "role" text NOT NULL DEFAULT 'member',
+  "status" text NOT NULL DEFAULT 'pending',
+  "revision" bigint NOT NULL DEFAULT 1,
+  "created_by_membership_id" uuid NOT NULL,
+  "accepted_membership_id" uuid,
+  "expires_at" timestamptz NOT NULL,
+  "created_at" timestamptz NOT NULL DEFAULT clock_timestamp(),
+  "updated_at" timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT "organization_membership_invitations_creator_fk"
+    FOREIGN KEY ("created_by_membership_id", "account_id")
+    REFERENCES "organization_memberships"("id", "account_id") ON DELETE RESTRICT,
+  CONSTRAINT "organization_membership_invitations_accepted_membership_fk"
+    FOREIGN KEY ("accepted_membership_id", "account_id")
+    REFERENCES "organization_memberships"("id", "account_id") ON DELETE RESTRICT,
+  CONSTRAINT "organization_membership_invitations_subject_check" CHECK (
+    "target_subject_id" = btrim("target_subject_id")
+    AND "target_subject_id" LIKE 'user:%'
+    AND octet_length(convert_to("target_subject_id", 'UTF8')) BETWEEN 6 AND 1024
+  ),
+  CONSTRAINT "organization_membership_invitations_email_check" CHECK (
+    "target_email" = lower(btrim("target_email"))
+    AND octet_length(convert_to("target_email", 'UTF8')) BETWEEN 3 AND 320
+  ),
+  CONSTRAINT "organization_membership_invitations_role_check"
+    CHECK ("role" IN ('owner', 'admin', 'member')),
+  CONSTRAINT "organization_membership_invitations_status_check"
+    CHECK ("status" IN ('pending', 'accepted', 'revoked', 'expired')),
+  CONSTRAINT "organization_membership_invitations_revision_check" CHECK ("revision" > 0),
+  CONSTRAINT "organization_membership_invitations_acceptance_check" CHECK (
+    ("status" = 'accepted' AND "accepted_membership_id" IS NOT NULL)
+    OR ("status" <> 'accepted' AND "accepted_membership_id" IS NULL)
+  )
+);
+CREATE UNIQUE INDEX "organization_membership_invitations_id_account_idx"
+  ON "organization_membership_invitations" ("id", "account_id");
+CREATE UNIQUE INDEX "organization_membership_invitations_pending_target_uq"
+  ON "organization_membership_invitations" ("account_id", "target_subject_id")
+  WHERE "status" = 'pending';
+CREATE INDEX "organization_membership_invitations_account_created_idx"
+  ON "organization_membership_invitations" ("account_id", "created_at" DESC, "id" DESC);
+CREATE INDEX "organization_membership_invitations_subject_created_idx"
+  ON "organization_membership_invitations" ("target_subject_id", "created_at" DESC, "id" DESC);
+
+CREATE TABLE "organization_membership_operation_receipts" (
+  "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
+  "operation_id" uuid NOT NULL,
+  "action" text NOT NULL,
+  "input_hash" text NOT NULL,
+  "result" jsonb NOT NULL,
+  "created_at" timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT "organization_membership_operation_receipts_pk"
+    PRIMARY KEY ("account_id", "operation_id"),
+  CONSTRAINT "organization_membership_operation_receipts_action_check" CHECK (
+    "action" IN ('invite', 'accept', 'revoke_invitation', 'change_role', 'suspend', 'reactivate', 'offboard', 'retention')
+  ),
+  CONSTRAINT "organization_membership_operation_receipts_input_hash_check"
+    CHECK ("input_hash" ~ '^[0-9a-f]{64}$')
+);
+
+CREATE TABLE "organization_membership_lifecycle_events" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
+  "operation_id" uuid NOT NULL,
+  "actor_membership_id" uuid NOT NULL,
+  "target_membership_id" uuid,
+  "kind" text NOT NULL,
+  "prior_authorization_revision" bigint,
+  "resulting_authorization_revision" bigint,
+  "reason" text,
+  "created_at" timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT "organization_membership_lifecycle_events_actor_fk"
+    FOREIGN KEY ("actor_membership_id", "account_id")
+    REFERENCES "organization_memberships"("id", "account_id") ON DELETE RESTRICT,
+  CONSTRAINT "organization_membership_lifecycle_events_target_fk"
+    FOREIGN KEY ("target_membership_id", "account_id")
+    REFERENCES "organization_memberships"("id", "account_id") ON DELETE RESTRICT,
+  CONSTRAINT "organization_membership_lifecycle_events_kind_check" CHECK (
+    "kind" IN ('invite', 'accept', 'revoke_invitation', 'change_role', 'suspend', 'reactivate', 'offboard', 'retention')
+  ),
+  CONSTRAINT "organization_membership_lifecycle_events_reason_check" CHECK (
+    "reason" IS NULL OR octet_length(convert_to("reason", 'UTF8')) <= 512
+  )
+);
+CREATE UNIQUE INDEX "organization_membership_lifecycle_events_operation_uq"
+  ON "organization_membership_lifecycle_events" ("account_id", "operation_id");
+
+ALTER TABLE "organization_membership_invitations" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "organization_membership_invitations" FORCE ROW LEVEL SECURITY;
+ALTER TABLE "organization_membership_operation_receipts" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "organization_membership_operation_receipts" FORCE ROW LEVEL SECURITY;
+ALTER TABLE "organization_membership_lifecycle_events" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "organization_membership_lifecycle_events" FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS organization_tenancy_lifecycle ON "organization_memberships";
+CREATE POLICY organization_tenancy_lifecycle ON "organization_memberships"
+  USING (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    IN ('managed_human_provisioning', 'organization_membership_lifecycle'))
+  WITH CHECK (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    IN ('managed_human_provisioning', 'organization_membership_lifecycle'));
+DROP POLICY IF EXISTS organization_tenancy_lifecycle ON "organization_user_retention_policies";
+CREATE POLICY organization_tenancy_lifecycle ON "organization_user_retention_policies"
+  USING (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    IN ('managed_human_provisioning', 'organization_membership_lifecycle'))
+  WITH CHECK (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    IN ('managed_human_provisioning', 'organization_membership_lifecycle'));
+DROP POLICY IF EXISTS organization_tenancy_lifecycle ON "organization_user_resource_authorities";
+CREATE POLICY organization_tenancy_lifecycle ON "organization_user_resource_authorities"
+  USING (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    IN ('managed_human_provisioning', 'organization_membership_lifecycle'))
+  WITH CHECK (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    IN ('managed_human_provisioning', 'organization_membership_lifecycle'));
+DROP POLICY IF EXISTS organization_tenancy_lifecycle ON "organization_user_resource_grants";
+CREATE POLICY organization_tenancy_lifecycle ON "organization_user_resource_grants"
+  USING (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    IN ('managed_human_provisioning', 'organization_membership_lifecycle'))
+  WITH CHECK (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    IN ('managed_human_provisioning', 'organization_membership_lifecycle'));
+
+CREATE POLICY organization_tenancy_lifecycle ON "organization_membership_invitations"
+  USING (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    = 'organization_membership_lifecycle')
+  WITH CHECK (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    = 'organization_membership_lifecycle');
+CREATE POLICY organization_tenancy_lifecycle ON "organization_membership_operation_receipts"
+  USING (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    = 'organization_membership_lifecycle')
+  WITH CHECK (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    = 'organization_membership_lifecycle');
+CREATE POLICY organization_tenancy_lifecycle ON "organization_membership_lifecycle_events"
+  USING (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    = 'organization_membership_lifecycle')
+  WITH CHECK (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    = 'organization_membership_lifecycle');
+
+CREATE OR REPLACE FUNCTION opengeni_private.organization_membership_row_json(
+  p_membership organization_memberships
+) RETURNS jsonb
+LANGUAGE sql IMMUTABLE
+SET search_path = pg_catalog
+AS $body$
+  SELECT pg_catalog.jsonb_build_object(
+    'id', p_membership.id,
+    'organizationId', p_membership.account_id,
+    'subjectId', p_membership.subject_id,
+    'role', p_membership.role,
+    'status', p_membership.status,
+    'authorizationRevision', p_membership.authorization_revision,
+    'personalWorkspaceId', p_membership.personal_workspace_id,
+    'revokedAt', p_membership.revoked_at,
+    'personalRetentionUntil', p_membership.personal_retention_until,
+    'createdAt', p_membership.created_at,
+    'updatedAt', p_membership.updated_at
+  )
+$body$;
+
+CREATE OR REPLACE FUNCTION opengeni_private.organization_invitation_row_json(
+  p_invitation organization_membership_invitations
+) RETURNS jsonb
+LANGUAGE sql STABLE
+SET search_path = pg_catalog
+AS $body$
+  SELECT pg_catalog.jsonb_build_object(
+    'id', p_invitation.id,
+    'organizationId', p_invitation.account_id,
+    'targetEmail', p_invitation.target_email,
+    'role', p_invitation.role,
+    'status', CASE
+      WHEN p_invitation.status = 'pending'
+        AND p_invitation.expires_at <= pg_catalog.clock_timestamp()
+      THEN 'expired'
+      ELSE p_invitation.status
+    END,
+    'revision', p_invitation.revision,
+    'expiresAt', p_invitation.expires_at,
+    'acceptedMembershipId', p_invitation.accepted_membership_id,
+    'createdAt', p_invitation.created_at,
+    'updatedAt', p_invitation.updated_at
+  )
+$body$;
+
+CREATE OR REPLACE FUNCTION list_self_organization_memberships(p_subject_id text)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE result jsonb;
+BEGIN
+  IF p_subject_id IS NULL
+    OR p_subject_id IS DISTINCT FROM opengeni_private.current_subject_id()
+    OR p_subject_id NOT LIKE 'user:%'
+  THEN
+    RAISE EXCEPTION 'managed human subject authority required' USING ERRCODE = '42501';
+  END IF;
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle',
+    'organization_membership_lifecycle', true
+  );
+  SELECT coalesce(
+    pg_catalog.jsonb_agg(
+      opengeni_private.organization_membership_row_json(membership)
+      ORDER BY membership.created_at, membership.id
+    ), '[]'::jsonb
+  ) INTO result
+  FROM organization_memberships membership
+  WHERE membership.subject_id = p_subject_id;
+  RETURN result;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION list_self_organization_invitations(
+  p_subject_id text,
+  p_cursor_id uuid,
+  p_limit integer
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE
+  cursor_created_at timestamptz;
+  result jsonb;
+BEGIN
+  IF p_subject_id IS NULL
+    OR p_subject_id IS DISTINCT FROM opengeni_private.current_subject_id()
+    OR p_subject_id NOT LIKE 'user:%'
+    OR p_limit IS NULL OR p_limit < 1 OR p_limit > 100
+  THEN
+    RAISE EXCEPTION 'managed human subject authority required' USING ERRCODE = '42501';
+  END IF;
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle',
+    'organization_membership_lifecycle', true
+  );
+  IF p_cursor_id IS NOT NULL THEN
+    SELECT invitation.created_at INTO cursor_created_at
+    FROM organization_membership_invitations invitation
+    WHERE invitation.target_subject_id = p_subject_id
+      AND invitation.id = p_cursor_id;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'organization invitation cursor not found' USING ERRCODE = 'P0002';
+    END IF;
+  END IF;
+  SELECT coalesce(
+    pg_catalog.jsonb_agg(
+      opengeni_private.organization_invitation_row_json(candidate)
+      ORDER BY candidate.created_at DESC, candidate.id DESC
+    ), '[]'::jsonb
+  ) INTO result
+  FROM (
+    SELECT invitation.*
+    FROM organization_membership_invitations invitation
+    WHERE invitation.target_subject_id = p_subject_id
+      AND (
+        p_cursor_id IS NULL
+        OR (invitation.created_at, invitation.id) < (cursor_created_at, p_cursor_id)
+      )
+    ORDER BY invitation.created_at DESC, invitation.id DESC
+    LIMIT p_limit + 1
+  ) candidate;
+  RETURN result;
+END
+$body$;
+
+-- Rolling compatibility for callers that predate keyset pagination. The
+-- legacy signature is deliberately capped rather than returning unbounded
+-- invitation history.
+CREATE OR REPLACE FUNCTION list_self_organization_invitations(p_subject_id text)
+RETURNS jsonb
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+  SELECT list_self_organization_invitations(p_subject_id, NULL::uuid, 100)
+$body$;
+
+CREATE OR REPLACE FUNCTION get_self_organization_invitation(
+  p_subject_id text,
+  p_invitation_id uuid
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE invitation organization_membership_invitations%ROWTYPE;
+BEGIN
+  IF p_subject_id IS NULL
+    OR p_subject_id IS DISTINCT FROM opengeni_private.current_subject_id()
+    OR p_subject_id NOT LIKE 'user:%'
+    OR p_invitation_id IS NULL
+  THEN
+    RAISE EXCEPTION 'managed human subject authority required' USING ERRCODE = '42501';
+  END IF;
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle',
+    'organization_membership_lifecycle', true
+  );
+  SELECT candidate.* INTO invitation
+  FROM organization_membership_invitations candidate
+  WHERE candidate.id = p_invitation_id
+    AND candidate.target_subject_id = p_subject_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'organization invitation not found' USING ERRCODE = 'P0002';
+  END IF;
+  RETURN opengeni_private.organization_invitation_row_json(invitation);
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION list_organization_members(
+  p_account_id uuid,
+  p_actor_subject_id text
+) RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE actor organization_memberships%ROWTYPE; result jsonb;
+BEGIN
+  IF p_account_id IS NULL
+    OR p_actor_subject_id IS DISTINCT FROM opengeni_private.current_subject_id()
+    OR p_account_id IS DISTINCT FROM opengeni_private.current_account_id()
+  THEN
+    RAISE EXCEPTION 'organization member authority required' USING ERRCODE = '42501';
+  END IF;
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle',
+    'organization_membership_lifecycle', true
+  );
+  SELECT * INTO actor FROM organization_memberships membership
+  WHERE membership.account_id = p_account_id
+    AND membership.subject_id = p_actor_subject_id;
+  IF NOT FOUND OR actor.status <> 'active' OR actor.role NOT IN ('owner', 'admin') THEN
+    RAISE EXCEPTION 'organization administration required' USING ERRCODE = '42501';
+  END IF;
+  SELECT coalesce(
+    pg_catalog.jsonb_agg(
+      opengeni_private.organization_membership_row_json(membership)
+      ORDER BY membership.created_at, membership.id
+    ), '[]'::jsonb
+  ) INTO result
+  FROM organization_memberships membership
+  WHERE membership.account_id = p_account_id;
+  RETURN result;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION list_organization_invitations(
+  p_account_id uuid,
+  p_actor_subject_id text,
+  p_cursor_id uuid,
+  p_limit integer
+) RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE
+  actor organization_memberships%ROWTYPE;
+  cursor_created_at timestamptz;
+  result jsonb;
+BEGIN
+  IF p_account_id IS NULL
+    OR p_actor_subject_id IS DISTINCT FROM opengeni_private.current_subject_id()
+    OR p_account_id IS DISTINCT FROM opengeni_private.current_account_id()
+    OR p_limit IS NULL OR p_limit < 1 OR p_limit > 100
+  THEN
+    RAISE EXCEPTION 'organization invitation page authority is invalid'
+      USING ERRCODE = '42501';
+  END IF;
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle',
+    'organization_membership_lifecycle', true
+  );
+  SELECT * INTO actor FROM organization_memberships membership
+  WHERE membership.account_id = p_account_id
+    AND membership.subject_id = p_actor_subject_id;
+  IF NOT FOUND OR actor.status <> 'active' OR actor.role NOT IN ('owner', 'admin') THEN
+    RAISE EXCEPTION 'organization administration required' USING ERRCODE = '42501';
+  END IF;
+  IF p_cursor_id IS NOT NULL THEN
+    SELECT invitation.created_at INTO cursor_created_at
+    FROM organization_membership_invitations invitation
+    WHERE invitation.account_id = p_account_id AND invitation.id = p_cursor_id;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'organization invitation cursor not found' USING ERRCODE = 'P0002';
+    END IF;
+  END IF;
+  SELECT coalesce(
+    pg_catalog.jsonb_agg(
+      opengeni_private.organization_invitation_row_json(candidate)
+      ORDER BY candidate.created_at DESC, candidate.id DESC
+    ), '[]'::jsonb
+  ) INTO result
+  FROM (
+    SELECT invitation.*
+    FROM organization_membership_invitations invitation
+    WHERE invitation.account_id = p_account_id
+      AND (
+        p_cursor_id IS NULL
+        OR (invitation.created_at, invitation.id) < (cursor_created_at, p_cursor_id)
+      )
+    ORDER BY invitation.created_at DESC, invitation.id DESC
+    LIMIT p_limit + 1
+  ) candidate;
+  RETURN result;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION organization_membership_command(p_command jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE
+  action_name text := p_command ->> 'action';
+  account_id_value uuid := nullif(p_command ->> 'organizationId', '')::uuid;
+  actor_subject text := p_command ->> 'actorSubjectId';
+  operation_id_value uuid := nullif(p_command ->> 'operationId', '')::uuid;
+  input_hash_value text;
+  receipt_row organization_membership_operation_receipts%ROWTYPE;
+  actor organization_memberships%ROWTYPE;
+  target organization_memberships%ROWTYPE;
+  invitation organization_membership_invitations%ROWTYPE;
+  policy organization_user_retention_policies%ROWTYPE;
+  result jsonb;
+  now_value timestamptz := pg_catalog.clock_timestamp();
+  target_subject text;
+  target_email text;
+  requested_role text;
+  target_id uuid;
+  expected_revision bigint;
+  workspace_id_value uuid;
+  reason_value text;
+  retention_days_value integer;
+  previous_workspace text := pg_catalog.current_setting('opengeni.workspace_id', true);
+  previous_visibility_capability text := pg_catalog.current_setting(
+    'opengeni.session_visibility_write_capability', true
+  );
+  visibility_capability_id uuid;
+  interruption_operation_id uuid;
+BEGIN
+  IF p_command IS NULL
+    OR action_name NOT IN ('invite', 'accept', 'revoke_invitation', 'change_role', 'suspend', 'reactivate', 'offboard', 'retention')
+    OR account_id_value IS NULL
+    OR operation_id_value IS NULL
+    OR actor_subject IS NULL
+    OR actor_subject IS DISTINCT FROM opengeni_private.current_subject_id()
+    OR account_id_value IS DISTINCT FROM opengeni_private.current_account_id()
+  THEN
+    RAISE EXCEPTION 'organization membership command authority is invalid'
+      USING ERRCODE = '42501';
+  END IF;
+  input_hash_value := pg_catalog.encode(
+    pg_catalog.sha256(pg_catalog.convert_to(p_command::text, 'UTF8')), 'hex'
+  );
+  PERFORM 1 FROM managed_accounts account WHERE account.id = account_id_value FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'organization not found' USING ERRCODE = 'P0002'; END IF;
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle',
+    'organization_membership_lifecycle', true
+  );
+
+  SELECT * INTO receipt_row
+  FROM organization_membership_operation_receipts receipt
+  WHERE receipt.account_id = account_id_value
+    AND receipt.operation_id = operation_id_value
+  FOR UPDATE;
+  IF FOUND THEN
+    IF receipt_row.action IS DISTINCT FROM action_name
+      OR receipt_row.input_hash IS DISTINCT FROM input_hash_value
+    THEN
+      RAISE EXCEPTION 'organization operation id was reused with different input'
+        USING ERRCODE = '23505';
+    END IF;
+    RETURN receipt_row.result;
+  END IF;
+
+  IF action_name = 'accept' THEN
+    target_id := nullif(p_command ->> 'invitationId', '')::uuid;
+    expected_revision := nullif(p_command ->> 'expectedRevision', '')::bigint;
+    SELECT * INTO invitation
+    FROM organization_membership_invitations candidate
+    WHERE candidate.id = target_id AND candidate.account_id = account_id_value
+    FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'invitation not found' USING ERRCODE = 'P0002'; END IF;
+    IF invitation.target_subject_id IS DISTINCT FROM actor_subject THEN
+      RAISE EXCEPTION 'invitation belongs to another subject' USING ERRCODE = '42501';
+    END IF;
+    IF invitation.status <> 'pending' OR invitation.expires_at <= now_value THEN
+      RAISE EXCEPTION 'invitation is not active' USING ERRCODE = '55000';
+    END IF;
+    IF invitation.revision IS DISTINCT FROM expected_revision THEN
+      RAISE EXCEPTION 'invitation revision is stale' USING ERRCODE = '40001';
+    END IF;
+    SELECT * INTO target FROM organization_memberships membership
+    WHERE membership.account_id = account_id_value
+      AND membership.subject_id = actor_subject
+    FOR UPDATE;
+    IF NOT FOUND THEN
+      workspace_id_value := gen_random_uuid();
+      PERFORM pg_catalog.set_config('opengeni.workspace_id', workspace_id_value::text, true);
+      INSERT INTO workspaces (
+        id, account_id, name, slug, external_source, external_id
+      ) VALUES (
+        workspace_id_value, account_id_value, 'Personal workspace', NULL,
+        'opengeni:organization-membership', account_id_value::text || ':' || actor_subject
+      ) ON CONFLICT (external_source, external_id) DO UPDATE
+        SET updated_at = workspaces.updated_at
+      RETURNING id INTO workspace_id_value;
+      INSERT INTO workspace_inference_controls (workspace_id, account_id)
+      VALUES (workspace_id_value, account_id_value) ON CONFLICT DO NOTHING;
+      INSERT INTO organization_memberships (
+        account_id, subject_id, role, status, personal_workspace_id
+      ) VALUES (
+        account_id_value, actor_subject, invitation.role, 'active', workspace_id_value
+      ) RETURNING * INTO target;
+    ELSE
+      IF target.status = 'active' THEN
+        RAISE EXCEPTION 'organization membership is already active' USING ERRCODE = '55000';
+      END IF;
+      workspace_id_value := target.personal_workspace_id;
+      IF workspace_id_value IS NULL THEN
+        workspace_id_value := gen_random_uuid();
+        PERFORM pg_catalog.set_config('opengeni.workspace_id', workspace_id_value::text, true);
+        INSERT INTO workspaces (
+          id, account_id, name, slug, external_source, external_id
+        ) VALUES (
+          workspace_id_value, account_id_value, 'Personal workspace', NULL,
+          'opengeni:organization-membership', account_id_value::text || ':' || actor_subject
+        ) ON CONFLICT (external_source, external_id) DO UPDATE
+          SET updated_at = workspaces.updated_at
+        RETURNING id INTO workspace_id_value;
+        INSERT INTO workspace_inference_controls (workspace_id, account_id)
+        VALUES (workspace_id_value, account_id_value) ON CONFLICT DO NOTHING;
+      END IF;
+      UPDATE organization_memberships SET
+        role = invitation.role,
+        status = 'active',
+        personal_workspace_id = workspace_id_value,
+        authorization_revision = authorization_revision + 1,
+        revoked_at = NULL,
+        personal_retention_until = NULL,
+        updated_at = now_value
+      WHERE id = target.id RETURNING * INTO target;
+    END IF;
+    UPDATE organization_membership_invitations SET
+      status = 'accepted', revision = revision + 1,
+      accepted_membership_id = target.id, updated_at = now_value
+    WHERE id = invitation.id RETURNING * INTO invitation;
+    result := pg_catalog.jsonb_build_object(
+      'invitation', opengeni_private.organization_invitation_row_json(invitation),
+      'membership', opengeni_private.organization_membership_row_json(target)
+    );
+    actor := target;
+  ELSE
+    -- Existing session-visibility activation serializes workspace -> member ->
+    -- session. Offboarding spans every owned workspace, so pre-lock that exact
+    -- workspace prefix in UUID order before locking either actor or target
+    -- membership. This prevents member/workspace lock inversion while the
+    -- later per-workspace pass takes the canonical session/turn/attempt suffix.
+    IF action_name IN ('suspend', 'offboard') THEN
+      FOR workspace_id_value IN
+        SELECT workspace.id
+        FROM workspaces workspace
+        WHERE workspace.account_id = account_id_value
+        ORDER BY workspace.id
+      LOOP
+        PERFORM pg_catalog.set_config(
+          'opengeni.workspace_id', workspace_id_value::text, true
+        );
+        PERFORM 1 FROM workspace_inference_controls control
+        WHERE control.account_id = account_id_value
+          AND control.workspace_id = workspace_id_value
+        FOR SHARE;
+        PERFORM 1 FROM workspaces workspace
+        WHERE workspace.account_id = account_id_value
+          AND workspace.id = workspace_id_value
+        FOR UPDATE;
+      END LOOP;
+    END IF;
+    SELECT * INTO actor FROM organization_memberships membership
+    WHERE membership.account_id = account_id_value
+      AND membership.subject_id = actor_subject
+    FOR UPDATE;
+    IF NOT FOUND OR actor.status <> 'active' THEN
+      RAISE EXCEPTION 'active organization membership required' USING ERRCODE = '42501';
+    END IF;
+
+    IF action_name = 'invite' THEN
+      IF actor.role NOT IN ('owner', 'admin') THEN
+        RAISE EXCEPTION 'organization administration required' USING ERRCODE = '42501';
+      END IF;
+      target_subject := p_command ->> 'targetSubjectId';
+      target_email := lower(btrim(p_command ->> 'targetEmail'));
+      requested_role := p_command ->> 'role';
+      IF target_subject IS NULL OR target_subject NOT LIKE 'user:%'
+        OR requested_role NOT IN ('owner', 'admin', 'member')
+        OR (actor.role = 'admin' AND requested_role <> 'member')
+        OR nullif(p_command ->> 'expiresAt', '')::timestamptz <= now_value
+        OR nullif(p_command ->> 'expiresAt', '')::timestamptz > now_value + interval '30 days'
+      THEN
+        RAISE EXCEPTION 'invitation input is invalid' USING ERRCODE = '22023';
+      END IF;
+      IF EXISTS (
+        SELECT 1 FROM organization_memberships membership
+        WHERE membership.account_id = account_id_value
+          AND membership.subject_id = target_subject
+          AND membership.status = 'active'
+      ) THEN
+        RAISE EXCEPTION 'subject is already an active organization member' USING ERRCODE = '55000';
+      END IF;
+      UPDATE organization_membership_invitations SET
+        status = 'revoked', revision = revision + 1, updated_at = now_value
+      WHERE account_id = account_id_value
+        AND target_subject_id = target_subject AND status = 'pending';
+      INSERT INTO organization_membership_invitations (
+        account_id, target_subject_id, target_email, role,
+        created_by_membership_id, expires_at
+      ) VALUES (
+        account_id_value, target_subject, target_email, requested_role,
+        actor.id, nullif(p_command ->> 'expiresAt', '')::timestamptz
+      ) RETURNING * INTO invitation;
+      result := opengeni_private.organization_invitation_row_json(invitation);
+      target := NULL;
+    ELSIF action_name = 'revoke_invitation' THEN
+      IF actor.role NOT IN ('owner', 'admin') THEN
+        RAISE EXCEPTION 'organization administration required' USING ERRCODE = '42501';
+      END IF;
+      target_id := nullif(p_command ->> 'invitationId', '')::uuid;
+      expected_revision := nullif(p_command ->> 'expectedRevision', '')::bigint;
+      SELECT * INTO invitation
+      FROM organization_membership_invitations candidate
+      WHERE candidate.id = target_id AND candidate.account_id = account_id_value
+      FOR UPDATE;
+      IF NOT FOUND THEN RAISE EXCEPTION 'invitation not found' USING ERRCODE = 'P0002'; END IF;
+      IF invitation.revision IS DISTINCT FROM expected_revision THEN
+        RAISE EXCEPTION 'invitation revision is stale' USING ERRCODE = '40001';
+      END IF;
+      IF invitation.status <> 'pending' THEN
+        RAISE EXCEPTION 'only a pending invitation can be revoked' USING ERRCODE = '55000';
+      END IF;
+      UPDATE organization_membership_invitations SET
+        status = 'revoked', revision = revision + 1, updated_at = now_value
+      WHERE id = invitation.id RETURNING * INTO invitation;
+      result := opengeni_private.organization_invitation_row_json(invitation);
+      target := NULL;
+    ELSIF action_name = 'retention' THEN
+      IF actor.role <> 'owner' THEN
+        RAISE EXCEPTION 'organization owner required' USING ERRCODE = '42501';
+      END IF;
+      expected_revision := nullif(p_command ->> 'expectedVersion', '')::bigint;
+      requested_role := p_command ->> 'mode';
+      retention_days_value := nullif(p_command ->> 'retentionDays', '')::integer;
+      IF requested_role NOT IN ('retain', 'delete_after')
+        OR (requested_role = 'retain' AND retention_days_value IS NOT NULL)
+        OR (requested_role = 'delete_after' AND retention_days_value NOT BETWEEN 30 AND 90)
+      THEN
+        RAISE EXCEPTION 'retention policy input is invalid' USING ERRCODE = '22023';
+      END IF;
+      SELECT * INTO policy FROM organization_user_retention_policies candidate
+      WHERE candidate.account_id = account_id_value FOR UPDATE;
+      IF NOT FOUND THEN
+        INSERT INTO organization_user_retention_policies (
+          account_id, mode, retention_days, version, updated_by_membership_id
+        ) VALUES (account_id_value, 'retain', NULL, 1, actor.id)
+        RETURNING * INTO policy;
+      END IF;
+      IF policy.version IS DISTINCT FROM expected_revision THEN
+        RAISE EXCEPTION 'retention policy version is stale' USING ERRCODE = '40001';
+      END IF;
+      UPDATE organization_user_retention_policies SET
+        mode = requested_role, retention_days = retention_days_value,
+        version = version + 1, updated_by_membership_id = actor.id,
+        updated_at = now_value
+      WHERE account_id = account_id_value RETURNING * INTO policy;
+      result := pg_catalog.jsonb_build_object(
+        'organizationId', policy.account_id, 'mode', policy.mode,
+        'retentionDays', policy.retention_days, 'version', policy.version,
+        'updatedAt', policy.updated_at
+      );
+      target := NULL;
+    ELSE
+      IF actor.role NOT IN ('owner', 'admin') THEN
+        RAISE EXCEPTION 'organization administration required' USING ERRCODE = '42501';
+      END IF;
+      target_id := nullif(p_command ->> 'membershipId', '')::uuid;
+      expected_revision := nullif(p_command ->> 'expectedAuthorizationRevision', '')::bigint;
+      requested_role := p_command ->> 'role';
+      reason_value := nullif(btrim(p_command ->> 'reason'), '');
+      IF reason_value IS NOT NULL
+        AND octet_length(convert_to(reason_value, 'UTF8')) > 512
+      THEN RAISE EXCEPTION 'reason is too large' USING ERRCODE = '22023'; END IF;
+      PERFORM 1 FROM organization_memberships membership
+      WHERE membership.account_id = account_id_value
+        AND membership.id IN (actor.id, target_id)
+      ORDER BY membership.id FOR UPDATE;
+      SELECT * INTO target FROM organization_memberships membership
+      WHERE membership.account_id = account_id_value AND membership.id = target_id;
+      IF NOT FOUND THEN RAISE EXCEPTION 'organization member not found' USING ERRCODE = 'P0002'; END IF;
+      IF target.authorization_revision IS DISTINCT FROM expected_revision THEN
+        RAISE EXCEPTION 'organization membership revision is stale' USING ERRCODE = '40001';
+      END IF;
+      IF actor.role = 'admin' AND target.role <> 'member' THEN
+        RAISE EXCEPTION 'administrators may manage members only' USING ERRCODE = '42501';
+      END IF;
+      IF target.role = 'owner' AND (
+        action_name IN ('suspend', 'offboard')
+        OR (action_name = 'change_role' AND requested_role <> 'owner')
+      ) AND NOT EXISTS (
+        SELECT 1 FROM organization_memberships other
+        WHERE other.account_id = account_id_value AND other.id <> target.id
+          AND other.status = 'active' AND other.role = 'owner'
+      ) THEN
+        RAISE EXCEPTION 'cannot remove the last active organization owner'
+          USING ERRCODE = '55000';
+      END IF;
+      IF action_name = 'change_role' THEN
+        IF target.status <> 'active' OR requested_role NOT IN ('owner', 'admin', 'member')
+          OR (actor.role = 'admin' AND requested_role <> 'member')
+        THEN RAISE EXCEPTION 'role transition is invalid' USING ERRCODE = '55000'; END IF;
+        UPDATE organization_memberships SET role = requested_role,
+          authorization_revision = authorization_revision + 1, updated_at = now_value
+        WHERE id = target.id RETURNING * INTO target;
+      ELSIF action_name = 'reactivate' THEN
+        IF target.status <> 'suspended' THEN
+          RAISE EXCEPTION 'only a suspended member can be reactivated' USING ERRCODE = '55000';
+        END IF;
+        UPDATE organization_memberships SET status = 'active',
+          authorization_revision = authorization_revision + 1, updated_at = now_value
+        WHERE id = target.id RETURNING * INTO target;
+      ELSIF action_name IN ('suspend', 'offboard') THEN
+        IF action_name = 'suspend' AND target.status <> 'active' THEN
+          RAISE EXCEPTION 'only an active member can be suspended' USING ERRCODE = '55000';
+        ELSIF action_name = 'offboard' AND target.status NOT IN ('active', 'suspended') THEN
+          RAISE EXCEPTION 'only an active or suspended member can be offboarded'
+            USING ERRCODE = '55000';
+        END IF;
+        SELECT * INTO policy FROM organization_user_retention_policies candidate
+        WHERE candidate.account_id = account_id_value;
+        UPDATE organization_user_resource_grants SET
+          status = 'revoked', generation = generation + 1,
+          revoked_at = now_value, updated_at = now_value
+        WHERE account_id = account_id_value
+          AND owner_organization_membership_id = target.id AND status = 'active';
+        UPDATE organization_user_resource_authorities SET
+          status = 'retained', generation = generation + 1, updated_at = now_value
+        WHERE account_id = account_id_value
+          AND organization_membership_id = target.id AND status = 'active'
+          AND action_name = 'offboard';
+        DELETE FROM workspace_memberships
+        WHERE account_id = account_id_value AND subject_id = target.subject_id;
+        -- Private-session attempts carry the exact authority epoch. Advance it
+        -- under each workspace's FORCE-RLS context without touching updated_at
+        -- (the session activity commit gate owns that separate concern).
+        visibility_capability_id := pg_catalog.gen_random_uuid();
+        INSERT INTO session_visibility_write_capabilities (
+          backend_pid, transaction_id, capability_id
+        ) VALUES (
+          pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(),
+          visibility_capability_id
+        );
+        PERFORM pg_catalog.set_config(
+          'opengeni.session_visibility_write_capability',
+          visibility_capability_id::text, true
+        );
+        FOR workspace_id_value IN
+          SELECT workspace.id
+          FROM workspaces workspace
+          WHERE workspace.account_id = account_id_value
+          ORDER BY workspace.id
+        LOOP
+          PERFORM pg_catalog.set_config(
+            'opengeni.workspace_id', workspace_id_value::text, true
+          );
+          PERFORM 1 FROM workspace_inference_controls control
+          WHERE control.account_id = account_id_value
+            AND control.workspace_id = workspace_id_value
+          FOR SHARE;
+          PERFORM 1 FROM workspaces workspace
+          WHERE workspace.account_id = account_id_value
+            AND workspace.id = workspace_id_value
+          FOR KEY SHARE;
+          PERFORM 1 FROM sessions affected
+          WHERE affected.account_id = account_id_value
+            AND affected.workspace_id = workspace_id_value
+            AND (
+              affected.owner_organization_membership_id = target.id
+              OR EXISTS (
+                SELECT 1 FROM session_turns initiated
+                WHERE initiated.session_id = affected.id
+                  AND initiated.initiating_human_subject_id = target.subject_id
+              )
+            )
+          ORDER BY affected.id
+          FOR UPDATE;
+          PERFORM 1 FROM session_turns turn_row
+          WHERE turn_row.account_id = account_id_value
+            AND turn_row.workspace_id = workspace_id_value
+            AND EXISTS (
+              SELECT 1 FROM sessions owned
+              WHERE owned.id = turn_row.session_id
+                AND (
+                  owned.owner_organization_membership_id = target.id
+                  OR turn_row.initiating_human_subject_id = target.subject_id
+                )
+            )
+          ORDER BY turn_row.id
+          FOR UPDATE;
+          PERFORM 1 FROM session_turn_attempts attempt
+          WHERE attempt.account_id = account_id_value
+            AND attempt.workspace_id = workspace_id_value
+            AND EXISTS (
+              SELECT 1 FROM sessions owned
+              WHERE owned.id = attempt.session_id
+                AND (
+                  owned.owner_organization_membership_id = target.id
+                  OR EXISTS (
+                    SELECT 1 FROM session_turns initiated
+                    WHERE initiated.id = attempt.turn_id
+                      AND initiated.initiating_human_subject_id = target.subject_id
+                  )
+                )
+            )
+          ORDER BY attempt.id
+          FOR UPDATE;
+          interruption_operation_id := pg_catalog.gen_random_uuid();
+          INSERT INTO session_command_receipts (
+            id, account_id, workspace_id, actor_type, actor_subject_id,
+            action, operation_key, canonical_request_hash, result
+          ) VALUES (
+            interruption_operation_id, account_id_value, workspace_id_value,
+            'human', actor_subject, 'organization.membership.' || action_name,
+            'organization-membership:' || operation_id_value::text,
+            input_hash_value,
+            pg_catalog.jsonb_build_object(
+              'organizationMembershipOperationId', operation_id_value,
+              'organizationMembershipId', target.id
+            )
+          );
+          INSERT INTO session_attempt_interruptions (
+            account_id, workspace_id, session_id, operation_id, attempt_id,
+            kind, control_revision
+          )
+          SELECT attempt.account_id, attempt.workspace_id, attempt.session_id,
+            interruption_operation_id, attempt.id, 'authority_change',
+            CASE WHEN owned.owner_organization_membership_id = target.id
+              THEN owned.authority_epoch + 1 ELSE owned.authority_epoch END
+          FROM session_turn_attempts attempt
+          JOIN sessions owned ON owned.id = attempt.session_id
+          JOIN session_turns initiated ON initiated.id = attempt.turn_id
+          WHERE attempt.account_id = account_id_value
+            AND attempt.workspace_id = workspace_id_value
+            AND (
+              owned.owner_organization_membership_id = target.id
+              OR initiated.initiating_human_subject_id = target.subject_id
+            )
+            AND attempt.state IN ('claimed', 'running')
+          ON CONFLICT ON CONSTRAINT session_attempt_interruptions_operation_attempt_uq
+          DO NOTHING;
+          UPDATE session_turns turn_row
+          SET status = 'cancelled', cancelled_by = actor_subject,
+            cancel_reason = 'authority_changed', finished_at = now_value,
+            updated_at = now_value, version = turn_row.version + 1
+          WHERE turn_row.account_id = account_id_value
+            AND turn_row.workspace_id = workspace_id_value
+            AND turn_row.status = 'queued'
+            AND EXISTS (
+              SELECT 1 FROM sessions owned
+              WHERE owned.id = turn_row.session_id
+                AND (
+                  owned.owner_organization_membership_id = target.id
+                  OR turn_row.initiating_human_subject_id = target.subject_id
+                )
+            );
+          UPDATE session_system_updates update_row SET state = 'cancelled'
+          WHERE update_row.account_id = account_id_value
+            AND update_row.workspace_id = workspace_id_value
+            AND update_row.state = 'pending'
+            AND EXISTS (
+              SELECT 1 FROM sessions owned
+              WHERE owned.id = update_row.session_id
+                AND owned.owner_organization_membership_id = target.id
+            );
+          UPDATE session_goals goal_row
+          SET status = 'paused', paused_reason = 'api',
+            rationale = CASE WHEN action_name = 'suspend'
+              THEN 'Organization membership was suspended; explicit reauthorization is required.'
+              ELSE 'Organization membership was revoked; explicit reauthorization is required.' END,
+            version = goal_row.version + 1, updated_at = now_value
+          WHERE goal_row.account_id = account_id_value
+            AND goal_row.workspace_id = workspace_id_value
+            AND goal_row.status = 'active'
+            AND EXISTS (
+              SELECT 1 FROM sessions owned
+              WHERE owned.id = goal_row.session_id
+                AND owned.owner_organization_membership_id = target.id
+            );
+          UPDATE organization_user_resource_grants grant_row
+          SET status = 'revoked', revoked_at = now_value,
+            generation = grant_row.generation + 1, updated_at = now_value
+          WHERE grant_row.account_id = account_id_value
+            AND grant_row.workspace_id = workspace_id_value
+            AND grant_row.status = 'active'
+            AND EXISTS (
+              SELECT 1 FROM sessions owned
+              WHERE owned.id = grant_row.session_id
+                AND owned.owner_organization_membership_id = target.id
+                AND owned.authority_epoch = grant_row.authority_epoch
+            );
+          WITH advanced AS (
+            UPDATE sessions owned SET
+              authority_epoch = owned.authority_epoch + 1,
+              initial_personal_connection_delegations = '[]'::jsonb,
+              last_sequence = owned.last_sequence + 1
+            WHERE owned.account_id = account_id_value
+              AND owned.workspace_id = workspace_id_value
+              AND owned.owner_organization_membership_id = target.id
+            RETURNING owned.id, owned.workspace_id, owned.last_sequence,
+              owned.authority_epoch
+          )
+          INSERT INTO session_events (
+            account_id, workspace_id, session_id, sequence, type, payload, occurred_at
+          )
+          SELECT account_id_value, advanced.workspace_id, advanced.id,
+            advanced.last_sequence,
+            CASE WHEN action_name = 'suspend'
+              THEN 'session.authority.suspended' ELSE 'session.authority.revoked' END,
+            pg_catalog.jsonb_build_object(
+              'operationId', operation_id_value,
+              'organizationMembershipId', target.id,
+              'previousAuthorityEpoch', advanced.authority_epoch - 1,
+              'authorityEpoch', advanced.authority_epoch
+            ), now_value
+          FROM advanced;
+        END LOOP;
+        DELETE FROM session_visibility_write_capabilities capability
+        WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+          AND capability.transaction_id = pg_catalog.pg_current_xact_id()
+          AND capability.capability_id = visibility_capability_id;
+        PERFORM pg_catalog.set_config(
+          'opengeni.session_visibility_write_capability',
+          coalesce(previous_visibility_capability, ''), true
+        );
+        UPDATE organization_memberships SET
+          status = CASE WHEN action_name = 'suspend' THEN 'suspended' ELSE 'revoked' END,
+          authorization_revision = authorization_revision + 1,
+          revoked_at = CASE WHEN action_name = 'offboard' THEN now_value ELSE NULL END,
+          personal_retention_until = CASE
+            WHEN action_name = 'offboard' AND policy.mode = 'delete_after'
+              THEN now_value + pg_catalog.make_interval(days => policy.retention_days)
+            ELSE NULL
+          END,
+          updated_at = now_value
+        WHERE id = target.id RETURNING * INTO target;
+      END IF;
+      result := opengeni_private.organization_membership_row_json(target);
+    END IF;
+  END IF;
+
+  INSERT INTO organization_membership_operation_receipts (
+    account_id, operation_id, action, input_hash, result
+  ) VALUES (
+    account_id_value, operation_id_value, action_name, input_hash_value, result
+  );
+  INSERT INTO organization_membership_lifecycle_events (
+    account_id, operation_id, actor_membership_id, target_membership_id, kind,
+    prior_authorization_revision, resulting_authorization_revision, reason
+  ) VALUES (
+    account_id_value, operation_id_value, actor.id,
+    CASE WHEN target.id IS NULL THEN NULL ELSE target.id END,
+    action_name, expected_revision,
+    CASE WHEN target.id IS NULL THEN NULL ELSE target.authorization_revision END,
+    reason_value
+  );
+  PERFORM pg_catalog.set_config(
+    'opengeni.workspace_id', coalesce(previous_workspace, ''), true
+  );
+  RETURN result;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM pg_catalog.set_config(
+    'opengeni.workspace_id', coalesce(previous_workspace, ''), true
+  );
+  PERFORM pg_catalog.set_config(
+    'opengeni.session_visibility_write_capability',
+    coalesce(previous_visibility_capability, ''), true
+  );
+  RAISE;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION get_organization_retention_policy(
+  p_account_id uuid,
+  p_actor_subject_id text
+) RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE actor organization_memberships%ROWTYPE; policy organization_user_retention_policies%ROWTYPE;
+BEGIN
+  IF p_account_id IS DISTINCT FROM opengeni_private.current_account_id()
+    OR p_actor_subject_id IS DISTINCT FROM opengeni_private.current_subject_id()
+  THEN RAISE EXCEPTION 'organization authority required' USING ERRCODE = '42501'; END IF;
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle',
+    'organization_membership_lifecycle', true
+  );
+  SELECT * INTO actor FROM organization_memberships membership
+  WHERE membership.account_id = p_account_id AND membership.subject_id = p_actor_subject_id;
+  IF NOT FOUND OR actor.status <> 'active' OR actor.role NOT IN ('owner', 'admin') THEN
+    RAISE EXCEPTION 'organization administration required' USING ERRCODE = '42501';
+  END IF;
+  SELECT * INTO policy FROM organization_user_retention_policies candidate
+  WHERE candidate.account_id = p_account_id;
+  IF NOT FOUND THEN
+    RETURN pg_catalog.jsonb_build_object(
+      'organizationId', p_account_id, 'mode', 'retain',
+      'retentionDays', NULL, 'version', 1, 'updatedAt', actor.created_at
+    );
+  END IF;
+  RETURN pg_catalog.jsonb_build_object(
+    'organizationId', policy.account_id, 'mode', policy.mode,
+    'retentionDays', policy.retention_days, 'version', policy.version,
+    'updatedAt', policy.updated_at
+  );
+END
+$body$;
+
+-- Pin every SECURITY DEFINER routine after creation. FROM CURRENT is used only
+-- while parsing the target-schema migration; the durable posture is closed.
+DO $pin_and_grant$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION opengeni_private.assign_managed_self_organization_owner() SET search_path = pg_catalog, %I, pg_temp',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.list_self_organization_memberships(text) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.list_self_organization_invitations(text) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.list_self_organization_invitations(text,uuid,integer) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.get_self_organization_invitation(text,uuid) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.list_organization_members(uuid,text) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.list_organization_invitations(uuid,text,uuid,integer) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.organization_membership_command(jsonb) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.get_organization_retention_policy(uuid,text) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION opengeni_private.assign_managed_self_organization_owner() TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION opengeni_private.organization_membership_row_json(organization_memberships) TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION opengeni_private.organization_invitation_row_json(organization_membership_invitations) TO opengeni_app;
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_self_organization_memberships(text) TO opengeni_app', data_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_self_organization_invitations(text) TO opengeni_app', data_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_self_organization_invitations(text,uuid,integer) TO opengeni_app', data_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.get_self_organization_invitation(text,uuid) TO opengeni_app', data_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_organization_members(uuid,text) TO opengeni_app', data_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_organization_invitations(uuid,text,uuid,integer) TO opengeni_app', data_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.organization_membership_command(jsonb) TO opengeni_app', data_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.get_organization_retention_policy(uuid,text) TO opengeni_app', data_schema);
+  END IF;
+END
+$pin_and_grant$;
+
+REVOKE ALL ON FUNCTION opengeni_private.organization_membership_row_json(organization_memberships) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.organization_invitation_row_json(organization_membership_invitations) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.assign_managed_self_organization_owner() FROM PUBLIC;
+REVOKE ALL ON FUNCTION list_self_organization_memberships(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION list_self_organization_invitations(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION list_self_organization_invitations(text,uuid,integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION get_self_organization_invitation(text,uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION list_organization_members(uuid,text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION list_organization_invitations(uuid,text,uuid,integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION organization_membership_command(jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION get_organization_retention_policy(uuid,text) FROM PUBLIC;
+
+REVOKE ALL ON TABLE organization_memberships FROM PUBLIC;
+REVOKE ALL ON TABLE organization_user_retention_policies FROM PUBLIC;
+REVOKE ALL ON TABLE organization_membership_invitations FROM PUBLIC;
+REVOKE ALL ON TABLE organization_membership_operation_receipts FROM PUBLIC;
+REVOKE ALL ON TABLE organization_membership_lifecycle_events FROM PUBLIC;
+DO $revoke_app_dml$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    REVOKE ALL ON TABLE organization_memberships FROM opengeni_app;
+    REVOKE ALL ON TABLE organization_user_retention_policies FROM opengeni_app;
+    REVOKE ALL ON TABLE organization_membership_invitations FROM opengeni_app;
+    REVOKE ALL ON TABLE organization_membership_operation_receipts FROM opengeni_app;
+    REVOKE ALL ON TABLE organization_membership_lifecycle_events FROM opengeni_app;
+  END IF;
+END
+$revoke_app_dml$;
+
+CREATE OR REPLACE FUNCTION opengeni_private.organization_membership_history_immutable()
+RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $body$
+BEGIN RAISE EXCEPTION 'organization membership history is immutable' USING ERRCODE = '55000'; END
+$body$;
+CREATE TRIGGER organization_membership_operation_receipts_immutable
+  BEFORE UPDATE OR DELETE ON organization_membership_operation_receipts
+  FOR EACH ROW EXECUTE FUNCTION opengeni_private.organization_membership_history_immutable();
+CREATE TRIGGER organization_membership_lifecycle_events_immutable
+  BEFORE UPDATE OR DELETE ON organization_membership_lifecycle_events
+  FOR EACH ROW EXECUTE FUNCTION opengeni_private.organization_membership_history_immutable();
+
+COMMENT ON TABLE organization_membership_invitations IS
+  'Registered-human organization invitations; acceptance is exact-subject and provider delivery is external.';
+COMMENT ON TABLE organization_membership_operation_receipts IS
+  'Immutable input-bound idempotency receipts for organization membership lifecycle commands.';
+COMMENT ON TABLE organization_membership_lifecycle_events IS
+  'Immutable value-bounded organization membership lifecycle audit evidence.';

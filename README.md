@@ -374,6 +374,12 @@ Core endpoints:
 - `GET /v1/config/client`
 - `GET /v1/access/me`
 - `GET /v1/organization-memberships` (managed-human self membership and personal-workspace identity)
+- bounded/keyset `GET /v1/organization-invitations` and exact subject-bound
+  `POST /v1/organization-invitations/:id/accept`
+- `GET|POST /v1/organizations/:id/invitations` for bounded admin listing and
+  creation, plus explicit invitation revoke
+- `GET /v1/organizations/:id/members` and revision-fenced member lifecycle `PATCH`
+- `GET|PATCH /v1/organizations/:id/retention-policy`
 - `GET /v1/workspaces`
 - `POST /v1/workspaces`
 - `POST /v1/workspaces/:workspaceId/sessions`

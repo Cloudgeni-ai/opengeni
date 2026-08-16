@@ -297,6 +297,22 @@ The managed-human-only `GET /v1/organization-memberships` route exposes just
 the exact active membership, organization, and personal-workspace identifiers
 returned by that provisioning capability; it is unavailable to API keys and
 delegated principals and does not expose retention, grant, or resource state.
+Migration 0263 adds registered-user invitations with exact-subject acceptance,
+owner/admin/member roles, revision-fenced suspension/reactivation/offboarding,
+and versioned retention policy. Input-bound operation receipts make retries
+idempotent and immutable lifecycle events retain bounded evidence. Suspension
+removes persisted shared-workspace grants, revokes user-resource grants, fences
+membership-owned sessions, and interrupts shared-session attempts whose frozen
+initiating human matches the subject. Offboarding applies the same canonical
+workspace/session/turn/attempt teardown, then terminally revokes membership
+while retaining physical data and authority. Organization invitation enumeration is an
+admin-only, bounded `(created_at,id)` keyset page. Retention policy may stamp a
+future deadline, but no destructive sweeper is part of this slice. Active
+memberships are re-read on managed access refresh to derive role-bounded account
+grants and only the human's own personal-workspace projections. Canonical:
+`packages/contracts/src/organization-membership-lifecycle.ts`,
+`packages/db/src/organization-membership-lifecycle.ts`, and
+`apps/api/src/routes/organization-memberships.ts`.
 Sessions gain additive owner, `user_private|workspace_shared` visibility,
 authority-epoch, and independent-fork provenance columns; every existing row
 defaults to workspace-shared epoch 1 with no owner or fork authority. This slice

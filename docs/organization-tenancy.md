@@ -139,6 +139,60 @@ bearers, configured/local access, and missing or terminal memberships fail
 closed. The response intentionally omits subjects, retention state, grants,
 resource authority, and the runtime grant itself.
 
+## Organization membership lifecycle (0263)
+
+Migration `0263_organization_membership_lifecycle.sql` activates the bounded
+managed-human administration plane without making organization membership a
+workspace grant. Owners may invite an already-registered human as owner,
+administrator, or member; administrators may invite and manage members only.
+Acceptance is bound to the exact authenticated `user:<id>` named by the
+invitation. Pending invitations can be revoked. Role changes, suspension,
+reactivation, offboarding, and retention-policy changes require an exact
+revision plus an input-bound operation id. Exact retries return the immutable
+receipt; changed reuse and stale revisions fail closed. The last active owner
+cannot be demoted, suspended, or offboarded.
+
+The managed-human API surface is:
+
+- `GET /v1/organization-invitations` (bounded to 100 with the same deterministic
+  keyset cursor) and
+  `POST /v1/organization-invitations/:invitationId/accept` for the invited
+  human. Acceptance resolves only the exact subject-bound invitation id; it
+  never scans invitation history;
+- `GET|POST /v1/organizations/:organizationId/invitations` and its explicit
+  `/revoke` operation for owners/administrators. Listing is capped at 100 and
+  uses a deterministic `(created_at,id)` keyset represented by the last
+  returned invitation UUID; ordinary members and cross-organization callers
+  cannot enumerate invitation metadata;
+- `GET /v1/organizations/:organizationId/members` and
+  `PATCH /v1/organizations/:organizationId/members/:membershipId`; and
+- `GET|PATCH /v1/organizations/:organizationId/retention-policy`.
+
+These routes require a direct managed-human cookie session; API keys and
+delegated bearer requests are rejected. Provider email delivery and invitations
+for people who have not registered remain separate integrations.
+
+Suspension immediately removes persisted shared-workspace grants, revokes
+personal-resource grants, fences membership-owned sessions, and interrupts
+shared-session attempts whose frozen initiating human is the suspended subject.
+Reactivation restores only active organization and personal-workspace access,
+never old grants. Offboarding applies the same canonical
+workspace/session/turn/attempt teardown, then terminally revokes membership and
+retains resource authority and physical data. Owned-session authority epochs
+advance with content-free audit events; unrelated users' shared-session state
+is not changed. `retain` has no deletion deadline;
+`delete_after` accepts the initial 30–90 day policy window and stamps a bounded
+future deadline, but this slice has no
+destructive sweeper.
+
+Invitation, operation-receipt, and lifecycle-event tables are FORCE RLS with
+zero direct application-role DML. Target-schema-local SECURITY DEFINER routines
+are PUBLIC-revoked, explicitly granted, and pinned to
+`pg_catalog,<target-schema>,pg_temp`. Managed access refresh re-reads all active
+memberships for the subject and derives role-bounded account plus owner-only
+personal-workspace grants; inactive organizations disappear on the next
+request.
+
 ## Canonical human identity and login bindings
 
 Migration `0235_canonical_human_login_bindings.sql` adds a separate,
@@ -219,7 +273,7 @@ the access path.
 
 ## Later migration phases
 
-### B. Dual-write and first access projection (0219 current)
+### B. Dual-write and first access projection (0219)
 
 Managed-human membership and personal-workspace lifecycle metadata now use the
 narrow provisioning seam described above. The first disjoint activation adds
@@ -231,7 +285,14 @@ work; old writers remain accepted. Migration 0222 separately delivers the
 accepted-attempt authority snapshot and stale activity-write fence described in
 the Legacy behavior section.
 
-### C. Backfill
+### C. Membership lifecycle (0263 current)
+
+The invitation, role, suspension, reactivation, offboarding, retention, and
+multi-organization access projection described above are active. Provider email
+delivery, unregistered-recipient invitations, a destructive retention sweeper,
+and member-management UI remain deferred.
+
+### D. Backfill
 
 Classify every existing resource explicitly as workspace-owned unless there is
 reviewed, deterministic evidence for user ownership. Never infer user authority
@@ -240,7 +301,7 @@ or current access. Provision personal workspaces for active memberships through
 an idempotent lifecycle operation. Record backfill receipts and unresolved rows
 without widening access.
 
-### D. Validate
+### E. Validate
 
 Verify organization/membership/workspace consistency, one personal workspace
 per active membership, stable authority uniqueness, provider-account collision
@@ -248,7 +309,7 @@ rules, session ownership, and zero partial delegations. Add read-only shadow
 comparisons between legacy and proposed effective scopes. No mismatch may fall
 back to user authority.
 
-### E. Activate
+### F. Activate
 
 Add exact organization+subject+workspace RLS policies and narrowly scoped
 security-definer lifecycle functions. Switch one subsystem at a time to
@@ -258,15 +319,16 @@ session visibility mutation, visibility-aware reads, sharing/fork copying,
 cancellation, cache/pin stripping, and owner-only grants before enabling
 personal attachment to shared sessions.
 
-### F. Retire
+### G. Retire
 
 Only after all writers/readers are activated and audited may legacy
 workspace-owned assumptions be removed. Resource FKs are never destructively
 rewritten in the same release that first activates user authority.
 
-## Non-goals in Slices A and B
+## Remaining non-goals
 
-- organization invitation, role/admin, offboarding, or member-management UI;
+- member-management UI and provider invitation email;
+- invitations for unregistered humans;
 - a personal `workspace_memberships` row or delegated personal-workspace access;
 - user-resource authority/grant writes, discovery, or sharing;
 - resource CRUD or discovery changes;
@@ -276,5 +338,5 @@ rewritten in the same release that first activates user authority.
   runtime;
 - Connected Machine, rig, variable-set, connection, Codex, or Document
   materialization changes;
-- retention deletion workers;
+- retention deletion workers (0263 records policy/deadline only);
 - provider, cloud, or deployment changes.

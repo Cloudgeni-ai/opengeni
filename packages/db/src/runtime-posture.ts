@@ -66,6 +66,16 @@ const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
 ] as const;
 const MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE =
   "ensure_managed_human_personal_workspace(uuid, text, uuid)";
+const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
+  "list_self_organization_memberships(text)",
+  "list_self_organization_invitations(text)",
+  "list_self_organization_invitations(text, uuid, integer)",
+  "get_self_organization_invitation(text, uuid)",
+  "list_organization_invitations(uuid, text, uuid, integer)",
+  "list_organization_members(uuid, text)",
+  "organization_membership_command(jsonb)",
+  "get_organization_retention_policy(uuid, text)",
+] as const;
 const PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE =
   "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)";
 const PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES = [
@@ -196,6 +206,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   GOOGLE_DRIVE_FILE_AUTHORIZATION_ROUTINE,
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
+  ...ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES,
   PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
   PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE,
   ...VARIABLE_SET_AUTHORITY_ROUTINES,
@@ -356,6 +367,9 @@ export const FORCE_RLS_TABLES = [
   "model_call_facts",
   "network_routes",
   "new_session_drafts",
+  "organization_membership_invitations",
+  "organization_membership_lifecycle_events",
+  "organization_membership_operation_receipts",
   "organization_memberships",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
@@ -767,6 +781,9 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "host_export_cursor_state",
   "host_export_dead_letters",
   "host_export_outbox",
+  "organization_membership_invitations",
+  "organization_membership_lifecycle_events",
+  "organization_membership_operation_receipts",
   "organization_memberships",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",

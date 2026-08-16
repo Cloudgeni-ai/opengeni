@@ -5,6 +5,7 @@ import {
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
   ModelContextContributionSummaries,
+  OrganizationMember,
   SessionGoalSnapshot,
   sessionGoalUtf8Bytes,
 } from "@opengeni/contracts";
@@ -373,6 +374,7 @@ export * from "./capability-integrations";
 export * from "./integration-bindings";
 export * from "./integration-facets";
 export * from "./insights";
+export * from "./organization-membership-lifecycle";
 export { memoryTextForStorage } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
 // The `@opengeni/db/migrate` subpath stays available too (internal callers + the
@@ -1175,6 +1177,14 @@ export const allAccountPermissions: Permission[] = [
   "api_keys:manage",
 ];
 
+function accountPermissionsForOrganizationRole(role: "owner" | "admin" | "member"): Permission[] {
+  if (role === "owner") return allAccountPermissions;
+  if (role === "admin") {
+    return ["account:read", "members:manage", "workspace:create", "billing:read"];
+  }
+  return ["account:read"];
+}
+
 export type BootstrapWorkspaceInput = {
   accountExternalSource: string;
   accountExternalId: string;
@@ -1642,6 +1652,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       accountId: account.id,
       workspaceId: null,
     });
+    await setSubjectRlsContext(tx as unknown as Database, subjectId);
     const memberships = await tx
       .select({
         membership: schema.workspaceMemberships,
@@ -1662,40 +1673,62 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       permissions: row.membership.permissions as Permission[],
       principalKind: "human_session",
     }));
-    workspaceGrants.push({
-      workspaceId: provisionedMembership.personal_workspace_id,
-      accountId: account.id,
-      subjectId,
-      subjectLabel,
-      permissions: managedPersonalWorkspacePermissions,
-      principalKind: "human_session",
-    });
+    const [organizationMembershipResult] = await rawRows<{ result: unknown }>(
+      tx,
+      sql`select list_self_organization_memberships(${subjectId}) as result`,
+    );
+    const activeOrganizationMemberships = OrganizationMember.array()
+      .parse(organizationMembershipResult?.result ?? [])
+      .flatMap((organizationMembership) =>
+        organizationMembership.status === "active" &&
+        organizationMembership.personalWorkspaceId !== null
+          ? [
+              {
+                ...organizationMembership,
+                status: "active" as const,
+                personalWorkspaceId: organizationMembership.personalWorkspaceId,
+              },
+            ]
+          : [],
+      );
+    for (const organizationMembership of activeOrganizationMemberships) {
+      if (
+        !workspaceGrants.some(
+          (grant) => grant.workspaceId === organizationMembership.personalWorkspaceId,
+        )
+      ) {
+        workspaceGrants.push({
+          workspaceId: organizationMembership.personalWorkspaceId,
+          accountId: organizationMembership.organizationId,
+          subjectId,
+          subjectLabel,
+          permissions: managedPersonalWorkspacePermissions,
+          principalKind: "human_session",
+        });
+      }
+    }
     return {
       accessContext: {
         mode: "managed",
         subjectId,
         subjectLabel,
-        accountGrants: [
-          {
-            accountId: account.id,
-            subjectId,
-            subjectLabel,
-            role: "owner",
-            permissions: allAccountPermissions,
-          },
-        ],
+        accountGrants: activeOrganizationMemberships.map((organizationMembership) => ({
+          accountId: organizationMembership.organizationId,
+          subjectId,
+          subjectLabel,
+          role: organizationMembership.role,
+          permissions: accountPermissionsForOrganizationRole(organizationMembership.role),
+        })),
         workspaceGrants,
         defaultAccountId: account.id,
         defaultWorkspaceId: defaultWorkspace.id,
       },
-      organizationMemberships: [
-        {
-          id: provisionedMembership.organization_membership_id,
-          organizationId: account.id,
-          status: "active",
-          personalWorkspaceId: provisionedMembership.personal_workspace_id,
-        },
-      ],
+      organizationMemberships: activeOrganizationMemberships.map((organizationMembership) => ({
+        id: organizationMembership.id,
+        organizationId: organizationMembership.organizationId,
+        status: "active" as const,
+        personalWorkspaceId: organizationMembership.personalWorkspaceId,
+      })),
     };
   });
 }
