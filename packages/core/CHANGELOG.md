@@ -1,5 +1,55 @@
 # @opengeni/core
 
+## 1.2.0
+
+### Minor Changes
+
+- c297fc0: Route derived Company Brain proposals through the immutable workspace learning-policy snapshot before destination admission.
+  Add exact rooted Task-note to proposed workspace Knowledge promotion with immutable value-free provenance and replay-safe MCP tools.
+  Add atomic Task-note correction/revert with immutable old/new lineage, strict attempt/version fencing, and replay-safe first-party tooling.
+- c297fc0: Add atomic rooted Task-note promotion into inactive instruction-policy and
+  preference proposals while preserving exact source evidence, replay identity,
+  and human-only activation.
+- 22c0c21: Add the managed-human organization invitation, role, suspension, offboarding,
+  and retention lifecycle with revision-fenced APIs and SDK methods. Self
+  invitation history is exposed only through bounded keyset pages, and acceptance
+  resolves one exact subject-bound invitation. Already-open session,
+  workspace-control, live, and interaction streams periodically recheck current
+  membership authority and close after revocation. A bounded operator command
+  commits expired offboarded personal database deletion together with a closed,
+  exact-key cleanup-obligation set before deleting external objects. Provider
+  failures retry only unfinished obligations, retained references abort before
+  external bytes are touched, File bucket identity stays frozen across retries,
+  and immutable lifecycle evidence survives cleanup.
+- c297fc0: Add deterministic governed-learning evaluation over exact accepted policy and evidence authority, with immutable content-free decision receipts and no activation capability.
+
+### Patch Changes
+
+- 6860c5f: Add organization, workspace, and owner-private scopes for Rigs and Connected Machines. Personal machine use and Rig materialization now revalidate exact-attempt grants, membership, workspace access, authority epochs, and generations before runtime access.
+- c297fc0: Complete governed goal rewrites with strict agent change metadata, immutable
+  proposal rejection and CAS-fenced rollback, bounded revision pagination, and
+  accepted-turn root constraints that child agents may inherit or narrow. The
+  original raw-array goal-revision list remains unchanged; bounded pagination is
+  available through a separately named API and SDK surface.
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [22c0c21]
+- Updated dependencies [6860c5f]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+  - @opengeni/contracts@1.2.0
+  - @opengeni/db@1.1.0
+  - @opengeni/documents@0.6.0
+  - @opengeni/runtime@1.0.3
+  - @opengeni/config@0.16.6
+  - @opengeni/events@0.3.114
+  - @opengeni/observability@0.7.9
+  - @opengeni/storage@0.2.98
+
 ## 1.1.0
 
 ### Minor Changes

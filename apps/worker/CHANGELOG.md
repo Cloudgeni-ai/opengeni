@@ -1,5 +1,35 @@
 # @opengeni/worker-bundle
 
+## 0.20.7
+
+### Patch Changes
+
+- 6860c5f: Add organization, workspace, and owner-private scopes for Rigs and Connected Machines. Personal machine use and Rig materialization now revalidate exact-attempt grants, membership, workspace access, authority epochs, and generations before runtime access.
+- c297fc0: Freeze Company Brain mode and bounded legacy instructions when a turn is
+  accepted, then bind them to a content-free first-attempt selection receipt whose
+  candidate and rendered-budget subsets make replacement recovery shrink-only.
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [22c0c21]
+- Updated dependencies [6860c5f]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+  - @opengeni/contracts@1.2.0
+  - @opengeni/db@1.1.0
+  - @opengeni/documents@0.6.0
+  - @opengeni/core@1.2.0
+  - @opengeni/runtime@1.0.3
+  - @opengeni/codemode@0.4.6
+  - @opengeni/config@0.16.6
+  - @opengeni/events@0.3.114
+  - @opengeni/github@0.4.61
+  - @opengeni/observability@0.7.9
+  - @opengeni/storage@0.2.98
+
 ## 0.20.6
 
 ### Patch Changes
