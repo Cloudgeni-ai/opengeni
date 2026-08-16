@@ -225,7 +225,28 @@ export type {
   WorkspaceStateResponse,
   WorkspaceStateSourceKindCounts,
 } from "./workspace-state";
-export type { CompanyBrainOkfDownload, CompanyBrainOkfPackage } from "./company-brain";
+export type {
+  CompanyBrainContextReceiptListOptions,
+  CompanyBrainContextReceiptPage,
+  CompanyBrainInspectorTransport,
+  CompanyBrainKnowledgeBrowseRequest,
+  CompanyBrainKnowledgeBrowseResponse,
+  CompanyBrainKnowledgeGetResponse,
+  CompanyBrainKnowledgeRecord,
+  CompanyBrainKnowledgeProposalListOptions,
+  CompanyBrainKnowledgeProposalPage,
+  CompanyBrainKnowledgeSearchRequest,
+  CompanyBrainKnowledgeSearchResponse,
+  CompanyBrainOkfDownload,
+  CompanyBrainOkfPackage,
+} from "./company-brain";
+export {
+  browseCompanyBrainKnowledge,
+  getCompanyBrainKnowledge,
+  listCompanyBrainContextReceipts,
+  listCompanyBrainKnowledgeProposals,
+  searchCompanyBrainKnowledge,
+} from "./company-brain";
 export type {
   MemorySlackImportance,
   MemorySlackPublication,

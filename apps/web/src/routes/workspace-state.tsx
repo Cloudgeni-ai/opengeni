@@ -22,7 +22,16 @@ import {
   CircleAlertIcon,
   Clock3Icon,
 } from "lucide-react";
-import { type FormEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import {
+  type FormEvent,
+  lazy,
+  type ReactNode,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { ContentPage } from "@/components/ui/content-layout";
@@ -42,6 +51,12 @@ import {
   PreferenceRegistryAdministration,
   type PreferenceRegistryReviewSummary,
 } from "./preference-registry-admin";
+
+const LazyCompanyBrainInspector = lazy(() =>
+  import("./company-brain-inspector").then(({ CompanyBrainInspector }) => ({
+    default: CompanyBrainInspector,
+  })),
+);
 
 const GAP_LABELS: Record<WorkspaceStateGapCode, string> = {
   no_document_bases: "No document bases are configured.",
@@ -1596,6 +1611,9 @@ export function WorkspaceStateRoute({
                   preferenceConflictCount={preferenceReview.conflictCount}
                   inventoryRefreshFailed={Boolean(error)}
                 />
+                <Suspense fallback={<Skeleton className="h-96 w-full" />}>
+                  <LazyCompanyBrainInspector key={workspaceId} workspaceId={workspaceId} />
+                </Suspense>
                 <details
                   id="brain-diagnostics"
                   className="group scroll-mt-4 rounded-lg border border-border bg-surface"

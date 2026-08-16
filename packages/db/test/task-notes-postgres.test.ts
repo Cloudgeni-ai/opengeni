@@ -13,6 +13,7 @@ import {
   grantWorkspaceAccess,
   getOrCreateWorkspaceLearningPolicySnapshot,
   listTaskNotes,
+  listCompanyBrainKnowledgeProposals,
   nestedPostgresSqlState,
   replaceTaskNote,
   transitionSessionVisibility,
@@ -775,6 +776,19 @@ describe("task-tree notes PostgreSQL authority", () => {
       active_head_count: 0,
       activation_event_count: 0,
     });
+    const review = await listCompanyBrainKnowledgeProposals(client.db, {
+      workspaceId: f.grant.workspaceId,
+      subjectId: f.ownerSubjectId,
+      limit: 20,
+    });
+    expect(review.proposals.map((proposal) => proposal.id)).toEqual(
+      expect.arrayContaining([
+        preferenceFirst.knowledgeChangeProposalId,
+        instructionFirst.knowledgeChangeProposalId,
+      ]),
+    );
+    expect(review.proposals.every((proposal) => proposal.status === "proposed")).toBe(true);
+    expect(review.responseBytes).toBeLessThanOrEqual(64 * 1_024);
   });
 
   test("serializes distinct-root instruction promotions before Task-note session locks", async () => {

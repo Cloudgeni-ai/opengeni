@@ -241,6 +241,8 @@ export type EffectiveKnowledgeBrowseInput = {
   workspaceId: string;
   /** Immutable human subject accepted for the logical request/turn. */
   initiatingSubjectId: string;
+  /** Human inspection bypasses agent_access but still uses exact subject/RLS authority. */
+  surface?: "human" | "agent" | undefined;
   /** Omit to browse top-level documents; pass a document record id for chunks. */
   parentId?: string | undefined;
   topic?: string | undefined;
@@ -1997,7 +1999,7 @@ export async function searchEffectiveKnowledge(
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     initiatingSubjectId,
-    surface: "agent",
+    surface: input.surface,
     agentAuthority: input.agentAuthority,
   });
   // Pull a bounded surplus so the permission-safe result set can still satisfy
@@ -2463,6 +2465,7 @@ export async function getEffectiveKnowledgeRecord(
     accountId: string;
     workspaceId: string;
     initiatingSubjectId: string;
+    surface?: "human" | "agent" | undefined;
     id: string;
     agentAuthority?: AgentDocumentAuthorityContext | undefined;
   },
@@ -2473,7 +2476,7 @@ export async function getEffectiveKnowledgeRecord(
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     initiatingSubjectId,
-    surface: "agent",
+    surface: input.surface ?? "agent",
     agentAuthority: input.agentAuthority,
   });
   return await withDocumentAccountRls(
@@ -2579,7 +2582,7 @@ export async function browseEffectiveKnowledge(
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     initiatingSubjectId,
-    surface: "agent",
+    surface: input.surface ?? "agent",
     agentAuthority: input.agentAuthority,
   });
   return await withDocumentAccountRls(

@@ -23,6 +23,7 @@ export const KNOWLEDGE_SEARCH_MAX_FLOOR_OMISSIONS = 200;
 // non-matches in SQL, but a small normalized floor removes incidental hits.
 export const KNOWLEDGE_SEARCH_MIN_VECTOR_SCORE = 0.52;
 export const KNOWLEDGE_SEARCH_MIN_KEYWORD_SCORE = 0.01;
+export const KNOWLEDGE_QUERY_MAX_BYTES = 4 * 1_024;
 
 const utf8Bytes = (value: string): number => new TextEncoder().encode(value).byteLength;
 const boundedUtf8 = (maxBytes: number) =>
@@ -111,6 +112,45 @@ export const KnowledgeSource = z.object({
   version: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
 });
 export type KnowledgeSource = z.infer<typeof KnowledgeSource>;
+
+export const KnowledgeSearchRequest = z
+  .object({
+    query: boundedUtf8(KNOWLEDGE_QUERY_MAX_BYTES).pipe(z.string().min(1)),
+    baseIds: z.array(z.string().uuid()).max(50).optional(),
+    mode: z.enum(["hybrid", "vector", "keyword"]).optional(),
+    sourceKinds: z.array(KnowledgeSource.shape.kind).max(8).optional(),
+    aclTags: z
+      .array(boundedUtf8(KNOWLEDGE_TOPIC_MAX_BYTES).pipe(z.string().min(1)))
+      .max(64)
+      .optional(),
+    limit: z.number().int().positive().max(KNOWLEDGE_SEARCH_MAX_RESULTS).default(5),
+  })
+  .strict();
+export type KnowledgeSearchRequest = z.input<typeof KnowledgeSearchRequest>;
+
+export const KnowledgeBrowseRequest = z
+  .object({
+    parentId: KnowledgeRecordId.optional(),
+    topic: boundedUtf8(KNOWLEDGE_TOPIC_MAX_BYTES).pipe(z.string().min(1)).optional(),
+    sourceKinds: z.array(KnowledgeSource.shape.kind).max(8).optional(),
+    cursor: z.string().min(1).max(KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS).optional(),
+    limit: z
+      .number()
+      .int()
+      .positive()
+      .max(KNOWLEDGE_BROWSE_MAX_LIMIT)
+      .default(KNOWLEDGE_BROWSE_DEFAULT_LIMIT),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.parentId && (value.topic || (value.sourceKinds?.length ?? 0) > 0)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "document contents do not accept topic or source filters",
+      });
+    }
+  });
+export type KnowledgeBrowseRequest = z.input<typeof KnowledgeBrowseRequest>;
 
 export const KnowledgeProviderCitation = z.object({
   provider: z.literal("google_drive"),

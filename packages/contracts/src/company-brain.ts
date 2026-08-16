@@ -6,6 +6,92 @@ export const COMPANY_BRAIN_OKF_SCHEMA_VERSION = 1 as const;
 export const COMPANY_BRAIN_GUIDANCE_MAX_ENTRIES = 512;
 export const COMPANY_BRAIN_GUIDANCE_CONTENT_MAX_CHARS = 262_144;
 export const COMPANY_BRAIN_GUIDANCE_MAX_CONTENT_BYTES = 4 * 1024 * 1024;
+export const COMPANY_BRAIN_INSPECTOR_DEFAULT_LIMIT = 20;
+export const COMPANY_BRAIN_INSPECTOR_MAX_LIMIT = 50;
+export const COMPANY_BRAIN_INSPECTOR_CURSOR_MAX_CHARS = 1_024;
+export const COMPANY_BRAIN_PROPOSAL_CONTENT_MAX_BYTES = 16 * 1_024;
+export const COMPANY_BRAIN_PROPOSAL_RESPONSE_MAX_BYTES = 64 * 1_024;
+
+const utf8Bytes = (value: string): number => new TextEncoder().encode(value).byteLength;
+const boundedUtf8 = (maxBytes: number) =>
+  z.string().superRefine((value, context) => {
+    if (utf8Bytes(value) > maxBytes) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `must be at most ${maxBytes} UTF-8 bytes`,
+      });
+    }
+  });
+
+export const CompanyBrainContextReceipt = z
+  .object({
+    id: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    rootSessionId: z.string().uuid(),
+    turnId: z.string().uuid(),
+    acceptedAt: z.string().datetime(),
+    createdAt: z.string().datetime(),
+    sessionRole: z.enum(["root", "child"]),
+    memoryEnabled: z.boolean(),
+    memoryPromptMode: z.enum(["legacy_standing", "retrieval_only"]),
+    companyProfileIncluded: z.boolean(),
+    instructionPolicyEntryHash: z.string().regex(/^[0-9a-f]{64}$/u),
+    preferenceDescriptorHash: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .nullable(),
+    companyProfileSnapshotHash: z.string().regex(/^[0-9a-f]{64}$/u),
+    turnContextSnapshotId: z.string().uuid(),
+    turnContextSnapshotHash: z.string().regex(/^[0-9a-f]{64}$/u),
+    turnContextSnapshotSource: z.enum(["accepted_turn", "legacy_first_claim"]),
+    selectionHash: z.string().regex(/^[0-9a-f]{64}$/u),
+    selectedMemoryCount: z.number().int().nonnegative().max(50),
+    renderedMemoryCount: z.number().int().nonnegative().max(50),
+    budgetOmittedMemoryCount: z.number().int().nonnegative().max(50),
+  })
+  .strict();
+export type CompanyBrainContextReceipt = z.infer<typeof CompanyBrainContextReceipt>;
+
+export const CompanyBrainContextReceiptPage = z
+  .object({
+    receipts: z.array(CompanyBrainContextReceipt).max(COMPANY_BRAIN_INSPECTOR_MAX_LIMIT),
+    nextCursor: z.string().min(1).max(COMPANY_BRAIN_INSPECTOR_CURSOR_MAX_CHARS).nullable(),
+    hasMore: z.boolean(),
+  })
+  .strict();
+export type CompanyBrainContextReceiptPage = z.infer<typeof CompanyBrainContextReceiptPage>;
+
+export const CompanyBrainKnowledgeProposal = z
+  .object({
+    id: z.string().uuid(),
+    authority: z.object({ kind: z.enum(["organization", "workspace", "personal"]) }).strict(),
+    targetKind: z.enum(["instruction_policy", "preference"]),
+    targetScope: z.string().min(1).max(96),
+    targetKey: z.string().min(1).max(96).nullable(),
+    content: boundedUtf8(COMPANY_BRAIN_PROPOSAL_CONTENT_MAX_BYTES),
+    contentHash: z.string().regex(/^[0-9a-f]{64}$/u),
+    source: z.object({ claimId: z.string().uuid(), evidenceId: z.string().uuid() }).strict(),
+    status: z.literal("proposed"),
+    createdAt: z.string().datetime(),
+    projection: z
+      .object({
+        truncated: z.boolean(),
+        originalContentUtf8Bytes: z.number().int().nonnegative().max(1_048_576),
+      })
+      .strict(),
+  })
+  .strict();
+export type CompanyBrainKnowledgeProposal = z.infer<typeof CompanyBrainKnowledgeProposal>;
+
+export const CompanyBrainKnowledgeProposalPage = z
+  .object({
+    proposals: z.array(CompanyBrainKnowledgeProposal).max(COMPANY_BRAIN_INSPECTOR_MAX_LIMIT),
+    truncatedForCount: z.boolean(),
+    truncatedForResponseBytes: z.boolean(),
+    responseBytes: z.number().int().nonnegative().max(COMPANY_BRAIN_PROPOSAL_RESPONSE_MAX_BYTES),
+  })
+  .strict();
+export type CompanyBrainKnowledgeProposalPage = z.infer<typeof CompanyBrainKnowledgeProposalPage>;
 
 export const CompanyBrainGuidanceClassification = z.enum([
   "company_profile",

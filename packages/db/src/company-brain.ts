@@ -1,3 +1,11 @@
+import {
+  COMPANY_BRAIN_INSPECTOR_DEFAULT_LIMIT,
+  COMPANY_BRAIN_INSPECTOR_MAX_LIMIT,
+  COMPANY_BRAIN_PROPOSAL_CONTENT_MAX_BYTES,
+  COMPANY_BRAIN_PROPOSAL_RESPONSE_MAX_BYTES,
+  type CompanyBrainKnowledgeProposal,
+  type CompanyBrainKnowledgeProposalPage,
+} from "@opengeni/contracts";
 import { and, asc, desc, eq, inArray, notInArray } from "drizzle-orm";
 
 import type { Database } from "./database";
@@ -35,6 +43,109 @@ export type CompanyBrainPreferenceGuidancePage = {
   revisionCountTruncated: boolean;
   contentBytesTruncated: boolean;
 };
+
+function boundedUtf8Projection(
+  value: string,
+  maxBytes: number,
+): {
+  value: string;
+  originalBytes: number;
+  truncated: boolean;
+} {
+  const originalBytes = Buffer.byteLength(value, "utf8");
+  if (originalBytes <= maxBytes) return { value, originalBytes, truncated: false };
+  const marker = `\n[truncated; original UTF-8 bytes=${originalBytes}]`;
+  const budget = Math.max(0, maxBytes - Buffer.byteLength(marker, "utf8"));
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const midpoint = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(value.slice(0, midpoint), "utf8") <= budget) low = midpoint;
+    else high = midpoint - 1;
+  }
+  return { value: value.slice(0, low) + marker, originalBytes, truncated: true };
+}
+
+function proposalPageBytes(page: CompanyBrainKnowledgeProposalPage): number {
+  return Buffer.byteLength(JSON.stringify(page), "utf8");
+}
+
+function finalizeProposalPage(
+  proposals: CompanyBrainKnowledgeProposal[],
+  truncatedForCount: boolean,
+  truncatedForResponseBytes: boolean,
+): CompanyBrainKnowledgeProposalPage {
+  const page: CompanyBrainKnowledgeProposalPage = {
+    proposals,
+    truncatedForCount,
+    truncatedForResponseBytes,
+    responseBytes: 0,
+  };
+  for (let pass = 0; pass < 3; pass += 1) page.responseBytes = proposalPageBytes(page);
+  return page;
+}
+
+/**
+ * Read-only review projection over governed Knowledge change proposals. RLS
+ * filters scope before rows enter this independent item/aggregate byte bound.
+ */
+export async function listCompanyBrainKnowledgeProposals(
+  db: Database,
+  input: { workspaceId: string; subjectId: string; limit?: number },
+): Promise<CompanyBrainKnowledgeProposalPage> {
+  const limit = input.limit ?? COMPANY_BRAIN_INSPECTOR_DEFAULT_LIMIT;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > COMPANY_BRAIN_INSPECTOR_MAX_LIMIT) {
+    throw new Error("Company Brain proposal limit must be between 1 and 50");
+  }
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.knowledgeChangeProposals)
+      .where(eq(schema.knowledgeChangeProposals.status, "proposed"))
+      .orderBy(
+        desc(schema.knowledgeChangeProposals.createdAt),
+        desc(schema.knowledgeChangeProposals.id),
+      )
+      .limit(limit + 1);
+    const truncatedForCount = rows.length > limit;
+    const selected: CompanyBrainKnowledgeProposal[] = [];
+    let truncatedForResponseBytes = false;
+    for (const row of rows.slice(0, limit)) {
+      const content = boundedUtf8Projection(row.content, COMPANY_BRAIN_PROPOSAL_CONTENT_MAX_BYTES);
+      const projected: CompanyBrainKnowledgeProposal = {
+        id: row.id,
+        authority: { kind: row.scopeKind as CompanyBrainKnowledgeProposal["authority"]["kind"] },
+        targetKind: row.targetKind as CompanyBrainKnowledgeProposal["targetKind"],
+        targetScope: row.targetScope,
+        targetKey: row.targetKey,
+        content: content.value,
+        contentHash: row.contentHash,
+        source: { claimId: row.claimId, evidenceId: row.evidenceId },
+        status: "proposed",
+        createdAt: row.createdAt.toISOString(),
+        projection: {
+          truncated: content.truncated,
+          originalContentUtf8Bytes: content.originalBytes,
+        },
+      };
+      const candidate = finalizeProposalPage(
+        [...selected, projected],
+        truncatedForCount,
+        truncatedForResponseBytes,
+      );
+      if (candidate.responseBytes > COMPANY_BRAIN_PROPOSAL_RESPONSE_MAX_BYTES) {
+        truncatedForResponseBytes = true;
+        continue;
+      }
+      selected.push(projected);
+    }
+    const page = finalizeProposalPage(selected, truncatedForCount, truncatedForResponseBytes);
+    if (page.responseBytes > COMPANY_BRAIN_PROPOSAL_RESPONSE_MAX_BYTES) {
+      throw new Error("Company Brain proposal projection exceeded its response boundary");
+    }
+    return page;
+  });
+}
 
 export async function listActivatedCompanyBrainPolicyRevisionIds(
   db: Database,

@@ -4,6 +4,16 @@ This document is the canonical contract for the permission-first agent Knowledge
 read surface. It is a projection over authorized, ready Documents; it does not
 create another durable store, a prompt-injection path, or behavioral authority.
 
+The Company Brain inspector reuses these bounded records for authenticated
+human search, get, and browse. Its `documents:search` grant selects the human
+surface, so personal knowledge follows the exact signed-in subject. Agent reads
+still require `agent_access` and exact attempt grants for activated personal
+authority; the browser route does not reuse or relax that agent capability.
+Structural browse pages retain the same scope-bound opaque cursor and the UI
+appends later pages with stable-id deduplication. A workspace switch remounts
+the inspector and generation-fences every outstanding body/page request, so a
+response authorized for the prior workspace cannot render in the new one.
+
 Canonical implementation:
 
 - wire envelope: `packages/contracts/src/knowledge.ts`

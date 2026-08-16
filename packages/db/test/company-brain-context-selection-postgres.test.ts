@@ -12,6 +12,7 @@ import {
   getOrCreateCompanyProfileSnapshot,
   getOrCreatePreferenceRegistrySnapshot,
   getOrCreateWorkspaceInstructionPolicySnapshot,
+  inspectCompanyBrainContextReceipts,
   nestedPostgresSqlState,
   resolveCompanyBrainContextSelection,
   saveWorkspaceMemory,
@@ -25,6 +26,10 @@ import {
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
   "../drizzle/0259_company_brain_context_selection_receipts.sql",
+);
+const inspectionMigrationPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "../drizzle/0266_company_brain_context_receipt_inspection.sql",
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
@@ -235,6 +240,23 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
 }
 
 describe("accepted-turn Company Brain context selection", () => {
+  test("declares a read-only, content-free, target-schema-safe inspection capability", async () => {
+    const sql = await readFile(inspectionMigrationPath, "utf8");
+    expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
+    expect(sql).toContain("company_brain_inspect_context_receipts");
+    expect(sql).toContain("p_subject_id IS DISTINCT FROM opengeni_private.current_subject_id()");
+    expect(sql).toContain("turn_row.initiating_human_subject_id");
+    expect(sql).toContain("session_reference_visible(");
+    expect(sql).toContain("SET search_path = pg_catalog, %I, pg_temp");
+    expect(sql).toContain("REVOKE ALL ON FUNCTION");
+    expect(sql).not.toMatch(
+      /\b(?:INSERT|UPDATE|DELETE)\s+(?:INTO|FROM)?\s*company_brain_context/iu,
+    );
+    expect(sql).not.toContain("legacy_workspace_instructions");
+    expect(sql).not.toContain("memory_text");
+    expect(sql).not.toContain("memory_selections) AS");
+  });
+
   test("declares a bounded content-free rolling receipt and target-schema-safe function", async () => {
     const sql = await readFile(migrationPath, "utf8");
     expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -555,6 +577,143 @@ describe("accepted-turn Company Brain context selection", () => {
       rootSessionId: f.root.id,
       turnContextSnapshotSource: "accepted_turn",
     });
+  }, 180_000);
+
+  test("inspects only existing receipts for the exact initiating human and visible task tree", async () => {
+    if (!shared || !client) return;
+    const f = await fixture({ child: true, mode: "retrieval_only" });
+    const rootAttempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.root.id,
+      ownerSubjectId: f.ownerSubjectId,
+    });
+    const childAttempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.child!.id,
+      ownerSubjectId: f.ownerSubjectId,
+    });
+    await prepareSnapshots(rootAttempt);
+    await prepareSnapshots(childAttempt);
+    const rootSelection = await resolve(rootAttempt);
+    const childSelection = await resolve(childAttempt);
+
+    const inspected = await inspectCompanyBrainContextReceipts(client.db, {
+      workspaceId: f.grant.workspaceId,
+      subjectId: f.ownerSubjectId,
+      limit: 10,
+    });
+    expect(inspected.map((item) => item.id).sort()).toEqual(
+      [rootSelection.receipt.id, childSelection.receipt.id].sort(),
+    );
+    expect(inspected.find((item) => item.id === rootSelection.receipt.id)).toMatchObject({
+      sessionId: f.root.id,
+      rootSessionId: f.root.id,
+      sessionRole: "root",
+      selectedMemoryCount: 0,
+      renderedMemoryCount: 0,
+    });
+    expect(JSON.stringify(inspected)).not.toContain("memorySelections");
+    expect(JSON.stringify(inspected)).not.toContain("legacyWorkspaceInstructions");
+
+    const recovery = await seedAttempt({ ...rootAttempt, generation: 2 });
+    await prepareSnapshots(recovery);
+    const byRecoveryAttempt = await inspectCompanyBrainContextReceipts(client.db, {
+      workspaceId: f.grant.workspaceId,
+      subjectId: f.ownerSubjectId,
+      attemptId: recovery.attemptId,
+      limit: 1,
+    });
+    expect(byRecoveryAttempt.map((item) => item.id)).toEqual([rootSelection.receipt.id]);
+
+    const otherSubject = `user:other-${crypto.randomUUID()}`;
+    expect(
+      await inspectCompanyBrainContextReceipts(client.db, {
+        workspaceId: f.grant.workspaceId,
+        subjectId: otherSubject,
+      }),
+    ).toEqual([]);
+  }, 180_000);
+
+  test("keeps private receipts owner-only and resists app-role TEMP relation shadowing", async () => {
+    if (!shared || !client) return;
+    const f = await fixture({ privateRoot: true });
+    const attempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.root.id,
+      ownerSubjectId: f.ownerSubjectId,
+    });
+    await prepareSnapshots(attempt);
+    const selected = await resolve(attempt);
+    expect(
+      await inspectCompanyBrainContextReceipts(client.db, {
+        workspaceId: f.grant.workspaceId,
+        subjectId: f.ownerSubjectId,
+        attemptId: attempt.attemptId,
+      }),
+    ).toHaveLength(1);
+
+    const app = postgres(shared.appUrl, { max: 1, prepare: false });
+    try {
+      const otherSubject = `user:other-${crypto.randomUUID()}`;
+      const denied = await app.begin(async (sql) => {
+        await sql`select
+          set_config('opengeni.account_id', ${f.grant.accountId}, true),
+          set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true),
+          set_config('opengeni.subject_id', ${otherSubject}, true)`;
+        return await sql`select * from company_brain_inspect_context_receipts(
+          ${f.grant.accountId}::uuid, ${f.grant.workspaceId}::uuid,
+          ${otherSubject}::text, ${attempt.attemptId}::uuid, null, null, 1
+        )`;
+      });
+      expect([...denied]).toEqual([]);
+
+      const projected = await app.begin(async (sql) => {
+        await sql`select
+          set_config('opengeni.account_id', ${f.grant.accountId}, true),
+          set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true),
+          set_config('opengeni.subject_id', ${f.ownerSubjectId}, true)`;
+        await sql`create temporary table company_brain_context_selection_receipts (
+          id uuid, account_id uuid, workspace_id uuid, session_id uuid,
+          root_session_id uuid, turn_id uuid
+        )`;
+        await sql`create temporary table session_turns (
+          id uuid, account_id uuid, workspace_id uuid, session_id uuid
+        )`;
+        await sql`create temporary table session_turn_attempts (
+          id uuid, account_id uuid, workspace_id uuid, session_id uuid, turn_id uuid
+        )`;
+        return await sql<Array<{ receiptId: string }>>`
+          select receipt_id as "receiptId"
+          from company_brain_inspect_context_receipts(
+            ${f.grant.accountId}::uuid, ${f.grant.workspaceId}::uuid,
+            ${f.ownerSubjectId}::text, ${attempt.attemptId}::uuid, null, null, 1
+          )
+        `;
+      });
+      expect(projected.map((row) => ({ receiptId: row.receiptId }))).toEqual([
+        { receiptId: selected.receipt.id },
+      ]);
+
+      await expectSqlState(
+        () =>
+          app.begin(async (sql) => {
+            await sql`select
+              set_config('opengeni.account_id', ${f.grant.accountId}, true),
+              set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true),
+              set_config('opengeni.subject_id', ${f.ownerSubjectId}, true)`;
+            await sql`select * from company_brain_inspect_context_receipts(
+              ${f.grant.accountId}::uuid, ${f.grant.workspaceId}::uuid,
+              'user:forged'::text, null, null, null, 20
+            )`;
+          }),
+        "42501",
+      );
+    } finally {
+      await app.end();
+    }
   }, 180_000);
 
   test("caps deterministic candidate order and renders only whole entries inside the standing token budget", async () => {

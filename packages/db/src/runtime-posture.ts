@@ -158,6 +158,8 @@ const TASK_NOTE_CAPABILITY_ROUTINES = [
 ] as const;
 const COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE =
   "company_brain_context_get_or_create_selection(uuid, uuid, uuid, uuid, uuid, integer)";
+const COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE =
+  "company_brain_inspect_context_receipts(uuid, uuid, text, uuid, timestamp with time zone, uuid, integer)";
 const TRANSITION_SESSION_VISIBILITY_ROUTINE =
   "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)";
 const FORK_SESSION_CONTENT_ROUTINE =
@@ -173,6 +175,7 @@ const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
   ...TASK_NOTE_CAPABILITY_ROUTINES,
   COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
+  COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE,
 ]);
 const XAI_CREATE_CREDENTIAL_ROUTINE =
   "create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone)";
@@ -193,6 +196,7 @@ const XAI_AUTHORITY_TABLES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE,
   COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
   FORK_SESSION_CONTENT_ROUTINE,
   XAI_AUTHORITY_LIVE_ROUTINE,

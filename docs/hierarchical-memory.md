@@ -186,6 +186,14 @@ rendered candidate. Revocation or drift can therefore only shrink recovery
 context. Normalized Knowledge and Task notes stay explicit tool reads and are not
 automatic prompt candidates.
 
+Human inspection is a separate read-only surface. Migration 0266 projects a
+bounded page of content-free receipt facts, or the receipt for a supplied
+attempt's already-accepted logical turn, only when the authenticated subject is
+that turn's frozen initiating human and both the session and root remain
+visible. It cannot call the 0259 get-or-create path, return memory identities or
+bodies, or grant direct table access. A recovery attempt therefore resolves the
+original logical-turn receipt without becoming authority to create or widen it.
+
 At ordinary and provider-backed compaction model-request boundaries, the worker
 also emits content-free, exact-attempt contribution telemetry for mandatory
 rules, guide/Skill descriptors, company profile, and the legacy standing block
@@ -204,4 +212,5 @@ Canonical source anchors:
 - `packages/db/src/memory-governance-schema.ts`
 - `packages/db/src/company-brain-context-selection.ts`
 - `packages/db/drizzle/0259_company_brain_context_selection_receipts.sql`
+- `packages/db/drizzle/0266_company_brain_context_receipt_inspection.sql`
 - `packages/db/src/runtime-posture.ts`

@@ -1,7 +1,7 @@
 import type { KnowledgeMemoryKind, WorkspaceMemoryPromptMode } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import type { Database } from "./database";
-import { rawRows, withRlsContext } from "./database";
+import { rawRows, withRlsContext, withWorkspaceSubjectRls } from "./database";
 import { fromPostgresLosslessText } from "./lossless-json";
 import {
   renderWorkspaceMemoryBlock,
@@ -60,6 +60,42 @@ export type ResolvedCompanyBrainContextSelection = Readonly<{
   workspaceMemory: string | null;
 }>;
 
+export type CompanyBrainContextReceiptInspection = Readonly<{
+  id: string;
+  sessionId: string;
+  rootSessionId: string;
+  turnId: string;
+  acceptedAt: string;
+  createdAt: string;
+  sessionRole: "root" | "child";
+  memoryEnabled: boolean;
+  memoryPromptMode: WorkspaceMemoryPromptMode;
+  companyProfileIncluded: boolean;
+  instructionPolicyEntryHash: string;
+  preferenceDescriptorHash: string | null;
+  companyProfileSnapshotHash: string;
+  turnContextSnapshotId: string;
+  turnContextSnapshotHash: string;
+  turnContextSnapshotSource: "accepted_turn" | "legacy_first_claim";
+  selectionHash: string;
+  selectedMemoryCount: number;
+  renderedMemoryCount: number;
+  budgetOmittedMemoryCount: number;
+}>;
+
+export type CompanyBrainContextReceiptInspectionCursor = Readonly<{
+  createdAt: string;
+  id: string;
+}>;
+
+export type InspectCompanyBrainContextReceiptsInput = Readonly<{
+  workspaceId: string;
+  subjectId: string;
+  attemptId?: string;
+  before?: CompanyBrainContextReceiptInspectionCursor;
+  limit?: number;
+}>;
+
 type SelectionRow = {
   receipt_id: string;
   root_session_id: string;
@@ -89,6 +125,28 @@ type SelectionRow = {
   selection_ordinal: number | null;
 };
 
+type InspectionRow = {
+  receipt_id: string;
+  session_id: string;
+  root_session_id: string;
+  turn_id: string;
+  accepted_at: Date | string;
+  created_at: Date | string;
+  session_role: string;
+  memory_enabled: boolean;
+  memory_prompt_mode: string;
+  company_profile_included: boolean;
+  instruction_policy_entry_hash: string;
+  preference_descriptor_hash: string | null;
+  company_profile_snapshot_hash: string;
+  turn_context_snapshot_id: string;
+  turn_context_snapshot_hash: string;
+  turn_context_snapshot_source: string;
+  selection_hash: string;
+  selected_memory_count: number;
+  rendered_memory_count: number;
+};
+
 function iso(value: Date | string): string {
   return (value instanceof Date ? value : new Date(value)).toISOString();
 }
@@ -97,6 +155,87 @@ function positiveGeneration(value: number): void {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error("Company Brain context selection requires a positive execution generation");
   }
+}
+
+function inspectionLimit(value: number | undefined): number {
+  const resolved = value ?? 20;
+  if (!Number.isSafeInteger(resolved) || resolved < 1 || resolved > 51) {
+    throw new Error("Company Brain context receipt inspection limit must be between 1 and 51");
+  }
+  return resolved;
+}
+
+function inspectionReceipt(row: InspectionRow): CompanyBrainContextReceiptInspection {
+  if (row.session_role !== "root" && row.session_role !== "child") {
+    throw new Error("Company Brain receipt inspection returned an invalid session role");
+  }
+  if (row.memory_prompt_mode !== "legacy_standing" && row.memory_prompt_mode !== "retrieval_only") {
+    throw new Error("Company Brain receipt inspection returned an invalid memory prompt mode");
+  }
+  if (
+    row.turn_context_snapshot_source !== "accepted_turn" &&
+    row.turn_context_snapshot_source !== "legacy_first_claim"
+  ) {
+    throw new Error("Company Brain receipt inspection returned an invalid snapshot source");
+  }
+  if (
+    !Number.isSafeInteger(row.selected_memory_count) ||
+    row.selected_memory_count < 0 ||
+    !Number.isSafeInteger(row.rendered_memory_count) ||
+    row.rendered_memory_count < 0 ||
+    row.rendered_memory_count > row.selected_memory_count
+  ) {
+    throw new Error("Company Brain receipt inspection returned invalid selection counts");
+  }
+  return {
+    id: row.receipt_id,
+    sessionId: row.session_id,
+    rootSessionId: row.root_session_id,
+    turnId: row.turn_id,
+    acceptedAt: iso(row.accepted_at),
+    createdAt: iso(row.created_at),
+    sessionRole: row.session_role,
+    memoryEnabled: row.memory_enabled,
+    memoryPromptMode: row.memory_prompt_mode,
+    companyProfileIncluded: row.company_profile_included,
+    instructionPolicyEntryHash: row.instruction_policy_entry_hash,
+    preferenceDescriptorHash: row.preference_descriptor_hash,
+    companyProfileSnapshotHash: row.company_profile_snapshot_hash,
+    turnContextSnapshotId: row.turn_context_snapshot_id,
+    turnContextSnapshotHash: row.turn_context_snapshot_hash,
+    turnContextSnapshotSource: row.turn_context_snapshot_source,
+    selectionHash: row.selection_hash,
+    selectedMemoryCount: row.selected_memory_count,
+    renderedMemoryCount: row.rendered_memory_count,
+    budgetOmittedMemoryCount: row.selected_memory_count - row.rendered_memory_count,
+  };
+}
+
+/**
+ * Read a bounded, content-free projection of existing accepted-turn receipts.
+ * The SQL capability independently proves the exact human and both session
+ * references; this adapter never calls the receipt-creating worker function.
+ */
+export async function inspectCompanyBrainContextReceipts(
+  db: Database,
+  input: InspectCompanyBrainContextReceiptsInput,
+): Promise<readonly CompanyBrainContextReceiptInspection[]> {
+  const limit = inspectionLimit(input.limit);
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const rows = await rawRows<InspectionRow>(
+      tx,
+      sql`SELECT * FROM company_brain_inspect_context_receipts(
+        current_setting('opengeni.account_id')::uuid,
+        ${input.workspaceId}::uuid,
+        ${input.subjectId}::text,
+        ${input.attemptId ?? null}::uuid,
+        ${input.before?.createdAt ?? null}::timestamptz,
+        ${input.before?.id ?? null}::uuid,
+        ${limit}::integer
+      )`,
+    );
+    return rows.map(inspectionReceipt);
+  });
 }
 
 /**

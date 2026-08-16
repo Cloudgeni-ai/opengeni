@@ -10,8 +10,13 @@ import {
   createApiKey,
   createDb,
   createSession,
+  ensureManagedAccessForUser,
   FORCE_RLS_TABLES,
+  getOrCreateCompanyProfileSnapshot,
+  getOrCreatePreferenceRegistrySnapshot,
+  getOrCreateWorkspaceInstructionPolicySnapshot,
   initializeSessionStartAtomically,
+  inspectCompanyBrainContextReceipts,
   listApiKeys,
   prepareRetainedScreenshotArtifact,
   PROTECTED_NO_DIRECT_DML_TABLES,
@@ -19,11 +24,14 @@ import {
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
   rlsStrategyFor,
+  resolveCompanyBrainContextSelection,
   setSubjectRlsContext,
+  transitionSessionVisibility,
   upsertKnowledgeProvider,
   upsertKnowledgeSource,
   upsertKnowledgeSourceObject,
   withRlsContext,
+  withSessionRlsActorContext,
   withWorkspaceRls,
   type Database,
   type DbClient,
@@ -1158,6 +1166,128 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     if (!available) return;
     expect(rlsStrategyFor(db)).toBe("force");
   });
+
+  test("0266 inspection remains content-free and TEMP-shadow-safe in the dedicated schema", async () => {
+    if (!available) return;
+    const suffix = crypto.randomUUID();
+    const userId = `dedicated-context-${suffix}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Dedicated context owner",
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await withSessionRlsActorContext({ subjectId }, async () =>
+      createSession(db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        initialMessage: "inspect accepted context",
+        resources: [],
+        metadata: {},
+        model: "dedicated-schema-test",
+        sandboxBackend: "none",
+        createdBy: { kind: "subject", subjectId },
+        createdByContext: {},
+      }),
+    );
+    await transitionSessionVisibility(db, {
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      actorSubjectId: subjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: `dedicated-context-private-${suffix}`,
+    });
+    await initializeSessionStartAtomically(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(db, grant.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `company-brain-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`fixture claim failed: ${claimed.reason}`);
+    const claims = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      turnId: claimed.turn.id,
+      attemptId,
+      executionGeneration: claimed.turn.executionGeneration,
+    };
+    await withSessionRlsActorContext(
+      { subjectId: "worker:dedicated-context", initiatingHumanSubjectId: subjectId },
+      async () => {
+        await getOrCreateCompanyProfileSnapshot(db, claims);
+        await getOrCreateWorkspaceInstructionPolicySnapshot(db, claims);
+        await getOrCreatePreferenceRegistrySnapshot(db, claims);
+        await resolveCompanyBrainContextSelection(db, claims);
+      },
+    );
+
+    const expected = await inspectCompanyBrainContextReceipts(db, {
+      workspaceId: grant.workspaceId,
+      subjectId,
+      attemptId,
+    });
+    expect(expected).toHaveLength(1);
+    expect(JSON.stringify(expected)).not.toContain("memorySelections");
+    expect(JSON.stringify(expected)).not.toContain("legacyWorkspaceInstructions");
+
+    const app = postgres(APP_URL, { max: 1, prepare: false });
+    try {
+      const shadowResistant = await app.begin(async (transactionSql) => {
+        await transactionSql`select set_config('search_path', ${SEARCH_PATH}, true)`;
+        await transactionSql`select
+          set_config('opengeni.account_id', ${grant.accountId}, true),
+          set_config('opengeni.workspace_id', ${grant.workspaceId}, true),
+          set_config('opengeni.subject_id', ${subjectId}, true)`;
+        await transactionSql`create temporary table company_brain_context_selection_receipts (
+          id uuid, account_id uuid, workspace_id uuid, session_id uuid,
+          root_session_id uuid, turn_id uuid
+        )`;
+        await transactionSql`create temporary table session_turns (
+          id uuid, account_id uuid, workspace_id uuid, session_id uuid
+        )`;
+        await transactionSql`create temporary table session_turn_attempts (
+          id uuid, account_id uuid, workspace_id uuid, session_id uuid, turn_id uuid
+        )`;
+        return await transactionSql<Array<{ receiptId: string }>>`
+          select receipt_id as "receiptId"
+          from company_brain_inspect_context_receipts(
+            ${grant.accountId}::uuid, ${grant.workspaceId}::uuid,
+            ${subjectId}::text, ${attemptId}::uuid, null, null, 1
+          )
+        `;
+      });
+      expect(shadowResistant.map((row) => row.receiptId)).toEqual(expected.map((row) => row.id));
+
+      const crossSubject = await app.begin(async (transactionSql) => {
+        const otherSubject = `user:other-${crypto.randomUUID()}`;
+        await transactionSql`select set_config('search_path', ${SEARCH_PATH}, true)`;
+        await transactionSql`select
+          set_config('opengeni.account_id', ${grant.accountId}, true),
+          set_config('opengeni.workspace_id', ${grant.workspaceId}, true),
+          set_config('opengeni.subject_id', ${otherSubject}, true)`;
+        return await transactionSql`select * from company_brain_inspect_context_receipts(
+          ${grant.accountId}::uuid, ${grant.workspaceId}::uuid,
+          ${otherSubject}::text, ${attemptId}::uuid, null, null, 1
+        )`;
+      });
+      expect([...crossSubject]).toEqual([]);
+    } finally {
+      await app.end();
+    }
+  }, 180_000);
 
   test("(B) rows written under A's RLS context land in the DEDICATED schema, not public", async () => {
     if (!available) return;

@@ -13,5 +13,11 @@ describe("Company Brain route discipline", () => {
     expect(route).toContain("subjectId: grant.subjectId");
     expect(route).toContain("subjectId: input.subjectId");
     expect(route).toContain('context.header("cache-control", "private, no-store")');
+    expect(route).toContain('surface: "human"');
+    expect(route).toContain('requireAccessGrant(context, deps, workspaceId, "documents:search")');
+    expect(route).toContain("inspectCompanyBrainContextReceipts");
+    expect(route).toContain("listCompanyBrainKnowledgeProposals");
+    expect(route).toContain("context receipt cursor belongs to another scope");
+    expect(route).not.toContain("resolveCompanyBrainContextSelection");
   });
 });

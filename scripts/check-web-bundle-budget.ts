@@ -29,10 +29,16 @@ const budgets = {
   // embed a configured VITE_API_BASE_URL; the supported loopback form adds up
   // to 18 raw bytes relative to the same-origin build. Keep a narrow full-KiB
   // envelope above that configured graph instead of a platform/config-specific
-  // one-byte margin. Hosted Linux produces a slightly larger gzip graph than
-  // macOS for identical sources: the measured configured Linux graph is
-  // 567,928 bytes. The 558 KiB envelope leaves 3,464 bytes of Linux headroom
-  // while preserving a narrow regression fence.
+  // one-byte margin. Canonical Bun 1.3.14 Linux/x64 measured the combined
+  // Company Brain base at 2,039,311/2,039,328/2,039,329 raw bytes for
+  // default/4-digit/5-digit API URLs; that integration already exceeded the old
+  // cap. The lazy residual inspector adds 769 raw bytes in every case, yielding
+  // a 2,040,098-byte worst case. A 1,994 KiB envelope leaves 1,758 raw bytes of
+  // worst-case headroom without relaxing gzip. Linux produces a slightly
+  // larger gzip graph than macOS for identical sources: the residual matrix's
+  // worst configured graph is 568,496 bytes. The unchanged 558 KiB envelope
+  // leaves 2,896 bytes of Linux headroom while preserving a narrow regression
+  // fence.
   initialRaw: 1448 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
@@ -40,7 +46,7 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 1991 * kib,
+  directSessionRaw: 1994 * kib,
   directSessionGzip: 558 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
