@@ -246,6 +246,9 @@ type SlackBotContext = {
   scheduledTaskId?: string | null;
 };
 
+type SlackCallAuthority = Readonly<{ operation: SlackBotOperation }>;
+type SlackProviderAuthorization = () => Promise<boolean | void>;
+
 export type SlackReactionContextCheckpointBinding = {
   inboxId: string;
   accountId: string;
@@ -492,6 +495,7 @@ export class OpenGeniSlackBotClient {
     private readonly metadata: OpenGeniSlackBotConnectionMetadata,
     private readonly context: SlackBotContext,
     private readonly fetchImpl: FetchLike = fetch,
+    private readonly authorizeProviderRequest?: SlackProviderAuthorization,
   ) {
     this.resolveCredential = buildConnectionTokenResolver(db, settings);
   }
@@ -1309,10 +1313,7 @@ export class OpenGeniSlackBotClient {
   }
 
   private async slackMessageExists(channelId: string, timestamp: string): Promise<boolean> {
-    const headers = await this.headersForDestination(
-      "message.delete",
-      `${SLACK_API_BASE}chat.getPermalink`,
-    );
+    const headers = await this.headersFor("message.delete");
     try {
       await this.call(headers, "chat.getPermalink", {
         channel: channelId,
@@ -1334,7 +1335,7 @@ export class OpenGeniSlackBotClient {
     text: string;
   }): Promise<{ timestamp: string }> {
     const method = input.threadTimestamp ? "conversations.replies" : "conversations.history";
-    const headers = await this.headersForDestination("message.post", `${SLACK_API_BASE}${method}`);
+    const headers = await this.headersFor("message.post");
     const seenCursors = new Set<string>();
     let cursor: string | null = null;
     let matchedTimestamp: string | null = null;
@@ -1382,7 +1383,7 @@ export class OpenGeniSlackBotClient {
     return { timestamp: matchedTimestamp };
   }
 
-  private async requireMemberChannel(headers: Record<string, string>, channelId: string) {
+  private async requireMemberChannel(headers: SlackCallAuthority, channelId: string) {
     const payload = await this.call(headers, "conversations.info", {
       channel: channelId,
     });
@@ -1397,7 +1398,7 @@ export class OpenGeniSlackBotClient {
   }
 
   private async requireActiveNonSharedMemberChannel(
-    headers: Record<string, string>,
+    headers: SlackCallAuthority,
     channelId: string,
   ) {
     const projected = await this.requireMemberChannel(headers, channelId);
@@ -1411,7 +1412,7 @@ export class OpenGeniSlackBotClient {
   }
 
   private async requireFileForChannel(
-    headers: Record<string, string>,
+    headers: SlackCallAuthority,
     operation: "file.info" | "file.content.read",
     input: { channelId: string; fileId: string; parentFileId?: string },
   ) {
@@ -1488,11 +1489,15 @@ export class OpenGeniSlackBotClient {
   }
 
   private async call(
-    headers: Record<string, string>,
+    authority: SlackCallAuthority,
     method: string,
     params: Record<string, string>,
   ): Promise<SlackPayload> {
     try {
+      const headers = await this.headersForDestination(
+        authority.operation,
+        `${SLACK_API_BASE}${method}`,
+      );
       return (await slackApiFetchWithHeaders(this.fetchImpl, method, headers, params)).payload;
     } catch (error) {
       if (slackCredentialRejected(error)) {
@@ -1508,11 +1513,10 @@ export class OpenGeniSlackBotClient {
 
   private async withAudit<T extends Record<string, unknown>>(
     operation: SlackBotOperation,
-    run: (headers: Record<string, string>) => Promise<T>,
+    run: (authority: SlackCallAuthority) => Promise<T>,
   ): Promise<T & { receipt: SlackBotReceipt }> {
     try {
-      const headers = await this.headersFor(operation);
-      const result = await run(headers);
+      const result = await run(await this.headersFor(operation));
       await this.recordAudit(operation, "succeeded");
       return { ...result, receipt: this.receipt(operation) };
     } catch (error) {
@@ -1521,11 +1525,8 @@ export class OpenGeniSlackBotClient {
     }
   }
 
-  private async headersFor(operation: SlackBotOperation): Promise<Record<string, string>> {
-    return await this.headersForDestination(
-      operation,
-      `${SLACK_API_BASE}${slackMethodForOperation(operation)}`,
-    );
+  private async headersFor(operation: SlackBotOperation): Promise<SlackCallAuthority> {
+    return Object.freeze({ operation });
   }
 
   private async headersForDestination(
@@ -1547,6 +1548,31 @@ export class OpenGeniSlackBotClient {
     });
     if (result.status !== "ok" || result.connectionId !== this.connection.id) {
       throw new Error("OpenGeni Slack bot connection needs to be reinstalled");
+    }
+    const current = await requireOpenGeniSlackBotConnection(
+      this.db,
+      this.context.workspaceId,
+      this.connection.id,
+    );
+    const currentMetadata = openGeniSlackBotMetadata(current.metadata);
+    if (
+      current.accountId !== this.context.accountId ||
+      current.version !== this.connection.version ||
+      result.connectionVersion !== this.connection.version ||
+      !currentMetadata ||
+      currentMetadata.slackTeamId !== this.metadata.slackTeamId ||
+      currentMetadata.botId !== this.metadata.botId ||
+      currentMetadata.botUserId !== this.metadata.botUserId
+    ) {
+      throw new Error("OpenGeni Slack bot connection authority changed");
+    }
+    // The adapter callback is a fallible preflight. The canonical credential
+    // callback must remain the final await before the physical fetch.
+    if (this.authorizeProviderRequest && (await this.authorizeProviderRequest()) === false) {
+      throw new Error("OpenGeni Slack bot provider request is no longer authorized");
+    }
+    if (result.authorizeProviderRequest && !(await result.authorizeProviderRequest())) {
+      throw new Error("OpenGeni Slack bot provider request is no longer authorized");
     }
     return result.headers;
   }
@@ -1590,8 +1616,8 @@ export class OpenGeniSlackBotClient {
     } catch {
       throw new SlackBotProviderError("invalid_file_url");
     }
-    const headers = await this.headersForDestination(operation, url.toString());
     await authorizeBeforeFetch?.();
+    const headers = await this.headersForDestination(operation, url.toString());
     let response: Response;
     try {
       response = await this.fetchImpl(url, {
@@ -1802,7 +1828,12 @@ export class OpenGeniSlackBotClient {
 }
 
 export function createOpenGeniSlackBotClient(
-  deps: { db: Database; settings: Settings; slackFetch?: typeof fetch },
+  deps: {
+    db: Database;
+    settings: Settings;
+    slackFetch?: typeof fetch;
+    authorizeProviderRequest?: SlackProviderAuthorization;
+  },
   resolved: Awaited<ReturnType<typeof resolveSlackBotConnectionForTool>>,
 ): OpenGeniSlackBotClient {
   return new OpenGeniSlackBotClient(
@@ -1812,11 +1843,17 @@ export function createOpenGeniSlackBotClient(
     resolved.metadata,
     resolved.context,
     deps.slackFetch,
+    deps.authorizeProviderRequest,
   );
 }
 
 export async function createOpenGeniSlackBotInteractionClient(
-  deps: { db: Database; settings: Settings; slackFetch?: typeof fetch },
+  deps: {
+    db: Database;
+    settings: Settings;
+    slackFetch?: typeof fetch;
+    authorizeProviderRequest?: SlackProviderAuthorization;
+  },
   input: {
     accountId: string;
     workspaceId: string;
@@ -1848,6 +1885,7 @@ export async function createOpenGeniSlackBotInteractionClient(
       scheduledTaskId: null,
     },
     deps.slackFetch,
+    deps.authorizeProviderRequest,
   );
 }
 
@@ -2800,32 +2838,6 @@ export function nextSlackFilesListPage(
     throw new SlackBotProviderError("invalid_files_paging");
   }
   return nextPage;
-}
-
-function slackMethodForOperation(operation: SlackBotOperation): string {
-  switch (operation) {
-    case "channels.list":
-      return "conversations.list";
-    case "channel_history.read":
-      return "conversations.history";
-    case "thread_replies.read":
-      return "conversations.replies";
-    case "users.list":
-      return "users.list";
-    case "files.list":
-      return "files.list";
-    case "file.info":
-    case "file.content.read":
-      return "files.info";
-    case "home.publish":
-      return "views.publish";
-    case "message.post":
-      return "chat.postMessage";
-    case "message.update":
-      return "chat.update";
-    case "message.delete":
-      return "chat.delete";
-  }
 }
 
 function validateSlackMessageBlocks(
