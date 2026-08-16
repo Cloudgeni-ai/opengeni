@@ -22,15 +22,194 @@ import {
   type OrganizationRetentionPolicy as OrganizationRetentionPolicyType,
   type UpdateOrganizationMemberRequest,
 } from "@opengeni/contracts";
-import { sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { Database } from "./database";
-import { rawRows, setSubjectRlsContext, withRlsContext } from "./database";
+import {
+  rawRows,
+  setSubjectRlsContext,
+  withRestoredSessionActivityRlsContext,
+  withRlsContext,
+} from "./database";
+import { lockSessionEventWriteRows } from "./session-control";
+import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
+import * as schema from "./schema";
 
 type CommandBase = {
   organizationId: string;
   actorSubjectId: string;
   operationId: string;
 };
+
+type OrganizationMembershipProtocolSettlement = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  executionGeneration: number;
+  turnAssociation: "current" | null;
+};
+
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function parseOrganizationMembershipProtocolSettlements(
+  value: unknown,
+): OrganizationMembershipProtocolSettlement[] {
+  if (!Array.isArray(value)) {
+    throw new Error("Organization membership protocol preparation returned a non-array result");
+  }
+  return value.map((candidate) => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      throw new Error("Organization membership protocol preparation returned an invalid item");
+    }
+    const item = candidate as Record<string, unknown>;
+    if (
+      typeof item.accountId !== "string" ||
+      !uuidPattern.test(item.accountId) ||
+      typeof item.workspaceId !== "string" ||
+      !uuidPattern.test(item.workspaceId) ||
+      typeof item.sessionId !== "string" ||
+      !uuidPattern.test(item.sessionId) ||
+      typeof item.turnId !== "string" ||
+      !uuidPattern.test(item.turnId) ||
+      typeof item.executionGeneration !== "number" ||
+      !Number.isSafeInteger(item.executionGeneration) ||
+      item.executionGeneration <= 0 ||
+      (item.turnAssociation !== "current" && item.turnAssociation !== null)
+    ) {
+      throw new Error("Organization membership protocol preparation returned an invalid item");
+    }
+    return {
+      accountId: item.accountId,
+      workspaceId: item.workspaceId,
+      sessionId: item.sessionId,
+      turnId: item.turnId,
+      executionGeneration: item.executionGeneration,
+      turnAssociation: item.turnAssociation,
+    };
+  });
+}
+
+async function prepareOrganizationMembershipProtocolSettlements(
+  db: Database,
+  command: CommandBase & Record<string, unknown>,
+): Promise<OrganizationMembershipProtocolSettlement[]> {
+  return await withRlsContext(
+    db,
+    { accountId: command.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, command.actorSubjectId);
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select prepare_organization_membership_protocol_settlements(
+          ${JSON.stringify(command)}::jsonb
+        ) as result`,
+      );
+      return parseOrganizationMembershipProtocolSettlements(row?.result ?? []);
+    },
+  );
+}
+
+async function settleOrganizationMembershipProtocols(
+  db: Database,
+  settlements: OrganizationMembershipProtocolSettlement[],
+): Promise<void> {
+  const [prior] = await rawRows<{ subject_id: string; initiating_human_subject_id: string }>(
+    db,
+    sql`select
+      coalesce(current_setting('opengeni.subject_id', true), '') as subject_id,
+      coalesce(
+        current_setting('opengeni.initiating_human_subject_id', true), ''
+      ) as initiating_human_subject_id`,
+  );
+  try {
+    // The SECURITY DEFINER preparation has already authorized and locked each
+    // exact target turn. Canonical settlement needs the established internal
+    // service RLS view because an administrator cannot otherwise see another
+    // member's user-private session rows.
+    await db.execute(sql`select
+      set_config('opengeni.subject_id', '', true),
+      set_config('opengeni.initiating_human_subject_id', '', true)`);
+    const workspaceIds = [
+      ...new Set(settlements.map((settlement) => settlement.workspaceId)),
+    ].sort();
+    for (const workspaceId of workspaceIds) {
+      const workspaceSettlements = settlements
+        .filter((settlement) => settlement.workspaceId === workspaceId)
+        .sort(
+          (left, right) =>
+            left.sessionId.localeCompare(right.sessionId) ||
+            left.turnId.localeCompare(right.turnId),
+        );
+      const accountId = workspaceSettlements[0]?.accountId;
+      if (!accountId) continue;
+      await withRestoredSessionActivityRlsContext(
+        db,
+        { accountId, workspaceId },
+        async (scopedDb) => {
+          for (const settlement of workspaceSettlements) {
+            const locks = await lockSessionEventWriteRows(scopedDb, {
+              workspaceId,
+              controlLock: "already_locked",
+              workspaceLock: "already_locked",
+              sessionIds: [settlement.sessionId],
+              turnIds: [settlement.turnId],
+            });
+            const session = locks.sessions[0];
+            const turn = locks.turns[0];
+            if (
+              !session ||
+              !turn ||
+              session.accountId !== settlement.accountId ||
+              turn.accountId !== settlement.accountId ||
+              turn.sessionId !== settlement.sessionId ||
+              turn.executionGeneration !== settlement.executionGeneration ||
+              !["queued", "running", "requires_action", "recovering", "waiting_capacity"].includes(
+                turn.status,
+              )
+            ) {
+              throw new Error("Organization membership protocol settlement lost its locked turn");
+            }
+            const now = new Date();
+            const closedTools = await closePendingSessionToolCallsInTransaction(scopedDb, {
+              accountId: settlement.accountId,
+              workspaceId,
+              sessionId: settlement.sessionId,
+              turnId: settlement.turnId,
+              reason: "authority_changed",
+              sequence: session.lastSequence,
+              now,
+              turnAssociation: settlement.turnAssociation,
+            });
+            if (closedTools.sequence !== session.lastSequence) {
+              const [updated] = await scopedDb
+                .update(schema.sessions)
+                .set({ lastSequence: closedTools.sequence, updatedAt: now })
+                .where(
+                  and(
+                    eq(schema.sessions.accountId, settlement.accountId),
+                    eq(schema.sessions.workspaceId, workspaceId),
+                    eq(schema.sessions.id, settlement.sessionId),
+                    eq(schema.sessions.lastSequence, session.lastSequence),
+                  ),
+                )
+                .returning({ id: schema.sessions.id });
+              if (!updated) {
+                throw new Error("Organization membership protocol sequence changed under its lock");
+              }
+            }
+          }
+        },
+      );
+    }
+  } finally {
+    await db.execute(sql`select
+      set_config('opengeni.subject_id', ${prior?.subject_id ?? ""}, true),
+      set_config(
+        'opengeni.initiating_human_subject_id',
+        ${prior?.initiating_human_subject_id ?? ""}, true
+      )`);
+  }
+}
 
 export async function assertActiveManagedHumanOrganizationMembership(
   db: Database,
@@ -235,15 +414,23 @@ export async function updateOrganizationMember(
   },
 ): Promise<OrganizationMemberType> {
   const { transition, ...base } = input;
-  return OrganizationMember.parse(
-    await runCommand(db, {
-      action: transition.kind,
-      ...base,
-      expectedAuthorizationRevision: transition.expectedAuthorizationRevision,
-      ...(transition.role === undefined ? {} : { role: transition.role }),
-      ...(transition.reason === undefined ? {} : { reason: transition.reason }),
-    }),
-  );
+  const command = {
+    action: transition.kind,
+    ...base,
+    expectedAuthorizationRevision: transition.expectedAuthorizationRevision,
+    ...(transition.role === undefined ? {} : { role: transition.role }),
+    ...(transition.reason === undefined ? {} : { reason: transition.reason }),
+  };
+  return await db.transaction(async (tx) => {
+    if (transition.kind === "suspend" || transition.kind === "offboard") {
+      const settlements = await prepareOrganizationMembershipProtocolSettlements(
+        tx as unknown as Database,
+        command,
+      );
+      await settleOrganizationMembershipProtocols(tx as unknown as Database, settlements);
+    }
+    return OrganizationMember.parse(await runCommand(tx as unknown as Database, command));
+  });
 }
 
 export async function getOrganizationRetentionPolicy(

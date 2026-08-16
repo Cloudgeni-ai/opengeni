@@ -591,6 +591,7 @@ describe("session_events writer inventory", () => {
     const violations: string[] = [];
     const gateWrappers = [
       "withSessionActivityRlsContext",
+      "withRestoredSessionActivityRlsContext",
       "withWorkspaceSessionActivityRls",
       "withWorkspaceSubjectSessionActivityRls",
       "retrySessionActivityRls",

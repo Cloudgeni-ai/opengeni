@@ -9,6 +9,7 @@ import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
   acceptOrganizationInvitation,
+  applyCreditLedgerEntry,
   claimOrganizationRetentionDeletion,
   completeOrganizationRetentionDeletion,
   createConnection,
@@ -20,6 +21,7 @@ import {
   failOrganizationRetentionDeletion,
   finalizeOrganizationRetentionDeletion,
   getSelfOrganizationInvitation,
+  getBillingBalance,
   listOrganizationMembers,
   listOrganizationRetentionDeletionObjects,
   listOrganizationInvitations,
@@ -37,6 +39,10 @@ import {
   type DbClient,
 } from "../src";
 import { rawRows, setSubjectRlsContext, withRlsContext } from "../src/database";
+import {
+  admitVideoGenerationOperation,
+  updateWorkspaceVideoGenerationPolicy,
+} from "../src/video-generation";
 
 const migrationUrl = new URL(
   "../drizzle/0263_organization_membership_lifecycle.sql",
@@ -269,12 +275,15 @@ describe("migration 0263 organization membership lifecycle", () => {
       const [posture] = await admin<
         Array<{
           execute: boolean;
+          executePreparation: boolean;
+          executeAdmission: boolean;
           executeRetention: boolean;
           executeRetentionComplete: boolean;
           directInsert: boolean;
           directRetentionInsert: boolean;
           directRetentionReceiptInsert: boolean;
           searchPath: string | null;
+          preparationSearchPath: string | null;
           retentionSearchPath: string | null;
         }>
       >`
@@ -284,6 +293,22 @@ describe("migration 0263 organization membership lifecycle", () => {
             format('%I.organization_membership_command(jsonb)', ${schemaName}::text),
             'EXECUTE'
           ) as execute,
+          has_function_privilege(
+            ${roleName}::text,
+            format(
+              '%I.prepare_organization_membership_protocol_settlements(jsonb)',
+              ${schemaName}::text
+            ),
+            'EXECUTE'
+          ) as "executePreparation",
+          has_function_privilege(
+            ${roleName}::text,
+            format(
+              '%I.assert_active_managed_human_organization_membership(uuid,text)',
+              ${schemaName}::text
+            ),
+            'EXECUTE'
+          ) as "executeAdmission",
           has_function_privilege(
             ${roleName}::text,
             format('%I.claim_organization_retention_deletion(uuid,uuid,uuid[])', ${schemaName}::text),
@@ -327,17 +352,29 @@ describe("migration 0263 organization membership lifecycle", () => {
             join pg_namespace namespace on namespace.oid = procedure.pronamespace
             cross join lateral unnest(coalesce(procedure.proconfig, array[]::text[])) config
             where namespace.nspname = ${schemaName}::text
+              and procedure.proname = 'prepare_organization_membership_protocol_settlements'
+              and config like 'search_path=%'
+          ) as "preparationSearchPath",
+          (
+            select config
+            from pg_proc procedure
+            join pg_namespace namespace on namespace.oid = procedure.pronamespace
+            cross join lateral unnest(coalesce(procedure.proconfig, array[]::text[])) config
+            where namespace.nspname = ${schemaName}::text
               and procedure.proname = 'claim_organization_retention_deletion'
               and config like 'search_path=%'
           ) as "retentionSearchPath"`;
       expect(posture).toEqual({
         execute: true,
+        executePreparation: true,
+        executeAdmission: true,
         executeRetention: true,
         executeRetentionComplete: true,
         directInsert: false,
         directRetentionInsert: false,
         directRetentionReceiptInsert: false,
         searchPath: `search_path=pg_catalog, ${schemaName}, pg_temp`,
+        preparationSearchPath: `search_path=pg_catalog, ${schemaName}, pg_temp`,
         retentionSearchPath: `search_path=pg_catalog, ${schemaName}, pg_temp`,
       });
 
@@ -371,6 +408,11 @@ describe("migration 0263 organization membership lifecycle", () => {
           ${crypto.randomUUID()}::uuid, ${accountId}::uuid, ${subjectId}, 'member', 'revoked',
           null, 99, now(), null, now(), now()
         )`;
+        const [admission] = await transaction.unsafe<Array<{ revision: number }>>(
+          `select "${schemaName}".assert_active_managed_human_organization_membership($1, $2)::int as revision`,
+          [accountId, subjectId],
+        );
+        expect(admission?.revision).toBe(1);
         return await transaction.unsafe<
           Array<{ result: Array<{ id: string; role: string; status: string }> }>
         >(`select "${schemaName}".list_self_organization_memberships($1) as result`, [subjectId]);
@@ -957,6 +999,15 @@ describe("migration 0263 organization membership lifecycle", () => {
       operationKey: `private:${crypto.randomUUID()}`,
     });
     expect(privateTransition.authorityEpoch).toBe(2);
+    const queuedTurnId = crypto.randomUUID();
+    const requiresActionTurnId = crypto.randomUUID();
+    const recoveringTurnId = crypto.randomUUID();
+    const waitingCapacityTurnId = crypto.randomUUID();
+    const requiresActionAttemptId = crypto.randomUUID();
+    const pendingToolCallId = `call-${crypto.randomUUID()}`;
+    const humanInputRequestId = crypto.randomUUID();
+    const deliveredUpdateId = crypto.randomUUID();
+    const deliveredHistoryItemId = crypto.randomUUID();
     await shared.admin`
       insert into session_turns (
         id, account_id, workspace_id, session_id, trigger_event_id,
@@ -965,29 +1016,196 @@ describe("migration 0263 organization membership lifecycle", () => {
         initiator_subject_id, initiating_human_subject_id
       ) values
       (
-        ${crypto.randomUUID()}, ${owner!.organizationId}, ${sharedWorkspaceId},
+        ${queuedTurnId}, ${owner!.organizationId}, ${sharedWorkspaceId},
         ${approvalSession.id}, ${crypto.randomUUID()}, ${`offboard-${crypto.randomUUID()}`},
         'queued', 1, 1, 'queued private work', 'test-model', 'medium', 'standard',
         'none', 'subject', ${targetSubject}, ${targetSubject}
       ),
       (
-        ${crypto.randomUUID()}, ${owner!.organizationId}, ${sharedWorkspaceId},
+        ${requiresActionTurnId}, ${owner!.organizationId}, ${sharedWorkspaceId},
         ${recoveringSession.id}, ${crypto.randomUUID()}, ${`offboard-${crypto.randomUUID()}`},
-        'requires_action', 1, 2, 'approval private work', 'test-model', 'medium', 'standard',
+        'running', 1, 2, 'approval private work', 'test-model', 'medium', 'standard',
         'none', 'subject', ${targetSubject}, ${targetSubject}
       ),
       (
-        ${crypto.randomUUID()}, ${owner!.organizationId}, ${sharedWorkspaceId},
+        ${recoveringTurnId}, ${owner!.organizationId}, ${sharedWorkspaceId},
         ${capacitySession.id}, ${crypto.randomUUID()}, ${`offboard-${crypto.randomUUID()}`},
         'recovering', 1, 3, 'recovering private work', 'test-model', 'medium', 'standard',
         'none', 'subject', ${targetSubject}, ${targetSubject}
       ),
       (
-        ${crypto.randomUUID()}, ${owner!.organizationId}, ${sharedWorkspaceId},
+        ${waitingCapacityTurnId}, ${owner!.organizationId}, ${sharedWorkspaceId},
         ${privateSession.id}, ${crypto.randomUUID()}, ${`offboard-${crypto.randomUUID()}`},
         'waiting_capacity', 1, 4, 'waiting private work', 'test-model', 'medium', 'standard',
         'none', 'subject', ${targetSubject}, ${targetSubject}
       )`;
+    await shared.admin.begin(async (tx) => {
+      await tx`update sessions
+        set active_turn_id = ${requiresActionTurnId}, status = 'running'
+        where id = ${recoveringSession.id}`;
+      await tx`update session_turns
+        set active_attempt_id = ${requiresActionAttemptId}
+        where id = ${requiresActionTurnId}`;
+      await tx`
+        insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id, execution_generation,
+          state, temporal_workflow_id, temporal_workflow_run_id,
+          temporal_activity_id, verified_control_revision, mcp_approval_policies
+        ) values (
+          ${requiresActionAttemptId}, ${owner!.organizationId}, ${sharedWorkspaceId},
+          ${recoveringSession.id}, ${requiresActionTurnId}, 1, 'running',
+          ${`offboard-${requiresActionTurnId}`}, ${`run-${requiresActionAttemptId}`},
+          ${`activity-${requiresActionAttemptId}`}, 0, '{}'::jsonb
+        )`;
+      await tx`update session_turn_attempts
+        set state = 'closed', outcome = 'requires_action', closed_at = now()
+        where id = ${requiresActionAttemptId}`;
+      await tx`update session_turns
+        set status = 'requires_action', active_attempt_id = null
+        where id = ${requiresActionTurnId}`;
+      await tx`update sessions
+        set status = 'requires_action'
+        where id = ${recoveringSession.id}`;
+    });
+    await shared.admin`
+      insert into session_pending_tool_calls (
+        account_id, workspace_id, session_id, turn_id, execution_generation,
+        attempt_id, call_id, call_type, call_item, call_item_codec_version
+      ) values (
+        ${owner!.organizationId}, ${sharedWorkspaceId}, ${recoveringSession.id},
+        ${requiresActionTurnId}, 1, ${requiresActionAttemptId}, ${pendingToolCallId},
+        'function_call',
+        ${shared.admin.json({
+          type: "function_call",
+          name: "request_human_input",
+          callId: pendingToolCallId,
+          arguments: "{}",
+        })},
+        1
+      )`;
+    await shared.admin`
+      insert into session_human_input_requests (
+        id, account_id, workspace_id, session_id, turn_id, turn_generation,
+        creation_attempt_id, tool_call_id, questions, allow_skip
+      ) values (
+        ${humanInputRequestId}, ${owner!.organizationId}, ${sharedWorkspaceId},
+        ${recoveringSession.id}, ${requiresActionTurnId}, 1,
+        ${requiresActionAttemptId}, ${pendingToolCallId},
+        ${shared.admin.json([
+          {
+            id: "approval",
+            header: "Approval",
+            question: "Continue?",
+            options: [
+              { label: "Yes", description: "Continue." },
+              { label: "No", description: "Stop." },
+            ],
+          },
+        ])},
+        false
+      )`;
+    await shared.admin`
+      insert into session_history_items (
+        id, account_id, workspace_id, session_id, turn_id, position, item
+      ) values (
+        ${deliveredHistoryItemId}, ${owner!.organizationId}, ${sharedWorkspaceId},
+        ${recoveringSession.id}, ${requiresActionTurnId}, 100,
+        ${shared.admin.json({
+          type: "message",
+          role: "user",
+          content: "delivered machine input",
+        })}
+      )`;
+    await shared.admin`
+      insert into session_system_updates (
+        id, account_id, workspace_id, session_id, kind, classification,
+        source_id, dedupe_key, summary, payload, lineage, state,
+        delivered_turn_id, delivered_history_item_id, delivered_at
+      ) values (
+        ${deliveredUpdateId}, ${owner!.organizationId}, ${sharedWorkspaceId},
+        ${recoveringSession.id}, 'agent_message', 'info', 'test-agent',
+        ${`delivered-${crypto.randomUUID()}`}, 'Delivered lifecycle input',
+        ${shared.admin.json({
+          type: "agent_message",
+          text: "Delivered lifecycle input",
+          operationId: crypto.randomUUID(),
+        })}, '{}'::jsonb, 'delivered', ${requiresActionTurnId},
+        ${deliveredHistoryItemId}, now()
+      )`;
+    await applyCreditLedgerEntry(client.db, {
+      accountId: owner!.organizationId,
+      workspaceId: sharedWorkspaceId,
+      type: "test_credit",
+      amountMicros: 1_000_000,
+      sourceType: "test",
+      sourceId: sharedWorkspaceId,
+      idempotencyKey: `test:membership-lifecycle-video:${sharedWorkspaceId}`,
+    });
+    const videoPolicy = await withRlsContext(
+      client.db,
+      { accountId: owner!.organizationId, workspaceId: sharedWorkspaceId },
+      async (scopedDb) => {
+        await setSubjectRlsContext(scopedDb, targetSubject);
+        return await updateWorkspaceVideoGenerationPolicy(scopedDb, {
+          accountId: owner!.organizationId,
+          workspaceId: sharedWorkspaceId,
+          subjectId: targetSubject,
+          expectedRevision: 0,
+          fundingSource: "opengeni_credits",
+          enabledModelIds: ["bytedance/seedance-2.5"],
+          defaultModelId: "bytedance/seedance-2.5",
+        });
+      },
+    );
+    const videoOperationId = crypto.randomUUID();
+    const videoReferenceCleanupAfter = new Date(Date.now() + 86_400_000);
+    await withRlsContext(
+      client.db,
+      { accountId: owner!.organizationId, workspaceId: sharedWorkspaceId },
+      async (scopedDb) => {
+        await setSubjectRlsContext(scopedDb, targetSubject);
+        await admitVideoGenerationOperation(scopedDb, {
+          id: videoOperationId,
+          accountId: owner!.organizationId,
+          workspaceId: sharedWorkspaceId,
+          sessionId: recoveringSession.id,
+          turnId: requiresActionTurnId,
+          attemptId: requiresActionAttemptId,
+          toolCallId: pendingToolCallId,
+          admissionKey: "a".repeat(64),
+          requestDigest: "b".repeat(64),
+          promptDigest: "c".repeat(64),
+          requestEncrypted: "encrypted-request",
+          modelId: "bytedance/seedance-2.5",
+          sourceMode: "first_frame",
+          capabilityRevision: "d".repeat(64),
+          policyRevision: videoPolicy.revision,
+          fundingSource: "opengeni_credits",
+          pricedCostMicros: 620_000,
+          connectionId: null,
+          credentialVersion: 1,
+          credentialEncrypted: "encrypted-managed-credential",
+          providerIdempotencyKey: `membership-lifecycle-${videoOperationId}`,
+          expectedArtifactId: crypto.randomUUID(),
+          expectedFileId: crypto.randomUUID(),
+          workspaceQuotaBytes: 1024 * 1024 * 1024,
+          maxConcurrentPerWorkspace: 2,
+          recoveryDeadlineAt: new Date(Date.now() + 60_000),
+          references: [
+            {
+              ordinal: 0,
+              role: "first_frame",
+              contentType: "image/png",
+              sizeBytes: 8,
+              sha256: "e".repeat(64),
+              stagingObjectKey: `video-staging/${videoOperationId}`,
+              cleanupAfter: videoReferenceCleanupAfter,
+            },
+          ],
+        });
+      },
+    );
+    expect((await getBillingBalance(client.db, owner!.organizationId)).balanceMicros).toBe(380_000);
     const secondWorkspaceId = crypto.randomUUID();
     await shared.admin`
       insert into workspaces (id, account_id, name, external_source, external_id)
@@ -1038,11 +1256,65 @@ describe("migration 0263 organization membership lifecycle", () => {
         ${owner!.organizationId}, ${sharedWorkspaceId}, ${privateSession.id},
         ${realtimeId}, ${crypto.randomUUID()}, 1, 'negotiating'
       )`;
+    const offboardOperationId = crypto.randomUUID();
+    const directCommand = {
+      action: "offboard",
+      organizationId: owner!.organizationId,
+      actorSubjectId: ownerSubject,
+      operationId: offboardOperationId,
+      membershipId: member.id,
+      expectedAuthorizationRevision: member.authorizationRevision,
+      reason: "employment ended",
+    };
+    await expectSqlState(
+      () =>
+        withRlsContext(
+          client!.db,
+          { accountId: owner!.organizationId, workspaceId: null },
+          async (scopedDb) => {
+            await setSubjectRlsContext(scopedDb, ownerSubject);
+            await rawRows(
+              scopedDb,
+              sql`select organization_membership_command(
+                ${JSON.stringify(directCommand)}::jsonb
+              )`,
+            );
+          },
+        ),
+      "55000",
+    );
+    const [directRollback] = await shared.admin<
+      Array<{ status: string; turnStatus: string; pendingToolCalls: number; receipts: number }>
+    >`
+      select membership.status,
+        (select status from session_turns where id = ${requiresActionTurnId}) as "turnStatus",
+        (select count(*)::int from session_pending_tool_calls
+          where turn_id = ${requiresActionTurnId}) as "pendingToolCalls",
+        (select count(*)::int from organization_membership_operation_receipts
+          where account_id = ${owner!.organizationId}
+            and operation_id = ${offboardOperationId}) as receipts
+      from organization_memberships membership where membership.id = ${member.id}`;
+    expect(directRollback).toEqual({
+      status: "active",
+      turnStatus: "requires_action",
+      pendingToolCalls: 1,
+      receipts: 0,
+    });
+    const [directVideoRollback] = await shared.admin<
+      Array<{ status: string; creditState: string; quotaState: string }>
+    >`
+      select status, credit_state as "creditState", quota_state as "quotaState"
+      from video_generation_operations where id = ${videoOperationId}`;
+    expect(directVideoRollback).toEqual({
+      status: "preparing",
+      creditState: "debited",
+      quotaState: "reserved",
+    });
     const offboardRace = await Promise.allSettled([
       updateOrganizationMember(client.db, {
         organizationId: owner!.organizationId,
         actorSubjectId: ownerSubject,
-        operationId: crypto.randomUUID(),
+        operationId: offboardOperationId,
         membershipId: member.id,
         transition: {
           kind: "offboard",
@@ -1110,6 +1382,155 @@ describe("migration 0263 organization membership lifecycle", () => {
       realtimeState: "ended",
       realtimeEndReason: "authority_revoked",
       realtimeConnectionState: "closed",
+    });
+    const [protocolSettlement] = await shared.admin<
+      Array<{
+        pendingToolCalls: number;
+        humanInputStatus: string;
+        interruptedHistoryItems: number;
+        toolOutputEvents: number;
+        humanInputEvents: number;
+        systemUpdateEvents: number;
+        cancelledTurnEvents: number;
+        lastSequence: number;
+      }>
+    >`
+      select
+        (select last_sequence::int from sessions
+          where id = ${recoveringSession.id}) as "lastSequence",
+        (select count(*)::int from session_pending_tool_calls pending
+          where pending.workspace_id = ${sharedWorkspaceId}
+            and pending.turn_id = ${requiresActionTurnId}) as "pendingToolCalls",
+        (select status from session_human_input_requests request_row
+          where request_row.id = ${humanInputRequestId}) as "humanInputStatus",
+        (select count(*)::int from session_history_items history
+          where history.workspace_id = ${sharedWorkspaceId}
+            and history.session_id = ${recoveringSession.id}
+            and history.turn_id = ${requiresActionTurnId}
+            and history.item ->> 'type' = 'function_call_result'
+            and history.item ->> 'callId' = ${pendingToolCallId}
+            and history.item ->> 'status' = 'incomplete') as "interruptedHistoryItems",
+        (select count(*)::int from session_events event_row
+          where event_row.workspace_id = ${sharedWorkspaceId}
+            and event_row.session_id = ${recoveringSession.id}
+            and event_row.turn_id = ${requiresActionTurnId}
+            and event_row.type = 'agent.toolCall.output'
+            and event_row.payload ->> 'id' = ${pendingToolCallId}) as "toolOutputEvents",
+        (select count(*)::int from session_events event_row
+          where event_row.workspace_id = ${sharedWorkspaceId}
+            and event_row.session_id = ${recoveringSession.id}
+            and event_row.turn_id = ${requiresActionTurnId}
+            and event_row.type = 'user.humanInputResponse'
+            and event_row.payload ->> 'requestId' = ${humanInputRequestId}) as "humanInputEvents",
+        (select count(*)::int from session_events event_row
+          where event_row.workspace_id = ${sharedWorkspaceId}
+            and event_row.session_id = ${recoveringSession.id}
+            and event_row.turn_id = ${requiresActionTurnId}
+            and event_row.type = 'system.update.settled'
+            and event_row.payload -> 'updateIds' = jsonb_build_array(${deliveredUpdateId}::uuid)
+            and event_row.payload ->> 'historyItemId' = ${deliveredHistoryItemId})
+          as "systemUpdateEvents",
+        (select count(*)::int from session_events event_row
+          where event_row.workspace_id = ${sharedWorkspaceId}
+            and event_row.session_id = ${recoveringSession.id}
+            and event_row.turn_id = ${requiresActionTurnId}
+            and event_row.type = 'turn.cancelled') as "cancelledTurnEvents"`;
+    expect(protocolSettlement).toEqual({
+      pendingToolCalls: 0,
+      humanInputStatus: "cancelled",
+      interruptedHistoryItems: 1,
+      toolOutputEvents: 1,
+      humanInputEvents: 1,
+      systemUpdateEvents: 1,
+      cancelledTurnEvents: 1,
+      lastSequence: expect.any(Number),
+    });
+    const [videoSettlement] = await shared.admin<
+      Array<{
+        status: string;
+        creditState: string;
+        quotaState: string;
+        terminalUpdateState: string;
+        reservedBytes: number;
+        referenceCleanupAdvanced: boolean;
+        usageEvents: number;
+      }>
+    >`
+      select operation.status, operation.credit_state as "creditState",
+        operation.quota_state as "quotaState",
+        operation.terminal_update_state as "terminalUpdateState",
+        quota.reserved_bytes::int as "reservedBytes",
+        reference.cleanup_after < ${videoReferenceCleanupAfter} as "referenceCleanupAdvanced",
+        (select count(*)::int from usage_events usage
+          where usage.source_resource_type = 'video_generation_operation'
+            and usage.source_resource_id = ${videoOperationId}
+            and usage.event_type in ('video_generation.cost', 'video_generation.refund'))
+          as "usageEvents"
+      from video_generation_operations operation
+      join workspace_video_generation_quotas quota
+        on quota.workspace_id = operation.workspace_id
+      join video_generation_references reference
+        on reference.operation_id = operation.id and reference.ordinal = 0
+      where operation.id = ${videoOperationId}`;
+    expect(videoSettlement).toEqual({
+      status: "cancelled_before_submit",
+      creditState: "refunded",
+      quotaState: "released",
+      terminalUpdateState: "suppressed",
+      reservedBytes: 0,
+      referenceCleanupAdvanced: true,
+      usageEvents: 2,
+    });
+    expect((await getBillingBalance(client.db, owner!.organizationId)).balanceMicros).toBe(
+      1_000_000,
+    );
+    const replayedMember = await updateOrganizationMember(client.db, {
+      organizationId: owner!.organizationId,
+      actorSubjectId: ownerSubject,
+      operationId: offboardOperationId,
+      membershipId: member.id,
+      transition: {
+        kind: "offboard",
+        expectedAuthorizationRevision: member.authorizationRevision - 1,
+        operationId: crypto.randomUUID(),
+        reason: "employment ended",
+      },
+    });
+    expect(replayedMember).toEqual(member);
+    const [replayEvidence] = await shared.admin<
+      Array<{
+        pendingToolCalls: number;
+        interruptedHistoryItems: number;
+        lifecycleProtocolEvents: number;
+        lastSequence: number;
+      }>
+    >`
+      select
+        (select count(*)::int from session_pending_tool_calls
+          where workspace_id = ${sharedWorkspaceId}
+            and turn_id = ${requiresActionTurnId}) as "pendingToolCalls",
+        (select count(*)::int from session_history_items history
+          where history.workspace_id = ${sharedWorkspaceId}
+            and history.session_id = ${recoveringSession.id}
+            and history.turn_id = ${requiresActionTurnId}
+            and history.item ->> 'type' = 'function_call_result'
+            and history.item ->> 'callId' = ${pendingToolCallId}
+            and history.item ->> 'status' = 'incomplete') as "interruptedHistoryItems",
+        (select count(*)::int from session_events event_row
+          where event_row.workspace_id = ${sharedWorkspaceId}
+            and event_row.session_id = ${recoveringSession.id}
+            and event_row.turn_id = ${requiresActionTurnId}
+            and event_row.type in (
+              'agent.toolCall.output', 'user.humanInputResponse',
+              'system.update.settled', 'turn.cancelled'
+            )) as "lifecycleProtocolEvents",
+        (select last_sequence::int from sessions
+          where id = ${recoveringSession.id}) as "lastSequence"`;
+    expect(replayEvidence).toEqual({
+      pendingToolCalls: 0,
+      interruptedHistoryItems: 1,
+      lifecycleProtocolEvents: 4,
+      lastSequence: protocolSettlement!.lastSequence,
     });
     const [secondRetainedSession] = await shared.admin<
       Array<{ authorityEpoch: number; revocationEvents: number }>
@@ -1504,6 +1925,160 @@ describe("migration 0263 organization membership lifecycle", () => {
     });
   });
 
+  test("replays an exact concurrent retention completion after the deletion-row lock", async () => {
+    if (!shared || !client) return;
+    const fixture = await provisionOrganizationMember("retention-complete-race");
+    const member = await expireOrganizationMember(fixture);
+    const operationId = crypto.randomUUID();
+    await claimOrganizationRetentionDeletion(client.db, {
+      organizationId: fixture.owner.organizationId,
+      operationId,
+    });
+    await finalizeOrganizationRetentionDeletion(client.db, {
+      organizationId: fixture.owner.organizationId,
+      membershipId: member.id,
+      operationId,
+      objectBucket: retentionObjectBucket,
+    });
+
+    let releaseLock!: () => void;
+    let lockAcquired!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const acquired = new Promise<void>((resolve) => {
+      lockAcquired = resolve;
+    });
+    const locking = shared.admin.begin(async (tx) => {
+      await tx`select 1 from organization_user_retention_deletions
+        where account_id = ${fixture.owner.organizationId} and membership_id = ${member.id}
+        for update`;
+      lockAcquired();
+      await release;
+    });
+    await acquired;
+    let settled = 0;
+    const completions = [0, 1].map(() =>
+      completeOrganizationRetentionDeletion(client!.db, {
+        organizationId: fixture.owner.organizationId,
+        membershipId: member.id,
+        operationId,
+        objectBucket: retentionObjectBucket,
+      }).finally(() => {
+        settled += 1;
+      }),
+    );
+    await Bun.sleep(75);
+    expect(settled).toBe(0);
+    releaseLock();
+    await locking;
+    const [first, second] = await Promise.all(completions);
+    expect(second).toEqual(first);
+    expect(first).toMatchObject({
+      membershipId: member.id,
+      operationId,
+      outcome: "completed",
+    });
+    const [completedEventCount] = await shared.admin<Array<{ completedEvents: number }>>`
+      select count(*)::int as "completedEvents"
+      from organization_user_retention_deletion_events
+      where account_id = ${fixture.owner.organizationId}
+        and membership_id = ${member.id}
+        and operation_id = ${operationId}
+        and kind = 'completed'`;
+    expect(completedEventCount?.completedEvents).toBe(1);
+  });
+
+  test("serializes exact concurrent retention failure and database finalization retries", async () => {
+    if (!shared || !client) return;
+    const failedFixture = await provisionOrganizationMember("retention-concurrent-fail");
+    const failedMember = await expireOrganizationMember(failedFixture);
+    const failedOperationId = crypto.randomUUID();
+    await claimOrganizationRetentionDeletion(client.db, {
+      organizationId: failedFixture.owner.organizationId,
+      operationId: failedOperationId,
+    });
+
+    let releaseFailureLock!: () => void;
+    let failureLockAcquired!: () => void;
+    const releaseFailure = new Promise<void>((resolve) => {
+      releaseFailureLock = resolve;
+    });
+    const acquiredFailure = new Promise<void>((resolve) => {
+      failureLockAcquired = resolve;
+    });
+    const failureLock = shared.admin.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtextextended(
+        ${`organization-retention:${failedOperationId}`}, 0
+      ))`;
+      failureLockAcquired();
+      await releaseFailure;
+    });
+    await acquiredFailure;
+    let failedSettled = 0;
+    const failures = [0, 1].map(() =>
+      failOrganizationRetentionDeletion(client!.db, {
+        organizationId: failedFixture.owner.organizationId,
+        membershipId: failedMember.id,
+        operationId: failedOperationId,
+        reasonCode: "concurrent_cleanup",
+      }).finally(() => {
+        failedSettled += 1;
+      }),
+    );
+    await Bun.sleep(75);
+    expect(failedSettled).toBe(0);
+    releaseFailureLock();
+    await failureLock;
+    expect(await Promise.all(failures)).toEqual([true, true]);
+
+    const finalizedFixture = await provisionOrganizationMember("retention-concurrent-finalize");
+    const finalizedMember = await expireOrganizationMember(finalizedFixture);
+    const finalizedOperationId = crypto.randomUUID();
+    await claimOrganizationRetentionDeletion(client.db, {
+      organizationId: finalizedFixture.owner.organizationId,
+      operationId: finalizedOperationId,
+    });
+    let releaseFinalizationLock!: () => void;
+    let finalizationLockAcquired!: () => void;
+    const releaseFinalization = new Promise<void>((resolve) => {
+      releaseFinalizationLock = resolve;
+    });
+    const acquiredFinalization = new Promise<void>((resolve) => {
+      finalizationLockAcquired = resolve;
+    });
+    const finalizationLock = shared.admin.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtextextended(
+        ${`organization-retention:${finalizedOperationId}`}, 0
+      ))`;
+      finalizationLockAcquired();
+      await releaseFinalization;
+    });
+    await acquiredFinalization;
+    let finalizedSettled = 0;
+    const finalizations = [0, 1].map(() =>
+      finalizeOrganizationRetentionDeletion(client!.db, {
+        organizationId: finalizedFixture.owner.organizationId,
+        membershipId: finalizedMember.id,
+        operationId: finalizedOperationId,
+        objectBucket: retentionObjectBucket,
+      }).finally(() => {
+        finalizedSettled += 1;
+      }),
+    );
+    await Bun.sleep(75);
+    expect(finalizedSettled).toBe(0);
+    releaseFinalizationLock();
+    await finalizationLock;
+    const [firstFinalization, secondFinalization] = await Promise.all(finalizations);
+    expect(secondFinalization).toEqual(firstFinalization);
+    expect(firstFinalization).toMatchObject({
+      membershipId: finalizedMember.id,
+      operationId: finalizedOperationId,
+      objectBucket: retentionObjectBucket,
+    });
+  });
+
   test("rejects a legacy File bucket mismatch before database finalization", async () => {
     if (!shared || !client) return;
     const fixture = await provisionOrganizationMember("retention-bucket-mismatch");
@@ -1854,6 +2429,15 @@ describe("migration 0263 organization membership lifecycle", () => {
       ),
     );
     expect(new Set(claims.map((claim) => claim?.membershipId))).toEqual(new Set(membershipIds));
+    await expectSqlState(
+      () =>
+        claimOrganizationRetentionDeletion(client!.db, {
+          organizationId: owner!.organizationId,
+          operationId: operationIds[0]!,
+          excludedMembershipIds: [claims[0]!.membershipId],
+        }),
+      "23505",
+    );
     await Promise.all(
       claims.map(
         async (claim) =>
@@ -1932,7 +2516,7 @@ describe("migration 0263 organization membership lifecycle", () => {
     if (!shared || !client) return;
     const userId = `terminal-self-${crypto.randomUUID()}`;
     const subjectId = `user:${userId}`;
-    const selfAccess = await provisionSelf(userId);
+    await provisionSelf(userId);
     const [selfMembership] = await listSelfOrganizationMemberships(client.db, subjectId);
     const secondOwnerSubject = `user:second-owner-${crypto.randomUUID()}`;
     const secondOwnerId = crypto.randomUUID();
@@ -2019,7 +2603,15 @@ describe("migration 0263 organization membership lifecycle", () => {
         (grant) => grant.accountId === selfMembership!.organizationId,
       ),
     ).toBe(false);
-    expect(projected.accessContext.defaultWorkspaceId).toBe(selfAccess.defaultWorkspaceId);
+    expect(projected.accessContext.defaultAccountId).toBe(otherOwner!.organizationId);
+    expect(projected.accessContext.defaultWorkspaceId).not.toBeNull();
+    expect(
+      projected.accessContext.workspaceGrants.some(
+        (grant) =>
+          grant.accountId === projected.accessContext.defaultAccountId &&
+          grant.workspaceId === projected.accessContext.defaultWorkspaceId,
+      ),
+    ).toBe(true);
 
     const reactivatedSelf = await updateOrganizationMember(client.db, {
       organizationId: selfMembership!.organizationId,

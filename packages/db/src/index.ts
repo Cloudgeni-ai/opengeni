@@ -1471,19 +1471,6 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       (organizationMembership) => organizationMembership.organizationId === account.id,
     );
     if (selfOrganizationMembership && selfOrganizationMembership.status !== "active") {
-      const [existingDefaultWorkspace] = await tx
-        .select()
-        .from(schema.workspaces)
-        .where(
-          and(
-            eq(schema.workspaces.externalSource, "better-auth:user"),
-            eq(schema.workspaces.externalId, `${input.userId}:default`),
-          ),
-        )
-        .limit(1);
-      if (!existingDefaultWorkspace) {
-        throw new Error("Inactive managed organization is missing its default workspace");
-      }
       const activeOrganizationMemberships = existingOrganizationMemberships.flatMap(
         (organizationMembership) =>
           organizationMembership.status === "active" &&
@@ -1497,6 +1484,13 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
               ]
             : [],
       );
+      if (activeOrganizationMemberships.length === 0) {
+        await assertActiveManagedHumanOrganizationMembership(tx as unknown as Database, {
+          accountId: account.id,
+          subjectId,
+        });
+        throw new Error("Inactive managed organization unexpectedly passed active membership");
+      }
       const workspaceGrants: AccessGrant[] = [];
       for (const organizationMembership of activeOrganizationMemberships) {
         await setRlsContext(tx as unknown as Database, {
@@ -1542,6 +1536,9 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
           });
         }
       }
+      const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
+      const defaultWorkspaceId =
+        workspaceGrants.find((grant) => grant.accountId === defaultAccountId)?.workspaceId ?? null;
       return {
         accessContext: {
           mode: "managed",
@@ -1555,8 +1552,8 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
             permissions: accountPermissionsForOrganizationRole(organizationMembership.role),
           })),
           workspaceGrants,
-          defaultAccountId: account.id,
-          defaultWorkspaceId: existingDefaultWorkspace.id,
+          defaultAccountId,
+          defaultWorkspaceId,
         },
         organizationMemberships: activeOrganizationMemberships.map((organizationMembership) => ({
           id: organizationMembership.id,
