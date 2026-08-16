@@ -33,8 +33,8 @@ const budgets = {
   // Company Brain base at 2,039,311/2,039,328/2,039,329 raw bytes for
   // default/4-digit/5-digit API URLs; that integration already exceeded the old
   // cap. The lazy residual inspector adds 769 raw bytes in every case. The
-  // reconciled 0262 stack adds another 270 bytes. The current-main OPE-195 and
-  // OPE-199 authority integration brings the combined default/4-digit/5-digit
+  // reconciled 0262 stack adds another 270 bytes. The current-main organization
+  // membership and connection-authority integration brings the combined default/4-digit/5-digit
   // graph to a worst observed 2,042,520 raw bytes. A 1,996 KiB envelope leaves
   // 1,384 raw bytes of worst-case headroom without relaxing gzip. Linux
   // produces a slightly larger gzip graph than

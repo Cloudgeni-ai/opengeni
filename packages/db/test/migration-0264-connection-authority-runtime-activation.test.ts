@@ -200,7 +200,9 @@ describe("migration 0264 connection authority runtime activation", () => {
   test("captures and resolves accepted authority in an embedded schema", async () => {
     const blank = await acquireBlankTestDatabase("migration-0264-embedded-authority-runtime");
     if (!blank) return;
-    await migrate(blank.databaseUrl, "opengeni");
+    await migrate(blank.databaseUrl, "opengeni", {
+      applicationDatabaseRoles: ["opengeni_app"],
+    });
     const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
     await sql.unsafe('set search_path = "opengeni", "opengeni_private", "public"');
     const client = createDb(blank.databaseUrl, {
