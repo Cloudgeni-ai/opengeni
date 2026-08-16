@@ -83,6 +83,19 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "finalize_organization_retention_deletion(uuid, uuid, uuid, text)",
   "complete_organization_retention_deletion(uuid, uuid, uuid, text)",
 ] as const;
+const ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES = [
+  "organization_membership_invitations",
+  "organization_membership_lifecycle_events",
+  "organization_membership_operation_receipts",
+  "organization_memberships",
+  "organization_user_resource_authorities",
+  "organization_user_resource_grants",
+  "organization_user_retention_deletion_events",
+  "organization_user_retention_deletions",
+  "organization_user_retention_object_deletion_receipts",
+  "organization_user_retention_object_obligations",
+  "organization_user_retention_policies",
+] as const;
 const PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE =
   "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)";
 const PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES = [
@@ -1554,6 +1567,31 @@ export function evaluateRuntimeDatabasePosture(
         violations.push(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0].owner}`,
         );
+      }
+    } else if (
+      (ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES as readonly string[]).includes(routine.name)
+    ) {
+      const missingAuthorityTables = ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
       }
     } else if (routine.name === PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE) {
       if (!tableByName.has("company_brain_preference_proposal_receipts")) {

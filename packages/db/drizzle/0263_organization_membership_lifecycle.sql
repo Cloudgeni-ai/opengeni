@@ -29,6 +29,7 @@ ALTER TABLE "organization_user_retention_policies"
     ("mode" = 'retain' AND "retention_days" IS NULL)
     OR (
       "mode" = 'delete_after'
+      AND "retention_days" IS NOT NULL
       AND "retention_days" BETWEEN 30 AND 90
     )
   ) NOT VALID;
@@ -281,9 +282,17 @@ ALTER TABLE "organization_user_retention_deletion_events" FORCE ROW LEVEL SECURI
 DROP POLICY IF EXISTS organization_tenancy_lifecycle ON "organization_memberships";
 CREATE POLICY organization_tenancy_lifecycle ON "organization_memberships"
   USING (current_setting('opengeni.organization_tenancy_lifecycle', true)
-    IN ('managed_human_provisioning', 'organization_membership_lifecycle'))
+    IN (
+      'managed_human_provisioning',
+      'session_visibility_activation',
+      'organization_membership_lifecycle'
+    ))
   WITH CHECK (current_setting('opengeni.organization_tenancy_lifecycle', true)
-    IN ('managed_human_provisioning', 'organization_membership_lifecycle'));
+    IN (
+      'managed_human_provisioning',
+      'session_visibility_activation',
+      'organization_membership_lifecycle'
+    ));
 DROP POLICY IF EXISTS organization_tenancy_lifecycle ON "organization_user_retention_policies";
 CREATE POLICY organization_tenancy_lifecycle ON "organization_user_retention_policies"
   USING (current_setting('opengeni.organization_tenancy_lifecycle', true)
@@ -299,9 +308,17 @@ CREATE POLICY organization_tenancy_lifecycle ON "organization_user_resource_auth
 DROP POLICY IF EXISTS organization_tenancy_lifecycle ON "organization_user_resource_grants";
 CREATE POLICY organization_tenancy_lifecycle ON "organization_user_resource_grants"
   USING (current_setting('opengeni.organization_tenancy_lifecycle', true)
-    IN ('managed_human_provisioning', 'organization_membership_lifecycle'))
+    IN (
+      'managed_human_provisioning',
+      'session_visibility_activation',
+      'organization_membership_lifecycle'
+    ))
   WITH CHECK (current_setting('opengeni.organization_tenancy_lifecycle', true)
-    IN ('managed_human_provisioning', 'organization_membership_lifecycle'));
+    IN (
+      'managed_human_provisioning',
+      'session_visibility_activation',
+      'organization_membership_lifecycle'
+    ));
 
 CREATE POLICY organization_tenancy_lifecycle ON "organization_membership_invitations"
   USING (current_setting('opengeni.organization_tenancy_lifecycle', true)
@@ -2366,6 +2383,7 @@ CREATE OR REPLACE FUNCTION opengeni_private.organization_membership_history_immu
 RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $body$
 BEGIN RAISE EXCEPTION 'organization membership history is immutable' USING ERRCODE = '55000'; END
 $body$;
+REVOKE ALL ON FUNCTION opengeni_private.organization_membership_history_immutable() FROM PUBLIC;
 CREATE TRIGGER organization_membership_operation_receipts_immutable
   BEFORE UPDATE OR DELETE ON organization_membership_operation_receipts
   FOR EACH ROW EXECUTE FUNCTION opengeni_private.organization_membership_history_immutable();

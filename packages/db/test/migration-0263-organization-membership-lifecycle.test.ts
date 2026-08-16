@@ -162,6 +162,22 @@ describe("migration 0263 organization membership lifecycle", () => {
     expect(migration).toContain("SET search_path = pg_catalog, %I, pg_temp");
     expect(migration).toContain("organization_membership_operation_receipts_immutable");
     expect(migration).toContain("organization_membership_lifecycle_events_immutable");
+    expect(migration).toContain(
+      "REVOKE ALL ON FUNCTION opengeni_private.organization_membership_history_immutable() FROM PUBLIC",
+    );
+    expect(migration).toMatch(
+      /"mode" = 'delete_after'\s+AND "retention_days" IS NOT NULL\s+AND "retention_days" BETWEEN 30 AND 90/u,
+    );
+    for (const table of ["organization_memberships", "organization_user_resource_grants"]) {
+      expect(migration).toMatch(
+        new RegExp(
+          `CREATE POLICY organization_tenancy_lifecycle ON "${table}"[\\s\\S]*?` +
+            `'managed_human_provisioning',[\\s\\S]*?'session_visibility_activation',[\\s\\S]*?` +
+            `'organization_membership_lifecycle'`,
+          "u",
+        ),
+      );
+    }
     expect(migration).toContain("REVOKE ALL ON TABLE organization_memberships FROM opengeni_app");
     expect(migration).toContain("DELETE FROM workspaces");
     expect(migration).not.toContain("DELETE FROM sessions");
@@ -205,6 +221,21 @@ describe("migration 0263 organization membership lifecycle", () => {
     ].map((needle) => offboard.indexOf(needle));
     expect(lockOrder.every((position) => position >= 0)).toBe(true);
     expect(lockOrder).toEqual([...lockOrder].sort((left, right) => left - right));
+  });
+
+  test("rejects a delete-after policy without an explicit bounded duration", async () => {
+    if (!shared) return;
+    const accountId = crypto.randomUUID();
+    await shared.admin`
+      insert into managed_accounts (id, name, external_source, external_id)
+      values (${accountId}, 'Retention bounds', 'test', ${crypto.randomUUID()})`;
+    await expectSqlState(
+      async () =>
+        await shared!.admin`
+          insert into organization_user_retention_policies (account_id, mode)
+          values (${accountId}, 'delete_after')`,
+      "23514",
+    );
   });
 
   test("fresh custom-schema migrate and provision pins definers against TEMP shadows", async () => {

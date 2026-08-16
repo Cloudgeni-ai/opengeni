@@ -137,13 +137,40 @@ function companyBrainPreferenceAuthorityTables(): RuntimeTablePosture[] {
   }));
 }
 
-function xaiAuthorityTables(): RuntimeTablePosture[] {
+function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[] {
   return [
+    "organization_membership_invitations",
+    "organization_membership_lifecycle_events",
+    "organization_membership_operation_receipts",
     "organization_memberships",
     "organization_user_resource_authorities",
-    "workspace_memberships",
-    "xai_subscription_credentials",
+    "organization_user_resource_grants",
+    "organization_user_retention_deletion_events",
+    "organization_user_retention_deletions",
+    "organization_user_retention_object_deletion_receipts",
+    "organization_user_retention_object_obligations",
+    "organization_user_retention_policies",
   ].map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
+
+function xaiAuthorityTables(): RuntimeTablePosture[] {
+  return ["workspace_memberships", "xai_subscription_credentials"].map((name) => ({
     name,
     owner: "opengeni_migrator",
     rlsEnabled: false,
@@ -218,6 +245,7 @@ function safePosture(): RuntimeDatabasePosture {
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
       ...companyBrainPreferenceAuthorityTables(),
+      ...organizationMembershipLifecycleAuthorityTables(),
       ...xaiAuthorityTables(),
     ],
     privateTables: [
@@ -519,18 +547,6 @@ describe("runtime database posture evaluator", () => {
         routine.name.includes("personal_document") ||
         routine.name === "resolve_document_original_file(uuid, uuid, text, uuid)" ||
         routine.name.includes("scoped_variable_set") ||
-        routine.name.startsWith("list_self_organization_") ||
-        routine.name.startsWith("list_organization_") ||
-        routine.name === "get_self_organization_invitation(text, uuid)" ||
-        routine.name === "organization_membership_command(jsonb)" ||
-        routine.name === "get_organization_retention_policy(uuid, text)" ||
-        routine.name === "preview_organization_retention_deletions(uuid, integer)" ||
-        routine.name === "claim_organization_retention_deletion(uuid, uuid, uuid[])" ||
-        routine.name ===
-          "record_organization_retention_object_deleted(uuid, uuid, uuid, text, text, text, text)" ||
-        routine.name === "fail_organization_retention_deletion(uuid, uuid, uuid, text)" ||
-        routine.name === "finalize_organization_retention_deletion(uuid, uuid, uuid, text)" ||
-        routine.name === "complete_organization_retention_deletion(uuid, uuid, uuid, text)" ||
         routine.name.includes("scoped_rig") ||
         routine.name.includes("scoped_enrollment") ||
         routine.name.includes("scoped_sandbox") ||
@@ -596,6 +612,37 @@ describe("runtime database posture evaluator", () => {
       "another_owner";
     expect(evaluateRuntimeDatabasePosture(split, options)).toContain(
       "target-schema runtime capability ensure_canonical_human_identity(text, text) authority table owners do not match: canonical_human_identities=opengeni_migrator, canonical_human_identity_subjects=opengeni_migrator, canonical_human_login_bindings=opengeni_migrator, canonical_human_identity_operations=another_owner",
+    );
+  });
+
+  test("requires same-owner organization membership lifecycle authority", () => {
+    const routineName = "organization_membership_command(jsonb)";
+
+    const missing = safePosture();
+    missing.tables = missing.tables.filter(
+      (table) => table.name !== "organization_user_retention_object_obligations",
+    );
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      `target-schema runtime capability ${routineName} authority tables are missing: organization_user_retention_object_obligations`,
+    );
+
+    const split = safePosture();
+    split.tables.find(
+      (table) => table.name === "organization_user_retention_deletion_events",
+    )!.owner = "another_owner";
+    expect(
+      evaluateRuntimeDatabasePosture(split, options).some((violation) =>
+        violation.startsWith(
+          `target-schema runtime capability ${routineName} authority table owners do not match:`,
+        ),
+      ),
+    ).toBe(true);
+
+    const invalidRoutine = safePosture();
+    invalidRoutine.targetRoutines.find((routine) => routine.name === routineName)!.owner =
+      "another_owner";
+    expect(evaluateRuntimeDatabasePosture(invalidRoutine, options)).toContain(
+      `target-schema runtime capability ${routineName} owner another_owner does not match authority table owner opengeni_migrator`,
     );
   });
 
@@ -758,15 +805,20 @@ describe("runtime database posture evaluator", () => {
   test("accepts one explicit deny-all policy for protected no-DML tables", () => {
     const posture = safePosture();
     posture.tables = [
-      {
-        ...posture.tables[0]!,
-        name: "organization_memberships",
-        policyCount: 1,
-        select: false,
-        insert: false,
-        update: false,
-        delete: false,
-      },
+      ...organizationMembershipLifecycleAuthorityTables().map((table) =>
+        table.name === "organization_memberships"
+          ? {
+              ...posture.tables[0]!,
+              name: table.name,
+              owner: table.owner,
+              policyCount: 1,
+              select: false,
+              insert: false,
+              update: false,
+              delete: false,
+            }
+          : table,
+      ),
       ...knowledgeAuthorityTables(),
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
@@ -780,7 +832,7 @@ describe("runtime database posture evaluator", () => {
 
     expect(evaluateRuntimeDatabasePosture(posture, inertOptions)).toEqual([]);
 
-    posture.tables[0]!.policyCount = 0;
+    posture.tables.find((table) => table.name === "organization_memberships")!.policyCount = 0;
     expect(evaluateRuntimeDatabasePosture(posture, inertOptions)).toContain(
       "table organization_memberships has no RLS policy",
     );
@@ -926,6 +978,7 @@ describe("runtime database posture evaluator", () => {
       ...knowledgeAuthorityTables(),
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
+      ...organizationMembershipLifecycleAuthorityTables(),
     ];
     for (const name of [
       "claim_editable_artifact_materializations(text, integer, integer, name)",
