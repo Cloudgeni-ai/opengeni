@@ -2,9 +2,21 @@
 
 A **Connected Machine** is one of a session's compute targets — your own
 computer (a laptop, a workstation, a CI box, even a macOS machine) connected to
-a workspace and driven by the agent directly. It is a **first-class, co-equal
+an organization, workspace, or organization user and driven by the agent directly. It is a **first-class, co-equal
 primary compute target**, not a backend variant layered on top of a managed
 box.
+
+Human device-flow approval defaults to user ownership. A user-owned machine follows
+its owner across same-organization workspaces they can currently access; workspace
+ownership limits it to the approving workspace, and organization ownership requires
+account-admin approval. Only the owner may attach a user machine. Using it from an
+exact agent attempt additionally requires an explicit `connected_machine.use` grant
+for that session visibility/context. Once/session/always grants use the common
+personal-resource lifecycle; every operation revalidates the exact attempt, owner
+membership revision, target-workspace access, authority epoch, resource/grant
+generation, interruption state, and current machine selection immediately before
+the machine transport is used. Revocation advances the machine and common authority
+generation and invalidates existing grants.
 
 This guide is embedder-facing: it shows how to create a session on a machine,
 discover the enrolled machines and their metrics, swap a session's active
@@ -20,13 +32,13 @@ client. The matching UI ships in
 
 ## The two compute targets
 
-| | Managed Sandbox | Connected Machine |
-| --- | --- | --- |
-| Ownership | platform-owned, ephemeral | user-owned, persistent |
-| Provisioning | platform provisions + tears down | platform **attaches** to what's already there |
-| Repos | cloned into `/workspace` | **not cloned** — the machine uses its own git auth |
-| Working dir | `/workspace` (virtual root) | a real host path you pass per session |
-| Backend enum | `docker`/`modal`/`local`/… | `selfhosted` |
+|              | Managed Sandbox                  | Connected Machine                                  |
+| ------------ | -------------------------------- | -------------------------------------------------- |
+| Ownership    | platform-owned, ephemeral        | user-owned, persistent                             |
+| Provisioning | platform provisions + tears down | platform **attaches** to what's already there      |
+| Repos        | cloned into `/workspace`         | **not cloned** — the machine uses its own git auth |
+| Working dir  | `/workspace` (virtual root)      | a real host path you pass per session              |
+| Backend enum | `docker`/`modal`/`local`/…       | `selfhosted`                                       |
 
 The model that follows from this: a machine-bound session has **no phantom Modal
 "home box"**, **no OpenGeni Git token is distributed to the machine** (it uses
@@ -44,10 +56,12 @@ Bun/Node/`ogtool`. It reaches the same journal/executor as model MCP; the machin
 still owns every ordinary credential and ambient environment.
 
 This authority follows the session's **active** execution path. The fleet
-`run_on` tool is a separate API-side, one-off route to a non-active machine; it
-does not impersonate the worker's exact turn/attempt and therefore does not
-inject Codemode credentials. Swap the session to that machine, or create the
-session there, before running Codemode on it.
+`run_on` tool is a separate API-side, one-off route to a non-active machine. An
+agent call still authorizes and snapshots the frozen initiating human's exact
+accepted attempt and revalidates its visibility-keyed grant immediately before
+dispatch; it does not change the active pointer or inject Codemode credentials.
+Swap the session to that machine, or create the session there, before running
+Codemode on it.
 
 For source development, build or run the complete host-native runtime with:
 
@@ -88,7 +102,9 @@ const client = new OpenGeniClient({ baseUrl, apiKey });
 
 // Pick a machine from the workspace fleet…
 const { machines } = await client.listMachines(workspaceId);
-const box = machines.find((m) => m.kind === "selfhosted" && m.state === "online");
+const box = machines.find(
+  (m) => m.kind === "selfhosted" && m.state === "online",
+);
 
 // …and run the session on it.
 const session = await client.createSession(workspaceId, {
@@ -142,20 +158,25 @@ Each `MachineView` carries the fields a dashboard needs:
 
 ```ts
 type MachineView = {
-  sandboxId: string;            // the id you pass as targetSandboxId / swap target
-  enrollmentId: string | null;  // the enrollment id for metrics + revoke
+  sandboxId: string; // the id you pass as targetSandboxId / swap target
+  enrollmentId: string | null; // the enrollment id for metrics + revoke
   name: string;
   kind: "modal" | "selfhosted";
-  state:                        // derived liveness + consent/display/enrollment state
-    | "online" | "reconnecting" | "offline"
-    | "consent_required" | "display_unavailable" | "enrolling";
-  active: boolean;              // is this the session's active sandbox?
-  isSessionGroup: boolean;      // the synthetic Modal group box (not a real machine)
+  state:
+    // derived liveness + consent/display/enrollment state
+    | "online"
+    | "reconnecting"
+    | "offline"
+    | "consent_required"
+    | "display_unavailable"
+    | "enrolling";
+  active: boolean; // is this the session's active sandbox?
+  isSessionGroup: boolean; // the synthetic Modal group box (not a real machine)
   os: string;
   arch: string;
   hasDisplay: boolean;
   allowScreenControl: boolean;
-  sharedSessionCount: number;   // live sessions sharing this whole-machine lease
+  sharedSessionCount: number; // live sessions sharing this whole-machine lease
   lastSeenAt: string | null;
   metrics: MetricSample | null; // latest point-in-time sample
 };
@@ -247,13 +268,24 @@ preserves its current value for older clients, `null` clears it, and a positive
 value sets it. Limits apply separately to each newly admitted exec or Git
 operation leaf; they are not an enrollment-wide aggregate, so N concurrent 1 GiB
 commands may use N GiB. An already-admitted command keeps its immutable policy.
-Each new command reads policy revision, enforcement capabilities, and exact live
-connection identity from one authoritative snapshot, even inside a cached or
-pinned multi-day turn. PTY, desktop, browser, computer-use, and filesystem-only
-operations do not perform that read and remain unchanged. Memory enforcement and
-CPU-quota enforcement are separately advertised; a configured unsupported limit
-fails command admission closed, while saving or clearing policy remains available
-for preconfiguration.
+Every provider operation revalidates its exact live connection and any
+caller-owned personal-machine authority at the last boundary before dispatch,
+even inside a cached, swapped, or pinned multi-day turn. For a personal machine,
+that same PostgreSQL snapshot verifies the accepted attempt, immutable admission
+snapshot, current visibility-keyed grant, membership/generation fences, and the
+runner connection. One-off `run_on` exec/read/write uses the same boundary after
+creating its attempt snapshot, so a concurrent revoke cannot reach the provider.
+Organization- and user-scoped machines used from another same-organization
+workspace retain the machine's origin workspace for their physical control and
+relay route; the session workspace remains the authorization target. A refused
+op-stream `OpStart` may be retried only after a fresh live admission proves the
+exact route and policy are still current, and a proven-unstarted downgrade to
+legacy request/reply takes another fresh admission immediately before dispatch.
+Exec and Git additionally read the policy revision and enforcement capabilities
+from that authoritative admission. Memory enforcement and CPU-quota enforcement
+are separately advertised; a configured unsupported limit fails command
+admission closed, while saving or clearing policy remains available for
+preconfiguration.
 
 The machine owner may also set a process-local ceiling with
 `OPENGENI_AGENT_OP_MEMORY_MAX`, `OPENGENI_AGENT_OP_MEMORY_HIGH`, and
@@ -297,6 +329,8 @@ backpressure nor a reply-size failure changes the machine's heartbeat state.
 
 The agent-facing `run_on` MCP tool is intentionally a one-off side channel to a
 specific enrolled machine and never changes the session's active route. Its
+personal-machine path requires the same exact accepted-attempt authorization
+and current `connected_machine.use` grant as an active route. Its
 `exec` receipt reports the exact `exitCode`, typed `timedOut`, and effective
 `deadlineMs` (`0` means none). A process killed at an explicitly configured
 deadline, or a response with no terminal
@@ -393,10 +427,12 @@ Mint a short-TTL enroll token and hand it to the machine's installer. The token
 is **secret** — surface it once with a copy-now warning; it cannot be re-read.
 
 ```ts
-const { token, expiresAt, expiresInSeconds } =
-  await client.mintEnrollToken(workspaceId, {
+const { token, expiresAt, expiresInSeconds } = await client.mintEnrollToken(
+  workspaceId,
+  {
     allowScreenControl: false, // bake screen-control consent into the token
-  });
+  },
+);
 // Run on the machine (the installer dials OpenGeni and exchanges the token for
 // its own long-lived agent credentials — the token exchange happens on the
 // machine, not through this client):
@@ -430,6 +466,7 @@ Then approve (the loud whole-machine consent) or deny:
 const approved = await client.approveDeviceEnrollment(pending.workspaceId, {
   userCode,
   allowScreenControl: true, // the authoritative screen-control consent
+  scope: "user", // explicit personal default; "workspace" and "organization" publish wider
 });
 // approved.enrollmentId, approved.sandboxId, approved.allowScreenControl
 
@@ -439,7 +476,10 @@ await client.denyDeviceEnrollment(pending.workspaceId, { userCode });
 
 Approving lands an enrollment plus a `selfhosted` sandbox and unblocks the
 agent's poll; `sandboxId` is immediately usable as a `targetSandboxId` or a swap
-target.
+target. The managed consent page always asks for personal, workspace, or
+organization access and defaults to personal. Organization publication is
+available only to account administrators. Machines and Rigs display the
+resulting scope in their list cards so wider publication is never implicit.
 
 ## Revoke / detach
 

@@ -134,6 +134,23 @@ const VARIABLE_SET_AUTHORITY_ROUTINES = [
   "materialize_scoped_variable_set_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
   "materialize_scoped_variable_set_for_session(uuid, uuid, uuid, uuid)",
 ] as const;
+const SCOPED_COMPUTE_CAPABILITY_PREDICATE_ROUTINE = "scoped_compute_capability_active(text)";
+const SCOPED_COMPUTE_CAPABILITY_TABLE = "scoped_compute_capabilities";
+const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
+  "create_scoped_rig(uuid, uuid, text, text, text, text, jsonb, boolean)",
+  "list_scoped_rigs(uuid, uuid, uuid, text, text)",
+  "count_scoped_rigs(uuid, uuid, text)",
+  "mutate_scoped_rig(uuid, uuid, uuid, text, text, boolean, text, boolean, boolean)",
+  "finalize_scoped_enrollment(uuid, uuid, text, text, boolean, boolean, text, text, text, boolean)",
+  "list_scoped_enrollments(uuid, uuid, uuid, text)",
+  "get_scoped_sandbox(uuid, uuid, uuid)",
+  "authorize_scoped_sandbox_attach(uuid, uuid, uuid)",
+  "materialize_scoped_rig_version_for_attempt(uuid, uuid, uuid, uuid, uuid, integer)",
+  "authorize_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
+  "assert_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean)",
+  "list_scoped_machine_dependent_sessions(uuid, uuid, uuid)",
+  "detach_scoped_machine_dependent_sessions(uuid, uuid, uuid)",
+] as const;
 const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
   "ensure_canonical_human_identity(text, text)",
   "validate_canonical_human_session(text, text, boolean)",
@@ -203,6 +220,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...VARIABLE_SET_AUTHORITY_ROUTINES,
   ...CONNECTION_AUTHORITY_ROUTINES,
   ...PERSONAL_DOCUMENT_AUTHORITY_ROUTINES,
+  ...SCOPED_COMPUTE_AUTHORITY_ROUTINES,
   ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
   ...TASK_NOTE_CAPABILITY_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
@@ -391,6 +409,7 @@ export const FORCE_RLS_TABLES = [
   "scheduled_task_runs",
   "scheduled_tasks",
   "session_attempt_codemode_calls",
+  "session_attempt_connected_machine_authorizations",
   "session_attempt_interruptions",
   "session_attempt_personal_document_admissions",
   "session_attempt_personal_document_snapshots",
@@ -783,6 +802,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "scheduled_task_run_personal_resource_admissions",
   "scheduled_task_run_personal_resource_once_receipts",
   "scheduled_task_run_personal_resource_snapshots",
+  "session_attempt_connected_machine_authorizations",
   "session_attempt_personal_document_admissions",
   "session_attempt_personal_document_snapshots",
   "session_attempt_personal_resource_admissions",
@@ -1163,7 +1183,8 @@ export async function inspectRuntimeDatabasePosture(
               ${PERSONAL_RESOURCE_CAPABILITY_TABLE},
               ${SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE},
               ${VARIABLE_SET_CAPABILITY_TABLE},
-              ${PERSONAL_DOCUMENT_CAPABILITY_TABLE}
+              ${PERSONAL_DOCUMENT_CAPABILITY_TABLE},
+              ${SCOPED_COMPUTE_CAPABILITY_TABLE}
             )
         `),
       ).map((row) => ({
@@ -1572,6 +1593,23 @@ export function evaluateRuntimeDatabasePosture(
         if (authorityOwner && routine.owner !== authorityOwner) {
           violations.push(
             `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match variable-set authority owner ${authorityOwner}`,
+          );
+        }
+      }
+    } else if ((SCOPED_COMPUTE_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = ["rigs", "rig_versions", "enrollments", "sandboxes"]
+        .map((tableName) => tableByName.get(tableName))
+        .filter((table): table is RuntimeTablePosture => table !== undefined);
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityOwners.size > 1) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} scoped-compute table owners do not match`,
+        );
+      } else {
+        const authorityOwner = authorityTables[0]?.owner ?? targetSchemaOwner;
+        if (authorityOwner && routine.owner !== authorityOwner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match scoped-compute authority owner ${authorityOwner}`,
           );
         }
       }
@@ -1991,6 +2029,56 @@ export function evaluateRuntimeDatabasePosture(
       }
       if (routine.publicExecute) {
         violations.push(`PUBLIC has forbidden variable-set capability predicate ${routine.name}`);
+      }
+      const directPrivileges = [
+        ["SELECT", table.select],
+        ["INSERT", table.insert],
+        ["UPDATE", table.update],
+        ["DELETE", table.delete],
+      ].filter(([, granted]) => granted);
+      if (directPrivileges.length > 0) {
+        violations.push(
+          `runtime role has forbidden direct privileges on private table ${table.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
+        );
+      }
+    }
+    const scopedComputeCapabilityTables = posture.privateTables.filter(
+      (table) => table.name === SCOPED_COMPUTE_CAPABILITY_TABLE,
+    );
+    const scopedComputeCapabilityRoutines = posture.privateRoutines.filter(
+      (routine) => routine.name === SCOPED_COMPUTE_CAPABILITY_PREDICATE_ROUTINE,
+    );
+    if (scopedComputeCapabilityTables.length !== 1) {
+      violations.push(
+        `scoped-compute capability table ${SCOPED_COMPUTE_CAPABILITY_TABLE} is missing or ambiguous`,
+      );
+    }
+    if (scopedComputeCapabilityRoutines.length !== 1) {
+      violations.push(
+        `scoped-compute capability predicate ${SCOPED_COMPUTE_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
+      );
+    }
+    if (
+      scopedComputeCapabilityTables.length === 1 &&
+      scopedComputeCapabilityRoutines.length === 1
+    ) {
+      const table = scopedComputeCapabilityTables[0]!;
+      const routine = scopedComputeCapabilityRoutines[0]!;
+      if (routine.owner !== table.owner) {
+        violations.push(
+          `scoped-compute capability predicate ${routine.name} owner ${routine.owner} does not match table owner ${table.owner}`,
+        );
+      }
+      if (!routine.securityDefiner) {
+        violations.push(
+          `scoped-compute capability predicate ${routine.name} is not SECURITY DEFINER`,
+        );
+      }
+      if (!routine.execute) {
+        violations.push(`runtime role lacks scoped-compute capability predicate ${routine.name}`);
+      }
+      if (routine.publicExecute) {
+        violations.push(`PUBLIC has forbidden scoped-compute capability predicate ${routine.name}`);
       }
       const directPrivileges = [
         ["SELECT", table.select],

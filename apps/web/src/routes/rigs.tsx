@@ -1,4 +1,4 @@
-// Rigs: workspace-scoped, versioned sandbox machine definitions. A rig is the
+// Rigs: organization-, workspace-, or user-scoped sandbox machine definitions. A rig is the
 // team's machine — a base image + setup script + health checks + default
 // variable sets, versioned and self-healing. This page lists them and creates
 // new ones; the per-rig detail owns versions, changes, and promotion.
@@ -222,6 +222,7 @@ function RigCard({
                 Draft
               </MetaChip>
             )}
+            <RigScopeChip scope={rig.scope} />
             {isDefault ? (
               <MetaChip
                 title="Workspace default — new sessions use this rig unless another is picked"
@@ -261,6 +262,15 @@ function RigCard({
         <ChevronRightIcon className="mt-0.5 size-4 shrink-0 text-fg-subtle transition-colors group-hover:text-fg-muted" />
       </div>
     </Link>
+  );
+}
+
+export function RigScopeChip({ scope }: { scope: Rig["scope"] }) {
+  const label = scope === "user" ? "Personal" : `${scope[0]!.toUpperCase()}${scope.slice(1)}`;
+  return (
+    <span data-rig-scope={scope}>
+      <MetaChip title={`${scope} access`}>{label}</MetaChip>
+    </span>
   );
 }
 

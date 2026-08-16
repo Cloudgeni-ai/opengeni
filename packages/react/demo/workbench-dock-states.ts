@@ -421,6 +421,8 @@ function machine(overrides: Partial<MachineView>): MachineView {
     runtime: null,
     metrics: null,
     ...overrides,
+    scope: overrides.scope ?? "workspace",
+    generation: overrides.generation ?? 1,
     operationPolicy: overrides.operationPolicy ?? null,
   };
 }

@@ -6631,6 +6631,9 @@ export const Rig = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
+  scope: ResourceAuthorityScope,
+  generation: z.number().int().positive(),
+  status: z.enum(["active", "revoked"]),
   name: z.string(),
   description: z.string().nullable(),
   createdBy: z.string().nullable(),
@@ -6689,6 +6692,8 @@ export const RigChange = z.object({
 export type RigChange = z.infer<typeof RigChange>;
 
 export const CreateRigRequest = z.object({
+  // Omitted remains the compatibility workspace-owned creation path.
+  scope: ResourceAuthorityScope.default("workspace"),
   name: z.string().min(1).max(120),
   description: z.string().max(2000).optional(),
   // Initial (version 1) content, inline.
@@ -12354,6 +12359,9 @@ export type DeviceEnrollmentStartResponse = z.infer<typeof DeviceEnrollmentStart
 export const DeviceEnrollmentApproveRequest = z.object({
   userCode: z.string().min(1).max(64),
   allowScreenControl: z.boolean().default(false),
+  // Human-approved machines are private by default. Workspace/organization
+  // publication is an explicit consent choice at this same loud boundary.
+  scope: ResourceAuthorityScope.default("user"),
 });
 export type DeviceEnrollmentApproveRequest = z.infer<typeof DeviceEnrollmentApproveRequest>;
 
@@ -12426,6 +12434,8 @@ export type DeviceEnrollmentPollResponse = z.infer<typeof DeviceEnrollmentPollRe
 // GET /enrollments — a workspace's machines (the Machines dashboard surface).
 export const EnrollmentSummary = z.object({
   id: z.string().uuid(),
+  scope: ResourceAuthorityScope,
+  generation: z.number().int().positive(),
   pubkey: z.string(),
   exposure: z.literal("whole-machine"),
   hasDisplay: z.boolean(),
@@ -12764,6 +12774,8 @@ export type UpdateMachineOperationPolicyRequest = z.infer<
 export const MachineView = z.object({
   sandboxId: z.string(),
   enrollmentId: z.string().nullable(),
+  scope: ResourceAuthorityScope.default("workspace"),
+  generation: z.number().int().positive().default(1),
   name: z.string(),
   kind: MachineKind,
   state: MachineState,
