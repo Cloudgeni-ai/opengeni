@@ -104,6 +104,7 @@ import type {
   SessionWorkflowClient,
 } from "../dependencies";
 import {
+  requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
 } from "../session-authorization";
@@ -644,6 +645,7 @@ export async function createAndStartSessionWithOutcome(input: {
     sandboxId: string;
     settings: Settings;
     workingDir?: string | null;
+    resourceSubjectId?: string | null;
   } | null;
   // Exact actor-private pre-session draft represented by this create. The
   // initializer consumes it only after the first durable runnable unit commits.
@@ -825,6 +827,7 @@ async function finishStartSession(
       sandboxId: string;
       settings: Settings;
       workingDir?: string | null;
+      resourceSubjectId?: string | null;
     } | null;
     consumeNewSessionDraft?: {
       subjectId: string;
@@ -850,6 +853,9 @@ async function finishStartSession(
       sessionId: session.id,
       sessionBackend: session.sandboxBackend,
       sessionGroupId: session.sandboxGroupId,
+      ...(input.seedTargetSandbox.resourceSubjectId
+        ? { subjectId: input.seedTargetSandbox.resourceSubjectId }
+        : {}),
     };
     const seeded = await swapActiveSandbox(
       {
@@ -1349,6 +1355,10 @@ export async function createSessionForRequestWithOutcome(
       message: "caller attempt does not belong to the parent session",
     });
   }
+  const personalResourceSubjectId = creationInitiator.actor
+    ? (await requireLiveAgentAttemptAuthorization(db, grant, creationInitiator.actor.sessionId))
+        .initiatingHumanSubjectId
+    : grant.subjectId;
   const xaiProviderAccountAuthoritySnapshot =
     parentSession && creationInitiator.actor
       ? await getSessionTurnXaiProviderAccountAuthoritySnapshot(
@@ -1479,7 +1489,7 @@ export async function createSessionForRequestWithOutcome(
   let frozenRigId: string | null = null;
   let frozenRigVersionId: string | null = null;
   if (requestedRigId) {
-    const rig = await getRig(db, workspaceId, requestedRigId);
+    const rig = await getRig(db, grant, requestedRigId);
     if (!rig || !rig.activeVersion) {
       if (payload.rigId) {
         throw new HTTPException(422, {
@@ -1857,11 +1867,19 @@ export async function createSessionForRequestWithOutcome(
     settings.sandboxOwnershipEnabled &&
     settings.sandboxSelfhostedEnabled
   ) {
-    const targetSandbox = await getSandbox(db, workspaceId, payload.targetSandboxId);
+    const targetSandbox = await getSandbox(
+      db,
+      personalResourceSubjectId ? { ...grant, subjectId: personalResourceSubjectId } : grant,
+      payload.targetSandboxId,
+    );
     if (targetSandbox?.kind === "selfhosted") {
       machineHomeBackend = "selfhosted";
       if (targetSandbox.enrollmentId) {
-        const enrollment = await getEnrollment(db, workspaceId, targetSandbox.enrollmentId);
+        const enrollment = await getEnrollment(
+          db,
+          targetSandbox.workspaceId,
+          targetSandbox.enrollmentId,
+        );
         if (
           enrollment &&
           (enrollment.os === "macos" || enrollment.os === "windows" || enrollment.os === "linux")
@@ -1948,6 +1966,7 @@ export async function createSessionForRequestWithOutcome(
             sandboxId: payload.targetSandboxId,
             settings,
             workingDir: payload.workingDir ?? null,
+            resourceSubjectId: personalResourceSubjectId,
           }
         : null,
       consumeNewSessionDraft:
