@@ -132,6 +132,7 @@ export type ConnectionUseGrantRevocationResponse = z.infer<
 export const ConnectionAuthoritySelectionSource = z.enum([
   "explicit_workspace",
   "legacy_workspace_omission",
+  "legacy_user_compatibility",
   "user_delegation",
 ]);
 export type ConnectionAuthoritySelectionSource = z.infer<typeof ConnectionAuthoritySelectionSource>;
@@ -178,52 +179,75 @@ export const ConnectionUseAuthoritySnapshot = z
     connectionStatus: z.literal("active"),
     providerDomain: z.string().min(1).max(2048),
     connectionKind: ConnectionKind,
-    scope: z.enum(["workspace", "user"]),
+    scope: z.enum(["workspace", "user", "legacy_user"]),
     ownerSubjectId: z.string().min(1).max(512).nullable(),
     ownerOrganizationMembershipId: z.string().uuid().nullable(),
+    ownerMembershipAuthorizationRevision: z.number().int().positive().nullable().default(null),
     authoritySource: ConnectionAuthoritySelectionSource,
     selectionSources: z.array(ConnectionUseSelectionSource).min(1).max(128),
     userDelegation: UserResourceDelegation.nullable(),
   })
   .strict()
   .superRefine((value, context) => {
-    const personal = value.scope === "user";
-    if (personal !== (value.ownerSubjectId !== null)) {
+    const ownedBySubject = value.scope !== "workspace";
+    const delegated = value.scope === "user";
+    if (ownedBySubject !== (value.ownerSubjectId !== null)) {
       context.addIssue({
         code: "custom",
         path: ["ownerSubjectId"],
-        message: "only user connections retain an owner subject",
+        message: "personal connections retain an owner subject",
       });
     }
-    if (personal !== (value.ownerOrganizationMembershipId !== null)) {
+    if (delegated !== (value.ownerOrganizationMembershipId !== null)) {
       context.addIssue({
         code: "custom",
         path: ["ownerOrganizationMembershipId"],
         message: "only user connections retain an owner membership",
       });
     }
-    if (personal !== (value.userDelegation !== null)) {
+    if (delegated !== (value.ownerMembershipAuthorizationRevision !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["ownerMembershipAuthorizationRevision"],
+        message: "only user connections retain an owner membership revision",
+      });
+    }
+    if (delegated !== (value.userDelegation !== null)) {
       context.addIssue({
         code: "custom",
         path: ["userDelegation"],
         message: "only user connections retain a delegation",
       });
     }
-    if (personal && value.authoritySource !== "user_delegation") {
+    if (delegated && value.authoritySource !== "user_delegation") {
       context.addIssue({
         code: "custom",
         path: ["authoritySource"],
         message: "user connections require user_delegation provenance",
       });
     }
-    if (!personal && value.authoritySource === "user_delegation") {
+    if (!delegated && value.authoritySource === "user_delegation") {
       context.addIssue({
         code: "custom",
         path: ["authoritySource"],
-        message: "workspace connections cannot claim user delegation provenance",
+        message: "non-delegated connections cannot claim user delegation provenance",
       });
     }
-    if (!personal && value.originWorkspaceId !== value.targetWorkspaceId) {
+    if (value.scope === "legacy_user" && value.authoritySource !== "legacy_user_compatibility") {
+      context.addIssue({
+        code: "custom",
+        path: ["authoritySource"],
+        message: "legacy user connections require explicit compatibility provenance",
+      });
+    }
+    if (value.scope === "workspace" && value.authoritySource === "legacy_user_compatibility") {
+      context.addIssue({
+        code: "custom",
+        path: ["authoritySource"],
+        message: "workspace connections cannot claim legacy user provenance",
+      });
+    }
+    if (!delegated && value.originWorkspaceId !== value.targetWorkspaceId) {
       context.addIssue({
         code: "custom",
         path: ["originWorkspaceId"],
@@ -284,6 +308,8 @@ export const ConnectionUseDenialReason = z.enum([
   "session_identity_changed",
   "session_visibility_changed",
   "session_authority_epoch_changed",
+  "accepted_attempt_authority_required",
+  "accepted_snapshot_digest_changed",
   "connection_missing",
   "connection_identity_changed",
   "connection_generation_changed",
@@ -310,7 +336,7 @@ const ConnectionUseAttributionFields = z
     sessionId: z.string().uuid(),
     connectionId: z.string().uuid(),
     connectionGeneration: z.number().int().positive(),
-    scope: z.enum(["workspace", "user"]),
+    scope: z.enum(["workspace", "user", "legacy_user"]),
     ownerSubjectId: z.string().min(1).max(512).nullable(),
     authorityId: z.string().uuid().nullable(),
     grantId: z.string().uuid().nullable(),
@@ -321,8 +347,8 @@ function refineConnectionUseAttribution(
   value: z.infer<typeof ConnectionUseAttributionFields>,
   context: z.RefinementCtx,
 ): void {
-  const personal = value.scope === "user";
-  for (const field of ["ownerSubjectId", "authorityId", "grantId"] as const) {
+  const personal = value.scope !== "workspace";
+  for (const field of ["ownerSubjectId"] as const) {
     if (personal !== (value[field] !== null)) {
       context.addIssue({
         code: "custom",
@@ -330,6 +356,18 @@ function refineConnectionUseAttribution(
         message: personal
           ? `personal attribution requires ${field}`
           : `workspace attribution cannot carry ${field}`,
+      });
+    }
+  }
+  const delegated = value.scope === "user";
+  for (const field of ["authorityId", "grantId"] as const) {
+    if (delegated !== (value[field] !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: [field],
+        message: delegated
+          ? `delegated personal attribution requires ${field}`
+          : `non-delegated attribution cannot carry ${field}`,
       });
     }
   }

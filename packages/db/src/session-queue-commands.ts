@@ -27,7 +27,7 @@ import {
   type TimelineAnnotation,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
-import type { Database, SessionActivityDatabase } from "./database";
+import { setSubjectRlsContext, type Database, type SessionActivityDatabase } from "./database";
 import {
   fromPostgresLosslessJson,
   fromPostgresLosslessText,
@@ -65,6 +65,7 @@ import {
   type FrozenTurnInitiator,
 } from "./turn-initiator";
 import { resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./xai-subscription";
+import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
 
 type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
   payload: unknown;
@@ -211,9 +212,16 @@ async function personalConnectionDelegationsForAgentActor(
   db: Database,
   workspaceId: string,
   actor: Extract<SessionCommandActor, { type: "agent_attempt" }>,
-): Promise<McpPersonalConnectionDelegation[]> {
+  targetSessionId: string,
+): Promise<{
+  delegations: McpPersonalConnectionDelegation[];
+  connectionAuthoritySubjectId: string | null;
+}> {
   const [row] = await db
-    .select({ delegations: schema.sessionTurns.personalConnectionDelegations })
+    .select({
+      delegations: schema.sessionTurns.personalConnectionDelegations,
+      initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+    })
     .from(schema.sessionTurns)
     .where(
       and(
@@ -234,7 +242,37 @@ async function personalConnectionDelegationsForAgentActor(
       `Agent authority turn has malformed personal MCP delegation state: ${actor.sessionId}/${actor.turnId}`,
     );
   }
-  return parsed.data.map((delegation) => ({ ...delegation }));
+  // Agent messages and Agent Steer create new accepted work. A once grant is
+  // already bound to the caller turn, while a session grant may be projected
+  // only into another turn of that exact session. Always grants can cross the
+  // direct parent/child boundary subject to the live admission fences.
+  const delegations = parsed.data
+    .filter((delegation) => {
+      const authority = delegation.userDelegation;
+      if (!authority) return true;
+      if (authority.mode === "once") return false;
+      if (authority.mode === "session") return authority.sessionId === targetSessionId;
+      return true;
+    })
+    .map((delegation) => ({ ...delegation }));
+  const activated = delegations.filter((delegation) => delegation.userDelegation);
+  if (activated.length === 0) {
+    return { delegations, connectionAuthoritySubjectId: null };
+  }
+  const connectionAuthoritySubjectId = row.initiatingHumanSubjectId;
+  if (!connectionAuthoritySubjectId) {
+    throw new SessionControlInvariantError(
+      `Agent authority turn lost its causal human: ${actor.sessionId}/${actor.turnId}`,
+    );
+  }
+  for (const delegation of activated) {
+    if (delegation.ownerSubjectId !== connectionAuthoritySubjectId) {
+      throw new SessionControlInvariantError(
+        `Agent authority turn causal human does not own retained connection authority: ${actor.sessionId}/${actor.turnId}`,
+      );
+    }
+  }
+  return { delegations, connectionAuthoritySubjectId };
 }
 
 async function xaiAuthorityForAgentActor(
@@ -1442,6 +1480,13 @@ export async function submitHumanPromptInTransaction(
 ): Promise<SubmitHumanPromptResult> {
   const annotations = TimelineAnnotations.parse(input.annotations ?? []);
   const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  if (input.actor.type === "human") {
+    await setSubjectRlsContext(db, input.actor.subjectId);
+    await assertActiveManagedHumanOrganizationMembership(db, {
+      accountId: input.accountId,
+      subjectId: input.actor.subjectId,
+    });
+  }
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
@@ -1467,6 +1512,7 @@ export async function submitHumanPromptInTransaction(
     turnMetadata: input.turnMetadata ?? {},
     messagePresentation: input.messagePresentation ?? null,
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
+    personalConnectionDelegations: input.personalConnectionDelegations ?? [],
     ...(input.actor.type === "service"
       ? {
           serviceInitiator: {
@@ -1710,6 +1756,29 @@ export async function submitHumanPromptInTransaction(
       input.subjectLabel,
     );
   }
+  const acceptedInitiatingHumanSubjectId = editedSourceTurn
+    ? (editedSourceTurn.initiatingHumanSubjectId ??
+      (editedSourceTurn.initiatorKind === "subject" ? editedSourceTurn.initiatorSubjectId : null))
+    : (frozenInitiator.initiatingHumanSubjectId ??
+      (frozenInitiator.initiator.kind === "subject" ? frozenInitiator.initiator.subjectId : null));
+  if (
+    (input.personalConnectionDelegations ?? []).some(
+      (delegation) => delegation.userDelegation !== undefined,
+    )
+  ) {
+    if (!acceptedInitiatingHumanSubjectId) {
+      throw new SessionControlInvariantError(
+        "Activated connection authority requires an exact causal human",
+      );
+    }
+    await db.execute(
+      sql`select set_config(
+        'opengeni.initiating_human_subject_id',
+        ${acceptedInitiatingHumanSubjectId},
+        true
+      )`,
+    );
+  }
   const xaiProviderAccountAuthoritySnapshot = editedSourceTurn
     ? XaiProviderAccountAuthoritySnapshotV1.parse(
         editedSourceTurn.xaiProviderAccountAuthoritySnapshot,
@@ -1788,14 +1857,7 @@ export async function submitHumanPromptInTransaction(
             : (input.turnMetadata ?? {}),
           lineage: { actor: input.actor.type },
           ...initiatorColumns(frozenInitiator),
-          initiatingHumanSubjectId: editedSourceTurn
-            ? (editedSourceTurn.initiatingHumanSubjectId ??
-              (editedSourceTurn.initiatorKind === "subject"
-                ? editedSourceTurn.initiatorSubjectId
-                : null))
-            : frozenInitiator.initiator.kind === "subject"
-              ? frozenInitiator.initiator.subjectId
-              : null,
+          initiatingHumanSubjectId: acceptedInitiatingHumanSubjectId,
           personalConnectionDelegations: editedSourceTurn
             ? editedSourceTurn.personalConnectionDelegations
             : (input.personalConnectionDelegations ?? []),
@@ -2148,11 +2210,13 @@ export async function sendAgentMessageInTransaction(
     targetSessionId: input.targetSessionId,
     action: "message",
   });
-  const personalConnectionDelegations = await personalConnectionDelegationsForAgentActor(
+  const inheritedConnectionAuthority = await personalConnectionDelegationsForAgentActor(
     db,
     input.workspaceId,
     input.actor,
+    input.targetSessionId,
   );
+  const personalConnectionDelegations = inheritedConnectionAuthority.delegations;
   const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
   if (session.status === "cancelled") {
@@ -2195,6 +2259,12 @@ export async function sendAgentMessageInTransaction(
               callerTurnId: input.actor.turnId,
               callerAttemptId: input.actor.attemptId,
               callerExecutionGeneration: input.actor.executionGeneration,
+              ...(inheritedConnectionAuthority.connectionAuthoritySubjectId
+                ? {
+                    connectionAuthoritySubjectId:
+                      inheritedConnectionAuthority.connectionAuthoritySubjectId,
+                  }
+                : {}),
               ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
             },
             personalConnectionDelegations,
@@ -2358,11 +2428,13 @@ export async function steerAgentSessionInTransaction(
     targetSessionId: input.targetSessionId,
     action: "steer",
   });
-  const personalConnectionDelegations = await personalConnectionDelegationsForAgentActor(
+  const inheritedConnectionAuthority = await personalConnectionDelegationsForAgentActor(
     db,
     input.workspaceId,
     input.actor,
+    input.targetSessionId,
   );
+  const personalConnectionDelegations = inheritedConnectionAuthority.delegations;
   const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);
   const resumed = await autoResumeSessionBranchInTransaction(db, {
     workspaceId: input.workspaceId,
@@ -2425,6 +2497,12 @@ export async function steerAgentSessionInTransaction(
               callerTurnId: input.actor.turnId,
               callerAttemptId: input.actor.attemptId,
               callerExecutionGeneration: input.actor.executionGeneration,
+              ...(inheritedConnectionAuthority.connectionAuthoritySubjectId
+                ? {
+                    connectionAuthoritySubjectId:
+                      inheritedConnectionAuthority.connectionAuthoritySubjectId,
+                  }
+                : {}),
               ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
             },
             personalConnectionDelegations,

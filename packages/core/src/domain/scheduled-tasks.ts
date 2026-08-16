@@ -90,6 +90,26 @@ export function scheduledTaskToolsProvided(rawPayload: unknown): boolean {
   );
 }
 
+export function scheduledConnectionSurfaceEligibility(
+  settings: Settings,
+  target: Pick<Session, "firstPartyMcpTools" | "firstPartyMcpPermissions"> | null,
+): { googleDrivePublicationEnabled: boolean; atlassianEnabled: boolean } {
+  const tools = target?.firstPartyMcpTools ?? resolveFirstPartyMcpToolPolicy(settings).default;
+  const permissions = target?.firstPartyMcpPermissions?.length
+    ? target.firstPartyMcpPermissions
+    : DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
+  return {
+    googleDrivePublicationEnabled:
+      tools.includes("editable_artifact_export") &&
+      tools.includes("editable_artifact_export_status") &&
+      permissions.includes("artifacts:read") &&
+      permissions.includes("artifacts:publish"),
+    atlassianEnabled:
+      tools.some((tool) => tool.startsWith("atlassian_")) &&
+      permissions.includes("connections:read"),
+  };
+}
+
 export async function createValidatedScheduledTask(input: {
   settings: Settings;
   db: Database;
@@ -154,20 +174,26 @@ export async function createValidatedScheduledTask(input: {
   if (!knowledgeAction && input.payload.rigId) {
     await requireScheduledTaskRig(input.db, input.grant.workspaceId, input.payload.rigId);
   }
-  const personalConnectionDelegations = knowledgeAction
-    ? []
-    : await freezePersonalConnectionDelegations({
-        db: input.db,
-        workspaceId: input.grant.workspaceId,
-        settings: await settingsWithEnabledCapabilityMcpServers(
-          input.db,
-          input.grant.workspaceId,
-          input.settings,
-          { subjectId: input.grant.subjectId },
-        ),
-        tools: [...agentConfig.tools, { kind: "mcp", id: "opengeni" }],
-        source: personalConnectionDelegationSourceForGrant(input.grant),
-      });
+  const runtimeSettings = knowledgeAction
+    ? null
+    : await settingsWithEnabledCapabilityMcpServers(
+        input.db,
+        input.grant.workspaceId,
+        input.settings,
+        { subjectId: input.grant.subjectId },
+      );
+  const personalConnectionDelegations =
+    knowledgeAction || !runtimeSettings
+      ? []
+      : await freezePersonalConnectionDelegations({
+          db: input.db,
+          workspaceId: input.grant.workspaceId,
+          settings: runtimeSettings,
+          tools: [...agentConfig.tools, { kind: "mcp", id: "opengeni" }],
+          source: personalConnectionDelegationSourceForGrant(input.grant),
+          rejectUnselectedActivatedConnections: true,
+          ...scheduledConnectionSurfaceEligibility(runtimeSettings, target),
+        });
   const creationInitiator = creationInitiatorForGrant(input.grant);
   const xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 =
     creationInitiator.actor
@@ -519,12 +545,28 @@ export async function validatedScheduledTaskUpdate(input: {
       input.settings,
       { subjectId: input.grant.subjectId },
     );
+    const nextTarget = await validateScheduledTaskTarget({
+      db: input.db,
+      sessionAuthorization: input.sessionAuthorization,
+      authorizationSurface: input.authorizationSurface,
+      grant: input.grant,
+      targetSessionId: nextTargetSessionId,
+      runMode: nextRunMode,
+      variableSetId:
+        input.payload.variableSetId !== undefined
+          ? input.payload.variableSetId
+          : input.existing.variableSetId,
+      rigId: input.payload.rigId !== undefined ? input.payload.rigId : input.existing.rigId,
+      agentConfig: nextAgentConfig,
+    });
     const personalConnectionDelegations = await freezePersonalConnectionDelegations({
       db: input.db,
       workspaceId: input.existing.workspaceId,
       settings: runtimeSettings,
       tools: [...nextAgentConfig.tools, { kind: "mcp", id: "opengeni" }],
       source: personalConnectionDelegationSourceForGrant(input.grant),
+      rejectUnselectedActivatedConnections: true,
+      ...scheduledConnectionSurfaceEligibility(runtimeSettings, nextTarget),
     });
     if (input.existing.reusableSessionId && input.existing.runMode === "reusable_session") {
       const existingDelegations = await getScheduledTaskPersonalConnectionDelegations(

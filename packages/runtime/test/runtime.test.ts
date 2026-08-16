@@ -6770,6 +6770,7 @@ describe("runtime event normalization", () => {
       requiredHeaders: { authorization: "Bearer fresh-token" },
     });
     const resolved: ResolveConnectionCredentialInput[] = [];
+    let providerAuthorizations = 0;
     const prepared = await prepareAgentTools(
       testSettings({
         mcpServers: [
@@ -6798,6 +6799,10 @@ describe("runtime event normalization", () => {
             headers: {
               authorization: input.forceRefresh ? "Bearer fresh-token" : "Bearer stale-token",
             },
+            authorizeProviderRequest: async () => {
+              providerAuthorizations += 1;
+              return true;
+            },
           };
         },
       },
@@ -6806,6 +6811,7 @@ describe("runtime event normalization", () => {
       const tools = await prepared.mcpServers[0]!.listTools();
       expect(tools.map((tool) => tool.name)).toContain("cap-refresh__search_documents");
       expect(resolved.some((input) => input.forceRefresh === true)).toBe(true);
+      expect(providerAuthorizations).toBe(mcp.requests.length);
     } finally {
       await prepared.close();
       mcp.close();
@@ -6818,6 +6824,7 @@ describe("runtime event normalization", () => {
       requiredHeaders: { authorization: "Bearer fresh-token" },
     });
     const resolved: ResolveConnectionCredentialInput[] = [];
+    let providerAuthorizations = 0;
     const prepared = await prepareAgentTools(
       testSettings({
         mcpServers: [
@@ -6846,11 +6853,16 @@ describe("runtime event normalization", () => {
             headers: {
               authorization: input.forceRefresh ? "Bearer fresh-token" : "Bearer stale-token",
             },
+            authorizeProviderRequest: async () => {
+              providerAuthorizations += 1;
+              return true;
+            },
           };
         },
       },
     );
     try {
+      const setupAuthorizations = providerAuthorizations;
       const result = await prepared.mcpServers[0]!.callToolResult!(
         "cap-uncertain__search_documents",
         {
@@ -6868,6 +6880,7 @@ describe("runtime event normalization", () => {
         1,
       );
       expect(mcp.calls).toHaveLength(0);
+      expect(providerAuthorizations - setupAuthorizations).toBe(1);
       expect(
         resolved.some((input) => input.toolName === "search_documents" && input.forceRefresh),
       ).toBe(true);

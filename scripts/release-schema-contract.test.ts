@@ -141,6 +141,7 @@ describe("release schema contract", () => {
       "0254_scoped_variable_set_authority.sql",
       "0256_connection_authority_delegation.sql",
       "0262_scoped_connected_machines_and_rigs.sql",
+      "0264_connection_authority_runtime_activation.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -348,6 +349,14 @@ describe("release schema contract", () => {
       sha256: "87901ff0b301b010a18e04ddd2137f291554071c8c9f73bec9b52b69cadd1cb8",
       deploymentMode: "rolling",
     });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0264_connection_authority_runtime_activation.sql",
+      ),
+    ).toMatchObject({
+      sha256: "1f72cf8be5a791fb42a4bf7b19f81cef4cce9c7f92dfb1dc8626127a1a8b420c",
+      deploymentMode: "maintenance",
+    });
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
@@ -497,8 +506,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0268_governed_learning_decision_receipts.sql")) {
         return includesActivation
-          ? "7c755cabec138b3b90315450de1d2a3f4a8dfd0ca7589ee1fe450b1a94d559d7"
-          : "59a155fee3b79133710851663df473ad8ec93f80e4f7a0734ad29f8b339234fb";
+          ? "d8f44cf53a2c1db85a2e24609544e14a454c3affb6e8d20e5a41e3f73e1831a7"
+          : "129d974d2af0f61dbd4c1d0b6cd020305445ec43bc85f34be27264b10280f16c";
       }
       if (migrations.has("0266_company_brain_context_receipt_inspection.sql")) {
         return includesActivation
@@ -527,6 +536,11 @@ describe("release schema contract", () => {
         return includesActivation
           ? "1997fbda36325fff330f3a34870148f1acf77d27fc1c541c67dd26f61e1d9ca5"
           : "bb3497f077a68c8ecb9b1b385067456ea3aa894d282ad0b820d97b55d2d25cc6";
+      }
+      if (migrations.has("0263_organization_membership_lifecycle.sql")) {
+        return includesActivation
+          ? "b6129a5f17ca1a93616951acefdcc64ac212f0305a535b86d66124215b8afca0"
+          : "21b202c054455b4db494e1ebe72f69ca4da3a0c0e9abdc6398b22f7bb59e2951";
       }
       if (migrations.has("0258_three_scope_document_knowledge_authority.sql")) {
         return includesActivation
@@ -880,7 +894,8 @@ describe("release schema contract", () => {
         (migrations.has("0260_task_note_knowledge_promotion.sql") ? 1 : 0) +
         (migrations.has("0261_preference_knowledge_proposal_actor_binding.sql") ? 1 : 0) +
         (migrations.has("0266_company_brain_context_receipt_inspection.sql") ? 1 : 0) +
-        (migrations.has("0268_governed_learning_decision_receipts.sql") ? 1 : 0),
+        (migrations.has("0268_governed_learning_decision_receipts.sql") ? 1 : 0) +
+        (migrations.has("0263_organization_membership_lifecycle.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -935,8 +950,14 @@ describe("release schema contract", () => {
                         ? "0248_terraform_stacks_component_resolution_fence.sql"
                         : migrations.has("0247_terraform_stacks_provenance_repair.sql")
                           ? "0247_terraform_stacks_provenance_repair.sql"
-                          : latestCompatibleMigration,
+                          : migrations.has("0263_organization_membership_lifecycle.sql")
+                            ? "0263_organization_membership_lifecycle.sql"
+                            : latestCompatibleMigration,
     );
+    expect(migrations.get("0263_organization_membership_lifecycle.sql")).toMatchObject({
+      sha256: "1119554dc06a768c92f7189a97b438ebdc011747a6c8d7cefc992962f2293593",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
       sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",
       deploymentMode: "maintenance",

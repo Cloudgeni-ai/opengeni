@@ -2,6 +2,7 @@ import type { McpServerConfig, Settings } from "@opengeni/config";
 import type {
   AccessGrant,
   ConnectionMetadata,
+  McpConnectionAuthoritySelection,
   McpPersonalConnectionDelegation,
   SessionTurn,
   SocialConnection,
@@ -20,6 +21,7 @@ import {
   getWorkspaceGrant,
   listConnectionsMetadata,
   listSocialConnections,
+  resolvePersonalConnectionAuthoritySelectionOrigin,
   type Database,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
@@ -212,13 +214,19 @@ export function personalConnectionDelegationsFromVisibleConnections(input: {
   servers: McpServerConfig[];
   subjectId: string;
   connections: ConnectionMetadata[];
+  authoritySelections?: McpConnectionAuthoritySelection[];
+  rejectUnselectedActivatedConnections?: boolean;
 }): McpPersonalConnectionDelegation[] {
   const delegations: McpPersonalConnectionDelegation[] = [];
   const connections = canonicalPersonalConnections(input.connections);
+  const selections = new Map(
+    (input.authoritySelections ?? []).map((selection) => [selection.serverId, selection]),
+  );
   for (const server of input.servers) {
     const ref = server.connectionRef;
     if (!ref || ref.subjectScope !== "subject") continue;
-    const connection = connections.find(
+    const selection = selections.get(server.id);
+    const eligible = connections.filter(
       (candidate) =>
         candidate.subjectId === input.subjectId &&
         candidate.status === "active" &&
@@ -226,14 +234,49 @@ export function personalConnectionDelegationsFromVisibleConnections(input: {
         (!ref.kind || candidate.kind === ref.kind) &&
         (!ref.connectionId || candidate.id === ref.connectionId),
     );
+    // An explicit accepted-work selection is authoritative. Canonical newest
+    // ordering is only the bounded legacy/omission fallback; it must never
+    // replace a caller's exact opaque connection UUID when several accounts
+    // share one server/provider tuple.
+    const connection = selection
+      ? eligible.find((candidate) => candidate.id === selection.connectionId)
+      : eligible[0];
     if (!connection) continue;
+    if (connection.authorityId) {
+      if (
+        !selection ||
+        selection.connectionId !== connection.id ||
+        selection.userDelegation.authorityId !== connection.authorityId
+      ) {
+        if (input.rejectUnselectedActivatedConnections) {
+          throw new Error(
+            `scheduled connection authority selection is required for activated server ${server.id}`,
+          );
+        }
+        // Activated organization-user connections are never admitted through
+        // the legacy owner tuple. The caller must select one exact opaque grant.
+        continue;
+      }
+      selections.delete(server.id);
+    } else if (selection) {
+      throw new Error(`connection authority is not available for legacy server ${server.id}`);
+    }
     delegations.push({
       serverId: server.id,
       connectionId: connection.id,
+      ...(selection ? { originWorkspaceId: connection.workspaceId } : {}),
       ownerSubjectId: input.subjectId,
       providerDomain: connection.providerDomain,
       kind: connection.kind,
+      ...(selection ? { userDelegation: selection.userDelegation } : {}),
     });
+  }
+  if (selections.size > 0) {
+    throw new Error(
+      `connection authority selection did not match an active selected server: ${[
+        ...selections.keys(),
+      ].join(", ")}`,
+    );
   }
   return delegations;
 }
@@ -241,7 +284,19 @@ export function personalConnectionDelegationsFromVisibleConnections(input: {
 export function personalConnectionDelegationsFromParent(input: {
   servers: McpServerConfig[];
   parentDelegations: McpPersonalConnectionDelegation[];
+  targetSessionId?: string;
+  rejectActivatedConnections?: boolean;
 }): McpPersonalConnectionDelegation[] {
+  // Every successor is new logical work. `once` remains bound to the original
+  // accepted turn, `session` may be re-admitted only into that exact session,
+  // and `always` may cross to another authorized session.
+  const childEligible = (delegation: McpPersonalConnectionDelegation) => {
+    const authority = delegation.userDelegation;
+    if (!authority) return true;
+    if (authority.mode === "once") return false;
+    if (authority.mode === "session") return authority.sessionId === input.targetSessionId;
+    return true;
+  };
   const mcp = input.servers.flatMap((server) => {
     const ref = server.connectionRef;
     if (!ref || ref.subjectScope !== "subject") return [];
@@ -251,19 +306,29 @@ export function personalConnectionDelegationsFromParent(input: {
         sameProviderDomain(candidate.providerDomain, ref.providerDomain) &&
         (!ref.kind || !candidate.kind || candidate.kind === ref.kind),
     );
-    return delegation ? [{ ...delegation }] : [];
+    return delegation && childEligible(delegation) ? [{ ...delegation }] : [];
   });
-  return [
+  const projected = [
     ...mcp,
     ...input.parentDelegations
       .filter(
         (item) =>
-          item.connectionType === "social" ||
-          item.connectionType === "atlassian" ||
-          item.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+          childEligible(item) &&
+          (item.connectionType === "social" ||
+            item.connectionType === "atlassian" ||
+            item.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID),
       )
       .map((item) => ({ ...item })),
   ];
+  if (
+    input.rejectActivatedConnections &&
+    projected.some((delegation) => delegation.userDelegation)
+  ) {
+    throw new Error(
+      "scheduled connection authority is not available until task occurrence authority is activated",
+    );
+  }
+  return projected;
 }
 
 /**
@@ -275,7 +340,10 @@ export function personalConnectionDelegationsFromParent(input: {
 export function googleDrivePublicationDelegationFromVisibleConnections(input: {
   subjectId: string;
   connections: ConnectionMetadata[];
+  authoritySelection?: McpConnectionAuthoritySelection;
+  rejectUnselectedActivatedConnection?: boolean;
 }): McpPersonalConnectionDelegation | null {
+  const selection = input.authoritySelection;
   const eligible = input.connections.filter((connection) => {
     if (
       connection.subjectId !== input.subjectId ||
@@ -294,15 +362,71 @@ export function googleDrivePublicationDelegationFromVisibleConnections(input: {
       (!metadata.data.lifecycle || metadata.data.lifecycle.state === "active"),
     );
   });
-  if (eligible.length !== 1) return null;
-  const connection = eligible[0]!;
+  const selectedEligible = selection
+    ? eligible.filter((connection) => connection.id === selection.connectionId)
+    : eligible;
+  if (selection && selectedEligible.length !== 1) {
+    throw new Error("Google Drive publication authority selection is unavailable");
+  }
+  if (!selection && selectedEligible.length !== 1) return null;
+  const connection = selectedEligible[0]!;
+  if (connection.authorityId) {
+    if (
+      !selection ||
+      selection.serverId !== GOOGLE_DRIVE_PUBLICATION_SERVER_ID ||
+      selection.connectionId !== connection.id ||
+      selection.userDelegation.authorityId !== connection.authorityId
+    ) {
+      if (input.rejectUnselectedActivatedConnection) {
+        throw new Error(
+          "scheduled connection authority selection is required for activated Google Drive publication",
+        );
+      }
+      return null;
+    }
+  } else if (selection) {
+    throw new Error("connection authority is not available for legacy Google Drive publication");
+  }
   return {
     serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
     connectionId: connection.id,
+    ...(selection ? { originWorkspaceId: connection.workspaceId } : {}),
     ownerSubjectId: input.subjectId,
     providerDomain: connection.providerDomain,
     kind: connection.kind,
+    ...(selection ? { userDelegation: selection.userDelegation } : {}),
   };
+}
+
+export function personalAtlassianDelegationsFromVisibleConnections(input: {
+  subjectId: string;
+  connections: ConnectionMetadata[];
+  rejectActivatedConnections?: boolean;
+}): McpPersonalConnectionDelegation[] {
+  const eligible = input.connections.filter(
+    (connection) =>
+      connection.subjectId === input.subjectId &&
+      connection.status === "active" &&
+      sameProviderDomain(connection.providerDomain, "api.atlassian.com"),
+  );
+  if (input.rejectActivatedConnections && eligible.some((connection) => connection.authorityId)) {
+    throw new Error(
+      "scheduled connection authority selection is required for activated Atlassian access",
+    );
+  }
+  // Atlassian's first-party multi-call adapter is a named successor. Until it
+  // can consume an accepted snapshot, common-authority rows are omitted rather
+  // than falling through the legacy owner-tuple resolver.
+  return eligible
+    .filter((connection) => !connection.authorityId)
+    .map((connection) => ({
+      serverId: `atlassian:${connection.id}`,
+      connectionId: connection.id,
+      ownerSubjectId: input.subjectId,
+      providerDomain: connection.providerDomain,
+      kind: connection.kind,
+      connectionType: "atlassian" as const,
+    }));
 }
 
 export function personalConnectionDelegationsEqual(
@@ -315,10 +439,13 @@ export function personalConnectionDelegationsEqual(
     const other = byServer.get(delegation.serverId);
     return (
       other?.connectionId === delegation.connectionId &&
+      other.originWorkspaceId === delegation.originWorkspaceId &&
       other.ownerSubjectId === delegation.ownerSubjectId &&
       sameProviderDomain(other.providerDomain, delegation.providerDomain) &&
       other.kind === delegation.kind &&
-      other.connectionType === delegation.connectionType
+      other.connectionType === delegation.connectionType &&
+      JSON.stringify(other.userDelegation ?? null) ===
+        JSON.stringify(delegation.userDelegation ?? null)
     );
   });
 }
@@ -390,7 +517,11 @@ export function withFrozenPersonalConnectionDelegations(input: {
         : publicationDelegations.length === 1
           ? publicationDelegations[0]!
           : null;
-      if (!delegation || !(await input.ownerHasWorkspaceMembership(delegation.ownerSubjectId))) {
+      if (
+        !delegation ||
+        (!delegation.userDelegation &&
+          !(await input.ownerHasWorkspaceMembership(delegation.ownerSubjectId)))
+      ) {
         return personalAuthorityUnavailable(request);
       }
       effectiveRequest = {
@@ -418,6 +549,14 @@ export async function freezePersonalConnectionDelegations(input: {
   settings: Pick<Settings, "mcpServers">;
   tools: ToolRef[];
   source: PersonalConnectionDelegationSource;
+  authoritySelections?: McpConnectionAuthoritySelection[];
+  rejectUnselectedActivatedConnections?: boolean;
+  /** Exact first-party export tool + permission gate, not broad opengeni attachment. */
+  googleDrivePublicationEnabled?: boolean;
+  /** Exact first-party Atlassian tool + permission gate. */
+  atlassianEnabled?: boolean;
+  /** Exact target for successor-mode projection (`session` never crosses it). */
+  targetSessionId?: string;
 }): Promise<McpPersonalConnectionDelegation[]> {
   const servers = selectedPersonalConnectionServers(input.settings, input.tools);
   const includeFirstPartyConnections = input.tools.some((tool) => tool.id === "opengeni");
@@ -425,6 +564,11 @@ export async function freezePersonalConnectionDelegations(input: {
     return [];
   }
   if (input.source.kind === "turn") {
+    if ((input.authoritySelections?.length ?? 0) > 0) {
+      throw new Error(
+        "agent-created work inherits connection authority from its exact parent turn",
+      );
+    }
     const inherited = personalConnectionDelegationsFromParent({
       servers,
       parentDelegations: await getSessionTurnPersonalConnectionDelegations(
@@ -433,30 +577,96 @@ export async function freezePersonalConnectionDelegations(input: {
         input.source.sessionId,
         input.source.turnId,
       ),
+      ...(input.targetSessionId ? { targetSessionId: input.targetSessionId } : {}),
+      ...(input.rejectUnselectedActivatedConnections !== undefined
+        ? { rejectActivatedConnections: input.rejectUnselectedActivatedConnections }
+        : {}),
     });
-    return includeFirstPartyConnections
-      ? inherited
-      : inherited.filter(
-          (item) =>
-            item.connectionType !== "social" &&
-            item.connectionType !== "atlassian" &&
-            item.serverId !== GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
-        );
+    return inherited.filter((item) => {
+      if (item.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID) {
+        return input.googleDrivePublicationEnabled === true;
+      }
+      if (item.connectionType === "atlassian") {
+        return includeFirstPartyConnections && input.atlassianEnabled === true;
+      }
+      if (item.connectionType === "social") {
+        return includeFirstPartyConnections;
+      }
+      return true;
+    });
   }
-  const membership = await getWorkspaceGrant(input.db, input.source.subjectId, input.workspaceId);
-  if (!membership) return [];
-  const visibleConnections = await listConnectionsMetadata(
+  const ownerSubjectId = input.source.subjectId;
+  const membership = await getWorkspaceGrant(input.db, ownerSubjectId, input.workspaceId);
+  const targetLocalConnections = await listConnectionsMetadata(
     input.db,
     input.workspaceId,
-    input.source.subjectId,
+    ownerSubjectId,
   );
+  const portableSelections = await Promise.all(
+    (input.authoritySelections ?? []).map(async (selection) => {
+      const originWorkspaceId = await resolvePersonalConnectionAuthoritySelectionOrigin(input.db, {
+        accountId: selection.userDelegation.organizationId,
+        targetWorkspaceId: input.workspaceId,
+        subjectId: ownerSubjectId,
+        connectionId: selection.connectionId,
+        delegation: selection.userDelegation,
+      });
+      if (!originWorkspaceId) {
+        throw new Error(`connection authority selection is unavailable: ${selection.serverId}`);
+      }
+      const connection = await getConnectionMetadata(
+        input.db,
+        originWorkspaceId,
+        selection.connectionId,
+        ownerSubjectId,
+      );
+      if (
+        !connection ||
+        connection.workspaceId !== originWorkspaceId ||
+        connection.subjectId !== ownerSubjectId ||
+        connection.authorityId !== selection.userDelegation.authorityId
+      ) {
+        throw new Error(`connection authority selection is unavailable: ${selection.serverId}`);
+      }
+      return connection;
+    }),
+  );
+  if (!membership && portableSelections.length === 0) return [];
+  const visibleConnections = [
+    ...new Map(
+      [...targetLocalConnections, ...portableSelections].map((connection) => [
+        connection.id,
+        connection,
+      ]),
+    ).values(),
+  ];
+  const selectedMcpServerIds = new Set(servers.map((server) => server.id));
+  const supportedSelectionIds = new Set(selectedMcpServerIds);
+  if (input.googleDrivePublicationEnabled) {
+    supportedSelectionIds.add(GOOGLE_DRIVE_PUBLICATION_SERVER_ID);
+  }
+  const unsupportedSelections = (input.authoritySelections ?? []).filter(
+    (selection) => !supportedSelectionIds.has(selection.serverId),
+  );
+  if (unsupportedSelections.length > 0) {
+    throw new Error(
+      `connection authority selection did not match a selected MCP server: ${unsupportedSelections
+        .map((selection) => selection.serverId)
+        .join(", ")}`,
+    );
+  }
   const mcp = personalConnectionDelegationsFromVisibleConnections({
     servers,
-    subjectId: input.source.subjectId,
+    subjectId: ownerSubjectId,
     connections: visibleConnections,
+    authoritySelections: (input.authoritySelections ?? []).filter((selection) =>
+      selectedMcpServerIds.has(selection.serverId),
+    ),
+    ...(input.rejectUnselectedActivatedConnections !== undefined
+      ? { rejectUnselectedActivatedConnections: input.rejectUnselectedActivatedConnections }
+      : {}),
   });
   if (!includeFirstPartyConnections) return mcp;
-  const ownerSubjectId = input.source.subjectId;
   const visible = await listSocialConnections(input.db, input.workspaceId, 500, ownerSubjectId);
   const latest = new Map<"x" | "reddit", (typeof visible)[number]>();
   for (const connection of visible) {
@@ -470,16 +680,32 @@ export async function freezePersonalConnectionDelegations(input: {
     if (!prior || connection.updatedAt > prior.updatedAt)
       latest.set(connection.provider, connection);
   }
-  const personalAtlassian = visibleConnections.filter(
-    (connection) =>
-      connection.subjectId === ownerSubjectId &&
-      connection.status === "active" &&
-      sameProviderDomain(connection.providerDomain, "api.atlassian.com"),
-  );
-  const googleDrivePublication = googleDrivePublicationDelegationFromVisibleConnections({
-    subjectId: ownerSubjectId,
-    connections: visibleConnections,
-  });
+  const personalAtlassian = input.atlassianEnabled
+    ? personalAtlassianDelegationsFromVisibleConnections({
+        subjectId: ownerSubjectId,
+        connections: visibleConnections,
+        ...(input.rejectUnselectedActivatedConnections !== undefined
+          ? { rejectActivatedConnections: input.rejectUnselectedActivatedConnections }
+          : {}),
+      })
+    : [];
+  const googleDriveAuthoritySelection = input.googleDrivePublicationEnabled
+    ? (input.authoritySelections ?? []).find(
+        (selection) => selection.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+      )
+    : undefined;
+  const googleDrivePublication = input.googleDrivePublicationEnabled
+    ? googleDrivePublicationDelegationFromVisibleConnections({
+        subjectId: ownerSubjectId,
+        connections: visibleConnections,
+        ...(googleDriveAuthoritySelection
+          ? { authoritySelection: googleDriveAuthoritySelection }
+          : {}),
+        ...(input.rejectUnselectedActivatedConnections !== undefined
+          ? { rejectUnselectedActivatedConnection: input.rejectUnselectedActivatedConnections }
+          : {}),
+      })
+    : null;
   return [
     ...mcp,
     ...(googleDrivePublication ? [googleDrivePublication] : []),
@@ -491,13 +717,6 @@ export async function freezePersonalConnectionDelegations(input: {
       kind: "oauth2" as const,
       connectionType: "social" as const,
     })),
-    ...personalAtlassian.map((connection) => ({
-      serverId: `atlassian:${connection.id}`,
-      connectionId: connection.id,
-      ownerSubjectId,
-      providerDomain: connection.providerDomain,
-      kind: connection.kind,
-      connectionType: "atlassian" as const,
-    })),
+    ...personalAtlassian,
   ];
 }

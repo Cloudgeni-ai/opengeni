@@ -323,19 +323,19 @@ describe("migration 0256 connection authority delegation", () => {
           return row!;
         });
       expect(await resolvePersonal(personalSnapshot)).toEqual({
-        status: "authorized",
-        reason: null,
+        status: "denied",
+        reason: "accepted_attempt_authority_required",
       });
       expect(await resolvePersonal(personalSnapshot)).toEqual({
-        status: "authorized",
-        reason: null,
+        status: "denied",
+        reason: "accepted_attempt_authority_required",
       });
       expect(
         await resolvePersonal({
           ...personalSnapshot,
           acceptedWork: { kind: "turn", turnId: secondTurnId },
         }),
-      ).toEqual({ status: "denied", reason: "grant_already_consumed" });
+      ).toEqual({ status: "denied", reason: "accepted_attempt_authority_required" });
 
       const revokedGrant = await sql.begin(async (tx) => {
         await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
@@ -352,7 +352,7 @@ describe("migration 0256 connection authority delegation", () => {
       expect(revokedGrant).toEqual({ generation: 2, status: "revoked" });
       expect(await resolvePersonal(personalSnapshot)).toEqual({
         status: "denied",
-        reason: "grant_generation_changed",
+        reason: "accepted_attempt_authority_required",
       });
 
       const workspaceConnection = await sql.begin(async (tx) => {
@@ -383,6 +383,40 @@ describe("migration 0256 connection authority delegation", () => {
         authorityId: null,
         authorityGeneration: 1,
       });
+
+      const workspaceSnapshot = {
+        organizationId: account!.id,
+        originWorkspaceId: targetWorkspace!.id,
+        targetWorkspaceId: targetWorkspace!.id,
+        targetSessionId: targetSession.id,
+        targetSessionVisibility: sessionAuthority.visibility,
+        targetSessionAuthorityEpoch: sessionAuthority.authorityEpoch,
+        acceptedWork: { kind: "turn", turnId: firstTurnId },
+        connectionId: workspaceConnection.id,
+        connectionGeneration: 1,
+        connectionStatus: "active",
+        providerDomain: "workspace.example.com",
+        connectionKind: "api_key",
+        scope: "workspace",
+        ownerSubjectId: null,
+        ownerOrganizationMembershipId: null,
+        authoritySource: "explicit_workspace",
+        selectionSources: ["mcp:workspace"],
+        userDelegation: null,
+      };
+      const workspaceResolution = await sql.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${targetWorkspace!.id}, true)`;
+        const [row] = await tx<{ status: string; reason: string | null }[]>`
+          select authorization_status as status, denial_reason as reason
+          from resolve_connection_use_authority(
+            ${account!.id}::uuid, ${targetWorkspace!.id}::uuid,
+            ${targetSession.id}::uuid, ${tx.json(workspaceSnapshot)}::jsonb
+          )
+        `;
+        return row!;
+      });
+      expect(workspaceResolution).toEqual({ status: "authorized", reason: null });
 
       const [revoked] = await sql<{ authorityGeneration: number }[]>`
         update connections set status = 'revoked'

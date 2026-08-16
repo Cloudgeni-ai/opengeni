@@ -187,6 +187,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   hasPermission,
   requireAccessGrant,
+  requireFreshAccessGrant,
   requirePermission,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
@@ -2142,19 +2143,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       c.req.raw.signal,
       {
         observability: deps.observability,
-        ...(authorization
-          ? {
-              reauthorizeAfterMs:
-                authorization.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
-              reauthorize: async () => {
-                await requireSessionAuthorization(deps, grant, {
-                  sessionId,
-                  operation: "session.stream.read",
-                  surface: "stream",
-                });
-              },
-            }
-          : {}),
+        reauthorizeAfterMs:
+          authorization?.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
+        reauthorize: async () => {
+          const freshGrant = await requireFreshAccessGrant(c, deps, workspaceId, "sessions:read");
+          await requireSessionAuthorization(deps, freshGrant, {
+            sessionId,
+            operation: "session.stream.read",
+            surface: "stream",
+          });
+        },
       },
     );
   });
@@ -2384,6 +2382,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       reasoningEffort: payload.reasoningEffort ?? null,
       latencyMode: payload.latencyMode ?? null,
       mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
+      connectionAuthorities: payload.connectionAuthorities,
       delivery: "steer",
       origin: "human",
       ...(payload.controlEtag !== undefined ? { controlEtag: payload.controlEtag } : {}),
@@ -2427,6 +2426,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         reasoningEffort: event.payload.reasoningEffort ?? null,
         latencyMode: event.payload.latencyMode ?? null,
         mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
+        connectionAuthorities: event.payload.connectionAuthorities,
         ...(event.payload.controlEtag !== undefined
           ? { controlEtag: event.payload.controlEtag }
           : {}),

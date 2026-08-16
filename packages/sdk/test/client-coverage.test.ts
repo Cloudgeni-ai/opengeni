@@ -335,6 +335,71 @@ describe("OpenGeniClient goals", () => {
 });
 
 describe("OpenGeniClient access + workspaces", () => {
+  test("organization lifecycle methods use the managed-human endpoints and exact bodies", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({}));
+    const organizationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const invitationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const membershipId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const operationId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    await client.listOrganizationInvitations({
+      cursor: invitationId,
+      limit: 25,
+    });
+    await client.listOrganizationInvitationsForOrganization(organizationId, {
+      cursor: invitationId,
+      limit: 25,
+    });
+    await client.createOrganizationInvitation(organizationId, {
+      email: "person@example.test",
+      role: "member",
+      expiresAt: "2026-08-17T00:00:00.000Z",
+      operationId,
+    });
+    await client.acceptOrganizationInvitation(invitationId, {
+      expectedRevision: 1,
+      operationId,
+    });
+    await client.revokeOrganizationInvitation(organizationId, invitationId, {
+      expectedRevision: 1,
+      operationId,
+    });
+    await client.listOrganizationMembers(organizationId);
+    await client.updateOrganizationMember(organizationId, membershipId, {
+      kind: "suspend",
+      expectedAuthorizationRevision: 2,
+      operationId,
+    });
+    await client.getOrganizationRetentionPolicy(organizationId);
+    await client.updateOrganizationRetentionPolicy(organizationId, {
+      mode: "delete_after",
+      retentionDays: 30,
+      expectedVersion: 1,
+      operationId,
+    });
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        "GET /v1/organization-invitations",
+        `GET /v1/organizations/${organizationId}/invitations`,
+        `POST /v1/organizations/${organizationId}/invitations`,
+        `POST /v1/organization-invitations/${invitationId}/accept`,
+        `POST /v1/organizations/${organizationId}/invitations/${invitationId}/revoke`,
+        `GET /v1/organizations/${organizationId}/members`,
+        `PATCH /v1/organizations/${organizationId}/members/${membershipId}`,
+        `GET /v1/organizations/${organizationId}/retention-policy`,
+        `PATCH /v1/organizations/${organizationId}/retention-policy`,
+      ],
+    );
+    expect(new URL(requests[1]!.url).searchParams.get("cursor")).toBe(invitationId);
+    expect(new URL(requests[1]!.url).searchParams.get("limit")).toBe("25");
+    expect(new URL(requests[0]!.url).searchParams.get("cursor")).toBe(invitationId);
+    expect(new URL(requests[0]!.url).searchParams.get("limit")).toBe("25");
+    expect(JSON.parse(requests[6]!.body!)).toEqual({
+      kind: "suspend",
+      expectedAuthorizationRevision: 2,
+      operationId,
+    });
+  });
+
   test("getAccessContext and workspace CRUD hit the expected endpoints", async () => {
     const { client, requests } = makeClient((request) => {
       if (request.url.endsWith("/v1/access/me")) {

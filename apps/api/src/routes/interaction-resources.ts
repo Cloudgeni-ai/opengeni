@@ -48,6 +48,8 @@ import {
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   requireAccessGrant,
+  requireFreshAccessGrant,
+  requirePermission,
   requireSessionAuthorization,
   type ApiRouteDeps,
   workflowIdForSession,
@@ -70,7 +72,18 @@ export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps)
       nonnegativeSafeIntegerQuery(context, "controlAfter", 0),
       nonnegativeSafeIntegerQuery(context, "interactionAfter", 0),
       context.req.raw.signal,
-      { observability: deps.observability },
+      {
+        observability: deps.observability,
+        reauthorize: async () => {
+          const freshGrant = await requireFreshAccessGrant(
+            context,
+            deps,
+            workspaceId,
+            "sessions:read",
+          );
+          requirePermission(freshGrant, "workspace:read");
+        },
+      },
     );
   });
 
@@ -83,7 +96,12 @@ export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps)
       workspaceId,
       after,
       context.req.raw.signal,
-      { observability: deps.observability },
+      {
+        observability: deps.observability,
+        reauthorize: async () => {
+          await requireFreshAccessGrant(context, deps, workspaceId, "sessions:read");
+        },
+      },
     );
   });
 

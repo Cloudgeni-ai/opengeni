@@ -8,6 +8,7 @@ import {
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
   ModelContextContributionSummaries,
+  OrganizationMember,
   SessionGoalSnapshot,
   SessionGoalRootConstraintsWrite,
   normalizeSessionGoalRootConstraints,
@@ -381,6 +382,8 @@ export * from "./capability-integrations";
 export * from "./integration-bindings";
 export * from "./integration-facets";
 export * from "./insights";
+export * from "./organization-membership-lifecycle";
+import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
 export { memoryTextForStorage } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
 // The `@opengeni/db/migrate` subpath stays available too (internal callers + the
@@ -466,7 +469,10 @@ import {
   type ConnectionCredentialForBroker,
   type ConnectionTokenResolverOptions,
 } from "./connection-token-resolver";
-import { resolveConnectionUseAuthority } from "./connection-authority";
+import {
+  resolveAcceptedConnectionUse,
+  resolveConnectionUseAuthority,
+} from "./connection-authority";
 import { resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./xai-subscription";
 
 function parsedPersonalConnectionDelegations(
@@ -1183,6 +1189,14 @@ export const allAccountPermissions: Permission[] = [
   "api_keys:manage",
 ];
 
+function accountPermissionsForOrganizationRole(role: "owner" | "admin" | "member"): Permission[] {
+  if (role === "owner") return allAccountPermissions;
+  if (role === "admin") {
+    return ["account:read", "members:manage", "workspace:create", "billing:read"];
+  }
+  return ["account:read"];
+}
+
 export type BootstrapWorkspaceInput = {
   accountExternalSource: string;
   accountExternalId: string;
@@ -1452,6 +1466,117 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
     if (!account) {
       throw new Error("Failed to ensure managed account");
     }
+    await setRlsContext(tx as unknown as Database, {
+      accountId: account.id,
+      workspaceId: null,
+    });
+    await setSubjectRlsContext(tx as unknown as Database, subjectId);
+    const [existingOrganizationMembershipResult] = await rawRows<{ result: unknown }>(
+      tx,
+      sql`select list_self_organization_memberships(${subjectId}) as result`,
+    );
+    const existingOrganizationMemberships = OrganizationMember.array().parse(
+      existingOrganizationMembershipResult?.result ?? [],
+    );
+    const selfOrganizationMembership = existingOrganizationMemberships.find(
+      (organizationMembership) => organizationMembership.organizationId === account.id,
+    );
+    if (
+      selfOrganizationMembership?.status === "suspended" ||
+      selfOrganizationMembership?.status === "revoked"
+    ) {
+      const activeOrganizationMemberships = existingOrganizationMemberships.flatMap(
+        (organizationMembership) =>
+          organizationMembership.status === "active" &&
+          organizationMembership.personalWorkspaceId !== null
+            ? [
+                {
+                  ...organizationMembership,
+                  status: "active" as const,
+                  personalWorkspaceId: organizationMembership.personalWorkspaceId,
+                },
+              ]
+            : [],
+      );
+      if (activeOrganizationMemberships.length === 0) {
+        await assertActiveManagedHumanOrganizationMembership(tx as unknown as Database, {
+          accountId: account.id,
+          subjectId,
+        });
+        throw new Error("Inactive managed organization unexpectedly passed active membership");
+      }
+      const workspaceGrants: AccessGrant[] = [];
+      for (const organizationMembership of activeOrganizationMemberships) {
+        await setRlsContext(tx as unknown as Database, {
+          accountId: organizationMembership.organizationId,
+          workspaceId: null,
+        });
+        const persistedMemberships = await tx
+          .select({
+            membership: schema.workspaceMemberships,
+            workspace: schema.workspaces,
+          })
+          .from(schema.workspaceMemberships)
+          .innerJoin(
+            schema.workspaces,
+            eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
+          )
+          .where(eq(schema.workspaceMemberships.subjectId, subjectId))
+          .orderBy(desc(schema.workspaces.createdAt));
+        workspaceGrants.push(
+          ...persistedMemberships.map((row) => ({
+            workspaceId: row.workspace.id,
+            accountId: row.workspace.accountId,
+            subjectId,
+            subjectLabel,
+            permissions: row.membership.permissions as Permission[],
+            principalKind: "human_session" as const,
+          })),
+        );
+      }
+      for (const organizationMembership of activeOrganizationMemberships) {
+        if (
+          !workspaceGrants.some(
+            (grant) => grant.workspaceId === organizationMembership.personalWorkspaceId,
+          )
+        ) {
+          workspaceGrants.push({
+            workspaceId: organizationMembership.personalWorkspaceId,
+            accountId: organizationMembership.organizationId,
+            subjectId,
+            subjectLabel,
+            permissions: managedPersonalWorkspacePermissions,
+            principalKind: "human_session",
+          });
+        }
+      }
+      const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
+      const defaultWorkspaceId =
+        workspaceGrants.find((grant) => grant.accountId === defaultAccountId)?.workspaceId ?? null;
+      return {
+        accessContext: {
+          mode: "managed",
+          subjectId,
+          subjectLabel,
+          accountGrants: activeOrganizationMemberships.map((organizationMembership) => ({
+            accountId: organizationMembership.organizationId,
+            subjectId,
+            subjectLabel,
+            role: organizationMembership.role,
+            permissions: accountPermissionsForOrganizationRole(organizationMembership.role),
+          })),
+          workspaceGrants,
+          defaultAccountId,
+          defaultWorkspaceId,
+        },
+        organizationMemberships: activeOrganizationMemberships.map((organizationMembership) => ({
+          id: organizationMembership.id,
+          organizationId: organizationMembership.organizationId,
+          status: "active" as const,
+          personalWorkspaceId: organizationMembership.personalWorkspaceId,
+        })),
+      };
+    }
     let [defaultWorkspace] = await tx
       .select()
       .from(schema.workspaces)
@@ -1650,6 +1775,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       accountId: account.id,
       workspaceId: null,
     });
+    await setSubjectRlsContext(tx as unknown as Database, subjectId);
     const memberships = await tx
       .select({
         membership: schema.workspaceMemberships,
@@ -1670,40 +1796,104 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       permissions: row.membership.permissions as Permission[],
       principalKind: "human_session",
     }));
-    workspaceGrants.push({
-      workspaceId: provisionedMembership.personal_workspace_id,
-      accountId: account.id,
-      subjectId,
-      subjectLabel,
-      permissions: managedPersonalWorkspacePermissions,
-      principalKind: "human_session",
-    });
+    const [organizationMembershipResult] = await rawRows<{ result: unknown }>(
+      tx,
+      sql`select list_self_organization_memberships(${subjectId}) as result`,
+    );
+    const projectedOrganizationMemberships = OrganizationMember.array().parse(
+      organizationMembershipResult?.result ?? [],
+    );
+    const inactiveOrganizationIds = new Set(
+      projectedOrganizationMemberships
+        .filter((organizationMembership) => organizationMembership.status !== "active")
+        .map((organizationMembership) => organizationMembership.organizationId),
+    );
+    for (let index = workspaceGrants.length - 1; index >= 0; index -= 1) {
+      if (inactiveOrganizationIds.has(workspaceGrants[index]!.accountId)) {
+        workspaceGrants.splice(index, 1);
+      }
+    }
+    const activeOrganizationMemberships = projectedOrganizationMemberships.flatMap(
+      (organizationMembership) =>
+        organizationMembership.status === "active" &&
+        organizationMembership.personalWorkspaceId !== null
+          ? [
+              {
+                ...organizationMembership,
+                status: "active" as const,
+                personalWorkspaceId: organizationMembership.personalWorkspaceId,
+              },
+            ]
+          : [],
+    );
+    for (const organizationMembership of activeOrganizationMemberships) {
+      if (organizationMembership.organizationId === account.id) continue;
+      await setRlsContext(tx as unknown as Database, {
+        accountId: organizationMembership.organizationId,
+        workspaceId: null,
+      });
+      const persistedOrganizationMemberships = await tx
+        .select({
+          membership: schema.workspaceMemberships,
+          workspace: schema.workspaces,
+        })
+        .from(schema.workspaceMemberships)
+        .innerJoin(
+          schema.workspaces,
+          eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
+        )
+        .where(eq(schema.workspaceMemberships.subjectId, subjectId))
+        .orderBy(desc(schema.workspaces.createdAt));
+      for (const row of persistedOrganizationMemberships) {
+        if (workspaceGrants.some((grant) => grant.workspaceId === row.workspace.id)) continue;
+        workspaceGrants.push({
+          workspaceId: row.workspace.id,
+          accountId: row.workspace.accountId,
+          subjectId,
+          subjectLabel,
+          permissions: row.membership.permissions as Permission[],
+          principalKind: "human_session",
+        });
+      }
+    }
+    for (const organizationMembership of activeOrganizationMemberships) {
+      if (
+        !workspaceGrants.some(
+          (grant) => grant.workspaceId === organizationMembership.personalWorkspaceId,
+        )
+      ) {
+        workspaceGrants.push({
+          workspaceId: organizationMembership.personalWorkspaceId,
+          accountId: organizationMembership.organizationId,
+          subjectId,
+          subjectLabel,
+          permissions: managedPersonalWorkspacePermissions,
+          principalKind: "human_session",
+        });
+      }
+    }
     return {
       accessContext: {
         mode: "managed",
         subjectId,
         subjectLabel,
-        accountGrants: [
-          {
-            accountId: account.id,
-            subjectId,
-            subjectLabel,
-            role: "owner",
-            permissions: allAccountPermissions,
-          },
-        ],
+        accountGrants: activeOrganizationMemberships.map((organizationMembership) => ({
+          accountId: organizationMembership.organizationId,
+          subjectId,
+          subjectLabel,
+          role: organizationMembership.role,
+          permissions: accountPermissionsForOrganizationRole(organizationMembership.role),
+        })),
         workspaceGrants,
         defaultAccountId: account.id,
         defaultWorkspaceId: defaultWorkspace.id,
       },
-      organizationMemberships: [
-        {
-          id: provisionedMembership.organization_membership_id,
-          organizationId: account.id,
-          status: "active",
-          personalWorkspaceId: provisionedMembership.personal_workspace_id,
-        },
-      ],
+      organizationMemberships: activeOrganizationMemberships.map((organizationMembership) => ({
+        id: organizationMembership.id,
+        organizationId: organizationMembership.organizationId,
+        status: "active" as const,
+        personalWorkspaceId: organizationMembership.personalWorkspaceId,
+      })),
     };
   });
 }
@@ -24378,6 +24568,20 @@ async function createSessionInTransaction(
     input.workspaceId,
     input.accountId,
   );
+  if (
+    input.createdBy?.kind === "subject" &&
+    input.subjectId !== null &&
+    input.subjectId !== undefined
+  ) {
+    if (input.subjectId !== input.createdBy.subjectId) {
+      throw new Error("Managed-human session creator does not match authenticated subject");
+    }
+    await setSubjectRlsContext(tx, input.createdBy.subjectId);
+    await assertActiveManagedHumanOrganizationMembership(tx, {
+      accountId: input.accountId,
+      subjectId: input.createdBy.subjectId,
+    });
+  }
   if (createIdempotencyKey !== null) {
     // Keyed admission retains the control -> advisory order used by old
     // binaries during the rolling migration. The database depth trigger takes
@@ -48261,9 +48465,12 @@ export async function materializeGoalContinuation(
           )
           .limit(1);
         const personalConnectionDelegations = causalTurn
-          ? parsedPersonalConnectionDelegations(
-              causalTurn.personalConnectionDelegations,
-              `session_turns:${input.workspaceId}:${input.sessionId}:${causalTurn.id}`,
+          ? personalConnectionDelegationsForSameSessionSuccessor(
+              parsedPersonalConnectionDelegations(
+                causalTurn.personalConnectionDelegations,
+                `session_turns:${input.workspaceId}:${input.sessionId}:${causalTurn.id}`,
+              ),
+              input.sessionId,
             )
           : [];
         const xaiProviderAccountAuthoritySnapshot = causalTurn
@@ -48316,6 +48523,12 @@ export async function materializeGoalContinuation(
                     goalId: decision.goal.id,
                     goalWakeRevision,
                     ...(causalTurn ? { causalTurnId: causalTurn.id } : {}),
+                    ...(causalTurn?.initiatingHumanSubjectId &&
+                    personalConnectionDelegations.some((delegation) => delegation.userDelegation)
+                      ? {
+                          connectionAuthoritySubjectId: causalTurn.initiatingHumanSubjectId,
+                        }
+                      : {}),
                     ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
                   },
                   personalConnectionDelegations,
@@ -48799,6 +49012,52 @@ export async function initializeSessionStartAtomically(
         let insertedTurn = false;
         let queueTailPosition = Number(session.queueTailPosition);
         if (!turn) {
+          const initialPersonalConnectionDelegations = parsedPersonalConnectionDelegations(
+            session.initialPersonalConnectionDelegations,
+            `sessions:${session.workspaceId}:${session.id}:initial`,
+          );
+          let initialTurnInitiatingHumanSubjectId =
+            creator.initiator.kind === "subject" ? creator.initiator.subjectId : null;
+          if (session.parentSessionId && session.parentTurnId) {
+            const [causalParentTurn] = await tx
+              .select({
+                initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+                initiatorKind: schema.sessionTurns.initiatorKind,
+                initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+              })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.accountId, session.accountId),
+                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurns.sessionId, session.parentSessionId),
+                  eq(schema.sessionTurns.id, session.parentTurnId),
+                ),
+              )
+              .limit(1);
+            if (!causalParentTurn) {
+              throw new Error(`Causal parent turn not found: ${session.parentTurnId}`);
+            }
+            initialTurnInitiatingHumanSubjectId =
+              causalParentTurn.initiatingHumanSubjectId ??
+              (causalParentTurn.initiatorKind === "subject"
+                ? causalParentTurn.initiatorSubjectId
+                : null);
+          }
+          if (
+            initialPersonalConnectionDelegations.some((delegation) => delegation.userDelegation)
+          ) {
+            if (!initialTurnInitiatingHumanSubjectId) {
+              throw new Error("Activated connection acceptance requires an initiating human");
+            }
+            await tx.execute(sql`
+              SELECT set_config(
+                'opengeni.initiating_human_subject_id',
+                ${initialTurnInitiatingHumanSubjectId},
+                true
+              )
+            `);
+          }
           queueTailPosition += 1;
           const acceptedAt = new Date();
           [turn] = await tx
@@ -48834,12 +49093,8 @@ export async function initializeSessionStartAtomically(
                     : {},
                   lineage: {},
                   ...initiatorColumns(creator),
-                  initiatingHumanSubjectId:
-                    creator.initiator.kind === "subject" ? creator.initiator.subjectId : null,
-                  personalConnectionDelegations: parsedPersonalConnectionDelegations(
-                    session.initialPersonalConnectionDelegations,
-                    `sessions:${session.workspaceId}:${session.id}:initial`,
-                  ),
+                  initiatingHumanSubjectId: initialTurnInitiatingHumanSubjectId,
+                  personalConnectionDelegations: initialPersonalConnectionDelegations,
                   xaiProviderAccountAuthoritySnapshot:
                     session.initialXaiProviderAccountAuthoritySnapshot,
                   createdAt: acceptedAt,
@@ -48983,6 +49238,13 @@ export async function enqueueSessionTurn(
           input.sessionId,
           { lock: "share" },
         );
+        if (input.initiator.kind === "subject") {
+          await setSubjectRlsContext(tx as unknown as Database, input.initiator.subjectId);
+          await assertActiveManagedHumanOrganizationMembership(tx as unknown as Database, {
+            accountId: input.accountId,
+            subjectId: input.initiator.subjectId,
+          });
+        }
         const [lockedSession] = await tx
           .select()
           .from(schema.sessions)
@@ -49002,6 +49264,20 @@ export async function enqueueSessionTurn(
           ? Number(lockedSession.queueHeadPosition) - 1
           : Number(lockedSession.queueTailPosition) + 1;
         const acceptedAt = new Date();
+        const initiatingHumanSubjectId =
+          input.initiator.kind === "subject" ? input.initiator.subjectId : null;
+        if (input.personalConnectionDelegations?.some((delegation) => delegation.userDelegation)) {
+          if (!initiatingHumanSubjectId) {
+            throw new Error("Activated connection acceptance requires an initiating human");
+          }
+          await tx.execute(sql`
+            SELECT set_config(
+              'opengeni.initiating_human_subject_id',
+              ${initiatingHumanSubjectId},
+              true
+            )
+          `);
+        }
         const [row] = await tx
           .insert(schema.sessionTurns)
           .values(
@@ -49031,8 +49307,7 @@ export async function enqueueSessionTurn(
                   initiator: input.initiator,
                   context: input.initiatorContext ?? {},
                 }),
-                initiatingHumanSubjectId:
-                  input.initiator.kind === "subject" ? input.initiator.subjectId : null,
+                initiatingHumanSubjectId,
                 personalConnectionDelegations: input.personalConnectionDelegations ?? [],
                 xaiProviderAccountAuthoritySnapshot:
                   input.xaiProviderAccountAuthoritySnapshot ??
@@ -49119,13 +49394,35 @@ function frozenXaiExecutionAuthorityKey(authority: FrozenXaiExecutionAuthority):
 }
 
 function systemUpdateExecutionAuthorityKey(update: BoundedSystemUpdate): string {
+  const personalConnectionDelegations = parsedPersonalConnectionDelegations(
+    update.personalConnectionDelegations,
+    `session_system_updates:${update.id}`,
+  );
   return stableJson({
-    personalConnectionDelegations: parsedPersonalConnectionDelegations(
-      update.personalConnectionDelegations,
-      `session_system_updates:${update.id}`,
-    ),
+    personalConnectionDelegations,
     xai: frozenXaiExecutionAuthority(update),
+    connectionAuthoritySubjectId: personalConnectionDelegations.some(
+      (delegation) => delegation.userDelegation,
+    )
+      ? (update.lineage.connectionAuthoritySubjectId ?? null)
+      : null,
     scheduledTaskRunId: update.scheduledTaskRunId,
+  });
+}
+
+function personalConnectionDelegationsForSameSessionSuccessor(
+  delegations: McpPersonalConnectionDelegation[],
+  targetSessionId: string,
+): McpPersonalConnectionDelegation[] {
+  // A continuation/internal turn is new accepted work. Session and always
+  // grants may be re-admitted under the live DB fences; once remains bound to
+  // its original accepted turn and is never copied forward.
+  return delegations.filter((delegation) => {
+    const authority = delegation.userDelegation;
+    if (!authority) return true;
+    if (authority.mode === "once") return false;
+    if (authority.mode === "session") return authority.sessionId === targetSessionId;
+    return true;
   });
 }
 
@@ -50685,9 +50982,32 @@ export async function claimSessionWorkForAttempt(
               })
             : null;
           let initiatingHumanSubjectId =
-            internalInitiator.initiator.kind === "subject"
+            internalInitiator.initiatingHumanSubjectId ??
+            (internalInitiator.initiator.kind === "subject"
               ? internalInitiator.initiator.subjectId
+              : null);
+          const connectionAuthoritySubjectValue =
+            authorityUpdate.lineage &&
+            typeof authorityUpdate.lineage === "object" &&
+            !Array.isArray(authorityUpdate.lineage)
+              ? (authorityUpdate.lineage as Record<string, unknown>).connectionAuthoritySubjectId
               : null;
+          const connectionAuthoritySubjectId =
+            typeof connectionAuthoritySubjectValue === "string" &&
+            connectionAuthoritySubjectValue.trim().length > 0
+              ? connectionAuthoritySubjectValue
+              : null;
+          if (connectionAuthoritySubjectId) {
+            if (
+              initiatingHumanSubjectId &&
+              initiatingHumanSubjectId !== connectionAuthoritySubjectId
+            ) {
+              throw new Error(
+                "system-update connection authority subject does not match turn provenance",
+              );
+            }
+            initiatingHumanSubjectId = connectionAuthoritySubjectId;
+          }
           if (!initiatingHumanSubjectId && routingGoalUpdate) {
             const causalTurnIdValue =
               routingGoalUpdate.lineage &&
@@ -50731,6 +51051,31 @@ export async function claimSessionWorkForAttempt(
               throw new Error("scheduled personal-resource subject does not match turn provenance");
             }
             initiatingHumanSubjectId = scheduledTaskCausalHuman;
+          }
+          if (
+            internalPersonalConnectionDelegations.some((delegation) => delegation.userDelegation)
+          ) {
+            if (!initiatingHumanSubjectId) {
+              throw new Error("Activated connection acceptance requires an initiating human");
+            }
+            if (
+              internalPersonalConnectionDelegations.some(
+                (delegation) =>
+                  delegation.userDelegation &&
+                  delegation.ownerSubjectId !== initiatingHumanSubjectId,
+              )
+            ) {
+              throw new Error(
+                "Activated connection owner does not match the causal initiating human",
+              );
+            }
+            await tx.execute(sql`
+              SELECT set_config(
+                'opengeni.initiating_human_subject_id',
+                ${initiatingHumanSubjectId},
+                true
+              )
+            `);
           }
           await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
           const [internalTurn] = await tx
@@ -51740,9 +52085,13 @@ export async function settleSessionAttemptInterruptions(
       }
 
       const terminalCancel = session.status === "cancelled";
+      const membershipAuthorityRevoked = interruptions.some(
+        (interruption) => interruption.kind === "organization_membership_revoked",
+      );
+      const terminalTurnCancel = terminalCancel || membershipAuthorityRevoked;
       const steer =
-        !terminalCancel && interruptions.some((interruption) => interruption.kind === "steer");
-      const outcome: SessionTurnAttemptOutcome = terminalCancel
+        !terminalTurnCancel && interruptions.some((interruption) => interruption.kind === "steer");
+      const outcome: SessionTurnAttemptOutcome = terminalTurnCancel
         ? "cancelled"
         : steer
           ? "superseded"
@@ -51756,14 +52105,16 @@ export async function settleSessionAttemptInterruptions(
         attempt.quiescedAt !== null;
       const reason = terminalCancel
         ? "session_cancelled"
-        : steer
-          ? "steer"
-          : interruptions.some((interruption) => interruption.kind === "workspace_pause")
-            ? "workspace_pause"
-            : interruptions.some((interruption) => interruption.kind === "maintenance")
-              ? "maintenance"
-              : "session_pause";
-      if (terminalCancel || steer) {
+        : membershipAuthorityRevoked
+          ? "authority_changed"
+          : steer
+            ? "steer"
+            : interruptions.some((interruption) => interruption.kind === "workspace_pause")
+              ? "workspace_pause"
+              : interruptions.some((interruption) => interruption.kind === "maintenance")
+                ? "maintenance"
+                : "session_pause";
+      if (terminalTurnCancel || steer) {
         await cancelTurnInteractionInterventionsInTransaction(tx as unknown as Database, {
           accountId: session.accountId,
           workspaceId,
@@ -51795,7 +52146,7 @@ export async function settleSessionAttemptInterruptions(
         outcome,
         closedAt: now,
       });
-      const eventValues: SessionEventInsertWithPayload[] = terminalCancel
+      const eventValues: SessionEventInsertWithPayload[] = terminalTurnCancel
         ? [
             {
               accountId: session.accountId,
@@ -51892,12 +52243,14 @@ export async function settleSessionAttemptInterruptions(
       await tx
         .update(schema.sessionTurns)
         .set(
-          terminalCancel
+          terminalTurnCancel
             ? {
                 status: "cancelled",
                 activeAttemptId: null,
                 metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
-                cancelledBy: "system:session_cancelled",
+                cancelledBy: terminalCancel
+                  ? "system:session_cancelled"
+                  : "system:authority_changed",
                 cancelReason: reason,
                 version: turn.version + 1,
                 finishedAt: turn.finishedAt ?? now,
@@ -51924,21 +52277,60 @@ export async function settleSessionAttemptInterruptions(
                 },
         )
         .where(eq(schema.sessionTurns.id, turn.id));
-      await tx
-        .update(schema.sessions)
-        .set({
-          status: terminalCancel
-            ? "cancelled"
-            : steer
-              ? "queued"
-              : pausedRecoveryAlreadyQuiesced
-                ? "idle"
-                : "recovering",
-          activeTurnId: terminalCancel || steer ? null : turn.id,
-          lastSequence: sequence,
-          updatedAt: now,
-        })
-        .where(eq(schema.sessions.id, sessionId));
+      if (membershipAuthorityRevoked && !terminalCancel) {
+        await tx.execute(sql`
+          update sessions session_row
+          set status = case
+                when exists (
+                  select 1 from session_turns queued_turn
+                  where queued_turn.account_id = session_row.account_id
+                    and queued_turn.workspace_id = session_row.workspace_id
+                    and queued_turn.session_id = session_row.id
+                    and queued_turn.status = 'queued'
+                ) then 'queued'
+                else 'idle'
+              end,
+              active_turn_id = null,
+              queue_head_position = coalesce((
+                select min(queued_turn.position)
+                from session_turns queued_turn
+                where queued_turn.account_id = session_row.account_id
+                  and queued_turn.workspace_id = session_row.workspace_id
+                  and queued_turn.session_id = session_row.id
+                  and queued_turn.status = 'queued'
+              ), 0),
+              queue_tail_position = coalesce((
+                select max(queued_turn.position)
+                from session_turns queued_turn
+                where queued_turn.account_id = session_row.account_id
+                  and queued_turn.workspace_id = session_row.workspace_id
+                  and queued_turn.session_id = session_row.id
+                  and queued_turn.status = 'queued'
+              ), 0),
+              queue_version = session_row.queue_version + 1,
+              last_sequence = ${sequence},
+              updated_at = clock_timestamp()
+          where session_row.account_id = ${session.accountId}
+            and session_row.workspace_id = ${workspaceId}
+            and session_row.id = ${sessionId}
+        `);
+      } else {
+        await tx
+          .update(schema.sessions)
+          .set({
+            status: terminalCancel
+              ? "cancelled"
+              : steer
+                ? "queued"
+                : pausedRecoveryAlreadyQuiesced
+                  ? "idle"
+                  : "recovering",
+            activeTurnId: terminalCancel || steer ? null : turn.id,
+            lastSequence: sequence,
+            updatedAt: now,
+          })
+          .where(eq(schema.sessions.id, sessionId));
+      }
       await tx
         .update(schema.sessionAttemptInterruptions)
         .set({
@@ -53107,11 +53499,14 @@ export async function settleSessionIdleWithParentOutbox(
       }
       const dedupeKey = `child-completion:${session.id}:${episodeKey}`;
       const personalConnectionDelegations = session.parentTurnId
-        ? await personalConnectionDelegationsForTurnInTransaction(
-            tx as unknown as Database,
-            workspaceId,
+        ? personalConnectionDelegationsForSameSessionSuccessor(
+            await personalConnectionDelegationsForTurnInTransaction(
+              tx as unknown as Database,
+              workspaceId,
+              session.parentSessionId,
+              session.parentTurnId,
+            ),
             session.parentSessionId,
-            session.parentTurnId,
           )
         : [];
       const xaiProviderAccountAuthoritySnapshot = session.parentTurnId
@@ -53147,6 +53542,15 @@ export async function settleSessionIdleWithParentOutbox(
       if (xaiProviderAccountAuthoritySnapshot.scope === "user" && !xaiAuthoritySubjectId) {
         throw new Error("Child idle outbox lost its parent xAI authority subject");
       }
+      const connectionAuthoritySubjectId =
+        parentTurn?.initiatingHumanSubjectId ??
+        (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null);
+      if (
+        personalConnectionDelegations.some((delegation) => delegation.userDelegation) &&
+        !connectionAuthoritySubjectId
+      ) {
+        throw new Error("Child idle outbox lost its parent connection authority subject");
+      }
       await tx
         .insert(schema.sessionSystemUpdateOutbox)
         .values(
@@ -53171,6 +53575,10 @@ export async function settleSessionIdleWithParentOutbox(
                   childSessionId: session.id,
                   parentSessionId: session.parentSessionId,
                   ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
+                  ...(connectionAuthoritySubjectId &&
+                  personalConnectionDelegations.some((delegation) => delegation.userDelegation)
+                    ? { connectionAuthoritySubjectId }
+                    : {}),
                   ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
                 },
                 personalConnectionDelegations,
@@ -55881,11 +56289,14 @@ async function enqueueFailedChildOutboxTx(
 ): Promise<void> {
   if (!session.parentSessionId) return;
   const personalConnectionDelegations = session.parentTurnId
-    ? await personalConnectionDelegationsForTurnInTransaction(
-        tx,
-        workspaceId,
+    ? personalConnectionDelegationsForSameSessionSuccessor(
+        await personalConnectionDelegationsForTurnInTransaction(
+          tx,
+          workspaceId,
+          session.parentSessionId,
+          session.parentTurnId,
+        ),
         session.parentSessionId,
-        session.parentTurnId,
       )
     : [];
   const xaiProviderAccountAuthoritySnapshot = session.parentTurnId
@@ -55921,6 +56332,15 @@ async function enqueueFailedChildOutboxTx(
   if (xaiProviderAccountAuthoritySnapshot.scope === "user" && !xaiAuthoritySubjectId) {
     throw new Error("Failed child outbox lost its parent xAI authority subject");
   }
+  const connectionAuthoritySubjectId =
+    parentTurn?.initiatingHumanSubjectId ??
+    (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null);
+  if (
+    personalConnectionDelegations.some((delegation) => delegation.userDelegation) &&
+    !connectionAuthoritySubjectId
+  ) {
+    throw new Error("Failed child outbox lost its parent connection authority subject");
+  }
   await tx
     .insert(schema.sessionSystemUpdateOutbox)
     .values(
@@ -55947,6 +56367,10 @@ async function enqueueFailedChildOutboxTx(
               parentSessionId: session.parentSessionId,
               ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
               ...(input.turnId ? { turnId: input.turnId } : {}),
+              ...(connectionAuthoritySubjectId &&
+              personalConnectionDelegations.some((delegation) => delegation.userDelegation)
+                ? { connectionAuthoritySubjectId }
+                : {}),
               ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
             },
             personalConnectionDelegations,
@@ -56576,6 +57000,9 @@ export async function getOrCreateSessionSystemUpdateOutbox(
     const inputXaiSubjectId = input.lineage.xaiAuthoritySubjectId;
     if (storedXaiSubjectId !== inputXaiSubjectId) {
       throw new Error("System-update outbox replay changed its xAI authority subject");
+    }
+    if (row.lineage.connectionAuthoritySubjectId !== input.lineage.connectionAuthoritySubjectId) {
+      throw new Error("System-update outbox replay changed its connection authority subject");
     }
     return {
       id: row.id,
@@ -59333,6 +59760,7 @@ function connectionBrokerDeps(): ConnectionBrokerDeps {
     keyBytes: environmentsEncryptionKeyBytes,
     now: () => new Date(),
     authorizeUse: resolveConnectionUseAuthority,
+    authorizeAcceptedUse: resolveAcceptedConnectionUse,
   };
 }
 

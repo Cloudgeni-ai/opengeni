@@ -563,6 +563,7 @@ export type ResolveConnectionCredentialResult =
       status: "ok";
       headers: Record<string, string>;
       connectionId: string;
+      authorizeProviderRequest?: () => Promise<boolean>;
       expiresAt?: Date | null;
     }
   | {
@@ -3788,6 +3789,16 @@ function connectionBrokerFetch(
       request,
       first.connectionId,
     );
+    if (!(await authorizeResolvedProviderRequest(first))) {
+      return await authNeededFetchResponse(
+        options,
+        config.id,
+        request,
+        providerRequestAuthorizationDenied(connectionRef, first.connectionId),
+        connectionRef,
+        suppressSetupAuthNeeded,
+      );
+    }
     const response = await baseFetch(
       fetchInputForAttempt(input),
       withConnectionHeaders(input, init, first.headers),
@@ -3835,6 +3846,16 @@ function connectionBrokerFetch(
       recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, refreshed.connectionId);
       if (!request.replaySafeAfter401) {
         return mcpOutcomeUncertainResponse(request, providerFailure!);
+      }
+      if (!(await authorizeResolvedProviderRequest(refreshed))) {
+        return await authNeededFetchResponse(
+          options,
+          config.id,
+          request,
+          providerRequestAuthorizationDenied(connectionRef, refreshed.connectionId),
+          connectionRef,
+          suppressSetupAuthNeeded,
+        );
       }
       const retry = await baseFetch(
         fetchInputForAttempt(input),
@@ -3895,6 +3916,34 @@ function connectionBrokerFetch(
       return response;
     }
     return response;
+  };
+}
+
+async function authorizeResolvedProviderRequest(
+  result: Extract<ResolveConnectionCredentialResult, { status: "ok" }>,
+): Promise<boolean> {
+  try {
+    return result.authorizeProviderRequest ? await result.authorizeProviderRequest() : true;
+  } catch {
+    return false;
+  }
+}
+
+function providerRequestAuthorizationDenied(
+  connectionRef: McpServerConnectionRef,
+  connectionId: string,
+): Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }> {
+  return {
+    status: "auth_needed",
+    reason: "personal_authority_unavailable",
+    providerDomain: connectionRef.providerDomain,
+    ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
+    connectionId,
+    ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
+    ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+    ...(connectionRef.selectedResources
+      ? { selectedResources: connectionRef.selectedResources }
+      : {}),
   };
 }
 
@@ -4057,7 +4106,12 @@ function buildConnectorAttachmentAuthority(
       ) {
         throw new ConnectorAttachmentTransferError();
       }
-      return await materializeConnectorAttachments(input);
+      return await materializeConnectorAttachments({
+        ...input,
+        ...(revalidated.authorizeProviderRequest
+          ? { authorizeProviderRequest: revalidated.authorizeProviderRequest }
+          : {}),
+      });
     },
   };
 }

@@ -112,6 +112,7 @@ describe("connection authority contracts", () => {
       scope: "user",
       ownerSubjectId: "user:alice",
       ownerOrganizationMembershipId: id("9"),
+      ownerMembershipAuthorizationRevision: 11,
       authoritySource: "user_delegation",
       selectionSources: ["mcp:example"],
       userDelegation: delegation,
@@ -122,6 +123,44 @@ describe("connection authority contracts", () => {
       ownerSubjectId: "user:alice",
       userDelegation: delegation,
     });
+  });
+
+  test("models bounded legacy-user attribution without common authority provenance", () => {
+    const snapshot = ConnectionUseAuthoritySnapshot.parse({
+      organizationId: id("3"),
+      originWorkspaceId: id("4"),
+      targetWorkspaceId: id("4"),
+      targetSessionId: id("5"),
+      targetSessionVisibility: "user_private",
+      targetSessionAuthorityEpoch: 7,
+      acceptedWork: { kind: "turn", turnId: id("7") },
+      connectionId: id("8"),
+      connectionGeneration: 9,
+      connectionStatus: "active",
+      providerDomain: "api.example.com",
+      connectionKind: "oauth2",
+      scope: "legacy_user",
+      ownerSubjectId: "user:alice",
+      ownerOrganizationMembershipId: null,
+      ownerMembershipAuthorizationRevision: null,
+      authoritySource: "legacy_user_compatibility",
+      selectionSources: ["mcp:example"],
+      userDelegation: null,
+    });
+    expect(snapshot.scope).toBe("legacy_user");
+    expect(
+      ConnectionUseAttribution.parse({
+        organizationId: id("3"),
+        workspaceId: id("4"),
+        sessionId: id("5"),
+        connectionId: id("8"),
+        connectionGeneration: 9,
+        scope: "legacy_user",
+        ownerSubjectId: "user:alice",
+        authorityId: null,
+        grantId: null,
+      }).scope,
+    ).toBe("legacy_user");
   });
 
   test("keeps usage attribution credential and value free", () => {

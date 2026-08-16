@@ -1,14 +1,15 @@
 # Connection authority delegation
 
-Status: active authority foundation. Connection-specific wire and snapshot
+Status: active foundation plus bounded runtime activation. Connection-specific wire and snapshot
 contracts live in `@opengeni/contracts/connection-authority`, pure capture and
 revalidation logic lives in `@opengeni/core/connection-authority`, and migration
 `0256_connection_authority_delegation.sql` owns database authority binding, the
 owner-only grant lifecycle, generation fences, and the immediate pre-use
-resolver. The local credential broker consumes this authority when an
-accepted-work snapshot is supplied. Provider surfaces must not claim delegated
-execution until they persist and pass that snapshot at their acceptance
-boundary.
+resolver. Maintenance migration `0264_connection_authority_runtime_activation.sql`
+persists server-built accepted-turn snapshots and activates configured remote
+MCP, API-hosted OpenAPI/GraphQL, Gmail REST, host MCP credential, and Google
+Drive publication requests. Other provider surfaces must not claim delegated
+execution until their own acceptance and per-request adapters land.
 
 ## Authority model
 
@@ -29,7 +30,7 @@ boundary.
 
 ## Immutable accepted-work snapshot
 
-Every accepted turn or scheduled task that selects a connection freezes:
+Every activated accepted human/API turn that selects a connection freezes:
 
 - organization, origin workspace, target workspace, target session,
   visibility, and authority epoch;
@@ -44,8 +45,9 @@ metadata, quota, usage value, or arbitrary caller-supplied owner.
 
 ## Immediate pre-use fence
 
-When an activated provider surface supplies an accepted-work snapshot, the
-database resolver reads and validates the following in one authority boundary.
+The activated provider surface supplies only exact lookup identity; the database
+loads the persisted accepted-work snapshot and validates the following in one
+authority boundary.
 That surface must invoke it immediately before each provider request, including
 queued, resumed, scheduled, approval-resumed, and long-lived tool use:
 
@@ -75,21 +77,28 @@ integrity-checked access grant, filter the common lifecycle to
 `resource_kind=connection`, and never accept or disclose another owner. Cross-
 organization discovery is denied before lookup.
 
-## Rolling compatibility boundary
+## Maintenance activation and compatibility boundary
 
-Personal connection rows whose exact organization membership is available are
+Migration 0256 was rolling and inert. Migration 0264 is a drained maintenance
+cutover: it rejects pre-activation executable work that could otherwise carry a
+common user connection without a snapshot, and old API/worker images must not
+restart afterward. It checks for live `opengeni_app` sessions before and after
+exclusive writer locks and never backfills accepted authority from a mutable
+current grant. Personal connection rows whose exact organization membership is available are
 bound to a common user-resource authority. Pre-tenancy rows without that proof
 are retained as `legacy_user`: they remain subject-private through the existing
-row policy but receive no delegable authority and cannot enter the new pre-use
-resolver. This keeps the rolling migration non-destructive without guessing an
-organization owner. The later tenancy cutover may bind those rows only from
-authoritative membership evidence.
+row policy but receive no delegable authority and use only the exact bounded
+legacy compatibility lane. They are never silently upgraded from mutable
+authority state.
 
 For authorized personal use, the target workspace is checked independently from
 the connection's frozen origin workspace. The credential broker loads only the
 exact authorized connection generation from that origin, which lets one user's
 connection follow them across workspaces in the same organization without
-making it a workspace credential.
+making it a workspace credential. The canonical managed personal-workspace
+owner is admitted through the lifecycle-derived organization membership even
+though that workspace intentionally has no durable membership row; other users
+and administrators are denied.
 
 Provider-specific connector behavior, transfer of personal credentials/quota,
 variable sets, machines, and rigs are outside this design.

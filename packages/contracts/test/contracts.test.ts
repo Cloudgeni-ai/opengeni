@@ -652,6 +652,30 @@ describe("contracts", () => {
         initialMessage: "do not fabricate this turn",
       }).success,
     ).toBe(false);
+    expect(
+      CreateSessionRequest.safeParse({
+        startMode: "realtime",
+        connectionAuthorities: [
+          {
+            serverId: "example",
+            connectionId: "00000000-0000-4000-8000-000000000001",
+            userDelegation: {
+              authorityId: "00000000-0000-4000-8000-000000000002",
+              grantId: "00000000-0000-4000-8000-000000000003",
+              organizationId: "00000000-0000-4000-8000-000000000004",
+              workspaceId: "00000000-0000-4000-8000-000000000005",
+              sessionId: null,
+              action: "connection.use",
+              mode: "always",
+              context: "workspace_shared",
+              authorityEpoch: null,
+              authorityGeneration: 1,
+              grantGeneration: 1,
+            },
+          },
+        ],
+      }).success,
+    ).toBe(false);
   });
 
   test("accepts validated inline session skills", () => {

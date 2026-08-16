@@ -66,6 +66,38 @@ const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
 ] as const;
 const MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE =
   "ensure_managed_human_personal_workspace(uuid, text, uuid)";
+const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
+  "list_self_organization_memberships(text)",
+  "list_self_organization_invitations(text)",
+  "list_self_organization_invitations(text, uuid, integer)",
+  "get_self_organization_invitation(text, uuid)",
+  "list_organization_invitations(uuid, text, uuid, integer)",
+  "list_organization_members(uuid, text)",
+  "organization_membership_command(jsonb)",
+  "prepare_organization_membership_protocol_settlements(jsonb)",
+  "assert_active_managed_human_organization_membership(uuid, text)",
+  "get_organization_retention_policy(uuid, text)",
+  "preview_organization_retention_deletions(uuid, integer)",
+  "claim_organization_retention_deletion(uuid, uuid, uuid[])",
+  "list_organization_retention_deletion_objects(uuid, uuid, uuid, text, integer)",
+  "record_organization_retention_object_deleted(uuid, uuid, uuid, text, text, text, text)",
+  "fail_organization_retention_deletion(uuid, uuid, uuid, text)",
+  "finalize_organization_retention_deletion(uuid, uuid, uuid, text)",
+  "complete_organization_retention_deletion(uuid, uuid, uuid, text)",
+] as const;
+const ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES = [
+  "organization_membership_invitations",
+  "organization_membership_lifecycle_events",
+  "organization_membership_operation_receipts",
+  "organization_memberships",
+  "organization_user_resource_authorities",
+  "organization_user_resource_grants",
+  "organization_user_retention_deletion_events",
+  "organization_user_retention_deletions",
+  "organization_user_retention_object_deletion_receipts",
+  "organization_user_retention_object_obligations",
+  "organization_user_retention_policies",
+] as const;
 const PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE =
   "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)";
 const PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES = [
@@ -101,6 +133,8 @@ const CONNECTION_AUTHORITY_ROUTINES = [
   "list_self_connection_authorities(uuid)",
   "issue_self_connection_use_grant(uuid, uuid, uuid, text, text, uuid, boolean)",
   "revoke_self_connection_use_grant(uuid, uuid)",
+  "resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb)",
+  "resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text)",
   "resolve_connection_use_authority(uuid, uuid, uuid, jsonb)",
 ] as const;
 const SCHEDULED_PERSONAL_RESOURCE_ROUTINES = [
@@ -248,6 +282,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   GOOGLE_DRIVE_FILE_AUTHORIZATION_ROUTINE,
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
+  ...ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES,
   PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
   PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE,
   ...VARIABLE_SET_AUTHORITY_ROUTINES,
@@ -329,6 +364,7 @@ export const FORCE_RLS_TABLES = [
   "computer_session_associations",
   "computer_sessions",
   "connection_disconnect_operations",
+  "connection_use_audit_facts",
   "connection_use_once_consumption_receipts",
   "connections",
   "connector_action_policies",
@@ -413,9 +449,16 @@ export const FORCE_RLS_TABLES = [
   "model_call_facts",
   "network_routes",
   "new_session_drafts",
+  "organization_membership_invitations",
+  "organization_membership_lifecycle_events",
+  "organization_membership_operation_receipts",
   "organization_memberships",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
+  "organization_user_retention_deletion_events",
+  "organization_user_retention_deletions",
+  "organization_user_retention_object_deletion_receipts",
+  "organization_user_retention_object_obligations",
   "organization_user_retention_policies",
   "pack_installation_components",
   "pack_installations",
@@ -505,6 +548,7 @@ export const FORCE_RLS_TABLES = [
   "transcription_recording_objects",
   "transcription_recording_segments",
   "transcription_recordings",
+  "turn_connection_authority_snapshots",
   "usage_events",
   "video_generation_operations",
   "video_generation_references",
@@ -821,6 +865,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "company_brain_context_selection_receipts",
   "company_brain_preference_proposal_receipts",
   "company_brain_turn_context_snapshots",
+  "connection_use_audit_facts",
   "connection_use_once_consumption_receipts",
   "editable_artifact_live_tickets",
   "editable_artifact_scope_authorization_heads",
@@ -830,9 +875,16 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "host_export_cursor_state",
   "host_export_dead_letters",
   "host_export_outbox",
+  "organization_membership_invitations",
+  "organization_membership_lifecycle_events",
+  "organization_membership_operation_receipts",
   "organization_memberships",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
+  "organization_user_retention_deletion_events",
+  "organization_user_retention_deletions",
+  "organization_user_retention_object_deletion_receipts",
+  "organization_user_retention_object_obligations",
   "organization_user_retention_policies",
   "personal_document_once_consumption_receipts",
   "personal_resource_once_consumption_receipts",
@@ -852,6 +904,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "task_note_replacement_receipts",
   "task_note_write_capabilities",
   "task_notes",
+  "turn_connection_authority_snapshots",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
 ] as const;
@@ -1267,13 +1320,15 @@ export async function inspectRuntimeDatabasePosture(
             )
           order by p.proname, pg_catalog.oidvectortypes(p.proargtypes)
         `),
-      ).map((row) => ({
-        name: row.name,
-        owner: row.owner,
-        execute: row.can_execute,
-        publicExecute: row.public_execute,
-        securityDefiner: row.security_definer,
-      }));
+      )
+        .map((row) => ({
+          name: row.name,
+          owner: row.owner,
+          execute: row.can_execute,
+          publicExecute: row.public_execute,
+          securityDefiner: row.security_definer,
+        }))
+        .sort((left, right) => left.name.localeCompare(right.name));
 
       const privateRoutines = resultRows<{
         name: string;
@@ -1580,6 +1635,31 @@ export function evaluateRuntimeDatabasePosture(
         );
       } else {
         const authorityTables = GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
+      }
+    } else if (
+      (ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES as readonly string[]).includes(routine.name)
+    ) {
+      const missingAuthorityTables = ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES.map(
           (tableName) => tableByName.get(tableName)!,
         );
         const authorityOwners = new Set(authorityTables.map((table) => table.owner));

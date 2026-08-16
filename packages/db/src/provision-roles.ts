@@ -482,11 +482,33 @@ async function grantAppRoleIfSchemaExists(
   const runtimeReadUpdateTables = `ARRAY[${RUNTIME_READ_UPDATE_TABLES.map(literal).join(", ")}]`;
   const runtimeReadInsertTables = `ARRAY[${RUNTIME_READ_INSERT_TABLES.map(literal).join(", ")}]`;
   const runtimeReadInsertUpdateTables = `ARRAY[${RUNTIME_READ_INSERT_UPDATE_TABLES.map(literal).join(", ")}]`;
+  const organizationMembershipLifecycleRoutines = `ARRAY[${[
+    "list_self_organization_memberships(text)",
+    "list_self_organization_invitations(text)",
+    "list_self_organization_invitations(text,uuid,integer)",
+    "get_self_organization_invitation(text,uuid)",
+    "list_organization_members(uuid,text)",
+    "list_organization_invitations(uuid,text,uuid,integer)",
+    "organization_membership_command(jsonb)",
+    "prepare_organization_membership_protocol_settlements(jsonb)",
+    "assert_active_managed_human_organization_membership(uuid,text)",
+    "get_organization_retention_policy(uuid,text)",
+    "preview_organization_retention_deletions(uuid,integer)",
+    "claim_organization_retention_deletion(uuid,uuid,uuid[])",
+    "list_organization_retention_deletion_objects(uuid,uuid,uuid,text,integer)",
+    "record_organization_retention_object_deleted(uuid,uuid,uuid,text,text,text,text)",
+    "fail_organization_retention_deletion(uuid,uuid,uuid,text)",
+    "finalize_organization_retention_deletion(uuid,uuid,uuid,text)",
+    "complete_organization_retention_deletion(uuid,uuid,uuid,text)",
+  ]
+    .map(literal)
+    .join(", ")}]`;
   await sql.unsafe(`
 DO $$
 DECLARE
   owner_role text := current_user;
   runtime_table text;
+  routine_signature text;
 BEGIN
   EXECUTE format('REVOKE CREATE ON DATABASE %I FROM %I', current_database(), ${literal(role)});
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${literal(schema)}) THEN
@@ -881,6 +903,18 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    FOREACH routine_signature IN ARRAY ${organizationMembershipLifecycleRoutines} LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC',
+          ${literal(schema)}, routine_signature
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.%s TO %I',
+          ${literal(schema)}, routine_signature, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
     IF to_regprocedure(format('%I.ensure_canonical_human_identity(text,text)', ${literal(schema)})) IS NOT NULL THEN
       EXECUTE format(
         'REVOKE ALL ON FUNCTION %I.ensure_canonical_human_identity(text, text) FROM PUBLIC',
@@ -1100,6 +1134,14 @@ BEGIN
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.revoke_self_connection_use_grant(uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.resolve_connection_use_authority(uuid, uuid, uuid, jsonb) FROM PUBLIC', ${literal(schema)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.resolve_connection_use_authority(uuid, uuid, uuid, jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      IF to_regprocedure(format('%I.resolve_personal_connection_authority_selection(uuid,uuid,text,uuid,jsonb)', ${literal(schema)})) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb) FROM PUBLIC', ${literal(schema)});
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      END IF;
+      IF to_regprocedure(format('%I.resolve_accepted_connection_use(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,uuid,text,text,text,text)', ${literal(schema)})) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text) FROM PUBLIC', ${literal(schema)});
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text) TO %I', ${literal(schema)}, ${literal(role)});
+      END IF;
     END IF;
     IF to_regprocedure(
       format('%I.create_personal_document_authority(uuid,uuid,uuid)', ${literal(schema)})

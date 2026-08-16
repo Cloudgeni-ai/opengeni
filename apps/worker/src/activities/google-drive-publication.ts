@@ -44,9 +44,12 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const FIRST_PARTY_MCP_SUBJECT_ID = "worker:first-party-mcp";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
+class GoogleDrivePublicationAuthorizationError extends Error {}
+
 export type GoogleDrivePublicationTarget = Readonly<{
   ownerSubjectId: string;
   connectionId: string;
+  originWorkspaceId: string;
   destination: GoogleDriveOutputDestination;
   credentialScope: typeof GOOGLE_DRIVE_FILE_SCOPE | typeof GOOGLE_DRIVE_FULL_SCOPE;
 }>;
@@ -87,16 +90,22 @@ export async function resolveGoogleDrivePublicationTarget(
   );
   if (frozen.length !== 1) return null;
   const delegation = frozen[0]!;
-  if (!(await ports.getMembership(db, delegation.ownerSubjectId, workspaceId))) return null;
+  const activated = delegation.userDelegation !== undefined;
+  if (!activated && !(await ports.getMembership(db, delegation.ownerSubjectId, workspaceId))) {
+    return null;
+  }
+  const originWorkspaceId = activated ? delegation.originWorkspaceId : workspaceId;
+  if (!originWorkspaceId) return null;
   const connection = await ports.getConnection(
     db,
-    workspaceId,
+    originWorkspaceId,
     delegation.connectionId,
     delegation.ownerSubjectId,
   );
   if (
     !connection ||
     connection.id !== delegation.connectionId ||
+    connection.workspaceId !== originWorkspaceId ||
     connection.subjectId !== delegation.ownerSubjectId ||
     connection.providerDomain.toLowerCase() !== GOOGLE_DRIVE_PROVIDER_DOMAIN ||
     connection.kind !== "oauth2" ||
@@ -117,6 +126,7 @@ export async function resolveGoogleDrivePublicationTarget(
   return Object.freeze({
     ownerSubjectId: delegation.ownerSubjectId,
     connectionId: connection.id,
+    originWorkspaceId,
     destination: metadata.data.outputDestination,
     credentialScope: connection.grantedScopes.includes(GOOGLE_DRIVE_FILE_SCOPE)
       ? GOOGLE_DRIVE_FILE_SCOPE
@@ -372,7 +382,7 @@ export async function executeGoogleDrivePublication(
   const request = GoogleDrivePublicationToolInput.parse(input.request);
   const connection = await ports.getConnection(
     input.db,
-    input.identity.workspaceId,
+    input.target.originWorkspaceId,
     input.target.connectionId,
     input.subjectId,
   );
@@ -426,42 +436,70 @@ export async function executeGoogleDrivePublication(
   ) {
     throw new Error("Editable artifact export bytes failed verification");
   }
-  const credential = await input.resolveCredential({
-    workspaceId: input.identity.workspaceId,
-    subjectId: input.subjectId,
-    serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
-    toolName: GOOGLE_DRIVE_PUBLICATION_TOOL_NAME,
-    connectionRef: {
-      providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
-      connectionId: input.target.connectionId,
-      kind: "oauth2",
-      subjectScope: "subject",
-      scopes: [input.target.credentialScope],
-    },
-    destinationUrl: `${DRIVE_UPLOAD_API}/files`,
-    forceRefresh: false,
-  });
-  if (credential.status !== "ok" || credential.connectionId !== input.target.connectionId) {
-    throw new Error("Google Drive publication credential is unavailable");
-  }
-  const resolvedConnection = await ports.getConnection(
-    input.db,
-    input.identity.workspaceId,
-    input.target.connectionId,
-    input.subjectId,
-  );
-  if (!resolvedConnection) {
-    throw new Error("Google Drive publication authority changed; retry on a new turn");
-  }
-  assertPublicationConnection(input, resolvedConnection);
+  const authorizedFetch: FetchLike = async (url, init) => {
+    const destinationUrl = url instanceof Request ? url.url : url.toString();
+    const credential = await input.resolveCredential({
+      workspaceId: input.identity.workspaceId,
+      subjectId: input.subjectId,
+      serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+      toolName: GOOGLE_DRIVE_PUBLICATION_TOOL_NAME,
+      connectionRef: {
+        providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
+        connectionId: input.target.connectionId,
+        kind: "oauth2",
+        subjectScope: "subject",
+        scopes: [input.target.credentialScope],
+      },
+      destinationUrl,
+      forceRefresh: false,
+    });
+    if (credential.status !== "ok" || credential.connectionId !== input.target.connectionId) {
+      throw new GoogleDrivePublicationAuthorizationError(
+        "Google Drive publication credential is unavailable",
+      );
+    }
+    const resolvedConnection = await ports.getConnection(
+      input.db,
+      input.target.originWorkspaceId,
+      input.target.connectionId,
+      input.subjectId,
+    );
+    if (!resolvedConnection) {
+      throw new GoogleDrivePublicationAuthorizationError(
+        "Google Drive publication authority changed; retry on a new turn",
+      );
+    }
+    try {
+      assertPublicationConnection(input, resolvedConnection);
+    } catch (error) {
+      throw new GoogleDrivePublicationAuthorizationError(
+        error instanceof Error ? error.message : "Google Drive publication authority changed",
+      );
+    }
+    if (credential.authorizeProviderRequest) {
+      let authorized = false;
+      try {
+        authorized = await credential.authorizeProviderRequest();
+      } catch {
+        authorized = false;
+      }
+      if (!authorized) {
+        throw new GoogleDrivePublicationAuthorizationError(
+          "Google Drive publication authority changed; retry on a new turn",
+        );
+      }
+    }
+    const headers = new Headers(credential.headers);
+    new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
+    return await ports.fetch(url, { ...init, headers });
+  };
   return await publishToGoogleDrive({
     workspaceId: input.identity.workspaceId,
     connectionId: input.target.connectionId,
     destination: input.target.destination,
     request,
     bytes,
-    headers: credential.headers,
-    fetchImpl: ports.fetch,
+    fetchImpl: authorizedFetch,
     ...(input.signal ? { signal: input.signal } : {}),
   });
 }
@@ -477,6 +515,7 @@ function assertPublicationConnection(
   if (
     input.subjectId !== input.target.ownerSubjectId ||
     connection.id !== input.target.connectionId ||
+    connection.workspaceId !== input.target.originWorkspaceId ||
     connection.subjectId !== input.target.ownerSubjectId ||
     connection.providerDomain.toLowerCase() !== GOOGLE_DRIVE_PROVIDER_DOMAIN ||
     connection.kind !== "oauth2" ||
@@ -585,7 +624,6 @@ async function publishToGoogleDrive(input: {
   destination: GoogleDriveOutputDestination;
   request: GoogleDrivePublicationToolInputValue;
   bytes: Uint8Array;
-  headers: Record<string, string>;
   fetchImpl: FetchLike;
   signal?: AbortSignal;
 }): Promise<GoogleDrivePublicationReceiptValue> {
@@ -626,7 +664,6 @@ async function publishToGoogleDrive(input: {
     await requestJson(input.fetchImpl, url, {
       method: "POST",
       headers: {
-        ...input.headers,
         accept: "application/json",
         "content-type": `multipart/related; boundary=${boundary}`,
         "content-length": String(body.byteLength),
@@ -645,7 +682,7 @@ async function verifyDestinationAtWriteTime(
   const url = new URL(`${DRIVE_API}/files/${encodeURIComponent(input.destination.folderId)}`);
   url.searchParams.set("supportsAllDrives", "true");
   url.searchParams.set("fields", "id,name,mimeType,driveId,trashed,capabilities(canAddChildren)");
-  const folder = record(await requestJson(input.fetchImpl, url, { headers: input.headers }));
+  const folder = record(await requestJson(input.fetchImpl, url, {}));
   const capabilities = record(folder.capabilities);
   if (
     folder.id !== input.destination.folderId ||
@@ -681,7 +718,7 @@ async function findExistingPublication(
     "fields",
     "files(id,name,mimeType,parents,driveId,webViewLink,appProperties,trashed)",
   );
-  const payload = record(await requestJson(input.fetchImpl, url, { headers: input.headers }));
+  const payload = record(await requestJson(input.fetchImpl, url, {}));
   const files = Array.isArray(payload.files) ? payload.files.map(parseDriveFile) : [];
   if (files.length > 1) throw new Error("Google Drive publication idempotency marker is ambiguous");
   const existing = files[0] ?? null;
@@ -819,8 +856,9 @@ async function requestJson(fetchImpl: FetchLike, url: URL, init: RequestInit): P
       redirect: "error",
       signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
-  } catch {
-    throw new Error("Google Drive publication transport failed");
+  } catch (error) {
+    if (error instanceof GoogleDrivePublicationAuthorizationError) throw error;
+    throw new Error("Google Drive publication transport failed", { cause: error });
   }
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);

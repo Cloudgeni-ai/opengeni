@@ -172,7 +172,11 @@ export type WorkspaceRealtimeModelCatalogResponse = {
   models: WorkspaceRealtimeModelCatalogItem[];
 };
 export type SessionRealtimeState = "active" | "ended";
-export type SessionRealtimeEndReason = "user_stop" | "browser_unload" | "lease_expired";
+export type SessionRealtimeEndReason =
+  | "user_stop"
+  | "browser_unload"
+  | "lease_expired"
+  | "authority_revoked";
 
 export type SessionRealtimeMode = {
   id: string;
@@ -3287,6 +3291,73 @@ export type ManagedOrganizationMembership = {
 
 export type ListManagedOrganizationMembershipsResponse = {
   memberships: ManagedOrganizationMembership[];
+};
+
+export type OrganizationMembershipRole = "owner" | "admin" | "member";
+export type OrganizationInvitation = {
+  id: string;
+  organizationId: string;
+  targetEmail: string;
+  role: OrganizationMembershipRole;
+  status: "pending" | "accepted" | "revoked" | "expired";
+  revision: number;
+  expiresAt: string;
+  acceptedMembershipId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+export type OrganizationMember = {
+  id: string;
+  organizationId: string;
+  subjectId: string;
+  role: OrganizationMembershipRole;
+  status: "provisioning" | "active" | "suspended" | "revoked";
+  authorizationRevision: number;
+  personalWorkspaceId: string | null;
+  revokedAt: string | null;
+  personalRetentionUntil: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+export type OrganizationRetentionPolicy = {
+  organizationId: string;
+  mode: "retain" | "delete_after";
+  retentionDays: number | null;
+  version: number;
+  updatedAt: string;
+};
+export type CreateOrganizationInvitationRequest = {
+  email: string;
+  role?: OrganizationMembershipRole;
+  expiresAt: string;
+  operationId: string;
+};
+export type AcceptOrganizationInvitationRequest = {
+  expectedRevision: number;
+  operationId: string;
+};
+export type RevokeOrganizationInvitationRequest = AcceptOrganizationInvitationRequest;
+export type UpdateOrganizationMemberRequest = {
+  kind: "change_role" | "suspend" | "reactivate" | "offboard";
+  role?: OrganizationMembershipRole;
+  expectedAuthorizationRevision: number;
+  operationId: string;
+  reason?: string;
+};
+export type UpdateOrganizationRetentionPolicyRequest = {
+  mode: "retain" | "delete_after";
+  retentionDays: number | null;
+  expectedVersion: number;
+  operationId: string;
+};
+export type ListOrganizationInvitationsPageResponse = {
+  invitations: OrganizationInvitation[];
+  nextCursor: string | null;
+};
+export type ListOrganizationMembersResponse = { members: OrganizationMember[] };
+export type AcceptOrganizationInvitationResponse = {
+  invitation: OrganizationInvitation;
+  membership: OrganizationMember;
 };
 
 export type Workspace = {
