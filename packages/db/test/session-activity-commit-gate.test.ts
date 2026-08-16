@@ -19,6 +19,7 @@ import {
   withWorkspaceSessionActivityRls,
   type Database,
 } from "../src/index";
+import { withRestoredSessionActivityRlsContext } from "../src/database";
 import * as schema from "../src/schema";
 
 let shared: SharedTestDatabase;
@@ -404,6 +405,50 @@ describe("session activity commit gate", () => {
     expect(after).toBe(before + 1n);
     expect(committed).toMatchObject({ status: "running", pendingXid: null });
     expect(BigInt(committed.revision)).toBe(after);
+  });
+
+  test("sequential restored scopes each finalize inside one outer transaction", async () => {
+    const firstGrant = await createWorkspace();
+    const secondGrant = await createWorkspace();
+    const firstSession = await createTestSession(firstGrant, "first restored scope");
+    const secondSession = await createTestSession(secondGrant, "second restored scope");
+    const firstBefore = await readCounter(firstGrant.workspaceId!);
+    const secondBefore = await readCounter(secondGrant.workspaceId!);
+
+    await client.db.transaction(async (tx) => {
+      const transaction = tx as unknown as Database;
+      await withRestoredSessionActivityRlsContext(
+        transaction,
+        { accountId: firstGrant.accountId, workspaceId: firstGrant.workspaceId! },
+        async (db) => {
+          await db
+            .update(schema.sessions)
+            .set({ status: "running", updatedAt: new Date() })
+            .where(eq(schema.sessions.id, firstSession.id));
+        },
+      );
+      await withRestoredSessionActivityRlsContext(
+        transaction,
+        { accountId: secondGrant.accountId, workspaceId: secondGrant.workspaceId! },
+        async (db) => {
+          await db
+            .update(schema.sessions)
+            .set({ status: "running", updatedAt: new Date() })
+            .where(eq(schema.sessions.id, secondSession.id));
+        },
+      );
+    });
+
+    expect(await readCounter(firstGrant.workspaceId!)).toBe(firstBefore + 1n);
+    expect(await readCounter(secondGrant.workspaceId!)).toBe(secondBefore + 1n);
+    expect(await readSessionState(firstGrant.workspaceId!, firstSession.id)).toMatchObject({
+      status: "running",
+      pendingXid: null,
+    });
+    expect(await readSessionState(secondGrant.workspaceId!, secondSession.id)).toMatchObject({
+      status: "running",
+      pendingXid: null,
+    });
   });
 
   test("a gate cannot begin halfway through an unrelated outer transaction", async () => {
