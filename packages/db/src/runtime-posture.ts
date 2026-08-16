@@ -177,6 +177,30 @@ const COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE =
   "company_brain_context_get_or_create_selection(uuid, uuid, uuid, uuid, uuid, integer)";
 const COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE =
   "company_brain_inspect_context_receipts(uuid, uuid, text, uuid, timestamp with time zone, uuid, integer)";
+const GOVERNED_LEARNING_EVALUATION_ROUTINE =
+  "evaluate_governed_learning_proposal(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, uuid)";
+const GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES = [
+  "document_chunks",
+  "documents",
+  "governed_learning_decision_receipts",
+  "knowledge_change_proposals",
+  "knowledge_claim_evidence",
+  "knowledge_claim_relations",
+  "knowledge_claim_reviews",
+  "knowledge_claims",
+  "knowledge_document_versions",
+  "knowledge_providers",
+  "knowledge_source_acl_versions",
+  "knowledge_source_objects",
+  "knowledge_sources",
+  "session_attempt_interruptions",
+  "session_turn_attempts",
+  "session_turns",
+  "sessions",
+  "task_notes",
+  "workspace_learning_policy_snapshots",
+  "workspaces",
+] as const;
 const TRANSITION_SESSION_VISIBILITY_ROUTINE =
   "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)";
 const FORK_SESSION_CONTENT_ROUTINE =
@@ -215,6 +239,7 @@ const XAI_AUTHORITY_TABLES = [
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE,
   COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
+  GOVERNED_LEARNING_EVALUATION_ROUTINE,
   FORK_SESSION_CONTENT_ROUTINE,
   XAI_AUTHORITY_LIVE_ROUTINE,
   XAI_CREATE_CREDENTIAL_ROUTINE,
@@ -338,6 +363,7 @@ export const FORCE_RLS_TABLES = [
   "github_installations",
   "google_drive_object_acl_evidence",
   "google_drive_object_acl_principals",
+  "governed_learning_decision_receipts",
   "host_export_config",
   "host_export_consumers",
   "host_export_cursor_state",
@@ -798,6 +824,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "connection_use_once_consumption_receipts",
   "editable_artifact_live_tickets",
   "editable_artifact_scope_authorization_heads",
+  "governed_learning_decision_receipts",
   "host_export_config",
   "host_export_consumers",
   "host_export_cursor_state",
@@ -1539,6 +1566,32 @@ export function evaluateRuntimeDatabasePosture(
         violations.push(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0].owner}`,
         );
+      }
+    } else if (routine.name === GOVERNED_LEARNING_EVALUATION_ROUTINE) {
+      if (!tableByName.has("governed_learning_decision_receipts")) {
+        continue;
+      }
+      const missingAuthorityTables = GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
       }
     } else if (routine.name === PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE) {
       if (!tableByName.has("company_brain_preference_proposal_receipts")) {

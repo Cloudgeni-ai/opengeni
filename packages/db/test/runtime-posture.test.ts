@@ -320,14 +320,14 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 247],
+            [FORCE_RLS_TABLES, 248],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 137],
             [RUNTIME_READ_ONLY_TABLES, 17],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 29],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 29],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 30],
             [RUNTIME_DML_TABLES, 229],
           ] as const)
         : ([
@@ -352,7 +352,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 258 : 201;
+      const tableCount = hasCurrentMainActivityLedger ? 259 : 201;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
@@ -615,6 +615,15 @@ describe("runtime database posture evaluator", () => {
     expect(RUNTIME_TABLE_PRIVILEGES.task_note_replacement_receipts).toBeUndefined();
     expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
       "replace_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, integer, text, text, integer, text)",
+    );
+  });
+
+  test("classifies governed-learning receipts as FORCE-RLS capability-only state", () => {
+    expect(FORCE_RLS_TABLES).toContain("governed_learning_decision_receipts");
+    expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("governed_learning_decision_receipts");
+    expect(RUNTIME_TABLE_PRIVILEGES.governed_learning_decision_receipts).toBeUndefined();
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
+      "evaluate_governed_learning_proposal(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, uuid)",
     );
   });
 
