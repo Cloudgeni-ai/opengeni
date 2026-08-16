@@ -926,6 +926,7 @@ export type {
   // Self-hosted enrollment UX (design 11): click-Grant approve-page lookup/deny +
   // headless enroll-token mint/exchange.
   EnrollmentOs,
+  ResourceAuthorityScope,
   DeviceEnrollmentLookupRequest,
   DeviceEnrollmentLookupResponse,
   DeviceEnrollmentLookupMachine,

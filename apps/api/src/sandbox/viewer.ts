@@ -667,6 +667,7 @@ export type DesktopStreamMint = {
 export type MintDesktopStreamInput = {
   accountId: string;
   workspaceId: string;
+  resourceSubjectId?: string;
   session: Session;
   /** The viewer holder id the scoped token is minted for. */
   viewerId: string;
@@ -733,14 +734,21 @@ export async function mintDesktopStream(
   // route to the relay (NOT the Modal group-box path — it would resume the wrong
   // box and return a Modal URL). No Modal lease required.
   if (session.activeSandboxId) {
-    const active = await getSandbox(db, workspaceId, session.activeSandboxId);
+    const active = await getSandbox(
+      db,
+      input.resourceSubjectId
+        ? { accountId, workspaceId, subjectId: input.resourceSubjectId }
+        : workspaceId,
+      session.activeSandboxId,
+    );
     if (active?.kind === "selfhosted") {
       const m = await tryMintActiveSelfhostedStream(
         services,
         {
           session,
           viewerId: input.viewerId,
-          workspaceId,
+          workspaceId: active.workspaceId,
+          ...(input.resourceSubjectId ? { resourceSubjectId: input.resourceSubjectId } : {}),
           port: DESKTOP_STREAM_PORT,
           sandbox: active,
         },
@@ -924,6 +932,7 @@ type SelfhostedStreamMint = Omit<TerminalStreamMint, "transport">;
 export type MintTerminalStreamInput = {
   accountId: string;
   workspaceId: string;
+  resourceSubjectId?: string;
   session: Session;
   /** The viewer holder / principal id the scoped token is minted for. */
   viewerId: string;
@@ -976,14 +985,21 @@ export async function mintTerminalStream(
   // route to the relay. NEVER fall through to the Modal group-box path (it would
   // resume the wrong box / return a Modal URL).
   if (session.activeSandboxId) {
-    const active = await getSandbox(db, workspaceId, session.activeSandboxId);
+    const active = await getSandbox(
+      db,
+      input.resourceSubjectId
+        ? { accountId, workspaceId, subjectId: input.resourceSubjectId }
+        : workspaceId,
+      session.activeSandboxId,
+    );
     if (active?.kind === "selfhosted") {
       const stream = await tryMintActiveSelfhostedStream(
         services,
         {
           session,
           viewerId: input.viewerId,
-          workspaceId,
+          workspaceId: active.workspaceId,
+          ...(input.resourceSubjectId ? { resourceSubjectId: input.resourceSubjectId } : {}),
           port: TERMINAL_STREAM_PORT,
           sandbox: active,
         },
@@ -1131,6 +1147,7 @@ async function tryMintActiveSelfhostedStream(
     session: Session;
     viewerId: string;
     workspaceId: string;
+    resourceSubjectId?: string;
     port: number;
     sandbox: SandboxRecord;
   },
@@ -1156,7 +1173,13 @@ async function tryMintActiveSelfhostedStream(
     } else {
       const enrollment = await getLiveEnrollmentConnection(
         services.db,
-        workspaceId,
+        input.resourceSubjectId
+          ? {
+              accountId: input.session.accountId,
+              workspaceId: input.session.workspaceId,
+              subjectId: input.resourceSubjectId,
+            }
+          : workspaceId,
         sandbox.enrollmentId,
       );
       if (!enrollment?.connectionInstanceId) return null;

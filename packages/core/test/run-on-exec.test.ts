@@ -169,6 +169,41 @@ async function run(
 }
 
 describe("run_on Connected Machine exec receipts", () => {
+  test("a grant revoked after snapshot fences exec/read/write at the last boundary with zero dispatch", async () => {
+    for (const op of [
+      { kind: "exec", cmd: "true" },
+      { kind: "read", path: "/workspace/input.txt" },
+      { kind: "write", path: "/workspace/output.txt", content: "blocked" },
+    ] satisfies RunOnOp[]) {
+      const runner = new InMemoryMachineRunner({
+        true: { durationMs: 1, exitCode: 0, sideEffect: true },
+      });
+      let gateReads = 0;
+      const result = await executeRunOnSelfhostedMachine(
+        {
+          workspaceId: WORKSPACE,
+          agentId: AGENT,
+          connectionInstanceId: "snapshotted-before-revoke",
+          controlRpc: runner,
+          relay: { host: "relay.test", tls: true },
+          controlTimeoutMs: 30_000,
+          execTimeoutMs: 120_000,
+          resolveOperationAdmission: async () => {
+            gateReads += 1;
+            return null;
+          },
+        },
+        TARGET,
+        op,
+      );
+      expect(result.ok).toBe(false);
+      expect(gateReads).toBe(1);
+      expect(runner.requests).toHaveLength(0);
+      expect(runner.executions).toBe(0);
+      expect(runner.completedSideEffects).toBe(0);
+    }
+  });
+
   test("threads the enrollment command policy and fails closed without support", async () => {
     const supported = new InMemoryMachineRunner({ true: { durationMs: 1, exitCode: 0 } });
     const base = {

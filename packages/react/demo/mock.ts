@@ -1214,6 +1214,9 @@ export class MockOpenGeniClient implements SessionClientLike {
       id: rigId,
       accountId: ACCOUNT_ID,
       workspaceId: WORKSPACE_ID,
+      scope: "workspace",
+      generation: 1,
+      status: "active",
       name: request.name,
       description: request.description ?? null,
       createdBy: "user:demo",
@@ -3184,6 +3187,8 @@ export class MockOpenGeniClient implements SessionClientLike {
         {
           sandboxId: "demo-sandbox",
           enrollmentId: null,
+          scope: "workspace",
+          generation: 1,
           name: "Cloud sandbox",
           kind: "modal",
           state: "online",

@@ -202,6 +202,7 @@ import type {
   CreateWorkspaceRequest,
   // Enrollment UX (design 11): the click-Grant approve-page lookup/deny + headless
   // enroll-token mint.
+  DeviceEnrollmentApproveRequest,
   DeviceEnrollmentApproveResponse,
   DeviceEnrollmentDenyResponse,
   DeviceEnrollmentLookupResponse,
@@ -1297,7 +1298,7 @@ export class OpenGeniClient {
    */
   async approveDeviceEnrollment(
     workspaceId: string,
-    request: { userCode: string; allowScreenControl?: boolean },
+    request: DeviceEnrollmentApproveRequest,
   ): Promise<DeviceEnrollmentApproveResponse> {
     return await this.requestJson<DeviceEnrollmentApproveResponse>(
       "POST",
@@ -1305,6 +1306,7 @@ export class OpenGeniClient {
       {
         userCode: request.userCode,
         allowScreenControl: request.allowScreenControl ?? false,
+        ...(request.scope ? { scope: request.scope } : {}),
       },
     );
   }

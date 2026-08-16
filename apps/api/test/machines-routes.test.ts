@@ -292,6 +292,47 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
+async function seedCrossWorkspaceScopedMachine(scope: "organization" | "user") {
+  const { accountId, workspaceId: originWorkspaceId } = await freshWorkspace();
+  const [target] = await admin<Array<{ id: string }>>`
+    insert into workspaces (account_id, name) values (${accountId}, ${`${scope} target`}) returning id
+  `;
+  const targetWorkspaceId = target!.id;
+  await admin`
+    insert into workspace_inference_controls (workspace_id, account_id)
+    values (${targetWorkspaceId}, ${accountId})
+  `;
+  await admin`
+    insert into organization_memberships (
+      account_id, subject_id, status, personal_workspace_id, authorization_revision
+    ) values (${accountId}, 'user-m10', 'active', ${originWorkspaceId}, 1)
+  `;
+  await admin`
+    insert into workspace_memberships (account_id, workspace_id, subject_id) values
+      (${accountId}, ${originWorkspaceId}, 'user-m10'),
+      (${accountId}, ${targetWorkspaceId}, 'user-m10')
+  `;
+  const machine = await admin.begin(async (tx) => {
+    await tx`select
+      set_config('opengeni.account_id', ${accountId}, true),
+      set_config('opengeni.workspace_id', ${originWorkspaceId}, true),
+      set_config('opengeni.subject_id', 'user-m10', true),
+      set_config('opengeni.initiating_human_subject_id', 'user-m10', true)`;
+    const [row] = await tx<Array<{ enrollmentId: string }>>`
+      select enrollment_id as "enrollmentId"
+      from finalize_scoped_enrollment(
+        ${accountId}::uuid, ${originWorkspaceId}::uuid, ${scope},
+        ${`ed25519:${crypto.randomUUID()}`}, true, true, 'linux', 'x86_64',
+        ${`${scope} machine`}, ${scope === "organization"}
+      )
+    `;
+    return row!;
+  });
+  await admin`update enrollments set last_seen_at = now() where id = ${machine.enrollmentId}`;
+  await claimConnection(originWorkspaceId, machine.enrollmentId);
+  return { accountId, originWorkspaceId, targetWorkspaceId, enrollmentId: machine.enrollmentId };
+}
+
 async function bearer(
   accountId: string,
   workspaceId: string,
@@ -677,6 +718,48 @@ describe("M10 GET /machines/:enrollmentId/metrics/series", () => {
 });
 
 describe("Connected Machine command policy", () => {
+  test("organization policy mutation requires account admin while personal ownership does not", async () => {
+    if (!available) return;
+    const policy = {
+      memoryMaxBytes: 536_870_912,
+      memoryHighBytes: null,
+      cpuMaxMillicores: 1_000,
+      expectedRevision: 0,
+    };
+    const patchPolicy = async (
+      machine: Awaited<ReturnType<typeof seedCrossWorkspaceScopedMachine>>,
+      permissions: Permission[],
+    ) =>
+      await appFor(new MemoryEventBus()).request(
+        `/v1/workspaces/${machine.targetWorkspaceId}/machines/${machine.enrollmentId}/operation-policy`,
+        {
+          method: "PATCH",
+          headers: {
+            authorization: `Bearer ${await bearer(
+              machine.accountId,
+              machine.targetWorkspaceId,
+              permissions,
+            )}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(policy),
+        },
+      );
+
+    const organization = await seedCrossWorkspaceScopedMachine("organization");
+    expect((await patchPolicy(organization, ["workspace:admin"])).status).toBe(403);
+    expect(
+      (await getEnrollment(db, organization.originWorkspaceId, organization.enrollmentId))
+        ?.operationPolicy.revision,
+    ).toBe(0);
+    expect((await patchPolicy(organization, ["enrollments:manage", "account:admin"])).status).toBe(
+      200,
+    );
+
+    const personal = await seedCrossWorkspaceScopedMachine("user");
+    expect((await patchPolicy(personal, ["enrollments:manage"])).status).toBe(200);
+  }, 90_000);
+
   test("updates exact memory and CPU limits under a revision fence and projects them", async () => {
     if (!available) return;
     const { accountId, workspaceId, enrollment } = await seed();
@@ -812,6 +895,148 @@ describe("Connected Machine command policy", () => {
 });
 
 describe("Connected Machine signed self-update orchestration", () => {
+  test("organization update requires account admin before any runner dispatch", async () => {
+    if (!available) return;
+    const machine = await seedCrossWorkspaceScopedMachine("organization");
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: machine.enrollmentId,
+          workspaceId: machine.originWorkspaceId,
+          agentVersion: "0.1.15",
+          binarySha256: "ab".repeat(32),
+          updateChannel: "stable",
+        }),
+      ).finish(),
+      `agent.${machine.originWorkspaceId}.${machine.enrollmentId}.connection.${CONNECTION_INSTANCE_ID}.hello`,
+    );
+    const requests: ControlRequest[] = [];
+    const app = appFor(
+      busWithAgent({
+        workspaceId: machine.originWorkspaceId,
+        agentId: machine.enrollmentId,
+        online: true,
+        onRequest: (request) => requests.push(request),
+      }),
+      { settings: { ...settings, agentStableVersion: "0.1.16" } },
+    );
+    const response = await app.request(
+      `/v1/workspaces/${machine.targetWorkspaceId}/machines/${machine.enrollmentId}/update`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${await bearer(machine.accountId, machine.targetWorkspaceId, [
+            "workspace:admin",
+          ])}`,
+        },
+      },
+    );
+    expect(response.status).toBe(403);
+    expect(requests).toHaveLength(0);
+  }, 90_000);
+
+  test.each(["user", "organization"] as const)(
+    "cross-workspace %s update advances and completes on the origin row",
+    async (scope) => {
+      if (!available) return;
+      const machine = await seedCrossWorkspaceScopedMachine(scope);
+      const currentDigest = "ab".repeat(32);
+      const targetDigest = "cd".repeat(32);
+      await handleHelloPayload(
+        db,
+        undefined,
+        Hello.encode(
+          Hello.fromPartial({
+            agentId: machine.enrollmentId,
+            workspaceId: machine.originWorkspaceId,
+            agentVersion: "0.1.15",
+            binarySha256: currentDigest,
+            updateChannel: "stable",
+          }),
+        ).finish(),
+        `agent.${machine.originWorkspaceId}.${machine.enrollmentId}.connection.${CONNECTION_INSTANCE_ID}.hello`,
+      );
+      const bus = busWithAgent({
+        workspaceId: machine.originWorkspaceId,
+        agentId: machine.enrollmentId,
+        online: true,
+      });
+      const app = appFor(bus, {
+        settings: {
+          ...settings,
+          agentStableVersion: "0.1.16",
+          publicBaseUrl: "https://dev.opengeni.example",
+        },
+      });
+      const permissions: Permission[] =
+        scope === "organization" ? ["enrollments:manage", "account:admin"] : ["enrollments:manage"];
+      const response = await app.request(
+        `/v1/workspaces/${machine.targetWorkspaceId}/machines/${machine.enrollmentId}/update`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${await bearer(
+              machine.accountId,
+              machine.targetWorkspaceId,
+              permissions,
+            )}`,
+          },
+        },
+      );
+      expect(response.status).toBe(202);
+      const { operationId } = (await response.json()) as { operationId: string };
+      expect(
+        (await getEnrollment(db, machine.originWorkspaceId, machine.enrollmentId))?.agentUpdate,
+      ).toMatchObject({ operationId, status: "accepted" });
+
+      await bus.emitAgentEvent(
+        `agent.${machine.originWorkspaceId}.${machine.enrollmentId}.connection.${CONNECTION_INSTANCE_ID}.events`,
+        AgentEvent.encode({
+          agentId: machine.enrollmentId,
+          event: {
+            $case: "agentUpdateProgress",
+            agentUpdateProgress: {
+              operationId,
+              targetVersion: "0.1.16",
+              expectedBinarySha256: targetDigest,
+              stage: AgentUpdateStage.AGENT_UPDATE_STAGE_RESTARTING,
+              errorCode: "",
+              retryable: false,
+              rolledBack: false,
+            },
+          },
+        }).finish(),
+      );
+      expect(
+        (await getEnrollment(db, machine.originWorkspaceId, machine.enrollmentId))?.agentUpdate
+          ?.status,
+      ).toBe("restarting");
+      await handleHelloPayload(
+        db,
+        undefined,
+        Hello.encode(
+          Hello.fromPartial({
+            agentId: machine.enrollmentId,
+            workspaceId: machine.originWorkspaceId,
+            agentVersion: "0.1.16",
+            binarySha256: targetDigest,
+            completedUpdateOperationId: operationId,
+            completedUpdateTargetVersion: "0.1.16",
+            completedUpdateBinarySha256: targetDigest,
+          }),
+        ).finish(),
+        `agent.${machine.originWorkspaceId}.${machine.enrollmentId}.connection.${CONNECTION_INSTANCE_ID}.hello`,
+      );
+      expect(
+        (await getEnrollment(db, machine.originWorkspaceId, machine.enrollmentId))?.agentUpdate
+          ?.status,
+      ).toBe("succeeded");
+    },
+    90_000,
+  );
+
   test("dispatches to the exact process and completes only after the matching successor Hello", async () => {
     if (!available) return;
     const { accountId, workspaceId, enrollment } = await seed();
