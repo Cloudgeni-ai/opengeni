@@ -182,6 +182,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   hasPermission,
   requireAccessGrant,
+  requireFreshAccessGrant,
   requirePermission,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
@@ -2022,19 +2023,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       c.req.raw.signal,
       {
         observability: deps.observability,
-        ...(authorization
-          ? {
-              reauthorizeAfterMs:
-                authorization.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
-              reauthorize: async () => {
-                await requireSessionAuthorization(deps, grant, {
-                  sessionId,
-                  operation: "session.stream.read",
-                  surface: "stream",
-                });
-              },
-            }
-          : {}),
+        reauthorizeAfterMs:
+          authorization?.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
+        reauthorize: async () => {
+          const freshGrant = await requireFreshAccessGrant(c, deps, workspaceId, "sessions:read");
+          await requireSessionAuthorization(deps, freshGrant, {
+            sessionId,
+            operation: "session.stream.read",
+            surface: "stream",
+          });
+        },
       },
     );
   });

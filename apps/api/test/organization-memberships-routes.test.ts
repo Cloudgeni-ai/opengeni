@@ -227,6 +227,23 @@ describe("organization membership routes", () => {
       { headers: { cookie: "session=present" } },
     );
     expect(memberEnumeration.status).toBe(403);
+    const memberEmailProbe = await targetApp.request(
+      `http://x/v1/organizations/${accountId}/invitations`,
+      {
+        method: "POST",
+        headers: {
+          cookie: "session=present",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          email: `${crypto.randomUUID()}@example.test`,
+          role: "member",
+          expiresAt,
+          operationId: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(memberEmailProbe.status).toBe(403);
     const suspendResponse = await app.request(
       `http://x/v1/organizations/${accountId}/members/${accepted.membership.id}`,
       {

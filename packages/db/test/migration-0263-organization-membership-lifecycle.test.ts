@@ -103,8 +103,8 @@ describe("migration 0263 organization membership lifecycle", () => {
   test("fresh custom-schema migrate and provision pins definers against TEMP shadows", async () => {
     const blank = await acquireBlankTestDatabase("migration-0263-custom-schema");
     if (!blank) return;
-    const schemaName = `ope195_${crypto.randomUUID().replaceAll("-", "")}`;
-    const roleName = `ope195_app_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
+    const schemaName = `membership_lifecycle_${crypto.randomUUID().replaceAll("-", "")}`;
+    const roleName = `membership_app_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
     const password = `pw-${crypto.randomUUID()}`;
     const admin = postgres(blank.databaseUrl, { max: 1 });
     let appSql: postgres.Sql | null = null;
@@ -892,6 +892,68 @@ describe("migration 0263 organization membership lifecycle", () => {
         expectedRevision: invitation.revision,
       }),
     ).toEqual(revoked);
+  });
+
+  test("administrators may revoke member invitations but not owner or admin invitations", async () => {
+    if (!client) return;
+    const ownerId = `revoke-role-owner-${crypto.randomUUID()}`;
+    const adminId = `revoke-role-admin-${crypto.randomUUID()}`;
+    const ownerSubject = `user:${ownerId}`;
+    const adminSubject = `user:${adminId}`;
+    await provisionSelf(ownerId);
+    const [owner] = await listSelfOrganizationMemberships(client.db, ownerSubject);
+    const adminInvitation = await createOrganizationInvitation(client.db, {
+      organizationId: owner!.organizationId,
+      actorSubjectId: ownerSubject,
+      operationId: crypto.randomUUID(),
+      targetSubjectId: adminSubject,
+      targetEmail: `${adminId}@example.test`,
+      role: "admin",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    await acceptOrganizationInvitation(client.db, {
+      organizationId: owner!.organizationId,
+      actorSubjectId: adminSubject,
+      operationId: crypto.randomUUID(),
+      invitationId: adminInvitation.id,
+      expectedRevision: adminInvitation.revision,
+    });
+    const pending = await Promise.all(
+      (["owner", "admin", "member"] as const).map((role) =>
+        createOrganizationInvitation(client!.db, {
+          organizationId: owner!.organizationId,
+          actorSubjectId: ownerSubject,
+          operationId: crypto.randomUUID(),
+          targetSubjectId: `user:${crypto.randomUUID()}`,
+          targetEmail: `${crypto.randomUUID()}@example.test`,
+          role,
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        }),
+      ),
+    );
+    for (const invitation of pending.filter((candidate) => candidate.role !== "member")) {
+      await expectSqlState(
+        () =>
+          revokeOrganizationInvitation(client!.db, {
+            organizationId: owner!.organizationId,
+            actorSubjectId: adminSubject,
+            operationId: crypto.randomUUID(),
+            invitationId: invitation.id,
+            expectedRevision: invitation.revision,
+          }),
+        "42501",
+      );
+    }
+    const memberInvitation = pending.find((candidate) => candidate.role === "member")!;
+    expect(
+      await revokeOrganizationInvitation(client.db, {
+        organizationId: owner!.organizationId,
+        actorSubjectId: adminSubject,
+        operationId: crypto.randomUUID(),
+        invitationId: memberInvitation.id,
+        expectedRevision: memberInvitation.revision,
+      }),
+    ).toMatchObject({ status: "revoked", role: "member" });
   });
 
   test("pages organization invitations for admins without exposing them to members", async () => {

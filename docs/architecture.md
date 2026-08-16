@@ -309,10 +309,14 @@ while retaining physical data and authority. Organization invitation enumeration
 admin-only, bounded `(created_at,id)` keyset page. Retention policy may stamp a
 future deadline, but no destructive sweeper is part of this slice. Active
 memberships are re-read on managed access refresh to derive role-bounded account
-grants and only the human's own personal-workspace projections. Canonical:
+grants and only the human's own personal-workspace projections. Long-lived
+session, workspace-control, live, and interaction SSE responses bypass the
+request-local access cache on a bounded timer so suspension/offboarding closes
+an already-open connection. Canonical:
 `packages/contracts/src/organization-membership-lifecycle.ts`,
 `packages/db/src/organization-membership-lifecycle.ts`, and
-`apps/api/src/routes/organization-memberships.ts`.
+`apps/api/src/routes/organization-memberships.ts`; fresh stream access is owned
+by `packages/core/src/access/index.ts` and `apps/api/src/http/sse.ts`.
 Sessions gain additive owner, `user_private|workspace_shared` visibility,
 authority-epoch, and independent-fork provenance columns; every existing row
 defaults to workspace-shared epoch 1 with no owner or fork authority. This slice

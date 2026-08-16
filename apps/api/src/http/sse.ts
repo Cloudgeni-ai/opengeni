@@ -268,31 +268,19 @@ export async function sseSessionStream(
   options: SessionSseDeliveryOptions = {},
 ): Promise<Response> {
   const heartbeatIntervalMs = resolveHeartbeatInterval(options.heartbeatIntervalMs);
-  if (
-    options.reauthorize &&
-    options.reauthorizeAfterMs !== undefined &&
-    (!Number.isSafeInteger(options.reauthorizeAfterMs) ||
-      options.reauthorizeAfterMs < 1_000 ||
-      options.reauthorizeAfterMs > 60_000)
-  ) {
-    throw new RangeError("session stream reauthorization must be between 1000 and 60000ms");
-  }
   let lastSent = after;
   let bootstrapping = true;
   let newestBuffered: SessionEvent | null = null;
   let unsubscribe: (() => void) | null = null;
   let delivery: LatestWinsDelivery<SessionEvent> | null = null;
-  let reauthorizationTimer: ReturnType<typeof setTimeout> | null = null;
+  let stopReauthorization = () => {};
   let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   let detachAbortListener = () => {};
   let closeMetrics = () => {};
   const stopUpstream = () => {
     closeMetrics();
     detachAbortListener();
-    if (reauthorizationTimer) {
-      clearTimeout(reauthorizationTimer);
-      reauthorizationTimer = null;
-    }
+    stopReauthorization();
     if (heartbeatTimer) {
       clearTimeout(heartbeatTimer);
       heartbeatTimer = null;
@@ -313,17 +301,7 @@ export async function sseSessionStream(
   const fail = (error: unknown) => {
     channel.fail(retryableSseFailure("session event stream delivery failed", error));
   };
-  const scheduleReauthorization = () => {
-    if (!options.reauthorize || channel.stopped()) return;
-    const interval = options.reauthorizeAfterMs ?? 15_000;
-    reauthorizationTimer = setTimeout(() => {
-      reauthorizationTimer = null;
-      void options.reauthorize!()
-        .then(scheduleReauthorization)
-        .catch((error) => fail(error));
-    }, interval);
-  };
-  scheduleReauthorization();
+  stopReauthorization = startSseReauthorization(options, channel.stopped, fail);
   let writeTail = Promise.resolve();
   const writeFrame = (frame: string): Promise<void> => {
     const write = writeTail.then(async () => {
@@ -471,12 +449,14 @@ export async function sseWorkspaceControlStream(
   let newestBuffered: WorkspaceControlEvent | null = null;
   let unsubscribe: (() => void) | null = null;
   let delivery: LatestWinsDelivery<WorkspaceControlEvent> | null = null;
+  let stopReauthorization = () => {};
   let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   let detachAbortListener = () => {};
   let closeMetrics = () => {};
   const stopUpstream = () => {
     closeMetrics();
     detachAbortListener();
+    stopReauthorization();
     if (heartbeatTimer) {
       clearTimeout(heartbeatTimer);
       heartbeatTimer = null;
@@ -497,6 +477,7 @@ export async function sseWorkspaceControlStream(
   const fail = (error: unknown) => {
     channel.fail(retryableSseFailure("workspace control stream delivery failed", error));
   };
+  stopReauthorization = startSseReauthorization(options, channel.stopped, fail);
   let writeTail = Promise.resolve();
   const writeFrame = (frame: string): Promise<void> => {
     const write = writeTail.then(async () => {
@@ -619,11 +600,13 @@ export async function sseWorkspaceLiveStream(
   options: WorkspaceInteractionSseOptions = {},
 ): Promise<Response> {
   const upstream = new AbortController();
+  let stopReauthorization = () => {};
   const channel = createByteBoundedSseStream({
     maxQueuedBytes: options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES,
     ...(options.stallTimeoutMs === undefined ? {} : { stallTimeoutMs: options.stallTimeoutMs }),
     onObservation: sseObservationReporter("workspace_interaction", options),
     onStop: () => {
+      stopReauthorization();
       signal.removeEventListener("abort", abort);
       upstream.abort();
     },
@@ -634,6 +617,15 @@ export async function sseWorkspaceLiveStream(
   };
   if (signal.aborted) abort();
   else signal.addEventListener("abort", abort, { once: true });
+  stopReauthorization = startSseReauthorization(options, channel.stopped, (error) => {
+    channel.fail(retryableSseFailure("workspace live stream authorization failed", error));
+  });
+
+  const upstreamOptions: WorkspaceInteractionSseOptions = {
+    ...options,
+    reauthorize: undefined,
+    reauthorizeAfterMs: undefined,
+  };
 
   let writeTail = Promise.resolve(true);
   const write = (frame: string): Promise<boolean> => {
@@ -665,14 +657,21 @@ export async function sseWorkspaceLiveStream(
   void (async () => {
     try {
       const [control, interaction] = await Promise.all([
-        sseWorkspaceControlStream(db, bus, workspaceId, controlAfter, upstream.signal, options),
+        sseWorkspaceControlStream(
+          db,
+          bus,
+          workspaceId,
+          controlAfter,
+          upstream.signal,
+          upstreamOptions,
+        ),
         sseWorkspaceInteractionRevisionStream(
           db,
           accountId,
           workspaceId,
           interactionAfter,
           upstream.signal,
-          options,
+          upstreamOptions,
         ),
       ]);
       const pumps = [pump(control), pump(interaction)];
@@ -721,6 +720,7 @@ export async function sseWorkspaceInteractionRevisionStream(
   let lastSent = after;
   let lastWriteAt = Date.now();
   let stopRequested = false;
+  let stopReauthorization = () => {};
   let detachAbortListener = () => {};
   let closeMetrics = () => {};
   const channel = createByteBoundedSseStream({
@@ -729,11 +729,15 @@ export async function sseWorkspaceInteractionRevisionStream(
     onObservation: sseObservationReporter("workspace_interaction", options),
     onStop: () => {
       stopRequested = true;
+      stopReauthorization();
       closeMetrics();
       detachAbortListener();
     },
   });
   closeMetrics = observeSseConnection("workspace_interaction", after, options.observability);
+  stopReauthorization = startSseReauthorization(options, channel.stopped, (error) => {
+    channel.fail(retryableSseFailure("workspace interaction stream authorization failed", error));
+  });
 
   const write = async (frame: string): Promise<boolean> => {
     const accepted = await channel.write(frame);
@@ -849,13 +853,12 @@ export type SseDeliveryOptions = {
   heartbeatIntervalMs?: number;
   observability?: Observability | undefined;
   onObservation?: ((observation: SseDeliveryBoundObservation) => void) | undefined;
-};
-
-export type SessionSseDeliveryOptions = SseDeliveryOptions & {
-  /** Host ACL re-check, run even while the event stream is otherwise idle. */
+  /** Current ACL re-check, run even while the event stream is idle. */
   reauthorize?: (() => Promise<void>) | undefined;
   reauthorizeAfterMs?: number | undefined;
 };
+
+export type SessionSseDeliveryOptions = SseDeliveryOptions;
 
 function sseObservationReporter(
   stream: SseStreamKind,
@@ -898,6 +901,32 @@ function resolveInteractionPollInterval(value: number | undefined): number {
     throw new RangeError("interaction revision poll interval must be between 100 and 60000ms");
   }
   return interval;
+}
+
+function startSseReauthorization(
+  options: SseDeliveryOptions,
+  stopped: () => boolean,
+  fail: (error: unknown) => void,
+): () => void {
+  if (!options.reauthorize) return () => {};
+  const interval = options.reauthorizeAfterMs ?? 15_000;
+  if (!Number.isSafeInteger(interval) || interval < 1_000 || interval > 60_000) {
+    throw new RangeError("SSE reauthorization must be between 1000 and 60000ms");
+  }
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const schedule = () => {
+    if (stopped()) return;
+    timer = setTimeout(() => {
+      timer = null;
+      void options.reauthorize!().then(schedule).catch(fail);
+    }, interval);
+  };
+  schedule();
+  return () => {
+    if (!timer) return;
+    clearTimeout(timer);
+    timer = null;
+  };
 }
 
 function formatWorkspaceInteractionRevisionSse(event: WorkspaceInteractionRevisionEvent): string {

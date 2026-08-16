@@ -146,13 +146,20 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       "organization id",
     );
     const payload = await parseBody(context, CreateOrganizationInvitationRequest);
-    const targetUserId = await getManagedUserByEmail(deps.db, payload.email);
-    if (!targetUserId) {
-      throw new HTTPException(404, {
-        message: "invitations currently require an existing registered user",
-      });
-    }
     try {
+      // Authenticate organization administration before resolving a platform
+      // email address, so this endpoint cannot become a registered-user oracle.
+      await listOrganizationInvitations(deps.db, {
+        organizationId,
+        actorSubjectId: subjectId,
+        limit: 1,
+      });
+      const targetUserId = await getManagedUserByEmail(deps.db, payload.email);
+      if (!targetUserId) {
+        throw new HTTPException(404, {
+          message: "invitations currently require an existing registered user",
+        });
+      }
       return context.json(
         OrganizationInvitation.parse(
           await createOrganizationInvitation(deps.db, {
@@ -168,6 +175,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         201,
       );
     } catch (error) {
+      if (error instanceof HTTPException) throw error;
       rethrowMembershipError(error);
     }
   });

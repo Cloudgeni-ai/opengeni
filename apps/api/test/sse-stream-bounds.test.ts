@@ -305,6 +305,52 @@ test("an idle session stream closes promptly when periodic host authorization is
   expect(released).toBe(1);
 });
 
+test("every long-lived SSE surface closes when its current workspace authority is revoked", async () => {
+  durableEvents = [];
+  durableControlEvents = [];
+  interactionRevisionState = { revision: 0, updatedAt: null };
+  const bus = {
+    subscribe: async () => () => {},
+    subscribeWorkspaceControl: async () => () => {},
+  } as unknown as EventBus;
+  const revoked = () => ({
+    reauthorizeAfterMs: 1_000,
+    reauthorize: async () => {
+      throw new Error("workspace membership revoked");
+    },
+  });
+  const signal = () => new AbortController().signal;
+  const responses = await Promise.all([
+    sseSessionStream(fakeDb as never, bus, WORKSPACE_ID, SESSION_ID, 0, signal(), revoked()),
+    sseWorkspaceControlStream(fakeDb as never, bus, WORKSPACE_ID, 0, signal(), revoked()),
+    sseWorkspaceInteractionRevisionStream(
+      fakeDb as never,
+      "00000000-0000-4000-8000-000000000010",
+      WORKSPACE_ID,
+      0,
+      signal(),
+      { ...revoked(), pollIntervalMs: 100 },
+    ),
+    sseWorkspaceLiveStream(
+      fakeDb as never,
+      bus,
+      "00000000-0000-4000-8000-000000000010",
+      WORKSPACE_ID,
+      0,
+      0,
+      signal(),
+      { ...revoked(), pollIntervalMs: 100 },
+    ),
+  ]);
+  const readers = responses.map((response) => response.body!.getReader());
+  await Promise.all(
+    readers.map(async (reader) => {
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain(": connected");
+      await expect(readUntilStreamFailure(reader)).rejects.toBeInstanceOf(TypeError);
+    }),
+  );
+});
+
 test("workspace-control SSE uses the same one-frame stall bound", async () => {
   durableControlEvents = [controlEvent(1), controlEvent(2)];
   durableControlReads.length = 0;
@@ -480,6 +526,17 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<voi
     if (Date.now() >= deadline) throw new Error("timed out waiting for SSE test condition");
     await Bun.sleep(1);
   }
+}
+
+async function readUntilStreamFailure(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<never> {
+  const deadline = Date.now() + 2_500;
+  while (Date.now() < deadline) {
+    const next = await reader.read();
+    if (next.done) throw new Error("SSE stream ended without an authorization failure");
+  }
+  throw new Error("SSE stream did not reauthorize within the test deadline");
 }
 
 function controlEvent(sequence: number): WorkspaceControlEvent {

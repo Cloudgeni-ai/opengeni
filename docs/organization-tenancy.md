@@ -175,6 +175,10 @@ for people who have not registered remain separate integrations.
 Suspension immediately removes persisted shared-workspace grants, revokes
 personal-resource grants, fences membership-owned sessions, and interrupts
 shared-session attempts whose frozen initiating human is the suspended subject.
+Session, workspace-control, combined live, and interaction SSE connections
+periodically re-resolve the current human access projection; an already-open
+connection therefore closes after suspension or offboarding instead of retaining
+the grant captured when the HTTP request began.
 Reactivation restores only active organization and personal-workspace access,
 never old grants. Offboarding applies the same canonical
 workspace/session/turn/attempt teardown, then terminally revokes membership and

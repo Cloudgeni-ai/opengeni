@@ -50,6 +50,25 @@ export async function requireAccessGrant(
   return (await requireAccessGrantAuthorization(c, deps, workspaceId, permission)).grant;
 }
 
+/**
+ * Re-resolve the authenticated principal and its current grants without using
+ * the request-local access cache. Long-lived responses use this to ensure a
+ * membership suspension or revocation takes effect while the connection is
+ * still open.
+ */
+export async function requireFreshAccessGrant(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+  permission?: Permission,
+): Promise<AccessGrant> {
+  const context = await resolveAccessContext(c, deps);
+  if (!context) {
+    throw new HTTPException(401, { message: "authentication required" });
+  }
+  return (await accessGrantAuthorization(context, deps, workspaceId, permission)).grant;
+}
+
 export type AccessGrantAuthorization = {
   grant: AccessGrant;
   accountGrant: AccountGrant | null;
@@ -96,6 +115,15 @@ export async function requireAccessGrantAuthorization(
   permission?: Permission,
 ): Promise<AccessGrantAuthorization> {
   const context = await requireAccessContext(c, deps);
+  return await accessGrantAuthorization(context, deps, workspaceId, permission);
+}
+
+async function accessGrantAuthorization(
+  context: AccessContext,
+  deps: AccessDeps,
+  workspaceId: string,
+  permission?: Permission,
+): Promise<AccessGrantAuthorization> {
   const principalKind = hostedHumanSessionPrincipalKind(context);
   const grant =
     context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId) ??

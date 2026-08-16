@@ -711,6 +711,9 @@ BEGIN
       IF invitation.status <> 'pending' THEN
         RAISE EXCEPTION 'only a pending invitation can be revoked' USING ERRCODE = '55000';
       END IF;
+      IF actor.role = 'admin' AND invitation.role <> 'member' THEN
+        RAISE EXCEPTION 'administrators may revoke member invitations only' USING ERRCODE = '42501';
+      END IF;
       UPDATE organization_membership_invitations SET
         status = 'revoked', revision = revision + 1, updated_at = now_value
       WHERE id = invitation.id RETURNING * INTO invitation;
