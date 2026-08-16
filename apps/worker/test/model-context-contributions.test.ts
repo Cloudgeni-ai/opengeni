@@ -125,6 +125,7 @@ describe("Company Brain model contribution receipts", () => {
 
   test("contained children retain rules and guide catalogs but omit standing knowledge", () => {
     const receipt = buildCompanyBrainContributionReceipt({
+      contextSelectionReceiptId: identity(),
       attemptId: identity(),
       turnId: identity(),
       nestedAgentDepth: 1,
@@ -169,6 +170,7 @@ describe("Company Brain model contribution receipts", () => {
   test("accounts for legacy workspace instructions only when structured policy is absent", () => {
     const emptyPolicy = { ...policy(), entries: [] };
     const receipt = buildCompanyBrainContributionReceipt({
+      contextSelectionReceiptId: identity(),
       attemptId: identity(),
       turnId: identity(),
       nestedAgentDepth: 0,

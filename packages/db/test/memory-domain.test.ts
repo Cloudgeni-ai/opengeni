@@ -90,10 +90,12 @@ describe("isMemoryTextTooLong / estimateMemoryTokens / shortMemoryId", () => {
     expect(isMemoryTextTooLong("x".repeat(MEMORY_TEXT_MAX_CHARS + 1))).toBe(true);
   });
 
-  test("token estimate is char/4 rounded up", () => {
+  test("token estimate is UTF-8 bytes/4 rounded up", () => {
     expect(estimateMemoryTokens("")).toBe(0);
     expect(estimateMemoryTokens("abcd")).toBe(1);
     expect(estimateMemoryTokens("abcde")).toBe(2);
+    expect(estimateMemoryTokens("🧠")).toBe(1);
+    expect(estimateMemoryTokens("🧠a")).toBe(2);
   });
 
   test("short id is the first 8 chars of the uuid", () => {

@@ -3,6 +3,7 @@ import { z } from "zod";
 export const KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS = 1_024;
 export const KNOWLEDGE_BROWSE_DEFAULT_LIMIT = 20;
 export const KNOWLEDGE_BROWSE_MAX_LIMIT = 50;
+export const KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES = 64 * 1_024;
 export const KNOWLEDGE_TITLE_MAX_BYTES = 1_024;
 export const KNOWLEDGE_BODY_MAX_BYTES = 16 * 1_024;
 export const KNOWLEDGE_SUMMARY_MAX_BYTES = 4 * 1_024;
@@ -13,6 +14,15 @@ export const KNOWLEDGE_METADATA_MAX_ITEMS = 64;
 export const KNOWLEDGE_METADATA_MAX_DEPTH = 4;
 export const KNOWLEDGE_SOURCE_STRING_MAX_BYTES = 2_048;
 export const KNOWLEDGE_SOURCE_URI_MAX_BYTES = 8_192;
+export const KNOWLEDGE_SEARCH_MAX_RESULTS = 50;
+export const KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES = 64 * 1_024;
+export const KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN = 4;
+export const KNOWLEDGE_SEARCH_MAX_FLOOR_OMISSIONS = 200;
+// Cosine similarity for unrelated embeddings clusters around 0.5 after the
+// distance conversion used by Documents. Keyword search already excludes
+// non-matches in SQL, but a small normalized floor removes incidental hits.
+export const KNOWLEDGE_SEARCH_MIN_VECTOR_SCORE = 0.52;
+export const KNOWLEDGE_SEARCH_MIN_KEYWORD_SCORE = 0.01;
 
 const utf8Bytes = (value: string): number => new TextEncoder().encode(value).byteLength;
 const boundedUtf8 = (maxBytes: number) =>
@@ -186,9 +196,10 @@ export const KnowledgeRecord = z.object({
           "provenance.source.title",
           "provenance.source.author",
           "provenance.source.version",
+          "provenance.citation",
         ]),
       )
-      .max(10),
+      .max(11),
   }),
 });
 export type KnowledgeRecord = z.infer<typeof KnowledgeRecord>;
@@ -196,16 +207,59 @@ export type KnowledgeRecord = z.infer<typeof KnowledgeRecord>;
 export const KnowledgeSearchResult = z.object({
   record: KnowledgeRecord,
   retrieval: z.object({
-    score: z.number(),
+    /** Final bounded ordering score after the documented quality adjustment. */
+    score: z.number().min(0).max(1),
+    /** Semantic score before the quality adjustment. */
+    semanticScore: z.number().min(0).max(1),
     matchType: z.enum(["hybrid", "vector", "keyword"]),
-    vectorScore: z.number().nullable(),
-    keywordScore: z.number().nullable(),
+    vectorScore: z.number().min(0).max(1).nullable(),
+    keywordScore: z.number().min(0).max(1).nullable(),
+    relevanceSignals: z
+      .array(z.enum(["vector", "keyword"]))
+      .min(1)
+      .max(2),
+    freshness: z.enum(["current", "aging", "stale"]),
+    qualityAdjustment: z.number().min(0).max(1),
+    duplicateCount: z.number().int().nonnegative(),
   }),
 });
 export type KnowledgeSearchResult = z.infer<typeof KnowledgeSearchResult>;
 
 export const KnowledgeSearchResponse = z.object({
-  results: z.array(KnowledgeSearchResult),
+  results: z.array(KnowledgeSearchResult).max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+  selection: z.object({
+    relevanceFloor: z.object({
+      policy: z.literal("any_signal"),
+      vectorScore: z.literal(KNOWLEDGE_SEARCH_MIN_VECTOR_SCORE),
+      keywordScore: z.literal(KNOWLEDGE_SEARCH_MIN_KEYWORD_SCORE),
+    }),
+    dedupe: z.object({
+      policy: z.literal("exact_textual_content"),
+    }),
+    candidates: z.object({
+      ranked: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+      rechecked: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+      omittedOnRecheck: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+    }),
+    omitted: z.object({
+      belowRelevanceFloor: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_FLOOR_OMISSIONS),
+      asDuplicate: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+      forLimit: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+      forResponseBudget: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+    }),
+    budget: z.object({
+      maxResults: z.literal(KNOWLEDGE_SEARCH_MAX_RESULTS),
+      maxResponseBytes: z.literal(KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES),
+      responseBytes: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES),
+      tokenEstimateBytesPerToken: z.literal(KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN),
+      estimatedTokens: z.number().int().nonnegative(),
+      maxEstimatedTokens: z.literal(
+        Math.ceil(
+          KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES / KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN,
+        ),
+      ),
+    }),
+  }),
 });
 export type KnowledgeSearchResponse = z.infer<typeof KnowledgeSearchResponse>;
 
@@ -215,8 +269,26 @@ export const KnowledgeGetResponse = z.object({
 export type KnowledgeGetResponse = z.infer<typeof KnowledgeGetResponse>;
 
 export const KnowledgeBrowseResponse = z.object({
-  records: z.array(KnowledgeRecord),
+  records: z.array(KnowledgeRecord).max(KNOWLEDGE_BROWSE_MAX_LIMIT),
   nextCursor: z.string().min(1).max(KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS).nullable(),
   hasMore: z.boolean(),
+  selection: z.object({
+    omitted: z.object({
+      forResponseBudget: z.number().int().nonnegative().max(KNOWLEDGE_BROWSE_MAX_LIMIT),
+    }),
+    compactedRecordCount: z.number().int().nonnegative().max(1),
+    budget: z.object({
+      maxResults: z.literal(KNOWLEDGE_BROWSE_MAX_LIMIT),
+      maxResponseBytes: z.literal(KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES),
+      responseBytes: z.number().int().nonnegative().max(KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES),
+      tokenEstimateBytesPerToken: z.literal(KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN),
+      estimatedTokens: z.number().int().nonnegative(),
+      maxEstimatedTokens: z.literal(
+        Math.ceil(
+          KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES / KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN,
+        ),
+      ),
+    }),
+  }),
 });
 export type KnowledgeBrowseResponse = z.infer<typeof KnowledgeBrowseResponse>;

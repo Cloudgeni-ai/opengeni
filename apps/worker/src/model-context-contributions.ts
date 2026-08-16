@@ -54,6 +54,7 @@ export function modelVisibleCompanyBrainSkillActivations(
 }
 
 export type CompanyBrainContributionReceipt = Readonly<{
+  contextSelectionReceiptId: string;
   attemptId: string;
   turnId: string;
   sessionRole: "root" | "child";
@@ -71,6 +72,7 @@ export type CompanyBrainContributionReceipt = Readonly<{
  * of truth for billing and context pressure.
  */
 export function buildCompanyBrainContributionReceipt(input: {
+  contextSelectionReceiptId: string;
   attemptId: string;
   turnId: string;
   nestedAgentDepth: number;
@@ -151,6 +153,7 @@ export function buildCompanyBrainContributionReceipt(input: {
     );
   }
   return Object.freeze({
+    contextSelectionReceiptId: input.contextSelectionReceiptId,
     attemptId: input.attemptId,
     turnId: input.turnId,
     sessionRole: input.nestedAgentDepth === 0 ? "root" : "child",

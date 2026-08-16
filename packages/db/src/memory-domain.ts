@@ -469,7 +469,7 @@ export function isMemoryTextTooLong(text: string): boolean {
 // ---------------------------------------------------------------------------
 
 export function estimateMemoryTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  return Math.ceil(Buffer.byteLength(text, "utf8") / 4);
 }
 
 // Short id shown in the block/tool output = first 8 chars of the uuid. Tools
@@ -491,33 +491,10 @@ export type MemoryBlockRecord = {
 // into kind sections. Episodic is excluded. Returns null if nothing renders
 // (no non-episodic records) — the caller substitutes the empty-state block.
 export function renderWorkspaceMemoryBlock(records: readonly MemoryBlockRecord[]): string | null {
-  const renderable = records.filter((record) => record.kind !== "episodic");
-  if (renderable.length === 0) {
+  if (!records.some((record) => record.kind !== "episodic")) {
     return null;
   }
-
-  // Greedy budget fill in priority order. We track the running token estimate of
-  // the whole block (header + section titles introduced so far + entries).
-  const headerTokens = estimateMemoryTokens(WORKSPACE_MEMORY_BLOCK_HEADER_POPULATED);
-  let usedTokens = headerTokens;
-  const seenSections = new Set<KnowledgeMemoryKind>();
-  const selected: MemoryBlockRecord[] = [];
-  for (const record of renderable) {
-    const entryLine = renderMemoryEntry(record);
-    let cost = estimateMemoryTokens(entryLine) + 1; // +1 for the entry's newline
-    if (!seenSections.has(record.kind)) {
-      const sectionTitle = `### ${MEMORY_KIND_SECTION_TITLES[record.kind]}`;
-      cost += estimateMemoryTokens(sectionTitle) + 2; // title + blank line separator
-    }
-    if (usedTokens + cost > WORKSPACE_MEMORY_BLOCK_TOKEN_BUDGET) {
-      // Skip entries that don't fit instead of stopping: one oversized entry
-      // must not starve smaller lower-priority records of the remaining budget.
-      continue;
-    }
-    usedTokens += cost;
-    seenSections.add(record.kind);
-    selected.push(record);
-  }
+  const selected = selectWorkspaceMemoryBlockRecords(records);
 
   const lines: string[] = [WORKSPACE_MEMORY_BLOCK_HEADER_POPULATED];
   for (const kind of MEMORY_BLOCK_KIND_ORDER) {
@@ -531,6 +508,30 @@ export function renderWorkspaceMemoryBlock(records: readonly MemoryBlockRecord[]
     }
   }
   return lines.join("\n");
+}
+
+/** Canonical whole-entry prompt-budget selector, shared with receipt validation. */
+export function selectWorkspaceMemoryBlockRecords(
+  records: readonly MemoryBlockRecord[],
+): readonly MemoryBlockRecord[] {
+  const renderable = records.filter((record) => record.kind !== "episodic");
+  const headerTokens = estimateMemoryTokens(WORKSPACE_MEMORY_BLOCK_HEADER_POPULATED);
+  let usedTokens = headerTokens;
+  const seenSections = new Set<KnowledgeMemoryKind>();
+  const selected: MemoryBlockRecord[] = [];
+  for (const record of renderable) {
+    const entryLine = renderMemoryEntry(record);
+    let cost = estimateMemoryTokens(entryLine) + 1;
+    if (!seenSections.has(record.kind)) {
+      const sectionTitle = `### ${MEMORY_KIND_SECTION_TITLES[record.kind]}`;
+      cost += estimateMemoryTokens(sectionTitle) + 2;
+    }
+    if (usedTokens + cost > WORKSPACE_MEMORY_BLOCK_TOKEN_BUDGET) continue;
+    usedTokens += cost;
+    seenSections.add(record.kind);
+    selected.push(record);
+  }
+  return selected;
 }
 
 function renderMemoryEntry(record: MemoryBlockRecord): string {

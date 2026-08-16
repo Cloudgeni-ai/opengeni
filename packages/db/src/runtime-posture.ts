@@ -154,6 +154,8 @@ const TASK_NOTE_CAPABILITY_ROUTINES = [
   "archive_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text)",
   "list_task_notes_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, boolean, integer)",
 ] as const;
+const COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE =
+  "company_brain_context_get_or_create_selection(uuid, uuid, uuid, uuid, uuid, integer)";
 const TRANSITION_SESSION_VISIBILITY_ROUTINE =
   "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)";
 const FORK_SESSION_CONTENT_ROUTINE =
@@ -168,6 +170,7 @@ const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
   ...TASK_NOTE_CAPABILITY_ROUTINES,
+  COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
 ]);
 const XAI_CREATE_CREDENTIAL_ROUTINE =
   "create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone)";
@@ -188,6 +191,7 @@ const XAI_AUTHORITY_TABLES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
   FORK_SESSION_CONTENT_ROUTINE,
   XAI_AUTHORITY_LIVE_ROUTINE,
   XAI_CREATE_CREDENTIAL_ROUTINE,
@@ -264,7 +268,9 @@ export const FORCE_RLS_TABLES = [
   "codex_reset_redemption_attempts",
   "codex_rotation_settings",
   "codex_subscription_credentials",
+  "company_brain_context_selection_receipts",
   "company_brain_preference_proposal_receipts",
+  "company_brain_turn_context_snapshots",
   "company_profile_activation_events",
   "company_profile_heads",
   "company_profile_revisions",
@@ -758,7 +764,9 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "canonical_human_identity_operations",
   "canonical_human_identity_subjects",
   "canonical_human_login_bindings",
+  "company_brain_context_selection_receipts",
   "company_brain_preference_proposal_receipts",
+  "company_brain_turn_context_snapshots",
   "connection_use_once_consumption_receipts",
   "editable_artifact_live_tickets",
   "editable_artifact_scope_authorization_heads",
