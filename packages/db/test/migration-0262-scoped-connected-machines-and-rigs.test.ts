@@ -7,7 +7,7 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
 const migrationUrl = new URL(
-  "../drizzle/0261_scoped_connected_machines_and_rigs.sql",
+  "../drizzle/0262_scoped_connected_machines_and_rigs.sql",
   import.meta.url,
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -29,7 +29,7 @@ async function asActor<T>(
   })) as T;
 }
 
-describe("migration 0261 scoped Connected Machines and Rigs", () => {
+describe("migration 0262 scoped Connected Machines and Rigs", () => {
   test("declares explicit scope, exact-attempt admission, and pre-use revalidation", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -49,9 +49,9 @@ describe("migration 0261 scoped Connected Machines and Rigs", () => {
   });
 
   test("enforces organization, workspace, and owner visibility through PostgreSQL", async () => {
-    const blank = await acquireBlankTestDatabase("migration-0261-scoped-compute");
+    const blank = await acquireBlankTestDatabase("migration-0262-scoped-compute");
     if (!blank && requireRealDatabase) {
-      throw new Error("[migration-0261-scoped-compute] PostgreSQL is unavailable");
+      throw new Error("[migration-0262-scoped-compute] PostgreSQL is unavailable");
     }
     if (!blank) return;
 
