@@ -1256,6 +1256,21 @@ BEGIN
 END
 $body$;
 
+CREATE OR REPLACE FUNCTION opengeni_private.assert_organization_retention_account(
+  p_account_id uuid
+) RETURNS void
+LANGUAGE plpgsql
+SET search_path FROM CURRENT
+AS $body$
+BEGIN
+  IF p_account_id IS NULL
+    OR p_account_id IS DISTINCT FROM opengeni_private.current_account_id()
+  THEN
+    RAISE EXCEPTION 'retention organization context mismatch' USING ERRCODE = '42501';
+  END IF;
+END
+$body$;
+
 CREATE OR REPLACE FUNCTION opengeni_private.organization_retention_file_candidates(
   p_account_id uuid,
   p_membership_id uuid
@@ -1264,9 +1279,12 @@ LANGUAGE sql
 SECURITY DEFINER
 SET search_path FROM CURRENT
 AS $body$
-  WITH member AS (
+  WITH authority_context AS MATERIALIZED (
+    SELECT opengeni_private.assert_organization_retention_account(p_account_id)
+  ), member AS (
     SELECT membership.personal_workspace_id
     FROM organization_memberships membership
+    CROSS JOIN authority_context
     WHERE membership.account_id = p_account_id
       AND membership.id = p_membership_id
   ), owned_document_files AS (
@@ -1320,9 +1338,12 @@ LANGUAGE sql
 SECURITY DEFINER
 SET search_path FROM CURRENT
 AS $body$
-  WITH member AS (
+  WITH authority_context AS MATERIALIZED (
+    SELECT opengeni_private.assert_organization_retention_account(p_account_id)
+  ), member AS (
     SELECT membership.personal_workspace_id
     FROM organization_memberships membership
+    CROSS JOIN authority_context
     WHERE membership.account_id = p_account_id
       AND membership.id = p_membership_id
   )
@@ -1435,6 +1456,7 @@ BEGIN
   IF p_account_id IS NULL OR p_limit NOT BETWEEN 1 AND 100 THEN
     RAISE EXCEPTION 'invalid retention preview input' USING ERRCODE = '22023';
   END IF;
+  PERFORM opengeni_private.assert_organization_retention_account(p_account_id);
   PERFORM pg_catalog.set_config(
     'opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true
   );
@@ -1511,6 +1533,7 @@ BEGIN
   IF coalesce(pg_catalog.array_length(p_excluded_membership_ids, 1), 0) > 100 THEN
     RAISE EXCEPTION 'too many excluded retention memberships' USING ERRCODE = '22023';
   END IF;
+  PERFORM opengeni_private.assert_organization_retention_account(p_account_id);
   PERFORM pg_catalog.set_config(
     'opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true
   );
@@ -1625,6 +1648,7 @@ BEGIN
   IF p_limit NOT BETWEEN 1 AND 100 THEN
     RAISE EXCEPTION 'invalid retention object page size' USING ERRCODE = '22023';
   END IF;
+  PERFORM opengeni_private.assert_organization_retention_account(p_account_id);
   PERFORM pg_catalog.set_config(
     'opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true
   );
@@ -1697,6 +1721,7 @@ BEGIN
     OR nullif(p_object_key, '') IS NULL
     OR octet_length(convert_to(p_object_key, 'UTF8')) > 4096
   THEN RAISE EXCEPTION 'invalid retention object key' USING ERRCODE = '22023'; END IF;
+  PERFORM opengeni_private.assert_organization_retention_account(p_account_id);
   PERFORM pg_catalog.set_config(
     'opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true
   );
@@ -1747,6 +1772,7 @@ BEGIN
   IF p_reason_code !~ '^[a-z0-9_]{1,64}$' THEN
     RAISE EXCEPTION 'invalid retention failure code' USING ERRCODE = '22023';
   END IF;
+  PERFORM opengeni_private.assert_organization_retention_account(p_account_id);
   PERFORM pg_catalog.set_config(
     'opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true
   );
@@ -1810,6 +1836,7 @@ BEGIN
   THEN
     RAISE EXCEPTION 'invalid retention object bucket' USING ERRCODE = '22023';
   END IF;
+  PERFORM opengeni_private.assert_organization_retention_account(p_account_id);
   PERFORM pg_catalog.set_config(
     'opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true
   );
@@ -2170,6 +2197,7 @@ BEGIN
   THEN
     RAISE EXCEPTION 'invalid retention object bucket' USING ERRCODE = '22023';
   END IF;
+  PERFORM opengeni_private.assert_organization_retention_account(p_account_id);
   PERFORM pg_catalog.set_config(
     'opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true
   );
@@ -2276,6 +2304,10 @@ BEGIN
     data_schema, data_schema
   );
   EXECUTE format(
+    'ALTER FUNCTION opengeni_private.assert_organization_retention_account(uuid) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema
+  );
+  EXECUTE format(
     'ALTER FUNCTION opengeni_private.organization_retention_file_candidates(uuid,uuid) SET search_path = pg_catalog, %I, pg_temp',
     data_schema
   );
@@ -2345,6 +2377,7 @@ REVOKE ALL ON FUNCTION list_organization_members(uuid,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION list_organization_invitations(uuid,text,uuid,integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION organization_membership_command(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION get_organization_retention_policy(uuid,text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.assert_organization_retention_account(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.organization_retention_file_candidates(uuid,uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.organization_retention_object_candidates(uuid,uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION preview_organization_retention_deletions(uuid,integer) FROM PUBLIC;

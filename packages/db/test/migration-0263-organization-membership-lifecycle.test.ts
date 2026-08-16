@@ -178,6 +178,9 @@ describe("migration 0263 organization membership lifecycle", () => {
         ),
       );
     }
+    expect(migration.match(/assert_organization_retention_account\(p_account_id\)/gu)).toHaveLength(
+      9,
+    );
     expect(migration).toContain("REVOKE ALL ON TABLE organization_memberships FROM opengeni_app");
     expect(migration).toContain("DELETE FROM workspaces");
     expect(migration).not.toContain("DELETE FROM sessions");
@@ -1078,6 +1081,57 @@ describe("migration 0263 organization membership lifecycle", () => {
         ),
       "42501",
     );
+  });
+
+  test("binds every retention operator capability to the exact organization context", async () => {
+    if (!client) return;
+    const currentOwnerId = `retention-context-current-${crypto.randomUUID()}`;
+    const targetOwnerId = `retention-context-target-${crypto.randomUUID()}`;
+    await provisionSelf(currentOwnerId);
+    await provisionSelf(targetOwnerId);
+    const [currentOrganization] = await listSelfOrganizationMemberships(
+      client.db,
+      `user:${currentOwnerId}`,
+    );
+    const [targetOrganization] = await listSelfOrganizationMemberships(
+      client.db,
+      `user:${targetOwnerId}`,
+    );
+    const membershipId = crypto.randomUUID();
+    const operationId = crypto.randomUUID();
+    const sourceId = crypto.randomUUID();
+    const invokeAsCurrentOrganization = async (statement: ReturnType<typeof sql>) =>
+      await withRlsContext(
+        client!.db,
+        { accountId: currentOrganization!.organizationId, workspaceId: null },
+        async (scopedDb) => await rawRows(scopedDb, statement),
+      );
+    const targetAccount = sql`${targetOrganization!.organizationId}::uuid`;
+
+    for (const statement of [
+      sql`select preview_organization_retention_deletions(${targetAccount}, 25)`,
+      sql`select claim_organization_retention_deletion(
+        ${targetAccount}, ${operationId}::uuid, ARRAY[]::uuid[]
+      )`,
+      sql`select list_organization_retention_deletion_objects(
+        ${targetAccount}, ${membershipId}::uuid, ${operationId}::uuid, ${retentionObjectBucket}, 100
+      )`,
+      sql`select record_organization_retention_object_deleted(
+        ${targetAccount}, ${membershipId}::uuid, ${operationId}::uuid,
+        'file', ${sourceId}, ${retentionObjectBucket}, 'retention/object'
+      )`,
+      sql`select fail_organization_retention_deletion(
+        ${targetAccount}, ${membershipId}::uuid, ${operationId}::uuid, 'cross_tenant_test'
+      )`,
+      sql`select finalize_organization_retention_deletion(
+        ${targetAccount}, ${membershipId}::uuid, ${operationId}::uuid, ${retentionObjectBucket}
+      )`,
+      sql`select complete_organization_retention_deletion(
+        ${targetAccount}, ${membershipId}::uuid, ${operationId}::uuid, ${retentionObjectBucket}
+      )`,
+    ]) {
+      await expectSqlState(() => invokeAsCurrentOrganization(statement), "42501");
+    }
   });
 
   test("deletes an expired personal workspace only after exact object proof and preserves audit", async () => {

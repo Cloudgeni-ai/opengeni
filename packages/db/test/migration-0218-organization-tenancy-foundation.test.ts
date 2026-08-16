@@ -519,8 +519,8 @@ describe("migration 0218 organization tenancy foundation", () => {
     // an isolated replay stopped at 0218. Therefore the live catalog must
     // assert the current lifecycle policy while the static checks above preserve
     // 0218's historical deny-all contract. Migration 0263 retains managed-human
-    // provisioning and adds only its exact organization-membership capability;
-    // direct app privileges below remain deny-all.
+    // provisioning and session-visibility activation while adding only its exact
+    // organization-membership capability; direct app privileges remain deny-all.
     expect([...policyRows]).toEqual(
       [...tenancyTables].sort().map((tableName) => {
         const lifecycleExpression =
