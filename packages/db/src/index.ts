@@ -24554,7 +24554,11 @@ async function createSessionInTransaction(
     input.workspaceId,
     input.accountId,
   );
-  if (input.createdBy?.kind === "subject") {
+  if (
+    input.createdBy?.kind === "subject" &&
+    input.subjectId !== null &&
+    input.subjectId !== undefined
+  ) {
     if (input.subjectId !== input.createdBy.subjectId) {
       throw new Error("Managed-human session creator does not match authenticated subject");
     }

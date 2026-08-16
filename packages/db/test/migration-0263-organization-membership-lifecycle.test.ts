@@ -248,6 +248,53 @@ describe("migration 0263 organization membership lifecycle", () => {
     );
   });
 
+  test("separates causal subject provenance from authenticated managed-human admission", async () => {
+    if (!client) return;
+    const fixture = await provisionOrganizationMember("session-create-admission");
+    const workspaceId = fixture.member.personalWorkspaceId!;
+    const baseInput = {
+      accountId: fixture.owner.organizationId,
+      workspaceId,
+      initialMessage: "managed-human admission fence",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject" as const, subjectId: fixture.targetSubject },
+      model: "test-model",
+      sandboxBackend: "none" as const,
+    };
+
+    const serviceCreated = await createSession(client.db, baseInput);
+    expect(serviceCreated.createdBy).toEqual(baseInput.createdBy);
+
+    await expect(
+      createSession(client.db, {
+        ...baseInput,
+        subjectId: fixture.ownerSubject,
+      }),
+    ).rejects.toThrow("Managed-human session creator does not match authenticated subject");
+
+    const suspended = await updateOrganizationMember(client.db, {
+      organizationId: fixture.owner.organizationId,
+      actorSubjectId: fixture.ownerSubject,
+      operationId: crypto.randomUUID(),
+      membershipId: fixture.member.id,
+      transition: {
+        kind: "suspend",
+        expectedAuthorizationRevision: fixture.member.authorizationRevision,
+        operationId: crypto.randomUUID(),
+      },
+    });
+    expect(suspended.status).toBe("suspended");
+    await expectSqlState(
+      () =>
+        createSession(client!.db, {
+          ...baseInput,
+          subjectId: fixture.targetSubject,
+        }),
+      "42501",
+    );
+  });
+
   test("fresh custom-schema migrate and provision pins definers against TEMP shadows", async () => {
     const blank = await acquireBlankTestDatabase("migration-0263-custom-schema");
     if (!blank) return;
