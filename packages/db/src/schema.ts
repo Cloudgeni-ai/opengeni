@@ -7755,6 +7755,11 @@ export const enrollments = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
+    authorityScope: text("authority_scope").notNull().default("workspace"),
+    authorityId: uuid("authority_id"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    originWorkspaceId: uuid("origin_workspace_id"),
+    generation: bigint("generation", { mode: "number" }).notNull().default(1),
     // The agent's ed25519 public key (the machine identity).
     pubkey: text("pubkey").notNull(),
     exposure: text("exposure", { enum: enrollmentExposureValues })
@@ -7776,11 +7781,19 @@ export const enrollments = pgTable(
     // Optional per-connection command policy. NULL is the unrestricted default.
     // Values remain within JavaScript's exact-integer wire range; local runner and
     // ancestor host policy may only tighten them at execution.
-    operationMemoryMaxBytes: bigint("operation_memory_max_bytes", { mode: "number" }),
-    operationMemoryHighBytes: bigint("operation_memory_high_bytes", { mode: "number" }),
-    operationCpuMaxMillicores: bigint("operation_cpu_max_millicores", { mode: "number" }),
+    operationMemoryMaxBytes: bigint("operation_memory_max_bytes", {
+      mode: "number",
+    }),
+    operationMemoryHighBytes: bigint("operation_memory_high_bytes", {
+      mode: "number",
+    }),
+    operationCpuMaxMillicores: bigint("operation_cpu_max_millicores", {
+      mode: "number",
+    }),
     operationPolicyRevision: integer("operation_policy_revision").notNull().default(0),
-    operationPolicyUpdatedAt: timestamp("operation_policy_updated_at", { withTimezone: true }),
+    operationPolicyUpdatedAt: timestamp("operation_policy_updated_at", {
+      withTimezone: true,
+    }),
     status: text("status", { enum: enrollmentStatusValues }).notNull().default("active"),
     // Credential-family fence. Existing rows/migration-era bearers are generation
     // 1; every successful re-enrollment increments this atomically before a new
@@ -7792,7 +7805,9 @@ export const enrollments = pgTable(
     // socket cannot receive work after a successor claims authority.
     connectionInstanceId: text("connection_instance_id"),
     connectionGeneration: integer("connection_generation").notNull().default(0),
-    connectionLeaseExpiresAt: timestamp("connection_lease_expires_at", { withTimezone: true }),
+    connectionLeaseExpiresAt: timestamp("connection_lease_expires_at", {
+      withTimezone: true,
+    }),
     // Durable diagnostics for valid cloned credentials / duplicate daemons that
     // were blocked while another process held the live authority lease.
     connectionDuplicateDeniedCount: integer("connection_duplicate_denied_count")
@@ -7817,7 +7832,9 @@ export const enrollments = pgTable(
     // authoritative process Hello. Null means an older agent has not reported it.
     agentVersion: text("agent_version"),
     agentBinarySha256: text("agent_binary_sha256"),
-    agentUpdateChannel: text("agent_update_channel", { enum: ["stable", "beta"] as const }),
+    agentUpdateChannel: text("agent_update_channel", {
+      enum: ["stable", "beta"] as const,
+    }),
     agentCapabilities: jsonb("agent_capabilities")
       .$type<Record<string, boolean>>()
       .notNull()
@@ -7825,7 +7842,9 @@ export const enrollments = pgTable(
     // One current/most-recent self-update. The accepting connection coordinates
     // fence every progress write; a successor Hello is the only success signal.
     agentUpdateOperationId: uuid("agent_update_operation_id"),
-    agentUpdateStatus: text("agent_update_status", { enum: agentUpdateStatusValues }),
+    agentUpdateStatus: text("agent_update_status", {
+      enum: agentUpdateStatusValues,
+    }),
     agentUpdateTargetVersion: text("agent_update_target_version"),
     agentUpdateExpectedBinarySha256: text("agent_update_expected_binary_sha256"),
     agentUpdateErrorCode: text("agent_update_error_code"),
@@ -7833,21 +7852,59 @@ export const enrollments = pgTable(
     agentUpdateRolledBack: boolean("agent_update_rolled_back").notNull().default(false),
     agentUpdateConnectionInstanceId: text("agent_update_connection_instance_id"),
     agentUpdateConnectionGeneration: integer("agent_update_connection_generation"),
-    agentUpdateRequestedAt: timestamp("agent_update_requested_at", { withTimezone: true }),
-    agentUpdateUpdatedAt: timestamp("agent_update_updated_at", { withTimezone: true }),
-    agentUpdateCompletedAt: timestamp("agent_update_completed_at", { withTimezone: true }),
+    agentUpdateRequestedAt: timestamp("agent_update_requested_at", {
+      withTimezone: true,
+    }),
+    agentUpdateUpdatedAt: timestamp("agent_update_updated_at", {
+      withTimezone: true,
+    }),
+    agentUpdateCompletedAt: timestamp("agent_update_completed_at", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    // One enrollment per (workspace, pubkey): a re-enroll is an idempotent upsert.
-    workspacePubkey: uniqueIndex("enrollments_workspace_pubkey_idx").on(
-      table.workspaceId,
-      table.pubkey,
-    ),
+    // One enrollment identity per authority boundary and pubkey. Revocation keeps
+    // the identity so a re-enroll can reactivate the same durable row.
+    workspacePubkey: uniqueIndex("enrollments_workspace_pubkey_idx")
+      .on(table.workspaceId, table.pubkey)
+      .where(sql`${table.authorityScope} = 'workspace'`),
+    organizationPubkey: uniqueIndex("enrollments_organization_pubkey_idx")
+      .on(table.accountId, table.pubkey)
+      .where(sql`${table.authorityScope} = 'organization'`),
+    userPubkey: uniqueIndex("enrollments_user_pubkey_idx")
+      .on(table.accountId, table.ownerOrganizationMembershipId, table.pubkey)
+      .where(sql`${table.authorityScope} = 'user'`),
     // List a workspace's ACTIVE machines without scanning revoked rows.
     workspaceStatus: index("enrollments_workspace_status_idx").on(table.workspaceId, table.status),
+    authorityShape: check(
+      "enrollments_authority_shape_check",
+      sql`(
+        ${table.authorityScope} in ('organization', 'workspace')
+        and ${table.authorityId} is null
+        and ${table.ownerOrganizationMembershipId} is null
+      ) or (
+        ${table.authorityScope} = 'user'
+        and ${table.authorityId} is not null
+        and ${table.ownerOrganizationMembershipId} is not null
+      )`,
+    ),
+    authorityScopeValid: check(
+      "enrollments_authority_scope_check",
+      sql`${table.authorityScope} in ('organization', 'workspace', 'user')`,
+    ),
+    generationPositive: check("enrollments_generation_check", sql`${table.generation} > 0`),
+    authority: foreignKey({
+      name: "enrollments_authority_fk",
+      columns: [table.authorityId, table.accountId, table.ownerOrganizationMembershipId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+        organizationUserResourceAuthorities.organizationMembershipId,
+      ],
+    }).onDelete("restrict"),
     connectionAuthorityShape: check(
       "enrollments_connection_authority_shape_chk",
       sql`(${table.connectionInstanceId} is null and ${table.connectionLeaseExpiresAt} is null)
@@ -8309,7 +8366,9 @@ export const scheduledTaskRuns = pgTable(
     taskId: uuid("task_id")
       .notNull()
       .references(() => scheduledTasks.id, { onDelete: "cascade" }),
-    taskAuthorityRevision: bigint("task_authority_revision", { mode: "number" }),
+    taskAuthorityRevision: bigint("task_authority_revision", {
+      mode: "number",
+    }),
     taskExecutionDigest: text("task_execution_digest"),
     status: text("status").notNull().default("queued"),
     triggerType: text("trigger_type").notNull(),
@@ -9761,22 +9820,31 @@ export const rigs = pgTable(
     description: text("description"),
     // Attribution string: 'user:<subject>' | 'session:<id>' | 'system'.
     createdBy: text("created_by"),
-    // Inert migration-0230 identity foundation. Existing DAO/API/runtime paths
-    // omit these fields and keep their historical workspace authority.
     authorityScope: text("authority_scope").notNull().default("workspace"),
     authorityId: uuid("authority_id"),
     ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
     originWorkspaceId: uuid("origin_workspace_id"),
+    generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    status: text("status").notNull().default("active"),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    workspaceName: uniqueIndex("rigs_workspace_name_idx").on(table.workspaceId, table.name),
+    workspaceName: uniqueIndex("rigs_workspace_name_active_idx")
+      .on(table.workspaceId, table.name)
+      .where(sql`${table.authorityScope} = 'workspace' and ${table.status} = 'active'`),
+    organizationName: uniqueIndex("rigs_organization_name_active_idx")
+      .on(table.accountId, table.name)
+      .where(sql`${table.authorityScope} = 'organization' and ${table.status} = 'active'`),
+    userName: uniqueIndex("rigs_user_name_active_idx")
+      .on(table.accountId, table.ownerOrganizationMembershipId, table.name)
+      .where(sql`${table.authorityScope} = 'user' and ${table.status} = 'active'`),
     workspaceCreated: index("rigs_workspace_created_idx").on(table.workspaceId, table.createdAt),
     authorityShape: check(
       "rigs_authority_shape_check",
       sql`(
-          ${table.authorityScope} = 'workspace'
+          ${table.authorityScope} in ('organization', 'workspace')
           and ${table.authorityId} is null
           and ${table.ownerOrganizationMembershipId} is null
         ) or (
@@ -9787,7 +9855,14 @@ export const rigs = pgTable(
     ),
     authorityScopeValid: check(
       "rigs_authority_scope_check",
-      sql`${table.authorityScope} in ('workspace', 'user')`,
+      sql`${table.authorityScope} in ('organization', 'workspace', 'user')`,
+    ),
+    generationPositive: check("rigs_generation_check", sql`${table.generation} > 0`),
+    statusValid: check("rigs_status_check", sql`${table.status} in ('active', 'revoked')`),
+    revocationShape: check(
+      "rigs_revocation_check",
+      sql`(${table.status} = 'active' and ${table.revokedAt} is null)
+        or (${table.status} = 'revoked' and ${table.revokedAt} is not null)`,
     ),
     authority: foreignKey({
       name: "rigs_authority_fk",

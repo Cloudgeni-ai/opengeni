@@ -154,6 +154,10 @@ export function MachineCard({
               ) : null}
             </div>
             <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-og-xs text-og-fg-subtle">
+              <span data-machine-scope={machine.scope} className="capitalize">
+                {machine.scope === "user" ? "personal" : machine.scope}
+              </span>
+              <span aria-hidden>·</span>
               <span className="capitalize">
                 {machine.isSessionGroup ? "session sandbox" : machine.kind}
               </span>

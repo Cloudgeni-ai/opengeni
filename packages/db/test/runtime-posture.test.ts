@@ -312,6 +312,7 @@ describe("runtime database posture evaluator", () => {
         "scheduled_task_run_personal_resource_snapshots",
         "session_attempt_personal_resource_admissions",
         "session_attempt_personal_resource_snapshots",
+        "session_attempt_connected_machine_authorizations",
       ].filter(
         (table) =>
           new Set<string>(FORCE_RLS_TABLES).has(table) &&
@@ -522,7 +523,12 @@ describe("runtime database posture evaluator", () => {
         routine.name.startsWith("list_organization_") ||
         routine.name === "get_self_organization_invitation(text, uuid)" ||
         routine.name === "organization_membership_command(jsonb)" ||
-        routine.name === "get_organization_retention_policy(uuid, text)"
+        routine.name === "get_organization_retention_policy(uuid, text)" ||
+        routine.name.includes("scoped_rig") ||
+        routine.name.includes("scoped_enrollment") ||
+        routine.name.includes("scoped_sandbox") ||
+        routine.name.includes("scoped_machine_dependent_sessions") ||
+        routine.name.includes("personal_machine")
       ) {
         routine.owner = "pg_database_owner";
       }
