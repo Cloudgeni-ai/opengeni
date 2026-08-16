@@ -724,6 +724,33 @@ BEGIN
       );
     END IF;
     IF to_regprocedure(
+      format('%I.inspect_governed_learning_decisions(uuid,uuid,text,integer)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.inspect_governed_learning_decisions(uuid, uuid, text, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.inspect_governed_learning_activations(uuid,uuid,text,integer)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.inspect_governed_learning_activations(uuid, uuid, text, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.inspect_governed_learning_activation_undos(uuid,uuid,text,integer)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.inspect_governed_learning_activation_undos(uuid, uuid, text, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
       format(
         '%I.replace_task_note_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,uuid,uuid,uuid,integer,text,text,integer,text)',
         ${literal(schema)}

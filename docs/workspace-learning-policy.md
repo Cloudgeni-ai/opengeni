@@ -60,6 +60,34 @@ activation can therefore return to no active head through the service-only
 boundary for later CAS. Accepted-turn event reconstruction observes no policy
 after that boundary. Human activation and rollback event shapes remain
 unchanged.
+
+## Administration and inspection
+
+Migration `0270_governed_learning_history_inspection.sql` keeps all three
+governed-learning receipt tables inaccessible to direct runtime reads and adds
+three bounded, read-only SECURITY DEFINER projections. Each projection requires
+the exact current account, workspace, subject, and `human_session` principal;
+decision history additionally retains session-visibility and immutable
+initiating-human checks. The projections return only the existing content-free
+receipts.
+
+`GET /v1/workspaces/:workspaceId/learning` is the canonical permission-filtered
+history surface. It combines the active workspace policy and immutable policy
+events with the current human's decision, automatic-activation, and undo
+receipts. The response cites stable source IDs, hashes, versions, confidence,
+reason codes, actors, and the `next_accepted_attempt` effective boundary. It
+never returns source text, proposal content, preference values, instruction
+content, credentials, or another human's receipts.
+
+Policy revision creation, activation, and rollback plus exact governed-change
+undo require `workspace:admin` and an authenticated human session. The
+Learning & autonomy Workspace State view maps the primary control directly to
+the canonical backend modes (`Off`, `Review first` = `suggest`, and
+`Autonomous` = `automatic`), keeps exact-source overrides under Advanced, and
+uses activation-version CAS for every change. Rollback and undo remain
+destination-native compensating lifecycle operations rather than history
+mutation.
+
 Destination ownership remains:
 
 - Documents/RAG: evidence and retrieval only.
@@ -75,7 +103,6 @@ The controller deliberately does not implement:
 - Personal or Organization scope expansion;
 - explicit session command/tool integration;
 - runtime prompt composition or automatic snapshot installation;
-- Workspace State/API/SDK/UI administration;
 - Slack notification delivery.
 
-Canonical policy code: `packages/contracts/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy-schema.ts`, and migration `0199_workspace_learning_policy.sql`. Canonical evaluator code: `packages/contracts/src/governed-learning-evaluator.ts`, `packages/core/src/domain/governed-learning-evaluator.ts`, `packages/db/src/governed-learning-evaluator.ts`, and migration `0268_governed_learning_decision_receipts.sql`. Canonical activation code: `packages/contracts/src/governed-learning-activation.ts`, `packages/core/src/domain/governed-learning-activation.ts`, `packages/db/src/governed-learning-activation.ts`, and migration `0269_governed_learning_activation_controller.sql`.
+Canonical policy code: `packages/contracts/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy-schema.ts`, and migration `0199_workspace_learning_policy.sql`. Canonical evaluator code: `packages/contracts/src/governed-learning-evaluator.ts`, `packages/core/src/domain/governed-learning-evaluator.ts`, `packages/db/src/governed-learning-evaluator.ts`, and migration `0268_governed_learning_decision_receipts.sql`. Canonical activation code: `packages/contracts/src/governed-learning-activation.ts`, `packages/core/src/domain/governed-learning-activation.ts`, `packages/db/src/governed-learning-activation.ts`, and migration `0269_governed_learning_activation_controller.sql`. Canonical administration code: `packages/contracts/src/workspace-learning-administration.ts`, `apps/api/src/routes/workspace-learning.ts`, `packages/sdk/src/workspace-learning.ts`, `apps/web/src/routes/workspace-learning-admin.tsx`, and migration `0270_governed_learning_history_inspection.sql`.

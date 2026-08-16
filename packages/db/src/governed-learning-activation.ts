@@ -161,6 +161,58 @@ function undoFromRow(row: UndoRow): UndoReceipt {
   });
 }
 
+/** Subject-filtered activation and compensation history for Workspace State. */
+export async function listGovernedLearningActivationHistory(
+  db: Database,
+  input: { workspaceId: string; subjectId: string; principalKind: string; limit: number },
+): Promise<{ activations: ActivationReceipt[]; undos: UndoReceipt[]; truncated: boolean }> {
+  if (input.principalKind !== "human_session") {
+    throw new GovernedLearningActivationAuthorityError(
+      "Governed-learning history requires an exact authenticated human actor",
+    );
+  }
+  const limit = Math.max(1, Math.min(input.limit, 100));
+  try {
+    return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scoped) => {
+      await scoped.execute(
+        sql`select set_config('opengeni.principal_kind', ${input.principalKind}, true)`,
+      );
+      const [activationRows, undoRows] = await Promise.all([
+        rawRows<ActivationRow>(
+          scoped,
+          sql`SELECT * FROM inspect_governed_learning_activations(
+          current_setting('opengeni.account_id')::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.subjectId},
+          ${limit + 1}
+        )`,
+        ),
+        rawRows<UndoRow>(
+          scoped,
+          sql`SELECT * FROM inspect_governed_learning_activation_undos(
+          current_setting('opengeni.account_id')::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.subjectId},
+          ${limit + 1}
+        )`,
+        ),
+      ]);
+      return {
+        activations: activationRows.slice(0, limit).map(activationFromRow),
+        undos: undoRows.slice(0, limit).map(undoFromRow),
+        truncated: activationRows.length > limit || undoRows.length > limit,
+      };
+    });
+  } catch (error) {
+    if (nestedPostgresSqlState(error) === "42501") {
+      throw new GovernedLearningActivationAuthorityError(
+        "Governed-learning history is unavailable",
+      );
+    }
+    throw error;
+  }
+}
+
 function translate(error: unknown): never {
   const state = nestedPostgresSqlState(error);
   if (state === "42501") {

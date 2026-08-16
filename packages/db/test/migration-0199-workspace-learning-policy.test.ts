@@ -328,6 +328,13 @@ describe("migration 0199 workspace learning policy", () => {
       head: { revisionId: first.id, activationVersion: 3 },
       event: { type: "rollback", oldRevision: { id: raceWinner.revisionId } },
     });
+    const activeOnly = await listWorkspaceLearningPolicyHistory(client.db, {
+      accountId: fixture.accountA,
+      workspaceId: fixture.workspaceA,
+      limit: 1,
+    });
+    expect(activeOnly.revisions).toEqual([first]);
+    expect(activeOnly.truncated).toBe(true);
 
     const frozen = await getOrCreateWorkspaceLearningPolicySnapshot(client.db, {
       accountId: fixture.accountA,

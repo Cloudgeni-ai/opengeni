@@ -10,6 +10,7 @@ import {
   Clock3Icon,
   FileSearchIcon,
   SlidersHorizontalIcon,
+  SparklesIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -155,7 +156,7 @@ function FocusAction({
   workspaceId,
 }: {
   children: ReactNode;
-  view: "company" | "instructions" | "preferences";
+  view: "company" | "instructions" | "preferences" | "learning";
   workspaceId: string;
 }) {
   return (
@@ -311,6 +312,17 @@ export function BrainOverview({
       </SummaryGroup>
 
       <SummaryGroup title="Available when needed">
+        <SummaryRow
+          icon={<SparklesIcon className="size-4" />}
+          title="Learning & autonomy"
+          status="Governed"
+          description="Choose whether source-backed changes stay off, wait for review, or apply automatically."
+          action={
+            <FocusAction view="learning" workspaceId={workspaceId}>
+              Manage
+            </FocusAction>
+          }
+        />
         <SummaryRow
           icon={<SlidersHorizontalIcon className="size-4" />}
           title="Guides & preferences"

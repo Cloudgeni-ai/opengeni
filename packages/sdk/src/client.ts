@@ -437,6 +437,16 @@ import type {
   WorkspaceInstructionPolicyRevision,
 } from "./workspace-instruction-policies";
 import type {
+  ActivateWorkspaceLearningPolicyRevisionRequest,
+  CreateWorkspaceLearningPolicyRevisionRequest,
+  GovernedLearningActivationUndoReceipt,
+  RollbackWorkspaceLearningPolicyRevisionRequest,
+  WorkspaceLearningHistoryOptions,
+  WorkspaceLearningHistoryResponse,
+  WorkspaceLearningPolicyMutationResponse,
+  WorkspaceLearningPolicyRevision,
+} from "./workspace-learning";
+import type {
   ActivateCompanyProfileRevisionRequest,
   CompanyProfileDiffRequest,
   CompanyProfileDiffResponse,
@@ -3705,6 +3715,66 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceInstructionPolicyListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/instruction-policies${query ? `?${query}` : ""}`,
+    );
+  }
+
+  /** Inspect the bounded, permission-filtered governed-learning timeline. */
+  async getWorkspaceLearningHistory(
+    workspaceId: string,
+    options: WorkspaceLearningHistoryOptions = {},
+  ): Promise<WorkspaceLearningHistoryResponse> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    const query = params.toString();
+    return await this.requestJson<WorkspaceLearningHistoryResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/learning${query ? `?${query}` : ""}`,
+    );
+  }
+
+  async createWorkspaceLearningPolicyRevision(
+    workspaceId: string,
+    request: CreateWorkspaceLearningPolicyRevisionRequest,
+  ): Promise<WorkspaceLearningPolicyRevision> {
+    return await this.requestJson<WorkspaceLearningPolicyRevision>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/learning/revisions`,
+      request,
+    );
+  }
+
+  async activateWorkspaceLearningPolicyRevision(
+    workspaceId: string,
+    revisionId: string,
+    request: ActivateWorkspaceLearningPolicyRevisionRequest,
+  ): Promise<WorkspaceLearningPolicyMutationResponse> {
+    return await this.requestJson<WorkspaceLearningPolicyMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/learning/revisions/${encodeURIComponent(revisionId)}/activate`,
+      request,
+    );
+  }
+
+  async rollbackWorkspaceLearningPolicyRevision(
+    workspaceId: string,
+    request: RollbackWorkspaceLearningPolicyRevisionRequest,
+  ): Promise<WorkspaceLearningPolicyMutationResponse> {
+    return await this.requestJson<WorkspaceLearningPolicyMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/learning/rollback`,
+      request,
+    );
+  }
+
+  async undoGovernedLearningActivation(
+    workspaceId: string,
+    activationReceiptId: string,
+    request: { operationId?: string } = {},
+  ): Promise<GovernedLearningActivationUndoReceipt> {
+    return await this.requestJson<GovernedLearningActivationUndoReceipt>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/learning/activations/${encodeURIComponent(activationReceiptId)}/undo`,
+      request,
     );
   }
 

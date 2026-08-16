@@ -300,8 +300,11 @@ const workspaceStateRoute = createRoute({
   path: "state",
   validateSearch: (
     search: Record<string, unknown>,
-  ): { view?: "company" | "instructions" | "preferences" } =>
-    search.view === "company" || search.view === "instructions" || search.view === "preferences"
+  ): { view?: "company" | "instructions" | "preferences" | "learning" } =>
+    search.view === "company" ||
+    search.view === "instructions" ||
+    search.view === "preferences" ||
+    search.view === "learning"
       ? { view: search.view }
       : {},
   component: WorkspaceState,
