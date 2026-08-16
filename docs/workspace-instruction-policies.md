@@ -74,7 +74,11 @@ Documents, or knowledge authority. One transaction:
    confidence basis points, actor, baseline, request fingerprint, and timestamp.
 
 The caller must supply both the expected current revision ID and activation
-version (`null` and `0` when no head exists). A changed head returns
+version (`null` and `0` only when the target has never had a head). An inactive
+target retains a revision-free boundary with its latest positive activation
+version in the additive deactivation ledger, which callers obtain from the
+bounded `inactiveHeads` list projection.
+A changed boundary returns
 `WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_STALE`. Reusing the same
 source version for the same target with different content, confidence, or
 baseline returns `WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_CONFLICT`.
@@ -133,10 +137,22 @@ service-only compensation operation for an instruction policy activated from a
 final governed-learning `automatic` receipt. It cannot be called as the generic
 human lifecycle and does not change human activation or rollback. Exact undo is
 CAS-fenced to the controller's still-current activation. When that activation
-replaced no prior head, the operation removes only that exact head and appends
-an immutable `automatic_deactivate` event with a null new revision. Canonical
-accepted-turn reconstruction treats that later event as no active policy; the
-automatic activation remains in history and no evidence is deleted.
+replaced no prior head, the operation removes only that exact active head and
+appends a durable monotonic `automatic_deactivate` boundary in an additive
+history whose shape does not weaken the legacy activation-event contract.
+Canonical accepted-turn reconstruction
+treats that later boundary as no active policy; the automatic activation remains
+in history and no evidence is deleted. A later human or automatic activation
+must CAS against the inactive boundary and continues the target's monotonic
+version sequence.
+
+The cutover remains rolling-compatible: the legacy head table keeps its
+non-null shape and contains no row while a target is inactive, so old readers
+cannot surface a tombstone as active. A pre-0269 writer that omits the activation
+version still computes version 1 for that absent row, which conflicts with the
+target's immutable historical version-1 activation event and rolls back before
+it can recreate a head. New writers read the additive boundary and continue at
+the exact next version.
 
 Rollback never mutates history. Its target must be a revision that was previously
 active for the same target, and rollback creates a new activation event and a new
@@ -146,7 +162,8 @@ head version.
 
 The API and `OpenGeniClient` expose:
 
-- list revision history, active heads, and activation events;
+- list revision history, active heads, bounded per-target inactive boundaries,
+  legacy activation events, and additive deactivation events;
 - get one revision;
 - create a draft;
 - import the stored legacy override as a draft;

@@ -599,7 +599,7 @@ describe("workspace instruction-policy API and PostgreSQL authority", () => {
     });
     expect(Date.parse(rollback.event.createdAt)).not.toBeNaN();
     expect(rollback.event.oldRevision.contentHash).toHaveLength(64);
-    expect(rollback.event.newRevision!.contentHash).toHaveLength(64);
+    expect(rollback.event.newRevision.contentHash).toHaveLength(64);
     const rollbackRetry = await request(legacyGrant, "/instruction-policies/rollback", {
       method: "POST",
       body: rollbackBody,

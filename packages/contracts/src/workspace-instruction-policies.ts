@@ -32,11 +32,7 @@ export type WorkspaceInstructionPolicyDraftProvenanceSource = z.infer<
   typeof WorkspaceInstructionPolicyDraftProvenanceSource
 >;
 
-export const WorkspaceInstructionPolicyActivationType = z.enum([
-  "activate",
-  "rollback",
-  "automatic_deactivate",
-]);
+export const WorkspaceInstructionPolicyActivationType = z.enum(["activate", "rollback"]);
 export type WorkspaceInstructionPolicyActivationType = z.infer<
   typeof WorkspaceInstructionPolicyActivationType
 >;
@@ -158,6 +154,16 @@ export const WorkspaceInstructionPolicyHead = z.object({
 });
 export type WorkspaceInstructionPolicyHead = z.infer<typeof WorkspaceInstructionPolicyHead>;
 
+export const WorkspaceInstructionPolicyInactiveHead = z.object({
+  workspaceId: z.string().uuid(),
+  ...targetShape,
+  activationVersion: z.number().int().positive(),
+  deactivatedAt: z.string().datetime(),
+});
+export type WorkspaceInstructionPolicyInactiveHead = z.infer<
+  typeof WorkspaceInstructionPolicyInactiveHead
+>;
+
 export const WorkspaceInstructionPolicySnapshotProvenance = z.object({
   source: WorkspaceInstructionPolicyProvenanceSource,
   sourceIdHash: z
@@ -216,38 +222,39 @@ export type ResolvedWorkspaceInstructionPolicySnapshot = z.infer<
   typeof ResolvedWorkspaceInstructionPolicySnapshot
 >;
 
-export const WorkspaceInstructionPolicyActivationEvent = z
-  .object({
-    id: z.string().uuid(),
-    operationId: z.string().uuid(),
-    accountId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
-    ...targetShape,
-    type: WorkspaceInstructionPolicyActivationType,
-    activationVersion: z.number().int().positive(),
-    oldRevision: WorkspaceInstructionPolicyRevisionIdentity.nullable(),
-    newRevision: WorkspaceInstructionPolicyRevisionIdentity.nullable(),
-    actorSubjectId: z.string().min(1),
-    reason: z.string().min(1).max(WORKSPACE_INSTRUCTION_POLICY_REASON_MAX_CHARS),
-    createdAt: z.string().datetime(),
-  })
-  .superRefine((event, ctx) => {
-    if (event.type === "automatic_deactivate") {
-      if (event.oldRevision === null || event.newRevision !== null) {
-        ctx.addIssue({
-          code: "custom",
-          message: "automatic deactivation requires an old revision and a null new revision",
-        });
-      }
-    } else if (event.newRevision === null) {
-      ctx.addIssue({
-        code: "custom",
-        message: "activation and rollback require a new revision",
-      });
-    }
-  });
+export const WorkspaceInstructionPolicyActivationEvent = z.object({
+  id: z.string().uuid(),
+  operationId: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  ...targetShape,
+  type: WorkspaceInstructionPolicyActivationType,
+  activationVersion: z.number().int().positive(),
+  oldRevision: WorkspaceInstructionPolicyRevisionIdentity.nullable(),
+  newRevision: WorkspaceInstructionPolicyRevisionIdentity,
+  actorSubjectId: z.string().min(1),
+  reason: z.string().min(1).max(WORKSPACE_INSTRUCTION_POLICY_REASON_MAX_CHARS),
+  createdAt: z.string().datetime(),
+});
 export type WorkspaceInstructionPolicyActivationEvent = z.infer<
   typeof WorkspaceInstructionPolicyActivationEvent
+>;
+
+export const WorkspaceInstructionPolicyDeactivationEvent = z.object({
+  id: z.string().uuid(),
+  operationId: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  ...targetShape,
+  type: z.literal("automatic_deactivate"),
+  activationVersion: z.number().int().positive(),
+  oldRevision: WorkspaceInstructionPolicyRevisionIdentity,
+  actorSubjectId: z.string().min(1),
+  reason: z.string().min(1).max(WORKSPACE_INSTRUCTION_POLICY_REASON_MAX_CHARS),
+  createdAt: z.string().datetime(),
+});
+export type WorkspaceInstructionPolicyDeactivationEvent = z.infer<
+  typeof WorkspaceInstructionPolicyDeactivationEvent
 >;
 
 export const CreateWorkspaceInstructionPolicyDraftRequest = z
@@ -299,7 +306,10 @@ export type WorkspaceInstructionPolicyListQuery = z.infer<
 export const WorkspaceInstructionPolicyListResponse = z.object({
   revisions: z.array(WorkspaceInstructionPolicyRevision),
   activeHeads: z.array(WorkspaceInstructionPolicyHead),
+  inactiveHeads: z.array(WorkspaceInstructionPolicyInactiveHead).default([]),
+  inactiveHeadsTruncated: z.boolean().default(false),
   activationEvents: z.array(WorkspaceInstructionPolicyActivationEvent),
+  deactivationEvents: z.array(WorkspaceInstructionPolicyDeactivationEvent).default([]),
   nextAfterRevision: z.number().int().positive().nullable(),
 });
 export type WorkspaceInstructionPolicyListResponse = z.infer<

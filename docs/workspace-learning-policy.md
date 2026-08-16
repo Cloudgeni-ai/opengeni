@@ -55,9 +55,11 @@ Undo is compensation, not history deletion. It succeeds only while both the
 automatic Knowledge review and destination head remain current. Knowledge adds
 an append-only revocation review, Preference uses its native deactivation
 lifecycle, and instruction policy restores the exact prior head. A first policy
-activation can therefore return to no head through the service-only
-`automatic_deactivate` event; accepted-turn event reconstruction observes that
-later null boundary. Human activation and rollback semantics are unchanged.
+activation can therefore return to no active head through the service-only
+`automatic_deactivate` event while retaining a durable monotonic inactive
+boundary for later CAS. Accepted-turn event reconstruction observes no policy
+after that boundary. Human activation and rollback event shapes remain
+unchanged.
 Destination ownership remains:
 
 - Documents/RAG: evidence and retrieval only.

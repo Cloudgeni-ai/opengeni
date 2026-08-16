@@ -3,6 +3,8 @@ import {
   CreateWorkspaceInstructionPolicyDraftRequest,
   CreateWorkspaceInstructionPolicyOnboardingProposalRequest,
   WorkspaceInstructionPolicyActivationEvent,
+  WorkspaceInstructionPolicyDeactivationEvent,
+  WorkspaceInstructionPolicyListResponse,
   WorkspaceInstructionPolicyOnboardingProposal,
   WorkspaceInstructionPolicyTarget,
   normalizeWorkspaceInstructionPolicyRoleKey,
@@ -142,22 +144,31 @@ describe("workspace instruction-policy contracts", () => {
     expect(event.type).toBe("rollback");
     expect(event.operationId).toBe("00000000-0000-4000-8000-000000000006");
     expect(event.oldRevision?.revision).toBe(11);
-    expect(event.newRevision!.revision).toBe(7);
+    expect(event.newRevision.revision).toBe(7);
     expect(
       WorkspaceInstructionPolicyActivationEvent.safeParse({
         ...event,
         type: "automatic_deactivate",
-        newRevision: null,
-      }).success,
-    ).toBe(true);
-    expect(
-      WorkspaceInstructionPolicyActivationEvent.safeParse({
-        ...event,
-        type: "automatic_deactivate",
-        oldRevision: null,
         newRevision: null,
       }).success,
     ).toBe(false);
+    expect(
+      WorkspaceInstructionPolicyDeactivationEvent.safeParse({
+        id: event.id,
+        operationId: event.operationId,
+        accountId: event.accountId,
+        workspaceId: event.workspaceId,
+        kind: event.kind,
+        scope: event.scope,
+        roleKey: event.roleKey,
+        type: "automatic_deactivate",
+        activationVersion: 4,
+        oldRevision: event.newRevision,
+        actorSubjectId: "service:governed-learning-activation:receipt",
+        reason: "Exact automatic undo.",
+        createdAt: event.createdAt,
+      }).success,
+    ).toBe(true);
     expect(
       WorkspaceInstructionPolicyActivationEvent.safeParse({
         ...event,
@@ -165,5 +176,14 @@ describe("workspace instruction-policy contracts", () => {
         newRevision: null,
       }).success,
     ).toBe(false);
+    const legacyList = WorkspaceInstructionPolicyListResponse.parse({
+      revisions: [],
+      activeHeads: [],
+      activationEvents: [event],
+      nextAfterRevision: null,
+    });
+    expect(legacyList.deactivationEvents).toEqual([]);
+    expect(legacyList.inactiveHeads).toEqual([]);
+    expect(legacyList.inactiveHeadsTruncated).toBe(false);
   });
 });

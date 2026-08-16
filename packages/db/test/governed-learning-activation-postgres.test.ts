@@ -23,6 +23,7 @@ import {
   ensureManagedAccessForUser,
   evaluateGovernedLearningProposal,
   getOrCreateWorkspaceLearningPolicySnapshot,
+  listWorkspaceInstructionPolicyRevisions,
   nestedPostgresSqlState,
   undoGovernedLearningActivation,
   upsertKnowledgeEntity,
@@ -151,6 +152,12 @@ async function fixture() {
 async function decision(
   f: Awaited<ReturnType<typeof fixture>>,
   destination: "preference" | "instruction_policy",
+  instructionTarget: {
+    kind: "policy";
+    scope: "global" | "role";
+    roleKey: string | null;
+  } = { kind: "policy", scope: "global", roleKey: null },
+  expectedInstructionActivationVersion = 0,
 ) {
   const note = await createTaskNote(client!.db, {
     ...f.writerAttempt,
@@ -188,9 +195,9 @@ async function decision(
         : {
             ...common,
             kind: "promote_task_note_instruction_policy" as const,
-            target: { kind: "policy" as const, scope: "global" as const, roleKey: null },
+            target: instructionTarget,
             expectedCurrentRevisionId: null,
-            expectedActivationVersion: 0,
+            expectedActivationVersion: expectedInstructionActivationVersion,
           },
   });
   if (!write.knowledgeChangeProposalId) throw new Error("missing change proposal");
@@ -426,8 +433,10 @@ describe("governed-learning activation PostgreSQL authority", () => {
     });
   });
 
-  test("restores a null instruction-policy head through append-only deactivation evidence", async () => {
+  test("keeps a monotonic null instruction-policy boundary and reactivates with exact CAS", async () => {
     if (!shared || !client) return;
+    const db = client.db;
+    const admin = shared.admin;
     const f = await fixture();
     const d = await decision(f, "instruction_policy");
     const activation = await activateGovernedLearningDecision(client.db, {
@@ -440,6 +449,26 @@ describe("governed-learning activation PostgreSQL authority", () => {
       destinationOldVersion: 0,
       destinationNewVersion: 1,
     });
+    const app = postgres(shared.appUrl, { max: 1, prepare: false });
+    try {
+      await expectSqlState(
+        () =>
+          app.begin(async (sql) => {
+            await sql`select set_config('opengeni.account_id', ${f.grant.accountId}, true)`;
+            await sql`select set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true)`;
+            await sql`select set_config('opengeni.subject_id', ${f.ownerSubjectId}, true)`;
+            await sql`select set_config('opengeni.governed_learning_deactivation_operation', ${crypto.randomUUID()}, true)`;
+            await sql`
+              delete from workspace_instruction_policy_heads
+              where workspace_id = ${f.grant.workspaceId}
+                and kind = 'policy' and scope = 'global'
+            `;
+          }),
+        "42501",
+      );
+    } finally {
+      await app.end();
+    }
     const undo = await undoGovernedLearningActivation(client.db, {
       caller: f.caller,
       request: { operationId: crypto.randomUUID(), activationReceiptId: activation.id },
@@ -449,26 +478,187 @@ describe("governed-learning activation PostgreSQL authority", () => {
       destinationOldVersion: 1,
       destinationNewVersion: 2,
     });
-    const [head, event, entries] = await Promise.all([
-      shared.admin<{ count: number }[]>`
-        select count(*)::int as count from workspace_instruction_policy_heads
+    const [legacyVisibleHeads, event, entries] = await Promise.all([
+      admin<Array<{ revision_id: string; activation_version: number }>>`
+        select revision_id, activation_version::int as activation_version
+        from workspace_instruction_policy_heads
         where workspace_id = ${f.grant.workspaceId} and kind = 'policy' and scope = 'global'
       `,
-      shared.admin<Array<{ type: string; new_revision_id: string | null }>>`
-        select type, new_revision_id from workspace_instruction_policy_activation_events
+      admin<Array<{ type: string; new_revision_id: string | null }>>`
+        select type, null::uuid as new_revision_id
+        from workspace_instruction_policy_deactivation_events
         where id = ${undo.destinationEventId}
       `,
-      shared.admin<Array<{ entries: unknown[] }>>`
+      admin<Array<{ entries: unknown[] }>>`
         select workspace_instruction_policy_canonical_snapshot_entries(
           ${f.grant.accountId}::uuid, ${f.grant.workspaceId}::uuid, null,
           clock_timestamp() + interval '1 second'
         ) as entries
       `,
     ]);
-    expect(head[0]?.count).toBe(0);
+    // This is the exact predecessor list/read query: a rolling-old binary sees
+    // no active head, never a nullable row that violates its required contract.
+    expect(legacyVisibleHeads).toHaveLength(0);
     expect(event[0]).toEqual({ type: "automatic_deactivate", new_revision_id: null });
     expect(entries[0]?.entries).toEqual([]);
-  });
+
+    const legacyDraft = await createWorkspaceInstructionPolicyDraft(db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      kind: "policy",
+      scope: "global",
+      roleKey: null,
+      content: "A rolling-old writer must not reactivate from a lost generation.",
+      provenanceSource: "human",
+      provenanceSourceId: null,
+      supersedesRevisionId: null,
+      createdBySubjectId: f.ownerSubjectId,
+    });
+    await expectSqlState(
+      () => admin`
+        insert into workspace_instruction_policy_activation_events (
+          operation_id, request_fingerprint, account_id, workspace_id,
+          kind, scope, role_key, type, activation_version,
+          old_revision_id, old_revision, old_content_hash,
+          new_revision_id, new_revision, new_content_hash,
+          actor_subject_id, reason
+        ) values (
+          ${crypto.randomUUID()}::uuid, ${"e".repeat(64)}, ${f.grant.accountId}::uuid,
+          ${f.grant.workspaceId}::uuid, 'policy', 'global', null, 'activate', 1,
+          null, null, null, ${legacyDraft.id}::uuid, ${legacyDraft.revision},
+          ${legacyDraft.contentHash}, ${f.ownerSubjectId},
+          'Simulated pre-0269 changeActiveRevision without an activation-version expectation.'
+        )
+      `,
+      "23505",
+    );
+    const [headCountAfterLegacyWrite] = await admin<Array<{ count: number }>>`
+      select count(*)::int as count from workspace_instruction_policy_heads
+      where workspace_id = ${f.grant.workspaceId} and kind = 'policy' and scope = 'global'
+    `;
+    expect(headCountAfterLegacyWrite?.count).toBe(0);
+
+    const nextAutomaticDecision = await decision(
+      f,
+      "instruction_policy",
+      { kind: "policy", scope: "global", roleKey: null },
+      2,
+    );
+    const nextAutomaticActivation = await activateGovernedLearningDecision(db, {
+      caller: f.caller,
+      request: {
+        operationId: crypto.randomUUID(),
+        decisionReceiptId: nextAutomaticDecision.receipt.id,
+      },
+    });
+    expect(nextAutomaticActivation).toMatchObject({
+      destination: "instruction_policy",
+      destinationOldRevisionId: null,
+      destinationOldVersion: 2,
+      destinationNewVersion: 3,
+    });
+    const nextAutomaticUndo = await undoGovernedLearningActivation(db, {
+      caller: f.caller,
+      request: {
+        operationId: crypto.randomUUID(),
+        activationReceiptId: nextAutomaticActivation.id,
+      },
+    });
+    expect(nextAutomaticUndo).toMatchObject({
+      destinationRestoredRevisionId: null,
+      destinationOldVersion: 3,
+      destinationNewVersion: 4,
+    });
+
+    const unrelatedDecision = await decision(f, "instruction_policy", {
+      kind: "policy",
+      scope: "role",
+      roleKey: `overflow-${crypto.randomUUID().slice(0, 8)}`,
+    });
+    const unrelatedActivation = await activateGovernedLearningDecision(db, {
+      caller: f.caller,
+      request: {
+        operationId: crypto.randomUUID(),
+        decisionReceiptId: unrelatedDecision.receipt.id,
+      },
+    });
+    const unrelatedUndo = await undoGovernedLearningActivation(db, {
+      caller: f.caller,
+      request: { operationId: crypto.randomUUID(), activationReceiptId: unrelatedActivation.id },
+    });
+    const boundedGlobal = await listWorkspaceInstructionPolicyRevisions(db, f.grant.workspaceId, {
+      kind: "policy",
+      scope: "global",
+      roleKey: null,
+      limit: 1,
+    });
+    expect(boundedGlobal.deactivationEvents[0]?.id).toBe(unrelatedUndo.destinationEventId);
+    expect(boundedGlobal.inactiveHeads).toEqual([
+      expect.objectContaining({
+        kind: "policy",
+        scope: "global",
+        roleKey: null,
+        activationVersion: 4,
+      }),
+    ]);
+    expect(boundedGlobal.inactiveHeadsTruncated).toBe(false);
+
+    const drafts = await Promise.all(
+      ["First human reactivation.", "Concurrent human reactivation."].map((content) =>
+        createWorkspaceInstructionPolicyDraft(db, {
+          accountId: f.grant.accountId,
+          workspaceId: f.grant.workspaceId,
+          kind: "policy",
+          scope: "global",
+          roleKey: null,
+          content,
+          provenanceSource: "human",
+          provenanceSourceId: null,
+          supersedesRevisionId: null,
+          createdBySubjectId: f.ownerSubjectId,
+        }),
+      ),
+    );
+    const firstHuman = drafts[0]!;
+    await expect(
+      activateWorkspaceInstructionPolicyRevision(db, {
+        accountId: f.grant.accountId,
+        workspaceId: f.grant.workspaceId,
+        revisionId: firstHuman.id,
+        expectedCurrentRevisionId: null,
+        expectedActivationVersion: 0,
+        actorSubjectId: f.ownerSubjectId,
+        reason: "A stale never-active CAS must not erase the tombstone generation.",
+      }),
+    ).rejects.toThrow("changed in another request");
+
+    const reactivations = await Promise.allSettled(
+      drafts.map((draft) =>
+        activateWorkspaceInstructionPolicyRevision(db, {
+          accountId: f.grant.accountId,
+          workspaceId: f.grant.workspaceId,
+          revisionId: draft.id,
+          expectedCurrentRevisionId: null,
+          expectedActivationVersion: 4,
+          actorSubjectId: f.ownerSubjectId,
+          reason: "Reactivate from the exact durable inactive boundary.",
+        }),
+      ),
+    );
+    expect(reactivations.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(reactivations.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const winner = reactivations.find((result) => result.status === "fulfilled");
+    if (!winner || winner.status !== "fulfilled") throw new Error("missing reactivation winner");
+    expect(winner.value.head.activationVersion).toBe(5);
+    expect(winner.value.event.oldRevision).toBeNull();
+    const [reactivatedEntries] = await admin<Array<{ entries: unknown[] }>>`
+      select workspace_instruction_policy_canonical_snapshot_entries(
+        ${f.grant.accountId}::uuid, ${f.grant.workspaceId}::uuid, null,
+        clock_timestamp() + interval '1 second'
+      ) as entries
+    `;
+    expect(reactivatedEntries?.entries).toHaveLength(1);
+  }, 15_000);
 
   test("denies stale destination CAS, cross-subject reuse, and direct receipt DML", async () => {
     if (!shared || !client) return;

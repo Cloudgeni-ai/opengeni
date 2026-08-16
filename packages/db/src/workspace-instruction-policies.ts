@@ -9,9 +9,11 @@ import type {
   WorkspaceInstructionPolicyActivationEvent,
   WorkspaceInstructionPolicyActivationResponse,
   WorkspaceInstructionPolicyActivationType,
+  WorkspaceInstructionPolicyDeactivationEvent,
   WorkspaceInstructionPolicyDiffResponse,
   WorkspaceInstructionPolicyDraftProvenanceSource,
   WorkspaceInstructionPolicyHead,
+  WorkspaceInstructionPolicyInactiveHead,
   WorkspaceInstructionPolicyKind,
   WorkspaceInstructionPolicyListQuery,
   WorkspaceInstructionPolicyListResponse,
@@ -24,7 +26,7 @@ import type {
   WorkspaceInstructionPolicySnapshotEntry,
   WorkspaceInstructionPolicyTarget,
 } from "@opengeni/contracts";
-import { and, asc, desc, eq, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, notExists, or, sql, type SQL } from "drizzle-orm";
 import type { Database } from "./database";
 import { withRlsContext, withWorkspaceRls, withWorkspaceSubjectRls } from "./database";
 import { nestedPostgresSqlState } from "./persistence-errors";
@@ -450,6 +452,7 @@ export async function getWorkspaceStateAcceptedAttemptGovernance(
 type RevisionRow = typeof schema.workspaceInstructionPolicyRevisions.$inferSelect;
 type HeadRow = typeof schema.workspaceInstructionPolicyHeads.$inferSelect;
 type EventRow = typeof schema.workspaceInstructionPolicyActivationEvents.$inferSelect;
+type DeactivationEventRow = typeof schema.workspaceInstructionPolicyDeactivationEvents.$inferSelect;
 type OnboardingProposalRow =
   typeof schema.workspaceInstructionPolicyOnboardingProposals.$inferSelect;
 
@@ -489,6 +492,17 @@ function headFromRow(row: HeadRow): WorkspaceInstructionPolicyHead {
   };
 }
 
+function inactiveHeadFromRow(row: DeactivationEventRow): WorkspaceInstructionPolicyInactiveHead {
+  return {
+    workspaceId: row.workspaceId,
+    kind: row.kind as WorkspaceInstructionPolicyKind,
+    scope: row.scope as WorkspaceInstructionPolicyScope,
+    roleKey: row.roleKey,
+    activationVersion: row.activationVersion,
+    deactivatedAt: iso(row.createdAt),
+  };
+}
+
 function eventFromRow(row: EventRow): WorkspaceInstructionPolicyActivationEvent {
   return {
     id: row.id,
@@ -508,14 +522,35 @@ function eventFromRow(row: EventRow): WorkspaceInstructionPolicyActivationEvent 
             revision: row.oldRevision!,
             contentHash: row.oldContentHash!,
           },
-    newRevision:
-      row.newRevisionId === null
-        ? null
-        : {
-            id: row.newRevisionId,
-            revision: row.newRevision!,
-            contentHash: row.newContentHash!,
-          },
+    newRevision: {
+      id: row.newRevisionId,
+      revision: row.newRevision,
+      contentHash: row.newContentHash,
+    },
+    actorSubjectId: row.actorSubjectId,
+    reason: row.reason,
+    createdAt: iso(row.createdAt),
+  };
+}
+
+function deactivationEventFromRow(
+  row: DeactivationEventRow,
+): WorkspaceInstructionPolicyDeactivationEvent {
+  return {
+    id: row.id,
+    operationId: row.operationId,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    kind: row.kind as WorkspaceInstructionPolicyKind,
+    scope: row.scope as WorkspaceInstructionPolicyScope,
+    roleKey: row.roleKey,
+    type: "automatic_deactivate",
+    activationVersion: row.activationVersion,
+    oldRevision: {
+      id: row.oldRevisionId,
+      revision: row.oldRevision,
+      contentHash: row.oldContentHash,
+    },
     actorSubjectId: row.actorSubjectId,
     reason: row.reason,
     createdAt: iso(row.createdAt),
@@ -561,11 +596,6 @@ function onboardingProposalFromRow(
 }
 
 function headFromEventRow(row: EventRow): WorkspaceInstructionPolicyHead {
-  if (row.newRevisionId === null || row.newRevision === null || row.newContentHash === null) {
-    throw new WorkspaceInstructionPolicyInvalidOperationError(
-      "A deactivation event cannot be replayed as an active instruction-policy head",
-    );
-  }
   return {
     workspaceId: row.workspaceId,
     kind: row.kind as WorkspaceInstructionPolicyKind,
@@ -604,6 +634,20 @@ function eventTargetConditions(
     target.roleKey === null
       ? isNull(schema.workspaceInstructionPolicyActivationEvents.roleKey)
       : eq(schema.workspaceInstructionPolicyActivationEvents.roleKey, target.roleKey),
+  ];
+}
+
+function deactivationTargetConditions(
+  workspaceId: string,
+  target: WorkspaceInstructionPolicyTarget,
+): SQL[] {
+  return [
+    eq(schema.workspaceInstructionPolicyDeactivationEvents.workspaceId, workspaceId),
+    eq(schema.workspaceInstructionPolicyDeactivationEvents.kind, target.kind),
+    eq(schema.workspaceInstructionPolicyDeactivationEvents.scope, target.scope),
+    target.roleKey === null
+      ? isNull(schema.workspaceInstructionPolicyDeactivationEvents.roleKey)
+      : eq(schema.workspaceInstructionPolicyDeactivationEvents.roleKey, target.roleKey),
   ];
 }
 
@@ -694,6 +738,24 @@ async function getEventByOperationInTransaction(
   return row ?? null;
 }
 
+async function hasDeactivationOperationInTransaction(
+  db: Database,
+  workspaceId: string,
+  operationId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: schema.workspaceInstructionPolicyDeactivationEvents.id })
+    .from(schema.workspaceInstructionPolicyDeactivationEvents)
+    .where(
+      and(
+        eq(schema.workspaceInstructionPolicyDeactivationEvents.workspaceId, workspaceId),
+        eq(schema.workspaceInstructionPolicyDeactivationEvents.operationId, operationId),
+      ),
+    )
+    .limit(1);
+  return row !== undefined;
+}
+
 async function getOnboardingProposalByOperationInTransaction(
   db: Database,
   workspaceId: string,
@@ -763,6 +825,23 @@ async function getHeadInTransaction(
   return row ?? null;
 }
 
+async function getLatestDeactivationInTransaction(
+  db: Database,
+  workspaceId: string,
+  target: WorkspaceInstructionPolicyTarget,
+): Promise<DeactivationEventRow | null> {
+  const [row] = await db
+    .select()
+    .from(schema.workspaceInstructionPolicyDeactivationEvents)
+    .where(and(...deactivationTargetConditions(workspaceId, target)))
+    .orderBy(
+      desc(schema.workspaceInstructionPolicyDeactivationEvents.activationVersion),
+      desc(schema.workspaceInstructionPolicyDeactivationEvents.id),
+    )
+    .limit(1);
+  return row ?? null;
+}
+
 function sameTarget(
   left: Pick<WorkspaceInstructionPolicyRevision, "kind" | "scope" | "roleKey">,
   right: WorkspaceInstructionPolicyTarget,
@@ -787,7 +866,10 @@ async function createDraftInTransaction(
   db: Database,
   input: DraftInput,
 ): Promise<WorkspaceInstructionPolicyRevision> {
-  if (await getEventByOperationInTransaction(db, input.workspaceId, input.operationId)) {
+  if (
+    (await getEventByOperationInTransaction(db, input.workspaceId, input.operationId)) ||
+    (await hasDeactivationOperationInTransaction(db, input.workspaceId, input.operationId))
+  ) {
     throw new WorkspaceInstructionPolicyOperationReuseError();
   }
   const existing = await getRevisionByOperationInTransaction(
@@ -882,7 +964,16 @@ export async function importLegacyWorkspaceInstructionPolicyDraft(
     async (scopedDb) => {
       const workspace = await lockWorkspace(scopedDb, input);
       if (
-        await getEventByOperationInTransaction(scopedDb, input.workspaceId, normalized.operationId)
+        (await getEventByOperationInTransaction(
+          scopedDb,
+          input.workspaceId,
+          normalized.operationId,
+        )) ||
+        (await hasDeactivationOperationInTransaction(
+          scopedDb,
+          input.workspaceId,
+          normalized.operationId,
+        ))
       ) {
         throw new WorkspaceInstructionPolicyOperationReuseError();
       }
@@ -955,6 +1046,11 @@ async function createWorkspaceInstructionPolicySourceProposal(
       }
       if (
         (await getEventByOperationInTransaction(scopedDb, input.workspaceId, input.operationId)) ||
+        (await hasDeactivationOperationInTransaction(
+          scopedDb,
+          input.workspaceId,
+          input.operationId,
+        )) ||
         (await getRevisionByOperationInTransaction(scopedDb, input.workspaceId, input.operationId))
       ) {
         throw new WorkspaceInstructionPolicyOperationReuseError();
@@ -967,9 +1063,14 @@ async function createWorkspaceInstructionPolicySourceProposal(
       };
       const currentRow = await getHeadInTransaction(scopedDb, input.workspaceId, target);
       const currentHead = currentRow ? headFromRow(currentRow) : null;
+      const inactiveBoundary = currentRow
+        ? null
+        : await getLatestDeactivationInTransaction(scopedDb, input.workspaceId, target);
+      const currentActivationVersion =
+        currentRow?.activationVersion ?? inactiveBoundary?.activationVersion ?? 0;
       if (
         (currentHead?.revisionId ?? null) !== input.expectedCurrentRevisionId ||
-        (currentHead?.activationVersion ?? 0) !== input.expectedActivationVersion
+        currentActivationVersion !== input.expectedActivationVersion
       ) {
         throw new WorkspaceInstructionPolicyOnboardingProposalStaleError(currentHead);
       }
@@ -1018,7 +1119,7 @@ async function createWorkspaceInstructionPolicySourceProposal(
           baselineRevisionId: currentHead?.revisionId ?? null,
           baselineRevision: currentHead?.revision ?? null,
           baselineContentHash: currentHead?.contentHash ?? null,
-          baselineActivationVersion: currentHead?.activationVersion ?? 0,
+          baselineActivationVersion: currentActivationVersion,
           baselineActivatedAt: currentHead ? new Date(currentHead.activatedAt) : null,
           draftRevisionId: draft.id,
           draftRevision: draft.revision,
@@ -1205,6 +1306,29 @@ function listFilterConditions(
   return conditions;
 }
 
+function inactiveHeadFilterConditions(
+  workspaceId: string,
+  query: WorkspaceInstructionPolicyListQuery,
+): SQL[] {
+  const conditions: SQL[] = [
+    eq(schema.workspaceInstructionPolicyDeactivationEvents.workspaceId, workspaceId),
+  ];
+  if (query.kind !== undefined) {
+    conditions.push(eq(schema.workspaceInstructionPolicyDeactivationEvents.kind, query.kind));
+  }
+  if (query.scope !== undefined) {
+    conditions.push(eq(schema.workspaceInstructionPolicyDeactivationEvents.scope, query.scope));
+  }
+  if (query.roleKey !== undefined) {
+    conditions.push(
+      query.roleKey === null
+        ? isNull(schema.workspaceInstructionPolicyDeactivationEvents.roleKey)
+        : eq(schema.workspaceInstructionPolicyDeactivationEvents.roleKey, query.roleKey),
+    );
+  }
+  return conditions;
+}
+
 export async function listWorkspaceInstructionPolicyRevisions(
   db: Database,
   workspaceId: string,
@@ -1219,7 +1343,7 @@ export async function listWorkspaceInstructionPolicyRevisions(
       .limit(query.limit + 1);
     const hasMore = rows.length > query.limit;
     const page = rows.slice(0, query.limit);
-    const [heads, events] = await Promise.all([
+    const [heads, inactiveHeadRows, events, deactivationEvents] = await Promise.all([
       scopedDb
         .select()
         .from(schema.workspaceInstructionPolicyHeads)
@@ -1230,19 +1354,81 @@ export async function listWorkspaceInstructionPolicyRevisions(
           asc(schema.workspaceInstructionPolicyHeads.roleKey),
         ),
       scopedDb
+        .selectDistinctOn([
+          schema.workspaceInstructionPolicyDeactivationEvents.kind,
+          schema.workspaceInstructionPolicyDeactivationEvents.scope,
+          sql`coalesce(${schema.workspaceInstructionPolicyDeactivationEvents.roleKey}, '')`,
+        ])
+        .from(schema.workspaceInstructionPolicyDeactivationEvents)
+        .where(
+          and(
+            ...inactiveHeadFilterConditions(workspaceId, query),
+            notExists(
+              scopedDb
+                .select({ id: schema.workspaceInstructionPolicyHeads.id })
+                .from(schema.workspaceInstructionPolicyHeads)
+                .where(
+                  and(
+                    eq(
+                      schema.workspaceInstructionPolicyHeads.workspaceId,
+                      schema.workspaceInstructionPolicyDeactivationEvents.workspaceId,
+                    ),
+                    eq(
+                      schema.workspaceInstructionPolicyHeads.kind,
+                      schema.workspaceInstructionPolicyDeactivationEvents.kind,
+                    ),
+                    eq(
+                      schema.workspaceInstructionPolicyHeads.scope,
+                      schema.workspaceInstructionPolicyDeactivationEvents.scope,
+                    ),
+                    sql`${schema.workspaceInstructionPolicyHeads.roleKey} IS NOT DISTINCT FROM ${schema.workspaceInstructionPolicyDeactivationEvents.roleKey}`,
+                  ),
+                ),
+            ),
+          ),
+        )
+        .orderBy(
+          asc(schema.workspaceInstructionPolicyDeactivationEvents.kind),
+          asc(schema.workspaceInstructionPolicyDeactivationEvents.scope),
+          sql`coalesce(${schema.workspaceInstructionPolicyDeactivationEvents.roleKey}, '')`,
+          desc(schema.workspaceInstructionPolicyDeactivationEvents.activationVersion),
+          desc(schema.workspaceInstructionPolicyDeactivationEvents.id),
+        )
+        .limit(query.limit + 1),
+      scopedDb
         .select()
         .from(schema.workspaceInstructionPolicyActivationEvents)
-        .where(eq(schema.workspaceInstructionPolicyActivationEvents.workspaceId, workspaceId))
+        .where(
+          and(
+            eq(schema.workspaceInstructionPolicyActivationEvents.workspaceId, workspaceId),
+            inArray(schema.workspaceInstructionPolicyActivationEvents.type, [
+              "activate",
+              "rollback",
+            ]),
+          ),
+        )
         .orderBy(
           desc(schema.workspaceInstructionPolicyActivationEvents.createdAt),
           desc(schema.workspaceInstructionPolicyActivationEvents.id),
+        )
+        .limit(query.limit),
+      scopedDb
+        .select()
+        .from(schema.workspaceInstructionPolicyDeactivationEvents)
+        .where(eq(schema.workspaceInstructionPolicyDeactivationEvents.workspaceId, workspaceId))
+        .orderBy(
+          desc(schema.workspaceInstructionPolicyDeactivationEvents.createdAt),
+          desc(schema.workspaceInstructionPolicyDeactivationEvents.id),
         )
         .limit(query.limit),
     ]);
     return {
       revisions: page.map(revisionFromRow),
       activeHeads: heads.map(headFromRow),
+      inactiveHeads: inactiveHeadRows.slice(0, query.limit).map(inactiveHeadFromRow),
+      inactiveHeadsTruncated: inactiveHeadRows.length > query.limit,
       activationEvents: events.map(eventFromRow),
+      deactivationEvents: deactivationEvents.map(deactivationEventFromRow),
       nextAfterRevision: hasMore ? page.at(-1)!.revision : null,
     };
   });
@@ -1357,6 +1543,16 @@ async function changeActiveRevision(
         input.workspaceId,
         input.operationId,
       );
+      if (
+        !existingEvent &&
+        (await hasDeactivationOperationInTransaction(
+          scopedDb,
+          input.workspaceId,
+          input.operationId,
+        ))
+      ) {
+        throw new WorkspaceInstructionPolicyOperationReuseError();
+      }
       if (existingEvent) {
         const legacyRequestMatches =
           hasOwnField(input, "expectedCurrentRevisionId") &&
@@ -1389,10 +1585,15 @@ async function changeActiveRevision(
       };
       const currentRow = await getHeadInTransaction(scopedDb, input.workspaceId, targetIdentity);
       const currentHead = currentRow ? headFromRow(currentRow) : null;
+      const inactiveBoundary = currentRow
+        ? null
+        : await getLatestDeactivationInTransaction(scopedDb, input.workspaceId, targetIdentity);
+      const currentActivationVersion =
+        currentRow?.activationVersion ?? inactiveBoundary?.activationVersion ?? 0;
       if (
         (currentHead?.revisionId ?? null) !== input.expectedCurrentRevisionId ||
         (input.expectedActivationVersion !== undefined &&
-          (currentHead?.activationVersion ?? 0) !== input.expectedActivationVersion)
+          currentActivationVersion !== input.expectedActivationVersion)
       ) {
         throw new WorkspaceInstructionPolicyConflictError(currentHead);
       }
@@ -1423,7 +1624,7 @@ async function changeActiveRevision(
           );
         }
       }
-      const activationVersion = (currentHead?.activationVersion ?? 0) + 1;
+      const activationVersion = currentActivationVersion + 1;
       const createdAt = new Date();
       const [eventRow] = await scopedDb
         .insert(schema.workspaceInstructionPolicyActivationEvents)

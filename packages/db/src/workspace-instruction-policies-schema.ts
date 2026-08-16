@@ -126,9 +126,9 @@ export const workspaceInstructionPolicyActivationEvents = pgTable(
     oldRevisionId: uuid("old_revision_id"),
     oldRevision: bigint("old_revision", { mode: "number" }),
     oldContentHash: text("old_content_hash"),
-    newRevisionId: uuid("new_revision_id"),
-    newRevision: bigint("new_revision", { mode: "number" }),
-    newContentHash: text("new_content_hash"),
+    newRevisionId: uuid("new_revision_id").notNull(),
+    newRevision: bigint("new_revision", { mode: "number" }).notNull(),
+    newContentHash: text("new_content_hash").notNull(),
     actorSubjectId: text("actor_subject_id").notNull(),
     reason: text("reason").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -163,6 +163,55 @@ export const workspaceInstructionPolicyActivationEvents = pgTable(
     ),
     target: check(
       "workspace_instruction_policy_activation_events_target_chk",
+      sql`(
+        (${table.kind} = 'charter' and ${table.scope} = 'global' and ${table.roleKey} is null)
+        or (${table.kind} = 'policy' and ${table.scope} = 'global' and ${table.roleKey} is null)
+        or (${table.kind} = 'policy' and ${table.scope} = 'role' and ${table.roleKey} is not null)
+      )`,
+    ),
+  }),
+);
+
+export const workspaceInstructionPolicyDeactivationEvents = pgTable(
+  "workspace_instruction_policy_deactivation_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    operationId: uuid("operation_id").notNull(),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    kind: text("kind").notNull(),
+    scope: text("scope").notNull(),
+    roleKey: text("role_key"),
+    type: text("type").notNull(),
+    activationVersion: bigint("activation_version", { mode: "number" }).notNull(),
+    oldRevisionId: uuid("old_revision_id").notNull(),
+    oldRevision: bigint("old_revision", { mode: "number" }).notNull(),
+    oldContentHash: text("old_content_hash").notNull(),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    reason: text("reason").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceOperation: uniqueIndex(
+      "workspace_instruction_policy_deactivate_workspace_operation_uq",
+    ).on(table.workspaceId, table.operationId),
+    workspaceActivationVersion: uniqueIndex(
+      "workspace_instruction_policy_deactivations_target_version_uq",
+    ).on(
+      table.workspaceId,
+      table.kind,
+      table.scope,
+      sql`coalesce(${table.roleKey}, '')`,
+      table.activationVersion,
+    ),
+    workspaceTimeline: index("workspace_instruction_policy_deactivations_workspace_time_idx").on(
+      table.workspaceId,
+      table.createdAt,
+      table.id,
+    ),
+    target: check(
+      "workspace_instruction_policy_deactivations_target_chk",
       sql`(
         (${table.kind} = 'charter' and ${table.scope} = 'global' and ${table.roleKey} is null)
         or (${table.kind} = 'policy' and ${table.scope} = 'global' and ${table.roleKey} is null)
@@ -239,7 +288,7 @@ export const workspaceInstructionPolicyOnboardingProposals = pgTable(
         ${table.baselineRevisionId} is null
         and ${table.baselineRevision} is null
         and ${table.baselineContentHash} is null
-        and ${table.baselineActivationVersion} = 0
+        and ${table.baselineActivationVersion} >= 0
         and ${table.baselineActivatedAt} is null
       ) or (
         ${table.baselineRevisionId} is not null

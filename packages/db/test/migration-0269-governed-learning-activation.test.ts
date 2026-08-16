@@ -13,6 +13,7 @@ describe("migration 0269 governed-learning activation controller", () => {
     for (const table of [
       "governed_learning_activation_receipts",
       "governed_learning_activation_undo_receipts",
+      "workspace_instruction_policy_deactivation_events",
     ]) {
       expect(migration).toContain(`ALTER TABLE "${table}" FORCE ROW LEVEL SECURITY`);
       expect(migration).toContain(`REVOKE ALL ON TABLE %I.${table}`);
@@ -48,7 +49,11 @@ describe("migration 0269 governed-learning activation controller", () => {
     expect(migration).toContain("service:governed-learning-activation:");
     expect(migration).toContain("governed_learning_apply_knowledge_review");
     expect(migration).toContain("automatic_deactivate");
-    expect(migration).toContain("DELETE FROM workspace_instruction_policy_heads");
+    expect(migration).toContain(
+      "DELETE FROM workspace_instruction_policy_heads WHERE id = current_head.id",
+    );
+    expect(migration).not.toContain('ALTER COLUMN "revision_id" DROP NOT NULL');
+    expect(migration).not.toContain("revision_id = NULL, revision = NULL, content_hash = NULL");
     expect(migration).toContain(
       "latest_review.id IS DISTINCT FROM activation_row.knowledge_approval_review_id",
     );
@@ -60,7 +65,12 @@ describe("migration 0269 governed-learning activation controller", () => {
     const migration = await readFile(migrationPath, "utf8");
     for (const routine of [
       "governed_learning_apply_knowledge_review",
+      "workspace_instruction_policy_validate_head",
+      "workspace_instruction_policy_validate_onboarding_proposal",
+      "workspace_instruction_policy_validate_deactivation_event",
       "governed_learning_apply_instruction_policy",
+      "governed_learning_deactivate_instruction_policy",
+      "workspace_instruction_policy_canonical_snapshot_entries",
       "governed_learning_apply_preference",
       "activate_governed_learning_decision",
       "undo_governed_learning_activation",
@@ -69,6 +79,6 @@ describe("migration 0269 governed-learning activation controller", () => {
     }
     expect(
       migration.match(/SET search_path = pg_catalog, %I, pg_temp/g)?.length,
-    ).toBeGreaterThanOrEqual(7);
+    ).toBeGreaterThanOrEqual(12);
   });
 });

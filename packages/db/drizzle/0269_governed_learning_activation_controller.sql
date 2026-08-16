@@ -321,54 +321,66 @@ REVOKE ALL ON FUNCTION governed_learning_apply_knowledge_review(
   uuid, uuid, uuid, uuid, uuid, bigint, text, text, text
 ) FROM PUBLIC;
 
--- The human lifecycle remains activate/rollback. This one additional event is
--- service-only and exists solely so exact undo can restore a previously absent
--- instruction-policy head without erasing the automatic activation from the
--- accepted-turn event reconstruction.
-ALTER TABLE "workspace_instruction_policy_activation_events"
-  DROP CONSTRAINT "workspace_instruction_policy_activation_events_type_chk",
-  DROP CONSTRAINT "workspace_instruction_policy_activation_events_new_revision_chk";
-ALTER TABLE "workspace_instruction_policy_activation_events"
-  ALTER COLUMN "new_revision_id" DROP NOT NULL,
-  ALTER COLUMN "new_revision" DROP NOT NULL,
-  ALTER COLUMN "new_content_hash" DROP NOT NULL;
-ALTER TABLE "workspace_instruction_policy_activation_events"
-  ADD CONSTRAINT "workspace_instruction_policy_activation_events_type_chk" CHECK (
-    "type" IN ('activate', 'rollback', 'automatic_deactivate')
+-- Deactivation history is additive so rolling old API binaries continue to
+-- read the legacy activation-event shape with a required new revision.
+CREATE TABLE "workspace_instruction_policy_deactivation_events" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  "operation_id" uuid NOT NULL,
+  "request_fingerprint" text NOT NULL,
+  "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
+  "workspace_id" uuid NOT NULL REFERENCES "workspaces"("id") ON DELETE CASCADE,
+  "kind" text NOT NULL,
+  "scope" text NOT NULL,
+  "role_key" text,
+  "type" text NOT NULL DEFAULT 'automatic_deactivate',
+  "activation_version" bigint NOT NULL,
+  "old_revision_id" uuid NOT NULL
+    REFERENCES "workspace_instruction_policy_revisions"("id") ON DELETE RESTRICT,
+  "old_revision" bigint NOT NULL,
+  "old_content_hash" text NOT NULL,
+  "actor_subject_id" text NOT NULL,
+  "reason" text NOT NULL,
+  "created_at" timestamptz NOT NULL DEFAULT transaction_timestamp(),
+  CONSTRAINT "workspace_instruction_policy_deactivations_receipt_chk" CHECK (
+    "request_fingerprint" ~ '^[0-9a-f]{64}$'
   ),
-  ADD CONSTRAINT "workspace_instruction_policy_activation_events_new_revision_chk" CHECK (
-    (
-      "type" = 'automatic_deactivate'
-      AND "new_revision_id" IS NULL
-      AND "new_revision" IS NULL
-      AND "new_content_hash" IS NULL
-      AND "old_revision_id" IS NOT NULL
-    ) OR (
-      "type" IN ('activate', 'rollback')
-      AND "new_revision_id" IS NOT NULL
-      AND "new_revision" > 0
-      AND "new_content_hash" ~ '^[0-9a-f]{64}$'
-    )
-  );
+  CONSTRAINT "workspace_instruction_policy_deactivations_target_chk" CHECK (
+    ("kind" = 'charter' AND "scope" = 'global' AND "role_key" IS NULL)
+    OR ("kind" = 'policy' AND "scope" = 'global' AND "role_key" IS NULL)
+    OR ("kind" = 'policy' AND "scope" = 'role' AND "role_key" IS NOT NULL)
+  ),
+  CONSTRAINT "workspace_instruction_policy_deactivations_boundary_chk" CHECK (
+    "type" = 'automatic_deactivate'
+    AND "activation_version" > 0
+    AND "old_revision" > 0
+    AND "old_content_hash" ~ '^[0-9a-f]{64}$'
+    AND "actor_subject_id" LIKE 'service:governed-learning-activation:%'
+    AND length(btrim("actor_subject_id")) BETWEEN 1 AND 1024
+    AND length(btrim("reason")) BETWEEN 1 AND 4096
+  ),
+  CONSTRAINT "workspace_instruction_policy_deactivate_workspace_operation_uq"
+    UNIQUE ("workspace_id", "operation_id")
+);
+CREATE UNIQUE INDEX "workspace_instruction_policy_deactivations_target_version_uq"
+  ON "workspace_instruction_policy_deactivation_events"
+  ("workspace_id", "kind", "scope", coalesce("role_key", ''), "activation_version");
+CREATE INDEX "workspace_instruction_policy_deactivations_workspace_time_idx"
+  ON "workspace_instruction_policy_deactivation_events"
+  ("workspace_id", "created_at" DESC, "id" DESC);
 
-CREATE OR REPLACE FUNCTION workspace_instruction_policy_validate_event()
+ALTER TABLE "workspace_instruction_policy_deactivation_events" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "workspace_instruction_policy_deactivation_events" FORCE ROW LEVEL SECURITY;
+CREATE POLICY workspace_isolation ON "workspace_instruction_policy_deactivation_events"
+  USING (opengeni_private.workspace_rls_visible("account_id", "workspace_id"))
+  WITH CHECK (opengeni_private.workspace_rls_visible("account_id", "workspace_id"));
+CREATE TRIGGER workspace_instruction_policy_deactivations_immutable
+  BEFORE UPDATE OR DELETE ON "workspace_instruction_policy_deactivation_events"
+  FOR EACH ROW EXECUTE FUNCTION workspace_instruction_policy_reject_mutation();
+
+CREATE OR REPLACE FUNCTION workspace_instruction_policy_validate_deactivation_event()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  IF NEW.type <> 'automatic_deactivate' AND NOT EXISTS (
-    SELECT 1 FROM workspace_instruction_policy_revisions revision
-    WHERE revision.id = NEW.new_revision_id
-      AND revision.account_id = NEW.account_id
-      AND revision.workspace_id = NEW.workspace_id
-      AND revision.kind = NEW.kind
-      AND revision.scope = NEW.scope
-      AND revision.role_key IS NOT DISTINCT FROM NEW.role_key
-      AND revision.revision = NEW.new_revision
-      AND revision.content_hash = NEW.new_content_hash
-  ) THEN
-    RAISE EXCEPTION 'instruction-policy activation event has an invalid new revision'
-      USING ERRCODE = '23514';
-  END IF;
-  IF NEW.old_revision_id IS NOT NULL AND NOT EXISTS (
+  IF NOT EXISTS (
     SELECT 1 FROM workspace_instruction_policy_revisions revision
     WHERE revision.id = NEW.old_revision_id
       AND revision.account_id = NEW.account_id
@@ -379,7 +391,257 @@ BEGIN
       AND revision.revision = NEW.old_revision
       AND revision.content_hash = NEW.old_content_hash
   ) THEN
-    RAISE EXCEPTION 'instruction-policy activation event has an invalid old revision'
+    RAISE EXCEPTION 'instruction-policy deactivation event has an invalid old revision'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER workspace_instruction_policy_deactivations_validate_revision
+  BEFORE INSERT ON "workspace_instruction_policy_deactivation_events"
+  FOR EACH ROW EXECUTE FUNCTION workspace_instruction_policy_validate_deactivation_event();
+
+CREATE OR REPLACE FUNCTION workspace_instruction_policy_guard_lifecycle_operation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_TABLE_NAME = 'workspace_instruction_policy_deactivation_events' THEN
+    IF EXISTS (
+      SELECT 1 FROM workspace_instruction_policy_activation_events event
+      WHERE event.workspace_id = NEW.workspace_id
+        AND event.operation_id = NEW.operation_id
+    ) THEN
+      RAISE EXCEPTION 'instruction-policy lifecycle operation was already used'
+        USING ERRCODE = '23505';
+    END IF;
+  ELSIF NEW.operation_id IS NOT NULL AND EXISTS (
+    SELECT 1 FROM workspace_instruction_policy_deactivation_events event
+    WHERE event.workspace_id = NEW.workspace_id
+      AND event.operation_id = NEW.operation_id
+  ) THEN
+    RAISE EXCEPTION 'instruction-policy lifecycle operation was already used'
+      USING ERRCODE = '23505';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER workspace_instruction_policy_activations_operation_guard
+  BEFORE INSERT ON "workspace_instruction_policy_activation_events"
+  FOR EACH ROW EXECUTE FUNCTION workspace_instruction_policy_guard_lifecycle_operation();
+CREATE TRIGGER workspace_instruction_policy_deactivations_operation_guard
+  BEFORE INSERT ON "workspace_instruction_policy_deactivation_events"
+  FOR EACH ROW EXECUTE FUNCTION workspace_instruction_policy_guard_lifecycle_operation();
+
+CREATE OR REPLACE FUNCTION workspace_instruction_policy_guard_head_delete()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE capability_writer boolean;
+BEGIN
+  IF pg_trigger_depth() > 1 AND NOT EXISTS (
+    SELECT 1 FROM workspaces workspace WHERE workspace.id = OLD.workspace_id
+  ) THEN
+    RETURN OLD;
+  END IF;
+  SELECT current_user = pg_catalog.pg_get_userbyid(procedure_row.proowner)
+  INTO capability_writer
+  FROM pg_catalog.pg_proc procedure_row
+  WHERE procedure_row.oid = pg_catalog.to_regprocedure(pg_catalog.format(
+    '%I.governed_learning_deactivate_instruction_policy(uuid,uuid,uuid,uuid,uuid,bigint,text)',
+    TG_TABLE_SCHEMA
+  ));
+  IF NOT coalesce(capability_writer, false)
+    OR current_setting('opengeni.governed_learning_deactivation_operation', true) IS NULL
+    OR current_setting('opengeni.governed_learning_deactivation_operation', true) = ''
+  THEN
+    RAISE EXCEPTION 'instruction-policy head deletion requires governed-learning capability'
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN OLD;
+END;
+$$;
+CREATE TRIGGER workspace_instruction_policy_heads_deactivation_guard
+  BEFORE DELETE ON "workspace_instruction_policy_heads"
+  FOR EACH ROW EXECUTE FUNCTION workspace_instruction_policy_guard_head_delete();
+
+ALTER TABLE "workspace_instruction_policy_onboarding_proposals"
+  DROP CONSTRAINT "workspace_instruction_policy_onboarding_proposals_baseline_chk";
+ALTER TABLE "workspace_instruction_policy_onboarding_proposals"
+  ADD CONSTRAINT "workspace_instruction_policy_onboarding_proposals_baseline_chk" CHECK (
+    (
+      "baseline_revision_id" IS NULL
+      AND "baseline_revision" IS NULL
+      AND "baseline_content_hash" IS NULL
+      AND "baseline_activation_version" >= 0
+      AND "baseline_activated_at" IS NULL
+    ) OR (
+      "baseline_revision_id" IS NOT NULL
+      AND "baseline_revision" > 0
+      AND "baseline_content_hash" ~ '^[0-9a-f]{64}$'
+      AND "baseline_activation_version" > 0
+      AND "baseline_activated_at" IS NOT NULL
+    )
+  );
+
+CREATE OR REPLACE FUNCTION workspace_instruction_policy_validate_onboarding_proposal()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.baseline_revision_id IS NULL THEN
+    IF EXISTS (
+      SELECT 1 FROM workspace_instruction_policy_heads head
+      WHERE head.account_id = NEW.account_id
+        AND head.workspace_id = NEW.workspace_id
+        AND head.kind = NEW.kind
+        AND head.scope = NEW.scope
+        AND head.role_key IS NOT DISTINCT FROM NEW.role_key
+    ) THEN
+      RAISE EXCEPTION 'instruction-policy proposal must capture the exact active head baseline'
+        USING ERRCODE = '23514';
+    END IF;
+    IF NOT (
+      (
+        NEW.baseline_activation_version = 0
+        AND NOT EXISTS (
+          SELECT 1 FROM workspace_instruction_policy_heads head
+          WHERE head.account_id = NEW.account_id
+            AND head.workspace_id = NEW.workspace_id
+            AND head.kind = NEW.kind
+            AND head.scope = NEW.scope
+            AND head.role_key IS NOT DISTINCT FROM NEW.role_key
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM workspace_instruction_policy_deactivation_events event
+          WHERE event.account_id = NEW.account_id
+            AND event.workspace_id = NEW.workspace_id
+            AND event.kind = NEW.kind
+            AND event.scope = NEW.scope
+            AND event.role_key IS NOT DISTINCT FROM NEW.role_key
+        )
+      ) OR (
+        NEW.baseline_activation_version > 0
+        AND NOT EXISTS (
+          SELECT 1 FROM workspace_instruction_policy_heads head
+          WHERE head.account_id = NEW.account_id
+            AND head.workspace_id = NEW.workspace_id
+            AND head.kind = NEW.kind
+            AND head.scope = NEW.scope
+            AND head.role_key IS NOT DISTINCT FROM NEW.role_key
+        )
+        AND EXISTS (
+          SELECT 1 FROM workspace_instruction_policy_deactivation_events event
+          WHERE event.account_id = NEW.account_id
+            AND event.workspace_id = NEW.workspace_id
+            AND event.kind = NEW.kind
+            AND event.scope = NEW.scope
+            AND event.role_key IS NOT DISTINCT FROM NEW.role_key
+            AND event.activation_version = NEW.baseline_activation_version
+            AND NOT EXISTS (
+              SELECT 1 FROM workspace_instruction_policy_deactivation_events newer
+              WHERE newer.account_id = event.account_id
+                AND newer.workspace_id = event.workspace_id
+                AND newer.kind = event.kind
+                AND newer.scope = event.scope
+                AND newer.role_key IS NOT DISTINCT FROM event.role_key
+                AND newer.activation_version > event.activation_version
+            )
+        )
+      )
+    ) THEN
+      RAISE EXCEPTION 'instruction-policy proposal must capture the exact inactive boundary'
+        USING ERRCODE = '23514';
+    END IF;
+  ELSIF NOT EXISTS (
+    SELECT 1 FROM workspace_instruction_policy_heads head
+    WHERE head.account_id = NEW.account_id
+      AND head.workspace_id = NEW.workspace_id
+      AND head.kind = NEW.kind
+      AND head.scope = NEW.scope
+      AND head.role_key IS NOT DISTINCT FROM NEW.role_key
+      AND head.revision_id = NEW.baseline_revision_id
+      AND head.revision = NEW.baseline_revision
+      AND head.content_hash = NEW.baseline_content_hash
+      AND head.activation_version = NEW.baseline_activation_version
+      AND head.activated_at = NEW.baseline_activated_at
+  ) THEN
+    RAISE EXCEPTION 'instruction-policy proposal must capture the exact active head baseline'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF NEW.baseline_revision_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM workspace_instruction_policy_revisions revision
+    WHERE revision.id = NEW.baseline_revision_id
+      AND revision.account_id = NEW.account_id
+      AND revision.workspace_id = NEW.workspace_id
+      AND revision.kind = NEW.kind
+      AND revision.scope = NEW.scope
+      AND revision.role_key IS NOT DISTINCT FROM NEW.role_key
+      AND revision.revision = NEW.baseline_revision
+      AND revision.content_hash = NEW.baseline_content_hash
+  ) THEN
+    RAISE EXCEPTION 'instruction-policy proposal has an invalid baseline revision'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM workspace_instruction_policy_revisions revision
+    WHERE revision.id = NEW.draft_revision_id
+      AND revision.operation_id = NEW.operation_id
+      AND revision.request_fingerprint = NEW.request_fingerprint
+      AND revision.account_id = NEW.account_id
+      AND revision.workspace_id = NEW.workspace_id
+      AND revision.kind = NEW.kind
+      AND revision.scope = NEW.scope
+      AND revision.role_key IS NOT DISTINCT FROM NEW.role_key
+      AND revision.revision = NEW.draft_revision
+      AND revision.content_hash = NEW.draft_content_hash
+      AND revision.supersedes_revision_id IS NOT DISTINCT FROM NEW.baseline_revision_id
+      AND revision.created_by_subject_id = NEW.created_by_subject_id
+      AND (
+        (
+          revision.provenance_source = 'onboarding'
+          AND revision.provenance_source_id = NEW.id::text
+        ) OR (
+          revision.provenance_source = 'knowledge_proposal'
+          AND revision.provenance_source_id = NEW.source_id
+          AND NEW.source_version = NEW.draft_content_hash
+          AND EXISTS (
+            SELECT 1 FROM knowledge_change_proposals proposal
+            WHERE proposal.id::text = NEW.source_id
+              AND proposal.account_id = NEW.account_id
+              AND proposal.scope_kind = 'workspace'
+              AND proposal.scope_workspace_id = NEW.workspace_id
+              AND proposal.scope_subject_id IS NULL
+              AND proposal.target_kind = 'instruction_policy'
+              AND proposal.target_scope = NEW.scope
+              AND proposal.target_key IS NOT DISTINCT FROM CASE
+                WHEN NEW.scope = 'role' THEN NEW.role_key
+                ELSE NULL
+              END
+              AND proposal.content_hash = NEW.source_version
+              AND proposal.actor_kind = 'service'
+              AND proposal.actor_subject_id = NEW.created_by_subject_id
+              AND proposal.initiating_human_subject_id
+                = current_setting('opengeni.subject_id', true)
+              AND proposal.claim_id IS NOT NULL
+              AND proposal.evidence_id IS NOT NULL
+              AND proposal.status = 'proposed'
+          )
+        )
+      )
+  ) THEN
+    RAISE EXCEPTION 'instruction-policy proposal must identify its exact inactive draft'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM workspace_instruction_policy_heads head
+    WHERE head.account_id = NEW.account_id
+      AND head.workspace_id = NEW.workspace_id
+      AND head.revision_id = NEW.draft_revision_id
+  ) OR EXISTS (
+    SELECT 1 FROM workspace_instruction_policy_activation_events event
+    WHERE event.account_id = NEW.account_id
+      AND event.workspace_id = NEW.workspace_id
+      AND event.new_revision_id = NEW.draft_revision_id
+  ) THEN
+    RAISE EXCEPTION 'instruction-policy proposal must identify a never-activated inactive draft'
       USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
@@ -404,6 +666,8 @@ DECLARE
   active_revision workspace_instruction_policy_revisions%ROWTYPE;
   target_revision workspace_instruction_policy_revisions%ROWTYPE;
   event_row workspace_instruction_policy_activation_events%ROWTYPE;
+  inactive_activation_version bigint;
+  current_activation_version bigint;
   next_version bigint;
   fingerprint text;
   event_time timestamptz;
@@ -411,6 +675,7 @@ BEGIN
   IF p_action NOT IN ('activate', 'undo')
     OR p_actor_subject_id NOT LIKE 'service:governed-learning-activation:%'
     OR p_expected_activation_version < 0
+    OR (p_action = 'undo' AND p_target_revision_id IS NULL)
   THEN
     RAISE EXCEPTION 'governed-learning instruction-policy input is invalid'
       USING ERRCODE = '22023';
@@ -449,8 +714,18 @@ BEGIN
     AND head.kind = proposal_row.kind AND head.scope = proposal_row.scope
     AND head.role_key IS NOT DISTINCT FROM proposal_row.role_key
   FOR UPDATE;
+  IF NOT FOUND THEN
+    SELECT event.activation_version INTO inactive_activation_version
+    FROM workspace_instruction_policy_deactivation_events event
+    WHERE event.account_id = p_account_id AND event.workspace_id = p_workspace_id
+      AND event.kind = proposal_row.kind AND event.scope = proposal_row.scope
+      AND event.role_key IS NOT DISTINCT FROM proposal_row.role_key
+    ORDER BY event.activation_version DESC, event.id DESC
+    LIMIT 1;
+  END IF;
+  current_activation_version := coalesce(current_head.activation_version, inactive_activation_version, 0);
   IF current_head.revision_id IS DISTINCT FROM p_expected_current_revision_id
-    OR coalesce(current_head.activation_version, 0) IS DISTINCT FROM p_expected_activation_version
+    OR current_activation_version IS DISTINCT FROM p_expected_activation_version
   THEN
     RAISE EXCEPTION 'governed-learning instruction-policy head changed'
       USING ERRCODE = '40001';
@@ -488,7 +763,7 @@ BEGIN
     p_expected_activation_version, p_target_revision_id, p_actor_subject_id
   )::text, 'UTF8')), 'hex');
   event_time := clock_timestamp();
-  next_version := p_expected_activation_version + 1;
+  next_version := current_activation_version + 1;
   IF p_action = 'activate' THEN
     IF current_head.id IS NULL THEN
       INSERT INTO workspace_instruction_policy_heads (
@@ -506,8 +781,6 @@ BEGIN
         activation_version = next_version, activated_at = event_time
       WHERE id = current_head.id;
     END IF;
-  ELSIF p_target_revision_id IS NULL THEN
-    DELETE FROM workspace_instruction_policy_heads WHERE id = current_head.id;
   ELSE
     UPDATE workspace_instruction_policy_heads SET
       revision_id = target_revision.id, revision = target_revision.revision,
@@ -523,8 +796,7 @@ BEGIN
   ) VALUES (
     p_operation_id, fingerprint, p_account_id, p_workspace_id, proposal_row.kind,
     proposal_row.scope, proposal_row.role_key,
-    CASE WHEN p_action = 'activate' THEN 'activate'
-      WHEN p_target_revision_id IS NULL THEN 'automatic_deactivate' ELSE 'rollback' END,
+    CASE WHEN p_action = 'activate' THEN 'activate' ELSE 'rollback' END,
     next_version, current_head.revision_id, current_head.revision,
     current_head.content_hash, target_revision.id, target_revision.revision,
     target_revision.content_hash, p_actor_subject_id,
@@ -537,6 +809,174 @@ END;
 $$;
 REVOKE ALL ON FUNCTION governed_learning_apply_instruction_policy(
   text, uuid, uuid, uuid, uuid, uuid, bigint, uuid, text
+) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION governed_learning_deactivate_instruction_policy(
+  p_account_id uuid,
+  p_workspace_id uuid,
+  p_operation_id uuid,
+  p_proposal_id uuid,
+  p_expected_current_revision_id uuid,
+  p_expected_activation_version bigint,
+  p_actor_subject_id text
+) RETURNS SETOF workspace_instruction_policy_deactivation_events
+LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+  proposal_row workspace_instruction_policy_onboarding_proposals%ROWTYPE;
+  current_head workspace_instruction_policy_heads%ROWTYPE;
+  result_row workspace_instruction_policy_deactivation_events%ROWTYPE;
+  fingerprint text;
+  event_time timestamptz;
+  next_version bigint;
+BEGIN
+  IF p_expected_current_revision_id IS NULL
+    OR p_expected_activation_version <= 0
+    OR p_actor_subject_id NOT LIKE 'service:governed-learning-activation:%'
+  THEN
+    RAISE EXCEPTION 'governed-learning instruction-policy deactivation input is invalid'
+      USING ERRCODE = '22023';
+  END IF;
+  PERFORM 1 FROM workspaces workspace
+  WHERE workspace.account_id = p_account_id AND workspace.id = p_workspace_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'governed-learning workspace is unavailable' USING ERRCODE = '42501';
+  END IF;
+  SELECT * INTO proposal_row FROM workspace_instruction_policy_onboarding_proposals proposal
+  WHERE proposal.account_id = p_account_id AND proposal.workspace_id = p_workspace_id
+    AND proposal.id = p_proposal_id AND proposal.status = 'proposed'
+  FOR SHARE;
+  IF NOT FOUND OR proposal_row.draft_revision_id IS DISTINCT FROM p_expected_current_revision_id
+  THEN
+    RAISE EXCEPTION 'governed-learning instruction-policy proposal is unavailable'
+      USING ERRCODE = '42501';
+  END IF;
+  SELECT * INTO current_head FROM workspace_instruction_policy_heads head
+  WHERE head.account_id = p_account_id AND head.workspace_id = p_workspace_id
+    AND head.kind = proposal_row.kind AND head.scope = proposal_row.scope
+    AND head.role_key IS NOT DISTINCT FROM proposal_row.role_key
+  FOR UPDATE;
+  IF current_head.revision_id IS DISTINCT FROM p_expected_current_revision_id
+    OR current_head.activation_version IS DISTINCT FROM p_expected_activation_version
+  THEN
+    RAISE EXCEPTION 'governed-learning instruction-policy activation was superseded'
+      USING ERRCODE = '40001';
+  END IF;
+  fingerprint := encode(sha256(convert_to(jsonb_build_array(
+    'governed-learning-instruction-policy-deactivation', 1, p_account_id,
+    p_workspace_id, p_operation_id, p_proposal_id,
+    p_expected_current_revision_id, p_expected_activation_version,
+    p_actor_subject_id
+  )::text, 'UTF8')), 'hex');
+  event_time := clock_timestamp();
+  next_version := p_expected_activation_version + 1;
+  PERFORM set_config(
+    'opengeni.governed_learning_deactivation_operation', p_operation_id::text, true
+  );
+  DELETE FROM workspace_instruction_policy_heads WHERE id = current_head.id;
+  INSERT INTO workspace_instruction_policy_deactivation_events (
+    operation_id, request_fingerprint, account_id, workspace_id, kind, scope,
+    role_key, type, activation_version, old_revision_id, old_revision,
+    old_content_hash, actor_subject_id, reason, created_at
+  ) VALUES (
+    p_operation_id, fingerprint, p_account_id, p_workspace_id, proposal_row.kind,
+    proposal_row.scope, proposal_row.role_key, 'automatic_deactivate', next_version,
+    current_head.revision_id, current_head.revision, current_head.content_hash,
+    p_actor_subject_id, 'Exact governed-learning activation undo.', event_time
+  ) RETURNING * INTO result_row;
+  PERFORM set_config('opengeni.governed_learning_deactivation_operation', '', true);
+  RETURN NEXT result_row;
+END;
+$$;
+REVOKE ALL ON FUNCTION governed_learning_deactivate_instruction_policy(
+  uuid, uuid, uuid, uuid, uuid, bigint, text
+) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION workspace_instruction_policy_canonical_snapshot_entries(
+  p_account_id uuid,
+  p_workspace_id uuid,
+  p_policy_role text,
+  p_accepted_at timestamptz
+) RETURNS jsonb
+LANGUAGE sql STABLE AS $$
+  SELECT coalesce(jsonb_agg(candidate.entry ORDER BY candidate.ordinal), '[]'::jsonb)
+  FROM (
+    SELECT
+      CASE
+        WHEN event.kind = 'charter' THEN 0
+        WHEN event.scope = 'global' THEN 1
+        ELSE 2
+      END AS ordinal,
+      jsonb_build_object(
+        'kind', event.kind,
+        'scope', event.scope,
+        'roleKey', event.role_key,
+        'revisionId', revision.id::text,
+        'revision', revision.revision,
+        'contentHash', revision.content_hash,
+        'activationVersion', event.activation_version,
+        'activatedAt', to_char(
+          event.created_at AT TIME ZONE 'UTC',
+          'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+        ),
+        'provenance', jsonb_build_object(
+          'source', revision.provenance_source,
+          'sourceIdHash', CASE
+            WHEN revision.provenance_source_id IS NULL THEN NULL
+            ELSE encode(sha256(convert_to(revision.provenance_source_id, 'UTF8')), 'hex')
+          END
+        )
+      ) AS entry
+    FROM (
+      SELECT DISTINCT ON (lifecycle.kind, lifecycle.scope, coalesce(lifecycle.role_key, ''))
+        lifecycle.*
+      FROM (
+        SELECT
+          activation.id, activation.account_id, activation.workspace_id,
+          activation.kind, activation.scope, activation.role_key,
+          activation.activation_version, activation.new_revision_id,
+          activation.new_revision, activation.new_content_hash,
+          activation.created_at
+        FROM workspace_instruction_policy_activation_events activation
+        UNION ALL
+        SELECT
+          deactivation.id, deactivation.account_id, deactivation.workspace_id,
+          deactivation.kind, deactivation.scope, deactivation.role_key,
+          deactivation.activation_version, NULL::uuid, NULL::bigint, NULL::text,
+          deactivation.created_at
+        FROM workspace_instruction_policy_deactivation_events deactivation
+      ) lifecycle
+      WHERE lifecycle.account_id = p_account_id
+        AND lifecycle.workspace_id = p_workspace_id
+        AND lifecycle.created_at <= p_accepted_at
+        AND (
+          (lifecycle.kind = 'charter' AND lifecycle.scope = 'global')
+          OR (lifecycle.kind = 'policy' AND lifecycle.scope = 'global')
+          OR (
+            p_policy_role IS NOT NULL
+            AND lifecycle.kind = 'policy'
+            AND lifecycle.scope = 'role'
+            AND lifecycle.role_key = p_policy_role
+          )
+        )
+      ORDER BY
+        lifecycle.kind,
+        lifecycle.scope,
+        coalesce(lifecycle.role_key, ''),
+        lifecycle.activation_version DESC,
+        lifecycle.created_at DESC,
+        lifecycle.id DESC
+    ) event
+    JOIN workspace_instruction_policy_revisions revision
+      ON revision.account_id = event.account_id
+      AND revision.workspace_id = event.workspace_id
+      AND revision.id = event.new_revision_id
+      AND revision.revision = event.new_revision
+      AND revision.content_hash = event.new_content_hash
+  ) candidate;
+$$;
+REVOKE ALL ON FUNCTION workspace_instruction_policy_canonical_snapshot_entries(
+  uuid, uuid, text, timestamptz
 ) FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION governed_learning_apply_preference(
@@ -677,6 +1117,7 @@ DECLARE
   preference_revision preference_registry_revisions%ROWTYPE;
   preference_event preference_registry_events%ROWTYPE;
   current_instruction_head workspace_instruction_policy_heads%ROWTYPE;
+  current_instruction_activation_version bigint;
   input_hash_value text;
   service_actor text;
   current_authority_hash text;
@@ -1003,8 +1444,22 @@ BEGIN
     WHERE head.account_id = p_account_id AND head.workspace_id = p_workspace_id
       AND head.kind = instruction_proposal.kind AND head.scope = instruction_proposal.scope
       AND head.role_key IS NOT DISTINCT FROM instruction_proposal.role_key FOR SHARE;
+    IF NOT FOUND THEN
+      SELECT event.activation_version INTO current_instruction_activation_version
+      FROM workspace_instruction_policy_deactivation_events event
+      WHERE event.account_id = p_account_id AND event.workspace_id = p_workspace_id
+        AND event.kind = instruction_proposal.kind AND event.scope = instruction_proposal.scope
+        AND event.role_key IS NOT DISTINCT FROM instruction_proposal.role_key
+      ORDER BY event.activation_version DESC, event.id DESC
+      LIMIT 1;
+    END IF;
+    current_instruction_activation_version := coalesce(
+      current_instruction_head.activation_version,
+      current_instruction_activation_version,
+      0
+    );
     IF current_instruction_head.revision_id IS DISTINCT FROM instruction_proposal.baseline_revision_id
-      OR coalesce(current_instruction_head.activation_version, 0)
+      OR current_instruction_activation_version
         IS DISTINCT FROM instruction_proposal.baseline_activation_version
     THEN
       RAISE EXCEPTION 'instruction-policy proposal baseline is stale' USING ERRCODE = '40001';
@@ -1130,6 +1585,7 @@ DECLARE
   revocation_row knowledge_claim_reviews%ROWTYPE;
   instruction_head workspace_instruction_policy_heads%ROWTYPE;
   instruction_event workspace_instruction_policy_activation_events%ROWTYPE;
+  instruction_deactivation workspace_instruction_policy_deactivation_events%ROWTYPE;
   preference_row preference_registry_preferences%ROWTYPE;
   preference_event preference_registry_events%ROWTYPE;
   input_hash_value text;
@@ -1244,15 +1700,27 @@ BEGIN
       RAISE EXCEPTION 'automatic instruction-policy activation was superseded'
         USING ERRCODE = '40001';
     END IF;
-    SELECT * INTO instruction_event FROM governed_learning_apply_instruction_policy(
-      'undo', p_account_id, p_workspace_id, destination_operation_id,
-      activation_row.destination_proposal_id, activation_row.destination_revision_id,
-      activation_row.destination_new_version, activation_row.destination_old_revision_id,
-      service_actor
-    );
-    destination_new_version_value := instruction_event.activation_version;
-    destination_event_id_value := instruction_event.id;
-    effective_at_value := instruction_event.created_at;
+    IF activation_row.destination_old_revision_id IS NULL THEN
+      SELECT * INTO instruction_deactivation
+      FROM governed_learning_deactivate_instruction_policy(
+        p_account_id, p_workspace_id, destination_operation_id,
+        activation_row.destination_proposal_id, activation_row.destination_revision_id,
+        activation_row.destination_new_version, service_actor
+      );
+      destination_new_version_value := instruction_deactivation.activation_version;
+      destination_event_id_value := instruction_deactivation.id;
+      effective_at_value := instruction_deactivation.created_at;
+    ELSE
+      SELECT * INTO instruction_event FROM governed_learning_apply_instruction_policy(
+        'undo', p_account_id, p_workspace_id, destination_operation_id,
+        activation_row.destination_proposal_id, activation_row.destination_revision_id,
+        activation_row.destination_new_version, activation_row.destination_old_revision_id,
+        service_actor
+      );
+      destination_new_version_value := instruction_event.activation_version;
+      destination_event_id_value := instruction_event.id;
+      effective_at_value := instruction_event.created_at;
+    END IF;
   ELSIF activation_row.destination = 'preference' THEN
     SELECT * INTO preference_row FROM preference_registry_preferences preference
     WHERE preference.account_id = p_account_id AND preference.id = activation_row.destination_proposal_id
@@ -1330,12 +1798,46 @@ BEGIN
       || 'SET search_path = pg_catalog, %I, pg_temp', target_schema, target_schema
   );
   EXECUTE format(
+    'ALTER FUNCTION %I.workspace_instruction_policy_reject_mutation() '
+      || 'SET search_path = pg_catalog, %I, pg_temp', target_schema, target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.workspace_instruction_policy_guard_lifecycle_operation() '
+      || 'SET search_path = pg_catalog, %I, pg_temp', target_schema, target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.workspace_instruction_policy_guard_head_delete() '
+      || 'SET search_path = pg_catalog, %I, pg_temp', target_schema, target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.workspace_instruction_policy_validate_head() '
+      || 'SET search_path = pg_catalog, %I, pg_temp', target_schema, target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.workspace_instruction_policy_validate_onboarding_proposal() '
+      || 'SET search_path = pg_catalog, %I, pg_temp', target_schema, target_schema
+  );
+  EXECUTE format(
     'ALTER FUNCTION %I.workspace_instruction_policy_validate_event() '
+      || 'SET search_path = pg_catalog, %I, pg_temp', target_schema, target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.workspace_instruction_policy_validate_deactivation_event() '
       || 'SET search_path = pg_catalog, %I, pg_temp', target_schema, target_schema
   );
   EXECUTE format(
     'ALTER FUNCTION %I.governed_learning_apply_instruction_policy('
       || 'text,uuid,uuid,uuid,uuid,uuid,bigint,uuid,text) '
+      || 'SET search_path = pg_catalog, %I, pg_temp', target_schema, target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.governed_learning_deactivate_instruction_policy('
+      || 'uuid,uuid,uuid,uuid,uuid,bigint,text) '
+      || 'SET search_path = pg_catalog, %I, pg_temp', target_schema, target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.workspace_instruction_policy_canonical_snapshot_entries('
+      || 'uuid,uuid,text,timestamp with time zone) '
       || 'SET search_path = pg_catalog, %I, pg_temp', target_schema, target_schema
   );
   EXECUTE format(
@@ -1353,9 +1855,12 @@ BEGIN
   );
   EXECUTE format('REVOKE ALL ON TABLE %I.governed_learning_activation_receipts FROM PUBLIC', target_schema);
   EXECUTE format('REVOKE ALL ON TABLE %I.governed_learning_activation_undo_receipts FROM PUBLIC', target_schema);
+  EXECUTE format('REVOKE ALL ON TABLE %I.workspace_instruction_policy_deactivation_events FROM PUBLIC', target_schema);
   IF runtime_role IS NOT NULL THEN
     EXECUTE format('REVOKE ALL ON TABLE %I.governed_learning_activation_receipts FROM %I', target_schema, runtime_role);
     EXECUTE format('REVOKE ALL ON TABLE %I.governed_learning_activation_undo_receipts FROM %I', target_schema, runtime_role);
+    EXECUTE format('REVOKE ALL ON TABLE %I.workspace_instruction_policy_deactivation_events FROM %I', target_schema, runtime_role);
+    EXECUTE format('GRANT SELECT ON TABLE %I.workspace_instruction_policy_deactivation_events TO %I', target_schema, runtime_role);
     EXECUTE format(
       'GRANT EXECUTE ON FUNCTION %I.activate_governed_learning_decision(uuid,uuid,uuid,uuid) TO %I',
       target_schema, runtime_role
