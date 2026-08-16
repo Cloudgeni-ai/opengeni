@@ -102,6 +102,8 @@ type FikenContext = {
   sessionId: string | null;
 };
 
+type FikenProviderAuthorization = () => Promise<boolean | void>;
+
 /**
  * Fiken allows only a single concurrent API request per credential; concurrent
  * requests can 429 and repeated violations can get the token banned. Serialize
@@ -281,6 +283,7 @@ export type FikenListInput = {
 
 export class FikenClient {
   private readonly resolveCredential: ReturnType<typeof buildConnectionTokenResolver>;
+  private expectedConnectionVersion: number;
 
   constructor(
     private readonly db: Database,
@@ -289,11 +292,22 @@ export class FikenClient {
     private readonly metadata: FikenConnectionMetadata,
     private readonly context: FikenContext,
     private readonly fetchImpl: FetchLike = fetch,
+    private readonly authorizeProviderRequest?: FikenProviderAuthorization,
   ) {
+    this.expectedConnectionVersion = connection.version;
     // OAuth-kind connections refresh through the generic broker; route that
-    // token-endpoint transport through the same injectable Fiken fetch.
+    // token-endpoint transport through the same injectable Fiken fetch. Keep
+    // the optional authorization immediately before actual refresh I/O.
+    const refreshFetch: FetchLike = this.authorizeProviderRequest
+      ? async (input, init) => {
+          if ((await this.authorizeProviderRequest?.()) === false) {
+            throw new Error("the Fiken credential refresh is no longer authorized");
+          }
+          return await this.fetchImpl(input, init);
+        }
+      : fetchImpl;
     this.resolveCredential = buildConnectionTokenResolver(db, settings, undefined, {
-      refreshTransport: { fetchImpl },
+      refreshTransport: { fetchImpl: refreshFetch },
     });
   }
 
@@ -619,17 +633,51 @@ export class FikenClient {
       for (const [key, value] of Object.entries(input.query ?? {})) {
         url.searchParams.set(key, value);
       }
-      // Credential resolution (DB read + possible broker refresh) happens
-      // outside the serialization chain: only the provider HTTP call itself
-      // must obey Fiken's single-concurrent-request rule.
-      const headers = await this.headersFor(operation, url.toString());
       const result = await serializedPerConnection(this.connection.id, async () => {
+        const current = await getConnectionMetadata(
+          this.db,
+          this.context.workspaceId,
+          this.connection.id,
+          null,
+        );
+        if (
+          !current ||
+          current.accountId !== this.context.accountId ||
+          current.status !== "active" ||
+          current.version !== this.expectedConnectionVersion ||
+          !isFikenConnection(current)
+        ) {
+          throw new Error("the Fiken connection authority changed");
+        }
+        const credential = await this.credentialFor(operation, url.toString());
+        const rechecked = await getConnectionMetadata(
+          this.db,
+          this.context.workspaceId,
+          this.connection.id,
+          null,
+        );
+        if (
+          !rechecked ||
+          rechecked.accountId !== this.context.accountId ||
+          rechecked.status !== "active" ||
+          rechecked.version !== credential.connectionVersion ||
+          !isFikenConnection(rechecked)
+        ) {
+          throw new Error("the Fiken connection authority changed");
+        }
+        if (credential.authorizeProviderRequest && !(await credential.authorizeProviderRequest())) {
+          throw new Error("the Fiken provider request is no longer authorized");
+        }
+        if (this.authorizeProviderRequest && (await this.authorizeProviderRequest()) === false) {
+          throw new Error("the Fiken provider request is no longer authorized");
+        }
+        this.expectedConnectionVersion = credential.connectionVersion;
         let response: Response;
         try {
           response = await this.fetchImpl(url, {
             method,
             headers: {
-              ...headers,
+              ...credential.headers,
               accept: "application/json",
               ...(input.body !== undefined ? { "content-type": "application/json" } : {}),
             },
@@ -716,10 +764,14 @@ export class FikenClient {
     );
   }
 
-  private async headersFor(
+  private async credentialFor(
     operation: FikenOperation,
     destinationUrl: string,
-  ): Promise<Record<string, string>> {
+  ): Promise<{
+    headers: Record<string, string>;
+    connectionVersion: number;
+    authorizeProviderRequest?: () => Promise<boolean>;
+  }> {
     const result = await this.resolveCredential({
       workspaceId: this.context.workspaceId,
       serverId: "opengeni-fiken",
@@ -732,10 +784,20 @@ export class FikenClient {
       },
       destinationUrl,
     });
-    if (result.status !== "ok" || result.connectionId !== this.connection.id) {
+    if (
+      result.status !== "ok" ||
+      result.connectionId !== this.connection.id ||
+      result.connectionVersion === undefined
+    ) {
       throw new Error("the Fiken connection needs to be reconnected");
     }
-    return result.headers;
+    return {
+      headers: result.headers,
+      connectionVersion: result.connectionVersion,
+      ...(result.authorizeProviderRequest
+        ? { authorizeProviderRequest: result.authorizeProviderRequest }
+        : {}),
+    };
   }
 
   private receipt(operation: FikenOperation, operationId?: string) {
@@ -771,7 +833,12 @@ export class FikenClient {
 }
 
 export function createFikenClient(
-  deps: { db: Database; settings: Settings; fikenFetch?: typeof fetch },
+  deps: {
+    db: Database;
+    settings: Settings;
+    fikenFetch?: typeof fetch;
+    authorizeProviderRequest?: FikenProviderAuthorization;
+  },
   resolved: Awaited<ReturnType<typeof resolveFikenConnectionForTool>>,
 ): FikenClient {
   return new FikenClient(
@@ -781,6 +848,7 @@ export function createFikenClient(
     resolved.metadata,
     resolved.context,
     deps.fikenFetch,
+    deps.authorizeProviderRequest,
   );
 }
 

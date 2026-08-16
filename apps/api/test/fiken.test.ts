@@ -16,6 +16,7 @@ import {
   encryptEnvironmentValue,
   getConnectionMetadata,
   refreshOAuthConnectionCredential,
+  setConnectionStatus,
   updateConnection,
   type DbClient,
 } from "@opengeni/db";
@@ -483,6 +484,7 @@ describe("FikenClient", () => {
     workspace: { accountId: string; workspaceId: string },
     fikenFetch: typeof globalThis.fetch,
     installPayload: Record<string, unknown> = {},
+    authorizeProviderRequest?: () => Promise<boolean | void>,
   ) {
     await installFiken(workspace, fakeFiken().fetch, installPayload);
     const resolved = await resolveFikenConnectionForTool({
@@ -492,7 +494,10 @@ describe("FikenClient", () => {
     });
     return {
       resolved,
-      fiken: createFikenClient({ db: client.db, settings, fikenFetch }, resolved),
+      fiken: createFikenClient(
+        { db: client.db, settings, fikenFetch, authorizeProviderRequest },
+        resolved,
+      ),
     };
   }
 
@@ -538,11 +543,174 @@ describe("FikenClient", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const provider = fakeFiken();
-    const { fiken } = await connectedClient(workspace, provider.fetch, {
-      defaultCompanySlug: "demo-as",
-    });
+    let authorizations = 0;
+    const { fiken } = await connectedClient(
+      workspace,
+      provider.fetch,
+      { defaultCompanySlug: "demo-as" },
+      async () => {
+        authorizations += 1;
+        return true;
+      },
+    );
     await Promise.all([fiken.listCompanies(), fiken.listContacts({}), fiken.listCompanies()]);
     expect(provider.maxInFlight()).toBe(1);
+    expect(authorizations).toBe(provider.calls.length);
+  });
+
+  test("denies queued calls after revoke or reconnect without stale provider I/O", async () => {
+    if (!available) return;
+    for (const transition of ["revoke", "reconnect"] as const) {
+      const workspace = await freshWorkspace();
+      const provider = fakeFiken();
+      let releaseFirst!: () => void;
+      let signalEntered!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        signalEntered = resolve;
+      });
+      const released = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let targetCalls = 0;
+      const gatedFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+        if (url.hostname === "api.fiken.no") {
+          targetCalls += 1;
+          if (targetCalls === 1) {
+            signalEntered();
+            await released;
+          }
+        }
+        return await provider.fetch(input, init);
+      }) as typeof globalThis.fetch;
+      const { fiken, resolved } = await connectedClient(workspace, gatedFetch, {
+        defaultCompanySlug: "demo-as",
+      });
+      const first = fiken.listCompanies();
+      await entered;
+      const queued = fiken.listContacts({});
+      const current = await getConnectionMetadata(
+        client.db,
+        workspace.workspaceId,
+        resolved.connection.id,
+        null,
+      );
+      if (!current) throw new Error("expected current Fiken connection");
+      if (transition === "revoke") {
+        expect(
+          await setConnectionStatus(client.db, workspace.workspaceId, "revoked", null, {
+            id: current.id,
+            version: current.version,
+            subjectId: null,
+          }),
+        ).toBe(true);
+      } else {
+        await updateConnection(client.db, {
+          workspaceId: workspace.workspaceId,
+          connectionId: current.id,
+          visibleToSubjectId: null,
+          credentialEncrypted: encryptEnvironmentValue(
+            Buffer.from(ENCRYPTION_KEY, "base64"),
+            JSON.stringify(fikenCredentialBundle(`${FIXTURE_TOKEN}-reconnected`)),
+          ),
+          metadata: { ...current.metadata },
+        });
+      }
+      releaseFirst();
+      await expect(first).resolves.toBeDefined();
+      await expect(queued).rejects.toThrow(/authority changed|reconnected/);
+      expect(targetCalls).toBe(1);
+    }
+  });
+
+  test("rechecks revocation after a delayed OAuth refresh before target I/O", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const installed = await installFiken(workspace, fakeFiken().fetch, {
+      defaultCompanySlug: "demo-as",
+    });
+    const current = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      installed.body.connection!.id,
+      null,
+    );
+    if (!current) throw new Error("expected current Fiken connection");
+    await updateConnection(client.db, {
+      workspaceId: workspace.workspaceId,
+      connectionId: current.id,
+      visibleToSubjectId: null,
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(
+        Buffer.from(ENCRYPTION_KEY, "base64"),
+        JSON.stringify({
+          access_token: "expired-access",
+          refresh_token: "refresh-fixture",
+          token_endpoint: "https://fiken.no/oauth/token",
+          client_id: "fiken-client-id",
+          client_secret: "fiken-client-secret",
+          token_endpoint_auth_method: "client_secret_basic",
+          token_type: "bearer",
+        }),
+      ),
+      expiresAt: new Date(0),
+      metadata: { ...current.metadata },
+    });
+    const resolved = await resolveFikenConnectionForTool({
+      db: client.db,
+      grant: grantFor(workspace),
+      sessionId: null,
+    });
+    let releaseRefresh!: () => void;
+    let signalRefresh!: () => void;
+    const refreshEntered = new Promise<void>((resolve) => {
+      signalRefresh = resolve;
+    });
+    const refreshReleased = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let refreshCalls = 0;
+    let targetCalls = 0;
+    const gatedFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.hostname === "fiken.no" && url.pathname === "/oauth/token") {
+        refreshCalls += 1;
+        signalRefresh();
+        await refreshReleased;
+        return Response.json({
+          access_token: "refreshed-access",
+          refresh_token: "refresh-fixture",
+          token_type: "bearer",
+          expires_in: 86_400,
+        });
+      }
+      targetCalls += 1;
+      return await fakeFiken().fetch(input, init);
+    }) as typeof globalThis.fetch;
+    const fiken = createFikenClient(
+      { db: client.db, settings: oauthSettings, fikenFetch: gatedFetch },
+      resolved,
+    );
+    const request = fiken.listContacts({ companySlug: "demo-as" });
+    await refreshEntered;
+    const duringRefresh = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      current.id,
+      null,
+    );
+    if (!duringRefresh) throw new Error("expected Fiken connection during refresh");
+    expect(
+      await setConnectionStatus(client.db, workspace.workspaceId, "revoked", null, {
+        id: duringRefresh.id,
+        version: duringRefresh.version,
+        subjectId: null,
+      }),
+    ).toBe(true);
+    releaseRefresh();
+    await expect(request).rejects.toThrow();
+    expect(refreshCalls).toBe(1);
+    expect(targetCalls).toBe(0);
   });
 
   test("marks the connection needs_reauth on 401 and stays active on 429/500", async () => {
@@ -596,6 +764,28 @@ describe("FikenClient", () => {
     expect(post.body).toEqual({ name: "Ny Kunde", customer: true });
   });
 
+  test("does not replay an outcome-unknown contact creation", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const provider = fakeFiken();
+    let contactPosts = 0;
+    const losePostResponse = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if ((init?.method ?? "GET") === "POST" && url.pathname.endsWith("/contacts")) {
+        contactPosts += 1;
+        throw new Error("response lost after provider acceptance");
+      }
+      return await provider.fetch(input, init);
+    }) as typeof globalThis.fetch;
+    const { fiken } = await connectedClient(workspace, losePostResponse, {
+      defaultCompanySlug: "demo-as",
+    });
+    await expect(fiken.createContact({ name: "Unknown Outcome" })).rejects.toThrow(
+      /transport_error/,
+    );
+    expect(contactPosts).toBe(1);
+  });
+
   test("rejects fiken reserved metadata on the generic connection routes", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -633,30 +823,38 @@ describe("FikenClient", () => {
     expect(patched.status).toBe(422);
   });
 
-  test("marks needs_reauth on 401 even when the row version moved after resolution", async () => {
+  test("denies a stale client before provider I/O when the connection version moved", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const failing = (async () =>
-      Response.json({ message: "revoked" }, { status: 401 })) as typeof globalThis.fetch;
+    let providerCalls = 0;
+    const failing = (async () => {
+      providerCalls += 1;
+      return Response.json({ message: "revoked" }, { status: 401 });
+    }) as typeof globalThis.fetch;
     const { fiken, resolved } = await connectedClient(workspace, failing, {
       defaultCompanySlug: "demo-as",
     });
-    // Simulate a concurrent writer (e.g. a broker refresh) bumping the version
-    // after this client resolved the row.
+    // Simulate a reconnect writer bumping the version after this client
+    // resolved the row. The stale 401 fixture must never be reached.
     await updateConnection(client.db, {
       workspaceId: workspace.workspaceId,
       connectionId: resolved.connection.id,
       visibleToSubjectId: null,
+      credentialEncrypted: encryptEnvironmentValue(
+        Buffer.from(ENCRYPTION_KEY, "base64"),
+        JSON.stringify(fikenCredentialBundle(`${FIXTURE_TOKEN}-moved`)),
+      ),
       metadata: { ...resolved.connection.metadata },
     });
-    await expect(fiken.listContacts({})).rejects.toThrow(/credential_rejected/);
+    await expect(fiken.listContacts({})).rejects.toThrow(/authority changed/);
     const after = await getConnectionMetadata(
       client.db,
       workspace.workspaceId,
       resolved.connection.id,
       null,
     );
-    expect(after?.status).toBe("needs_reauth");
+    expect(after?.status).toBe("active");
+    expect(providerCalls).toBe(0);
   });
 
   test("draft idempotency ignores unrelated drafts when the provider drops the uuid filter", async () => {
@@ -705,9 +903,16 @@ describe("FikenClient", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const provider = fakeFiken();
-    const { fiken } = await connectedClient(workspace, provider.fetch, {
-      defaultCompanySlug: "demo-as",
-    });
+    let authorizations = 0;
+    const { fiken } = await connectedClient(
+      workspace,
+      provider.fetch,
+      { defaultCompanySlug: "demo-as" },
+      async () => {
+        authorizations += 1;
+        return true;
+      },
+    );
     const operationId = crypto.randomUUID();
     const draft = {
       operationId,
@@ -731,6 +936,7 @@ describe("FikenClient", () => {
       (entry) => entry.method === "POST" && entry.url.pathname.endsWith("/invoices/drafts"),
     );
     expect(posts).toHaveLength(1);
+    expect(authorizations).toBe(provider.calls.length);
     expect(posts[0]!.body).toMatchObject({
       type: "invoice",
       uuid: operationId,

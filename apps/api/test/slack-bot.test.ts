@@ -972,6 +972,7 @@ async function connectBot(
 async function connectedTestBot(
   workspace: { accountId: string; workspaceId: string },
   slackFetch: typeof globalThis.fetch,
+  authorizeProviderRequest?: () => Promise<boolean | void>,
 ) {
   const connected = await connectBot(workspace, slackFetch);
   const connection = await getConnectionMetadata(
@@ -994,7 +995,15 @@ async function connectedTestBot(
   });
   return {
     connection,
-    bot: createOpenGeniSlackBotClient({ db: client.db, settings, slackFetch }, resolved),
+    bot: createOpenGeniSlackBotClient(
+      {
+        db: client.db,
+        settings,
+        slackFetch,
+        ...(authorizeProviderRequest ? { authorizeProviderRequest } : {}),
+      },
+      resolved,
+    ),
   };
 }
 
@@ -2249,6 +2258,100 @@ describe("OpenGeni Slack bot connection", () => {
     expect(slack.calls.filter((call) => call.method === "files.list")).toHaveLength(3);
   });
 
+  test("authorizes every physical Slack call and denies a revoked continuation page", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({
+      fileListResponse: ({ count, page }) => ({
+        files: [{ id: `F_PAGE_${page}` }],
+        paging: { count, total: 2, page, pages: 2 },
+      }),
+    });
+    let authorizations = 0;
+    const { bot, connection } = await connectedTestBot(workspace, slack.fetch, async () => {
+      authorizations += 1;
+      return true;
+    });
+    const before = slack.calls.length;
+    const first = await bot.listFiles({ channelId: "C_MEMBER", limit: 1 });
+    expect(authorizations).toBe(slack.calls.length - before);
+    expect(first.nextCursor).toBeString();
+    const current = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connection.id,
+      null,
+    );
+    if (!current) throw new Error("expected current Slack connection");
+    expect(
+      await setConnectionStatus(client.db, workspace.workspaceId, "revoked", null, {
+        id: current.id,
+        version: current.version,
+        subjectId: null,
+      }),
+    ).toBe(true);
+    const callCount = slack.calls.length;
+    await expect(
+      bot.listFiles({ channelId: "C_MEMBER", cursor: first.nextCursor! }),
+    ).rejects.toThrow(/reinstalled|authority changed/);
+    expect(slack.calls).toHaveLength(callCount);
+  });
+
+  test("rechecks authority before a private-file redirect leg", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const connected = await connectBot(workspace, slack.fetch);
+    const resolved = await resolveSlackBotConnectionForTool({
+      db: client.db,
+      grant: {
+        ...workspace,
+        subjectId: "subject-a",
+        permissions: ["connections:read"],
+        metadata: {},
+      },
+      sessionId: null,
+      requestedConnectionId: connected.body.connection.id,
+    });
+    let privateFileCalls = 0;
+    const redirectingFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.hostname === "files.slack.com") {
+        privateFileCalls += 1;
+        const current = await getConnectionMetadata(
+          client.db,
+          workspace.workspaceId,
+          connected.body.connection.id,
+          null,
+        );
+        if (!current) throw new Error("expected current Slack connection");
+        expect(
+          await setConnectionStatus(client.db, workspace.workspaceId, "revoked", null, {
+            id: current.id,
+            version: current.version,
+            subjectId: null,
+          }),
+        ).toBe(true);
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location:
+              "https://files.slack.com/files-pri/T_OPEN_GENI-F_CANVAS/download/redirected.html",
+          },
+        });
+      }
+      return await slack.fetch(input, init);
+    }) as typeof globalThis.fetch;
+    const bot = createOpenGeniSlackBotClient(
+      { db: client.db, settings, slackFetch: redirectingFetch },
+      resolved,
+    );
+    await expect(bot.fileContent({ channelId: "C_MEMBER", fileId: "F_CANVAS" })).rejects.toThrow(
+      /reinstalled|authority changed/,
+    );
+    expect(privateFileCalls).toBe(1);
+  });
+
   test("rejects malformed, mixed, and non-advancing files.list paging", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -3297,7 +3400,30 @@ describe("OpenGeni Slack bot connection", () => {
         ).toBe(true);
       }
 
-      await expect(bot.deleteMessage(request)).resolves.toMatchObject({
+      let completionBot = bot;
+      let expectedAttempts = 3;
+      if (failure === "headers") {
+        const callsBeforeStaleRetry = slack.calls.length;
+        await expect(bot.deleteMessage(request)).rejects.toThrow(/authority changed/);
+        expect(slack.calls).toHaveLength(callsBeforeStaleRetry);
+        const refreshed = await resolveSlackBotConnectionForTool({
+          db: client.db,
+          grant: {
+            ...workspace,
+            subjectId: "subject-a",
+            permissions: ["connections:read"],
+            metadata: {},
+          },
+          sessionId: null,
+          requestedConnectionId: connected.body.connection.id,
+        });
+        completionBot = createOpenGeniSlackBotClient(
+          { db: client.db, settings, slackFetch: slack.fetch },
+          refreshed,
+        );
+        expectedAttempts = 4;
+      }
+      await expect(completionBot.deleteMessage(request)).resolves.toMatchObject({
         deleted: true,
       });
       expect(slack.calls.filter((call) => call.method === "chat.getPermalink")).toHaveLength(1);
@@ -3309,7 +3435,7 @@ describe("OpenGeni Slack bot connection", () => {
           connected.body.connection.id,
           operationId,
         ),
-      ).toMatchObject({ status: "completed", attemptCount: 3 });
+      ).toMatchObject({ status: "completed", attemptCount: expectedAttempts });
     }
   });
 
