@@ -27,6 +27,7 @@ import {
   getConnectionMetadata,
   getWorkspaceGrant,
   listConnectionsMetadata,
+  loadConnectionCredentialForBroker,
   recordAuditEvent,
   setConnectionStatus,
   updateConnection,
@@ -634,41 +635,17 @@ export class FikenClient {
         url.searchParams.set(key, value);
       }
       const result = await serializedPerConnection(this.connection.id, async () => {
-        const current = await getConnectionMetadata(
-          this.db,
-          this.context.workspaceId,
-          this.connection.id,
-          null,
-        );
-        if (
-          !current ||
-          current.accountId !== this.context.accountId ||
-          current.status !== "active" ||
-          current.version !== this.expectedConnectionVersion ||
-          !isFikenConnection(current)
-        ) {
-          throw new Error("the Fiken connection authority changed");
-        }
+        const authority = await this.currentAuthority(this.expectedConnectionVersion);
         const credential = await this.credentialFor(operation, url.toString());
-        const rechecked = await getConnectionMetadata(
-          this.db,
-          this.context.workspaceId,
-          this.connection.id,
-          null,
-        );
-        if (
-          !rechecked ||
-          rechecked.accountId !== this.context.accountId ||
-          rechecked.status !== "active" ||
-          rechecked.version !== credential.connectionVersion ||
-          !isFikenConnection(rechecked)
-        ) {
-          throw new Error("the Fiken connection authority changed");
-        }
-        if (credential.authorizeProviderRequest && !(await credential.authorizeProviderRequest())) {
+        await this.currentAuthority(credential.connectionVersion, authority.authorityGeneration);
+        // The adapter callback is a fallible preflight. The canonical
+        // credential callback below records the physical-use fact, so it must
+        // be the final await before the target fetch.
+        if (this.authorizeProviderRequest && (await this.authorizeProviderRequest()) === false) {
           throw new Error("the Fiken provider request is no longer authorized");
         }
-        if (this.authorizeProviderRequest && (await this.authorizeProviderRequest()) === false) {
+        await this.currentAuthority(credential.connectionVersion, authority.authorityGeneration);
+        if (credential.authorizeProviderRequest && !(await credential.authorizeProviderRequest())) {
           throw new Error("the Fiken provider request is no longer authorized");
         }
         this.expectedConnectionVersion = credential.connectionVersion;
@@ -690,7 +667,7 @@ export class FikenClient {
         } catch {
           throw new FikenProviderError("transport_error");
         }
-        return await this.readResponse(operation, response);
+        return await this.readResponse(operation, response, credential.connectionVersion);
       });
       await this.recordAudit(operation, "succeeded");
       return result;
@@ -703,15 +680,14 @@ export class FikenClient {
   private async readResponse(
     operation: FikenOperation,
     response: Response,
+    credentialVersion: number,
   ): Promise<{ payload: unknown; page: FikenPage | null; locationId: number | null }> {
     if (response.status === 401) {
       await response.body?.cancel().catch(() => undefined);
-      // A 401 after resolution means the credential is genuinely rejected
-      // (revoked token or revoked OAuth grant). setConnectionStatus is a
-      // strict version CAS and a broker refresh may have bumped the version
-      // since this client resolved the row, so re-read the current version
-      // instead of using the resolution-time snapshot.
-      await this.markNeedsReauth().catch(() => undefined);
+      // Only the exact active credential generation sent on this request may
+      // transition. A late 401 must not poison a reconnect or revocation that
+      // became current while the provider response was in flight.
+      await this.markNeedsReauth(credentialVersion).catch(() => undefined);
       throw new FikenProviderError("credential_rejected", 401);
     }
     if (response.status === 429) {
@@ -747,21 +723,57 @@ export class FikenClient {
     return { payload, page: pageFromHeaders(response.headers), locationId };
   }
 
-  private async markNeedsReauth(): Promise<void> {
+  private async markNeedsReauth(credentialVersion: number): Promise<void> {
     const current = await getConnectionMetadata(
       this.db,
       this.context.workspaceId,
       this.connection.id,
       null,
     );
-    if (!current || current.status === "needs_reauth") return;
+    if (
+      !current ||
+      current.status !== "active" ||
+      current.version !== credentialVersion ||
+      !isFikenConnection(current)
+    ) {
+      return;
+    }
     await setConnectionStatus(
       this.db,
       this.context.workspaceId,
       "needs_reauth",
       "Fiken rejected the credential",
-      { id: current.id, version: current.version, subjectId: null },
+      { id: current.id, version: credentialVersion, subjectId: null },
     );
+  }
+
+  private async currentAuthority(
+    expectedVersion: number,
+    expectedAuthorityGeneration?: number,
+  ): Promise<{ version: number; authorityGeneration: number }> {
+    const current = await loadConnectionCredentialForBroker(this.db, this.settings, {
+      workspaceId: this.context.workspaceId,
+      connectionId: this.connection.id,
+      providerDomain: FIKEN_PROVIDER_DOMAIN,
+      kind: this.connection.kind === "oauth2" ? "oauth2" : "api_key",
+      subjectId: null,
+      ...(expectedAuthorityGeneration !== undefined ? { expectedAuthorityGeneration } : {}),
+    });
+    if (
+      !current ||
+      current.accountId !== this.context.accountId ||
+      current.workspaceId !== this.context.workspaceId ||
+      current.subjectId !== null ||
+      current.providerDomain !== FIKEN_PROVIDER_DOMAIN ||
+      current.kind !== this.connection.kind ||
+      current.status !== "active" ||
+      current.version !== expectedVersion ||
+      current.authorityGeneration === undefined ||
+      !fikenConnectionMetadata(current.metadata)
+    ) {
+      throw new Error("the Fiken connection authority changed");
+    }
+    return { version: current.version, authorityGeneration: current.authorityGeneration };
   }
 
   private async credentialFor(

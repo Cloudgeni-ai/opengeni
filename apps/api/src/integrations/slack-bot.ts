@@ -1566,10 +1566,12 @@ export class OpenGeniSlackBotClient {
     ) {
       throw new Error("OpenGeni Slack bot connection authority changed");
     }
-    if (result.authorizeProviderRequest && !(await result.authorizeProviderRequest())) {
+    // The adapter callback is a fallible preflight. The canonical credential
+    // callback must remain the final await before the physical fetch.
+    if (this.authorizeProviderRequest && (await this.authorizeProviderRequest()) === false) {
       throw new Error("OpenGeni Slack bot provider request is no longer authorized");
     }
-    if (this.authorizeProviderRequest && (await this.authorizeProviderRequest()) === false) {
+    if (result.authorizeProviderRequest && !(await result.authorizeProviderRequest())) {
       throw new Error("OpenGeni Slack bot provider request is no longer authorized");
     }
     return result.headers;
@@ -1614,8 +1616,8 @@ export class OpenGeniSlackBotClient {
     } catch {
       throw new SlackBotProviderError("invalid_file_url");
     }
-    const headers = await this.headersForDestination(operation, url.toString());
     await authorizeBeforeFetch?.();
+    const headers = await this.headersForDestination(operation, url.toString());
     let response: Response;
     try {
       response = await this.fetchImpl(url, {

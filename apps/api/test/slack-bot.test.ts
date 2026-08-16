@@ -2352,6 +2352,44 @@ describe("OpenGeni Slack bot connection", () => {
     expect(privateFileCalls).toBe(1);
   });
 
+  test("denies a private-file preflight before recording provider use or fetching", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    let privateFileCalls = 0;
+    const countingFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.hostname === "files.slack.com") privateFileCalls += 1;
+      return await slack.fetch(input, init);
+    }) as typeof globalThis.fetch;
+    let providerAuthorizations = 0;
+    const { bot } = await connectedTestBot(workspace, countingFetch, async () => {
+      providerAuthorizations += 1;
+      return true;
+    });
+    let sharedPreflights = 0;
+    await expect(
+      bot.downloadReactionImage(
+        {
+          fileId: "F_IMAGE",
+          filename: "image.png",
+          declaredMimeType: "image/png",
+          declaredSizeBytes: null,
+          downloadUrl: new URL(
+            "https://files.slack.com/files-pri/T_OPEN_GENI-F_IMAGE/download/image.png",
+          ),
+        },
+        async () => {
+          sharedPreflights += 1;
+          throw new Error("shared read authority changed");
+        },
+      ),
+    ).rejects.toThrow(/shared read authority changed/);
+    expect(sharedPreflights).toBe(1);
+    expect(providerAuthorizations).toBe(0);
+    expect(privateFileCalls).toBe(0);
+  });
+
   test("rejects malformed, mixed, and non-advancing files.list paging", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
