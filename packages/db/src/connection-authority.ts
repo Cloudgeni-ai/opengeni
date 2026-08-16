@@ -8,7 +8,11 @@ import {
   type IssueConnectionUseGrantRequest,
   type ConnectionUseDenialReason as ConnectionUseDenialReasonValue,
 } from "@opengeni/contracts/connection-authority";
-import { ConnectionKind, type ConnectionKind as ConnectionKindValue } from "@opengeni/contracts";
+import {
+  ConnectionKind,
+  type ConnectionKind as ConnectionKindValue,
+  type UserResourceDelegation,
+} from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 
@@ -157,6 +161,47 @@ export async function revokeSelfConnectionUseGrant(
     if (!row) throw new Error("connection use grant was not returned");
     return row;
   });
+}
+
+/**
+ * Resolves the immutable physical origin for one explicit common-user
+ * connection selection. The SECURITY DEFINER database boundary proves the
+ * owning human, active organization membership, target-workspace access, and
+ * exact authority/grant generations without exposing credentials or allowing
+ * an ambient cross-workspace inventory.
+ */
+export async function resolvePersonalConnectionAuthoritySelectionOrigin(
+  db: Database,
+  input: {
+    accountId: string;
+    targetWorkspaceId: string;
+    subjectId: string;
+    connectionId: string;
+    delegation: UserResourceDelegation;
+  },
+): Promise<string | null> {
+  return await withOwnerContext(
+    db,
+    {
+      accountId: input.accountId,
+      workspaceId: input.targetWorkspaceId,
+      subjectId: input.subjectId,
+    },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ originWorkspaceId: string }>(
+        scopedDb,
+        sql`
+          select origin_workspace_id as "originWorkspaceId"
+          from resolve_personal_connection_authority_selection(
+            ${input.accountId}::uuid, ${input.targetWorkspaceId}::uuid,
+            ${input.subjectId}, ${input.connectionId}::uuid,
+            ${JSON.stringify(input.delegation)}::text::jsonb
+          )
+        `,
+      );
+      return row?.originWorkspaceId ?? null;
+    },
+  );
 }
 
 export async function resolveConnectionUseAuthority(

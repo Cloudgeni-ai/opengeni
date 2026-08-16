@@ -141,7 +141,7 @@ describe("release schema contract", () => {
       "0254_scoped_variable_set_authority.sql",
       "0256_connection_authority_delegation.sql",
       "0262_scoped_connected_machines_and_rigs.sql",
-      "0263_connection_authority_runtime_activation.sql",
+      "0264_connection_authority_runtime_activation.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -303,10 +303,10 @@ describe("release schema contract", () => {
     });
     expect(
       completeSourceContract.migrations.find(
-        (migration) => migration.path === "0263_connection_authority_runtime_activation.sql",
+        (migration) => migration.path === "0264_connection_authority_runtime_activation.sql",
       ),
     ).toMatchObject({
-      sha256: "9f07d8ba4ddb1830edbdbb9306601d722a95dd8e314c061b846dd3b4fd5560cd",
+      sha256: "439c0605087f3eb890b54a45e93b17b3a71b8846d710c79c1e883ffd8844de9f",
       deploymentMode: "maintenance",
     });
     const migrations = new Map(

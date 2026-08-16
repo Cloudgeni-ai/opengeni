@@ -21,6 +21,7 @@ import {
   getWorkspaceGrant,
   listConnectionsMetadata,
   listSocialConnections,
+  resolvePersonalConnectionAuthoritySelectionOrigin,
   type Database,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
@@ -256,6 +257,7 @@ export function personalConnectionDelegationsFromVisibleConnections(input: {
     delegations.push({
       serverId: server.id,
       connectionId: connection.id,
+      ...(selection ? { originWorkspaceId: connection.workspaceId } : {}),
       ownerSubjectId: input.subjectId,
       providerDomain: connection.providerDomain,
       kind: connection.kind,
@@ -375,6 +377,7 @@ export function googleDrivePublicationDelegationFromVisibleConnections(input: {
   return {
     serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
     connectionId: connection.id,
+    ...(selection ? { originWorkspaceId: connection.workspaceId } : {}),
     ownerSubjectId: input.subjectId,
     providerDomain: connection.providerDomain,
     kind: connection.kind,
@@ -423,6 +426,7 @@ export function personalConnectionDelegationsEqual(
     const other = byServer.get(delegation.serverId);
     return (
       other?.connectionId === delegation.connectionId &&
+      other.originWorkspaceId === delegation.originWorkspaceId &&
       other.ownerSubjectId === delegation.ownerSubjectId &&
       sameProviderDomain(other.providerDomain, delegation.providerDomain) &&
       other.kind === delegation.kind &&
@@ -500,7 +504,11 @@ export function withFrozenPersonalConnectionDelegations(input: {
         : publicationDelegations.length === 1
           ? publicationDelegations[0]!
           : null;
-      if (!delegation || !(await input.ownerHasWorkspaceMembership(delegation.ownerSubjectId))) {
+      if (
+        !delegation ||
+        (!delegation.userDelegation &&
+          !(await input.ownerHasWorkspaceMembership(delegation.ownerSubjectId)))
+      ) {
         return personalAuthorityUnavailable(request);
       }
       effectiveRequest = {
@@ -574,13 +582,51 @@ export async function freezePersonalConnectionDelegations(input: {
       return true;
     });
   }
-  const membership = await getWorkspaceGrant(input.db, input.source.subjectId, input.workspaceId);
-  if (!membership) return [];
-  const visibleConnections = await listConnectionsMetadata(
+  const ownerSubjectId = input.source.subjectId;
+  const membership = await getWorkspaceGrant(input.db, ownerSubjectId, input.workspaceId);
+  const targetLocalConnections = await listConnectionsMetadata(
     input.db,
     input.workspaceId,
-    input.source.subjectId,
+    ownerSubjectId,
   );
+  const portableSelections = await Promise.all(
+    (input.authoritySelections ?? []).map(async (selection) => {
+      const originWorkspaceId = await resolvePersonalConnectionAuthoritySelectionOrigin(input.db, {
+        accountId: selection.userDelegation.organizationId,
+        targetWorkspaceId: input.workspaceId,
+        subjectId: ownerSubjectId,
+        connectionId: selection.connectionId,
+        delegation: selection.userDelegation,
+      });
+      if (!originWorkspaceId) {
+        throw new Error(`connection authority selection is unavailable: ${selection.serverId}`);
+      }
+      const connection = await getConnectionMetadata(
+        input.db,
+        originWorkspaceId,
+        selection.connectionId,
+        ownerSubjectId,
+      );
+      if (
+        !connection ||
+        connection.workspaceId !== originWorkspaceId ||
+        connection.subjectId !== ownerSubjectId ||
+        connection.authorityId !== selection.userDelegation.authorityId
+      ) {
+        throw new Error(`connection authority selection is unavailable: ${selection.serverId}`);
+      }
+      return connection;
+    }),
+  );
+  if (!membership && portableSelections.length === 0) return [];
+  const visibleConnections = [
+    ...new Map(
+      [...targetLocalConnections, ...portableSelections].map((connection) => [
+        connection.id,
+        connection,
+      ]),
+    ).values(),
+  ];
   const selectedMcpServerIds = new Set(servers.map((server) => server.id));
   const supportedSelectionIds = new Set(selectedMcpServerIds);
   if (input.googleDrivePublicationEnabled) {
@@ -598,7 +644,7 @@ export async function freezePersonalConnectionDelegations(input: {
   }
   const mcp = personalConnectionDelegationsFromVisibleConnections({
     servers,
-    subjectId: input.source.subjectId,
+    subjectId: ownerSubjectId,
     connections: visibleConnections,
     authoritySelections: (input.authoritySelections ?? []).filter((selection) =>
       selectedMcpServerIds.has(selection.serverId),
@@ -608,7 +654,6 @@ export async function freezePersonalConnectionDelegations(input: {
       : {}),
   });
   if (!includeFirstPartyConnections) return mcp;
-  const ownerSubjectId = input.source.subjectId;
   const visible = await listSocialConnections(input.db, input.workspaceId, 500, ownerSubjectId);
   const latest = new Map<"x" | "reddit", (typeof visible)[number]>();
   for (const connection of visible) {

@@ -5,7 +5,7 @@ contracts live in `@opengeni/contracts/connection-authority`, pure capture and
 revalidation logic lives in `@opengeni/core/connection-authority`, and migration
 `0256_connection_authority_delegation.sql` owns database authority binding, the
 owner-only grant lifecycle, generation fences, and the immediate pre-use
-resolver. Maintenance migration `0263_connection_authority_runtime_activation.sql`
+resolver. Maintenance migration `0264_connection_authority_runtime_activation.sql`
 persists server-built accepted-turn snapshots and activates configured remote
 MCP, API-hosted OpenAPI/GraphQL, Gmail REST, host MCP credential, and Google
 Drive publication requests. Other provider surfaces must not claim delegated
@@ -79,10 +79,12 @@ organization discovery is denied before lookup.
 
 ## Maintenance activation and compatibility boundary
 
-Migration 0256 was rolling and inert. Migration 0263 is a drained maintenance
+Migration 0256 was rolling and inert. Migration 0264 is a drained maintenance
 cutover: it rejects pre-activation executable work that could otherwise carry a
 common user connection without a snapshot, and old API/worker images must not
-restart afterward. Personal connection rows whose exact organization membership is available are
+restart afterward. It checks for live `opengeni_app` sessions before and after
+exclusive writer locks and never backfills accepted authority from a mutable
+current grant. Personal connection rows whose exact organization membership is available are
 bound to a common user-resource authority. Pre-tenancy rows without that proof
 are retained as `legacy_user`: they remain subject-private through the existing
 row policy but receive no delegable authority and use only the exact bounded
@@ -93,7 +95,10 @@ For authorized personal use, the target workspace is checked independently from
 the connection's frozen origin workspace. The credential broker loads only the
 exact authorized connection generation from that origin, which lets one user's
 connection follow them across workspaces in the same organization without
-making it a workspace credential.
+making it a workspace credential. The canonical managed personal-workspace
+owner is admitted through the lifecycle-derived organization membership even
+though that workspace intentionally has no durable membership row; other users
+and administrators are denied.
 
 Provider-specific connector behavior, transfer of personal credentials/quota,
 variable sets, machines, and rigs are outside this design.

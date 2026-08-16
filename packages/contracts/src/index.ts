@@ -3436,6 +3436,13 @@ export const McpPersonalConnectionDelegation = z
   .object({
     serverId: z.string().min(1).max(256),
     connectionId: z.string().uuid(),
+    /**
+     * Immutable physical workspace that owns an activated common-user
+     * connection. It is server-resolved from the selected authority and lets
+     * provider adapters load only that exact row when the accepted turn runs
+     * in another workspace of the same organization.
+     */
+    originWorkspaceId: z.string().uuid().optional(),
     ownerSubjectId: z.string().min(1).max(512),
     providerDomain: z.string().min(1).max(2048),
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),

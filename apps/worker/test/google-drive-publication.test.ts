@@ -55,6 +55,7 @@ const destination = {
 const target: GoogleDrivePublicationTarget = {
   ownerSubjectId: "subject-a",
   connectionId,
+  originWorkspaceId: workspaceId,
   destination,
   credentialScope: GOOGLE_DRIVE_FILE_SCOPE,
 };
@@ -139,12 +140,13 @@ function connection(
     grantedScopes?: string[];
     accessMode?: "file_only" | "readonly";
     version?: number;
+    workspaceId?: string;
   } = {},
 ) {
   return {
     id: connectionId,
     accountId,
-    workspaceId,
+    workspaceId: overrides.workspaceId ?? workspaceId,
     subjectId: "subject-a",
     providerDomain: "googleapis.com",
     kind: "oauth2",
@@ -256,6 +258,46 @@ describe("Google Drive editable artifact publication", () => {
         },
       ),
     ).toBeNull();
+  });
+
+  test("routes an activated same-organization publication through its frozen physical origin", async () => {
+    const originWorkspaceId = "77777777-7777-4777-8777-777777777777";
+    let membershipReads = 0;
+    const resolved = await resolveGoogleDrivePublicationTarget(
+      {} as Database,
+      workspaceId,
+      [
+        {
+          ...publicationDelegation,
+          originWorkspaceId,
+          userDelegation: {
+            organizationId: accountId,
+            authorityId: "88888888-8888-4888-8888-888888888888",
+            authorityGeneration: 1,
+            workspaceId,
+            sessionId: null,
+            action: "connection.use",
+            mode: "always",
+            context: "workspace_shared",
+            authorityEpoch: null,
+            grantId: "99999999-9999-4999-8999-999999999999",
+            grantGeneration: 1,
+          },
+        },
+      ],
+      {
+        getMembership: async () => {
+          membershipReads += 1;
+          return null;
+        },
+        getConnection: async (_db, requestedWorkspaceId) => {
+          expect(requestedWorkspaceId).toBe(originWorkspaceId);
+          return connection({ workspaceId: originWorkspaceId }) as never;
+        },
+      },
+    );
+    expect(resolved).toEqual({ ...target, originWorkspaceId });
+    expect(membershipReads).toBe(0);
   });
 
   test("binds approval to the private connector target and hashes the idempotency key", () => {
@@ -525,6 +567,7 @@ describe("Google Drive editable artifact publication", () => {
   test("reauthorizes before every physical request and stops after mid-publication revocation", async () => {
     let credentialCalls = 0;
     let providerCalls = 0;
+    const originWorkspaceId = "77777777-7777-4777-8777-777777777777";
     await expect(
       executeGoogleDrivePublication(
         {
@@ -532,7 +575,7 @@ describe("Google Drive editable artifact publication", () => {
           objectStorage: objectStorage(),
           identity,
           subjectId: "subject-a",
-          target,
+          target: { ...target, originWorkspaceId },
           request,
           resolveCredential: async () => {
             credentialCalls += 1;
@@ -552,18 +595,24 @@ describe("Google Drive editable artifact publication", () => {
             } as never;
           },
         },
-        executionPorts(async (url) => {
-          providerCalls += 1;
-          expect(new URL(url.toString()).pathname).toBe("/drive/v3/files/folder-1");
-          return Response.json({
-            id: destination.folderId,
-            name: destination.folderName,
-            mimeType: "application/vnd.google-apps.folder",
-            driveId: null,
-            trashed: false,
-            capabilities: { canAddChildren: true },
-          });
-        }),
+        {
+          ...executionPorts(async (url) => {
+            providerCalls += 1;
+            expect(new URL(url.toString()).pathname).toBe("/drive/v3/files/folder-1");
+            return Response.json({
+              id: destination.folderId,
+              name: destination.folderName,
+              mimeType: "application/vnd.google-apps.folder",
+              driveId: null,
+              trashed: false,
+              capabilities: { canAddChildren: true },
+            });
+          }),
+          getConnection: async (_db, requestedWorkspaceId) => {
+            expect(requestedWorkspaceId).toBe(originWorkspaceId);
+            return connection({ workspaceId: originWorkspaceId }) as never;
+          },
+        },
       ),
     ).rejects.toThrow("credential is unavailable");
     expect(credentialCalls).toBe(2);

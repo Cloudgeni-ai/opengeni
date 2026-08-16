@@ -98,21 +98,31 @@ cannot be accepted with it. Audit facts contain identifiers, generations, outcom
 and a denial reason only—never credentials, headers, arguments, content, or
 provider responses.
 
-Migration 0263 is a drained maintenance cutover because an old worker can omit
-these attempt/use facts. Its first bounded activation covers configured remote
+Migration 0264 is a drained maintenance cutover because an old worker can omit
+these attempt/use facts. The migration enforces the drain with live app-role
+session checks around exclusive writer locks and rejects all executable
+pre-activation common-user work instead of backfilling it from mutable state.
+Its first bounded activation covers configured remote
 MCP, API-hosted OpenAPI/GraphQL, Gmail REST, and Google Drive publication
 requests; the publication adapter reauthorizes
 independently before destination verification, idempotency search, and upload,
 and never replays an outcome-uncertain upload. Host credential callbacks are
 limited here to host MCP credential callbacks: they are invoked only after local
 authorization and receive credential-free attribution. Git, sandbox, and run
-credential ports are separate authorities and are not covered by migration 0263.
+credential ports are separate authorities and are not covered by migration 0264.
 Activated Atlassian is omitted from direct turns, and scheduled tasks reject
 activated MCP, Google Drive, and Atlassian selections, until their dedicated
 acceptance/occurrence adapters land. First-party Atlassian, Fiken, Slack,
 social, and scheduled knowledge-source surfaces remain explicit successors;
 workspace and `legacy_user` connections remain on their bounded compatibility
 path rather than being silently upgraded.
+
+An activated personal connection freezes its physical origin separately from
+the target workspace. Exact common authority permits same-organization use and
+the lifecycle-derived owner-only personal workspace even though that personal
+workspace intentionally has no membership row. Workspace administrators,
+other subjects, and cross-organization callers receive no corresponding
+portable authority.
 
 ### Codex Apps designation parity verdict
 

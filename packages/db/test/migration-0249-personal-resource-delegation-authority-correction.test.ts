@@ -10,7 +10,7 @@ const migrationName = "0249_personal_resource_delegation_authority_correction.sq
 const commonAuthorityMigrationName = "0253_common_user_resource_authority_lifecycle.sql";
 const connectionAuthorityMigrationName = "0256_connection_authority_delegation.sql";
 const connectionAuthorityActivationMigrationName =
-  "0263_connection_authority_runtime_activation.sql";
+  "0264_connection_authority_runtime_activation.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 const migration0241Url = new URL(
   "../drizzle/0241_atomic_personal_resource_delegation.sql",

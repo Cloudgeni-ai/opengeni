@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { acquireBlankTestDatabase } from "@opengeni/testing";
+import postgres from "postgres";
 import type { ConnectionMetadata, McpPersonalConnectionDelegation } from "@opengeni/contracts";
 import {
   GOOGLE_DRIVE_CREDENTIAL_LABEL,
@@ -8,7 +10,10 @@ import {
   GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
 } from "@opengeni/contracts/google-drive";
 import type { ResolveConnectionCredentialInput } from "@opengeni/db";
+import { createDb } from "@opengeni/db";
+import { migrate } from "@opengeni/db/migrate";
 import {
+  freezePersonalConnectionDelegations,
   googleDrivePublicationDelegationFromVisibleConnections,
   personalAtlassianDelegationsFromVisibleConnections,
   personalConnectionDelegationSourceForGrant,
@@ -70,6 +75,182 @@ function googleDriveConnection(overrides: Partial<ConnectionMetadata> = {}): Con
 }
 
 describe("personal MCP connection delegation", () => {
+  test("admits an exact same-organization portable selection and membershipless personal owner", async () => {
+    const blank = await acquireBlankTestDatabase("core-portable-connection-authority");
+    if (!blank) return;
+    await migrate(blank.databaseUrl);
+    const sql = postgres(blank.databaseUrl, { max: 2, onnotice: () => undefined });
+    const client = createDb(blank.databaseUrl, { max: 2 });
+    try {
+      const [account] = await sql<{ id: string }[]>`
+        insert into managed_accounts (name) values ('portable connection authority') returning id
+      `;
+      const [origin] = await sql<{ id: string }[]>`
+        insert into workspaces (account_id, name) values (${account!.id}, 'owner personal')
+        returning id
+      `;
+      const [target] = await sql<{ id: string }[]>`
+        insert into workspaces (account_id, name) values (${account!.id}, 'shared target')
+        returning id
+      `;
+      await sql`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${origin!.id}, ${account!.id}), (${target!.id}, ${account!.id})
+      `;
+      const subjectId = `user:${crypto.randomUUID()}`;
+      await sql`
+        insert into organization_memberships (
+          account_id, subject_id, status, personal_workspace_id
+        ) values (${account!.id}, ${subjectId}, 'active', ${origin!.id})
+      `;
+      await sql`
+        insert into workspace_memberships (account_id, workspace_id, subject_id)
+        values (${account!.id}, ${target!.id}, ${subjectId})
+      `;
+      const connection = await sql.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${origin!.id}, true)`;
+        await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+        const [row] = await tx<Array<{ id: string; authorityId: string }>>`
+          insert into connections (
+            account_id, workspace_id, subject_id, provider_domain, kind,
+            credential_encrypted
+          ) values (
+            ${account!.id}, ${origin!.id}, ${subjectId}, 'linear.app', 'oauth2', 'ciphertext'
+          ) returning id, authority_id as "authorityId"
+        `;
+        return row!;
+      });
+      const issueGrant = async (workspaceId: string) =>
+        await sql.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+          await tx`select set_config('opengeni.workspace_id', ${workspaceId}, true)`;
+          await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+          const [row] = await tx<Array<{ id: string; generation: number }>>`
+            select grant_id as id, grant_generation::int as generation
+            from issue_self_connection_use_grant(
+              ${account!.id}::uuid, ${connection.authorityId}::uuid, ${workspaceId}::uuid,
+              'always', 'workspace_shared', null::uuid, true
+            )
+          `;
+          return row!;
+        });
+      const targetGrant = await issueGrant(target!.id);
+      const selection = {
+        serverId: "linear",
+        connectionId: connection.id,
+        userDelegation: {
+          organizationId: account!.id,
+          authorityId: connection.authorityId,
+          authorityGeneration: 1,
+          workspaceId: target!.id,
+          sessionId: null,
+          action: "connection.use" as const,
+          mode: "always" as const,
+          context: "workspace_shared" as const,
+          authorityEpoch: null,
+          grantId: targetGrant.id,
+          grantGeneration: targetGrant.generation,
+        },
+      };
+      const frozen = await freezePersonalConnectionDelegations({
+        db: client.db,
+        workspaceId: target!.id,
+        settings: { mcpServers: [personalServer] },
+        tools: [{ kind: "mcp", id: "linear" }],
+        source: { kind: "subject", subjectId },
+        authoritySelections: [selection],
+      });
+      expect(frozen).toEqual([
+        {
+          serverId: "linear",
+          connectionId: connection.id,
+          originWorkspaceId: origin!.id,
+          ownerSubjectId: subjectId,
+          providerDomain: "linear.app",
+          kind: "oauth2",
+          userDelegation: selection.userDelegation,
+        },
+      ]);
+
+      const personalGrant = await issueGrant(origin!.id);
+      const personalFrozen = await freezePersonalConnectionDelegations({
+        db: client.db,
+        workspaceId: origin!.id,
+        settings: { mcpServers: [personalServer] },
+        tools: [{ kind: "mcp", id: "linear" }],
+        source: { kind: "subject", subjectId },
+        authoritySelections: [
+          {
+            ...selection,
+            userDelegation: {
+              ...selection.userDelegation,
+              workspaceId: origin!.id,
+              grantId: personalGrant.id,
+              grantGeneration: personalGrant.generation,
+            },
+          },
+        ],
+      });
+      expect(personalFrozen[0]?.originWorkspaceId).toBe(origin!.id);
+      expect(
+        await sql`
+          select 1 from workspace_memberships
+          where workspace_id = ${origin!.id} and subject_id = ${subjectId}
+        `,
+      ).toHaveLength(0);
+
+      await expect(
+        freezePersonalConnectionDelegations({
+          db: client.db,
+          workspaceId: target!.id,
+          settings: { mcpServers: [personalServer] },
+          tools: [{ kind: "mcp", id: "linear" }],
+          source: { kind: "subject", subjectId: `user:${crypto.randomUUID()}` },
+          authoritySelections: [selection],
+        }),
+      ).rejects.toBeTruthy();
+
+      const ambientAdminSubjectId = `user:${crypto.randomUUID()}`;
+      await sql`
+        insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+        values
+          (${account!.id}, ${origin!.id}, ${ambientAdminSubjectId}, 'admin'),
+          (${account!.id}, ${target!.id}, ${ambientAdminSubjectId}, 'admin')
+      `;
+      await expect(
+        freezePersonalConnectionDelegations({
+          db: client.db,
+          workspaceId: target!.id,
+          settings: { mcpServers: [personalServer] },
+          tools: [{ kind: "mcp", id: "linear" }],
+          source: { kind: "subject", subjectId: ambientAdminSubjectId },
+          authoritySelections: [selection],
+        }),
+      ).rejects.toBeTruthy();
+
+      await sql`
+        update organization_user_resource_grants
+        set status = 'revoked', revoked_at = clock_timestamp()
+        where id = ${targetGrant.id}
+      `;
+      await expect(
+        freezePersonalConnectionDelegations({
+          db: client.db,
+          workspaceId: target!.id,
+          settings: { mcpServers: [personalServer] },
+          tools: [{ kind: "mcp", id: "linear" }],
+          source: { kind: "subject", subjectId },
+          authoritySelections: [selection],
+        }),
+      ).rejects.toBeTruthy();
+    } finally {
+      await client.close();
+      await sql.end({ timeout: 1 });
+      await blank.release();
+    }
+  }, 120_000);
+
   test("uses human/API subjects but copies authority for agent attempts", () => {
     expect(
       personalConnectionDelegationSourceForGrant({
@@ -206,6 +387,7 @@ describe("personal MCP connection delegation", () => {
       {
         serverId: "linear",
         connectionId: active.id,
+        originWorkspaceId: active.workspaceId,
         ownerSubjectId: "user:owner",
         providerDomain: "linear.app",
         kind: "oauth2",

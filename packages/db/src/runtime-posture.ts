@@ -133,6 +133,7 @@ const CONNECTION_AUTHORITY_ROUTINES = [
   "list_self_connection_authorities(uuid)",
   "issue_self_connection_use_grant(uuid, uuid, uuid, text, text, uuid, boolean)",
   "revoke_self_connection_use_grant(uuid, uuid)",
+  "resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb)",
   "resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text)",
   "resolve_connection_use_authority(uuid, uuid, uuid, jsonb)",
 ] as const;

@@ -5,6 +5,47 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
+DO $connection_authority_writer_drain_before_lock$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app')
+    AND EXISTS (
+      SELECT 1 FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND usename = 'opengeni_app'
+        AND pid <> pg_backend_pid()
+    )
+  THEN
+    RAISE EXCEPTION
+      '0264 connection authority activation requires all opengeni_app sessions to be stopped'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$connection_authority_writer_drain_before_lock$;
+
+LOCK TABLE sessions IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE session_turns IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE session_system_updates IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE session_system_update_outbox IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE scheduled_tasks IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE connections IN ACCESS EXCLUSIVE MODE;
+
+DO $connection_authority_writer_drain_after_lock$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app')
+    AND EXISTS (
+      SELECT 1 FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND usename = 'opengeni_app'
+        AND pid <> pg_backend_pid()
+    )
+  THEN
+    RAISE EXCEPTION
+      '0264 connection authority activation requires all opengeni_app sessions to be stopped'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$connection_authority_writer_drain_after_lock$;
+
 -- The maintenance label is operational guidance; this data precondition is
 -- the durable cutover fence. Migration 0256 activated common-user Connection
 -- rows before accepted-work snapshots existed. Do not install the new runtime
@@ -28,7 +69,6 @@ BEGIN
           AND existing_turn.session_id = session_value.id
       )
       AND connection_value.authority_scope = 'user'
-      AND delegation -> 'userDelegation' IS NULL
   ) OR EXISTS (
     SELECT 1
     FROM session_turns turn_value
@@ -40,9 +80,8 @@ BEGIN
       AND connection_value.account_id = turn_value.account_id
     WHERE turn_value.status IN (
       'queued', 'running', 'requires_action', 'recovering', 'waiting_capacity'
-    )
+      )
       AND connection_value.authority_scope = 'user'
-      AND delegation -> 'userDelegation' IS NULL
   ) OR EXISTS (
     SELECT 1
     FROM session_system_updates update_value
@@ -54,7 +93,6 @@ BEGIN
       AND connection_value.account_id = update_value.account_id
     WHERE update_value.state = 'pending'
       AND connection_value.authority_scope = 'user'
-      AND delegation -> 'userDelegation' IS NULL
   ) OR EXISTS (
     SELECT 1
     FROM session_system_update_outbox outbox
@@ -66,7 +104,6 @@ BEGIN
       AND connection_value.account_id = outbox.account_id
     WHERE outbox.status = 'pending'
       AND connection_value.authority_scope = 'user'
-      AND delegation -> 'userDelegation' IS NULL
   ) OR EXISTS (
     SELECT 1
     FROM scheduled_tasks task
@@ -78,10 +115,9 @@ BEGIN
       AND connection_value.account_id = task.account_id
     WHERE task.status = 'active'
       AND connection_value.authority_scope = 'user'
-      AND delegation -> 'userDelegation' IS NULL
   ) THEN
     RAISE EXCEPTION
-      '0263 requires draining or superseding executable pre-activation common-user connection work'
+      '0264 requires draining or superseding executable pre-activation common-user connection work'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -246,6 +282,115 @@ DECLARE
   data_schema text := current_schema();
 BEGIN
 EXECUTE format($ddl$
+CREATE OR REPLACE FUNCTION %1$I.resolve_personal_connection_authority_selection(
+  p_account_id uuid, p_target_workspace_id uuid, p_subject_id text,
+  p_connection_id uuid, p_delegation jsonb
+) RETURNS TABLE (origin_workspace_id uuid)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = %1$I, pg_catalog, pg_temp
+AS $body$
+DECLARE
+  membership_row organization_memberships%%ROWTYPE;
+  connection_row connections%%ROWTYPE;
+  authority_row organization_user_resource_authorities%%ROWTYPE;
+  grant_row organization_user_resource_grants%%ROWTYPE;
+BEGIN
+  IF p_account_id IS NULL OR p_target_workspace_id IS NULL
+    OR p_connection_id IS NULL OR nullif(btrim(p_subject_id), '') IS NULL
+    OR nullif(current_setting('opengeni.account_id', true), '')::uuid
+      IS DISTINCT FROM p_account_id
+    OR nullif(current_setting('opengeni.workspace_id', true), '')::uuid
+      IS DISTINCT FROM p_target_workspace_id
+    OR nullif(current_setting('opengeni.subject_id', true), '')
+      IS DISTINCT FROM p_subject_id
+    OR p_delegation ->> 'organizationId' IS DISTINCT FROM p_account_id::text
+    OR p_delegation ->> 'workspaceId' IS DISTINCT FROM p_target_workspace_id::text
+    OR p_delegation ->> 'action' IS DISTINCT FROM 'connection.use'
+  THEN
+    RAISE EXCEPTION 'personal connection authority selection context is invalid'
+      USING ERRCODE = '42501';
+  END IF;
+
+  PERFORM 1 FROM workspaces workspace_value
+  WHERE workspace_value.id = p_target_workspace_id
+    AND workspace_value.account_id = p_account_id
+  FOR SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'connection authority target workspace is unavailable'
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT membership.* INTO STRICT membership_row
+  FROM organization_memberships membership
+  WHERE membership.account_id = p_account_id
+    AND membership.subject_id = p_subject_id
+    AND membership.status = 'active'
+    AND membership.revoked_at IS NULL
+  FOR SHARE;
+  IF membership_row.personal_workspace_id IS DISTINCT FROM p_target_workspace_id
+    AND NOT EXISTS (
+      SELECT 1 FROM workspace_memberships workspace_membership
+      WHERE workspace_membership.account_id = p_account_id
+        AND workspace_membership.workspace_id = p_target_workspace_id
+        AND workspace_membership.subject_id = p_subject_id
+    )
+  THEN
+    RAISE EXCEPTION 'personal connection owner lacks target workspace access'
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT connection_value.* INTO STRICT connection_row
+  FROM connections connection_value
+  WHERE connection_value.id = p_connection_id
+    AND connection_value.account_id = p_account_id
+    AND connection_value.subject_id = p_subject_id
+    AND connection_value.owner_organization_membership_id = membership_row.id
+    AND connection_value.authority_scope = 'user'
+    AND connection_value.status = 'active'
+  FOR SHARE;
+
+  SELECT authority.* INTO STRICT authority_row
+  FROM organization_user_resource_authorities authority
+  WHERE authority.id = nullif(p_delegation ->> 'authorityId', '')::uuid
+    AND authority.account_id = p_account_id
+    AND authority.organization_membership_id = membership_row.id
+    AND authority.resource_kind = 'connection'
+    AND authority.resource_id = connection_row.id
+    AND authority.origin_workspace_id = connection_row.origin_workspace_id
+    AND authority.generation = (p_delegation ->> 'authorityGeneration')::bigint
+    AND authority.status = 'active'
+    AND authority.revoked_at IS NULL
+  FOR SHARE;
+  IF connection_row.authority_id IS DISTINCT FROM authority_row.id THEN
+    RAISE EXCEPTION 'personal connection authority selection is unavailable'
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT grant_value.* INTO STRICT grant_row
+  FROM organization_user_resource_grants grant_value
+  WHERE grant_value.id = nullif(p_delegation ->> 'grantId', '')::uuid
+    AND grant_value.account_id = p_account_id
+    AND grant_value.authority_id = authority_row.id
+    AND grant_value.owner_organization_membership_id = membership_row.id
+    AND grant_value.workspace_id = p_target_workspace_id
+    AND grant_value.action = 'connection.use'
+    AND grant_value.mode = p_delegation ->> 'mode'
+    AND grant_value.context = p_delegation ->> 'context'
+    AND grant_value.generation = (p_delegation ->> 'grantGeneration')::bigint
+    AND grant_value.status = 'active'
+    AND (grant_value.expires_at IS NULL OR grant_value.expires_at > clock_timestamp())
+    AND nullif(p_delegation ->> 'sessionId', '')::uuid
+      IS NOT DISTINCT FROM grant_value.session_id
+    AND nullif(p_delegation ->> 'authorityEpoch', '')::integer
+      IS NOT DISTINCT FROM grant_value.authority_epoch
+  FOR SHARE;
+
+  origin_workspace_id := connection_row.origin_workspace_id;
+  RETURN NEXT;
+END
+$body$;
+
 CREATE OR REPLACE FUNCTION opengeni_private.capture_accepted_turn_connection_authorities()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -465,6 +610,12 @@ BEGIN
         IS DISTINCT FROM grant_row.authority_epoch
     THEN
       RAISE EXCEPTION 'accepted connection grant metadata is contradictory'
+        USING ERRCODE = '42501';
+    END IF;
+    IF nullif(item ->> 'originWorkspaceId', '')::uuid
+      IS DISTINCT FROM connection_row.origin_workspace_id
+    THEN
+      RAISE EXCEPTION 'accepted connection origin is not server-resolved'
         USING ERRCODE = '42501';
     END IF;
 
@@ -888,6 +1039,9 @@ REVOKE ALL ON FUNCTION resolve_connection_use_authority_legacy_0256(
   uuid, uuid, uuid, jsonb
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION resolve_connection_use_authority(uuid, uuid, uuid, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION resolve_personal_connection_authority_selection(
+  uuid, uuid, text, uuid, jsonb
+) FROM PUBLIC;
 REVOKE ALL ON FUNCTION resolve_accepted_connection_use(
   uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text
 ) FROM PUBLIC;
@@ -900,6 +1054,9 @@ BEGIN
     ) FROM opengeni_app;
     GRANT EXECUTE ON FUNCTION resolve_connection_use_authority(
       uuid, uuid, uuid, jsonb
+    ) TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION resolve_personal_connection_authority_selection(
+      uuid, uuid, text, uuid, jsonb
     ) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION resolve_accepted_connection_use(
       uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text

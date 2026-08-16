@@ -49,6 +49,7 @@ class GoogleDrivePublicationAuthorizationError extends Error {}
 export type GoogleDrivePublicationTarget = Readonly<{
   ownerSubjectId: string;
   connectionId: string;
+  originWorkspaceId: string;
   destination: GoogleDriveOutputDestination;
   credentialScope: typeof GOOGLE_DRIVE_FILE_SCOPE | typeof GOOGLE_DRIVE_FULL_SCOPE;
 }>;
@@ -89,16 +90,22 @@ export async function resolveGoogleDrivePublicationTarget(
   );
   if (frozen.length !== 1) return null;
   const delegation = frozen[0]!;
-  if (!(await ports.getMembership(db, delegation.ownerSubjectId, workspaceId))) return null;
+  const activated = delegation.userDelegation !== undefined;
+  if (!activated && !(await ports.getMembership(db, delegation.ownerSubjectId, workspaceId))) {
+    return null;
+  }
+  const originWorkspaceId = activated ? delegation.originWorkspaceId : workspaceId;
+  if (!originWorkspaceId) return null;
   const connection = await ports.getConnection(
     db,
-    workspaceId,
+    originWorkspaceId,
     delegation.connectionId,
     delegation.ownerSubjectId,
   );
   if (
     !connection ||
     connection.id !== delegation.connectionId ||
+    connection.workspaceId !== originWorkspaceId ||
     connection.subjectId !== delegation.ownerSubjectId ||
     connection.providerDomain.toLowerCase() !== GOOGLE_DRIVE_PROVIDER_DOMAIN ||
     connection.kind !== "oauth2" ||
@@ -119,6 +126,7 @@ export async function resolveGoogleDrivePublicationTarget(
   return Object.freeze({
     ownerSubjectId: delegation.ownerSubjectId,
     connectionId: connection.id,
+    originWorkspaceId,
     destination: metadata.data.outputDestination,
     credentialScope: connection.grantedScopes.includes(GOOGLE_DRIVE_FILE_SCOPE)
       ? GOOGLE_DRIVE_FILE_SCOPE
@@ -374,7 +382,7 @@ export async function executeGoogleDrivePublication(
   const request = GoogleDrivePublicationToolInput.parse(input.request);
   const connection = await ports.getConnection(
     input.db,
-    input.identity.workspaceId,
+    input.target.originWorkspaceId,
     input.target.connectionId,
     input.subjectId,
   );
@@ -452,7 +460,7 @@ export async function executeGoogleDrivePublication(
     }
     const resolvedConnection = await ports.getConnection(
       input.db,
-      input.identity.workspaceId,
+      input.target.originWorkspaceId,
       input.target.connectionId,
       input.subjectId,
     );
@@ -507,6 +515,7 @@ function assertPublicationConnection(
   if (
     input.subjectId !== input.target.ownerSubjectId ||
     connection.id !== input.target.connectionId ||
+    connection.workspaceId !== input.target.originWorkspaceId ||
     connection.subjectId !== input.target.ownerSubjectId ||
     connection.providerDomain.toLowerCase() !== GOOGLE_DRIVE_PROVIDER_DOMAIN ||
     connection.kind !== "oauth2" ||

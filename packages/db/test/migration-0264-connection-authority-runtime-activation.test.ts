@@ -17,12 +17,13 @@ import {
 import { migrate } from "../src/migrate";
 
 const migrationUrl = new URL(
-  "../drizzle/0263_connection_authority_runtime_activation.sql",
+  "../drizzle/0264_connection_authority_runtime_activation.sql",
   import.meta.url,
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
+const migrationName = "0264_connection_authority_runtime_activation.sql";
 
-describe("migration 0263 connection authority runtime activation", () => {
+describe("migration 0264 connection authority runtime activation", () => {
   test("is a drained exact-attempt cutover with canonical snapshots and idempotent audit", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: maintenance");
@@ -45,18 +46,165 @@ describe("migration 0263 connection authority runtime activation", () => {
     expect(source).toContain("connection_use_once_consumption_receipts");
     expect(source).toContain("resolve_connection_use_authority_legacy_0256");
     expect(source).toContain("GRANT EXECUTE ON FUNCTION resolve_accepted_connection_use");
+    expect(source).toContain("FROM pg_stat_activity");
+    expect(source.match(/all opengeni_app sessions to be stopped/gu)).toHaveLength(2);
+    expect(source).toContain("resolve_personal_connection_authority_selection");
     expect(source).not.toMatch(/credential_encrypted\s*(?:->|#>|#>>)|decrypt/iu);
     expect(createHash("sha256").update(source).digest("hex")).toMatch(/^[0-9a-f]{64}$/u);
   });
+
+  test("rejects a live application writer and explicit pre-activation queued authority", async () => {
+    const blank = await acquireBlankTestDatabase("migration-0264-cutover-drain");
+    if (!blank) return;
+    const sql = postgres(blank.databaseUrl, { max: 2, onnotice: () => undefined });
+    try {
+      await sql`
+        create table schema_migrations (
+          name text primary key,
+          applied_at timestamptz not null default now()
+        )
+      `;
+      await sql`insert into schema_migrations (name) values (${migrationName})`;
+      await migrate(blank.databaseUrl);
+
+      const [account] = await sql<{ id: string }[]>`
+        insert into managed_accounts (name) values ('connection cutover drain') returning id
+      `;
+      const [origin] = await sql<{ id: string }[]>`
+        insert into workspaces (account_id, name) values (${account!.id}, 'origin') returning id
+      `;
+      const [target] = await sql<{ id: string }[]>`
+        insert into workspaces (account_id, name) values (${account!.id}, 'target') returning id
+      `;
+      await sql`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${origin!.id}, ${account!.id}), (${target!.id}, ${account!.id})
+      `;
+      const subjectId = `user:${crypto.randomUUID()}`;
+      await sql`
+        insert into organization_memberships (
+          account_id, subject_id, status, personal_workspace_id
+        ) values (${account!.id}, ${subjectId}, 'active', ${origin!.id})
+      `;
+      await sql`
+        insert into workspace_memberships (account_id, workspace_id, subject_id)
+        values (${account!.id}, ${target!.id}, ${subjectId})
+      `;
+      const connection = await sql.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${origin!.id}, true)`;
+        await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+        const [row] = await tx<Array<{ id: string; authorityId: string }>>`
+          insert into connections (
+            account_id, workspace_id, subject_id, provider_domain, kind,
+            credential_encrypted
+          ) values (
+            ${account!.id}, ${origin!.id}, ${subjectId}, 'api.example.com', 'oauth2', 'ciphertext'
+          ) returning id, authority_id as "authorityId"
+        `;
+        return row!;
+      });
+      const cutoverClient = createDb(blank.databaseUrl, { max: 1 });
+      const session = await createSession(cutoverClient.db, {
+        accountId: account!.id,
+        workspaceId: target!.id,
+        initialMessage: "pre-activation authority",
+        resources: [],
+        tools: [],
+        metadata: {},
+        createdBy: { kind: "subject", subjectId },
+        model: "test-model",
+        sandboxBackend: "none",
+        subjectId,
+      });
+      await cutoverClient.close();
+      const explicitDelegation = [
+        {
+          serverId: "example",
+          connectionId: connection.id,
+          ownerSubjectId: subjectId,
+          providerDomain: "api.example.com",
+          kind: "oauth2",
+          userDelegation: {
+            organizationId: account!.id,
+            authorityId: connection.authorityId,
+            authorityGeneration: 1,
+            workspaceId: target!.id,
+            sessionId: null,
+            action: "connection.use",
+            mode: "always",
+            context: "workspace_shared",
+            authorityEpoch: null,
+            grantId: crypto.randomUUID(),
+            grantGeneration: 1,
+          },
+        },
+      ];
+      const [preActivationTurn] = await sql<{ id: string }[]>`
+        insert into session_turns (
+          account_id, workspace_id, session_id, trigger_event_id,
+          temporal_workflow_id, status, execution_generation, position, prompt,
+          model, reasoning_effort, latency_mode, sandbox_backend, source,
+          initiator_kind, initiator_subject_id, initiating_human_subject_id,
+          personal_connection_delegations
+        ) values (
+          ${account!.id}, ${target!.id}, ${session.id}, ${crypto.randomUUID()},
+          ${`cutover-${crypto.randomUUID()}`}, 'queued', 1, 1, 'queued authority',
+          'test-model', 'medium', 'standard', 'none', 'user',
+          'subject', ${subjectId}, ${subjectId},
+          ${sql.json(explicitDelegation)}::jsonb
+        ) returning id
+      `;
+      await sql`delete from schema_migrations where name = ${migrationName}`;
+      await expect(migrate(blank.databaseUrl)).rejects.toMatchObject({ code: "55000" });
+
+      await sql`
+        update sessions set status = 'recovering', active_turn_id = ${preActivationTurn!.id}
+        where id = ${session.id}
+      `;
+      await sql`
+        update session_turns set status = 'recovering', active_attempt_id = null
+        where id = ${preActivationTurn!.id}
+      `;
+      await expect(migrate(blank.databaseUrl)).rejects.toMatchObject({ code: "55000" });
+
+      await sql`delete from session_turns where session_id = ${session.id}`;
+      await sql`
+        do $role$
+        begin
+          if not exists (select 1 from pg_roles where rolname = 'opengeni_app') then
+            create role opengeni_app login password 'cutover-test';
+          else
+            alter role opengeni_app login password 'cutover-test';
+          end if;
+        end
+        $role$
+      `;
+      await sql`grant connect on database ${sql(blank.databaseUrl.split("/").at(-1)!)} to opengeni_app`;
+      const appUrl = new URL(blank.databaseUrl);
+      appUrl.username = "opengeni_app";
+      appUrl.password = "cutover-test";
+      const appSql = postgres(appUrl.toString(), { max: 1 });
+      try {
+        await appSql`select 1`;
+        await expect(migrate(blank.databaseUrl)).rejects.toMatchObject({ code: "55000" });
+      } finally {
+        await appSql.end({ timeout: 1 });
+      }
+    } finally {
+      await sql.end({ timeout: 1 });
+      await blank.release();
+    }
+  }, 180_000);
 
   test("freezes at turn acceptance and revalidates exact physical use on PostgreSQL", async () => {
     const externalDatabaseUrl = process.env.OPENGENI_TEST_DATABASE_URL?.trim();
     const blank = externalDatabaseUrl
       ? { databaseUrl: externalDatabaseUrl, release: async () => undefined }
-      : await acquireBlankTestDatabase("migration-0263-connection-authority-runtime");
+      : await acquireBlankTestDatabase("migration-0264-connection-authority-runtime");
     if (!blank && requireRealDatabase) {
       throw new Error(
-        "[migration-0263-connection-authority-runtime] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+        "[migration-0264-connection-authority-runtime] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
       );
     }
     if (!blank) return;
@@ -157,6 +305,7 @@ describe("migration 0263 connection authority runtime activation", () => {
       const delegation = {
         serverId: "example",
         connectionId: personal.id,
+        originWorkspaceId: origin!.id,
         ownerSubjectId: subjectId,
         providerDomain: "api.example.com",
         kind: "oauth2" as const,
@@ -175,6 +324,60 @@ describe("migration 0263 connection authority runtime activation", () => {
           grantGeneration: grant.generation,
         },
       };
+      const resolveAdmissionOrigin = async (
+        requestedSubjectId: string,
+        requestedAccountId = account!.id,
+        requestedWorkspaceId = target!.id,
+        requestedDelegation = delegation.userDelegation,
+      ) =>
+        await sql.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${requestedAccountId}, true)`;
+          await tx`select set_config('opengeni.workspace_id', ${requestedWorkspaceId}, true)`;
+          await tx`select set_config('opengeni.subject_id', ${requestedSubjectId}, true)`;
+          const [row] = await tx<Array<{ originWorkspaceId: string }>>`
+            select origin_workspace_id as "originWorkspaceId"
+            from resolve_personal_connection_authority_selection(
+              ${requestedAccountId}::uuid, ${requestedWorkspaceId}::uuid,
+              ${requestedSubjectId}, ${personal.id}::uuid,
+              ${JSON.stringify(requestedDelegation)}::text::jsonb
+            )
+          `;
+          return row ?? null;
+        });
+      expect(await resolveAdmissionOrigin(subjectId)).toEqual({ originWorkspaceId: origin!.id });
+      await expect(resolveAdmissionOrigin(`user:${crypto.randomUUID()}`)).rejects.toBeTruthy();
+      await expect(resolveAdmissionOrigin(subjectId, crypto.randomUUID())).rejects.toBeTruthy();
+      const rollbackRevokedAdmission = new Error("rollback revoked admission");
+      let revokedAdmissionDenied = false;
+      try {
+        await sql.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+          await tx`select set_config('opengeni.workspace_id', ${target!.id}, true)`;
+          await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+          await tx`
+            update organization_user_resource_grants
+            set status = 'revoked', revoked_at = clock_timestamp()
+            where id = ${grant.id}
+          `;
+          try {
+            await tx.savepoint(async (savepoint) => {
+              await savepoint`
+                select * from resolve_personal_connection_authority_selection(
+                  ${account!.id}::uuid, ${target!.id}::uuid, ${subjectId},
+                  ${personal.id}::uuid,
+                  ${JSON.stringify(delegation.userDelegation)}::text::jsonb
+                )
+              `;
+            });
+          } catch {
+            revokedAdmissionDenied = true;
+          }
+          throw rollbackRevokedAdmission;
+        });
+      } catch (error) {
+        if (error !== rollbackRevokedAdmission) throw error;
+      }
+      expect(revokedAdmissionDenied).toBe(true);
       await expect(
         withWorkspaceSubjectSessionActivityRls(client.db, target!.id, subjectId, (db) =>
           submitHumanPromptInTransaction(db, {
