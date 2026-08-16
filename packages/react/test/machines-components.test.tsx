@@ -6,7 +6,7 @@
    the consent screen's whole-machine + screen-control toggle render.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
-import { registerDom, renderComponent, flush } from "./render-hook";
+import { actRun, registerDom, renderComponent, flush } from "./render-hook";
 import { MachineCard } from "../src/components/machine-card";
 import { MachineDetail } from "../src/components/machines/machine-detail";
 import { MachinesDashboard } from "../src/components/machines-dashboard";
@@ -187,6 +187,23 @@ describe("MachineMetrics", () => {
 });
 
 describe("MachineCard — attach/swap affordance", () => {
+  test("distinguishes personal, workspace, and organization machine scope", async () => {
+    for (const [scope, label] of [
+      ["user", "personal"],
+      ["workspace", "workspace"],
+      ["organization", "organization"],
+    ] as const) {
+      const r = await renderComponent(
+        <MachineCard machine={machine({ sandboxId: `scope-${scope}`, state: "online", scope })} />,
+      );
+      await flush();
+      expect(
+        r.container.querySelector(`[data-machine-scope="${scope}"]`)?.textContent?.toLowerCase(),
+      ).toBe(label);
+      await r.unmount();
+    }
+  });
+
   test("an outdated agent shows exact build truth and one-click update without opening detail", async () => {
     const updated: MachineView[] = [];
     const opened: MachineView[] = [];
@@ -669,13 +686,13 @@ describe("EnrollmentConsent — loud whole-machine consent", () => {
     await r.unmount();
   });
 
-  test("approve passes the screen-control consent through", async () => {
-    const got: boolean[] = [];
+  test("approve submits the user scope by default with the screen-control consent", async () => {
+    const got: Array<[boolean, string]> = [];
     const r = await renderComponent(
       <EnrollmentConsent
         userCode="A"
         machine={display}
-        onApprove={(v) => got.push(v)}
+        onApprove={(screenControl, scope) => got.push([screenControl, scope])}
         onDeny={() => {}}
       />,
     );
@@ -683,7 +700,76 @@ describe("EnrollmentConsent — loud whole-machine consent", () => {
     (r.container.querySelector("[data-approve]") as HTMLButtonElement).click();
     await flush();
     // The toggle defaults to requestsScreenControl (true) for a display machine.
-    expect(got).toEqual([true]);
+    expect(got).toEqual([[true, "user"]]);
+    await r.unmount();
+  });
+
+  test("scope choices are explicit and organization publication is admin-gated", async () => {
+    const got: string[] = [];
+    const r = await renderComponent(
+      <EnrollmentConsent
+        userCode="A"
+        machine={display}
+        onApprove={(_screenControl, scope) => got.push(scope)}
+      />,
+    );
+    await flush();
+    expect(
+      (r.container.querySelector('[data-enrollment-scope="user"] input') as HTMLInputElement)
+        .checked,
+    ).toBe(true);
+    expect(
+      (
+        r.container.querySelector(
+          '[data-enrollment-scope="organization"] input',
+        ) as HTMLInputElement
+      ).disabled,
+    ).toBe(true);
+    expect(r.container.textContent).toContain("organization admin required");
+    await actRun(() =>
+      (
+        r.container.querySelector('[data-enrollment-scope="workspace"] input') as HTMLInputElement
+      ).click(),
+    );
+    (r.container.querySelector("[data-approve]") as HTMLButtonElement).click();
+    await flush();
+    expect(got).toEqual(["workspace"]);
+    await r.unmount();
+
+    const admin = await renderComponent(
+      <EnrollmentConsent
+        userCode="A"
+        machine={display}
+        allowOrganizationScope
+        onApprove={(_screenControl, scope) => got.push(scope)}
+      />,
+    );
+    await flush();
+    const organization = admin.container.querySelector(
+      '[data-enrollment-scope="organization"] input',
+    ) as HTMLInputElement;
+    expect(organization.disabled).toBe(false);
+    await actRun(() => organization.click());
+    (admin.container.querySelector("[data-approve]") as HTMLButtonElement).click();
+    await flush();
+    expect(got).toEqual(["workspace", "organization"]);
+    expect(admin.container.textContent).toContain("Members of this organization");
+    await admin.unmount();
+  });
+
+  test("scope copy truthfully follows the selected audience", async () => {
+    const r = await renderComponent(
+      <EnrollmentConsent userCode="A" machine={headless} onApprove={() => {}} />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("Only you can use this machine");
+    await actRun(() =>
+      (
+        r.container.querySelector('[data-enrollment-scope="workspace"] input') as HTMLInputElement
+      ).click(),
+    );
+    await flush();
+    expect(r.container.textContent).toContain("Everyone with access to this workspace");
     await r.unmount();
   });
 

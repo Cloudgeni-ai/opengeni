@@ -33,7 +33,7 @@ import {
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "@opengeni/core";
+import { requireAccessGrant, requireAccessGrantAuthorization } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { buildFleetContextForSession, swapActiveSandbox } from "@opengeni/core";
 import { listMachines, metricRowToSample } from "../sandbox/machines";
@@ -126,7 +126,13 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // concurrency fence so two operators cannot silently overwrite each other.
   app.patch("/v1/workspaces/:workspaceId/machines/:enrollmentId/operation-policy", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:manage");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "enrollments:manage",
+    );
+    const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
     let json: unknown;
@@ -145,6 +151,12 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const body = parsed.data;
     const current = await requireScopedEnrollment(grant, enrollmentId);
+    if (
+      current.scope === "organization" &&
+      authorization.accountGrant?.permissions.includes("account:admin") !== true
+    ) {
+      throw new HTTPException(403, { message: "missing permission: account:admin" });
+    }
     const updated = await updateEnrollmentOperationPolicy(db, {
       accountId: grant.accountId,
       workspaceId: current.workspaceId,
@@ -169,10 +181,22 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // successor Hello drive the durable state to completion.
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/update", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:manage");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "enrollments:manage",
+    );
+    const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
     const visibleEnrollment = await requireScopedEnrollment(grant, enrollmentId);
+    if (
+      visibleEnrollment.scope === "organization" &&
+      authorization.accountGrant?.permissions.includes("account:admin") !== true
+    ) {
+      throw new HTTPException(403, { message: "missing permission: account:admin" });
+    }
     const originWorkspaceId = visibleEnrollment.workspaceId;
     const live = await getLiveEnrollmentConnection(
       db,
@@ -303,7 +327,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     } else {
       await advanceEnrollmentAgentUpdate(db, {
         accountId: grant.accountId,
-        workspaceId,
+        workspaceId: originWorkspaceId,
         enrollmentId,
         connectionInstanceId: live.connectionInstanceId,
         connectionGeneration: live.connectionGeneration,

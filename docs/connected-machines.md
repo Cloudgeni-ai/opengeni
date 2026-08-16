@@ -466,6 +466,7 @@ Then approve (the loud whole-machine consent) or deny:
 const approved = await client.approveDeviceEnrollment(pending.workspaceId, {
   userCode,
   allowScreenControl: true, // the authoritative screen-control consent
+  scope: "user", // explicit personal default; "workspace" and "organization" publish wider
 });
 // approved.enrollmentId, approved.sandboxId, approved.allowScreenControl
 
@@ -475,7 +476,10 @@ await client.denyDeviceEnrollment(pending.workspaceId, { userCode });
 
 Approving lands an enrollment plus a `selfhosted` sandbox and unblocks the
 agent's poll; `sandboxId` is immediately usable as a `targetSandboxId` or a swap
-target.
+target. The managed consent page always asks for personal, workspace, or
+organization access and defaults to personal. Organization publication is
+available only to account administrators. Machines and Rigs display the
+resulting scope in their list cards so wider publication is never implicit.
 
 ## Revoke / detach
 

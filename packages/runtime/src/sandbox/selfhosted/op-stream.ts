@@ -133,9 +133,9 @@ export interface OpStreamExecClientDeps {
   /** Per-connection policy snapshot attached only to OpStart. Lifecycle controls
    * identify an already-admitted operation and must not imply a policy change. */
   resourcePolicy?: OperationResourcePolicy;
-  /** Revalidate the exact live route/authority immediately before a retry of an
-   * OpStart that the protocol proved never began. An already-accepted or
-   * outcome-ambiguous operation never calls this hook. */
+  /** Revalidate the exact live route/authority immediately before every
+   * physical OpStart dispatch. An already-accepted or outcome-ambiguous
+   * operation never calls this hook again. */
   revalidateBeforeStartRetry?: () => void | Promise<void>;
 }
 
@@ -421,6 +421,10 @@ class OpConsumer {
     let drainingRetries = 0;
     let blipRetries = 0;
     for (;;) {
+      // Subscription setup can yield after the caller's initial admission.
+      // Close that window, and the equivalent proven-unstarted retry windows,
+      // at the last boundary before bytes can reach the provider.
+      await this.deps.revalidateBeforeStartRetry?.();
       try {
         const result = await this.controlOp(
           {
@@ -469,7 +473,6 @@ class OpConsumer {
           await this.deps.retryClock.sleep(
             selfhostedRetryBackoffMs(drainingRetries, this.deps.retryClock.jitter()),
           );
-          await this.deps.revalidateBeforeStartRetry?.();
           drainingRetries += 1;
           continue;
         }
@@ -477,7 +480,6 @@ class OpConsumer {
           await this.deps.retryClock.sleep(
             selfhostedRetryBackoffMs(blipRetries, this.deps.retryClock.jitter()),
           );
-          await this.deps.revalidateBeforeStartRetry?.();
           blipRetries += 1;
           continue;
         }

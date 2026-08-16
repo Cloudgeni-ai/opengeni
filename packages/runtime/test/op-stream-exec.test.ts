@@ -610,6 +610,64 @@ describe("op-stream exec (fake runner)", () => {
     expect(runner.runs.has("call_retry_revoke:0")).toBe(false);
   });
 
+  test("revocation while the frame subscription is opening fences the initial OpStart", async () => {
+    const transport = new InMemoryOpStreamTransport();
+    const runner = new FakeOpRunner({ transport, workspaceId: WORKSPACE, agentId: AGENT });
+    runner.script("call_subscribe_revoke:0", {
+      frames: [{ channel: "stdout", bytes: "must-not-run" }],
+    });
+    let authorized = true;
+    let startDispatches = 0;
+    const subscribe = transport.subscribe.bind(transport);
+    transport.subscribe = async (subject, onMessage) => {
+      // Model a broker subscription that yields long enough for the exact
+      // personal-machine authority to be revoked after initial admission.
+      await Promise.resolve();
+      authorized = false;
+      return await subscribe(subject, onMessage);
+    };
+    const rpc: ControlRpc = {
+      request: async (subject, request, opts) => {
+        if (request.op?.$case === "opStart") startDispatches += 1;
+        return await runner.request(subject, request, opts);
+      },
+    };
+    const session = new SelfhostedSession({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: "connection-1",
+      controlRpc: rpc,
+      relay: { host: "relay.test" },
+      timeoutMs: 2_000,
+      execTimeoutMs: 5_000,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      resolveOperationAdmission: async () =>
+        authorized
+          ? {
+              connectionInstanceId: "connection-1",
+              operationResourcePolicy: {
+                memoryMaxBytes: null,
+                memoryHighBytes: null,
+                cpuMaxMillicores: null,
+                revision: 1,
+              },
+              operationResourcePolicySupported: true,
+              operationCpuQuotaSupported: true,
+              opStream: { transport },
+            }
+          : null,
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+
+    await expect(
+      runWithToolCallCorrelation("call_subscribe_revoke", () =>
+        session.exec({ cmd: "must-not-run" }),
+      ),
+    ).rejects.toThrow(/authoritative live runner connection/iu);
+    expect(startDispatches).toBe(0);
+    expect(runner.runs.has("call_subscribe_revoke:0")).toBe(false);
+  });
+
   test("revocation after an OpStart downgrade fences legacy fallback dispatch", async () => {
     const transport = new InMemoryOpStreamTransport();
     const { MockAgentResponder } = await import("../src/sandbox/selfhosted/testing");

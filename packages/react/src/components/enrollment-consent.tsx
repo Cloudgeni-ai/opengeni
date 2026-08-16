@@ -1,4 +1,5 @@
 import { type ReactNode, useState } from "react";
+import type { ResourceAuthorityScope } from "@opengeni/sdk";
 import {
   CircleAlertIcon,
   LaptopIcon,
@@ -30,8 +31,10 @@ export type EnrollmentConsentProps = {
   userCode: string;
   machine: EnrollmentConsentMachine;
   phase?: EnrollmentConsentPhase | undefined;
-  /** Approve with the chosen screen-control consent. */
-  onApprove?: ((allowScreenControl: boolean) => void) | undefined;
+  /** Whether this caller may publish the machine to the whole organization. */
+  allowOrganizationScope?: boolean | undefined;
+  /** Approve with the chosen screen-control consent and explicit access scope. */
+  onApprove?: ((allowScreenControl: boolean, scope: ResourceAuthorityScope) => void) | undefined;
   onDeny?: (() => void) | undefined;
   /** Error message when phase === "error". */
   errorMessage?: string | undefined;
@@ -61,13 +64,29 @@ export function EnrollmentConsent({
   userCode,
   machine,
   phase = "review",
+  allowOrganizationScope = false,
   onApprove,
   onDeny,
   errorMessage,
   className,
 }: EnrollmentConsentProps) {
   const [allowScreenControl, setAllowScreenControl] = useState(machine.requestsScreenControl);
+  const [scope, setScope] = useState<ResourceAuthorityScope>("user");
   const busy = phase === "approving";
+  const scopeCopy = {
+    user: {
+      label: "Personal",
+      body: "Only you can use this machine, from any workspace you can access in this organization.",
+    },
+    workspace: {
+      label: "Workspace",
+      body: "Everyone with access to this workspace can use this machine.",
+    },
+    organization: {
+      label: "Organization",
+      body: "Members of this organization can use this machine from their workspaces.",
+    },
+  } satisfies Record<ResourceAuthorityScope, { label: string; body: string }>;
 
   if (phase === "approved") {
     return (
@@ -75,7 +94,7 @@ export function EnrollmentConsent({
         className={className}
         tone="ok"
         title="Machine connected"
-        body={`${machine.machineName} is now enrolled in this workspace. You can close this page — it will appear in your Machines dashboard.`}
+        body={`${machine.machineName} is now connected with ${scopeCopy[scope].label.toLowerCase()} access. You can close this page — it will appear in your Machines dashboard.`}
       />
     );
   }
@@ -156,10 +175,49 @@ export function EnrollmentConsent({
         ) : null}
         <Capability
           icon={<UsersIcon className="size-4" aria-hidden />}
-          title="Shared while connected"
-          body="Any session in this workspace can use this machine while it is online. Disconnect the agent to revoke access instantly."
+          title={`${scopeCopy[scope].label} access while connected`}
+          body={`${scopeCopy[scope].body} Disconnect the agent to revoke access instantly.`}
         />
       </ul>
+
+      <fieldset className="flex flex-col gap-2" disabled={busy}>
+        <legend className="mb-1 text-og-sm font-medium text-og-fg">
+          Who can use this machine?
+        </legend>
+        {(["user", "workspace", "organization"] as const).map((candidate) => {
+          const disabled = candidate === "organization" && !allowOrganizationScope;
+          return (
+            <label
+              key={candidate}
+              data-enrollment-scope={candidate}
+              data-disabled={disabled ? "true" : "false"}
+              className={cn(
+                "flex items-start gap-2.5 rounded-og-md border border-og-border bg-og-bg px-3 py-2.5",
+                disabled ? "cursor-not-allowed opacity-55" : "cursor-pointer",
+              )}
+            >
+              <input
+                type="radio"
+                name="enrollment-scope"
+                value={candidate}
+                checked={scope === candidate}
+                disabled={disabled || busy}
+                onChange={() => setScope(candidate)}
+                className="mt-0.5 size-4 accent-og-accent"
+              />
+              <span className="min-w-0">
+                <span className="block text-og-base font-medium text-og-fg">
+                  {scopeCopy[candidate].label}
+                  {disabled ? " · organization admin required" : ""}
+                </span>
+                <span className="block text-og-sm text-og-fg-muted">
+                  {scopeCopy[candidate].body}
+                </span>
+              </span>
+            </label>
+          );
+        })}
+      </fieldset>
 
       {machine.canOfferDisplay ? (
         <label
@@ -206,7 +264,7 @@ export function EnrollmentConsent({
           type="button"
           data-approve
           disabled={busy}
-          onClick={() => onApprove?.(allowScreenControl)}
+          onClick={() => onApprove?.(allowScreenControl, scope)}
           className="flex-1 rounded-og-sm bg-og-status-failed px-3 py-2 text-og-sm font-semibold text-og-accent-fg transition-colors hover:opacity-90 disabled:opacity-50 pointer-coarse:min-h-11"
         >
           {busy ? "Connecting…" : "Grant full access"}
