@@ -527,10 +527,10 @@ describe("runtime database posture evaluator", () => {
         routine.name === "preview_organization_retention_deletions(uuid, integer)" ||
         routine.name === "claim_organization_retention_deletion(uuid, uuid, uuid[])" ||
         routine.name ===
-          "record_organization_retention_object_deleted(uuid, uuid, uuid, text, text, text)" ||
+          "record_organization_retention_object_deleted(uuid, uuid, uuid, text, text, text, text)" ||
         routine.name === "fail_organization_retention_deletion(uuid, uuid, uuid, text)" ||
-        routine.name === "finalize_organization_retention_deletion(uuid, uuid, uuid)" ||
-        routine.name === "complete_organization_retention_deletion(uuid, uuid, uuid)" ||
+        routine.name === "finalize_organization_retention_deletion(uuid, uuid, uuid, text)" ||
+        routine.name === "complete_organization_retention_deletion(uuid, uuid, uuid, text)" ||
         routine.name.includes("scoped_rig") ||
         routine.name.includes("scoped_enrollment") ||
         routine.name.includes("scoped_sandbox") ||

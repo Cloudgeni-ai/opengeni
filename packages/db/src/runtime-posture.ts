@@ -77,11 +77,11 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "get_organization_retention_policy(uuid, text)",
   "preview_organization_retention_deletions(uuid, integer)",
   "claim_organization_retention_deletion(uuid, uuid, uuid[])",
-  "list_organization_retention_deletion_objects(uuid, uuid, uuid, integer)",
-  "record_organization_retention_object_deleted(uuid, uuid, uuid, text, text, text)",
+  "list_organization_retention_deletion_objects(uuid, uuid, uuid, text, integer)",
+  "record_organization_retention_object_deleted(uuid, uuid, uuid, text, text, text, text)",
   "fail_organization_retention_deletion(uuid, uuid, uuid, text)",
-  "finalize_organization_retention_deletion(uuid, uuid, uuid)",
-  "complete_organization_retention_deletion(uuid, uuid, uuid)",
+  "finalize_organization_retention_deletion(uuid, uuid, uuid, text)",
+  "complete_organization_retention_deletion(uuid, uuid, uuid, text)",
 ] as const;
 const PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE =
   "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)";

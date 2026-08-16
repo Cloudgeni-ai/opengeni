@@ -81,7 +81,8 @@ export const OrganizationRetentionDeletionObject = z.object({
     "workspace_capture_blob",
   ]),
   sourceId: z.string().min(1).max(2048),
-  objectKey: z.string().min(1),
+  objectBucket: z.string().min(1).max(1024),
+  objectKey: z.string().min(1).max(4096),
 });
 export type OrganizationRetentionDeletionObject = z.infer<
   typeof OrganizationRetentionDeletionObject
@@ -92,6 +93,7 @@ export const OrganizationRetentionDatabaseFinalization = z.object({
   membershipId: z.string().uuid(),
   operationId: z.string().uuid(),
   outcome: z.literal("cleanup_pending"),
+  objectBucket: z.string().min(1).max(1024),
   objectCount: z.number().int().nonnegative(),
   deletedResources: z.record(z.string(), z.number().int().nonnegative()),
   databaseFinalizedAt: z.string().datetime({ offset: true }),

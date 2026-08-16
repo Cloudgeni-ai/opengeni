@@ -12,6 +12,7 @@ const secondOperationId = "00000000-0000-4000-8000-000000000005";
 const firstObjectId = "00000000-0000-4000-8000-000000000006";
 const secondObjectId = "00000000-0000-4000-8000-000000000007";
 const now = "2026-08-16T00:00:00.000Z";
+const objectBucket = "retention-test";
 
 describe("organization retention operator", () => {
   test("isolates a failed membership and continues the bounded batch", async () => {
@@ -47,11 +48,12 @@ describe("organization retention operator", () => {
           {
             objectKind: "file",
             sourceId: membershipId === firstMembershipId ? firstObjectId : secondObjectId,
+            objectBucket,
             objectKey: `retention/${membershipId}`,
           },
         ];
       },
-      deleteObject: async (objectKey) => {
+      deleteObject: async ({ objectKey }) => {
         if (objectKey.endsWith(firstMembershipId)) throw new Error("provider unavailable");
         deleted.push(objectKey);
       },
@@ -61,6 +63,7 @@ describe("organization retention operator", () => {
         membershipId,
         operationId,
         outcome: "cleanup_pending",
+        objectBucket,
         objectCount: 1,
         deletedResources: { personalWorkspaces: 1 },
         databaseFinalizedAt: now,
@@ -80,7 +83,7 @@ describe("organization retention operator", () => {
     };
 
     const result = await runOrganizationRetentionSweep(
-      { organizationId, limit: 2, dryRun: false },
+      { organizationId, limit: 2, dryRun: false, objectBucket },
       ports,
     );
     expect(result).toMatchObject({
@@ -154,6 +157,7 @@ describe("organization retention operator", () => {
         membershipId: firstMembershipId,
         operationId,
         outcome: "cleanup_pending",
+        objectBucket,
         objectCount: 2,
         deletedResources: { personalWorkspaces: 1 },
         databaseFinalizedAt: now,
@@ -162,9 +166,10 @@ describe("organization retention operator", () => {
         [...remaining].map((sourceId) => ({
           objectKind: "file" as const,
           sourceId,
+          objectBucket,
           objectKey: `retention/${sourceId}`,
         })),
-      deleteObject: async (objectKey) => {
+      deleteObject: async ({ objectKey }) => {
         if (objectKey.endsWith(secondObjectId) && !failedOnce) {
           failedOnce = true;
           throw new Error("transient storage failure");
@@ -184,17 +189,81 @@ describe("organization retention operator", () => {
     };
 
     const first = await runOrganizationRetentionSweep(
-      { organizationId, limit: 1, dryRun: false },
+      { organizationId, limit: 1, dryRun: false, objectBucket },
       ports,
     );
     expect(first).toMatchObject({ dryRun: false, completed: [], failed: [{}] });
     expect(remaining).toEqual(new Set([secondObjectId]));
     const second = await runOrganizationRetentionSweep(
-      { organizationId, limit: 1, dryRun: false },
+      { organizationId, limit: 1, dryRun: false, objectBucket },
       ports,
     );
     expect(second).toMatchObject({ dryRun: false, completed: [{}], failed: [] });
     expect(remaining.size).toBe(0);
     expect(deleted).toEqual([`retention/${firstObjectId}`, `retention/${secondObjectId}`]);
+  });
+
+  test("refuses a resumed cleanup under a changed configured bucket", async () => {
+    const frozenBucket = "retention-original";
+    const changedBucket = "retention-reconfigured";
+    const deleted: Array<{ objectBucket: string; objectKey: string }> = [];
+    let invocation = 0;
+    const ports: OrganizationRetentionSweepPorts = {
+      preview: async () => [],
+      newOperationId: () => (invocation++ === 0 ? firstOperationId : secondOperationId),
+      claim: async ({ operationId }) => ({
+        organizationId,
+        membershipId: firstMembershipId,
+        operationId,
+        retentionUntil: now,
+        claimExpiresAt: now,
+        personalWorkspaceId: null,
+        objectCount: 1,
+        deletedObjectCount: 0,
+      }),
+      finalizeDatabase: async ({ operationId, objectBucket: configuredBucket }) => {
+        if (configuredBucket !== frozenBucket) throw new Error("bucket changed");
+        return {
+          organizationId,
+          membershipId: firstMembershipId,
+          operationId,
+          outcome: "cleanup_pending",
+          objectBucket: frozenBucket,
+          objectCount: 1,
+          deletedResources: { personalWorkspaces: 1 },
+          databaseFinalizedAt: now,
+        };
+      },
+      listObjects: async () => [
+        {
+          objectKind: "file",
+          sourceId: firstObjectId,
+          objectBucket: frozenBucket,
+          objectKey: `retention/${firstObjectId}`,
+        },
+      ],
+      deleteObject: async (object) => {
+        deleted.push(object);
+        throw new Error("first provider attempt failed");
+      },
+      recordObjectDeleted: async () => true,
+      complete: async () => {
+        throw new Error("not reached");
+      },
+      fail: async () => true,
+    };
+
+    await runOrganizationRetentionSweep(
+      { organizationId, limit: 1, dryRun: false, objectBucket: frozenBucket },
+      ports,
+    );
+    expect(deleted).toEqual([
+      { objectBucket: frozenBucket, objectKey: `retention/${firstObjectId}` },
+    ]);
+    await runOrganizationRetentionSweep(
+      { organizationId, limit: 1, dryRun: false, objectBucket: changedBucket },
+      ports,
+    );
+    expect(deleted).toHaveLength(1);
   });
 });

@@ -33,26 +33,30 @@ export type OrganizationRetentionSweepPorts = Readonly<{
     organizationId: string;
     membershipId: string;
     operationId: string;
+    objectBucket: string;
     limit: number;
   }) => Promise<OrganizationRetentionDeletionObject[]>;
-  deleteObject: (objectKey: string) => Promise<void>;
+  deleteObject: (input: { objectBucket: string; objectKey: string }) => Promise<void>;
   recordObjectDeleted: (input: {
     organizationId: string;
     membershipId: string;
     operationId: string;
     objectKind: OrganizationRetentionDeletionObject["objectKind"];
     sourceId: string;
+    objectBucket: string;
     objectKey: string;
   }) => Promise<boolean>;
   finalizeDatabase: (input: {
     organizationId: string;
     membershipId: string;
     operationId: string;
+    objectBucket: string;
   }) => Promise<OrganizationRetentionDatabaseFinalization>;
   complete: (input: {
     organizationId: string;
     membershipId: string;
     operationId: string;
+    objectBucket: string;
   }) => Promise<OrganizationRetentionDeletionResult>;
   fail: (input: {
     organizationId: string;
@@ -64,7 +68,7 @@ export type OrganizationRetentionSweepPorts = Readonly<{
 }>;
 
 export async function runOrganizationRetentionSweep(
-  input: { organizationId: string; limit: number; dryRun: boolean },
+  input: { organizationId: string; limit: number; dryRun: boolean; objectBucket?: string },
   ports: OrganizationRetentionSweepPorts,
 ): Promise<
   | { dryRun: true; organizationId: string; candidates: OrganizationRetentionDeletionPreview[] }
@@ -85,6 +89,9 @@ export async function runOrganizationRetentionSweep(
       }),
     };
   }
+  if (!input.objectBucket) {
+    throw new Error("Object storage bucket is required for destructive retention");
+  }
   const completed: OrganizationRetentionDeletionResult[] = [];
   const failed: Array<{ membershipId: string; operationId: string; reasonCode: string }> = [];
   const attemptedMembershipIds: string[] = [];
@@ -102,23 +109,32 @@ export async function runOrganizationRetentionSweep(
         organizationId: input.organizationId,
         membershipId: claim.membershipId,
         operationId,
+        objectBucket: input.objectBucket,
       });
       for (;;) {
         const objects = await ports.listObjects({
           organizationId: input.organizationId,
           membershipId: claim.membershipId,
           operationId,
+          objectBucket: input.objectBucket,
           limit: 100,
         });
         if (objects.length === 0) break;
         for (const object of objects) {
-          await ports.deleteObject(object.objectKey);
+          if (object.objectBucket !== input.objectBucket) {
+            throw new Error("Retention object bucket does not match configured storage");
+          }
+          await ports.deleteObject({
+            objectBucket: object.objectBucket,
+            objectKey: object.objectKey,
+          });
           await ports.recordObjectDeleted({
             organizationId: input.organizationId,
             membershipId: claim.membershipId,
             operationId,
             objectKind: object.objectKind,
             sourceId: object.sourceId,
+            objectBucket: object.objectBucket,
             objectKey: object.objectKey,
           });
         }
@@ -128,6 +144,7 @@ export async function runOrganizationRetentionSweep(
           organizationId: input.organizationId,
           membershipId: claim.membershipId,
           operationId,
+          objectBucket: input.objectBucket,
         }),
       );
     } catch {
@@ -174,13 +191,23 @@ async function main(): Promise<void> {
     if (!dryRun && !storage)
       throw new Error("Object storage is required for destructive retention");
     const result = await runOrganizationRetentionSweep(
-      { organizationId, limit, dryRun },
+      {
+        organizationId,
+        limit,
+        dryRun,
+        ...(storage ? { objectBucket: storage.bucket } : {}),
+      },
       {
         preview: async (request) => await previewOrganizationRetentionDeletions(client.db, request),
         claim: async (request) => await claimOrganizationRetentionDeletion(client.db, request),
         listObjects: async (request) =>
           await listOrganizationRetentionDeletionObjects(client.db, request),
-        deleteObject: async (objectKey) => await storage!.deleteObject(objectKey),
+        deleteObject: async ({ objectBucket, objectKey }) => {
+          if (objectBucket !== storage!.bucket) {
+            throw new Error("Retention object bucket does not match configured storage");
+          }
+          await storage!.deleteObject(objectKey);
+        },
         recordObjectDeleted: async (request) =>
           await recordOrganizationRetentionObjectDeleted(client.db, request),
         finalizeDatabase: async (request) =>

@@ -206,11 +206,13 @@ operation and lease fences, so one provider failure records immutable
 content-free failure evidence without rolling back successful members.
 Database finalization first locks the personal workspace and every known
 storage-key source, materializes an immutable exact-key cleanup-obligation set,
-and erases that user's personal workspace and supported personal resources.
+freezes the configured storage bucket, rejects any mismatched File bucket, and
+erases that user's personal workspace and supported personal resources.
 Foreign-key checks therefore serialize concurrent retained consumers and abort
 before external bytes are touched. The operator then deletes only those
 prepared objects and records separate content-free completion receipts; a
-provider failure retries only unfinished obligations. The closed inventory
+provider failure retries only unfinished obligations, and every resume must
+present the same frozen bucket before deletion. The closed inventory
 covers Files, session recordings, browser-state uploads/artifacts,
 transcription and video staging objects, workspace artifact/editable blobs, and
 workspace-capture manifest/tree/blob payloads. Provider-native sandbox

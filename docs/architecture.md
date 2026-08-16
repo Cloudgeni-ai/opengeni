@@ -311,7 +311,9 @@ resources are deleted only by the explicit bounded
 `db:sweep-organization-retention` operator command: database finalization first
 freezes a closed exact-key cleanup-obligation set and removes personal metadata,
 then provider deletion records a separate content-free receipt for each
-obligation. Concurrent retained references therefore abort before external
+obligation. File bucket identity is checked before finalization and frozen into
+every obligation, so reconfiguration cannot reinterpret a key on resume.
+Concurrent retained references therefore abort before external
 bytes are touched; provider retries see only unfinished obligations. Each
 member has an independent expiring claim, and immutable evidence survives
 cleanup. There is no new

@@ -42,6 +42,7 @@ const migrationUrl = new URL(
   import.meta.url,
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
+const retentionObjectBucket = "test";
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
@@ -255,7 +256,7 @@ describe("migration 0263 organization membership lifecycle", () => {
           ) as "executeRetention",
           has_function_privilege(
             ${roleName}::text,
-            format('%I.complete_organization_retention_deletion(uuid,uuid,uuid)', ${schemaName}::text),
+            format('%I.complete_organization_retention_deletion(uuid,uuid,uuid,text)', ${schemaName}::text),
             'EXECUTE'
           ) as "executeRetentionComplete",
           has_table_privilege(
@@ -1132,6 +1133,7 @@ describe("migration 0263 organization membership lifecycle", () => {
       organizationId: owner!.organizationId,
       membershipId: member.id,
       operationId,
+      objectBucket: retentionObjectBucket,
     });
     expect(databaseFinalized).toMatchObject({
       outcome: "cleanup_pending",
@@ -1142,15 +1144,68 @@ describe("migration 0263 organization membership lifecycle", () => {
       organizationId: owner!.organizationId,
       membershipId: member.id,
       operationId,
+      objectBucket: retentionObjectBucket,
       limit: 100,
     });
-    expect(objects).toEqual([{ objectKind: "file", sourceId: fileId, objectKey }]);
+    expect(objects).toEqual([
+      {
+        objectKind: "file",
+        sourceId: fileId,
+        objectBucket: retentionObjectBucket,
+        objectKey,
+      },
+    ]);
+    await expectSqlState(
+      () =>
+        finalizeOrganizationRetentionDeletion(client!.db, {
+          organizationId: owner!.organizationId,
+          membershipId: member.id,
+          operationId,
+          objectBucket: "reconfigured-retention-bucket",
+        }),
+      "40001",
+    );
+    await expectSqlState(
+      () =>
+        listOrganizationRetentionDeletionObjects(client!.db, {
+          organizationId: owner!.organizationId,
+          membershipId: member.id,
+          operationId,
+          objectBucket: "reconfigured-retention-bucket",
+          limit: 100,
+        }),
+      "40001",
+    );
+    await expectSqlState(
+      () =>
+        recordOrganizationRetentionObjectDeleted(client!.db, {
+          organizationId: owner!.organizationId,
+          membershipId: member.id,
+          operationId,
+          objectKind: "file",
+          sourceId: fileId,
+          objectBucket: "reconfigured-retention-bucket",
+          objectKey,
+        }),
+      "40001",
+    );
     await expectSqlState(
       () =>
         completeOrganizationRetentionDeletion(client!.db, {
           organizationId: owner!.organizationId,
           membershipId: member.id,
           operationId,
+          objectBucket: "reconfigured-retention-bucket",
+        }),
+      "40001",
+    );
+    await expectSqlState(
+      () =>
+        completeOrganizationRetentionDeletion(client!.db, {
+          organizationId: owner!.organizationId,
+          membershipId: member.id,
+          operationId,
+          objectBucket: retentionObjectBucket,
         }),
       "55000",
     );
@@ -1162,6 +1217,7 @@ describe("migration 0263 organization membership lifecycle", () => {
           operationId,
           objectKind: "file",
           sourceId: fileId,
+          objectBucket: retentionObjectBucket,
           objectKey: `${objectKey}-forged`,
         }),
       "42501",
@@ -1173,6 +1229,7 @@ describe("migration 0263 organization membership lifecycle", () => {
         operationId,
         objectKind: "file",
         sourceId: fileId,
+        objectBucket: retentionObjectBucket,
         objectKey,
       }),
     ).toBe(true);
@@ -1183,6 +1240,7 @@ describe("migration 0263 organization membership lifecycle", () => {
         operationId,
         objectKind: "file",
         sourceId: fileId,
+        objectBucket: retentionObjectBucket,
         objectKey,
       }),
     ).toBe(false);
@@ -1190,6 +1248,7 @@ describe("migration 0263 organization membership lifecycle", () => {
       organizationId: owner!.organizationId,
       membershipId: member.id,
       operationId,
+      objectBucket: retentionObjectBucket,
     });
     expect(completed).toMatchObject({
       membershipId: member.id,
@@ -1202,6 +1261,7 @@ describe("migration 0263 organization membership lifecycle", () => {
         organizationId: owner!.organizationId,
         membershipId: member.id,
         operationId,
+        objectBucket: retentionObjectBucket,
       }),
     ).toEqual(completed);
     const [evidence] = await shared.admin<
@@ -1241,6 +1301,59 @@ describe("migration 0263 organization membership lifecycle", () => {
     });
   });
 
+  test("rejects a legacy File bucket mismatch before database finalization", async () => {
+    if (!shared || !client) return;
+    const fixture = await provisionOrganizationMember("retention-bucket-mismatch");
+    const workspaceId = fixture.member.personalWorkspaceId!;
+    const fileId = crypto.randomUUID();
+    await shared.admin`
+      insert into files (
+        id, account_id, workspace_id, status, filename, safe_filename,
+        content_type, size_bytes, bucket, object_key
+      ) values (
+        ${fileId}, ${fixture.owner.organizationId}, ${workspaceId}, 'ready',
+        'legacy-bucket.txt', 'legacy-bucket.txt', 'text/plain', 8,
+        'legacy-retention-bucket', ${`retention/${crypto.randomUUID()}`}
+      )`;
+    const member = await expireOrganizationMember(fixture);
+    const operationId = crypto.randomUUID();
+    await claimOrganizationRetentionDeletion(client.db, {
+      organizationId: fixture.owner.organizationId,
+      operationId,
+    });
+    await expectSqlState(
+      () =>
+        finalizeOrganizationRetentionDeletion(client!.db, {
+          organizationId: fixture.owner.organizationId,
+          membershipId: member.id,
+          operationId,
+          objectBucket: retentionObjectBucket,
+        }),
+      "55000",
+    );
+    const [evidence] = await shared.admin<
+      Array<{
+        workspaceCount: number;
+        fileCount: number;
+        obligationCount: number;
+        databaseFinalizedAt: string | null;
+      }>
+    >`
+      select
+        (select count(*)::int from workspaces where id = ${workspaceId}) as "workspaceCount",
+        (select count(*)::int from files where id = ${fileId}) as "fileCount",
+        (select count(*)::int from organization_user_retention_object_obligations
+          where membership_id = ${member.id}) as "obligationCount",
+        (select database_finalized_at::text from organization_user_retention_deletions
+          where membership_id = ${member.id}) as "databaseFinalizedAt"`;
+    expect(evidence).toEqual({
+      workspaceCount: 1,
+      fileCount: 1,
+      obligationCount: 0,
+      databaseFinalizedAt: null,
+    });
+  });
+
   test("fails database finalization before object deletion when a retained non-document consumer exists", async () => {
     if (!shared || !client) return;
     const fixture = await provisionOrganizationMember("retained-consumer");
@@ -1272,6 +1385,7 @@ describe("migration 0263 organization membership lifecycle", () => {
           organizationId: fixture.owner.organizationId,
           membershipId: member.id,
           operationId,
+          objectBucket: retentionObjectBucket,
         }),
       "23503",
     );
@@ -1347,6 +1461,7 @@ describe("migration 0263 organization membership lifecycle", () => {
       organizationId: fixture.owner.organizationId,
       membershipId: member.id,
       operationId,
+      objectBucket: retentionObjectBucket,
     }).finally(() => {
       finalizerSettled = true;
     });
@@ -1401,6 +1516,7 @@ describe("migration 0263 organization membership lifecycle", () => {
           organizationId: fixture.owner.organizationId,
           membershipId: member.id,
           operationId,
+          objectBucket: retentionObjectBucket,
         }),
       "55000",
     );
@@ -1464,38 +1580,45 @@ describe("migration 0263 organization membership lifecycle", () => {
       organizationId: fixture.owner.organizationId,
       membershipId: member.id,
       operationId,
+      objectBucket: retentionObjectBucket,
     });
     expect(finalized.objectCount).toBe(5);
     const obligations = await listOrganizationRetentionDeletionObjects(client.db, {
       organizationId: fixture.owner.organizationId,
       membershipId: member.id,
       operationId,
+      objectBucket: retentionObjectBucket,
       limit: 100,
     });
     expect(obligations).toEqual([
       {
         objectKind: "session_recording",
         sourceId: recordingId,
+        objectBucket: retentionObjectBucket,
         objectKey: recordingKey,
       },
       {
         objectKind: "workspace_capture_blob",
         sourceId: `${captureId}:1`,
+        objectBucket: retentionObjectBucket,
         objectKey: blobKeys[0]!,
       },
       {
         objectKind: "workspace_capture_blob",
         sourceId: `${captureId}:2`,
+        objectBucket: retentionObjectBucket,
         objectKey: blobKeys[1]!,
       },
       {
         objectKind: "workspace_capture_manifest",
         sourceId: captureId,
+        objectBucket: retentionObjectBucket,
         objectKey: manifestKey,
       },
       {
         objectKind: "workspace_capture_tree_index",
         sourceId: captureId,
+        objectBucket: retentionObjectBucket,
         objectKey: treeKey,
       },
     ]);

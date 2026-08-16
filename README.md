@@ -402,8 +402,9 @@ failures, and requires configured object storage for destructive execution.
 It first commits the database deletion and an immutable, exact-key cleanup
 obligation set; only then does it delete external objects and record
 content-free completion receipts. A provider failure retries only unfinished
-obligations, while an unexpected retained database reference aborts before any
-external object is touched.
+obligations. The configured storage bucket is frozen into that authority and
+must still match on resume; a legacy bucket mismatch or an unexpected retained
+database reference aborts before any external object is touched.
 
 GitHub endpoints:
 
