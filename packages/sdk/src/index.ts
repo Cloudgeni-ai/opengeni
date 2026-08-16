@@ -158,6 +158,25 @@ export {
   normalizeWorkspaceInstructionPolicyRoleKey,
   WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
 } from "./workspace-instruction-policies";
+export type {
+  ActivateWorkspaceLearningPolicyRevisionRequest,
+  CreateWorkspaceLearningPolicyRevisionRequest,
+  GovernedLearningActivationReceipt,
+  GovernedLearningActivationUndoReceipt,
+  GovernedLearningDecisionReceipt,
+  RollbackWorkspaceLearningPolicyRevisionRequest,
+  WorkspaceLearningHistoryOptions,
+  WorkspaceLearningHistoryResponse,
+  WorkspaceLearningMode,
+  WorkspaceLearningOverrideMode,
+  WorkspaceLearningPolicyEvent,
+  WorkspaceLearningPolicyHead,
+  WorkspaceLearningPolicyMutationResponse,
+  WorkspaceLearningPolicyRevision,
+  WorkspaceLearningPolicyRevisionIdentity,
+  WorkspaceLearningSourceOverride,
+  WorkspaceLearningSourceOverrideInput,
+} from "./workspace-learning";
 export {
   COMPANY_PROFILE_ENTRY_MAX_CHARS,
   COMPANY_PROFILE_ENTRY_MAX_COUNT,

@@ -217,6 +217,17 @@ const GOVERNED_LEARNING_ACTIVATION_ROUTINES = [
   "activate_governed_learning_decision(uuid, uuid, uuid, uuid)",
   "undo_governed_learning_activation(uuid, uuid, uuid, uuid)",
 ] as const;
+const GOVERNED_LEARNING_INSPECTION_ROUTINES = [
+  "inspect_governed_learning_decisions(uuid, uuid, text, integer)",
+  "inspect_governed_learning_activations(uuid, uuid, text, integer)",
+  "inspect_governed_learning_activation_undos(uuid, uuid, text, integer)",
+] as const;
+const GOVERNED_LEARNING_INSPECTION_AUTHORITY_TABLES = [
+  "governed_learning_decision_receipts",
+  "governed_learning_activation_receipts",
+  "governed_learning_activation_undo_receipts",
+  "sessions",
+] as const;
 const GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES = [
   "document_chunks",
   "documents",
@@ -295,6 +306,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
   GOVERNED_LEARNING_EVALUATION_ROUTINE,
   ...GOVERNED_LEARNING_ACTIVATION_ROUTINES,
+  ...GOVERNED_LEARNING_INSPECTION_ROUTINES,
   FORK_SESSION_CONTENT_ROUTINE,
   XAI_AUTHORITY_LIVE_ROUTINE,
   XAI_CREATE_CREDENTIAL_ROUTINE,
@@ -1672,6 +1684,30 @@ export function evaluateRuntimeDatabasePosture(
         } else if (routine.owner !== authorityTables[0]!.owner) {
           violations.push(
             `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
+      }
+    } else if (
+      GOVERNED_LEARNING_INSPECTION_ROUTINES.includes(
+        routine.name as (typeof GOVERNED_LEARNING_INSPECTION_ROUTINES)[number],
+      )
+    ) {
+      if (!tableByName.has("governed_learning_decision_receipts")) continue;
+      const missingAuthorityTables = GOVERNED_LEARNING_INSPECTION_AUTHORITY_TABLES.filter(
+        (name) => !tableByName.has(name),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = GOVERNED_LEARNING_INSPECTION_AUTHORITY_TABLES.map(
+          (name) => tableByName.get(name)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1 || routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner does not match governed-learning inspection authority`,
           );
         }
       }

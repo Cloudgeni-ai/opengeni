@@ -696,6 +696,13 @@ describe("runtime database posture evaluator", () => {
     expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
       "undo_governed_learning_activation(uuid, uuid, uuid, uuid)",
     );
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toEqual(
+      expect.arrayContaining([
+        "inspect_governed_learning_decisions(uuid, uuid, text, integer)",
+        "inspect_governed_learning_activations(uuid, uuid, text, integer)",
+        "inspect_governed_learning_activation_undos(uuid, uuid, text, integer)",
+      ]),
+    );
     expect(FORCE_RLS_TABLES).toContain("workspace_instruction_policy_deactivation_events");
     expect(RUNTIME_READ_ONLY_TABLES).toContain("workspace_instruction_policy_deactivation_events");
     expect(RUNTIME_TABLE_PRIVILEGES.workspace_instruction_policy_deactivation_events).toEqual([

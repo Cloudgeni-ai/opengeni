@@ -41,6 +41,7 @@ import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions"
 
 import { BrainOverview, type BrainProposalReview } from "./agent-brain-overview";
 import { AgentBrainPrompt } from "./agent-brain-prompt";
+import { WorkspaceLearningAdministration } from "./workspace-learning-admin";
 import { CompanyBrainExportButton } from "./company-brain-export";
 import {
   useCompanyProfileInventory,
@@ -1424,7 +1425,7 @@ export function WorkspaceStateRoute({
   view,
 }: {
   workspaceId: string;
-  view?: "company" | "instructions" | "preferences";
+  view?: "company" | "instructions" | "preferences" | "learning";
 }) {
   const { client } = useAppContext();
   const [attemptInput, setAttemptInput] = useState("");
@@ -1530,7 +1531,9 @@ export function WorkspaceStateRoute({
               ? "Workspace instructions"
               : view === "preferences"
                 ? "Preferences"
-                : "Company Brain"
+                : view === "learning"
+                  ? "Learning & autonomy"
+                  : "Company Brain"
         }
         description={
           view === "company"
@@ -1539,7 +1542,9 @@ export function WorkspaceStateRoute({
               ? "Set how agents should work in this workspace."
               : view === "preferences"
                 ? "Save reusable instructions agents can apply when relevant."
-                : "Knowledge, rules, guides, review, and learning - with scope and delivery kept explicit."
+                : view === "learning"
+                  ? "Choose how governed, source-backed changes are reviewed and applied."
+                  : "Knowledge, rules, guides, review, and learning - with scope and delivery kept explicit."
         }
         actions={
           view ? undefined : <CompanyBrainExportButton client={client} workspaceId={workspaceId} />
@@ -1600,6 +1605,9 @@ export function WorkspaceStateRoute({
                 onWorkspaceStateReload={reload}
                 compact
               />
+            ) : null}
+            {view === "learning" ? (
+              <WorkspaceLearningAdministration workspaceId={workspaceId} />
             ) : null}
             {!view ? (
               <>

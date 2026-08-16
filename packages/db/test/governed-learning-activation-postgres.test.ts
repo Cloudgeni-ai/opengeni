@@ -23,6 +23,7 @@ import {
   ensureManagedAccessForUser,
   evaluateGovernedLearningProposal,
   getOrCreateWorkspaceLearningPolicySnapshot,
+  listGovernedLearningActivationHistory,
   listWorkspaceInstructionPolicyRevisions,
   nestedPostgresSqlState,
   undoGovernedLearningActivation,
@@ -430,6 +431,18 @@ describe("governed-learning activation PostgreSQL authority", () => {
       destinationOldVersion: 1,
       destinationNewVersion: 2,
       superseded: false,
+    });
+    expect(
+      await listGovernedLearningActivationHistory(client.db, {
+        workspaceId: f.grant.workspaceId,
+        subjectId: f.ownerSubjectId,
+        principalKind: "human_session",
+        limit: 10,
+      }),
+    ).toMatchObject({
+      activations: [{ id: activation.id }],
+      undos: [{ id: undo.id, activationReceiptId: activation.id }],
+      truncated: false,
     });
   });
 

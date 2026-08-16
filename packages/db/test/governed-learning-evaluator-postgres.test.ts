@@ -13,6 +13,7 @@ import {
   evaluateGovernedLearningProposal,
   getOrCreateWorkspaceLearningPolicySnapshot,
   linkKnowledgeClaims,
+  listGovernedLearningDecisionReceipts,
   nestedPostgresSqlState,
   writeCompanyBrainGovernedProposal,
   withSessionRlsActorContext,
@@ -203,6 +204,28 @@ describe("governed-learning evaluator PostgreSQL authority", () => {
       reasons: ["policy_suggest"],
       automaticEligible: false,
     });
+    const history = await listGovernedLearningDecisionReceipts(client.db, {
+      workspaceId: f.grant.workspaceId,
+      subjectId: f.ownerSubjectId,
+      principalKind: "human_session",
+      limit: 10,
+    });
+    expect(history).toMatchObject({ receipts: [{ id: receipt.id }], truncated: false });
+    await expect(
+      listGovernedLearningDecisionReceipts(client.db, {
+        workspaceId: f.grant.workspaceId,
+        subjectId: f.ownerSubjectId,
+        principalKind: "service",
+        limit: 10,
+      }),
+    ).rejects.toThrow(/authenticated human/i);
+    const otherSubject = await listGovernedLearningDecisionReceipts(client.db, {
+      workspaceId: f.grant.workspaceId,
+      subjectId: `user:other-${crypto.randomUUID()}`,
+      principalKind: "human_session",
+      limit: 10,
+    });
+    expect(otherSubject.receipts).toEqual([]);
   });
 
   test("converges exact concurrent replay, denies changed input, and never activates a destination", async () => {
