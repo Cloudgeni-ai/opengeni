@@ -2482,7 +2482,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // would mint its relay terminal/desktop cells. Resolve the active target once
     // and use the selfhosted liveness probe when it is a connected machine.
     const activeSandbox = session.activeSandboxId
-      ? await getSandbox(db, workspaceId, session.activeSandboxId)
+      ? await getSandbox(
+          db,
+          { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+          session.activeSandboxId,
+        )
       : null;
     const selfhostedActive = activeSandbox?.kind === "selfhosted";
     const lease = await readGroupLease(
@@ -2531,13 +2535,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     let capabilities;
     if (selfhostedActive && activeSandbox.enrollmentId) {
       const [enrollment, liveConnection] = await Promise.all([
-        getEnrollment(db, workspaceId, activeSandbox.enrollmentId),
-        getLiveEnrollmentConnection(db, workspaceId, activeSandbox.enrollmentId),
+        getEnrollment(db, grant, activeSandbox.enrollmentId),
+        getLiveEnrollmentConnection(db, grant, activeSandbox.enrollmentId),
       ]);
       let probeResponded = false;
       if (liveConnection?.connectionInstanceId) {
         const machine = new SelfhostedSession({
-          workspaceId,
+          workspaceId: activeSandbox.workspaceId,
           agentId: liveConnection.id,
           connectionInstanceId: liveConnection.connectionInstanceId,
           controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
@@ -2728,7 +2732,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // attachViewer (it warms the Modal group box — the wrong target). Synthesize a
     // result shaped like ViewerAttachResult and mint relay cells directly.
     const activeSandbox = session.activeSandboxId
-      ? await getSandbox(db, workspaceId, session.activeSandboxId)
+      ? await getSandbox(
+          db,
+          { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+          session.activeSandboxId,
+        )
       : null;
     const selfhostedActive = activeSandbox?.kind === "selfhosted";
 
@@ -2758,6 +2766,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           stream = await mintDesktopStream(viewerServices, {
             accountId: grant.accountId,
             workspaceId,
+            resourceSubjectId: grant.subjectId,
             session,
             viewerId,
             // No Modal lease for selfhosted-active; the mint routes to the relay.
@@ -2767,6 +2776,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           terminal = await mintTerminalStream(viewerServices, {
             accountId: grant.accountId,
             workspaceId,
+            resourceSubjectId: grant.subjectId,
             session,
             viewerId,
             // No Modal lease for selfhosted-active; the mint routes to the relay.
@@ -2805,6 +2815,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             stream = await mintDesktopStream(viewerServices, {
               accountId: grant.accountId,
               workspaceId,
+              resourceSubjectId: grant.subjectId,
               session,
               viewerId: result.viewerId,
               lease,
@@ -2814,6 +2825,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             terminal = await mintTerminalStream(viewerServices, {
               accountId: grant.accountId,
               workspaceId,
+              resourceSubjectId: grant.subjectId,
               session,
               viewerId: result.viewerId,
               lease,

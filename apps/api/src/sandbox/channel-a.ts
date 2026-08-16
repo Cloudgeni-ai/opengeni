@@ -625,13 +625,22 @@ async function withChannelAOperation<T>(
           message: "machine-home session has no active Connected Machine",
         });
       }
-      const sandbox = await getSandbox(db, workspaceId, pointer.activeSandboxId);
+      const sandbox = await getSandbox(
+        db,
+        { accountId: ctx.accountId, workspaceId, subjectId: ctx.subjectId },
+        pointer.activeSandboxId,
+      );
       if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) {
         throw new HTTPException(409, {
           message: "machine-home session points to an unavailable Connected Machine",
         });
       }
-      const enrollment = await getLiveEnrollmentConnection(db, workspaceId, sandbox.enrollmentId);
+      const originWorkspaceId = sandbox.workspaceId;
+      const enrollment = await getLiveEnrollmentConnection(
+        db,
+        { accountId, workspaceId, subjectId: ctx.subjectId },
+        sandbox.enrollmentId,
+      );
       if (!enrollment?.connectionInstanceId) {
         // Preserve causal machine liveness through Channel-A. Generic callers
         // retain the established 409 mapping below; Browser/Computer callers can
@@ -641,7 +650,7 @@ async function withChannelAOperation<T>(
         );
       }
       const built = await buildSelfhostedBackendSession({
-        workspaceId,
+        workspaceId: originWorkspaceId,
         agentId: sandbox.enrollmentId,
         connectionInstanceId: enrollment.connectionInstanceId,
         relay: relayConfigFromSettings(settings),
@@ -686,6 +695,7 @@ async function withChannelAOperation<T>(
           accountId,
           workspaceId,
           sessionId: session.id,
+          resourceSubjectId: ctx.subjectId,
           pinnedSelfhosted: {
             sandboxId: sandbox.id,
             epoch: pointer.activeEpoch,
@@ -937,6 +947,7 @@ async function withChannelAOperation<T>(
           accountId,
           workspaceId,
           sessionId: session.id,
+          resourceSubjectId: ctx.subjectId,
           homeLease: {
             sandboxGroupId,
             leaseEpoch: leaseSnapshot.leaseEpoch,
