@@ -87,6 +87,7 @@ describe("Company Brain first-party MCP policy", () => {
       "task_notes_list",
       "task_note_save",
       "task_note_archive",
+      "task_note_replace",
     ];
     const readOnly = buildOpenGeniMcpServer(deps(), grant(["sessions:read"], selected));
     expect(registeredToolNames(readOnly)).toEqual(["task_notes_list"]);
@@ -101,5 +102,34 @@ describe("Company Brain first-party MCP policy", () => {
     humanGrant.principalKind = "human";
     const denied = buildOpenGeniMcpServer(deps(), humanGrant);
     expect(registeredToolNames(denied)).toEqual([]);
+  });
+
+  test("governed write tools are production-registered and permission filtered", () => {
+    const selected: FirstPartyMcpToolName[] = [
+      "knowledge_propose",
+      "knowledge_correct",
+      "task_note_promote_knowledge",
+      "task_note_promote_instruction_policy",
+      "task_note_promote_preference",
+      "instruction_policy_propose",
+      "preference_propose",
+    ];
+    const readOnly = buildOpenGeniMcpServer(
+      deps(),
+      grant(["documents:search", "workspace:read"], selected),
+    );
+    expect(registeredToolNames(readOnly)).toEqual(
+      selected.filter((name) => !name.startsWith("task_note_promote_")).sort(),
+    );
+
+    const admitted = buildOpenGeniMcpServer(
+      deps(),
+      grant(["documents:search", "workspace:read", "sessions:control"], selected),
+    );
+    expect(registeredToolNames(admitted)).toEqual([...selected].sort());
+
+    const humanGrant = grant(["documents:search", "workspace:read", "sessions:control"], selected);
+    humanGrant.principalKind = "human";
+    expect(registeredToolNames(buildOpenGeniMcpServer(deps(), humanGrant))).toEqual([]);
   });
 });

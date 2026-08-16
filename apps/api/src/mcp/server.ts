@@ -100,6 +100,7 @@ import {
   archiveTaskNote,
   createTaskNote,
   listTaskNotes,
+  replaceTaskNote,
 } from "@opengeni/db";
 import {
   appendAndPublishEvents,
@@ -234,6 +235,7 @@ import {
 } from "../integrations/atlassian";
 import { AtlassianConnectionMetadata } from "@opengeni/contracts/atlassian";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
+import { registerCompanyBrainGovernedWriteTools } from "./company-brain-governed-writes";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 
 export type McpServerOptions = {
@@ -384,6 +386,29 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   task_notes_list: { sessionRequired: true, allOf: ["sessions:read"] },
   task_note_save: { sessionRequired: true, allOf: ["sessions:control"] },
   task_note_archive: { sessionRequired: true, allOf: ["sessions:control"] },
+  task_note_replace: { sessionRequired: true, allOf: ["sessions:control"] },
+  knowledge_propose: { sessionRequired: true, allOf: ["documents:search"] },
+  knowledge_correct: { sessionRequired: true, allOf: ["documents:search"] },
+  task_note_promote_knowledge: {
+    sessionRequired: true,
+    allOf: ["documents:search", "sessions:control"],
+  },
+  task_note_promote_instruction_policy: {
+    sessionRequired: true,
+    allOf: ["documents:search", "sessions:control", "workspace:read"],
+  },
+  task_note_promote_preference: {
+    sessionRequired: true,
+    allOf: ["documents:search", "sessions:control", "workspace:read"],
+  },
+  instruction_policy_propose: {
+    sessionRequired: true,
+    allOf: ["documents:search", "workspace:read"],
+  },
+  preference_propose: {
+    sessionRequired: true,
+    allOf: ["documents:search", "workspace:read"],
+  },
   sandboxes_list: { sessionRequired: true, allOf: ["sessions:read"] },
   sandbox_attach: { sessionRequired: true, allOf: ["sessions:control"] },
   sandbox_swap: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -714,6 +739,20 @@ export function buildOpenGeniMcpServer(
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerPreferenceRegistryTools(server, deps, grant, json);
     registerTaskNoteTools(server, deps, grant, sessionId, json);
+    const attempt = exactAgentAttemptClaims(grant)!;
+    registerCompanyBrainGovernedWriteTools({
+      server,
+      db: deps.db,
+      attempt: {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        ...attempt,
+      },
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+    });
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerWorkspaceArtifactTools(server, deps, grant, sessionId, json);
@@ -2923,6 +2962,53 @@ function registerTaskNoteTools(
           operationId,
           noteId,
           expectedVersion,
+          reason,
+        }),
+      );
+    },
+  );
+
+  server.registerTool(
+    "task_note_replace",
+    {
+      description:
+        "Atomically correct one exact active coordination note: archive the old immutable note and create a fresh linked replacement. Exact retries replay safely; stale versions or changed input fail closed.",
+      inputSchema: {
+        operationId: z4.string().uuid(),
+        replacedNoteId: z4.string().uuid(),
+        expectedReplacedVersion: z4.number().int().min(1).max(1),
+        replacementKind: z4.enum([
+          "finding",
+          "decision",
+          "blocker",
+          "ownership",
+          "artifact",
+          "handoff",
+        ]),
+        replacementText: boundedUtf8(TASK_NOTE_TEXT_MAX_BYTES, "Task note replacement text"),
+        replacementExpiresInDays: z4.number().int().min(1).max(TASK_NOTE_MAX_LIFETIME_DAYS),
+        reason: boundedUtf8(TASK_NOTE_REASON_MAX_BYTES, "Task note replacement reason"),
+      },
+    },
+    async ({
+      operationId,
+      replacedNoteId,
+      expectedReplacedVersion,
+      replacementKind,
+      replacementText,
+      replacementExpiresInDays,
+      reason,
+    }) => {
+      await authorize();
+      return json(
+        await replaceTaskNote(deps.db, {
+          ...attemptClaims(),
+          operationId,
+          replacedNoteId,
+          expectedReplacedVersion,
+          replacementKind,
+          replacementText,
+          replacementExpiresInDays,
           reason,
         }),
       );

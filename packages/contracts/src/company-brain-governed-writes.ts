@@ -11,6 +11,7 @@ import {
   WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
   WorkspaceInstructionPolicyTarget,
 } from "./workspace-instruction-policies";
+import { WorkspaceLearningPolicyEffectiveMode } from "./workspace-learning-policy";
 
 const boundedReason = z.string().trim().min(1).max(4_096);
 const operationId = z.string().uuid();
@@ -56,6 +57,117 @@ export const CorrectWorkspaceKnowledgeClaimRequest = z
 export type CorrectWorkspaceKnowledgeClaimRequest = z.infer<
   typeof CorrectWorkspaceKnowledgeClaimRequest
 >;
+
+/**
+ * Promote one still-active task-tree note into a normalized, workspace-local
+ * Knowledge claim proposal. The note text is the exact fact value and source
+ * evidence; callers may describe the subject and predicate but cannot widen
+ * authority or supply replacement source bytes.
+ */
+export const PromoteTaskNoteKnowledgeRequest = z
+  .object({
+    kind: z.literal("promote_task_note_knowledge"),
+    operationId,
+    noteId: z.string().uuid(),
+    expectedNoteVersion: z.literal(1),
+    entityType: z
+      .string()
+      .trim()
+      .min(1)
+      .max(96)
+      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+    normalizedKey: z.string().trim().min(1).max(512),
+    displayName: z.string().trim().min(1).max(512),
+    predicateKey: z
+      .string()
+      .trim()
+      .min(1)
+      .max(128)
+      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+    confidenceBps: z.number().int().min(0).max(10_000),
+    reason: boundedReason,
+  })
+  .strict();
+export type PromoteTaskNoteKnowledgeRequest = z.infer<typeof PromoteTaskNoteKnowledgeRequest>;
+
+/**
+ * Promote the exact immutable Task-note bytes into an inactive mandatory-rule
+ * draft. The caller selects only the governed target and active-head baseline;
+ * it cannot replace the source content or activate the draft.
+ */
+export const PromoteTaskNoteInstructionPolicyRequest = z
+  .strictObject({
+    kind: z.literal("promote_task_note_instruction_policy"),
+    operationId,
+    noteId: z.string().uuid(),
+    expectedNoteVersion: z.literal(1),
+    entityType: z
+      .string()
+      .trim()
+      .min(1)
+      .max(96)
+      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+    normalizedKey: z.string().trim().min(1).max(512),
+    displayName: z.string().trim().min(1).max(512),
+    predicateKey: z
+      .string()
+      .trim()
+      .min(1)
+      .max(128)
+      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+    confidenceBps: z.number().int().min(0).max(10_000),
+    target: WorkspaceInstructionPolicyTarget,
+    expectedCurrentRevisionId: z.string().uuid().nullable(),
+    expectedActivationVersion: z.number().int().nonnegative(),
+    reason: boundedReason,
+  })
+  .superRefine((value, context) => {
+    const target = WorkspaceInstructionPolicyTarget.safeParse(value.target);
+    if (!target.success) {
+      for (const issue of target.error.issues) {
+        context.addIssue({ ...issue, path: ["target", ...issue.path] });
+      }
+    }
+  });
+export type PromoteTaskNoteInstructionPolicyRequest = z.infer<
+  typeof PromoteTaskNoteInstructionPolicyRequest
+>;
+
+/**
+ * Promote the exact immutable Task-note bytes into an inactive workspace
+ * preference proposal. Descriptor metadata is caller-supplied and bounded,
+ * while the full proposal content always comes from the admitted note.
+ */
+export const PromoteTaskNotePreferenceRequest = z.strictObject({
+  kind: z.literal("promote_task_note_preference"),
+  operationId,
+  noteId: z.string().uuid(),
+  expectedNoteVersion: z.literal(1),
+  entityType: z
+    .string()
+    .trim()
+    .min(1)
+    .max(96)
+    .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+  normalizedKey: z.string().trim().min(1).max(512),
+  displayName: z.string().trim().min(1).max(512),
+  predicateKey: z
+    .string()
+    .trim()
+    .min(1)
+    .max(128)
+    .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+  confidenceBps: z.number().int().min(0).max(10_000),
+  stableKey: PreferenceRegistryStableKey.max(PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS),
+  title: z.string().trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
+  description: z.string().trim().min(1).max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
+  precedenceRank: z.number().int().min(-1_000).max(1_000).default(0),
+  conflictStrategy: PreferenceRegistryConflictStrategy.default("override"),
+  conflictsWith: z.array(PreferenceRegistryStableKey).max(32).default([]),
+  expiresAt: z.string().datetime({ offset: true }).nullable().default(null),
+  reason: boundedReason,
+});
+export type PromoteTaskNotePreferenceRequest = z.infer<typeof PromoteTaskNotePreferenceRequest>;
 
 export const ProposeWorkspaceInstructionPolicyRequest = z
   .strictObject({
@@ -111,6 +223,9 @@ export type ProposeWorkspacePreferenceRequest = z.infer<typeof ProposeWorkspaceP
 export const CompanyBrainGovernedWriteRequest = z.discriminatedUnion("kind", [
   ProposeWorkspaceKnowledgeClaimRequest,
   CorrectWorkspaceKnowledgeClaimRequest,
+  PromoteTaskNoteKnowledgeRequest,
+  PromoteTaskNoteInstructionPolicyRequest,
+  PromoteTaskNotePreferenceRequest,
   ProposeWorkspaceInstructionPolicyRequest,
   ProposeWorkspacePreferenceRequest,
 ]);
@@ -138,6 +253,15 @@ export const CompanyBrainGovernedWriteReceipt = z.object({
   knowledgeChangeProposalId: z.string().uuid().nullable(),
   destinationProposalId: z.string().uuid().nullable(),
   destinationRevisionId: z.string().uuid().nullable(),
+  taskNoteSource: z
+    .object({
+      noteId: z.string().uuid(),
+      rootSessionId: z.string().uuid(),
+      noteVersion: z.literal(1),
+      textHash: z.string().regex(/^[0-9a-f]{64}$/),
+    })
+    .nullable()
+    .optional(),
   effectiveBoundary: z.literal("human_review_required"),
   rollback: z.object({
     supported: z.literal(false),
@@ -145,3 +269,31 @@ export const CompanyBrainGovernedWriteReceipt = z.object({
   }),
 });
 export type CompanyBrainGovernedWriteReceipt = z.infer<typeof CompanyBrainGovernedWriteReceipt>;
+
+/**
+ * Policy routing is deliberately separate from destination admission. The
+ * immutable accepted-attempt snapshot decides whether derived evidence may
+ * create a proposal; the destination still owns activation and rollback.
+ */
+export const CompanyBrainLearningPolicyDecision = z.enum([
+  "blocked",
+  "proposal_created",
+  "activation_requested",
+]);
+export type CompanyBrainLearningPolicyDecision = z.infer<typeof CompanyBrainLearningPolicyDecision>;
+
+export const CompanyBrainLearningPolicyRouteReceipt = z.object({
+  operationId,
+  workspaceId: z.string().uuid(),
+  effectivePolicy: WorkspaceLearningPolicyEffectiveMode,
+  decision: CompanyBrainLearningPolicyDecision,
+  write: CompanyBrainGovernedWriteReceipt.nullable(),
+  activation: z.object({
+    requested: z.boolean(),
+    activated: z.literal(false),
+    boundary: z.enum(["policy_off", "human_review", "destination_authority"]),
+  }),
+});
+export type CompanyBrainLearningPolicyRouteReceipt = z.infer<
+  typeof CompanyBrainLearningPolicyRouteReceipt
+>;
