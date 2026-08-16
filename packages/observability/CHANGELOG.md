@@ -1,5 +1,23 @@
 # @opengeni/observability
 
+## 0.7.8
+
+### Patch Changes
+
+- 31231dc: Expose bounded configured and effective sandbox rollout state for every API and worker workload revision.
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ffbbf4c]
+- Updated dependencies [d34dd9a]
+- Updated dependencies [eeb7cb6]
+- Updated dependencies [c3f0598]
+- Updated dependencies [d2f172c]
+- Updated dependencies [04b1a1f]
+- Updated dependencies [c056063]
+  - @opengeni/contracts@1.1.0
+
 ## 0.7.7
 
 ### Patch Changes
