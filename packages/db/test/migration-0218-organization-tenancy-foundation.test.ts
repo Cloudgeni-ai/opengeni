@@ -140,7 +140,7 @@ describe("migration 0218 organization tenancy foundation", () => {
       `"session_id" IS NOT NULL\n      AND "authority_epoch" IS NOT NULL\n      AND "authority_epoch" > 0`,
     );
     expect(schema).toMatch(
-      /organization_user_retention_policies_duration_check[\s\S]*?\$\{table\.mode\} = 'delete_after'\s+and \$\{table\.retentionDays\} is not null\s+and \$\{table\.retentionDays\} between 1 and 3650/u,
+      /organization_user_retention_policies_duration_check[\s\S]*?\$\{table\.mode\} = 'delete_after'\s+and \$\{table\.retentionDays\} is not null\s+and \$\{table\.retentionDays\} between 30 and 90/u,
     );
     expect(schema).toMatch(
       /sessions_fork_provenance_check[\s\S]*?\$\{table\.forkedFromSessionId\} is not null\s+and \$\{table\.forkedFromAuthorityEpoch\} is not null\s+and \$\{table\.forkedFromAuthorityEpoch\} > 0/u,
