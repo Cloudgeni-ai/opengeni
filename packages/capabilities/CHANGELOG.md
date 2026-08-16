@@ -1,5 +1,11 @@
 # @opengeni/capabilities
 
+## 0.2.3
+
+### Patch Changes
+
+- b06071c: Publish the Gmail integration visibility fix with product release 0.23.8.
+
 ## 0.2.2
 
 ### Patch Changes
