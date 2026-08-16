@@ -1,5 +1,20 @@
 # @opengeni/core
 
+## 1.1.1
+
+### Patch Changes
+
+- 6860c5f: Add organization, workspace, and owner-private scopes for Rigs and Connected Machines. Personal machine use and Rig materialization now revalidate exact-attempt grants, membership, workspace access, authority epochs, and generations before runtime access.
+- Updated dependencies [6860c5f]
+  - @opengeni/contracts@1.1.1
+  - @opengeni/db@1.0.3
+  - @opengeni/config@0.16.6
+  - @opengeni/documents@0.5.43
+  - @opengeni/events@0.3.114
+  - @opengeni/observability@0.7.9
+  - @opengeni/runtime@1.0.3
+  - @opengeni/storage@0.2.98
+
 ## 1.1.0
 
 ### Minor Changes
