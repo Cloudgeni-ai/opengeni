@@ -24,7 +24,8 @@ const budgets = {
   // channels and the "For you" rail entry add always-loaded rail code and one
   // more shared-chunk boundary in both graphs. Revision-fenced Connected Machine
   // command policy adds its memory/CPU fields to the shared session contract.
-  // Keep tight headroom above the measured production graph.
+  // Versioned package metadata pushes the release graph just above 553 KiB;
+  // keep one KiB of measured headroom without relaxing the other graph limits.
   initialRaw: 1448 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
@@ -33,7 +34,7 @@ const budgets = {
   initialFileGzip: 77 * kib,
   initialFiles: 17,
   directSessionRaw: 1990 * kib,
-  directSessionGzip: 553 * kib,
+  directSessionGzip: 554 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
