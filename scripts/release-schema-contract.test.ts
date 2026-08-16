@@ -294,7 +294,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0260_task_note_knowledge_promotion.sql",
       ),
     ).toMatchObject({
-      sha256: "27317b17a565e14c7508d5cb6bde6822596fd4c3e6a7d2ca4e2fe0dd687511e7",
+      sha256: "1f067ac286f94effc2a98bf5d016fab6e2d563054bbb3eafa358ce4b653191fe",
       deploymentMode: "rolling",
     });
     expect(
@@ -436,13 +436,13 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0261_preference_knowledge_proposal_actor_binding.sql")) {
         return includesActivation
-          ? "aab6a15730d94a208528589bfe10ba8d5c7992c83bd066686bdbf1619e7ed6ea"
-          : "b90392ac1f3a0ca8f82c911cf511dd494d5be8a16385278adfaf688570019265";
+          ? "e3d73ba0a62c8de9672a75cb3405942c86d6577a4c74c8efbe4a59fe5834c597"
+          : "e5b35ae9f24859fd241d814f0f22f920671a27e7c53eda0cb3d943eeb239c300";
       }
       if (migrations.has("0260_task_note_knowledge_promotion.sql")) {
         return includesActivation
-          ? "9215d4b59e41895ba0e76f96a4446a7f19bf4c81daacdb2c8c51cbc81b8af52f"
-          : "7e5bd09849982dbd592fc934f719649dc0de65c51a159e3b2ba3e3cf1de908b8";
+          ? "285908f04e88cb1f2ea38db1d57f6ba40b69000fbeb20a2f34d5de011cb2b58d"
+          : "fe69b939f58e49bcc99e28ba57cba430b88122f75030b458c4dde3c8452c214d";
       }
       if (migrations.has("0258_three_scope_document_knowledge_authority.sql")) {
         return includesActivation

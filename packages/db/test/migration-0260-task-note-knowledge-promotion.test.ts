@@ -37,7 +37,7 @@ describe("migration 0260 Task-note Knowledge promotion", () => {
     expect(sql).toContain("GRANT EXECUTE ON FUNCTION");
   });
 
-  test("requires a one-shot exact-operation capability and hardens the definer path", async () => {
+  test("requires a one-shot capability and hardens the complete invoked authority path", async () => {
     const sql = await readFile(migrationPath, "utf8");
     expect(sql).toContain('CREATE TABLE "task_note_knowledge_promotion_capabilities"');
     expect(sql).toContain(
@@ -53,7 +53,19 @@ describe("migration 0260 Task-note Knowledge promotion", () => {
     expect(sql).toContain("FROM workspace_learning_policy_snapshots snapshot");
     expect(sql).toContain("effective_learning_mode NOT IN ('suggest', 'automatic')");
     expect(sql).toContain("DELETE FROM task_note_knowledge_promotion_capabilities capability");
-    expect(sql.match(/SET search_path = pg_catalog, %I, pg_temp/g)).toHaveLength(4);
+    for (const signature of [
+      "guard_task_note_mutation()",
+      "guard_task_note_event_mutation()",
+      "resolve_task_note_attempt_authority(uuid,uuid,uuid,uuid,uuid,integer)",
+      "create_task_note_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,integer)",
+      "archive_task_note_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,uuid,integer,text)",
+      "list_task_notes_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,boolean,integer)",
+      "session_private_actor_visible(uuid,uuid,uuid,text)",
+      "session_reference_visible(uuid,uuid,uuid)",
+    ]) {
+      expect(sql).toContain(`'${signature}'`);
+    }
+    expect(sql.match(/SET search_path = pg_catalog, %I, pg_temp/g)).toHaveLength(12);
     expect(sql).toContain("resolve_task_note_knowledge_promotion_source(");
   });
 
@@ -74,7 +86,7 @@ describe("migration 0260 Task-note Knowledge promotion", () => {
     expect(sql).toContain("Task-note replacement receipts are immutable");
     expect(sql).toContain("CREATE OR REPLACE FUNCTION replace_task_note_for_attempt(");
     expect(sql).toContain("receipt_row.input_hash IS DISTINCT FROM calculated_input_hash");
-    expect(sql.match(/SET search_path = pg_catalog, %I, pg_temp/g)).toHaveLength(4);
+    expect(sql.match(/SET search_path = pg_catalog, %I, pg_temp/g)).toHaveLength(12);
     expect(sql).toContain("GRANT EXECUTE ON FUNCTION %I.replace_task_note_for_attempt(");
   });
 });

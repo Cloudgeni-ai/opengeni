@@ -1015,7 +1015,7 @@ describe("task-tree notes PostgreSQL authority", () => {
 
   test("definer paths ignore caller temporary authority relations and keep durable tables closed", async () => {
     if (!shared || !client) return;
-    const f = await fixture();
+    const f = await fixture({ privateRoot: true });
     const policy = await createWorkspaceLearningPolicyRevision(client.db, {
       accountId: f.grant.accountId,
       workspaceId: f.grant.workspaceId,
@@ -1048,6 +1048,44 @@ describe("task-tree notes PostgreSQL authority", () => {
       text: "Durable provenance must win over caller temporary relations.",
       expiresInDays: 7,
     });
+    const targetRoot = await withSessionRlsActorContext(
+      { subjectId: f.ownerSubjectId },
+      async () =>
+        await createSession(client!.db, {
+          accountId: f.grant.accountId,
+          workspaceId: f.grant.workspaceId,
+          initialMessage: "private target root",
+          resources: [],
+          metadata: {},
+          model: "test-model",
+          sandboxBackend: "none",
+          createdBy: { kind: "subject", subjectId: f.ownerSubjectId },
+          createdByContext: {},
+        }),
+    );
+    await transitionSessionVisibility(client.db, {
+      workspaceId: f.grant.workspaceId,
+      sessionId: targetRoot.id,
+      actorSubjectId: f.ownerSubjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: `private-target-${crypto.randomUUID()}`,
+    });
+    const targetAttempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: targetRoot.id,
+      initiatorSubjectId: f.ownerSubjectId,
+      initiatingHumanSubjectId: f.ownerSubjectId,
+    });
+    await getOrCreateWorkspaceLearningPolicySnapshot(client.db, claims(targetAttempt));
+    const targetNote = await createTaskNote(client.db, {
+      ...claims(targetAttempt),
+      operationId: crypto.randomUUID(),
+      kind: "decision",
+      text: "A different private root must remain unavailable to the source attempt.",
+      expiresInDays: 7,
+    });
     const app = postgres(shared.appUrl, { max: 1, prepare: false });
     let observedSource:
       | {
@@ -1065,7 +1103,26 @@ describe("task-tree notes PostgreSQL authority", () => {
           await sql`select set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true)`;
           await sql`select set_config('opengeni.subject_id', ${f.ownerSubjectId}, true)`;
           await sql`select set_config('opengeni.initiating_human_subject_id', ${f.ownerSubjectId}, true)`;
+          await sql.unsafe("create temporary table workspaces (trap text) on commit drop");
+          await sql.unsafe("create temporary table sessions (trap text) on commit drop");
+          await sql.unsafe("create temporary table session_turns (trap text) on commit drop");
+          await sql.unsafe(
+            "create temporary table session_turn_attempts (trap text) on commit drop",
+          );
+          await sql.unsafe(
+            "create temporary table session_attempt_interruptions (trap text) on commit drop",
+          );
+          await sql.unsafe(
+            "create temporary table organization_memberships (trap text) on commit drop",
+          );
+          await sql.unsafe(
+            "create temporary table workspace_memberships (trap text) on commit drop",
+          );
           await sql.unsafe("create temporary table task_notes (trap text) on commit drop");
+          await sql.unsafe("create temporary table task_note_events (trap text) on commit drop");
+          await sql.unsafe(
+            "create temporary table task_note_write_capabilities (trap text) on commit drop",
+          );
           await sql.unsafe(
             "create temporary table workspace_learning_policy_snapshots (trap text) on commit drop",
           );
@@ -1106,6 +1163,110 @@ describe("task-tree notes PostgreSQL authority", () => {
         note_text: note.note.text,
         note_text_hash: createHash("sha256").update(note.note.text, "utf8").digest("hex"),
       });
+
+      const [interruptionReceipt] = await shared.admin<{ id: string }[]>`
+        insert into session_command_receipts (
+          account_id, workspace_id, actor_type, actor_subject_id, action,
+          target_session_id, target_turn_id, operation_key, canonical_request_hash
+        ) values (
+          ${attempt.accountId}, ${attempt.workspaceId}, 'human', ${f.ownerSubjectId},
+          'session.queue.steer', ${attempt.sessionId}, ${attempt.turnId},
+          ${crypto.randomUUID()}, ${`temp-shadow-interruption-${crypto.randomUUID()}`}
+        ) returning id
+      `;
+      await shared.admin`
+        insert into session_attempt_interruptions (
+          account_id, workspace_id, session_id, operation_id, attempt_id,
+          kind, control_revision
+        ) values (
+          ${attempt.accountId}, ${attempt.workspaceId}, ${attempt.sessionId},
+          ${interruptionReceipt!.id}, ${attempt.attemptId}, 'steer', 1
+        )
+      `;
+
+      const forgedSubjectId = `user:temp-shadow-${crypto.randomUUID()}`;
+      const forgedMembershipId = crypto.randomUUID();
+      await expectSqlState(
+        async () =>
+          await app.begin(async (sql) => {
+            await sql`select set_config('opengeni.account_id', ${f.grant.accountId}, true)`;
+            await sql`select set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true)`;
+            await sql`select set_config('opengeni.subject_id', ${f.ownerSubjectId}, true)`;
+            await sql`select set_config('opengeni.initiating_human_subject_id', ${f.ownerSubjectId}, true)`;
+            await sql.unsafe(
+              "create temporary table workspaces (account_id uuid, id uuid) on commit drop",
+            );
+            await sql.unsafe(
+              "create temporary table sessions (account_id uuid, workspace_id uuid, id uuid, root_session_id uuid, active_turn_id uuid, visibility text, owner_organization_membership_id uuid, owner_subject_id text) on commit drop",
+            );
+            await sql.unsafe(
+              "create temporary table session_turns (account_id uuid, workspace_id uuid, session_id uuid, id uuid, active_attempt_id uuid, execution_generation integer, status text, initiator_kind text, initiator_subject_id text, initiating_human_subject_id text) on commit drop",
+            );
+            await sql.unsafe(
+              "create temporary table session_turn_attempts (account_id uuid, workspace_id uuid, session_id uuid, turn_id uuid, id uuid, execution_generation integer, state text) on commit drop",
+            );
+            await sql.unsafe(
+              "create temporary table session_attempt_interruptions (workspace_id uuid, attempt_id uuid, state text) on commit drop",
+            );
+            await sql.unsafe(
+              "create temporary table organization_memberships (account_id uuid, id uuid, subject_id text, status text) on commit drop",
+            );
+            await sql.unsafe(
+              "create temporary table workspace_memberships (account_id uuid, workspace_id uuid, subject_id text) on commit drop",
+            );
+            await sql`
+              insert into workspaces values (${attempt.accountId}, ${attempt.workspaceId})
+            `;
+            await sql`
+              insert into sessions values
+                (${attempt.accountId}, ${attempt.workspaceId}, ${attempt.sessionId},
+                  ${targetRoot.id}, ${attempt.turnId}, 'user_private',
+                  ${forgedMembershipId}, ${forgedSubjectId}),
+                (${attempt.accountId}, ${attempt.workspaceId}, ${targetRoot.id},
+                  ${targetRoot.id}, ${targetAttempt.turnId}, 'user_private',
+                  ${forgedMembershipId}, ${forgedSubjectId})
+            `;
+            await sql`
+              insert into session_turns values (
+                ${attempt.accountId}, ${attempt.workspaceId}, ${attempt.sessionId},
+                ${attempt.turnId}, ${attempt.attemptId}, ${attempt.executionGeneration},
+                'running', 'subject', ${forgedSubjectId}, ${forgedSubjectId}
+              )
+            `;
+            await sql`
+              insert into session_turn_attempts values (
+                ${attempt.accountId}, ${attempt.workspaceId}, ${attempt.sessionId},
+                ${attempt.turnId}, ${attempt.attemptId}, ${attempt.executionGeneration}, 'running'
+              )
+            `;
+            await sql`
+              insert into organization_memberships values (
+                ${attempt.accountId}, ${forgedMembershipId}, ${forgedSubjectId}, 'active'
+              )
+            `;
+            await sql`
+              insert into workspace_memberships values (
+                ${attempt.accountId}, ${attempt.workspaceId}, ${forgedSubjectId}
+              )
+            `;
+            await sql`
+              select * from resolve_task_note_knowledge_promotion_source(
+                ${attempt.accountId}::uuid,
+                ${attempt.workspaceId}::uuid,
+                ${attempt.sessionId}::uuid,
+                ${attempt.turnId}::uuid,
+                ${attempt.attemptId}::uuid,
+                ${attempt.executionGeneration}::integer,
+                ${targetNote.note.id}::uuid,
+                1,
+                ${crypto.randomUUID()}::text,
+                ${crypto.randomUUID()}::text,
+                ${`service:temp-shadow-forgery:${crypto.randomUUID()}`}::text
+              )
+            `;
+          }),
+        "42501",
+      );
 
       await expectSqlState(
         async () =>

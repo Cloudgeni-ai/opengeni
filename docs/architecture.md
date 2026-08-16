@@ -238,8 +238,11 @@ note text becomes the proposed fact only, the one-shot database capability
 verifies that exact claim-to-fact binding, retries converge after note archival,
 and another root/tenant/stale attempt fails closed. It also adds the atomic
 `task_note_replace` correction/revert operation and immutable content-free
-replacement receipt without making Task notes authoritative. The explicit
-proposal MCP tools remain proposal-only and learning-policy gated; see
+replacement receipt without making Task notes authoritative. Its explicit
+`pg_catalog`, target-schema, `pg_temp` posture covers both the new entry points
+and their full legacy Task-note/session-visibility closure, so runtime TEMP
+objects cannot replace authority reads at a nested definer or RLS boundary. The
+explicit proposal MCP tools remain proposal-only and learning-policy gated; see
 [`company-brain-write-routing.md`](company-brain-write-routing.md).
 Migration 0261 is a rolling function-only repair for the two released
 Knowledge-backed Ways adapters: canonical global/role instruction target
