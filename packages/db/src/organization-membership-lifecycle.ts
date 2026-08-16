@@ -6,6 +6,7 @@ import {
   OrganizationInvitation,
   OrganizationMember,
   OrganizationRetentionDeletionClaim,
+  OrganizationRetentionDatabaseFinalization,
   OrganizationRetentionDeletionObject,
   OrganizationRetentionDeletionPreview,
   OrganizationRetentionDeletionResult,
@@ -14,6 +15,7 @@ import {
   type OrganizationMember as OrganizationMemberType,
   type OrganizationMembershipRole,
   type OrganizationRetentionDeletionClaim as OrganizationRetentionDeletionClaimType,
+  type OrganizationRetentionDatabaseFinalization as OrganizationRetentionDatabaseFinalizationType,
   type OrganizationRetentionDeletionObject as OrganizationRetentionDeletionObjectType,
   type OrganizationRetentionDeletionPreview as OrganizationRetentionDeletionPreviewType,
   type OrganizationRetentionDeletionResult as OrganizationRetentionDeletionResultType,
@@ -319,7 +321,6 @@ export async function listOrganizationRetentionDeletionObjects(
     organizationId: string;
     membershipId: string;
     operationId: string;
-    afterFileId?: string;
     limit?: number;
   },
 ): Promise<OrganizationRetentionDeletionObjectType[]> {
@@ -330,7 +331,6 @@ export async function listOrganizationRetentionDeletionObjects(
         ${input.organizationId}::uuid,
         ${input.membershipId}::uuid,
         ${input.operationId}::uuid,
-        ${input.afterFileId ?? null}::uuid,
         ${input.limit ?? 100}
       ) as result`,
     );
@@ -344,7 +344,8 @@ export async function recordOrganizationRetentionObjectDeleted(
     organizationId: string;
     membershipId: string;
     operationId: string;
-    fileId: string;
+    objectKind: OrganizationRetentionDeletionObjectType["objectKind"];
+    sourceId: string;
     objectKey: string;
   },
 ): Promise<boolean> {
@@ -355,7 +356,8 @@ export async function recordOrganizationRetentionObjectDeleted(
         ${input.organizationId}::uuid,
         ${input.membershipId}::uuid,
         ${input.operationId}::uuid,
-        ${input.fileId}::uuid,
+        ${input.objectKind},
+        ${input.sourceId},
         ${input.objectKey}
       ) as result`,
     );
@@ -389,11 +391,28 @@ export async function failOrganizationRetentionDeletion(
 export async function finalizeOrganizationRetentionDeletion(
   db: Database,
   input: { organizationId: string; membershipId: string; operationId: string },
-): Promise<OrganizationRetentionDeletionResultType> {
+): Promise<OrganizationRetentionDatabaseFinalizationType> {
   return await runRetentionCapability(db, input.organizationId, async (scopedDb) => {
     const [row] = await rawRows<{ result: unknown }>(
       scopedDb,
       sql`select finalize_organization_retention_deletion(
+        ${input.organizationId}::uuid,
+        ${input.membershipId}::uuid,
+        ${input.operationId}::uuid
+      ) as result`,
+    );
+    return OrganizationRetentionDatabaseFinalization.parse(row?.result);
+  });
+}
+
+export async function completeOrganizationRetentionDeletion(
+  db: Database,
+  input: { organizationId: string; membershipId: string; operationId: string },
+): Promise<OrganizationRetentionDeletionResultType> {
+  return await runRetentionCapability(db, input.organizationId, async (scopedDb) => {
+    const [row] = await rawRows<{ result: unknown }>(
+      scopedDb,
+      sql`select complete_organization_retention_deletion(
         ${input.organizationId}::uuid,
         ${input.membershipId}::uuid,
         ${input.operationId}::uuid

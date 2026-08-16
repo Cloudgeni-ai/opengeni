@@ -1,6 +1,7 @@
 import { dbSearchPath, getSettings } from "@opengeni/config";
 import {
   claimOrganizationRetentionDeletion,
+  completeOrganizationRetentionDeletion,
   createDb,
   failOrganizationRetentionDeletion,
   finalizeOrganizationRetentionDeletion,
@@ -11,6 +12,7 @@ import {
 } from "@opengeni/db";
 import type {
   OrganizationRetentionDeletionClaim,
+  OrganizationRetentionDatabaseFinalization,
   OrganizationRetentionDeletionObject,
   OrganizationRetentionDeletionPreview,
   OrganizationRetentionDeletionResult,
@@ -38,10 +40,16 @@ export type OrganizationRetentionSweepPorts = Readonly<{
     organizationId: string;
     membershipId: string;
     operationId: string;
-    fileId: string;
+    objectKind: OrganizationRetentionDeletionObject["objectKind"];
+    sourceId: string;
     objectKey: string;
   }) => Promise<boolean>;
-  finalize: (input: {
+  finalizeDatabase: (input: {
+    organizationId: string;
+    membershipId: string;
+    operationId: string;
+  }) => Promise<OrganizationRetentionDatabaseFinalization>;
+  complete: (input: {
     organizationId: string;
     membershipId: string;
     operationId: string;
@@ -90,6 +98,11 @@ export async function runOrganizationRetentionSweep(
     if (!claim) break;
     attemptedMembershipIds.push(claim.membershipId);
     try {
+      await ports.finalizeDatabase({
+        organizationId: input.organizationId,
+        membershipId: claim.membershipId,
+        operationId,
+      });
       for (;;) {
         const objects = await ports.listObjects({
           organizationId: input.organizationId,
@@ -104,13 +117,14 @@ export async function runOrganizationRetentionSweep(
             organizationId: input.organizationId,
             membershipId: claim.membershipId,
             operationId,
-            fileId: object.fileId,
+            objectKind: object.objectKind,
+            sourceId: object.sourceId,
             objectKey: object.objectKey,
           });
         }
       }
       completed.push(
-        await ports.finalize({
+        await ports.complete({
           organizationId: input.organizationId,
           membershipId: claim.membershipId,
           operationId,
@@ -169,8 +183,10 @@ async function main(): Promise<void> {
         deleteObject: async (objectKey) => await storage!.deleteObject(objectKey),
         recordObjectDeleted: async (request) =>
           await recordOrganizationRetentionObjectDeleted(client.db, request),
-        finalize: async (request) =>
+        finalizeDatabase: async (request) =>
           await finalizeOrganizationRetentionDeletion(client.db, request),
+        complete: async (request) =>
+          await completeOrganizationRetentionDeletion(client.db, request),
         fail: async (request) => await failOrganizationRetentionDeletion(client.db, request),
         newOperationId: () => crypto.randomUUID(),
       },

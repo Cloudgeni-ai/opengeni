@@ -161,6 +161,8 @@ CREATE TABLE "organization_user_retention_deletions" (
   "claim_operation_id" uuid NOT NULL,
   "claim_expires_at" timestamptz NOT NULL,
   "attempt_count" integer NOT NULL DEFAULT 1,
+  "database_result" jsonb,
+  "database_finalized_at" timestamptz,
   "result" jsonb,
   "completed_at" timestamptz,
   "updated_at" timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -176,6 +178,10 @@ CREATE TABLE "organization_user_retention_deletions" (
   CONSTRAINT "organization_user_retention_deletions_completion_check" CHECK (
     ("state" = 'completed' AND "completed_at" IS NOT NULL AND "result" IS NOT NULL)
     OR ("state" <> 'completed' AND "completed_at" IS NULL AND "result" IS NULL)
+  ),
+  CONSTRAINT "organization_retention_deletions_db_finalized_chk" CHECK (
+    ("database_finalized_at" IS NULL AND "database_result" IS NULL)
+    OR ("database_finalized_at" IS NOT NULL AND "database_result" IS NOT NULL)
   )
 );
 CREATE UNIQUE INDEX "organization_user_retention_deletions_operation_uq"
@@ -186,21 +192,50 @@ CREATE INDEX "organization_memberships_retention_due_idx"
   ON "organization_memberships" ("account_id", "personal_retention_until", "id")
   WHERE "status" = 'revoked' AND "personal_retention_until" IS NOT NULL;
 
-CREATE TABLE "organization_user_retention_object_receipts" (
+CREATE TABLE "organization_user_retention_object_obligations" (
   "account_id" uuid NOT NULL,
   "membership_id" uuid NOT NULL,
-  "file_id" uuid NOT NULL,
-  "operation_id" uuid NOT NULL,
+  "object_kind" text NOT NULL,
+  "source_id" text NOT NULL,
+  "object_key" text NOT NULL,
+  "prepared_operation_id" uuid NOT NULL,
   "object_key_hash" text NOT NULL,
-  "deleted_at" timestamptz NOT NULL DEFAULT clock_timestamp(),
-  CONSTRAINT "organization_user_retention_object_receipts_pk"
-    PRIMARY KEY ("account_id", "membership_id", "file_id"),
-  CONSTRAINT "organization_user_retention_object_receipts_deletion_fk"
+  "prepared_at" timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT "organization_user_retention_object_obligations_pk"
+    PRIMARY KEY ("account_id", "membership_id", "object_kind", "source_id"),
+  CONSTRAINT "organization_retention_object_obligations_deletion_fk"
     FOREIGN KEY ("account_id", "membership_id")
     REFERENCES "organization_user_retention_deletions"("account_id", "membership_id")
     ON DELETE RESTRICT,
-  CONSTRAINT "organization_user_retention_object_receipts_hash_check"
-    CHECK ("object_key_hash" ~ '^[0-9a-f]{64}$')
+  CONSTRAINT "organization_user_retention_object_obligations_hash_check"
+    CHECK ("object_key_hash" ~ '^[0-9a-f]{64}$'),
+  CONSTRAINT "organization_user_retention_object_obligations_shape_check" CHECK (
+    "object_kind" IN (
+      'file', 'session_recording', 'browser_state_artifact', 'browser_state_upload',
+      'transcription_recording_object', 'video_staging_reference',
+      'workspace_artifact_version', 'editable_artifact_blob',
+      'workspace_capture_manifest', 'workspace_capture_tree_index',
+      'workspace_capture_blob'
+    )
+    AND octet_length("source_id") BETWEEN 1 AND 2048
+    AND octet_length(convert_to("object_key", 'UTF8')) BETWEEN 1 AND 4096
+  )
+);
+
+CREATE TABLE "organization_user_retention_object_deletion_receipts" (
+  "account_id" uuid NOT NULL,
+  "membership_id" uuid NOT NULL,
+  "object_kind" text NOT NULL,
+  "source_id" text NOT NULL,
+  "operation_id" uuid NOT NULL,
+  "deleted_at" timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT "organization_user_retention_object_deletion_receipts_pk"
+    PRIMARY KEY ("account_id", "membership_id", "object_kind", "source_id"),
+  CONSTRAINT "organization_retention_object_deletions_obligation_fk"
+    FOREIGN KEY ("account_id", "membership_id", "object_kind", "source_id")
+    REFERENCES "organization_user_retention_object_obligations"(
+      "account_id", "membership_id", "object_kind", "source_id"
+    ) ON DELETE RESTRICT
 );
 
 CREATE TABLE "organization_user_retention_deletion_events" (
@@ -233,8 +268,10 @@ ALTER TABLE "organization_membership_lifecycle_events" ENABLE ROW LEVEL SECURITY
 ALTER TABLE "organization_membership_lifecycle_events" FORCE ROW LEVEL SECURITY;
 ALTER TABLE "organization_user_retention_deletions" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "organization_user_retention_deletions" FORCE ROW LEVEL SECURITY;
-ALTER TABLE "organization_user_retention_object_receipts" ENABLE ROW LEVEL SECURITY;
-ALTER TABLE "organization_user_retention_object_receipts" FORCE ROW LEVEL SECURITY;
+ALTER TABLE "organization_user_retention_object_obligations" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "organization_user_retention_object_obligations" FORCE ROW LEVEL SECURITY;
+ALTER TABLE "organization_user_retention_object_deletion_receipts" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "organization_user_retention_object_deletion_receipts" FORCE ROW LEVEL SECURITY;
 ALTER TABLE "organization_user_retention_deletion_events" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "organization_user_retention_deletion_events" FORCE ROW LEVEL SECURITY;
 
@@ -283,7 +320,12 @@ CREATE POLICY organization_tenancy_lifecycle ON "organization_user_retention_del
     = 'organization_membership_lifecycle')
   WITH CHECK (current_setting('opengeni.organization_tenancy_lifecycle', true)
     = 'organization_membership_lifecycle');
-CREATE POLICY organization_tenancy_lifecycle ON "organization_user_retention_object_receipts"
+CREATE POLICY organization_tenancy_lifecycle ON "organization_user_retention_object_obligations"
+  USING (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    = 'organization_membership_lifecycle')
+  WITH CHECK (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    = 'organization_membership_lifecycle');
+CREATE POLICY organization_tenancy_lifecycle ON "organization_user_retention_object_deletion_receipts"
   USING (current_setting('opengeni.organization_tenancy_lifecycle', true)
     = 'organization_membership_lifecycle')
   WITH CHECK (current_setting('opengeni.organization_tenancy_lifecycle', true)
@@ -1246,6 +1288,116 @@ AS $body$
   ORDER BY file.id
 $body$;
 
+-- Closed inventory of every @opengeni/storage key whose owning metadata is
+-- removed with a personal workspace. Provider-native sandbox checkpoint
+-- artifacts deliberately do not appear here: their global GC rows survive
+-- workspace deletion and remain the sole provider-bound deletion authority.
+CREATE OR REPLACE FUNCTION opengeni_private.organization_retention_object_candidates(
+  p_account_id uuid,
+  p_membership_id uuid
+) RETURNS TABLE(object_kind text, source_id text, object_key text)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+  WITH member AS (
+    SELECT membership.personal_workspace_id
+    FROM organization_memberships membership
+    WHERE membership.account_id = p_account_id
+      AND membership.id = p_membership_id
+  )
+  SELECT 'file'::text, candidate.file_id::text, candidate.object_key
+  FROM opengeni_private.organization_retention_file_candidates(
+    p_account_id, p_membership_id
+  ) candidate
+  UNION ALL
+  SELECT 'session_recording', recording.id::text, recording.storage_key
+  FROM session_recordings recording CROSS JOIN member
+  WHERE recording.account_id = p_account_id
+    AND recording.workspace_id = member.personal_workspace_id
+    AND recording.storage_key IS NOT NULL
+  UNION ALL
+  SELECT 'browser_state_artifact', artifact.id::text, artifact.object_key
+  FROM browser_state_artifacts artifact CROSS JOIN member
+  WHERE artifact.account_id = p_account_id
+    AND artifact.workspace_id = member.personal_workspace_id
+    AND artifact.state <> 'deleted'
+  UNION ALL
+  SELECT 'browser_state_upload', upload.id::text, upload.object_key
+  FROM browser_state_uploads upload CROSS JOIN member
+  WHERE upload.account_id = p_account_id
+    AND upload.workspace_id = member.personal_workspace_id
+    AND upload.state <> 'deleted'
+    AND (
+      upload.state <> 'committed'
+      OR NOT EXISTS (
+        SELECT 1
+        FROM browser_state_artifacts committed
+        WHERE committed.account_id = upload.account_id
+          AND committed.workspace_id = upload.workspace_id
+          AND committed.id = upload.committed_artifact_id
+          AND committed.object_key = upload.object_key
+          AND committed.state <> 'deleted'
+      )
+    )
+  UNION ALL
+  SELECT 'transcription_recording_object',
+    recording_object.recording_id::text || ':' || encode(
+      digest(recording_object.object_key, 'sha256'), 'hex'
+    ),
+    recording_object.object_key
+  FROM transcription_recording_objects recording_object CROSS JOIN member
+  WHERE recording_object.account_id = p_account_id
+    AND recording_object.workspace_id = member.personal_workspace_id
+    AND recording_object.cleaned_at IS NULL
+  UNION ALL
+  SELECT 'video_staging_reference',
+    reference.operation_id::text || ':' || reference.ordinal::text,
+    reference.staging_object_key
+  FROM video_generation_references reference CROSS JOIN member
+  WHERE reference.account_id = p_account_id
+    AND reference.workspace_id = member.personal_workspace_id
+    AND reference.staging_object_key IS NOT NULL
+    AND reference.cleaned_at IS NULL
+  UNION ALL
+  SELECT 'workspace_artifact_version', version.id::text, version.content_key
+  FROM workspace_artifact_versions version CROSS JOIN member
+  WHERE version.account_id = p_account_id
+    AND version.workspace_id = member.personal_workspace_id
+  UNION ALL
+  SELECT 'editable_artifact_blob',
+    blob.artifact_id || ':' || blob.id,
+    blob.object_reference
+  FROM editable_artifact_blob_refs blob CROSS JOIN member
+  WHERE blob.account_id = p_account_id
+    AND blob.workspace_id = member.personal_workspace_id
+  UNION ALL
+  SELECT 'workspace_capture_manifest', capture.id::text, capture.manifest_key
+  FROM workspace_captures capture CROSS JOIN member
+  WHERE capture.account_id = p_account_id
+    AND capture.workspace_id = member.personal_workspace_id
+    AND capture.manifest_key IS NOT NULL
+  UNION ALL
+  SELECT 'workspace_capture_tree_index', capture.id::text, capture.tree_index_key
+  FROM workspace_captures capture CROSS JOIN member
+  WHERE capture.account_id = p_account_id
+    AND capture.workspace_id = member.personal_workspace_id
+    AND capture.tree_index_key IS NOT NULL
+  UNION ALL
+  SELECT 'workspace_capture_blob',
+    capture.id::text || ':' || blob.ordinality::text,
+    blob.value #>> '{}'
+  FROM workspace_captures capture CROSS JOIN member
+  CROSS JOIN LATERAL jsonb_array_elements(
+    CASE WHEN jsonb_typeof(capture.blob_keys) = 'array'
+      THEN capture.blob_keys ELSE '[]'::jsonb END
+  ) WITH ORDINALITY AS blob(value, ordinality)
+  WHERE capture.account_id = p_account_id
+    AND capture.workspace_id = member.personal_workspace_id
+    AND jsonb_typeof(blob.value) = 'string'
+  ORDER BY 1, 2
+$body$;
+
 CREATE OR REPLACE FUNCTION preview_organization_retention_deletions(
   p_account_id uuid,
   p_limit integer DEFAULT 25
@@ -1276,10 +1428,25 @@ BEGIN
       (SELECT count(*)::integer FROM organization_user_resource_authorities authority
        WHERE authority.account_id = p_account_id
          AND authority.organization_membership_id = membership.id) AS resource_count,
-      (SELECT count(*)::integer
-       FROM opengeni_private.organization_retention_file_candidates(
-         p_account_id, membership.id
-       )) AS object_count
+      CASE WHEN deletion.database_finalized_at IS NOT NULL THEN
+        (SELECT count(*)::integer
+         FROM organization_user_retention_object_obligations receipt
+         WHERE receipt.account_id = p_account_id
+           AND receipt.membership_id = membership.id
+           AND NOT EXISTS (
+             SELECT 1
+             FROM organization_user_retention_object_deletion_receipts deleted
+             WHERE deleted.account_id = receipt.account_id
+               AND deleted.membership_id = receipt.membership_id
+               AND deleted.object_kind = receipt.object_kind
+               AND deleted.source_id = receipt.source_id
+           ))
+      ELSE
+        (SELECT count(*)::integer
+         FROM opengeni_private.organization_retention_object_candidates(
+           p_account_id, membership.id
+         ))
+      END AS object_count
     FROM organization_memberships membership
     LEFT JOIN organization_user_retention_deletions deletion
       ON deletion.account_id = membership.account_id
@@ -1384,10 +1551,16 @@ BEGIN
     updated_at = clock_timestamp()
   RETURNING * INTO deletion;
 
-  SELECT count(*)::integer INTO object_count
-  FROM opengeni_private.organization_retention_file_candidates(p_account_id, member.id);
+  IF deletion.database_finalized_at IS NULL THEN
+    SELECT count(*)::integer INTO object_count
+    FROM opengeni_private.organization_retention_object_candidates(p_account_id, member.id);
+  ELSE
+    SELECT count(*)::integer INTO object_count
+    FROM organization_user_retention_object_obligations receipt
+    WHERE receipt.account_id = p_account_id AND receipt.membership_id = member.id;
+  END IF;
   SELECT count(*)::integer INTO deleted_object_count
-  FROM organization_user_retention_object_receipts receipt
+  FROM organization_user_retention_object_deletion_receipts receipt
   WHERE receipt.account_id = p_account_id AND receipt.membership_id = member.id;
   result_value := pg_catalog.jsonb_build_object(
     'organizationId', p_account_id,
@@ -1410,7 +1583,6 @@ CREATE OR REPLACE FUNCTION list_organization_retention_deletion_objects(
   p_account_id uuid,
   p_membership_id uuid,
   p_operation_id uuid,
-  p_after_file_id uuid DEFAULT NULL,
   p_limit integer DEFAULT 100
 ) RETURNS jsonb
 LANGUAGE plpgsql
@@ -1431,27 +1603,31 @@ BEGIN
     AND deletion.membership_id = p_membership_id
     AND deletion.claim_operation_id = p_operation_id
     AND deletion.state = 'claimed'
-    AND deletion.claim_expires_at > clock_timestamp();
+    AND deletion.claim_expires_at > clock_timestamp()
+    AND deletion.database_finalized_at IS NOT NULL;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'retention deletion claim is stale' USING ERRCODE = '40001';
   END IF;
   SELECT COALESCE(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
-    'fileId', candidate.file_id, 'objectKey', candidate.object_key
-  ) ORDER BY candidate.file_id), '[]'::jsonb)
+    'objectKind', candidate.object_kind,
+    'sourceId', candidate.source_id,
+    'objectKey', candidate.object_key
+  ) ORDER BY candidate.object_kind, candidate.source_id), '[]'::jsonb)
   INTO result
   FROM (
-    SELECT candidate.file_id, candidate.object_key
-    FROM opengeni_private.organization_retention_file_candidates(
-      p_account_id, p_membership_id
-    ) candidate
-    WHERE (p_after_file_id IS NULL OR candidate.file_id > p_after_file_id)
+    SELECT receipt.object_kind, receipt.source_id, receipt.object_key
+    FROM organization_user_retention_object_obligations receipt
+    WHERE receipt.account_id = p_account_id
+      AND receipt.membership_id = p_membership_id
       AND NOT EXISTS (
-        SELECT 1 FROM organization_user_retention_object_receipts receipt
-        WHERE receipt.account_id = p_account_id
-          AND receipt.membership_id = p_membership_id
-          AND receipt.file_id = candidate.file_id
+        SELECT 1
+        FROM organization_user_retention_object_deletion_receipts deleted
+        WHERE deleted.account_id = receipt.account_id
+          AND deleted.membership_id = receipt.membership_id
+          AND deleted.object_kind = receipt.object_kind
+          AND deleted.source_id = receipt.source_id
       )
-    ORDER BY candidate.file_id
+    ORDER BY receipt.object_kind, receipt.source_id
     LIMIT p_limit
   ) candidate;
   RETURN result;
@@ -1462,16 +1638,26 @@ CREATE OR REPLACE FUNCTION record_organization_retention_object_deleted(
   p_account_id uuid,
   p_membership_id uuid,
   p_operation_id uuid,
-  p_file_id uuid,
+  p_object_kind text,
+  p_source_id text,
   p_object_key text
 ) RETURNS boolean
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path FROM CURRENT
 AS $body$
-DECLARE expected_key text; existing organization_user_retention_object_receipts%ROWTYPE;
+DECLARE obligation organization_user_retention_object_obligations%ROWTYPE;
 BEGIN
-  IF nullif(p_object_key, '') IS NULL
+  IF p_object_kind NOT IN (
+      'file', 'session_recording', 'browser_state_artifact', 'browser_state_upload',
+      'transcription_recording_object', 'video_staging_reference',
+      'workspace_artifact_version', 'editable_artifact_blob',
+      'workspace_capture_manifest', 'workspace_capture_tree_index',
+      'workspace_capture_blob'
+    )
+    OR nullif(p_source_id, '') IS NULL
+    OR octet_length(convert_to(p_source_id, 'UTF8')) > 2048
+    OR nullif(p_object_key, '') IS NULL
     OR octet_length(convert_to(p_object_key, 'UTF8')) > 4096
   THEN RAISE EXCEPTION 'invalid retention object key' USING ERRCODE = '22023'; END IF;
   PERFORM pg_catalog.set_config(
@@ -1483,33 +1669,27 @@ BEGIN
     AND deletion.membership_id = p_membership_id
     AND deletion.claim_operation_id = p_operation_id
     AND deletion.state = 'claimed'
-    AND deletion.claim_expires_at > clock_timestamp();
+    AND deletion.claim_expires_at > clock_timestamp()
+    AND deletion.database_finalized_at IS NOT NULL;
   IF NOT FOUND THEN RAISE EXCEPTION 'retention deletion claim is stale' USING ERRCODE = '40001'; END IF;
-  SELECT candidate.object_key INTO expected_key
-  FROM opengeni_private.organization_retention_file_candidates(
-    p_account_id, p_membership_id
-  ) candidate
-  WHERE candidate.file_id = p_file_id;
-  IF NOT FOUND OR expected_key IS DISTINCT FROM p_object_key THEN
-    RAISE EXCEPTION 'retention object is outside the exact claim' USING ERRCODE = '42501';
-  END IF;
-  SELECT * INTO existing FROM organization_user_retention_object_receipts receipt
+  SELECT * INTO obligation
+  FROM organization_user_retention_object_obligations receipt
   WHERE receipt.account_id = p_account_id
     AND receipt.membership_id = p_membership_id
-    AND receipt.file_id = p_file_id;
-  IF FOUND THEN
-    IF existing.object_key_hash <> encode(digest(p_object_key, 'sha256'), 'hex') THEN
-      RAISE EXCEPTION 'retention object receipt mismatch' USING ERRCODE = '55000';
-    END IF;
-    RETURN false;
+    AND receipt.object_kind = p_object_kind
+    AND receipt.source_id = p_source_id
+  FOR UPDATE;
+  IF NOT FOUND OR obligation.object_key IS DISTINCT FROM p_object_key
+    OR obligation.object_key_hash <> encode(digest(p_object_key, 'sha256'), 'hex')
+  THEN
+    RAISE EXCEPTION 'retention object is outside the exact claim' USING ERRCODE = '42501';
   END IF;
-  INSERT INTO organization_user_retention_object_receipts (
-    account_id, membership_id, file_id, operation_id, object_key_hash
+  INSERT INTO organization_user_retention_object_deletion_receipts (
+    account_id, membership_id, object_kind, source_id, operation_id
   ) VALUES (
-    p_account_id, p_membership_id, p_file_id, p_operation_id,
-    encode(digest(p_object_key, 'sha256'), 'hex')
-  );
-  RETURN true;
+    p_account_id, p_membership_id, p_object_kind, p_source_id, p_operation_id
+  ) ON CONFLICT (account_id, membership_id, object_kind, source_id) DO NOTHING;
+  RETURN FOUND;
 END
 $body$;
 
@@ -1581,6 +1761,7 @@ DECLARE
   deleted_xai integer := 0;
   tombstoned_machines integer := 0;
   deleted_workspace integer := 0;
+  object_count integer := 0;
   locked_personal_workspace_id uuid;
   result_value jsonb;
 BEGIN
@@ -1590,7 +1771,13 @@ BEGIN
   SELECT * INTO prior_event FROM organization_user_retention_deletion_events event
   WHERE event.account_id = p_account_id AND event.operation_id = p_operation_id
     AND event.kind = 'completed';
-  IF FOUND THEN RETURN prior_event.result; END IF;
+  IF FOUND THEN
+    SELECT candidate.database_result INTO result_value
+    FROM organization_user_retention_deletions candidate
+    WHERE candidate.account_id = p_account_id
+      AND candidate.membership_id = p_membership_id;
+    RETURN result_value;
+  END IF;
   SELECT * INTO member FROM organization_memberships membership
   WHERE membership.account_id = p_account_id AND membership.id = p_membership_id;
   IF NOT FOUND OR member.status <> 'revoked'
@@ -1626,6 +1813,14 @@ BEGIN
   IF deletion.retention_until IS DISTINCT FROM member.personal_retention_until THEN
     RAISE EXCEPTION 'retention deadline changed after claim' USING ERRCODE = '40001';
   END IF;
+  IF deletion.database_finalized_at IS NOT NULL THEN
+    RETURN pg_catalog.jsonb_set(
+      deletion.database_result,
+      '{operationId}',
+      pg_catalog.to_jsonb(p_operation_id::text),
+      false
+    );
+  END IF;
   IF member.personal_workspace_id IS NOT NULL AND EXISTS (
     SELECT 1
     FROM documents document
@@ -1645,20 +1840,23 @@ BEGIN
     RAISE EXCEPTION 'personal workspace contains retained external document authority'
       USING ERRCODE = '55000';
   END IF;
-  IF EXISTS (
+  IF member.personal_workspace_id IS NOT NULL AND EXISTS (
     SELECT 1
-    FROM opengeni_private.organization_retention_file_candidates(
-      p_account_id, p_membership_id
-    ) candidate
-    WHERE NOT EXISTS (
-      SELECT 1 FROM organization_user_retention_object_receipts receipt
-      WHERE receipt.account_id = p_account_id
-        AND receipt.membership_id = p_membership_id
-        AND receipt.file_id = candidate.file_id
-        AND receipt.object_key_hash = encode(digest(candidate.object_key, 'sha256'), 'hex')
-    )
+    FROM workspace_captures capture
+    WHERE capture.account_id = p_account_id
+      AND capture.workspace_id = member.personal_workspace_id
+      AND (
+        pg_catalog.jsonb_typeof(capture.blob_keys) <> 'array'
+        OR CASE WHEN pg_catalog.jsonb_typeof(capture.blob_keys) = 'array' THEN EXISTS (
+            SELECT 1
+            FROM pg_catalog.jsonb_array_elements(capture.blob_keys) blob(value)
+            WHERE pg_catalog.jsonb_typeof(blob.value) <> 'string'
+              OR octet_length(convert_to(blob.value #>> '{}', 'UTF8')) NOT BETWEEN 1 AND 4096
+          ) ELSE false END
+      )
   ) THEN
-    RAISE EXCEPTION 'retention objects remain undeleted' USING ERRCODE = '55000';
+    RAISE EXCEPTION 'personal workspace contains malformed external object inventory'
+      USING ERRCODE = '55000';
   END IF;
   SELECT authority.resource_kind INTO unsupported_kind
   FROM organization_user_resource_authorities authority
@@ -1682,6 +1880,55 @@ BEGIN
   FROM opengeni_private.organization_retention_file_candidates(
     p_account_id, p_membership_id
   ) candidate;
+  PERFORM 1 FROM files file
+  WHERE file.account_id = p_account_id AND file.id = ANY(candidate_file_ids)
+  ORDER BY file.id FOR UPDATE;
+  -- Freeze every external-key source before materializing obligations. The
+  -- workspace row above excludes new FK children; these row locks exclude key
+  -- rotation while exact obligations are copied and the workspace is erased.
+  PERFORM 1 FROM session_recordings recording
+  WHERE recording.account_id = p_account_id
+    AND recording.workspace_id = member.personal_workspace_id
+  ORDER BY recording.id FOR UPDATE;
+  PERFORM 1 FROM browser_state_artifacts artifact
+  WHERE artifact.account_id = p_account_id
+    AND artifact.workspace_id = member.personal_workspace_id
+  ORDER BY artifact.id FOR UPDATE;
+  PERFORM 1 FROM browser_state_uploads upload
+  WHERE upload.account_id = p_account_id
+    AND upload.workspace_id = member.personal_workspace_id
+  ORDER BY upload.id FOR UPDATE;
+  PERFORM 1 FROM transcription_recording_objects recording_object
+  WHERE recording_object.account_id = p_account_id
+    AND recording_object.workspace_id = member.personal_workspace_id
+  ORDER BY recording_object.object_key FOR UPDATE;
+  PERFORM 1 FROM video_generation_references reference
+  WHERE reference.account_id = p_account_id
+    AND reference.workspace_id = member.personal_workspace_id
+  ORDER BY reference.operation_id, reference.ordinal FOR UPDATE;
+  PERFORM 1 FROM workspace_artifact_versions version
+  WHERE version.account_id = p_account_id
+    AND version.workspace_id = member.personal_workspace_id
+  ORDER BY version.id FOR UPDATE;
+  PERFORM 1 FROM editable_artifact_blob_refs blob
+  WHERE blob.account_id = p_account_id
+    AND blob.workspace_id = member.personal_workspace_id
+  ORDER BY blob.artifact_id, blob.id FOR UPDATE;
+  PERFORM 1 FROM workspace_captures capture
+  WHERE capture.account_id = p_account_id
+    AND capture.workspace_id = member.personal_workspace_id
+  ORDER BY capture.id FOR UPDATE;
+  INSERT INTO organization_user_retention_object_obligations (
+    account_id, membership_id, object_kind, source_id, object_key,
+    prepared_operation_id, object_key_hash
+  )
+  SELECT p_account_id, p_membership_id, candidate.object_kind,
+    candidate.source_id, candidate.object_key, p_operation_id,
+    encode(digest(candidate.object_key, 'sha256'), 'hex')
+  FROM opengeni_private.organization_retention_object_candidates(
+    p_account_id, p_membership_id
+  ) candidate;
+  GET DIAGNOSTICS object_count = ROW_COUNT;
 
   DELETE FROM documents document
   USING organization_user_resource_authorities authority
@@ -1813,7 +2060,8 @@ BEGIN
     'organizationId', p_account_id,
     'membershipId', p_membership_id,
     'operationId', p_operation_id,
-    'outcome', 'completed',
+    'outcome', 'cleanup_pending',
+    'objectCount', object_count,
     'deletedResources', pg_catalog.jsonb_build_object(
       'documents', deleted_documents, 'files', deleted_files,
       'variableSets', deleted_variable_sets, 'rigs', deleted_rigs,
@@ -1821,6 +2069,81 @@ BEGIN
       'xaiSubscriptions', deleted_xai, 'connectedMachinesTombstoned', tombstoned_machines,
       'personalWorkspaces', deleted_workspace
     ),
+    'databaseFinalizedAt', clock_timestamp()
+  );
+  UPDATE organization_user_retention_deletions current_deletion
+  SET database_result = result_value, database_finalized_at = clock_timestamp(),
+    claim_expires_at = clock_timestamp() + interval '15 minutes',
+    updated_at = clock_timestamp()
+  WHERE current_deletion.account_id = p_account_id
+    AND current_deletion.membership_id = p_membership_id
+    AND current_deletion.claim_operation_id = p_operation_id;
+  RETURN result_value;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION complete_organization_retention_deletion(
+  p_account_id uuid,
+  p_membership_id uuid,
+  p_operation_id uuid
+) RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE
+  deletion organization_user_retention_deletions%ROWTYPE;
+  prior_event organization_user_retention_deletion_events%ROWTYPE;
+  result_value jsonb;
+  object_count integer;
+BEGIN
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true
+  );
+  SELECT * INTO prior_event
+  FROM organization_user_retention_deletion_events event
+  WHERE event.account_id = p_account_id
+    AND event.operation_id = p_operation_id
+    AND event.kind = 'completed';
+  IF FOUND THEN RETURN prior_event.result; END IF;
+  SELECT * INTO deletion
+  FROM organization_user_retention_deletions candidate
+  WHERE candidate.account_id = p_account_id
+    AND candidate.membership_id = p_membership_id
+  FOR UPDATE;
+  IF NOT FOUND OR deletion.state <> 'claimed'
+    OR deletion.claim_operation_id <> p_operation_id
+    OR deletion.claim_expires_at <= clock_timestamp()
+    OR deletion.database_finalized_at IS NULL
+  THEN
+    RAISE EXCEPTION 'retention deletion claim is stale' USING ERRCODE = '40001';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM organization_user_retention_object_obligations receipt
+    WHERE receipt.account_id = p_account_id
+      AND receipt.membership_id = p_membership_id
+      AND NOT EXISTS (
+        SELECT 1
+        FROM organization_user_retention_object_deletion_receipts deleted
+        WHERE deleted.account_id = receipt.account_id
+          AND deleted.membership_id = receipt.membership_id
+          AND deleted.object_kind = receipt.object_kind
+          AND deleted.source_id = receipt.source_id
+      )
+  ) THEN
+    RAISE EXCEPTION 'retention object cleanup remains incomplete' USING ERRCODE = '55000';
+  END IF;
+  SELECT count(*)::integer INTO object_count
+  FROM organization_user_retention_object_obligations receipt
+  WHERE receipt.account_id = p_account_id
+    AND receipt.membership_id = p_membership_id;
+  result_value := pg_catalog.jsonb_build_object(
+    'organizationId', p_account_id,
+    'membershipId', p_membership_id,
+    'operationId', p_operation_id,
+    'outcome', 'completed',
+    'deletedResources', deletion.database_result -> 'deletedResources'
+      || pg_catalog.jsonb_build_object('externalObjects', object_count),
     'completedAt', clock_timestamp()
   );
   UPDATE organization_user_retention_deletions current_deletion
@@ -1882,6 +2205,10 @@ BEGIN
     data_schema
   );
   EXECUTE format(
+    'ALTER FUNCTION opengeni_private.organization_retention_object_candidates(uuid,uuid) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema
+  );
+  EXECUTE format(
     'ALTER FUNCTION %I.preview_organization_retention_deletions(uuid,integer) SET search_path = pg_catalog, %I, pg_temp',
     data_schema, data_schema
   );
@@ -1890,11 +2217,11 @@ BEGIN
     data_schema, data_schema
   );
   EXECUTE format(
-    'ALTER FUNCTION %I.list_organization_retention_deletion_objects(uuid,uuid,uuid,uuid,integer) SET search_path = pg_catalog, %I, pg_temp',
+    'ALTER FUNCTION %I.list_organization_retention_deletion_objects(uuid,uuid,uuid,integer) SET search_path = pg_catalog, %I, pg_temp',
     data_schema, data_schema
   );
   EXECUTE format(
-    'ALTER FUNCTION %I.record_organization_retention_object_deleted(uuid,uuid,uuid,uuid,text) SET search_path = pg_catalog, %I, pg_temp',
+    'ALTER FUNCTION %I.record_organization_retention_object_deleted(uuid,uuid,uuid,text,text,text) SET search_path = pg_catalog, %I, pg_temp',
     data_schema, data_schema
   );
   EXECUTE format(
@@ -1903,6 +2230,10 @@ BEGIN
   );
   EXECUTE format(
     'ALTER FUNCTION %I.finalize_organization_retention_deletion(uuid,uuid,uuid) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.complete_organization_retention_deletion(uuid,uuid,uuid) SET search_path = pg_catalog, %I, pg_temp',
     data_schema, data_schema
   );
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
@@ -1919,10 +2250,11 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.get_organization_retention_policy(uuid,text) TO opengeni_app', data_schema);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.preview_organization_retention_deletions(uuid,integer) TO opengeni_app', data_schema);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.claim_organization_retention_deletion(uuid,uuid,uuid[]) TO opengeni_app', data_schema);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_organization_retention_deletion_objects(uuid,uuid,uuid,uuid,integer) TO opengeni_app', data_schema);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.record_organization_retention_object_deleted(uuid,uuid,uuid,uuid,text) TO opengeni_app', data_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_organization_retention_deletion_objects(uuid,uuid,uuid,integer) TO opengeni_app', data_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.record_organization_retention_object_deleted(uuid,uuid,uuid,text,text,text) TO opengeni_app', data_schema);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.fail_organization_retention_deletion(uuid,uuid,uuid,text) TO opengeni_app', data_schema);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.finalize_organization_retention_deletion(uuid,uuid,uuid) TO opengeni_app', data_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.complete_organization_retention_deletion(uuid,uuid,uuid) TO opengeni_app', data_schema);
   END IF;
 END
 $pin_and_grant$;
@@ -1939,19 +2271,22 @@ REVOKE ALL ON FUNCTION list_organization_invitations(uuid,text,uuid,integer) FRO
 REVOKE ALL ON FUNCTION organization_membership_command(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION get_organization_retention_policy(uuid,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.organization_retention_file_candidates(uuid,uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.organization_retention_object_candidates(uuid,uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION preview_organization_retention_deletions(uuid,integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION claim_organization_retention_deletion(uuid,uuid,uuid[]) FROM PUBLIC;
-REVOKE ALL ON FUNCTION list_organization_retention_deletion_objects(uuid,uuid,uuid,uuid,integer) FROM PUBLIC;
-REVOKE ALL ON FUNCTION record_organization_retention_object_deleted(uuid,uuid,uuid,uuid,text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION list_organization_retention_deletion_objects(uuid,uuid,uuid,integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION record_organization_retention_object_deleted(uuid,uuid,uuid,text,text,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fail_organization_retention_deletion(uuid,uuid,uuid,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION finalize_organization_retention_deletion(uuid,uuid,uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION complete_organization_retention_deletion(uuid,uuid,uuid) FROM PUBLIC;
 
 REVOKE ALL ON TABLE organization_memberships FROM PUBLIC;
 REVOKE ALL ON TABLE organization_user_retention_policies FROM PUBLIC;
 REVOKE ALL ON TABLE organization_membership_invitations FROM PUBLIC;
 REVOKE ALL ON TABLE organization_membership_operation_receipts FROM PUBLIC;
 REVOKE ALL ON TABLE organization_user_retention_deletions FROM PUBLIC;
-REVOKE ALL ON TABLE organization_user_retention_object_receipts FROM PUBLIC;
+REVOKE ALL ON TABLE organization_user_retention_object_obligations FROM PUBLIC;
+REVOKE ALL ON TABLE organization_user_retention_object_deletion_receipts FROM PUBLIC;
 REVOKE ALL ON TABLE organization_user_retention_deletion_events FROM PUBLIC;
 DO $revoke_app_dml$
 BEGIN
@@ -1962,7 +2297,8 @@ BEGIN
     REVOKE ALL ON TABLE organization_membership_operation_receipts FROM opengeni_app;
     REVOKE ALL ON TABLE organization_membership_lifecycle_events FROM opengeni_app;
     REVOKE ALL ON TABLE organization_user_retention_deletions FROM opengeni_app;
-    REVOKE ALL ON TABLE organization_user_retention_object_receipts FROM opengeni_app;
+    REVOKE ALL ON TABLE organization_user_retention_object_obligations FROM opengeni_app;
+    REVOKE ALL ON TABLE organization_user_retention_object_deletion_receipts FROM opengeni_app;
     REVOKE ALL ON TABLE organization_user_retention_deletion_events FROM opengeni_app;
   END IF;
 END
@@ -1978,8 +2314,11 @@ CREATE TRIGGER organization_membership_operation_receipts_immutable
 CREATE TRIGGER organization_membership_lifecycle_events_immutable
   BEFORE UPDATE OR DELETE ON organization_membership_lifecycle_events
   FOR EACH ROW EXECUTE FUNCTION opengeni_private.organization_membership_history_immutable();
-CREATE TRIGGER organization_user_retention_object_receipts_immutable
-  BEFORE UPDATE OR DELETE ON organization_user_retention_object_receipts
+CREATE TRIGGER organization_user_retention_object_obligations_immutable
+  BEFORE UPDATE OR DELETE ON organization_user_retention_object_obligations
+  FOR EACH ROW EXECUTE FUNCTION opengeni_private.organization_membership_history_immutable();
+CREATE TRIGGER organization_user_retention_object_deletion_receipts_immutable
+  BEFORE UPDATE OR DELETE ON organization_user_retention_object_deletion_receipts
   FOR EACH ROW EXECUTE FUNCTION opengeni_private.organization_membership_history_immutable();
 CREATE TRIGGER organization_user_retention_deletion_events_immutable
   BEFORE UPDATE OR DELETE ON organization_user_retention_deletion_events
@@ -1993,7 +2332,9 @@ COMMENT ON TABLE organization_membership_lifecycle_events IS
   'Immutable value-bounded organization membership lifecycle audit evidence.';
 COMMENT ON TABLE organization_user_retention_deletions IS
   'Mutable, claim-fenced state for bounded destructive retention of one expired offboarded member.';
-COMMENT ON TABLE organization_user_retention_object_receipts IS
-  'Immutable content-free proof that an exact retained object key was deleted before database erasure.';
+COMMENT ON TABLE organization_user_retention_object_obligations IS
+  'Immutable exact-key cleanup obligations prepared by database-first retention finalization; protected lifecycle capability only.';
+COMMENT ON TABLE organization_user_retention_object_deletion_receipts IS
+  'Immutable content-free proof that one exact prepared retention cleanup obligation was deleted from external storage.';
 COMMENT ON TABLE organization_user_retention_deletion_events IS
   'Immutable content-free claim, failure and completion evidence for membership retention deletion.';

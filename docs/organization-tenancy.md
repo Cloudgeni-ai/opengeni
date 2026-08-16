@@ -204,10 +204,20 @@ the same command without `--dry-run` processes a bounded batch (`--limit`,
 default 10). Each member is claimed independently with `SKIP LOCKED`, exact
 operation and lease fences, so one provider failure records immutable
 content-free failure evidence without rolling back successful members.
-Object-storage keys are deleted before the matching SHA-256 receipt permits the
-database transaction to erase that user's personal workspace and supported
-personal resources. Unknown resource kinds fail closed; membership, lifecycle,
-grant/authority, object-receipt, and deletion-event evidence is retained.
+Database finalization first locks the personal workspace and every known
+storage-key source, materializes an immutable exact-key cleanup-obligation set,
+and erases that user's personal workspace and supported personal resources.
+Foreign-key checks therefore serialize concurrent retained consumers and abort
+before external bytes are touched. The operator then deletes only those
+prepared objects and records separate content-free completion receipts; a
+provider failure retries only unfinished obligations. The closed inventory
+covers Files, session recordings, browser-state uploads/artifacts,
+transcription and video staging objects, workspace artifact/editable blobs, and
+workspace-capture manifest/tree/blob payloads. Provider-native sandbox
+checkpoints remain under their surviving global GC authority. Unknown resource
+kinds or malformed/unrepresentable storage facts fail closed. Membership,
+lifecycle, grant/authority, cleanup-obligation, deletion-receipt, and event
+evidence is retained.
 
 Invitation, operation-receipt, and lifecycle-event tables are FORCE RLS with
 zero direct application-role DML. Target-schema-local SECURITY DEFINER routines

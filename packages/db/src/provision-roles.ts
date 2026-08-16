@@ -493,10 +493,11 @@ async function grantAppRoleIfSchemaExists(
     "get_organization_retention_policy(uuid,text)",
     "preview_organization_retention_deletions(uuid,integer)",
     "claim_organization_retention_deletion(uuid,uuid,uuid[])",
-    "list_organization_retention_deletion_objects(uuid,uuid,uuid,uuid,integer)",
-    "record_organization_retention_object_deleted(uuid,uuid,uuid,uuid,text)",
+    "list_organization_retention_deletion_objects(uuid,uuid,uuid,integer)",
+    "record_organization_retention_object_deleted(uuid,uuid,uuid,text,text,text)",
     "fail_organization_retention_deletion(uuid,uuid,uuid,text)",
     "finalize_organization_retention_deletion(uuid,uuid,uuid)",
+    "complete_organization_retention_deletion(uuid,uuid,uuid)",
   ]
     .map(literal)
     .join(", ")}]`;

@@ -10,6 +10,7 @@ import postgres from "postgres";
 import {
   acceptOrganizationInvitation,
   claimOrganizationRetentionDeletion,
+  completeOrganizationRetentionDeletion,
   createConnection,
   createSession,
   createDb,
@@ -76,12 +77,83 @@ async function provisionSelf(userId: string) {
   });
 }
 
+async function provisionOrganizationMember(label: string) {
+  if (!client) throw new Error("test database unavailable");
+  const ownerId = `${label}-owner-${crypto.randomUUID()}`;
+  const targetId = `${label}-target-${crypto.randomUUID()}`;
+  const ownerSubject = `user:${ownerId}`;
+  const targetSubject = `user:${targetId}`;
+  await provisionSelf(ownerId);
+  const [owner] = await listSelfOrganizationMemberships(client.db, ownerSubject);
+  const invitation = await createOrganizationInvitation(client.db, {
+    organizationId: owner!.organizationId,
+    actorSubjectId: ownerSubject,
+    operationId: crypto.randomUUID(),
+    targetSubjectId: targetSubject,
+    targetEmail: `${targetId}@example.test`,
+    role: "member",
+    expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+  });
+  const member = (
+    await acceptOrganizationInvitation(client.db, {
+      organizationId: owner!.organizationId,
+      actorSubjectId: targetSubject,
+      operationId: crypto.randomUUID(),
+      invitationId: invitation.id,
+      expectedRevision: invitation.revision,
+    })
+  ).membership;
+  return { owner: owner!, member, ownerSubject, targetSubject };
+}
+
+async function expireOrganizationMember(
+  input: Awaited<ReturnType<typeof provisionOrganizationMember>>,
+) {
+  if (!client || !shared) throw new Error("test database unavailable");
+  const member = await updateOrganizationMember(client.db, {
+    organizationId: input.owner.organizationId,
+    actorSubjectId: input.ownerSubject,
+    operationId: crypto.randomUUID(),
+    membershipId: input.member.id,
+    transition: {
+      kind: "offboard",
+      expectedAuthorizationRevision: input.member.authorizationRevision,
+      operationId: crypto.randomUUID(),
+      reason: "retention test",
+    },
+  });
+  await shared.admin`update organization_memberships
+    set personal_retention_until = now() - interval '1 second'
+    where account_id = ${input.owner.organizationId} and id = ${member.id}`;
+  return member;
+}
+
+async function insertRetainedScreenshotReference(input: {
+  accountId: string;
+  workspaceId: string;
+  fileId: string;
+  db?: postgres.Sql | postgres.TransactionSql;
+}) {
+  if (!shared) throw new Error("test database unavailable");
+  const db = input.db ?? shared.admin;
+  await db`
+    insert into retained_screenshot_artifacts (
+      artifact_id, account_id, workspace_id, session_id, turn_id, attempt_id,
+      settlement_key, tool_call_id, tool_output_id, status, quota_state,
+      media_type, size_bytes, sha256, width, height, retention_expires_at, ready_at
+    ) values (
+      ${input.fileId}, ${input.accountId}, ${input.workspaceId}, null, null, null,
+      ${`retention-screenshot:${crypto.randomUUID()}`}, 'call', 'output', 'ready', 'ready',
+      'image/png', 8, ${"a".repeat(64)}, 1, 1, now() + interval '1 day', now()
+    )`;
+}
+
 describe("migration 0263 organization membership lifecycle", () => {
   test("declares a closed lifecycle capability and immutable FORCE-RLS evidence", async () => {
     const migration = await readFile(migrationUrl, "utf8");
     expect(migration.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
-    expect(migration.match(/ENABLE ROW LEVEL SECURITY/gu)).toHaveLength(6);
-    expect(migration.match(/FORCE ROW LEVEL SECURITY/gu)).toHaveLength(6);
+    expect(migration.match(/ENABLE ROW LEVEL SECURITY/gu)).toHaveLength(7);
+    expect(migration.match(/FORCE ROW LEVEL SECURITY/gu)).toHaveLength(7);
     expect(migration).toContain("organization_membership_command(p_command jsonb)");
     expect(migration).toContain("invitation.target_subject_id IS DISTINCT FROM actor_subject");
     expect(migration).toContain("organization operation id was reused with different input");
@@ -92,6 +164,34 @@ describe("migration 0263 organization membership lifecycle", () => {
     expect(migration).toContain("REVOKE ALL ON TABLE organization_memberships FROM opengeni_app");
     expect(migration).toContain("DELETE FROM workspaces");
     expect(migration).not.toContain("DELETE FROM sessions");
+    for (const source of [
+      "'file'::text",
+      "'session_recording'",
+      "'browser_state_artifact'",
+      "'browser_state_upload'",
+      "'transcription_recording_object'",
+      "'video_staging_reference'",
+      "'workspace_artifact_version'",
+      "'editable_artifact_blob'",
+      "'workspace_capture_manifest'",
+      "'workspace_capture_tree_index'",
+      "'workspace_capture_blob'",
+    ]) {
+      expect(migration).toContain(source);
+    }
+    for (const sourceTable of [
+      "FROM session_recordings",
+      "FROM browser_state_artifacts",
+      "FROM browser_state_uploads",
+      "FROM transcription_recording_objects",
+      "FROM video_generation_references",
+      "FROM workspace_artifact_versions",
+      "FROM editable_artifact_blob_refs",
+      "FROM workspace_captures",
+    ]) {
+      expect(migration).toContain(sourceTable);
+    }
+    expect(migration).toContain("committed.object_key = upload.object_key");
     const offboard = migration.slice(
       migration.indexOf("ELSIF action_name IN ('suspend', 'offboard')"),
     );
@@ -134,8 +234,10 @@ describe("migration 0263 organization membership lifecycle", () => {
         Array<{
           execute: boolean;
           executeRetention: boolean;
+          executeRetentionComplete: boolean;
           directInsert: boolean;
           directRetentionInsert: boolean;
+          directRetentionReceiptInsert: boolean;
           searchPath: string | null;
           retentionSearchPath: string | null;
         }>
@@ -151,6 +253,11 @@ describe("migration 0263 organization membership lifecycle", () => {
             format('%I.claim_organization_retention_deletion(uuid,uuid,uuid[])', ${schemaName}::text),
             'EXECUTE'
           ) as "executeRetention",
+          has_function_privilege(
+            ${roleName}::text,
+            format('%I.complete_organization_retention_deletion(uuid,uuid,uuid)', ${schemaName}::text),
+            'EXECUTE'
+          ) as "executeRetentionComplete",
           has_table_privilege(
             ${roleName}::text,
             format('%I.organization_membership_operation_receipts', ${schemaName}::text),
@@ -161,6 +268,14 @@ describe("migration 0263 organization membership lifecycle", () => {
             format('%I.organization_user_retention_deletions', ${schemaName}::text),
             'INSERT'
           ) as "directRetentionInsert",
+          has_table_privilege(
+            ${roleName}::text,
+            format(
+              '%I.organization_user_retention_object_deletion_receipts',
+              ${schemaName}::text
+            ),
+            'INSERT'
+          ) as "directRetentionReceiptInsert",
           (
             select config
             from pg_proc procedure
@@ -182,8 +297,10 @@ describe("migration 0263 organization membership lifecycle", () => {
       expect(posture).toEqual({
         execute: true,
         executeRetention: true,
+        executeRetentionComplete: true,
         directInsert: false,
         directRetentionInsert: false,
+        directRetentionReceiptInsert: false,
         searchPath: `search_path=pg_catalog, ${schemaName}, pg_temp`,
         retentionSearchPath: `search_path=pg_catalog, ${schemaName}, pg_temp`,
       });
@@ -1011,16 +1128,26 @@ describe("migration 0263 organization membership lifecycle", () => {
         operationId,
       }),
     ).toEqual(claim);
+    const databaseFinalized = await finalizeOrganizationRetentionDeletion(client.db, {
+      organizationId: owner!.organizationId,
+      membershipId: member.id,
+      operationId,
+    });
+    expect(databaseFinalized).toMatchObject({
+      outcome: "cleanup_pending",
+      objectCount: 1,
+      deletedResources: { files: 1, connections: 1, personalWorkspaces: 1 },
+    });
     const objects = await listOrganizationRetentionDeletionObjects(client.db, {
       organizationId: owner!.organizationId,
       membershipId: member.id,
       operationId,
       limit: 100,
     });
-    expect(objects).toEqual([{ fileId, objectKey }]);
+    expect(objects).toEqual([{ objectKind: "file", sourceId: fileId, objectKey }]);
     await expectSqlState(
       () =>
-        finalizeOrganizationRetentionDeletion(client!.db, {
+        completeOrganizationRetentionDeletion(client!.db, {
           organizationId: owner!.organizationId,
           membershipId: member.id,
           operationId,
@@ -1033,7 +1160,8 @@ describe("migration 0263 organization membership lifecycle", () => {
           organizationId: owner!.organizationId,
           membershipId: member.id,
           operationId,
-          fileId,
+          objectKind: "file",
+          sourceId: fileId,
           objectKey: `${objectKey}-forged`,
         }),
       "42501",
@@ -1043,7 +1171,8 @@ describe("migration 0263 organization membership lifecycle", () => {
         organizationId: owner!.organizationId,
         membershipId: member.id,
         operationId,
-        fileId,
+        objectKind: "file",
+        sourceId: fileId,
         objectKey,
       }),
     ).toBe(true);
@@ -1052,11 +1181,12 @@ describe("migration 0263 organization membership lifecycle", () => {
         organizationId: owner!.organizationId,
         membershipId: member.id,
         operationId,
-        fileId,
+        objectKind: "file",
+        sourceId: fileId,
         objectKey,
       }),
     ).toBe(false);
-    const completed = await finalizeOrganizationRetentionDeletion(client.db, {
+    const completed = await completeOrganizationRetentionDeletion(client.db, {
       organizationId: owner!.organizationId,
       membershipId: member.id,
       operationId,
@@ -1068,7 +1198,7 @@ describe("migration 0263 organization membership lifecycle", () => {
       deletedResources: { files: 1, connections: 1, personalWorkspaces: 1 },
     });
     expect(
-      await finalizeOrganizationRetentionDeletion(client.db, {
+      await completeOrganizationRetentionDeletion(client.db, {
         organizationId: owner!.organizationId,
         membershipId: member.id,
         operationId,
@@ -1081,7 +1211,8 @@ describe("migration 0263 organization membership lifecycle", () => {
         personalWorkspaceId: string | null;
         lifecycleEvents: number;
         retentionEvents: number;
-        objectReceipts: number;
+        objectObligations: number;
+        objectDeletionReceipts: number;
         connectionCount: number;
       }>
     >`
@@ -1093,8 +1224,10 @@ describe("migration 0263 organization membership lifecycle", () => {
           where target_membership_id = ${member.id}) as "lifecycleEvents",
         (select count(*)::int from organization_user_retention_deletion_events
           where membership_id = ${member.id}) as "retentionEvents",
-        (select count(*)::int from organization_user_retention_object_receipts
-          where membership_id = ${member.id}) as "objectReceipts",
+        (select count(*)::int from organization_user_retention_object_obligations
+          where membership_id = ${member.id}) as "objectObligations",
+        (select count(*)::int from organization_user_retention_object_deletion_receipts
+          where membership_id = ${member.id}) as "objectDeletionReceipts",
         (select count(*)::int from connections where id = ${personalConnection.id}) as "connectionCount"`;
     expect(evidence).toEqual({
       workspaceCount: 0,
@@ -1102,9 +1235,270 @@ describe("migration 0263 organization membership lifecycle", () => {
       personalWorkspaceId: null,
       lifecycleEvents: 2,
       retentionEvents: 2,
-      objectReceipts: 1,
+      objectObligations: 1,
+      objectDeletionReceipts: 1,
       connectionCount: 0,
     });
+  });
+
+  test("fails database finalization before object deletion when a retained non-document consumer exists", async () => {
+    if (!shared || !client) return;
+    const fixture = await provisionOrganizationMember("retained-consumer");
+    const workspaceId = fixture.member.personalWorkspaceId!;
+    const fileId = crypto.randomUUID();
+    const objectKey = `retention/${crypto.randomUUID()}`;
+    await shared.admin`
+      insert into files (
+        id, account_id, workspace_id, status, filename, safe_filename,
+        content_type, size_bytes, bucket, object_key
+      ) values (
+        ${fileId}, ${fixture.owner.organizationId}, ${workspaceId}, 'ready',
+        'retained.png', 'retained.png', 'image/png', 8, 'test', ${objectKey}
+      )`;
+    await insertRetainedScreenshotReference({
+      accountId: fixture.owner.organizationId,
+      workspaceId,
+      fileId,
+    });
+    const member = await expireOrganizationMember(fixture);
+    const operationId = crypto.randomUUID();
+    await claimOrganizationRetentionDeletion(client.db, {
+      organizationId: fixture.owner.organizationId,
+      operationId,
+    });
+    await expectSqlState(
+      () =>
+        finalizeOrganizationRetentionDeletion(client!.db, {
+          organizationId: fixture.owner.organizationId,
+          membershipId: member.id,
+          operationId,
+        }),
+      "23503",
+    );
+    const [evidence] = await shared.admin<
+      Array<{
+        workspaceCount: number;
+        fileCount: number;
+        consumerCount: number;
+        obligationCount: number;
+        databaseFinalizedAt: string | null;
+      }>
+    >`
+      select
+        (select count(*)::int from workspaces where id = ${workspaceId}) as "workspaceCount",
+        (select count(*)::int from files where id = ${fileId}) as "fileCount",
+        (select count(*)::int from retained_screenshot_artifacts
+          where artifact_id = ${fileId}) as "consumerCount",
+        (select count(*)::int from organization_user_retention_object_obligations
+          where membership_id = ${member.id}) as "obligationCount",
+        (select database_finalized_at::text from organization_user_retention_deletions
+          where membership_id = ${member.id}) as "databaseFinalizedAt"`;
+    expect(evidence).toEqual({
+      workspaceCount: 1,
+      fileCount: 1,
+      consumerCount: 1,
+      obligationCount: 0,
+      databaseFinalizedAt: null,
+    });
+  });
+
+  test("serializes a concurrent retained reference before database finalization", async () => {
+    if (!shared || !client) return;
+    const fixture = await provisionOrganizationMember("retained-race");
+    const workspaceId = fixture.member.personalWorkspaceId!;
+    const fileId = crypto.randomUUID();
+    await shared.admin`
+      insert into files (
+        id, account_id, workspace_id, status, filename, safe_filename,
+        content_type, size_bytes, bucket, object_key
+      ) values (
+        ${fileId}, ${fixture.owner.organizationId}, ${workspaceId}, 'ready',
+        'racing.png', 'racing.png', 'image/png', 8, 'test',
+        ${`retention/${crypto.randomUUID()}`}
+      )`;
+    const member = await expireOrganizationMember(fixture);
+    const operationId = crypto.randomUUID();
+    await claimOrganizationRetentionDeletion(client.db, {
+      organizationId: fixture.owner.organizationId,
+      operationId,
+    });
+
+    let releaseInsert!: () => void;
+    let insertionStarted!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseInsert = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      insertionStarted = resolve;
+    });
+    const inserting = shared.admin.begin(async (tx) => {
+      await insertRetainedScreenshotReference({
+        accountId: fixture.owner.organizationId,
+        workspaceId,
+        fileId,
+        db: tx,
+      });
+      insertionStarted();
+      await release;
+    });
+    await started;
+    let finalizerSettled = false;
+    const finalizing = finalizeOrganizationRetentionDeletion(client.db, {
+      organizationId: fixture.owner.organizationId,
+      membershipId: member.id,
+      operationId,
+    }).finally(() => {
+      finalizerSettled = true;
+    });
+    await Bun.sleep(75);
+    expect(finalizerSettled).toBe(false);
+    releaseInsert();
+    await inserting;
+    await expectSqlState(() => finalizing, "23503");
+
+    const [evidence] = await shared.admin<
+      Array<{ workspaceCount: number; fileCount: number; obligationCount: number }>
+    >`
+      select
+        (select count(*)::int from workspaces where id = ${workspaceId}) as "workspaceCount",
+        (select count(*)::int from files where id = ${fileId}) as "fileCount",
+        (select count(*)::int from organization_user_retention_object_obligations
+          where membership_id = ${member.id}) as "obligationCount"`;
+    expect(evidence).toEqual({ workspaceCount: 1, fileCount: 1, obligationCount: 0 });
+  });
+
+  test("fails closed on an unrepresentable external-object inventory", async () => {
+    if (!shared || !client) return;
+    const fixture = await provisionOrganizationMember("malformed-inventory");
+    const workspaceId = fixture.member.personalWorkspaceId!;
+    const session = await createSession(client.db, {
+      accountId: fixture.owner.organizationId,
+      workspaceId,
+      initialMessage: "malformed capture inventory",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: fixture.targetSubject },
+      subjectId: fixture.targetSubject,
+      model: "test-model",
+      sandboxBackend: "none",
+    });
+    await shared.admin`
+      insert into workspace_captures (
+        id, account_id, workspace_id, session_id, revision, lease_epoch, state, blob_keys
+      ) values (
+        ${crypto.randomUUID()}, ${fixture.owner.organizationId}, ${workspaceId},
+        ${session.id}, 1, 1, 'available', ${shared.admin.json({ unknown: "shape" })}
+      )`;
+    const member = await expireOrganizationMember(fixture);
+    const operationId = crypto.randomUUID();
+    await claimOrganizationRetentionDeletion(client.db, {
+      organizationId: fixture.owner.organizationId,
+      operationId,
+    });
+    await expectSqlState(
+      () =>
+        finalizeOrganizationRetentionDeletion(client!.db, {
+          organizationId: fixture.owner.organizationId,
+          membershipId: member.id,
+          operationId,
+        }),
+      "55000",
+    );
+    const [evidence] = await shared.admin<
+      Array<{ workspaceCount: number; databaseFinalizedAt: string | null }>
+    >`
+      select
+        (select count(*)::int from workspaces where id = ${workspaceId}) as "workspaceCount",
+        (select database_finalized_at::text from organization_user_retention_deletions
+          where membership_id = ${member.id}) as "databaseFinalizedAt"`;
+    expect(evidence).toEqual({ workspaceCount: 1, databaseFinalizedAt: null });
+  });
+
+  test("transfers session recording and workspace capture keys into immutable obligations", async () => {
+    if (!shared || !client) return;
+    const fixture = await provisionOrganizationMember("external-obligations");
+    const workspaceId = fixture.member.personalWorkspaceId!;
+    const session = await createSession(client.db, {
+      accountId: fixture.owner.organizationId,
+      workspaceId,
+      initialMessage: "external cleanup obligations",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: fixture.targetSubject },
+      subjectId: fixture.targetSubject,
+      model: "test-model",
+      sandboxBackend: "none",
+    });
+    const recordingId = crypto.randomUUID();
+    const captureId = crypto.randomUUID();
+    const recordingKey = `recordings/${crypto.randomUUID()}`;
+    const manifestKey = `captures/${crypto.randomUUID()}/manifest`;
+    const treeKey = `captures/${crypto.randomUUID()}/tree`;
+    const blobKeys = [
+      `captures/${crypto.randomUUID()}/blob-1`,
+      `captures/${crypto.randomUUID()}/blob-2`,
+    ];
+    await shared.admin`
+      insert into session_recordings (
+        id, account_id, workspace_id, session_id, state, mode, codec,
+        storage_key, size_bytes, duration_seconds, width, height, finalized_at
+      ) values (
+        ${recordingId}, ${fixture.owner.organizationId}, ${workspaceId}, ${session.id},
+        'available', 'manual', 'h264-mp4', ${recordingKey}, 8, 1, 1, 1, now()
+      )`;
+    await shared.admin`
+      insert into workspace_captures (
+        id, account_id, workspace_id, session_id, revision, lease_epoch, state,
+        manifest_key, tree_index_key, blob_keys
+      ) values (
+        ${captureId}, ${fixture.owner.organizationId}, ${workspaceId}, ${session.id},
+        1, 1, 'available', ${manifestKey}, ${treeKey}, ${shared.admin.json(blobKeys)}
+      )`;
+    const member = await expireOrganizationMember(fixture);
+    const operationId = crypto.randomUUID();
+    await claimOrganizationRetentionDeletion(client.db, {
+      organizationId: fixture.owner.organizationId,
+      operationId,
+    });
+    const finalized = await finalizeOrganizationRetentionDeletion(client.db, {
+      organizationId: fixture.owner.organizationId,
+      membershipId: member.id,
+      operationId,
+    });
+    expect(finalized.objectCount).toBe(5);
+    const obligations = await listOrganizationRetentionDeletionObjects(client.db, {
+      organizationId: fixture.owner.organizationId,
+      membershipId: member.id,
+      operationId,
+      limit: 100,
+    });
+    expect(obligations).toEqual([
+      {
+        objectKind: "session_recording",
+        sourceId: recordingId,
+        objectKey: recordingKey,
+      },
+      {
+        objectKind: "workspace_capture_blob",
+        sourceId: `${captureId}:1`,
+        objectKey: blobKeys[0]!,
+      },
+      {
+        objectKind: "workspace_capture_blob",
+        sourceId: `${captureId}:2`,
+        objectKey: blobKeys[1]!,
+      },
+      {
+        objectKind: "workspace_capture_manifest",
+        sourceId: captureId,
+        objectKey: manifestKey,
+      },
+      {
+        objectKind: "workspace_capture_tree_index",
+        sourceId: captureId,
+        objectKey: treeKey,
+      },
+    ]);
   });
 
   test("claims due memberships concurrently without duplicate ownership", async () => {

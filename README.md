@@ -399,6 +399,11 @@ bun run db:sweep-organization-retention --organization-id <uuid> --limit 10
 
 The command is retry-safe, continues past independently recorded member
 failures, and requires configured object storage for destructive execution.
+It first commits the database deletion and an immutable, exact-key cleanup
+obligation set; only then does it delete external objects and record
+content-free completion receipts. A provider failure retries only unfinished
+obligations, while an unexpected retained database reference aborts before any
+external object is touched.
 
 GitHub endpoints:
 

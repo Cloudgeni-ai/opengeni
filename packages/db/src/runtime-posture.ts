@@ -77,10 +77,11 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "get_organization_retention_policy(uuid, text)",
   "preview_organization_retention_deletions(uuid, integer)",
   "claim_organization_retention_deletion(uuid, uuid, uuid[])",
-  "list_organization_retention_deletion_objects(uuid, uuid, uuid, uuid, integer)",
-  "record_organization_retention_object_deleted(uuid, uuid, uuid, uuid, text)",
+  "list_organization_retention_deletion_objects(uuid, uuid, uuid, integer)",
+  "record_organization_retention_object_deleted(uuid, uuid, uuid, text, text, text)",
   "fail_organization_retention_deletion(uuid, uuid, uuid, text)",
   "finalize_organization_retention_deletion(uuid, uuid, uuid)",
+  "complete_organization_retention_deletion(uuid, uuid, uuid)",
 ] as const;
 const PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE =
   "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)";
@@ -399,7 +400,8 @@ export const FORCE_RLS_TABLES = [
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",
   "organization_user_retention_deletions",
-  "organization_user_retention_object_receipts",
+  "organization_user_retention_object_deletion_receipts",
+  "organization_user_retention_object_obligations",
   "organization_user_retention_policies",
   "pack_installation_components",
   "pack_installations",
@@ -817,7 +819,8 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",
   "organization_user_retention_deletions",
-  "organization_user_retention_object_receipts",
+  "organization_user_retention_object_deletion_receipts",
+  "organization_user_retention_object_obligations",
   "organization_user_retention_policies",
   "personal_document_once_consumption_receipts",
   "personal_resource_once_consumption_receipts",
@@ -1250,13 +1253,15 @@ export async function inspectRuntimeDatabasePosture(
             )
           order by p.proname, pg_catalog.oidvectortypes(p.proargtypes)
         `),
-      ).map((row) => ({
-        name: row.name,
-        owner: row.owner,
-        execute: row.can_execute,
-        publicExecute: row.public_execute,
-        securityDefiner: row.security_definer,
-      }));
+      )
+        .map((row) => ({
+          name: row.name,
+          owner: row.owner,
+          execute: row.can_execute,
+          publicExecute: row.public_execute,
+          securityDefiner: row.security_definer,
+        }))
+        .sort((left, right) => left.name.localeCompare(right.name));
 
       const privateRoutines = resultRows<{
         name: string;

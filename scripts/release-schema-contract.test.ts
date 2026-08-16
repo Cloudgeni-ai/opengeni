@@ -431,8 +431,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0263_organization_membership_lifecycle.sql")) {
         return includesActivation
-          ? "98684d114620f79d6a6f93753ea77a47a14343cdb1898e7a08b72b107b3d3f18"
-          : "119c7b57a5b0adb801da949af69224d5d0e05802b19174d9d30f86a17f2c7288";
+          ? "5b6a2ed3fcc7fede170ccde6475246ebeef96105134f79e64cf4a633033fa6ab"
+          : "a6b877a3c07570ece57a399ca4d7f6ac148b1ff18ba69c92319323285c6b7057";
       }
       if (migrations.has("0258_three_scope_document_knowledge_authority.sql")) {
         return includesActivation
@@ -822,7 +822,7 @@ describe("release schema contract", () => {
                 : latestCompatibleMigration,
     );
     expect(migrations.get("0263_organization_membership_lifecycle.sql")).toMatchObject({
-      sha256: "99bd0df0dc2211e1be6c15e698c9517080c4b30b4117d4d95e79f9f499a4aae3",
+      sha256: "0f785bda80414be1260c9751e7aaaf1084847dda4cf04e794770fc25b96b14a1",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({

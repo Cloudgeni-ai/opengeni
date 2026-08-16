@@ -681,6 +681,8 @@ export const organizationUserRetentionDeletions = pgTable(
     claimOperationId: uuid("claim_operation_id").notNull(),
     claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }).notNull(),
     attemptCount: integer("attempt_count").notNull().default(1),
+    databaseResult: jsonb("database_result").$type<Record<string, unknown>>(),
+    databaseFinalizedAt: timestamp("database_finalized_at", { withTimezone: true }),
     result: jsonb("result").$type<Record<string, unknown>>(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -713,23 +715,32 @@ export const organizationUserRetentionDeletions = pgTable(
       sql`(${table.state} = 'completed' and ${table.completedAt} is not null and ${table.result} is not null)
         or (${table.state} <> 'completed' and ${table.completedAt} is null and ${table.result} is null)`,
     ),
+    databaseFinalizationValid: check(
+      "organization_retention_deletions_db_finalized_chk",
+      sql`(${table.databaseFinalizedAt} is null and ${table.databaseResult} is null)
+        or (${table.databaseFinalizedAt} is not null and ${table.databaseResult} is not null)`,
+    ),
   }),
 );
 
-export const organizationUserRetentionObjectReceipts = pgTable(
-  "organization_user_retention_object_receipts",
+export const organizationUserRetentionObjectObligations = pgTable(
+  "organization_user_retention_object_obligations",
   {
     accountId: uuid("account_id").notNull(),
     membershipId: uuid("membership_id").notNull(),
-    fileId: uuid("file_id").notNull(),
-    operationId: uuid("operation_id").notNull(),
+    objectKind: text("object_kind").notNull(),
+    sourceId: text("source_id").notNull(),
+    objectKey: text("object_key").notNull(),
+    preparedOperationId: uuid("prepared_operation_id").notNull(),
     objectKeyHash: text("object_key_hash").notNull(),
-    deletedAt: timestamp("deleted_at", { withTimezone: true }).notNull().defaultNow(),
+    preparedAt: timestamp("prepared_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    identity: primaryKey({ columns: [table.accountId, table.membershipId, table.fileId] }),
+    identity: primaryKey({
+      columns: [table.accountId, table.membershipId, table.objectKind, table.sourceId],
+    }),
     deletion: foreignKey({
-      name: "organization_user_retention_object_receipts_deletion_fk",
+      name: "organization_retention_object_obligations_deletion_fk",
       columns: [table.accountId, table.membershipId],
       foreignColumns: [
         organizationUserRetentionDeletions.accountId,
@@ -737,9 +748,48 @@ export const organizationUserRetentionObjectReceipts = pgTable(
       ],
     }).onDelete("restrict"),
     hashValid: check(
-      "organization_user_retention_object_receipts_hash_check",
+      "organization_user_retention_object_obligations_hash_check",
       sql`${table.objectKeyHash} ~ '^[0-9a-f]{64}$'`,
     ),
+    shapeValid: check(
+      "organization_user_retention_object_obligations_shape_check",
+      sql`${table.objectKind} in (
+          'file', 'session_recording', 'browser_state_artifact', 'browser_state_upload',
+          'transcription_recording_object', 'video_staging_reference',
+          'workspace_artifact_version', 'editable_artifact_blob',
+          'workspace_capture_manifest', 'workspace_capture_tree_index',
+          'workspace_capture_blob'
+        )
+        and octet_length(${table.sourceId}) between 1 and 2048
+        and octet_length(${table.objectKey}) between 1 and 4096`,
+    ),
+  }),
+);
+
+export const organizationUserRetentionObjectDeletionReceipts = pgTable(
+  "organization_user_retention_object_deletion_receipts",
+  {
+    accountId: uuid("account_id").notNull(),
+    membershipId: uuid("membership_id").notNull(),
+    objectKind: text("object_kind").notNull(),
+    sourceId: text("source_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    identity: primaryKey({
+      columns: [table.accountId, table.membershipId, table.objectKind, table.sourceId],
+    }),
+    obligation: foreignKey({
+      name: "organization_retention_object_deletions_obligation_fk",
+      columns: [table.accountId, table.membershipId, table.objectKind, table.sourceId],
+      foreignColumns: [
+        organizationUserRetentionObjectObligations.accountId,
+        organizationUserRetentionObjectObligations.membershipId,
+        organizationUserRetentionObjectObligations.objectKind,
+        organizationUserRetentionObjectObligations.sourceId,
+      ],
+    }).onDelete("restrict"),
   }),
 );
 

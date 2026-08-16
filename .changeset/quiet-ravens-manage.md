@@ -11,5 +11,7 @@ invitation history is exposed only through bounded keyset pages, and acceptance
 resolves one exact subject-bound invitation. Already-open session,
 workspace-control, live, and interaction streams periodically recheck current
 membership authority and close after revocation. A bounded operator command
-deletes expired offboarded personal data only after exact object receipts and
-retains immutable lifecycle evidence.
+commits expired offboarded personal database deletion together with a closed,
+exact-key cleanup-obligation set before deleting external objects. Provider
+failures retry only unfinished obligations, retained references abort before
+external bytes are touched, and immutable lifecycle evidence survives cleanup.

@@ -67,11 +67,37 @@ export const OrganizationRetentionDeletionClaim = z.object({
 export type OrganizationRetentionDeletionClaim = z.infer<typeof OrganizationRetentionDeletionClaim>;
 
 export const OrganizationRetentionDeletionObject = z.object({
-  fileId: z.string().uuid(),
+  objectKind: z.enum([
+    "file",
+    "session_recording",
+    "browser_state_artifact",
+    "browser_state_upload",
+    "transcription_recording_object",
+    "video_staging_reference",
+    "workspace_artifact_version",
+    "editable_artifact_blob",
+    "workspace_capture_manifest",
+    "workspace_capture_tree_index",
+    "workspace_capture_blob",
+  ]),
+  sourceId: z.string().min(1).max(2048),
   objectKey: z.string().min(1),
 });
 export type OrganizationRetentionDeletionObject = z.infer<
   typeof OrganizationRetentionDeletionObject
+>;
+
+export const OrganizationRetentionDatabaseFinalization = z.object({
+  organizationId: z.string().uuid(),
+  membershipId: z.string().uuid(),
+  operationId: z.string().uuid(),
+  outcome: z.literal("cleanup_pending"),
+  objectCount: z.number().int().nonnegative(),
+  deletedResources: z.record(z.string(), z.number().int().nonnegative()),
+  databaseFinalizedAt: z.string().datetime({ offset: true }),
+});
+export type OrganizationRetentionDatabaseFinalization = z.infer<
+  typeof OrganizationRetentionDatabaseFinalization
 >;
 
 export const OrganizationRetentionDeletionResult = z.object({

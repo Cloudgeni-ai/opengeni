@@ -9,8 +9,8 @@ const firstMembershipId = "00000000-0000-4000-8000-000000000002";
 const secondMembershipId = "00000000-0000-4000-8000-000000000003";
 const firstOperationId = "00000000-0000-4000-8000-000000000004";
 const secondOperationId = "00000000-0000-4000-8000-000000000005";
-const firstFileId = "00000000-0000-4000-8000-000000000006";
-const secondFileId = "00000000-0000-4000-8000-000000000007";
+const firstObjectId = "00000000-0000-4000-8000-000000000006";
+const secondObjectId = "00000000-0000-4000-8000-000000000007";
 const now = "2026-08-16T00:00:00.000Z";
 
 describe("organization retention operator", () => {
@@ -45,7 +45,8 @@ describe("organization retention operator", () => {
         listed.add(membershipId);
         return [
           {
-            fileId: membershipId === firstMembershipId ? firstFileId : secondFileId,
+            objectKind: "file",
+            sourceId: membershipId === firstMembershipId ? firstObjectId : secondObjectId,
             objectKey: `retention/${membershipId}`,
           },
         ];
@@ -55,7 +56,16 @@ describe("organization retention operator", () => {
         deleted.push(objectKey);
       },
       recordObjectDeleted: async () => true,
-      finalize: async ({ membershipId, operationId }) => ({
+      finalizeDatabase: async ({ membershipId, operationId }) => ({
+        organizationId,
+        membershipId,
+        operationId,
+        outcome: "cleanup_pending",
+        objectCount: 1,
+        deletedResources: { personalWorkspaces: 1 },
+        databaseFinalizedAt: now,
+      }),
+      complete: async ({ membershipId, operationId }) => ({
         organizationId,
         membershipId,
         operationId,
@@ -105,7 +115,10 @@ describe("organization retention operator", () => {
         listObjects: async () => [],
         deleteObject: async () => undefined,
         recordObjectDeleted: async () => true,
-        finalize: async () => {
+        finalizeDatabase: async () => {
+          throw new Error("not reached");
+        },
+        complete: async () => {
           throw new Error("not reached");
         },
         fail: async () => true,
@@ -116,5 +129,72 @@ describe("organization retention operator", () => {
       candidates: [{ membershipId: firstMembershipId }],
     });
     expect(claimed).toBe(false);
+  });
+
+  test("retries only unfinished object obligations after a partial provider failure", async () => {
+    const remaining = new Set([firstObjectId, secondObjectId]);
+    const deleted: string[] = [];
+    let invocation = 0;
+    let failedOnce = false;
+    const ports: OrganizationRetentionSweepPorts = {
+      preview: async () => [],
+      newOperationId: () => (invocation++ === 0 ? firstOperationId : secondOperationId),
+      claim: async ({ operationId }) => ({
+        organizationId,
+        membershipId: firstMembershipId,
+        operationId,
+        retentionUntil: now,
+        claimExpiresAt: now,
+        personalWorkspaceId: null,
+        objectCount: 2,
+        deletedObjectCount: 2 - remaining.size,
+      }),
+      finalizeDatabase: async ({ operationId }) => ({
+        organizationId,
+        membershipId: firstMembershipId,
+        operationId,
+        outcome: "cleanup_pending",
+        objectCount: 2,
+        deletedResources: { personalWorkspaces: 1 },
+        databaseFinalizedAt: now,
+      }),
+      listObjects: async () =>
+        [...remaining].map((sourceId) => ({
+          objectKind: "file" as const,
+          sourceId,
+          objectKey: `retention/${sourceId}`,
+        })),
+      deleteObject: async (objectKey) => {
+        if (objectKey.endsWith(secondObjectId) && !failedOnce) {
+          failedOnce = true;
+          throw new Error("transient storage failure");
+        }
+        deleted.push(objectKey);
+      },
+      recordObjectDeleted: async ({ sourceId }) => remaining.delete(sourceId),
+      complete: async ({ operationId }) => ({
+        organizationId,
+        membershipId: firstMembershipId,
+        operationId,
+        outcome: "completed",
+        deletedResources: { personalWorkspaces: 1, externalObjects: 2 },
+        completedAt: now,
+      }),
+      fail: async () => true,
+    };
+
+    const first = await runOrganizationRetentionSweep(
+      { organizationId, limit: 1, dryRun: false },
+      ports,
+    );
+    expect(first).toMatchObject({ dryRun: false, completed: [], failed: [{}] });
+    expect(remaining).toEqual(new Set([secondObjectId]));
+    const second = await runOrganizationRetentionSweep(
+      { organizationId, limit: 1, dryRun: false },
+      ports,
+    );
+    expect(second).toMatchObject({ dryRun: false, completed: [{}], failed: [] });
+    expect(remaining.size).toBe(0);
+    expect(deleted).toEqual([`retention/${firstObjectId}`, `retention/${secondObjectId}`]);
   });
 });
