@@ -9,6 +9,8 @@ import { migrate } from "../src/migrate";
 const migrationName = "0249_personal_resource_delegation_authority_correction.sql";
 const commonAuthorityMigrationName = "0253_common_user_resource_authority_lifecycle.sql";
 const connectionAuthorityMigrationName = "0256_connection_authority_delegation.sql";
+const connectionAuthorityActivationMigrationName =
+  "0264_connection_authority_runtime_activation.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 const migration0241Url = new URL(
   "../drizzle/0241_atomic_personal_resource_delegation.sql",
@@ -161,7 +163,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         values
           (${migrationName}),
           (${commonAuthorityMigrationName}),
-          (${connectionAuthorityMigrationName})
+          (${connectionAuthorityMigrationName}),
+          (${connectionAuthorityActivationMigrationName})
       `;
       await migrate(databaseUrl);
       await sql`
@@ -169,7 +172,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         where name in (
           ${migrationName},
           ${commonAuthorityMigrationName},
-          ${connectionAuthorityMigrationName}
+          ${connectionAuthorityMigrationName},
+          ${connectionAuthorityActivationMigrationName}
         )
       `;
 
@@ -188,7 +192,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         where name in (
           ${migrationName},
           ${commonAuthorityMigrationName},
-          ${connectionAuthorityMigrationName}
+          ${connectionAuthorityMigrationName},
+          ${connectionAuthorityActivationMigrationName}
         )
         order by name
       `;
@@ -196,6 +201,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         migrationName,
         commonAuthorityMigrationName,
         connectionAuthorityMigrationName,
+        connectionAuthorityActivationMigrationName,
       ]);
       expect(await countWorkspaceMemberships(sql, ids)).toBe(0);
       await insertAttempt(sql, ids, ids.attemptId);

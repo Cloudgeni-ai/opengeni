@@ -133,6 +133,8 @@ const CONNECTION_AUTHORITY_ROUTINES = [
   "list_self_connection_authorities(uuid)",
   "issue_self_connection_use_grant(uuid, uuid, uuid, text, text, uuid, boolean)",
   "revoke_self_connection_use_grant(uuid, uuid)",
+  "resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb)",
+  "resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text)",
   "resolve_connection_use_authority(uuid, uuid, uuid, jsonb)",
 ] as const;
 const SCHEDULED_PERSONAL_RESOURCE_ROUTINES = [
@@ -324,6 +326,7 @@ export const FORCE_RLS_TABLES = [
   "computer_session_associations",
   "computer_sessions",
   "connection_disconnect_operations",
+  "connection_use_audit_facts",
   "connection_use_once_consumption_receipts",
   "connections",
   "connector_action_policies",
@@ -504,6 +507,7 @@ export const FORCE_RLS_TABLES = [
   "transcription_recording_objects",
   "transcription_recording_segments",
   "transcription_recordings",
+  "turn_connection_authority_snapshots",
   "usage_events",
   "video_generation_operations",
   "video_generation_references",
@@ -818,6 +822,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "canonical_human_identity_subjects",
   "canonical_human_login_bindings",
   "company_brain_preference_proposal_receipts",
+  "connection_use_audit_facts",
   "connection_use_once_consumption_receipts",
   "editable_artifact_live_tickets",
   "editable_artifact_scope_authorization_heads",
@@ -853,6 +858,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "task_note_events",
   "task_note_write_capabilities",
   "task_notes",
+  "turn_connection_authority_snapshots",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
 ] as const;

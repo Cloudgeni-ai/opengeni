@@ -25,6 +25,8 @@ export type ConnectorAttachmentMaterializationRequest = Readonly<{
   operationId: string;
   connectionId: string;
   attachments: readonly ConnectorAttachmentTransfer[];
+  /** Revalidate once for each external attachment source request. */
+  authorizeProviderRequest?: () => Promise<boolean>;
 }>;
 
 export type ConnectorAttachmentMaterializer = (

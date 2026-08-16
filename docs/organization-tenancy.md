@@ -312,11 +312,20 @@ complete opaque delegation.
   organization as the destination session. The source may be in another
   workspace in that organization.
 
-These constraints represent identity, not runtime permission. Later access
+These constraints represent identity, not runtime permission. Activated access
 paths must still prove the authenticated owner membership and target-workspace
-grant. A later activation slice must atomically consume an active `once` grant
-before accepting its use; Slice A stores the invariant but does not activate
-the access path.
+grant. Migration 0264 activates the first bounded Connection surfaces: its
+accepted-turn transaction atomically changes an active `once` grant to consumed
+and binds the exact logical turn in the durable receipt. Recovery and each
+physical provider request only revalidate that receipt; no later turn can reuse
+it. The accepted snapshot keeps the Connection's same-organization physical
+origin distinct from its target workspace, including the owning human's
+membershipless canonical personal workspace; this does not create ambient
+authority for administrators or other subjects. The maintenance migration
+checks for live app-role writers around its exclusive locks and rejects every
+executable pre-activation common-user source rather than deriving historical
+acceptance from mutable authority. Surfaces outside the explicit 0264 boundary
+remain future activation work.
 
 ## Later migration phases
 

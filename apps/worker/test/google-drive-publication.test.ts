@@ -55,6 +55,7 @@ const destination = {
 const target: GoogleDrivePublicationTarget = {
   ownerSubjectId: "subject-a",
   connectionId,
+  originWorkspaceId: workspaceId,
   destination,
   credentialScope: GOOGLE_DRIVE_FILE_SCOPE,
 };
@@ -139,12 +140,13 @@ function connection(
     grantedScopes?: string[];
     accessMode?: "file_only" | "readonly";
     version?: number;
+    workspaceId?: string;
   } = {},
 ) {
   return {
     id: connectionId,
     accountId,
-    workspaceId,
+    workspaceId: overrides.workspaceId ?? workspaceId,
     subjectId: "subject-a",
     providerDomain: "googleapis.com",
     kind: "oauth2",
@@ -258,6 +260,46 @@ describe("Google Drive editable artifact publication", () => {
     ).toBeNull();
   });
 
+  test("routes an activated same-organization publication through its frozen physical origin", async () => {
+    const originWorkspaceId = "77777777-7777-4777-8777-777777777777";
+    let membershipReads = 0;
+    const resolved = await resolveGoogleDrivePublicationTarget(
+      {} as Database,
+      workspaceId,
+      [
+        {
+          ...publicationDelegation,
+          originWorkspaceId,
+          userDelegation: {
+            organizationId: accountId,
+            authorityId: "88888888-8888-4888-8888-888888888888",
+            authorityGeneration: 1,
+            workspaceId,
+            sessionId: null,
+            action: "connection.use",
+            mode: "always",
+            context: "workspace_shared",
+            authorityEpoch: null,
+            grantId: "99999999-9999-4999-8999-999999999999",
+            grantGeneration: 1,
+          },
+        },
+      ],
+      {
+        getMembership: async () => {
+          membershipReads += 1;
+          return null;
+        },
+        getConnection: async (_db, requestedWorkspaceId) => {
+          expect(requestedWorkspaceId).toBe(originWorkspaceId);
+          return connection({ workspaceId: originWorkspaceId }) as never;
+        },
+      },
+    );
+    expect(resolved).toEqual({ ...target, originWorkspaceId });
+    expect(membershipReads).toBe(0);
+  });
+
   test("binds approval to the private connector target and hashes the idempotency key", () => {
     const call = googleDrivePublicationConnectorCall(target, request, "call-1");
     expect(call).toMatchObject({
@@ -361,6 +403,7 @@ describe("Google Drive editable artifact publication", () => {
   test("creates once and a retry converges through the provider idempotency marker", async () => {
     let providerFile: Record<string, unknown> | null = null;
     let createCalls = 0;
+    let providerAuthorizations = 0;
     const credentialScopes: Array<string[] | undefined> = [];
     const fetch = async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
@@ -418,6 +461,10 @@ describe("Google Drive editable artifact publication", () => {
               connectionId,
               connectionVersion: 3,
               expiresAt: null,
+              authorizeProviderRequest: async () => {
+                providerAuthorizations += 1;
+                return true;
+              },
             } as never;
           },
         },
@@ -439,9 +486,14 @@ describe("Google Drive editable artifact publication", () => {
     expect(replayed).toMatchObject({ providerFileId: "drive-file-1", replayed: true });
     expect(fullDriveReplay).toMatchObject({ providerFileId: "drive-file-1", replayed: true });
     expect(createCalls).toBe(1);
+    expect(providerAuthorizations).toBe(credentialScopes.length);
     expect(credentialScopes).toEqual([
       [GOOGLE_DRIVE_FILE_SCOPE],
       [GOOGLE_DRIVE_FILE_SCOPE],
+      [GOOGLE_DRIVE_FILE_SCOPE],
+      [GOOGLE_DRIVE_FILE_SCOPE],
+      [GOOGLE_DRIVE_FILE_SCOPE],
+      [GOOGLE_DRIVE_FULL_SCOPE],
       [GOOGLE_DRIVE_FULL_SCOPE],
     ]);
   });
@@ -509,7 +561,62 @@ describe("Google Drive editable artifact publication", () => {
       },
     );
     expect(receipt).toMatchObject({ providerFileId: "drive-file-refreshed", replayed: false });
-    expect(connectionReads).toBe(2);
+    expect(connectionReads).toBe(4);
+  });
+
+  test("reauthorizes before every physical request and stops after mid-publication revocation", async () => {
+    let credentialCalls = 0;
+    let providerCalls = 0;
+    const originWorkspaceId = "77777777-7777-4777-8777-777777777777";
+    await expect(
+      executeGoogleDrivePublication(
+        {
+          db: {} as Database,
+          objectStorage: objectStorage(),
+          identity,
+          subjectId: "subject-a",
+          target: { ...target, originWorkspaceId },
+          request,
+          resolveCredential: async () => {
+            credentialCalls += 1;
+            if (credentialCalls === 2) {
+              return {
+                status: "auth_needed",
+                reason: "personal_authority_unavailable",
+                providerDomain: "googleapis.com",
+              };
+            }
+            return {
+              status: "ok",
+              headers: { authorization: "Bearer exact-use" },
+              connectionId,
+              connectionVersion: 3,
+              expiresAt: null,
+            } as never;
+          },
+        },
+        {
+          ...executionPorts(async (url) => {
+            providerCalls += 1;
+            expect(new URL(url.toString()).pathname).toBe("/drive/v3/files/folder-1");
+            return Response.json({
+              id: destination.folderId,
+              name: destination.folderName,
+              mimeType: "application/vnd.google-apps.folder",
+              driveId: null,
+              trashed: false,
+              capabilities: { canAddChildren: true },
+            });
+          }),
+          getConnection: async (_db, requestedWorkspaceId) => {
+            expect(requestedWorkspaceId).toBe(originWorkspaceId);
+            return connection({ workspaceId: originWorkspaceId }) as never;
+          },
+        },
+      ),
+    ).rejects.toThrow("credential is unavailable");
+    expect(credentialCalls).toBe(2);
+    expect(providerCalls).toBe(1);
   });
 
   test("rejects a local authority change after credential resolution before provider access", async () => {

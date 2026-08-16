@@ -86,6 +86,7 @@ describe("installed API Integration worker adapters", () => {
       authorization: string | null;
       cookie: string | null;
     }> = [];
+    let providerAuthorizations = 0;
     const item = integration();
     const settings = testSettings({
       mcpServers: [
@@ -119,6 +120,10 @@ describe("installed API Integration worker adapters", () => {
             { carrier: "query", name: "api_key", value: "query-secret" },
             { carrier: "cookie", name: "session_key", value: "cookie-secret" },
           ],
+          authorizeProviderRequest: async () => {
+            providerAuthorizations += 1;
+            return true;
+          },
         };
       },
       fetchImpl: async (request, init) => {
@@ -159,6 +164,53 @@ describe("installed API Integration worker adapters", () => {
           cookie: "session_key=cookie-secret",
         },
       ]);
+      expect(providerAuthorizations).toBe(requests.length);
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  test("revalidates after credential resolution and denies before provider I/O", async () => {
+    const item = integration();
+    let providerCalls = 0;
+    let providerAuthorizations = 0;
+    const settings = testSettings({
+      mcpServers: [
+        {
+          id: item.serverId,
+          name: item.name,
+          url: item.baseUrl,
+          allowedTools: item.allowedTools,
+          connectionRef: item.connectionRef!,
+        },
+      ],
+    });
+    const localMcpServers = buildApiIntegrationServersForTurn({
+      settings,
+      integrations: [item],
+      authority,
+      resolveCredential: async (): Promise<ResolveConnectionCredentialResult> => ({
+        status: "ok",
+        connectionId: item.connectionRef!.connectionId!,
+        headers: { Authorization: "Bearer discarded" },
+        authorizeProviderRequest: async () => {
+          providerAuthorizations += 1;
+          return false;
+        },
+      }),
+      fetchImpl: async () => {
+        providerCalls += 1;
+        return Response.json({ items: [] });
+      },
+    });
+    const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: item.serverId }], {
+      localMcpServers,
+    });
+    try {
+      const result = await prepared.mcpServers[0]!.callToolResult!("inventory_api__list_items", {});
+      expect(result).toMatchObject({ isError: true });
+      expect(providerAuthorizations).toBe(1);
+      expect(providerCalls).toBe(0);
     } finally {
       await prepared.close();
     }

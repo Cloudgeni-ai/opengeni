@@ -81,6 +81,49 @@ returns to the same prepared MCP instance, so the per-request designated-owner
 check and connector-wire compatibility layer remain authoritative and no static
 or weaker credential copy reaches sandbox code.
 
+### Accepted connection-use authority
+
+Organization-user connections are selected explicitly; a session creator,
+current browser user, service actor, or worker identity is never a substitute.
+For activated configured MCP connections, the accepted human/API turn stores a
+server-built, credential-free snapshot of the exact connection, causal human,
+organization membership authorization revision, common resource authority,
+grant, target session visibility/epoch, and accepted logical work. Each
+physical provider request—including a safe read retry after 401—must authorize
+that persisted snapshot for the exact current attempt before resolving any
+credential. A `once` grant is consumed atomically when the logical turn is
+accepted and is bound to that turn by its durable receipt; every physical call
+and recovery attempt only validates the matching receipt, while another turn
+cannot be accepted with it. Audit facts contain identifiers, generations, outcome,
+and a denial reason only—never credentials, headers, arguments, content, or
+provider responses.
+
+Migration 0264 is a drained maintenance cutover because an old worker can omit
+these attempt/use facts. The migration enforces the drain with live app-role
+session checks around exclusive writer locks and rejects all executable
+pre-activation common-user work instead of backfilling it from mutable state.
+Its first bounded activation covers configured remote
+MCP, API-hosted OpenAPI/GraphQL, Gmail REST, and Google Drive publication
+requests; the publication adapter reauthorizes
+independently before destination verification, idempotency search, and upload,
+and never replays an outcome-uncertain upload. Host credential callbacks are
+limited here to host MCP credential callbacks: they are invoked only after local
+authorization and receive credential-free attribution. Git, sandbox, and run
+credential ports are separate authorities and are not covered by migration 0264.
+Activated Atlassian is omitted from direct turns, and scheduled tasks reject
+activated MCP, Google Drive, and Atlassian selections, until their dedicated
+acceptance/occurrence adapters land. First-party Atlassian, Fiken, Slack,
+social, and scheduled knowledge-source surfaces remain explicit successors;
+workspace and `legacy_user` connections remain on their bounded compatibility
+path rather than being silently upgraded.
+
+An activated personal connection freezes its physical origin separately from
+the target workspace. Exact common authority permits same-organization use and
+the lifecycle-derived owner-only personal workspace even though that personal
+workspace intentionally has no membership row. Workspace administrators,
+other subjects, and cross-organization callers receive no corresponding
+portable authority.
+
 ### Codex Apps designation parity verdict
 
 - **Pelle/MCP:** the designated credential powers the direct model MCP. There is

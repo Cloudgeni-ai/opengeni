@@ -105,6 +105,9 @@ function integrationCredentialResolver(
             name,
             value,
           })),
+        ...(result.authorizeProviderRequest
+          ? { authorizeProviderRequest: result.authorizeProviderRequest }
+          : {}),
         ...(result.expiresAt ? { expiresAt: result.expiresAt.toISOString() } : {}),
         ...(connectionRef.scopes ? { scope: [...connectionRef.scopes] } : {}),
       };

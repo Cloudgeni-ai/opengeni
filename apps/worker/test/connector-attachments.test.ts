@@ -155,6 +155,7 @@ describe("connector attachment sandbox materialization", () => {
       workspaceRoot: root,
       emit: async (batch) => events.push(...batch),
     });
+    let providerAuthorizations = 0;
     const request = {
       serverId: "example-connector",
       toolName: "download_attachment",
@@ -175,6 +176,10 @@ describe("connector attachment sandbox materialization", () => {
           expiresAt: "2030-01-02T03:04:05.000Z",
         },
       })),
+      authorizeProviderRequest: async () => {
+        providerAuthorizations += 1;
+        return true;
+      },
     };
     let mutationRuns = 0;
     const options = {
@@ -220,6 +225,7 @@ describe("connector attachment sandbox materialization", () => {
       const replay = await materializeConnectorAttachmentsInChannel(channel, request, options);
       expect(replay).toEqual(first);
       expect(mutationRuns).toBe(1);
+      expect(providerAuthorizations).toBe(fixtures.length);
       for (const fixture of fixtures) expect(requests.get(fixture.fileName)).toBe(1);
       expect(channel.currentRevision()).toBe(firstRevision);
       expect(events).toEqual(firstEvents);
@@ -263,6 +269,59 @@ describe("connector attachment sandbox materialization", () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
     expect(connectorAttachmentImportOperationId(request, attachment, 0)).toBe(operation);
+  });
+
+  test("fences every attachment source and stops before the next revoked fetch", async () => {
+    let authorizations = 0;
+    let imports = 0;
+    const attachments = ["one", "two"].map((value) => ({
+      providerAttachmentId: {
+        provider: "example",
+        kind: "attachment" as const,
+        value,
+      },
+      fileName: `${value}.txt`,
+      mediaType: "text/plain",
+      byteSize: value.length,
+      contentSha256: sha256(new TextEncoder().encode(value)),
+      source: {
+        url: `https://files.example.test/${value}`,
+        expiresAt: "2030-01-02T03:04:05.000Z",
+      },
+    }));
+
+    await expect(
+      materializeConnectorAttachmentsInChannel(
+        {
+          async inspectWorkspaceFiles() {
+            return null;
+          },
+          async importWorkspaceFiles() {
+            imports += 1;
+            return [
+              {
+                destinationPath: ".opengeni/connector-attachments/example/one.txt",
+                sizeBytes: 3,
+                sha256: sha256(new TextEncoder().encode("one")),
+              },
+            ];
+          },
+        },
+        {
+          serverId: "example-connector",
+          toolName: "download_attachment",
+          operationId: "11111111-1111-4111-8111-111111111111",
+          connectionId: "22222222-2222-4222-8222-222222222222",
+          attachments,
+          authorizeProviderRequest: async () => {
+            authorizations += 1;
+            return authorizations === 1;
+          },
+        },
+      ),
+    ).rejects.toBeInstanceOf(ChannelAPartialMutationError);
+    expect(authorizations).toBe(2);
+    expect(imports).toBe(1);
   });
 
   test("preserves routed mutation outcome-unknown", async () => {

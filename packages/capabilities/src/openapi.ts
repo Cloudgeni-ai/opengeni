@@ -426,6 +426,22 @@ async function sendOpenApiRequest(
   const headers = buildOperationHeaders(binding, args);
   const body = buildOperationBody(binding, args, headers);
   if (credential) applyCredentialPlacements(url, headers, credential);
+  if (credential?.authorizeProviderRequest) {
+    let authorized = false;
+    try {
+      authorized = await credential.authorizeProviderRequest();
+    } catch {
+      authorized = false;
+    }
+    if (!authorized) {
+      throw new IntegrationInvocationError(
+        "authorization_rejected",
+        "The connected account is no longer authorized for this operation",
+        "not_started",
+        false,
+      );
+    }
+  }
   return await fetchWithDeadline(
     options.transport,
     url,

@@ -26,6 +26,7 @@ const snapshot: ConnectionUseAuthoritySnapshot = {
   scope: "user",
   ownerSubjectId: "user:alice",
   ownerOrganizationMembershipId: id("9"),
+  ownerMembershipAuthorizationRevision: 11,
   authoritySource: "user_delegation",
   selectionSources: ["mcp:example"],
   userDelegation: {

@@ -33,6 +33,10 @@ import { Buffer } from "node:buffer";
 import { isIP } from "node:net";
 import { encryptEnvironmentValue } from "./environment-crypto";
 import type { Database } from "./database";
+import type {
+  AcceptedConnectionUseContext,
+  AcceptedConnectionUseResolution,
+} from "./connection-authority";
 import { connectionScopeKey } from "./connection-scopes";
 
 const MAX_CREDENTIAL_PLACEMENTS = 32;
@@ -109,6 +113,12 @@ export type ResolveConnectionCredentialResult =
       connectionVersion?: number;
       /** Metadata-only owner attribution from the immediate pre-use fence. */
       connectionUseAttribution?: ConnectionUseAttribution;
+      /**
+       * Revalidate the exact accepted attempt immediately before one target
+       * provider request. Credential lookup/refresh is a separate audited
+       * boundary and must not manufacture a provider-request fact by itself.
+       */
+      authorizeProviderRequest?: () => Promise<boolean>;
       expiresAt?: Date | null;
     }
   | {
@@ -142,6 +152,8 @@ export type ResolveConnectionCredentialInput = {
   forceRefresh?: boolean;
   /** Exact immutable accepted-work authority; never credential-bearing. */
   connectionUseAuthority?: unknown;
+  /** Exact accepted attempt plus one stable physical-provider request id. */
+  connectionUseContext?: AcceptedConnectionUseContext;
 };
 
 export type HostMcpCredentialResolverContext = {
@@ -268,6 +280,12 @@ export function buildHostConnectionTokenResolver(
           : {}),
       },
       forceRefresh: input.forceRefresh === true,
+      ...(input.connectionUseAuthority !== undefined
+        ? { connectionUseAuthority: input.connectionUseAuthority }
+        : {}),
+      ...(input.connectionUseContext
+        ? { connectionUseRequestId: input.connectionUseContext.physicalRequestId }
+        : {}),
       ...(toolName ? { toolName } : {}),
       ...(input.subjectId ? { callerSubjectId: input.subjectId } : {}),
     };
@@ -592,6 +610,17 @@ export type ConnectionBrokerDeps = {
     db: Database,
     input: { snapshot: unknown },
   ) => Promise<ConnectionUseAuthorizationResult>;
+  authorizeAcceptedUse?: (
+    db: Database,
+    input: AcceptedConnectionUseContext & {
+      serverId: string;
+      connectionId?: string;
+      providerDomain: string;
+      connectionKind?: ConnectionKind;
+      subjectScope?: "workspace" | "subject";
+      ownerSubjectId?: string;
+    },
+  ) => Promise<AcceptedConnectionUseResolution>;
 };
 
 export type PermanentConnectionRefreshFailure = {
@@ -805,7 +834,42 @@ export function buildConnectionTokenResolver(
     if (ref.selectedResources) {
       return authNeeded(ref, "resource_scope_unavailable", ref.connectionId);
     }
-    if (input.connectionUseAuthority !== undefined) {
+    if (input.connectionUseContext !== undefined) {
+      if (!deps.authorizeAcceptedUse) {
+        return authNeeded(
+          ref,
+          ref.subjectScope === "subject" ? "personal_authority_unavailable" : "missing_connection",
+          ref.connectionId,
+        );
+      }
+      const authorization = await deps.authorizeAcceptedUse(db, {
+        ...input.connectionUseContext,
+        serverId: input.serverId,
+        ...(ref.connectionId ? { connectionId: ref.connectionId } : {}),
+        providerDomain: ref.providerDomain,
+        ...(ref.kind ? { connectionKind: ref.kind } : {}),
+        subjectScope: ref.subjectScope === "subject" ? "subject" : "workspace",
+        ...(subjectId ? { ownerSubjectId: subjectId } : {}),
+      });
+      if (authorization.status === "denied") {
+        return authNeeded(
+          ref,
+          ref.subjectScope === "subject" ? "personal_authority_unavailable" : "missing_connection",
+          ref.connectionId,
+        );
+      }
+      connectionUseAttribution = authorization.attribution;
+      expectedAuthorityGeneration = authorization.attribution.connectionGeneration;
+      const expectedPersonal = authorization.attribution.scope !== "workspace";
+      credentialWorkspaceId = authorization.originWorkspaceId;
+      subjectId = authorization.attribution.ownerSubjectId ?? undefined;
+      ref = {
+        ...ref,
+        connectionId: authorization.attribution.connectionId,
+        kind: authorization.connectionKind,
+        subjectScope: expectedPersonal ? "subject" : "workspace",
+      };
+    } else if (input.connectionUseAuthority !== undefined) {
       const authority = ConnectionUseAuthoritySnapshot.parse(input.connectionUseAuthority);
       const expectedPersonal = authority.scope === "user";
       if (

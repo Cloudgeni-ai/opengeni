@@ -84,9 +84,34 @@ describe("Gmail REST MCP adapter", () => {
     expect(JSON.stringify([first, second])).not.toContain("gmail-token");
   });
 
+  test("connect resolves credentials without recording a provider request", async () => {
+    let providerAuthorizations = 0;
+    let requests = 0;
+    const gmail = server({
+      resolveCredential: async () => ({
+        status: "ok",
+        headers: { authorization: "Bearer gmail-token" },
+        connectionId: "conn_1",
+        authorizeProviderRequest: async () => {
+          providerAuthorizations += 1;
+          return true;
+        },
+      }),
+      fetchImpl: async () => {
+        requests += 1;
+        return Response.json({});
+      },
+    });
+
+    await gmail.connect();
+    expect(providerAuthorizations).toBe(0);
+    expect(requests).toBe(0);
+  });
+
   test("refreshes and retries a read once after 401", async () => {
     let resolves = 0;
     let requests = 0;
+    let providerAuthorizations = 0;
     const gmail = server({
       resolveCredential: async (input) => {
         resolves += 1;
@@ -95,6 +120,10 @@ describe("Gmail REST MCP adapter", () => {
           status: "ok",
           headers: { authorization: `Bearer token-${resolves}` },
           connectionId: "conn_1",
+          authorizeProviderRequest: async () => {
+            providerAuthorizations += 1;
+            return true;
+          },
         };
       },
       fetchImpl: async () => {
@@ -108,6 +137,7 @@ describe("Gmail REST MCP adapter", () => {
     expect(result.isError).not.toBe(true);
     expect(resolves).toBe(2);
     expect(requests).toBe(2);
+    expect(providerAuthorizations).toBe(2);
   });
 
   test("keeps draft and search outputs compatible with the hosted MCP field shape", async () => {
@@ -164,6 +194,7 @@ describe("Gmail REST MCP adapter", () => {
   test("never replays a mutation after a provider 401", async () => {
     let resolves = 0;
     let requests = 0;
+    let providerAuthorizations = 0;
     const gmail = server({
       resolveCredential: async () => {
         resolves += 1;
@@ -171,6 +202,10 @@ describe("Gmail REST MCP adapter", () => {
           status: "ok",
           headers: { authorization: "Bearer token" },
           connectionId: "conn_1",
+          authorizeProviderRequest: async () => {
+            providerAuthorizations += 1;
+            return true;
+          },
         };
       },
       fetchImpl: async () => {
@@ -186,6 +221,7 @@ describe("Gmail REST MCP adapter", () => {
     expect(result.content[0]!.text).toContain("outcome is uncertain");
     expect(resolves).toBe(1);
     expect(requests).toBe(1);
+    expect(providerAuthorizations).toBe(1);
   });
 
   test("rejects sensitive label additions before any provider request", async () => {

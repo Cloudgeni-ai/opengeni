@@ -25,6 +25,7 @@ type ResolveCredentialResult =
       status: "ok";
       headers: Record<string, string>;
       connectionId: string;
+      authorizeProviderRequest?: () => Promise<boolean>;
       expiresAt?: Date | null;
     }
   | {
@@ -595,10 +596,14 @@ export class GmailRestMcpServer implements MCPServer {
         headers: { ...headers, ...headersRecord(init.headers) },
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
-    const sendBounded = async (headers: Record<string, string>) => {
+    const sendBounded = async (credential: Extract<ResolveCredentialResult, { status: "ok" }>) => {
       try {
-        return await send(headers);
+        if (credential.authorizeProviderRequest && !(await credential.authorizeProviderRequest())) {
+          throw new GmailRestAuthError("Authentication required for Gmail");
+        }
+        return await send(credential.headers);
       } catch (error) {
+        if (error instanceof GmailRestAuthError) throw error;
         throw new GmailRestProviderError(
           replaySafe
             ? `Gmail request failed: ${safeProviderTransportMessage(error)}`
@@ -607,7 +612,7 @@ export class GmailRestMcpServer implements MCPServer {
       }
     };
     const first = await resolve(false);
-    let response = await sendBounded(first.headers);
+    let response = await sendBounded(first);
     if (response.status === 401) {
       await response.body?.cancel().catch(() => undefined);
       if (!replaySafe) {
@@ -616,7 +621,7 @@ export class GmailRestMcpServer implements MCPServer {
         );
       }
       const refreshed = await resolve(true);
-      response = await sendBounded(refreshed.headers);
+      response = await sendBounded(refreshed);
     }
     const payload = await readResponseJsonBounded<unknown>(
       response,
