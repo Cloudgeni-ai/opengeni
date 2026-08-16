@@ -556,7 +556,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     for (const routine of taskNoteFunctions) {
       expect(routine.securityDefiner).toBe(true);
       expect(routine.publicExecute).toBe(false);
-      expect(routine.settings).toContain(`search_path=${SCHEMA}, pg_catalog`);
+      expect(routine.settings).toContain(`search_path=pg_catalog, ${SCHEMA}, pg_temp`);
       expect(routine.appExecute).toBe(appExecutableTaskNoteFunctions.has(routine.name));
     }
   });
@@ -755,6 +755,84 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       publicExecute: false,
       settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
     });
+
+    const authorityClosure = await admin<
+      Array<{
+        name: string;
+        arguments: string;
+        securityDefiner: boolean;
+        settings: string[] | null;
+      }>
+    >`
+      SELECT
+        procedure.proname AS name,
+        pg_catalog.oidvectortypes(procedure.proargtypes) AS arguments,
+        procedure.prosecdef AS "securityDefiner",
+        procedure.proconfig AS settings
+      FROM pg_proc procedure
+      JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+      WHERE namespace.nspname = ${SCHEMA}
+        AND procedure.proname IN (
+          'guard_task_note_mutation',
+          'guard_task_note_event_mutation',
+          'resolve_task_note_attempt_authority',
+          'create_task_note_for_attempt',
+          'archive_task_note_for_attempt',
+          'list_task_notes_for_attempt',
+          'session_private_actor_visible',
+          'session_reference_visible'
+        )
+      ORDER BY procedure.proname`;
+    expect(Array.from(authorityClosure)).toEqual([
+      {
+        name: "archive_task_note_for_attempt",
+        arguments: "uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text",
+        securityDefiner: true,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "create_task_note_for_attempt",
+        arguments: "uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, integer",
+        securityDefiner: true,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "guard_task_note_event_mutation",
+        arguments: "",
+        securityDefiner: true,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "guard_task_note_mutation",
+        arguments: "",
+        securityDefiner: true,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "list_task_notes_for_attempt",
+        arguments: "uuid, uuid, uuid, uuid, uuid, integer, boolean, integer",
+        securityDefiner: true,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "resolve_task_note_attempt_authority",
+        arguments: "uuid, uuid, uuid, uuid, uuid, integer",
+        securityDefiner: true,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "session_private_actor_visible",
+        arguments: "uuid, uuid, uuid, text",
+        securityDefiner: true,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "session_reference_visible",
+        arguments: "uuid, uuid, uuid",
+        securityDefiner: false,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+    ]);
 
     const [capabilityTable] = await admin<
       Array<{

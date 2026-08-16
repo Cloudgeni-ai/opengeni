@@ -4,8 +4,9 @@
 -- The evidence row retains a value-free immutable source receipt after the
 -- short-lived task tree is cleaned up; the source bytes remain in the ordinary
 -- Task-note lifecycle and are never copied into evidence metadata.
--- Every SECURITY DEFINER path explicitly puts pg_temp last so caller-created
--- temporary relations cannot shadow target-schema authority relations.
+-- Every new path and the complete invoked 0239/0225 Task-note authority
+-- closure explicitly put pg_temp last so caller-created temporary relations
+-- cannot shadow target-schema authority relations.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
@@ -686,8 +687,81 @@ END;
 $$;
 
 DO $function_access$
-DECLARE data_schema text := current_schema();
+DECLARE
+  data_schema text := current_schema();
+  required_routine text;
 BEGIN
+  -- Migration 0239 predates the explicit pg_temp-last posture. Its lifecycle
+  -- functions are invoked by both 0260 entry points, while their RLS path also
+  -- invokes the 0225 session-reference/private-actor helpers. A caller with
+  -- database TEMP privilege must not be able to shadow any authority relation
+  -- reached through that nested closure. Fail closed if the exact predecessor
+  -- signatures are absent, then repair only their persisted search paths.
+  FOREACH required_routine IN ARRAY ARRAY[
+    'guard_task_note_mutation()',
+    'guard_task_note_event_mutation()',
+    'resolve_task_note_attempt_authority(uuid,uuid,uuid,uuid,uuid,integer)',
+    'create_task_note_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,integer)',
+    'archive_task_note_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,uuid,integer,text)',
+    'list_task_notes_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,boolean,integer)',
+    'session_private_actor_visible(uuid,uuid,uuid,text)',
+    'session_reference_visible(uuid,uuid,uuid)'
+  ]
+  LOOP
+    IF pg_catalog.to_regprocedure(
+      pg_catalog.format('%I.%s', data_schema, required_routine)
+    ) IS NULL THEN
+      RAISE EXCEPTION 'Task-note authority closure routine is missing: %.%',
+        data_schema, required_routine
+        USING ERRCODE = '42883';
+    END IF;
+  END LOOP;
+
+  EXECUTE format(
+    'ALTER FUNCTION %I.guard_task_note_mutation() '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.guard_task_note_event_mutation() '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.resolve_task_note_attempt_authority('
+      || 'uuid,uuid,uuid,uuid,uuid,integer) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.create_task_note_for_attempt('
+      || 'uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,integer) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.archive_task_note_for_attempt('
+      || 'uuid,uuid,uuid,uuid,uuid,integer,uuid,uuid,integer,text) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.list_task_notes_for_attempt('
+      || 'uuid,uuid,uuid,uuid,uuid,integer,boolean,integer) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.session_private_actor_visible(uuid,uuid,uuid,text) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.session_reference_visible(uuid,uuid,uuid) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+
   EXECUTE format(
     'REVOKE ALL ON FUNCTION %I.validate_task_note_knowledge_evidence() FROM PUBLIC',
     data_schema

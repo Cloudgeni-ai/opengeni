@@ -231,8 +231,11 @@ note text becomes the proposed fact only, the one-shot database capability
 verifies that exact claim-to-fact binding, retries converge after note archival,
 and another root/tenant/stale attempt fails closed. It also adds the atomic
 `task_note_replace` correction/revert operation and immutable content-free
-replacement receipt without making Task notes authoritative. The explicit
-proposal MCP tools remain proposal-only and learning-policy gated; see
+replacement receipt without making Task notes authoritative. Its explicit
+`pg_catalog`, target-schema, `pg_temp` posture covers both the new entry points
+and their full legacy Task-note/session-visibility closure, so runtime TEMP
+objects cannot replace authority reads at a nested definer or RLS boundary. The
+explicit proposal MCP tools remain proposal-only and learning-policy gated; see
 [`company-brain-write-routing.md`](company-brain-write-routing.md).
 
 Workspace decision publication to Slack retains the pure Memory policy/projection boundary, then atomically binds eligible changes to an immutable workspace-admin destination revision and durable outbox. A security-definer `SKIP LOCKED` claim path records append-only attempt/receipt history, retries transient Slack failures, terminally fails or cancels unsafe work, and reuses the existing verified-bot post-operation idempotency fence. The Capabilities UI selects only active non-shared bot-member channels; delivery revalidates that exact live membership/archive/Slack-Connect boundary after the post claim and immediately before the provider call, making destination drift a no-post immutable cancellation receipt. The UI exposes bounded review/retry/history state. A narrow post-persistence adapter consumes matching immutable durable-learning attempt/receipt outcomes without owning router or learning-policy authority. Slack receives only bounded summaries and authoritative application links; canonical Memory and learning ledgers never derive authority from Slack. See [`memory-slack-publication.md`](memory-slack-publication.md).

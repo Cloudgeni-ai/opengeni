@@ -103,10 +103,13 @@ learning-policy snapshot, locks the note, and rejects policy-off, another root,
 workspace, tenant, archived note, expired note, or stale version. A value-free,
 one-transaction capability binds the exact evidence/claim operations and is
 consumed by the insert trigger; the runtime role has no direct capability-table
-DML and cannot forge Task-note evidence onto another claim. Every migration
-0260 definer path pins `pg_catalog`, the deployment target schema, then
-`pg_temp`, so caller-created temporary relations cannot shadow durable
-authority relations.
+DML and cannot forge Task-note evidence onto another claim. Migration 0260 pins
+`pg_catalog`, the deployment target schema, then `pg_temp` for every new
+definer and the complete invoked Task-note closure: the legacy attempt resolver,
+create/archive/list lifecycle, mutation/event guards, session-reference RLS
+helper, and private-actor visibility helper. A runtime caller with database
+`TEMP` privilege therefore cannot shadow session, turn, attempt, interruption,
+membership, Task-note, event, or capability authority relations.
 The resulting claim is `proposed`, never approved or prompt-active. Exact retry
 reconstructs the same receipt even after the short-lived note is archived;
 changed input conflicts, and source cleanup cannot silently widen authority.
