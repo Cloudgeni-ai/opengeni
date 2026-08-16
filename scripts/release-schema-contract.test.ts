@@ -470,8 +470,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0261_preference_knowledge_proposal_actor_binding.sql")) {
         return includesActivation
-          ? "e3d73ba0a62c8de9672a75cb3405942c86d6577a4c74c8efbe4a59fe5834c597"
-          : "e5b35ae9f24859fd241d814f0f22f920671a27e7c53eda0cb3d943eeb239c300";
+          ? "3d4eb52fca664546de7a6fea355d5289c0044a457400daafd72d7e253ecca624"
+          : "1c224ffa4cd47dbbc09880425e879fe56f3606307516bcb6ae4f2dca3d5e8312";
       }
       if (migrations.has("0260_task_note_knowledge_promotion.sql")) {
         return includesActivation
