@@ -23,10 +23,9 @@ const budgets = {
   // live media renderers and browser/computer controls remain lazy. Workspace
   // channels and the "For you" rail entry add always-loaded rail code and one
   // more shared-chunk boundary in both graphs. Revision-fenced Connected Machine
-  // command policy adds its memory/CPU fields to the shared session contract;
-  // governed goal revision paging, rejection, and rollback add the matching SDK
-  // methods to that same direct-session graph.
-  // Keep tight headroom above the measured production graph.
+  // command policy adds its memory/CPU fields to the shared session contract.
+  // Versioned package metadata pushes the release graph just above 553 KiB;
+  // keep one KiB of measured headroom without relaxing the other graph limits.
   initialRaw: 1448 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
