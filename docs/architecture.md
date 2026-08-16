@@ -302,10 +302,13 @@ owner/admin/member roles, revision-fenced suspension/reactivation/offboarding,
 and versioned retention policy. Input-bound operation receipts make retries
 idempotent and immutable lifecycle events retain bounded evidence. Suspension
 removes persisted shared-workspace grants, revokes user-resource grants, fences
-membership-owned sessions, and interrupts shared-session attempts whose frozen
-initiating human matches the subject. Offboarding applies the same canonical
-workspace/session/turn/attempt teardown, then terminally revokes membership
-while retaining physical data and authority until expiry. Organization invitation enumeration is an
+membership-owned sessions, terminally cancels all of their nonterminal work,
+and cancels shared-session work whose frozen initiating human matches the
+subject. Every SSE frame rechecks current authority before delivery, while
+active realtime connections owned by the subject are ended atomically.
+Offboarding applies the same canonical workspace/session/turn/attempt teardown,
+then terminally revokes membership and rejects re-invitation while retaining
+physical data and authority until expiry. Organization invitation enumeration is an
 admin-only, bounded `(created_at,id)` keyset page. Expired offboarded personal
 resources are deleted only by the explicit bounded
 `db:sweep-organization-retention` operator command: database finalization first

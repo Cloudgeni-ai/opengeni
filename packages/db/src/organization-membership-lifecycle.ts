@@ -32,6 +32,22 @@ type CommandBase = {
   operationId: string;
 };
 
+export async function assertActiveManagedHumanOrganizationMembership(
+  db: Database,
+  input: { accountId: string; subjectId: string },
+): Promise<number | null> {
+  const [row] = await rawRows<{ authorization_revision: number | string | null }>(
+    db,
+    sql`select assert_active_managed_human_organization_membership(
+      ${input.accountId}::uuid,
+      ${input.subjectId}
+    ) as authorization_revision`,
+  );
+  return row?.authorization_revision === null || row?.authorization_revision === undefined
+    ? null
+    : Number(row.authorization_revision);
+}
+
 async function runCommand(
   db: Database,
   command: CommandBase & Record<string, unknown>,

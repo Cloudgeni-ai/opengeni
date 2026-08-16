@@ -160,7 +160,11 @@ invitation. Pending invitations can be revoked. Role changes, suspension,
 reactivation, offboarding, and retention-policy changes require an exact
 revision plus an input-bound operation id. Exact retries return the immutable
 receipt; changed reuse and stale revisions fail closed. The last active owner
-cannot be demoted, suspended, or offboarded.
+cannot be demoted, suspended, or offboarded. Suspension is reversible only
+through an explicit owner-authorized reactivation. Offboarding is terminal: a
+revoked membership cannot be re-invited or accepted again. A future rejoin
+contract would need a new generation identity propagated through the immutable
+retention ledger; 0263 deliberately does not reset or reuse that evidence.
 
 The managed-human API surface is:
 
@@ -183,18 +187,25 @@ delegated bearer requests are rejected. Provider email delivery and invitations
 for people who have not registered remain separate integrations.
 
 Suspension immediately removes persisted shared-workspace grants, revokes
-personal-resource grants, fences membership-owned sessions, and interrupts
-shared-session attempts whose frozen initiating human is the suspended subject.
+personal-resource grants, fences membership-owned sessions, terminally cancels
+their nonterminal work, and cancels shared-session work whose frozen initiating
+human is the suspended subject. Active realtime modes owned by that subject are
+ended with `authority_revoked`; their connections close and the durable workflow
+wake makes teardown repairable.
 Session, workspace-control, combined live, and interaction SSE connections
-periodically re-resolve the current human access projection; an already-open
-connection therefore closes after suspension or offboarding instead of retaining
-the grant captured when the HTTP request began.
+re-resolve the current human access projection before every emitted frame and
+also on the bounded idle timer. A buffered or replayed event therefore fails
+closed after suspension or offboarding instead of retaining the grant captured
+when the HTTP request began.
 Reactivation restores only active organization and personal-workspace access,
 never old grants. Offboarding applies the same canonical
 workspace/session/turn/attempt teardown, then terminally revokes membership and
 retains resource authority and physical data. Owned-session authority epochs
 advance with content-free audit events; unrelated users' shared-session state
-is not changed. `retain` has no deletion deadline;
+is not changed. The lifecycle does not infer membership ownership for retained
+processes or other direct provider operations that lack an exact membership
+authority field; adding that attribution and stream-token invalidation belongs
+to the separate live-access hardening program. `retain` has no deletion deadline;
 `delete_after` accepts the initial 30–90 day policy window and stamps a bounded
 future deadline. Destructive expiry is an explicit operator lifecycle, not an
 API request or background service. The command
@@ -370,7 +381,6 @@ rewritten in the same release that first activates user authority.
 - user-resource authority/grant writes, discovery, or sharing;
 - resource CRUD or discovery changes;
 - session sharing/fork runtime;
-- turn/task cancellation;
 - session visibility mutation, visibility-aware reads, or independent fork
   runtime;
 - Connected Machine, rig, variable-set, connection, Codex, or Document

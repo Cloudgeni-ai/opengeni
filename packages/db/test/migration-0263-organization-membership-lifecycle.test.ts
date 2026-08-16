@@ -29,6 +29,7 @@ import {
   provisionRoles,
   recordOrganizationRetentionObjectDeleted,
   revokeOrganizationInvitation,
+  settleSessionAttemptInterruptions,
   transitionSessionVisibility,
   updateOrganizationMember,
   updateOrganizationRetentionPolicy,
@@ -802,6 +803,8 @@ describe("migration 0263 organization membership lifecycle", () => {
         authorityStatus: string;
         ownedSessionEpoch: number;
         ownedSessionEvents: number;
+        interruptionKind: string;
+        workflowWakeCount: number;
       }>
     >`
       select
@@ -817,7 +820,12 @@ describe("migration 0263 organization membership lifecycle", () => {
           as "ownedSessionEpoch",
         (select count(*)::int from session_events event_row
           where event_row.session_id = ${targetOwnedSession.id}
-            and event_row.type = 'session.authority.suspended') as "ownedSessionEvents"`;
+            and event_row.type = 'session.authority.suspended') as "ownedSessionEvents",
+        (select kind from session_attempt_interruptions interruption
+          where interruption.attempt_id = ${initiatedAttemptId}) as "interruptionKind",
+        (select count(*)::int from session_workflow_wake_outbox wake
+          where wake.session_id in (${sharedSession.id}, ${targetOwnedSession.id}))
+          as "workflowWakeCount"`;
     expect(suspensionFence).toEqual({
       interruptionCount: 1,
       authorityEpoch: 1,
@@ -825,7 +833,22 @@ describe("migration 0263 organization membership lifecycle", () => {
       authorityStatus: "active",
       ownedSessionEpoch: 2,
       ownedSessionEvents: 1,
+      interruptionKind: "organization_membership_revoked",
+      workflowWakeCount: 1,
     });
+    const interruptionSettlement = await settleSessionAttemptInterruptions(
+      client.db,
+      suspensionWorkspaceId,
+      sharedSession.id,
+      initiatedAttemptId,
+    );
+    expect(interruptionSettlement.outcome).toBe("cancelled");
+    const [terminalized] = await shared.admin<Array<{ turnStatus: string; sessionStatus: string }>>`
+      select turn_row.status as "turnStatus", session_row.status as "sessionStatus"
+      from session_turns turn_row
+      join sessions session_row on session_row.id = turn_row.session_id
+      where turn_row.id = ${initiatedTurnId}`;
+    expect(terminalized).toEqual({ turnStatus: "cancelled", sessionStatus: "idle" });
     const suspendedAccess = await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
       userId: targetId,
       email: `${targetId}@example.test`,
@@ -892,6 +915,39 @@ describe("migration 0263 organization membership lifecycle", () => {
       model: "test-model",
       sandboxBackend: "none",
     });
+    const approvalSession = await createSession(client.db, {
+      accountId: owner!.organizationId,
+      workspaceId: sharedWorkspaceId,
+      initialMessage: "approval retained work",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: targetSubject },
+      subjectId: targetSubject,
+      model: "test-model",
+      sandboxBackend: "none",
+    });
+    const recoveringSession = await createSession(client.db, {
+      accountId: owner!.organizationId,
+      workspaceId: sharedWorkspaceId,
+      initialMessage: "recovering retained work",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: targetSubject },
+      subjectId: targetSubject,
+      model: "test-model",
+      sandboxBackend: "none",
+    });
+    const capacitySession = await createSession(client.db, {
+      accountId: owner!.organizationId,
+      workspaceId: sharedWorkspaceId,
+      initialMessage: "capacity retained work",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: targetSubject },
+      subjectId: targetSubject,
+      model: "test-model",
+      sandboxBackend: "none",
+    });
     const privateTransition = await transitionSessionVisibility(client.db, {
       workspaceId: sharedWorkspaceId,
       sessionId: privateSession.id,
@@ -907,10 +963,29 @@ describe("migration 0263 organization membership lifecycle", () => {
         temporal_workflow_id, status, execution_generation, position, prompt,
         model, reasoning_effort, latency_mode, sandbox_backend, initiator_kind,
         initiator_subject_id, initiating_human_subject_id
-      ) values (
+      ) values
+      (
+        ${crypto.randomUUID()}, ${owner!.organizationId}, ${sharedWorkspaceId},
+        ${approvalSession.id}, ${crypto.randomUUID()}, ${`offboard-${crypto.randomUUID()}`},
+        'queued', 1, 1, 'queued private work', 'test-model', 'medium', 'standard',
+        'none', 'subject', ${targetSubject}, ${targetSubject}
+      ),
+      (
+        ${crypto.randomUUID()}, ${owner!.organizationId}, ${sharedWorkspaceId},
+        ${recoveringSession.id}, ${crypto.randomUUID()}, ${`offboard-${crypto.randomUUID()}`},
+        'requires_action', 1, 2, 'approval private work', 'test-model', 'medium', 'standard',
+        'none', 'subject', ${targetSubject}, ${targetSubject}
+      ),
+      (
+        ${crypto.randomUUID()}, ${owner!.organizationId}, ${sharedWorkspaceId},
+        ${capacitySession.id}, ${crypto.randomUUID()}, ${`offboard-${crypto.randomUUID()}`},
+        'recovering', 1, 3, 'recovering private work', 'test-model', 'medium', 'standard',
+        'none', 'subject', ${targetSubject}, ${targetSubject}
+      ),
+      (
         ${crypto.randomUUID()}, ${owner!.organizationId}, ${sharedWorkspaceId},
         ${privateSession.id}, ${crypto.randomUUID()}, ${`offboard-${crypto.randomUUID()}`},
-        'queued', 1, 1, 'queued private work', 'test-model', 'medium', 'standard',
+        'waiting_capacity', 1, 4, 'waiting private work', 'test-model', 'medium', 'standard',
         'none', 'subject', ${targetSubject}, ${targetSubject}
       )`;
     const secondWorkspaceId = crypto.randomUUID();
@@ -942,6 +1017,27 @@ describe("migration 0263 organization membership lifecycle", () => {
       expectedAuthorityEpoch: 1,
       operationKey: `private:${crypto.randomUUID()}`,
     });
+    const realtimeId = crypto.randomUUID();
+    await shared.admin`
+      insert into session_realtime_modes (
+        id, account_id, workspace_id, session_id, operation_id,
+        owner_subject_id, browser_instance_id, owner_key_hash, model,
+        state, version, connection_epoch, lease_expires_at, last_heartbeat_at
+      ) values (
+        ${realtimeId}, ${owner!.organizationId}, ${sharedWorkspaceId},
+        ${privateSession.id}, ${crypto.randomUUID()}, ${targetSubject},
+        ${`browser-${crypto.randomUUID()}`}, ${"a".repeat(64)},
+        'opengeni-gateway/openai/gpt-realtime-mini', 'active', 1, 1,
+        now() + interval '1 minute', now()
+      )`;
+    await shared.admin`
+      insert into session_realtime_connections (
+        account_id, workspace_id, session_id, realtime_id, operation_id,
+        connection_epoch, state
+      ) values (
+        ${owner!.organizationId}, ${sharedWorkspaceId}, ${privateSession.id},
+        ${realtimeId}, ${crypto.randomUUID()}, 1, 'negotiating'
+      )`;
     const offboardRace = await Promise.allSettled([
       updateOrganizationMember(client.db, {
         organizationId: owner!.organizationId,
@@ -980,7 +1076,11 @@ describe("migration 0263 organization membership lifecycle", () => {
         authorityEpoch: number;
         ownerMembershipId: string | null;
         cancelledTurns: number;
+        stateMatrixCancelledTurns: number;
         revocationEvents: number;
+        realtimeState: string;
+        realtimeEndReason: string;
+        realtimeConnectionState: string;
       }>
     >`
       select id, authority_epoch::int as "authorityEpoch",
@@ -988,16 +1088,28 @@ describe("migration 0263 organization membership lifecycle", () => {
         (select count(*)::int from session_turns turn_row
           where turn_row.session_id = sessions.id and turn_row.status = 'cancelled')
           as "cancelledTurns",
+        (select count(*)::int from session_turns turn_row
+          where turn_row.session_id in (
+            ${privateSession.id}, ${approvalSession.id}, ${recoveringSession.id}, ${capacitySession.id}
+          ) and turn_row.status = 'cancelled') as "stateMatrixCancelledTurns",
         (select count(*)::int from session_events event_row
           where event_row.session_id = sessions.id
-            and event_row.type = 'session.authority.revoked') as "revocationEvents"
+            and event_row.type = 'session.authority.revoked') as "revocationEvents",
+        (select state from session_realtime_modes where id = ${realtimeId}) as "realtimeState",
+        (select end_reason from session_realtime_modes where id = ${realtimeId}) as "realtimeEndReason",
+        (select state from session_realtime_connections where realtime_id = ${realtimeId})
+          as "realtimeConnectionState"
       from sessions where id = ${privateSession.id}`;
     expect(retainedSession).toEqual({
       id: privateSession.id,
       authorityEpoch: 3,
       ownerMembershipId: member.id,
       cancelledTurns: 1,
+      stateMatrixCancelledTurns: 4,
       revocationEvents: 1,
+      realtimeState: "ended",
+      realtimeEndReason: "authority_revoked",
+      realtimeConnectionState: "closed",
     });
     const [secondRetainedSession] = await shared.admin<
       Array<{ authorityEpoch: number; revocationEvents: number }>
@@ -1349,6 +1461,12 @@ describe("migration 0263 organization membership lifecycle", () => {
         objectBucket: retentionObjectBucket,
       }),
     ).toEqual(completed);
+    expect(
+      await claimOrganizationRetentionDeletion(client.db, {
+        organizationId: owner!.organizationId,
+        operationId,
+      }),
+    ).toEqual(claim);
     const [evidence] = await shared.admin<
       Array<{
         workspaceCount: number;
@@ -1746,6 +1864,198 @@ describe("migration 0263 organization membership lifecycle", () => {
             reasonCode: "test_cleanup",
           }),
       ),
+    );
+  });
+
+  test("rejects null retention bounds and malformed failed evidence at the app boundary", async () => {
+    if (!client) return;
+    const ownerId = `retention-null-${crypto.randomUUID()}`;
+    const ownerSubject = `user:${ownerId}`;
+    await provisionSelf(ownerId);
+    const [owner] = await listSelfOrganizationMemberships(client.db, ownerSubject);
+    await expectSqlState(
+      () =>
+        withRlsContext(
+          client!.db,
+          { accountId: owner!.organizationId, workspaceId: null },
+          async (scopedDb) => {
+            await setSubjectRlsContext(scopedDb, ownerSubject);
+            return await rawRows(
+              scopedDb,
+              sql`select preview_organization_retention_deletions(
+                ${owner!.organizationId}::uuid, null::integer
+              )`,
+            );
+          },
+        ),
+      "22023",
+    );
+    await expectSqlState(
+      () =>
+        withRlsContext(
+          client!.db,
+          { accountId: owner!.organizationId, workspaceId: null },
+          async (scopedDb) => {
+            await setSubjectRlsContext(scopedDb, ownerSubject);
+            return await rawRows(
+              scopedDb,
+              sql`select list_organization_retention_deletion_objects(
+                ${owner!.organizationId}::uuid, ${crypto.randomUUID()}::uuid,
+                ${crypto.randomUUID()}::uuid, ${retentionObjectBucket}, null::integer
+              )`,
+            );
+          },
+        ),
+      "22023",
+    );
+    await expectSqlState(
+      () =>
+        withRlsContext(
+          client!.db,
+          { accountId: owner!.organizationId, workspaceId: null },
+          async (scopedDb) => {
+            await setSubjectRlsContext(scopedDb, ownerSubject);
+            return await rawRows(
+              scopedDb,
+              sql`select fail_organization_retention_deletion(
+                ${owner!.organizationId}::uuid, ${crypto.randomUUID()}::uuid,
+                ${crypto.randomUUID()}::uuid, null::text
+              )`,
+            );
+          },
+        ),
+      "22023",
+    );
+  });
+
+  test("keeps revoked membership terminal while preserving unrelated organization grants", async () => {
+    if (!shared || !client) return;
+    const userId = `terminal-self-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const selfAccess = await provisionSelf(userId);
+    const [selfMembership] = await listSelfOrganizationMemberships(client.db, subjectId);
+    const secondOwnerSubject = `user:second-owner-${crypto.randomUUID()}`;
+    const secondOwnerId = crypto.randomUUID();
+    const secondOwnerWorkspaceId = crypto.randomUUID();
+    await shared.admin`
+      insert into workspaces (id, account_id, name, external_source, external_id)
+      values (
+        ${secondOwnerWorkspaceId}, ${selfMembership!.organizationId}, 'Second owner personal',
+        'test', ${crypto.randomUUID()}
+      )`;
+    await shared.admin`
+      insert into workspace_inference_controls (account_id, workspace_id)
+      values (${selfMembership!.organizationId}, ${secondOwnerWorkspaceId})`;
+    await shared.admin`
+      insert into organization_memberships (
+        id, account_id, subject_id, role, status, personal_workspace_id
+      ) values (
+        ${secondOwnerId}, ${selfMembership!.organizationId}, ${secondOwnerSubject},
+        'owner', 'active', ${secondOwnerWorkspaceId}
+      )`;
+
+    const otherOwnerId = `terminal-other-owner-${crypto.randomUUID()}`;
+    const otherOwnerSubject = `user:${otherOwnerId}`;
+    await provisionSelf(otherOwnerId);
+    const [otherOwner] = await listSelfOrganizationMemberships(client.db, otherOwnerSubject);
+    const otherInvitation = await createOrganizationInvitation(client.db, {
+      organizationId: otherOwner!.organizationId,
+      actorSubjectId: otherOwnerSubject,
+      operationId: crypto.randomUUID(),
+      targetSubjectId: subjectId,
+      targetEmail: `${userId}@example.test`,
+      role: "member",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    const otherMember = (
+      await acceptOrganizationInvitation(client.db, {
+        organizationId: otherOwner!.organizationId,
+        actorSubjectId: subjectId,
+        operationId: crypto.randomUUID(),
+        invitationId: otherInvitation.id,
+        expectedRevision: otherInvitation.revision,
+      })
+    ).membership;
+    const ordinaryWorkspaceId = crypto.randomUUID();
+    await shared.admin`
+      insert into workspaces (id, account_id, name, external_source, external_id)
+      values (${ordinaryWorkspaceId}, ${otherOwner!.organizationId}, 'Other shared', 'test', ${crypto.randomUUID()})`;
+    await shared.admin`
+      insert into workspace_inference_controls (account_id, workspace_id)
+      values (${otherOwner!.organizationId}, ${ordinaryWorkspaceId})`;
+    await shared.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${otherOwner!.organizationId}, ${ordinaryWorkspaceId}, ${subjectId}, 'member')`;
+
+    const suspendedSelf = await updateOrganizationMember(client.db, {
+      organizationId: selfMembership!.organizationId,
+      actorSubjectId: secondOwnerSubject,
+      operationId: crypto.randomUUID(),
+      membershipId: selfMembership!.id,
+      transition: {
+        kind: "suspend",
+        expectedAuthorizationRevision: selfMembership!.authorizationRevision,
+        operationId: crypto.randomUUID(),
+      },
+    });
+    expect(suspendedSelf.status).toBe("suspended");
+    const projected = await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: userId,
+    });
+    expect(
+      projected.accessContext.workspaceGrants.some(
+        (grant) => grant.workspaceId === ordinaryWorkspaceId,
+      ),
+    ).toBe(true);
+    expect(
+      projected.accessContext.workspaceGrants.some(
+        (grant) => grant.workspaceId === otherMember.personalWorkspaceId,
+      ),
+    ).toBe(true);
+    expect(
+      projected.accessContext.workspaceGrants.some(
+        (grant) => grant.accountId === selfMembership!.organizationId,
+      ),
+    ).toBe(false);
+    expect(projected.accessContext.defaultWorkspaceId).toBe(selfAccess.defaultWorkspaceId);
+
+    const reactivatedSelf = await updateOrganizationMember(client.db, {
+      organizationId: selfMembership!.organizationId,
+      actorSubjectId: secondOwnerSubject,
+      operationId: crypto.randomUUID(),
+      membershipId: selfMembership!.id,
+      transition: {
+        kind: "reactivate",
+        expectedAuthorizationRevision: suspendedSelf.authorizationRevision,
+        operationId: crypto.randomUUID(),
+      },
+    });
+    const revokedSelf = await updateOrganizationMember(client.db, {
+      organizationId: selfMembership!.organizationId,
+      actorSubjectId: secondOwnerSubject,
+      operationId: crypto.randomUUID(),
+      membershipId: selfMembership!.id,
+      transition: {
+        kind: "offboard",
+        expectedAuthorizationRevision: reactivatedSelf.authorizationRevision,
+        operationId: crypto.randomUUID(),
+      },
+    });
+    expect(revokedSelf.status).toBe("revoked");
+    await expectSqlState(
+      () =>
+        createOrganizationInvitation(client!.db, {
+          organizationId: selfMembership!.organizationId,
+          actorSubjectId: secondOwnerSubject,
+          operationId: crypto.randomUUID(),
+          targetSubjectId: subjectId,
+          targetEmail: `${userId}@example.test`,
+          role: "member",
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        }),
+      "55000",
     );
   });
 

@@ -305,6 +305,10 @@ export async function sseSessionStream(
   let writeTail = Promise.resolve();
   const writeFrame = (frame: string): Promise<void> => {
     const write = writeTail.then(async () => {
+      // A periodic check closes an idle stream, while this exact pre-delivery
+      // check prevents a buffered/replayed event from crossing a revocation
+      // boundary merely because its timer has not fired yet.
+      await options.reauthorize?.();
       if (!(await channel.write(frame))) throw new SseStreamStoppedError();
     });
     writeTail = write.catch(() => {});
@@ -481,6 +485,7 @@ export async function sseWorkspaceControlStream(
   let writeTail = Promise.resolve();
   const writeFrame = (frame: string): Promise<void> => {
     const write = writeTail.then(async () => {
+      await options.reauthorize?.();
       if (!(await channel.write(frame))) throw new SseStreamStoppedError();
     });
     writeTail = write.catch(() => {});
@@ -629,7 +634,10 @@ export async function sseWorkspaceLiveStream(
 
   let writeTail = Promise.resolve(true);
   const write = (frame: string): Promise<boolean> => {
-    const pending = writeTail.then(() => channel.write(frame));
+    const pending = writeTail.then(async () => {
+      await options.reauthorize?.();
+      return await channel.write(frame);
+    });
     writeTail = pending.catch(() => false);
     return pending;
   };
@@ -740,6 +748,7 @@ export async function sseWorkspaceInteractionRevisionStream(
   });
 
   const write = async (frame: string): Promise<boolean> => {
+    await options.reauthorize?.();
     const accepted = await channel.write(frame);
     if (accepted) lastWriteAt = Date.now();
     return accepted;

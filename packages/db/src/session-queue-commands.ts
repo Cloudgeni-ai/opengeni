@@ -27,7 +27,7 @@ import {
   type TimelineAnnotation,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
-import type { Database, SessionActivityDatabase } from "./database";
+import { setSubjectRlsContext, type Database, type SessionActivityDatabase } from "./database";
 import {
   fromPostgresLosslessJson,
   fromPostgresLosslessText,
@@ -65,6 +65,7 @@ import {
   type FrozenTurnInitiator,
 } from "./turn-initiator";
 import { resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./xai-subscription";
+import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
 
 type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
   payload: unknown;
@@ -1442,6 +1443,13 @@ export async function submitHumanPromptInTransaction(
 ): Promise<SubmitHumanPromptResult> {
   const annotations = TimelineAnnotations.parse(input.annotations ?? []);
   const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  if (input.actor.type === "human") {
+    await setSubjectRlsContext(db, input.actor.subjectId);
+    await assertActiveManagedHumanOrganizationMembership(db, {
+      accountId: input.accountId,
+      subjectId: input.actor.subjectId,
+    });
+  }
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",

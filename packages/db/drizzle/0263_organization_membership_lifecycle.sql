@@ -6,6 +6,28 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
+ALTER TABLE "session_realtime_modes"
+  DROP CONSTRAINT "session_realtime_modes_end_reason_check";
+ALTER TABLE "session_realtime_modes"
+  ADD CONSTRAINT "session_realtime_modes_end_reason_check"
+  CHECK (
+    "end_reason" IS NULL
+    OR "end_reason" IN ('user_stop', 'browser_unload', 'lease_expired', 'authority_revoked')
+  ) NOT VALID;
+ALTER TABLE "session_realtime_modes"
+  VALIDATE CONSTRAINT "session_realtime_modes_end_reason_check";
+
+ALTER TABLE "session_attempt_interruptions"
+  DROP CONSTRAINT "session_attempt_interruptions_kind_check";
+ALTER TABLE "session_attempt_interruptions"
+  ADD CONSTRAINT "session_attempt_interruptions_kind_check"
+  CHECK ("kind" IN (
+    'session_pause', 'workspace_pause', 'steer', 'maintenance',
+    'authority_change', 'organization_membership_revoked'
+  )) NOT VALID;
+ALTER TABLE "session_attempt_interruptions"
+  VALIDATE CONSTRAINT "session_attempt_interruptions_kind_check";
+
 ALTER TABLE "organization_memberships"
   ADD COLUMN "role" text NOT NULL DEFAULT 'member';
 
@@ -257,7 +279,11 @@ CREATE TABLE "organization_user_retention_deletion_events" (
   CONSTRAINT "organization_user_retention_deletion_events_kind_check"
     CHECK ("kind" IN ('claimed', 'failed', 'completed')),
   CONSTRAINT "organization_user_retention_deletion_events_reason_check"
-    CHECK ("reason_code" IS NULL OR "reason_code" ~ '^[a-z0-9_]{1,64}$')
+    CHECK (
+      ("kind" = 'failed' AND "reason_code" IS NOT NULL
+        AND "reason_code" ~ '^[a-z0-9_]{1,64}$')
+      OR ("kind" IN ('claimed', 'completed') AND "reason_code" IS NULL)
+    )
 );
 CREATE UNIQUE INDEX "organization_user_retention_deletion_events_operation_kind_uq"
   ON "organization_user_retention_deletion_events" ("account_id", "operation_id", "kind");
@@ -663,8 +689,18 @@ DECLARE
   previous_visibility_capability text := pg_catalog.current_setting(
     'opengeni.session_visibility_write_capability', true
   );
+  previous_activity_gate_state text := pg_catalog.current_setting(
+    'opengeni.session_activity_gate_state', true
+  );
+  previous_activity_gate_workspace text := pg_catalog.current_setting(
+    'opengeni.session_activity_gate_workspace_id', true
+  );
   visibility_capability_id uuid;
   interruption_operation_id uuid;
+  affected_session_ids uuid[];
+  affected_realtime_ids uuid[];
+  cancelled_turn_ids uuid[];
+  activity_revision_value bigint;
 BEGIN
   IF p_command IS NULL
     OR action_name NOT IN ('invite', 'accept', 'revoke_invitation', 'change_role', 'suspend', 'reactivate', 'offboard', 'retention')
@@ -745,30 +781,8 @@ BEGIN
       IF target.status = 'active' THEN
         RAISE EXCEPTION 'organization membership is already active' USING ERRCODE = '55000';
       END IF;
-      workspace_id_value := target.personal_workspace_id;
-      IF workspace_id_value IS NULL THEN
-        workspace_id_value := gen_random_uuid();
-        PERFORM pg_catalog.set_config('opengeni.workspace_id', workspace_id_value::text, true);
-        INSERT INTO workspaces (
-          id, account_id, name, slug, external_source, external_id
-        ) VALUES (
-          workspace_id_value, account_id_value, 'Personal workspace', NULL,
-          'opengeni:organization-membership', account_id_value::text || ':' || actor_subject
-        ) ON CONFLICT (external_source, external_id) DO UPDATE
-          SET updated_at = workspaces.updated_at
-        RETURNING id INTO workspace_id_value;
-        INSERT INTO workspace_inference_controls (workspace_id, account_id)
-        VALUES (workspace_id_value, account_id_value) ON CONFLICT DO NOTHING;
-      END IF;
-      UPDATE organization_memberships SET
-        role = invitation.role,
-        status = 'active',
-        personal_workspace_id = workspace_id_value,
-        authorization_revision = authorization_revision + 1,
-        revoked_at = NULL,
-        personal_retention_until = NULL,
-        updated_at = now_value
-      WHERE id = target.id RETURNING * INTO target;
+      RAISE EXCEPTION 'inactive organization membership requires explicit owner lifecycle action'
+        USING ERRCODE = '55000';
     END IF;
     UPDATE organization_membership_invitations SET
       status = 'accepted', revision = revision + 1,
@@ -835,6 +849,15 @@ BEGIN
           AND membership.status = 'active'
       ) THEN
         RAISE EXCEPTION 'subject is already an active organization member' USING ERRCODE = '55000';
+      END IF;
+      IF EXISTS (
+        SELECT 1 FROM organization_memberships membership
+        WHERE membership.account_id = account_id_value
+          AND membership.subject_id = target_subject
+          AND membership.status IN ('suspended', 'revoked')
+      ) THEN
+        RAISE EXCEPTION 'inactive organization membership cannot be re-invited'
+          USING ERRCODE = '55000';
       END IF;
       UPDATE organization_membership_invitations SET
         status = 'revoked', revision = revision + 1, updated_at = now_value
@@ -1002,6 +1025,12 @@ BEGIN
           PERFORM pg_catalog.set_config(
             'opengeni.workspace_id', workspace_id_value::text, true
           );
+          PERFORM pg_catalog.set_config(
+            'opengeni.session_activity_gate_state', 'open', true
+          );
+          PERFORM pg_catalog.set_config(
+            'opengeni.session_activity_gate_workspace_id', workspace_id_value::text, true
+          );
           PERFORM 1 FROM workspace_inference_controls control
           WHERE control.account_id = account_id_value
             AND control.workspace_id = workspace_id_value
@@ -1022,6 +1051,27 @@ BEGIN
               )
             )
           ORDER BY affected.id
+          FOR UPDATE;
+          PERFORM 1 FROM session_realtime_modes realtime
+          WHERE realtime.account_id = account_id_value
+            AND realtime.workspace_id = workspace_id_value
+            AND realtime.owner_subject_id = target.subject_id
+            AND realtime.state = 'active'
+          ORDER BY realtime.id
+          FOR UPDATE;
+          SELECT COALESCE(pg_catalog.array_agg(realtime.id ORDER BY realtime.id), ARRAY[]::uuid[])
+          INTO affected_realtime_ids
+          FROM session_realtime_modes realtime
+          WHERE realtime.account_id = account_id_value
+            AND realtime.workspace_id = workspace_id_value
+            AND realtime.owner_subject_id = target.subject_id
+            AND realtime.state = 'active';
+          PERFORM 1 FROM session_realtime_connections connection
+          WHERE connection.account_id = account_id_value
+            AND connection.workspace_id = workspace_id_value
+            AND connection.realtime_id = ANY(affected_realtime_ids)
+            AND connection.state IN ('negotiating', 'ready', 'active')
+          ORDER BY connection.id
           FOR UPDATE;
           PERFORM 1 FROM session_turns turn_row
           WHERE turn_row.account_id = account_id_value
@@ -1053,6 +1103,33 @@ BEGIN
             )
           ORDER BY attempt.id
           FOR UPDATE;
+          SELECT COALESCE(pg_catalog.array_agg(DISTINCT turn_row.session_id), ARRAY[]::uuid[])
+          INTO affected_session_ids
+          FROM session_turns turn_row
+          JOIN sessions owned
+            ON owned.account_id = turn_row.account_id
+           AND owned.workspace_id = turn_row.workspace_id
+           AND owned.id = turn_row.session_id
+          WHERE turn_row.account_id = account_id_value
+            AND turn_row.workspace_id = workspace_id_value
+            AND turn_row.status IN (
+              'queued', 'running', 'requires_action', 'recovering', 'waiting_capacity'
+            )
+            AND (
+              owned.owner_organization_membership_id = target.id
+              OR turn_row.initiating_human_subject_id = target.subject_id
+            );
+          affected_session_ids := ARRAY(
+            SELECT DISTINCT candidate.session_id
+            FROM (
+              SELECT unnest(affected_session_ids) AS session_id
+              UNION ALL
+              SELECT realtime.session_id
+              FROM session_realtime_modes realtime
+              WHERE realtime.id = ANY(affected_realtime_ids)
+            ) candidate
+            ORDER BY candidate.session_id
+          );
           interruption_operation_id := pg_catalog.gen_random_uuid();
           INSERT INTO session_command_receipts (
             id, account_id, workspace_id, actor_type, actor_subject_id,
@@ -1072,7 +1149,7 @@ BEGIN
             kind, control_revision
           )
           SELECT attempt.account_id, attempt.workspace_id, attempt.session_id,
-            interruption_operation_id, attempt.id, 'authority_change',
+            interruption_operation_id, attempt.id, 'organization_membership_revoked',
             CASE WHEN owned.owner_organization_membership_id = target.id
               THEN owned.authority_epoch + 1 ELSE owned.authority_epoch END
           FROM session_turn_attempts attempt
@@ -1087,20 +1164,158 @@ BEGIN
             AND attempt.state IN ('claimed', 'running')
           ON CONFLICT ON CONSTRAINT session_attempt_interruptions_operation_attempt_uq
           DO NOTHING;
-          UPDATE session_turns turn_row
-          SET status = 'cancelled', cancelled_by = actor_subject,
-            cancel_reason = 'authority_changed', finished_at = now_value,
-            updated_at = now_value, version = turn_row.version + 1
-          WHERE turn_row.account_id = account_id_value
-            AND turn_row.workspace_id = workspace_id_value
-            AND turn_row.status = 'queued'
+          WITH cancelled AS (
+            UPDATE session_turns turn_row
+            SET status = 'cancelled', active_attempt_id = NULL,
+              cancelled_by = actor_subject, cancel_reason = 'authority_changed',
+              finished_at = now_value, updated_at = now_value,
+              version = turn_row.version + 1
+            WHERE turn_row.account_id = account_id_value
+              AND turn_row.workspace_id = workspace_id_value
+              AND turn_row.status IN (
+                'queued', 'running', 'requires_action', 'recovering', 'waiting_capacity'
+              )
+              AND EXISTS (
+                SELECT 1 FROM sessions owned
+                WHERE owned.account_id = turn_row.account_id
+                  AND owned.workspace_id = turn_row.workspace_id
+                  AND owned.id = turn_row.session_id
+                  AND (
+                    owned.owner_organization_membership_id = target.id
+                    OR turn_row.initiating_human_subject_id = target.subject_id
+                  )
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM session_turn_attempts live_attempt
+                WHERE live_attempt.account_id = turn_row.account_id
+                  AND live_attempt.workspace_id = turn_row.workspace_id
+                  AND live_attempt.session_id = turn_row.session_id
+                  AND live_attempt.turn_id = turn_row.id
+                  AND live_attempt.id = turn_row.active_attempt_id
+                  AND live_attempt.state IN ('claimed', 'running')
+              )
+            RETURNING turn_row.id
+          )
+          SELECT COALESCE(pg_catalog.array_agg(cancelled.id ORDER BY cancelled.id), ARRAY[]::uuid[])
+          INTO cancelled_turn_ids
+          FROM cancelled;
+          UPDATE session_human_input_requests request_row
+          SET status = 'cancelled', response = '{"outcome":"cancelled"}'::jsonb,
+            responded_by = actor_subject, responded_at = now_value,
+            updated_at = now_value
+          WHERE request_row.account_id = account_id_value
+            AND request_row.workspace_id = workspace_id_value
+            AND request_row.turn_id = ANY(cancelled_turn_ids)
+            AND request_row.status = 'pending';
+          UPDATE interaction_interventions intervention
+          SET status = 'cancelled', response_actor_subject_id = actor_subject,
+            version = intervention.version + 1, settled_at = now_value,
+            updated_at = now_value
+          WHERE intervention.account_id = account_id_value
+            AND intervention.workspace_id = workspace_id_value
+            AND intervention.originating_turn_id = ANY(cancelled_turn_ids)
+            AND intervention.status = 'open';
+          DELETE FROM agent_run_states run_state
+          WHERE run_state.account_id = account_id_value
+            AND run_state.workspace_id = workspace_id_value
+            AND run_state.turn_id = ANY(cancelled_turn_ids);
+          UPDATE codex_capacity_waiters waiter
+          SET status = 'superseded', observed_wake_revision = waiter.wake_revision,
+            last_wake_reason = 'organization_membership_' || action_name,
+            updated_at = now_value
+          WHERE waiter.account_id = account_id_value
+            AND waiter.workspace_id = workspace_id_value
+            AND waiter.blocked_turn_id = ANY(cancelled_turn_ids)
+            AND waiter.status = 'waiting';
+          UPDATE xai_capacity_waiters waiter
+          SET status = 'superseded', observed_wake_revision = waiter.wake_revision,
+            last_wake_reason = 'organization_membership_' || action_name,
+            updated_at = now_value
+          WHERE waiter.account_id = account_id_value
+            AND waiter.workspace_id = workspace_id_value
+            AND waiter.blocked_turn_id = ANY(cancelled_turn_ids)
+            AND waiter.status = 'waiting';
+          UPDATE session_realtime_connections connection
+          SET state = 'closed', closed_at = now_value, updated_at = now_value
+          WHERE connection.account_id = account_id_value
+            AND connection.workspace_id = workspace_id_value
+            AND connection.realtime_id = ANY(affected_realtime_ids)
+            AND connection.state IN ('negotiating', 'ready', 'active');
+          WITH ended AS (
+            UPDATE session_realtime_modes realtime
+            SET state = 'ended', version = realtime.version + 1,
+              ended_at = now_value, end_reason = 'authority_revoked',
+              updated_at = now_value
+            WHERE realtime.account_id = account_id_value
+              AND realtime.workspace_id = workspace_id_value
+              AND realtime.id = ANY(affected_realtime_ids)
+              AND realtime.state = 'active'
+            RETURNING realtime.id, realtime.session_id, realtime.operation_id,
+              realtime.version, realtime.connection_epoch
+          ), advanced AS (
+            UPDATE sessions affected
+            SET last_sequence = affected.last_sequence + 1, updated_at = now_value
+            FROM ended
+            WHERE affected.account_id = account_id_value
+              AND affected.workspace_id = workspace_id_value
+              AND affected.id = ended.session_id
+            RETURNING affected.id AS session_id, affected.last_sequence,
+              ended.id AS realtime_id, ended.operation_id,
+              ended.version, ended.connection_epoch
+          )
+          INSERT INTO session_events (
+            account_id, workspace_id, session_id, sequence, type, payload, occurred_at
+          )
+          SELECT account_id_value, workspace_id_value, advanced.session_id,
+            advanced.last_sequence, 'session.realtime.ended',
+            pg_catalog.jsonb_build_object(
+              'realtimeId', advanced.realtime_id,
+              'operationId', advanced.operation_id,
+              'reason', 'authority_revoked',
+              'version', advanced.version,
+              'connectionEpoch', advanced.connection_epoch
+            ), now_value
+          FROM advanced;
+          UPDATE sessions affected
+          SET active_turn_id = CASE
+                WHEN affected.active_turn_id = ANY(cancelled_turn_ids) THEN NULL
+                ELSE affected.active_turn_id
+              END,
+            status = CASE
+              WHEN affected.active_turn_id = ANY(cancelled_turn_ids) THEN
+                CASE WHEN EXISTS (
+                  SELECT 1 FROM session_turns queued
+                  WHERE queued.account_id = affected.account_id
+                    AND queued.workspace_id = affected.workspace_id
+                    AND queued.session_id = affected.id
+                    AND queued.status = 'queued'
+                ) THEN 'queued' ELSE 'idle' END
+              ELSE affected.status
+            END,
+            queue_head_position = COALESCE((
+              SELECT min(queued.position)::bigint FROM session_turns queued
+              WHERE queued.account_id = affected.account_id
+                AND queued.workspace_id = affected.workspace_id
+                AND queued.session_id = affected.id
+                AND queued.status = 'queued'
+            ), 0),
+            queue_tail_position = COALESCE((
+              SELECT max(queued.position)::bigint FROM session_turns queued
+              WHERE queued.account_id = affected.account_id
+                AND queued.workspace_id = affected.workspace_id
+                AND queued.session_id = affected.id
+                AND queued.status = 'queued'
+            ), 0),
+            queue_version = affected.queue_version + 1,
+            updated_at = now_value
+          WHERE affected.account_id = account_id_value
+            AND affected.workspace_id = workspace_id_value
             AND EXISTS (
-              SELECT 1 FROM sessions owned
-              WHERE owned.id = turn_row.session_id
-                AND (
-                  owned.owner_organization_membership_id = target.id
-                  OR turn_row.initiating_human_subject_id = target.subject_id
-                )
+              SELECT 1 FROM session_turns cancelled
+              WHERE cancelled.account_id = affected.account_id
+                AND cancelled.workspace_id = affected.workspace_id
+                AND cancelled.session_id = affected.id
+                AND cancelled.id = ANY(cancelled_turn_ids)
             );
           UPDATE session_system_updates update_row SET state = 'cancelled'
           WHERE update_row.account_id = account_id_value
@@ -1110,6 +1325,17 @@ BEGIN
               SELECT 1 FROM sessions owned
               WHERE owned.id = update_row.session_id
                 AND owned.owner_organization_membership_id = target.id
+            );
+          UPDATE session_system_update_outbox outbox
+          SET status = 'failed', last_error = 'organization_membership_' || action_name,
+            updated_at = now_value
+          WHERE outbox.account_id = account_id_value
+            AND outbox.workspace_id = workspace_id_value
+            AND outbox.status = 'pending'
+            AND EXISTS (
+              SELECT 1 FROM sessions source_session
+              WHERE source_session.id = outbox.source_session_id
+                AND source_session.owner_organization_membership_id = target.id
             );
           UPDATE session_goals goal_row
           SET status = 'paused', paused_reason = 'api',
@@ -1125,6 +1351,15 @@ BEGIN
               WHERE owned.id = goal_row.session_id
                 AND owned.owner_organization_membership_id = target.id
             );
+          UPDATE scheduled_tasks task
+          SET status = 'paused', personal_connection_delegations = '[]'::jsonb,
+            authority_revision = task.authority_revision + 1,
+            updated_at = now_value
+          WHERE task.account_id = account_id_value
+            AND task.workspace_id = workspace_id_value
+            AND task.status = 'active'
+            AND task.created_by_kind = 'subject'
+            AND task.created_by_subject_id = target.subject_id;
           UPDATE organization_user_resource_grants grant_row
           SET status = 'revoked', revoked_at = now_value,
             generation = grant_row.generation + 1, updated_at = now_value
@@ -1162,6 +1397,60 @@ BEGIN
               'authorityEpoch', advanced.authority_epoch
             ), now_value
           FROM advanced;
+          INSERT INTO session_workflow_wake_outbox (
+            session_id, account_id, workspace_id, temporal_workflow_id,
+            reason, control_revision
+          )
+          SELECT affected.id, affected.account_id, affected.workspace_id,
+            COALESCE(affected.temporal_workflow_id, 'session-' || affected.id::text),
+            'organization_membership_' || action_name, 1
+          FROM sessions affected
+          WHERE affected.account_id = account_id_value
+            AND affected.workspace_id = workspace_id_value
+            AND affected.id = ANY(affected_session_ids)
+          ON CONFLICT (session_id) DO UPDATE SET
+            wake_revision = session_workflow_wake_outbox.wake_revision + 1,
+            control_revision = session_workflow_wake_outbox.wake_revision + 1,
+            temporal_workflow_id = EXCLUDED.temporal_workflow_id,
+            reason = EXCLUDED.reason, attempts = 0,
+            next_attempt_at = now_value, last_error = NULL,
+            updated_at = now_value;
+          PERFORM pg_catalog.set_config(
+            'opengeni.session_activity_gate_state', 'preparing', true
+          );
+          SET CONSTRAINTS ALL IMMEDIATE;
+          SET CONSTRAINTS sessions_activity_insert_commit_guard,
+            sessions_activity_update_commit_guard DEFERRED;
+          PERFORM pg_catalog.set_config(
+            'opengeni.session_activity_gate_state', 'finalizing', true
+          );
+          UPDATE workspace_session_activity_revisions counter
+          SET revision = counter.revision + 1
+          WHERE counter.workspace_id = workspace_id_value
+          RETURNING counter.revision INTO activity_revision_value;
+          IF activity_revision_value IS NULL THEN
+            RAISE EXCEPTION 'organization membership session activity counter is unavailable'
+              USING ERRCODE = '55000';
+          END IF;
+          UPDATE sessions affected
+          SET activity_revision = activity_revision_value,
+            activity_revision_pending_xid = NULL
+          WHERE affected.account_id = account_id_value
+            AND affected.workspace_id = workspace_id_value
+            AND affected.activity_revision_pending_xid
+              = pg_catalog.pg_current_xact_id()::text::bigint;
+          SET CONSTRAINTS sessions_activity_insert_commit_guard,
+            sessions_activity_update_commit_guard IMMEDIATE;
+          SET CONSTRAINTS sessions_activity_insert_commit_guard,
+            sessions_activity_update_commit_guard DEFERRED;
+          PERFORM pg_catalog.set_config(
+            'opengeni.session_activity_gate_state',
+            COALESCE(previous_activity_gate_state, ''), true
+          );
+          PERFORM pg_catalog.set_config(
+            'opengeni.session_activity_gate_workspace_id',
+            COALESCE(previous_activity_gate_workspace, ''), true
+          );
         END LOOP;
         DELETE FROM session_visibility_write_capabilities capability
         WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
@@ -1213,6 +1502,14 @@ EXCEPTION WHEN OTHERS THEN
   PERFORM pg_catalog.set_config(
     'opengeni.session_visibility_write_capability',
     coalesce(previous_visibility_capability, ''), true
+  );
+  PERFORM pg_catalog.set_config(
+    'opengeni.session_activity_gate_state',
+    coalesce(previous_activity_gate_state, ''), true
+  );
+  PERFORM pg_catalog.set_config(
+    'opengeni.session_activity_gate_workspace_id',
+    coalesce(previous_activity_gate_workspace, ''), true
   );
   RAISE;
 END
@@ -1268,6 +1565,62 @@ BEGIN
   THEN
     RAISE EXCEPTION 'retention organization context mismatch' USING ERRCODE = '42501';
   END IF;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION assert_active_managed_human_organization_membership(
+  p_account_id uuid,
+  p_subject_id text
+) RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE
+  membership organization_memberships%ROWTYPE;
+  previous_lifecycle_marker text := pg_catalog.current_setting(
+    'opengeni.organization_tenancy_lifecycle', true
+  );
+BEGIN
+  IF p_account_id IS NULL
+    OR p_subject_id IS NULL
+    OR p_account_id IS DISTINCT FROM opengeni_private.current_account_id()
+    OR p_subject_id IS DISTINCT FROM opengeni_private.current_subject_id()
+  THEN
+    RAISE EXCEPTION 'managed-human mutation authority is invalid'
+      USING ERRCODE = '42501';
+  END IF;
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle',
+    'organization_membership_lifecycle', true
+  );
+  SELECT * INTO membership
+  FROM organization_memberships candidate
+  WHERE candidate.account_id = p_account_id
+    AND candidate.subject_id = p_subject_id
+  FOR KEY SHARE;
+  IF NOT FOUND THEN
+    PERFORM pg_catalog.set_config(
+      'opengeni.organization_tenancy_lifecycle',
+      COALESCE(previous_lifecycle_marker, ''), true
+    );
+    RETURN NULL;
+  END IF;
+  IF membership.status <> 'active' THEN
+    RAISE EXCEPTION 'active organization membership required for managed-human mutation'
+      USING ERRCODE = '42501';
+  END IF;
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle',
+    COALESCE(previous_lifecycle_marker, ''), true
+  );
+  RETURN membership.authorization_revision;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle',
+    COALESCE(previous_lifecycle_marker, ''), true
+  );
+  RAISE;
 END
 $body$;
 
@@ -1453,7 +1806,7 @@ SET search_path FROM CURRENT
 AS $body$
 DECLARE result jsonb;
 BEGIN
-  IF p_account_id IS NULL OR p_limit NOT BETWEEN 1 AND 100 THEN
+  IF p_account_id IS NULL OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100 THEN
     RAISE EXCEPTION 'invalid retention preview input' USING ERRCODE = '22023';
   END IF;
   PERFORM opengeni_private.assert_organization_retention_account(p_account_id);
@@ -1543,7 +1896,7 @@ BEGIN
   SELECT * INTO prior_event
   FROM organization_user_retention_deletion_events event
   WHERE event.account_id = p_account_id AND event.operation_id = p_operation_id
-  ORDER BY CASE event.kind WHEN 'completed' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END
+  ORDER BY CASE event.kind WHEN 'failed' THEN 0 WHEN 'claimed' THEN 1 ELSE 2 END
   LIMIT 1;
   IF FOUND THEN
     IF prior_event.kind = 'failed' THEN
@@ -1645,7 +1998,7 @@ BEGIN
   THEN
     RAISE EXCEPTION 'invalid retention object bucket' USING ERRCODE = '22023';
   END IF;
-  IF p_limit NOT BETWEEN 1 AND 100 THEN
+  IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100 THEN
     RAISE EXCEPTION 'invalid retention object page size' USING ERRCODE = '22023';
   END IF;
   PERFORM opengeni_private.assert_organization_retention_account(p_account_id);
@@ -1767,15 +2120,31 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path FROM CURRENT
 AS $body$
-DECLARE event_result jsonb;
+DECLARE
+  prior_event organization_user_retention_deletion_events%ROWTYPE;
+  event_result jsonb;
 BEGIN
-  IF p_reason_code !~ '^[a-z0-9_]{1,64}$' THEN
+  IF p_reason_code IS NULL OR p_reason_code !~ '^[a-z0-9_]{1,64}$' THEN
     RAISE EXCEPTION 'invalid retention failure code' USING ERRCODE = '22023';
   END IF;
   PERFORM opengeni_private.assert_organization_retention_account(p_account_id);
   PERFORM pg_catalog.set_config(
     'opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true
   );
+  SELECT * INTO prior_event
+  FROM organization_user_retention_deletion_events event
+  WHERE event.account_id = p_account_id
+    AND event.operation_id = p_operation_id
+    AND event.kind = 'failed';
+  IF FOUND THEN
+    IF prior_event.membership_id IS DISTINCT FROM p_membership_id
+      OR prior_event.reason_code IS DISTINCT FROM p_reason_code
+    THEN
+      RAISE EXCEPTION 'retention failure operation id was reused with different input'
+        USING ERRCODE = '23505';
+    END IF;
+    RETURN true;
+  END IF;
   UPDATE organization_user_retention_deletions deletion
   SET state = 'failed', claim_expires_at = clock_timestamp(), updated_at = clock_timestamp()
   WHERE deletion.account_id = p_account_id
@@ -1783,11 +2152,7 @@ BEGIN
     AND deletion.claim_operation_id = p_operation_id
     AND deletion.state = 'claimed';
   IF NOT FOUND THEN
-    RETURN EXISTS (
-      SELECT 1 FROM organization_user_retention_deletion_events event
-      WHERE event.account_id = p_account_id AND event.operation_id = p_operation_id
-        AND event.kind = 'failed' AND event.reason_code = p_reason_code
-    );
+    RETURN false;
   END IF;
   event_result := pg_catalog.jsonb_build_object(
     'organizationId', p_account_id, 'membershipId', p_membership_id,
@@ -1798,6 +2163,18 @@ BEGIN
   ) VALUES (
     p_account_id, p_membership_id, p_operation_id, 'failed', p_reason_code, event_result
   ) ON CONFLICT (account_id, operation_id, kind) DO NOTHING;
+  SELECT * INTO prior_event
+  FROM organization_user_retention_deletion_events event
+  WHERE event.account_id = p_account_id
+    AND event.operation_id = p_operation_id
+    AND event.kind = 'failed';
+  IF NOT FOUND
+    OR prior_event.membership_id IS DISTINCT FROM p_membership_id
+    OR prior_event.reason_code IS DISTINCT FROM p_reason_code
+  THEN
+    RAISE EXCEPTION 'retention failure operation id was reused with different input'
+      USING ERRCODE = '23505';
+  END IF;
   RETURN true;
 END
 $body$;
@@ -1844,10 +2221,20 @@ BEGIN
   WHERE event.account_id = p_account_id AND event.operation_id = p_operation_id
     AND event.kind = 'completed';
   IF FOUND THEN
+    IF prior_event.membership_id IS DISTINCT FROM p_membership_id THEN
+      RAISE EXCEPTION 'retention completion operation id belongs to another membership'
+        USING ERRCODE = '23505';
+    END IF;
     SELECT candidate.database_result INTO result_value
     FROM organization_user_retention_deletions candidate
     WHERE candidate.account_id = p_account_id
       AND candidate.membership_id = p_membership_id;
+    IF NOT FOUND
+      OR result_value ->> 'objectBucket' IS DISTINCT FROM p_object_bucket
+    THEN
+      RAISE EXCEPTION 'retention completion operation id has different frozen input'
+        USING ERRCODE = '23505';
+    END IF;
     RETURN result_value;
   END IF;
   SELECT * INTO member FROM organization_memberships membership
@@ -2206,7 +2593,23 @@ BEGIN
   WHERE event.account_id = p_account_id
     AND event.operation_id = p_operation_id
     AND event.kind = 'completed';
-  IF FOUND THEN RETURN prior_event.result; END IF;
+  IF FOUND THEN
+    IF prior_event.membership_id IS DISTINCT FROM p_membership_id THEN
+      RAISE EXCEPTION 'retention completion operation id belongs to another membership'
+        USING ERRCODE = '23505';
+    END IF;
+    SELECT * INTO deletion
+    FROM organization_user_retention_deletions candidate
+    WHERE candidate.account_id = p_account_id
+      AND candidate.membership_id = p_membership_id;
+    IF NOT FOUND
+      OR deletion.database_result ->> 'objectBucket' IS DISTINCT FROM p_object_bucket
+    THEN
+      RAISE EXCEPTION 'retention completion operation id has different frozen input'
+        USING ERRCODE = '23505';
+    END IF;
+    RETURN prior_event.result;
+  END IF;
   SELECT * INTO deletion
   FROM organization_user_retention_deletions candidate
   WHERE candidate.account_id = p_account_id
@@ -2308,6 +2711,10 @@ BEGIN
     data_schema
   );
   EXECUTE format(
+    'ALTER FUNCTION %I.assert_active_managed_human_organization_membership(uuid,text) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
     'ALTER FUNCTION opengeni_private.organization_retention_file_candidates(uuid,uuid) SET search_path = pg_catalog, %I, pg_temp',
     data_schema
   );
@@ -2355,6 +2762,7 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_organization_invitations(uuid,text,uuid,integer) TO opengeni_app', data_schema);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.organization_membership_command(jsonb) TO opengeni_app', data_schema);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.get_organization_retention_policy(uuid,text) TO opengeni_app', data_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.assert_active_managed_human_organization_membership(uuid,text) TO opengeni_app', data_schema);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.preview_organization_retention_deletions(uuid,integer) TO opengeni_app', data_schema);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.claim_organization_retention_deletion(uuid,uuid,uuid[]) TO opengeni_app', data_schema);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_organization_retention_deletion_objects(uuid,uuid,uuid,text,integer) TO opengeni_app', data_schema);
@@ -2377,6 +2785,7 @@ REVOKE ALL ON FUNCTION list_organization_members(uuid,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION list_organization_invitations(uuid,text,uuid,integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION organization_membership_command(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION get_organization_retention_policy(uuid,text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION assert_active_managed_human_organization_membership(uuid,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.assert_organization_retention_account(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.organization_retention_file_candidates(uuid,uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.organization_retention_object_candidates(uuid,uuid) FROM PUBLIC;

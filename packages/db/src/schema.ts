@@ -3483,7 +3483,7 @@ export const sessionRealtimeModes = pgTable(
     ),
     endReasonValid: check(
       "session_realtime_modes_end_reason_check",
-      sql`${table.endReason} is null or ${table.endReason} in ('user_stop', 'browser_unload', 'lease_expired')`,
+      sql`${table.endReason} is null or ${table.endReason} in ('user_stop', 'browser_unload', 'lease_expired', 'authority_revoked')`,
     ),
     versionValid: check("session_realtime_modes_version_check", sql`${table.version} >= 1`),
     epochValid: check("session_realtime_modes_epoch_check", sql`${table.connectionEpoch} >= 1`),
@@ -5901,7 +5901,7 @@ export const sessionAttemptInterruptions = pgTable(
       .where(sql`${table.state} in ('pending', 'delivered', 'acknowledged')`),
     kindValid: check(
       "session_attempt_interruptions_kind_check",
-      sql`${table.kind} in ('session_pause', 'workspace_pause', 'steer', 'maintenance')`,
+      sql`${table.kind} in ('session_pause', 'workspace_pause', 'steer', 'maintenance', 'authority_change', 'organization_membership_revoked')`,
     ),
     stateValid: check(
       "session_attempt_interruptions_state_check",

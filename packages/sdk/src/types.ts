@@ -172,7 +172,11 @@ export type WorkspaceRealtimeModelCatalogResponse = {
   models: WorkspaceRealtimeModelCatalogItem[];
 };
 export type SessionRealtimeState = "active" | "ended";
-export type SessionRealtimeEndReason = "user_stop" | "browser_unload" | "lease_expired";
+export type SessionRealtimeEndReason =
+  | "user_stop"
+  | "browser_unload"
+  | "lease_expired"
+  | "authority_revoked";
 
 export type SessionRealtimeMode = {
   id: string;
