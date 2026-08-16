@@ -1,5 +1,12 @@
 # @opengeni/agent-proto
 
+## 0.5.1
+
+### Patch Changes
+
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+- d34dd9a: Add revision-fenced per-command memory and CPU policies for Connected Machines, exact live runner capability gating, and lifecycle-safe Linux operation accounting without introducing default resource limits.
+
 ## 0.5.0
 
 ### Minor Changes
