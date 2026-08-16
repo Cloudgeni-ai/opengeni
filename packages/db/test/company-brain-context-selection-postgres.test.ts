@@ -728,7 +728,20 @@ describe("accepted-turn Company Brain context selection", () => {
         pinned: index === 0,
       }),
     );
-    await Promise.all(writes);
+    const saved = await Promise.all(writes);
+    const orderingBase = Date.now() - 120_000;
+    await Promise.all(
+      saved.map(
+        (result, index) =>
+          shared!.admin`
+          update knowledge_memories
+          set updated_at = ${new Date(orderingBase + index * 1_000)}
+          where account_id = ${f.grant.accountId}
+            and workspace_id = ${f.grant.workspaceId}
+            and id = ${result.memory.id}
+        `,
+      ),
+    );
     const attempt = await seedAttempt({
       accountId: f.grant.accountId,
       workspaceId: f.grant.workspaceId,
