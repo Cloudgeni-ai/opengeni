@@ -306,7 +306,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0264_connection_authority_runtime_activation.sql",
       ),
     ).toMatchObject({
-      sha256: "439c0605087f3eb890b54a45e93b17b3a71b8846d710c79c1e883ffd8844de9f",
+      sha256: "1f72cf8be5a791fb42a4bf7b19f81cef4cce9c7f92dfb1dc8626127a1a8b420c",
       deploymentMode: "maintenance",
     });
     const migrations = new Map(

@@ -197,6 +197,162 @@ describe("migration 0264 connection authority runtime activation", () => {
     }
   }, 180_000);
 
+  test("captures and resolves accepted authority in an embedded schema", async () => {
+    const blank = await acquireBlankTestDatabase("migration-0264-embedded-authority-runtime");
+    if (!blank) return;
+    await migrate(blank.databaseUrl, "opengeni");
+    const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
+    await sql.unsafe('set search_path = "opengeni", "opengeni_private", "public"');
+    const client = createDb(blank.databaseUrl, {
+      max: 2,
+      searchPath: "opengeni,opengeni_private,public",
+    });
+    try {
+      const [account] = await sql<{ id: string }[]>`
+        insert into managed_accounts (name) values ('embedded accepted authority') returning id
+      `;
+      const [origin] = await sql<{ id: string }[]>`
+        insert into workspaces (account_id, name) values (${account!.id}, 'origin') returning id
+      `;
+      const [target] = await sql<{ id: string }[]>`
+        insert into workspaces (account_id, name) values (${account!.id}, 'target') returning id
+      `;
+      await sql`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${origin!.id}, ${account!.id}), (${target!.id}, ${account!.id})
+      `;
+      const subjectId = `user:${crypto.randomUUID()}`;
+      await sql`
+        insert into organization_memberships (
+          account_id, subject_id, status, personal_workspace_id
+        ) values (${account!.id}, ${subjectId}, 'active', ${origin!.id})
+      `;
+      await sql`
+        insert into workspace_memberships (account_id, workspace_id, subject_id)
+        values (${account!.id}, ${target!.id}, ${subjectId})
+      `;
+      const connection = await sql.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${origin!.id}, true)`;
+        await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+        const [row] = await tx<Array<{ id: string; authorityId: string }>>`
+          insert into connections (
+            account_id, workspace_id, subject_id, provider_domain, kind,
+            credential_encrypted
+          ) values (
+            ${account!.id}, ${origin!.id}, ${subjectId}, 'embedded.example.com',
+            'oauth2', 'ciphertext'
+          ) returning id, authority_id as "authorityId"
+        `;
+        return row!;
+      });
+      const session = await createSession(client.db, {
+        accountId: account!.id,
+        workspaceId: target!.id,
+        initialMessage: "embedded accepted authority",
+        resources: [],
+        tools: [],
+        metadata: {},
+        createdBy: { kind: "subject", subjectId },
+        model: "test-model",
+        sandboxBackend: "none",
+        subjectId,
+      });
+      const [sessionAuthority] = await sql<
+        Array<{ visibility: "user_private" | "workspace_shared"; epoch: number }>
+      >`
+        select visibility, authority_epoch::int as epoch from sessions where id = ${session.id}
+      `;
+      const grant = await sql.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${target!.id}, true)`;
+        await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+        const [row] = await tx<Array<{ id: string; generation: number }>>`
+          select grant_id as id, grant_generation::int as generation
+          from issue_self_connection_use_grant(
+            ${account!.id}::uuid, ${connection.authorityId}::uuid, ${target!.id}::uuid,
+            'once', ${sessionAuthority!.visibility}, ${session.id}::uuid,
+            ${sessionAuthority!.visibility === "workspace_shared"}
+          )
+        `;
+        return row!;
+      });
+      const delegation = {
+        serverId: "embedded",
+        connectionId: connection.id,
+        originWorkspaceId: origin!.id,
+        ownerSubjectId: subjectId,
+        providerDomain: "embedded.example.com",
+        kind: "oauth2" as const,
+        connectionType: "mcp" as const,
+        userDelegation: {
+          authorityId: connection.authorityId,
+          grantId: grant.id,
+          organizationId: account!.id,
+          workspaceId: target!.id,
+          sessionId: session.id,
+          action: "connection.use" as const,
+          mode: "once" as const,
+          context: sessionAuthority!.visibility,
+          authorityEpoch: sessionAuthority!.epoch,
+          authorityGeneration: 1,
+          grantGeneration: grant.generation,
+        },
+      };
+      const submitted = await withWorkspaceSubjectSessionActivityRls(
+        client.db,
+        target!.id,
+        subjectId,
+        (db) =>
+          submitHumanPromptInTransaction(db, {
+            accountId: account!.id,
+            workspaceId: target!.id,
+            sessionId: session.id,
+            subjectId,
+            actor: { type: "human", subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "use embedded authority",
+            resources: [],
+            model: "test-model",
+            reasoningEffort: "low",
+            reasoningEffortFallback: "medium",
+            source: "user",
+            personalConnectionDelegations: [delegation],
+          }),
+      );
+      const attemptId = crypto.randomUUID();
+      const claim = await claimSessionWorkForAttempt(client.db, target!.id, {
+        sessionId: session.id,
+        workflowId: `session-${session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (claim.action !== "claimed") throw new Error(`turn was not claimed: ${claim.reason}`);
+      const [authorization] = await sql.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${target!.id}, true)`;
+        return await tx<Array<{ status: string; reason: string | null }>>`
+          select authorization_status as status, denial_reason as reason
+          from resolve_accepted_connection_use(
+            ${account!.id}::uuid, ${target!.id}::uuid, ${session.id}::uuid,
+            ${submitted.turnId}::uuid, ${attemptId}::uuid,
+            ${claim.turn.executionGeneration}, ${crypto.randomUUID()}::uuid,
+            'provider_request', 'embedded', ${connection.id}::uuid,
+            'embedded.example.com', 'oauth2', 'subject', ${subjectId}
+          )
+        `;
+      });
+      expect(authorization).toEqual({ status: "authorized", reason: null });
+    } finally {
+      await client.close();
+      await sql.end({ timeout: 1 });
+      await blank.release();
+    }
+  }, 180_000);
+
   test("freezes at turn acceptance and revalidates exact physical use on PostgreSQL", async () => {
     const externalDatabaseUrl = process.env.OPENGENI_TEST_DATABASE_URL?.trim();
     const blank = externalDatabaseUrl
@@ -400,18 +556,16 @@ describe("migration 0264 connection authority runtime activation", () => {
           }),
         ),
       ).rejects.toMatchObject({ cause: { code: "42501" } });
-      const submitted = await withWorkspaceSubjectSessionActivityRls(
-        client.db,
-        target!.id,
-        subjectId,
-        (db) =>
+      const submittedOperationKey = crypto.randomUUID();
+      const submitAcceptedOnceWork = () =>
+        withWorkspaceSubjectSessionActivityRls(client.db, target!.id, subjectId, (db) =>
           submitHumanPromptInTransaction(db, {
             accountId: account!.id,
             workspaceId: target!.id,
             sessionId: session.id,
             subjectId,
             actor: { type: "human", subjectId },
-            operationKey: crypto.randomUUID(),
+            operationKey: submittedOperationKey,
             delivery: "send",
             text: "use the exact accepted connection",
             resources: [],
@@ -421,7 +575,15 @@ describe("migration 0264 connection authority runtime activation", () => {
             source: "user",
             personalConnectionDelegations: [delegation],
           }),
-      );
+        );
+      const submitted = await submitAcceptedOnceWork();
+      // The once grant is now consumed, but its immutable receipt allows the
+      // exact transport retry to clear preflight and reach the durable command
+      // receipt. A distinct accepted turn is still rejected by the trigger.
+      expect(await resolveAdmissionOrigin(subjectId)).toEqual({ originWorkspaceId: origin!.id });
+      const submittedReplay = await submitAcceptedOnceWork();
+      expect(submittedReplay.turnId).toBe(submitted.turnId);
+      expect(submittedReplay.replay).toBe(true);
       const [accepted] = await sql<
         Array<{
           connectionId: string;
@@ -665,50 +827,61 @@ describe("migration 0264 connection authority runtime activation", () => {
         reason: "owner_membership_inactive",
       });
 
-      const raceSession = await createSession(client.db, {
-        accountId: account!.id,
-        workspaceId: target!.id,
-        initialMessage: "once acceptance race",
-        resources: [],
-        tools: [],
-        metadata: {},
-        createdBy: { kind: "subject", subjectId },
-        model: "test-model",
-        sandboxBackend: "none",
-        subjectId,
-      });
-      const [raceAuthority] = await sql<
-        Array<{ visibility: "user_private" | "workspace_shared"; epoch: number }>
-      >`
-        select visibility, authority_epoch::int as epoch
-        from sessions where id = ${raceSession.id}
-      `;
-      const raceGrant = await sql.begin(async (tx) => {
-        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
-        await tx`select set_config('opengeni.workspace_id', ${target!.id}, true)`;
-        await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
-        const [row] = await tx<Array<{ id: string; generation: number }>>`
-          select grant_id as id, grant_generation::int as generation
-          from issue_self_connection_use_grant(
-            ${account!.id}::uuid, ${personal.authorityId}::uuid, ${target!.id}::uuid,
-            'once', ${raceAuthority!.visibility}, ${raceSession.id}::uuid,
-            ${raceAuthority!.visibility === "workspace_shared"}
-          )
+      const createOnceRaceFixture = async (initialMessage: string) => {
+        const raceSession = await createSession(client.db, {
+          accountId: account!.id,
+          workspaceId: target!.id,
+          initialMessage,
+          resources: [],
+          tools: [],
+          metadata: {},
+          createdBy: { kind: "subject", subjectId },
+          model: "test-model",
+          sandboxBackend: "none",
+          subjectId,
+        });
+        const [raceAuthority] = await sql<
+          Array<{ visibility: "user_private" | "workspace_shared"; epoch: number }>
+        >`
+          select visibility, authority_epoch::int as epoch
+          from sessions where id = ${raceSession.id}
         `;
-        return row!;
-      });
-      const raceDelegation = {
-        ...delegation,
-        userDelegation: {
-          ...delegation.userDelegation,
-          grantId: raceGrant.id,
-          sessionId: raceSession.id,
-          context: raceAuthority!.visibility,
-          authorityEpoch: raceAuthority!.epoch,
-          grantGeneration: raceGrant.generation,
-        },
+        const raceGrant = await sql.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+          await tx`select set_config('opengeni.workspace_id', ${target!.id}, true)`;
+          await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+          const [row] = await tx<Array<{ id: string; generation: number }>>`
+            select grant_id as id, grant_generation::int as generation
+            from issue_self_connection_use_grant(
+              ${account!.id}::uuid, ${personal.authorityId}::uuid, ${target!.id}::uuid,
+              'once', ${raceAuthority!.visibility}, ${raceSession.id}::uuid,
+              ${raceAuthority!.visibility === "workspace_shared"}
+            )
+          `;
+          return row!;
+        });
+        return {
+          session: raceSession,
+          grant: raceGrant,
+          delegation: {
+            ...delegation,
+            userDelegation: {
+              ...delegation.userDelegation,
+              grantId: raceGrant.id,
+              sessionId: raceSession.id,
+              context: raceAuthority!.visibility,
+              authorityEpoch: raceAuthority!.epoch,
+              grantGeneration: raceGrant.generation,
+            },
+          },
+        };
       };
-      const acceptRaceTurn = (text: string) =>
+      const raceFixture = await createOnceRaceFixture("once identical acceptance race");
+      const raceSession = raceFixture.session;
+      const raceGrant = raceFixture.grant;
+      const raceDelegation = raceFixture.delegation;
+      const raceOperationKey = crypto.randomUUID();
+      const acceptRaceTurn = (operationKey = raceOperationKey) =>
         withWorkspaceSubjectSessionActivityRls(client.db, target!.id, subjectId, (db) =>
           submitHumanPromptInTransaction(db, {
             accountId: account!.id,
@@ -716,9 +889,9 @@ describe("migration 0264 connection authority runtime activation", () => {
             sessionId: raceSession.id,
             subjectId,
             actor: { type: "human", subjectId },
-            operationKey: crypto.randomUUID(),
+            operationKey,
             delivery: "send",
-            text,
+            text: "one exactly replayable once request",
             resources: [],
             model: "test-model",
             reasoningEffort: "low",
@@ -727,12 +900,13 @@ describe("migration 0264 connection authority runtime activation", () => {
             personalConnectionDelegations: [raceDelegation],
           }),
         );
-      const raceResults = await Promise.allSettled([
-        acceptRaceTurn("once contender a"),
-        acceptRaceTurn("once contender b"),
-      ]);
-      expect(raceResults.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-      expect(raceResults.filter((result) => result.status === "rejected")).toHaveLength(1);
+      const raceResults = await Promise.allSettled([acceptRaceTurn(), acceptRaceTurn()]);
+      expect(raceResults.filter((result) => result.status === "fulfilled")).toHaveLength(2);
+      const replayedTurnIds = raceResults.map((result) => {
+        if (result.status !== "fulfilled") throw result.reason;
+        return result.value.turnId;
+      });
+      expect(new Set(replayedTurnIds).size).toBe(1);
       const [raceProof] = await sql<Array<{ snapshots: number; receipts: number }>>`
         select
           (select count(*)::int from turn_connection_authority_snapshots
@@ -745,6 +919,45 @@ describe("migration 0264 connection authority runtime activation", () => {
       if (!acceptedRace || acceptedRace.status !== "fulfilled") {
         throw new Error("once acceptance race had no winner");
       }
+      await expect(acceptRaceTurn(crypto.randomUUID())).rejects.toMatchObject({
+        cause: { code: "42501" },
+      });
+
+      const competingFixture = await createOnceRaceFixture("once distinct-work race");
+      const acceptCompetingTurn = (text: string) =>
+        withWorkspaceSubjectSessionActivityRls(client.db, target!.id, subjectId, (db) =>
+          submitHumanPromptInTransaction(db, {
+            accountId: account!.id,
+            workspaceId: target!.id,
+            sessionId: competingFixture.session.id,
+            subjectId,
+            actor: { type: "human", subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text,
+            resources: [],
+            model: "test-model",
+            reasoningEffort: "low",
+            reasoningEffortFallback: "medium",
+            source: "user",
+            personalConnectionDelegations: [competingFixture.delegation],
+          }),
+        );
+      const competingResults = await Promise.allSettled([
+        acceptCompetingTurn("once contender a"),
+        acceptCompetingTurn("once contender b"),
+      ]);
+      expect(competingResults.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(competingResults.filter((result) => result.status === "rejected")).toHaveLength(1);
+      const [competingProof] = await sql<Array<{ snapshots: number; receipts: number }>>`
+        select
+          (select count(*)::int from turn_connection_authority_snapshots
+            where session_id = ${competingFixture.session.id}) as snapshots,
+          (select count(*)::int from connection_use_once_consumption_receipts
+            where grant_id = ${competingFixture.grant.id}) as receipts
+      `;
+      expect(competingProof).toEqual({ snapshots: 1, receipts: 1 });
+
       const raceAttemptId = crypto.randomUUID();
       const raceClaim = await claimSessionWorkForAttempt(client.db, target!.id, {
         sessionId: raceSession.id,

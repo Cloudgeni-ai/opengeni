@@ -378,8 +378,19 @@ BEGIN
     AND grant_value.mode = p_delegation ->> 'mode'
     AND grant_value.context = p_delegation ->> 'context'
     AND grant_value.generation = (p_delegation ->> 'grantGeneration')::bigint
-    AND grant_value.status = 'active'
-    AND (grant_value.expires_at IS NULL OR grant_value.expires_at > clock_timestamp())
+    AND (
+      (grant_value.status = 'active'
+        AND (grant_value.expires_at IS NULL OR grant_value.expires_at > clock_timestamp()))
+      OR (grant_value.status = 'consumed' AND grant_value.mode = 'once' AND EXISTS (
+        SELECT 1 FROM connection_use_once_consumption_receipts receipt
+        WHERE receipt.grant_id = grant_value.id
+          AND receipt.account_id = grant_value.account_id
+          AND receipt.authority_id = grant_value.authority_id
+          AND receipt.authority_generation = authority_row.generation
+          AND receipt.grant_generation = grant_value.generation
+          AND receipt.accepted_work_kind = 'turn'
+      ))
+    )
     AND nullif(p_delegation ->> 'sessionId', '')::uuid
       IS NOT DISTINCT FROM grant_value.session_id
     AND nullif(p_delegation ->> 'authorityEpoch', '')::integer
@@ -395,7 +406,7 @@ CREATE OR REPLACE FUNCTION opengeni_private.capture_accepted_turn_connection_aut
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = %1$I, pg_catalog, pg_temp
+SET search_path = %1$I, pg_catalog, public, pg_temp
 AS $body$
 DECLARE
   session_row sessions%%ROWTYPE;
@@ -761,7 +772,7 @@ CREATE OR REPLACE FUNCTION %1$I.resolve_accepted_connection_use(
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = %1$I, pg_catalog, pg_temp
+SET search_path = %1$I, pg_catalog, public, pg_temp
 AS $body$
 #variable_conflict use_column
 DECLARE

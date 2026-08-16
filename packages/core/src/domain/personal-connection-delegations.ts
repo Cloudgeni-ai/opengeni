@@ -225,7 +225,8 @@ export function personalConnectionDelegationsFromVisibleConnections(input: {
   for (const server of input.servers) {
     const ref = server.connectionRef;
     if (!ref || ref.subjectScope !== "subject") continue;
-    const connection = connections.find(
+    const selection = selections.get(server.id);
+    const eligible = connections.filter(
       (candidate) =>
         candidate.subjectId === input.subjectId &&
         candidate.status === "active" &&
@@ -233,8 +234,14 @@ export function personalConnectionDelegationsFromVisibleConnections(input: {
         (!ref.kind || candidate.kind === ref.kind) &&
         (!ref.connectionId || candidate.id === ref.connectionId),
     );
+    // An explicit accepted-work selection is authoritative. Canonical newest
+    // ordering is only the bounded legacy/omission fallback; it must never
+    // replace a caller's exact opaque connection UUID when several accounts
+    // share one server/provider tuple.
+    const connection = selection
+      ? eligible.find((candidate) => candidate.id === selection.connectionId)
+      : eligible[0];
     if (!connection) continue;
-    const selection = selections.get(server.id);
     if (connection.authorityId) {
       if (
         !selection ||
@@ -336,6 +343,7 @@ export function googleDrivePublicationDelegationFromVisibleConnections(input: {
   authoritySelection?: McpConnectionAuthoritySelection;
   rejectUnselectedActivatedConnection?: boolean;
 }): McpPersonalConnectionDelegation | null {
+  const selection = input.authoritySelection;
   const eligible = input.connections.filter((connection) => {
     if (
       connection.subjectId !== input.subjectId ||
@@ -354,9 +362,14 @@ export function googleDrivePublicationDelegationFromVisibleConnections(input: {
       (!metadata.data.lifecycle || metadata.data.lifecycle.state === "active"),
     );
   });
-  if (eligible.length !== 1) return null;
-  const connection = eligible[0]!;
-  const selection = input.authoritySelection;
+  const selectedEligible = selection
+    ? eligible.filter((connection) => connection.id === selection.connectionId)
+    : eligible;
+  if (selection && selectedEligible.length !== 1) {
+    throw new Error("Google Drive publication authority selection is unavailable");
+  }
+  if (!selection && selectedEligible.length !== 1) return null;
+  const connection = selectedEligible[0]!;
   if (connection.authorityId) {
     if (
       !selection ||

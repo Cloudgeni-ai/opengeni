@@ -10,7 +10,12 @@ import {
   GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
 } from "@opengeni/contracts/google-drive";
 import type { ResolveConnectionCredentialInput } from "@opengeni/db";
-import { createDb } from "@opengeni/db";
+import {
+  createDb,
+  createSession,
+  submitHumanPromptInTransaction,
+  withWorkspaceSubjectSessionActivityRls,
+} from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import {
   freezePersonalConnectionDelegations,
@@ -229,6 +234,86 @@ describe("personal MCP connection delegation", () => {
         }),
       ).rejects.toBeTruthy();
 
+      const onceSession = await createSession(client.db, {
+        accountId: account!.id,
+        workspaceId: target!.id,
+        initialMessage: "once transport replay",
+        resources: [],
+        tools: [],
+        metadata: {},
+        createdBy: { kind: "subject", subjectId },
+        model: "test-model",
+        sandboxBackend: "none",
+        subjectId,
+      });
+      const [onceAuthority] = await sql<
+        Array<{ visibility: "user_private" | "workspace_shared"; epoch: number }>
+      >`
+        select visibility, authority_epoch::int as epoch
+        from sessions where id = ${onceSession.id}
+      `;
+      const onceGrant = await sql.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${target!.id}, true)`;
+        await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+        const [row] = await tx<Array<{ id: string; generation: number }>>`
+          select grant_id as id, grant_generation::int as generation
+          from issue_self_connection_use_grant(
+            ${account!.id}::uuid, ${connection.authorityId}::uuid, ${target!.id}::uuid,
+            'once', ${onceAuthority!.visibility}, ${onceSession.id}::uuid,
+            ${onceAuthority!.visibility === "workspace_shared"}
+          )
+        `;
+        return row!;
+      });
+      const onceSelection = {
+        ...selection,
+        userDelegation: {
+          ...selection.userDelegation,
+          sessionId: onceSession.id,
+          mode: "once" as const,
+          context: onceAuthority!.visibility,
+          authorityEpoch: onceAuthority!.epoch,
+          grantId: onceGrant.id,
+          grantGeneration: onceGrant.generation,
+        },
+      };
+      const freezeOnce = () =>
+        freezePersonalConnectionDelegations({
+          db: client.db,
+          workspaceId: target!.id,
+          settings: { mcpServers: [personalServer] },
+          tools: [{ kind: "mcp", id: "linear" }],
+          source: { kind: "subject", subjectId },
+          authoritySelections: [onceSelection],
+        });
+      const frozenOnce = await freezeOnce();
+      const onceOperationKey = crypto.randomUUID();
+      const submitOnce = (operationKey = onceOperationKey) =>
+        withWorkspaceSubjectSessionActivityRls(client.db, target!.id, subjectId, (db) =>
+          submitHumanPromptInTransaction(db, {
+            accountId: account!.id,
+            workspaceId: target!.id,
+            sessionId: onceSession.id,
+            subjectId,
+            actor: { type: "human", subjectId },
+            operationKey,
+            delivery: "send",
+            text: "one replayable accepted use",
+            resources: [],
+            model: "test-model",
+            reasoningEffort: "low",
+            reasoningEffortFallback: "medium",
+            source: "user",
+            personalConnectionDelegations: frozenOnce,
+          }),
+        );
+      const acceptedOnce = await submitOnce();
+      expect(await freezeOnce()).toEqual(frozenOnce);
+      const replayedOnce = await submitOnce();
+      expect(replayedOnce).toMatchObject({ turnId: acceptedOnce.turnId, replay: true });
+      await expect(submitOnce(crypto.randomUUID())).rejects.toBeTruthy();
+
       await sql`
         update organization_user_resource_grants
         set status = 'revoked', revoked_at = clock_timestamp()
@@ -430,6 +515,62 @@ describe("personal MCP connection delegation", () => {
         connections: [base, newest],
       }),
     ).toMatchObject([{ connectionId: newest.id, providerDomain: "LINEAR.APP" }]);
+  });
+
+  test("gives an exact activated selection precedence over the deterministic newest row", () => {
+    const selected = {
+      ...googleDriveConnection({
+        providerDomain: "linear.app",
+        grantedScopes: [],
+        metadata: {},
+        authorityId: crypto.randomUUID(),
+      }),
+      updatedAt: "2026-08-01T00:00:00.000Z",
+    };
+    const newest = {
+      ...selected,
+      id: crypto.randomUUID(),
+      authorityId: crypto.randomUUID(),
+      updatedAt: "2026-08-02T00:00:00.000Z",
+    };
+    const userDelegation = {
+      organizationId: selected.accountId,
+      authorityId: selected.authorityId!,
+      authorityGeneration: 1,
+      workspaceId: selected.workspaceId,
+      sessionId: null,
+      action: "connection.use" as const,
+      mode: "always" as const,
+      context: "workspace_shared" as const,
+      authorityEpoch: null,
+      grantId: crypto.randomUUID(),
+      grantGeneration: 1,
+    };
+
+    expect(
+      personalConnectionDelegationsFromVisibleConnections({
+        servers: [personalServer],
+        subjectId: "user:owner",
+        connections: [newest, selected],
+        authoritySelections: [
+          {
+            serverId: personalServer.id,
+            connectionId: selected.id,
+            userDelegation,
+          },
+        ],
+      }),
+    ).toEqual([
+      {
+        serverId: personalServer.id,
+        connectionId: selected.id,
+        originWorkspaceId: selected.workspaceId,
+        ownerSubjectId: "user:owner",
+        providerDomain: "linear.app",
+        kind: "oauth2",
+        userDelegation,
+      },
+    ]);
   });
 
   test("children copy only selected server-bound grants", () => {
@@ -659,6 +800,21 @@ describe("personal MCP connection delegation", () => {
       googleDrivePublicationDelegationFromVisibleConnections({
         subjectId: "user:owner",
         connections: [activatedDrive],
+        authoritySelection: {
+          serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+          connectionId: activatedDrive.id,
+          userDelegation,
+        },
+      }),
+    ).toMatchObject({ connectionId: activatedDrive.id, userDelegation });
+
+    const otherActivatedDrive = googleDriveConnection({
+      authorityId: crypto.randomUUID(),
+    });
+    expect(
+      googleDrivePublicationDelegationFromVisibleConnections({
+        subjectId: "user:owner",
+        connections: [otherActivatedDrive, activatedDrive],
         authoritySelection: {
           serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
           connectionId: activatedDrive.id,

@@ -1512,6 +1512,7 @@ export async function submitHumanPromptInTransaction(
     turnMetadata: input.turnMetadata ?? {},
     messagePresentation: input.messagePresentation ?? null,
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
+    personalConnectionDelegations: input.personalConnectionDelegations ?? [],
     ...(input.actor.type === "service"
       ? {
           serviceInitiator: {
