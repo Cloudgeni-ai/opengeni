@@ -152,5 +152,6 @@ export function fakeGoal(overrides: Partial<SessionGoal> = {}): SessionGoal {
     createdAt: "2026-06-12T00:00:00.000Z",
     updatedAt: "2026-06-12T00:00:00.000Z",
     ...overrides,
+    rootConstraints: overrides.rootConstraints ?? [],
   };
 }

@@ -2,11 +2,16 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   SESSION_GOAL_PROGRESS_MAX_BYTES,
   SESSION_GOAL_RATIONALE_MAX_BYTES,
+  SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES,
+  SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES,
+  SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS,
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
   ModelContextContributionSummaries,
   OrganizationMember,
   SessionGoalSnapshot,
+  SessionGoalRootConstraintsWrite,
+  normalizeSessionGoalRootConstraints,
   sessionGoalUtf8Bytes,
 } from "@opengeni/contracts";
 import {
@@ -348,12 +353,15 @@ export * from "./new-session-drafts";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
 export * from "./workspace-learning-policy";
+export * from "./governed-learning-evaluator";
 export * from "./slack-task-policy";
 export * from "./preference-registry";
 export * from "./memory-governance";
 export * from "./memory-slack-delivery";
 export * from "./scoped-knowledge";
+export * from "./company-brain";
 export * from "./company-brain-governed-writes";
+export * from "./company-brain-context-selection";
 export * from "./knowledge-source-sync";
 export * from "./task-notes";
 export * from "./generated-images";
@@ -45869,6 +45877,7 @@ export type CreateSessionGoalInput = {
   sessionId: string;
   text: string;
   successCriteria?: string | null;
+  rootConstraints?: string[];
   maxAutoContinuations?: number | null;
   mutationPolicy?: SessionGoalMutationPolicy;
   expectedObjectiveRevision?: number;
@@ -45876,6 +45885,7 @@ export type CreateSessionGoalInput = {
   changeKind?: SessionGoalChangeKind;
   changeRationale?: string;
   sourceProposalId?: string;
+  rollbackOfRevisionId?: string;
   createdBy: SessionGoalCreatedBy;
 };
 
@@ -45883,6 +45893,7 @@ export async function createSessionGoal(
   db: Database,
   input: CreateSessionGoalInput,
 ): Promise<SessionGoal> {
+  const rootConstraints = normalizeAndAssertSessionGoalRootConstraints(input.rootConstraints ?? []);
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -45895,6 +45906,7 @@ export async function createSessionGoal(
           sessionId: input.sessionId,
           text: input.text,
           successCriteria: input.successCriteria ?? null,
+          rootConstraints,
           maxAutoContinuations: input.maxAutoContinuations ?? null,
           mutationPolicy: input.mutationPolicy ?? "preserve_intent",
           createdBy: input.createdBy,
@@ -46245,6 +46257,10 @@ export async function upsertSessionGoal(
   db: Database,
   input: CreateSessionGoalInput,
 ): Promise<{ goal: SessionGoal; replaced: boolean }> {
+  const suppliedRootConstraints =
+    input.rootConstraints === undefined
+      ? null
+      : normalizeAndAssertSessionGoalRootConstraints(input.rootConstraints);
   assertSessionGoalFieldBytes(input.text, SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
   if (input.successCriteria !== null && input.successCriteria !== undefined) {
     assertSessionGoalFieldBytes(
@@ -46284,6 +46300,7 @@ export async function upsertSessionGoal(
             sessionId: input.sessionId,
             text: input.text,
             successCriteria: input.successCriteria ?? null,
+            rootConstraints: suppliedRootConstraints ?? [],
             maxAutoContinuations: input.maxAutoContinuations ?? null,
             mutationPolicy: input.mutationPolicy ?? "preserve_intent",
             createdBy: input.createdBy,
@@ -46307,6 +46324,94 @@ export async function upsertSessionGoal(
           `goal identity changed: expected ${input.expectedGoalId}, current ${existing.id}`,
         );
       }
+      const rootConstraints = suppliedRootConstraints ?? existing.rootConstraints;
+      if (input.sourceProposalId) {
+        const [proposal] = await scopedDb
+          .select()
+          .from(schema.sessionGoalRevisions)
+          .where(
+            and(
+              eq(schema.sessionGoalRevisions.workspaceId, input.workspaceId),
+              eq(schema.sessionGoalRevisions.sessionId, input.sessionId),
+              eq(schema.sessionGoalRevisions.id, input.sourceProposalId),
+            ),
+          )
+          .limit(1);
+        if (!proposal || proposal.disposition !== "proposed" || proposal.goalId !== existing.id) {
+          throw new SessionControlConflictError("goal rewrite proposal is not applicable");
+        }
+        const [decision] = await scopedDb
+          .select({ id: schema.sessionGoalRevisions.id })
+          .from(schema.sessionGoalRevisions)
+          .where(
+            and(
+              eq(schema.sessionGoalRevisions.workspaceId, input.workspaceId),
+              eq(schema.sessionGoalRevisions.proposalId, proposal.id),
+              inArray(schema.sessionGoalRevisions.disposition, ["applied", "rejected"]),
+            ),
+          )
+          .limit(1);
+        if (decision) {
+          throw new SessionControlConflictError("goal rewrite proposal was already decided");
+        }
+        if (
+          proposal.baseObjectiveRevision !== existing.objectiveRevision ||
+          proposal.baseObjectiveRevision !== input.expectedObjectiveRevision
+        ) {
+          throw new SessionControlConflictError(
+            `goal rewrite proposal is stale: based on ${proposal.baseObjectiveRevision}, current ${existing.objectiveRevision}`,
+          );
+        }
+        if (
+          proposal.text !== input.text ||
+          proposal.successCriteria !== (input.successCriteria ?? null) ||
+          proposal.mutationPolicy !== (input.mutationPolicy ?? existing.mutationPolicy) ||
+          JSON.stringify(proposal.rootConstraints) !== JSON.stringify(rootConstraints)
+        ) {
+          throw new SessionControlConflictError(
+            "goal rewrite proposal content changed before apply",
+          );
+        }
+      }
+      if (input.rollbackOfRevisionId) {
+        const [target] = await scopedDb
+          .select()
+          .from(schema.sessionGoalRevisions)
+          .where(
+            and(
+              eq(schema.sessionGoalRevisions.workspaceId, input.workspaceId),
+              eq(schema.sessionGoalRevisions.sessionId, input.sessionId),
+              eq(schema.sessionGoalRevisions.id, input.rollbackOfRevisionId),
+              eq(schema.sessionGoalRevisions.goalId, existing.id),
+              eq(schema.sessionGoalRevisions.disposition, "applied"),
+            ),
+          )
+          .limit(1);
+        if (!target) {
+          throw new SessionControlConflictError("goal revision is not an applied rollback target");
+        }
+        if (target.resultObjectiveRevision === existing.objectiveRevision) {
+          throw new SessionControlConflictError("goal revision is already current");
+        }
+        if (
+          target.text === existing.text &&
+          target.successCriteria === existing.successCriteria &&
+          target.mutationPolicy === existing.mutationPolicy &&
+          JSON.stringify(target.rootConstraints) === JSON.stringify(existing.rootConstraints)
+        ) {
+          throw new SessionControlConflictError(
+            "goal rollback target matches the current objective",
+          );
+        }
+        if (
+          target.text !== input.text ||
+          target.successCriteria !== (input.successCriteria ?? null) ||
+          target.mutationPolicy !== (input.mutationPolicy ?? existing.mutationPolicy) ||
+          JSON.stringify(target.rootConstraints) !== JSON.stringify(rootConstraints)
+        ) {
+          throw new SessionControlConflictError("goal rollback target content changed");
+        }
+      }
       if (input.changeKind) {
         await scopedDb.execute(
           sql`select set_config('opengeni.goal_change_kind', ${input.changeKind}, true)`,
@@ -46322,6 +46427,11 @@ export async function upsertSessionGoal(
           sql`select set_config('opengeni.goal_change_proposal_id', ${input.sourceProposalId}, true)`,
         );
       }
+      if (input.rollbackOfRevisionId) {
+        await scopedDb.execute(
+          sql`select set_config('opengeni.goal_change_rollback_of_revision_id', ${input.rollbackOfRevisionId}, true)`,
+        );
+      }
       await scopedDb.execute(
         sql`select set_config('opengeni.goal_change_actor', ${input.createdBy === "scheduled_task" ? "scheduled_task" : input.createdBy === "agent" ? "agent" : "api"}, true)`,
       );
@@ -46331,6 +46441,7 @@ export async function upsertSessionGoal(
           status: "active",
           text: input.text,
           successCriteria: input.successCriteria ?? null,
+          rootConstraints,
           maxAutoContinuations: input.maxAutoContinuations ?? null,
           mutationPolicy: input.mutationPolicy ?? existing.mutationPolicy,
           evidence: null,
@@ -46404,6 +46515,7 @@ export async function upsertSessionGoalWithEvent(
             .select({
               objectiveRevision: schema.sessionGoals.objectiveRevision,
               status: schema.sessionGoals.status,
+              rootConstraints: schema.sessionGoals.rootConstraints,
             })
             .from(schema.sessionGoals)
             .where(
@@ -46414,6 +46526,19 @@ export async function upsertSessionGoalWithEvent(
             )
             .for("update")
             .limit(1);
+          const requestedRootConstraints =
+            input.rootConstraints === undefined
+              ? null
+              : normalizeAndAssertSessionGoalRootConstraints(input.rootConstraints);
+          if (
+            requestedRootConstraints !== null &&
+            JSON.stringify(requestedRootConstraints) !==
+              JSON.stringify(existing?.rootConstraints ?? [])
+          ) {
+            throw new SessionControlConflictError(
+              "agent goal mutations cannot change root constraints",
+            );
+          }
           if (existing && existing.status !== "completed") {
             throw new SessionControlConflictError(
               `agent goal_set cannot replace a goal while it is ${existing.status} at objective revision ${existing.objectiveRevision}; use goal_update to revise it`,
@@ -46438,6 +46563,7 @@ export async function upsertSessionGoalWithEvent(
                   ...(result.goal.successCriteria
                     ? { successCriteria: result.goal.successCriteria }
                     : {}),
+                  rootConstraints: result.goal.rootConstraints,
                   version: result.goal.version,
                   objectiveRevision: result.goal.objectiveRevision,
                   mutationPolicy: result.goal.mutationPolicy,
@@ -46495,12 +46621,14 @@ function mapSessionGoalRevision(
     resultObjectiveRevision: row.resultObjectiveRevision,
     text: row.text,
     successCriteria: row.successCriteria,
+    rootConstraints: row.rootConstraints,
     mutationPolicy: row.mutationPolicy,
     rationale: row.rationale,
     actor: row.actor,
     actorTurnId: row.actorTurnId,
     actorAttemptId: row.actorAttemptId,
     proposalId: row.proposalId,
+    rollbackOfRevisionId: row.rollbackOfRevisionId,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -46525,6 +46653,69 @@ export async function listSessionGoalRevisions(
   });
 }
 
+export async function listSessionGoalRevisionPage(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  options: { limit: number; before?: string } = { limit: 50 },
+): Promise<{
+  revisions: SessionGoalRevision[];
+  hasMore: boolean;
+  nextCursor: string | null;
+}> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const boundedLimit = Math.max(1, Math.min(100, Math.floor(options.limit)));
+    const [anchor] = options.before
+      ? await scopedDb
+          .select({
+            id: schema.sessionGoalRevisions.id,
+            createdAt: schema.sessionGoalRevisions.createdAt,
+          })
+          .from(schema.sessionGoalRevisions)
+          .where(
+            and(
+              eq(schema.sessionGoalRevisions.workspaceId, workspaceId),
+              eq(schema.sessionGoalRevisions.sessionId, sessionId),
+              eq(schema.sessionGoalRevisions.id, options.before),
+            ),
+          )
+          .limit(1)
+      : [];
+    if (options.before && !anchor) {
+      throw new SessionControlConflictError("goal revision cursor is not visible in this session");
+    }
+    const rows = await scopedDb
+      .select()
+      .from(schema.sessionGoalRevisions)
+      .where(
+        and(
+          eq(schema.sessionGoalRevisions.workspaceId, workspaceId),
+          eq(schema.sessionGoalRevisions.sessionId, sessionId),
+          ...(anchor
+            ? [
+                or(
+                  lt(schema.sessionGoalRevisions.createdAt, anchor.createdAt),
+                  and(
+                    eq(schema.sessionGoalRevisions.createdAt, anchor.createdAt),
+                    lt(schema.sessionGoalRevisions.id, anchor.id),
+                  ),
+                )!,
+              ]
+            : []),
+        ),
+      )
+      .orderBy(desc(schema.sessionGoalRevisions.createdAt), desc(schema.sessionGoalRevisions.id))
+      .limit(boundedLimit + 1);
+    const hasMore = rows.length > boundedLimit;
+    const revisions = rows.slice(0, boundedLimit).map(mapSessionGoalRevision);
+    return {
+      revisions,
+      hasMore,
+      nextCursor: hasMore ? (revisions.at(-1)?.id ?? null) : null,
+    };
+  });
+}
+
 export async function getSessionGoalRevision(
   db: Database,
   workspaceId: string,
@@ -46545,6 +46736,148 @@ export async function getSessionGoalRevision(
       .limit(1);
     return row ? mapSessionGoalRevision(row) : null;
   });
+}
+
+export async function rejectSessionGoalRevisionWithEvent(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    revisionId: string;
+    expectedObjectiveRevision: number;
+    rationale: string;
+  },
+): Promise<{
+  revision: SessionGoalRevision;
+  events: SessionEvent[];
+  replay: boolean;
+}> {
+  assertSessionGoalFieldBytes(input.rationale, SESSION_GOAL_RATIONALE_MAX_BYTES, "goal rationale");
+  return await withSessionActivityRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await withSessionActivitySavepoint(scopedDb, async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!locks.control || !locks.workspace || !session) {
+          throw new Error(`Session not found: ${input.sessionId}`);
+        }
+        const [goal] = await tx
+          .select()
+          .from(schema.sessionGoals)
+          .where(
+            and(
+              eq(schema.sessionGoals.workspaceId, input.workspaceId),
+              eq(schema.sessionGoals.sessionId, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!goal) throw new Error("this session has no goal");
+        const [proposal] = await tx
+          .select()
+          .from(schema.sessionGoalRevisions)
+          .where(
+            and(
+              eq(schema.sessionGoalRevisions.workspaceId, input.workspaceId),
+              eq(schema.sessionGoalRevisions.sessionId, input.sessionId),
+              eq(schema.sessionGoalRevisions.id, input.revisionId),
+            ),
+          )
+          .limit(1);
+        if (!proposal || proposal.disposition !== "proposed" || proposal.goalId !== goal.id) {
+          throw new SessionControlConflictError("goal rewrite proposal is not applicable");
+        }
+        const [existingDecision] = await tx
+          .select()
+          .from(schema.sessionGoalRevisions)
+          .where(
+            and(
+              eq(schema.sessionGoalRevisions.workspaceId, input.workspaceId),
+              eq(schema.sessionGoalRevisions.proposalId, proposal.id),
+              inArray(schema.sessionGoalRevisions.disposition, ["applied", "rejected"]),
+            ),
+          )
+          .limit(1);
+        if (existingDecision?.disposition === "rejected") {
+          return { revision: mapSessionGoalRevision(existingDecision), events: [], replay: true };
+        }
+        if (existingDecision) {
+          throw new SessionControlConflictError("goal rewrite proposal was already applied");
+        }
+        if (
+          goal.objectiveRevision !== input.expectedObjectiveRevision ||
+          proposal.baseObjectiveRevision !== input.expectedObjectiveRevision
+        ) {
+          throw new SessionControlConflictError(
+            `goal rewrite proposal is stale: based on ${proposal.baseObjectiveRevision}, current ${goal.objectiveRevision}`,
+          );
+        }
+        const [decision] = await tx
+          .insert(schema.sessionGoalRevisions)
+          .values({
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            goalId: goal.id,
+            disposition: "rejected",
+            changeKind: proposal.changeKind,
+            baseObjectiveRevision: proposal.baseObjectiveRevision,
+            resultObjectiveRevision: null,
+            text: proposal.text,
+            successCriteria: proposal.successCriteria,
+            rootConstraints: proposal.rootConstraints,
+            mutationPolicy: proposal.mutationPolicy,
+            rationale: input.rationale,
+            actor: "api",
+            proposalId: proposal.id,
+          })
+          .returning();
+        if (!decision) throw new Error("Failed to reject goal rewrite proposal");
+        const now = new Date();
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence: session.lastSequence + 1,
+                type: "goal.rewrite.rejected",
+                payload: {
+                  goalId: goal.id,
+                  proposalId: proposal.id,
+                  decisionId: decision.id,
+                  objectiveRevision: goal.objectiveRevision,
+                  rationale: input.rationale,
+                  actor: "api",
+                },
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        if (!event) throw new Error("Failed to append goal.rewrite.rejected event");
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+          .where(eq(schema.sessions.id, input.sessionId));
+        return {
+          revision: mapSessionGoalRevision(decision),
+          events: [mapEvent(event)],
+          replay: false,
+        };
+      }),
+  );
 }
 
 /**
@@ -46740,8 +47073,23 @@ export async function updateSessionGoalWithEvent(
       if (existing.status === "completed") {
         throw new Error("session goal is completed; use goal_set to start a new goal");
       }
-      const changeKind = input.changeKind ?? "refinement";
-      const rationale = input.rationale?.trim() || "Goal revision requested";
+      const semanticChangeRequested =
+        input.text !== undefined ||
+        input.successCriteria !== undefined ||
+        input.mutationPolicy !== undefined;
+      if (
+        input.actor === "agent" &&
+        semanticChangeRequested &&
+        (!input.changeKind ||
+          !input.rationale?.trim() ||
+          input.expectedObjectiveRevision === undefined)
+      ) {
+        throw new Error(
+          "agent goal_update requires changeKind, rationale, and expectedObjectiveRevision for every semantic rewrite",
+        );
+      }
+      const changeKind = input.changeKind ?? "replacement";
+      const rationale = input.rationale?.trim() || "Direct goal revision";
       const expectedObjectiveRevision =
         input.expectedObjectiveRevision ?? existing.objectiveRevision;
       if (existing.objectiveRevision !== expectedObjectiveRevision) {
@@ -46753,10 +47101,6 @@ export async function updateSessionGoalWithEvent(
       const nextSuccessCriteria =
         input.successCriteria !== undefined ? input.successCriteria : existing.successCriteria;
       const nextMutationPolicy = input.mutationPolicy ?? existing.mutationPolicy;
-      const semanticChangeRequested =
-        input.text !== undefined ||
-        input.successCriteria !== undefined ||
-        input.mutationPolicy !== undefined;
       if (!semanticChangeRequested) {
         if (!input.progressNote) {
           throw new Error("goal_update requires semantic content or a progress note");
@@ -46833,6 +47177,7 @@ export async function updateSessionGoalWithEvent(
             resultObjectiveRevision: null,
             text: nextText,
             successCriteria: nextSuccessCriteria,
+            rootConstraints: existing.rootConstraints,
             mutationPolicy: nextMutationPolicy,
             rationale,
             actor: input.actor,
@@ -46946,6 +47291,7 @@ export async function updateSessionGoalWithEvent(
                 goalId: goal.id,
                 text: goal.text,
                 ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
+                rootConstraints: goal.rootConstraints,
                 ...(input.progressNote ? { progressNote: input.progressNote } : {}),
                 version: goal.version,
                 objectiveRevision: goal.objectiveRevision,
@@ -48302,6 +48648,7 @@ function mapSessionGoal(row: typeof schema.sessionGoals.$inferSelect): SessionGo
     status: row.status as SessionGoal["status"],
     text: row.text,
     successCriteria: row.successCriteria,
+    rootConstraints: row.rootConstraints,
     evidence: row.evidence,
     rationale: row.rationale,
     pausedReason: row.pausedReason,
@@ -48330,6 +48677,7 @@ export type InitializeSessionStartInput = {
   goal?: {
     text: string;
     successCriteria?: string | null;
+    rootConstraints?: string[];
     maxAutoContinuations?: number | null;
     mutationPolicy?: SessionGoalMutationPolicy;
     createdBy?: SessionGoalCreatedBy;
@@ -48420,6 +48768,9 @@ export async function initializeSessionStartAtomically(
           .for("update")
           .limit(1);
         if (!goal && input.goal) {
+          const rootConstraints = normalizeAndAssertSessionGoalRootConstraints(
+            input.goal.rootConstraints ?? [],
+          );
           [goal] = await tx
             .insert(schema.sessionGoals)
             .values({
@@ -48428,6 +48779,7 @@ export async function initializeSessionStartAtomically(
               sessionId: session.id,
               text: input.goal.text,
               successCriteria: input.goal.successCriteria ?? null,
+              rootConstraints,
               maxAutoContinuations: input.goal.maxAutoContinuations ?? null,
               mutationPolicy: input.goal.mutationPolicy ?? "preserve_intent",
               createdBy: input.goal.createdBy ?? "api",
@@ -48485,6 +48837,7 @@ export async function initializeSessionStartAtomically(
                               ...(goal.successCriteria
                                 ? { successCriteria: goal.successCriteria }
                                 : {}),
+                              rootConstraints: goal.rootConstraints,
                               version: goal.version,
                               objectiveRevision: goal.objectiveRevision,
                               mutationPolicy: goal.mutationPolicy,
@@ -48599,6 +48952,7 @@ export async function initializeSessionStartAtomically(
                             ...(goal.successCriteria
                               ? { successCriteria: goal.successCriteria }
                               : {}),
+                            rootConstraints: goal.rootConstraints,
                             version: goal.version,
                             objectiveRevision: goal.objectiveRevision,
                             mutationPolicy: goal.mutationPolicy,
@@ -49175,6 +49529,35 @@ function assertSessionGoalFieldBytes(value: string, maxBytes: number, field: str
   }
 }
 
+function normalizeAndAssertSessionGoalRootConstraints(values: readonly string[]): string[] {
+  const normalized = normalizeSessionGoalRootConstraints(values);
+  if (normalized.some((value) => value.length === 0)) {
+    throw new Error("goal root constraints must not be blank");
+  }
+  if (normalized.length > SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS) {
+    throw new Error(
+      `goal root constraints exceed ${SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS} items`,
+    );
+  }
+  for (const value of normalized) {
+    assertSessionGoalFieldBytes(
+      value,
+      SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES,
+      "goal root constraint",
+    );
+  }
+  const aggregateBytes = normalized.reduce(
+    (total, value) => total + sessionGoalUtf8Bytes(value),
+    0,
+  );
+  if (aggregateBytes > SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES) {
+    throw new Error(
+      `goal root constraints exceed ${SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES} aggregate UTF-8 bytes (received ${aggregateBytes})`,
+    );
+  }
+  return normalized;
+}
+
 /**
  * Bound legacy exact goal content only at the immutable model-context snapshot
  * boundary. The canonical goal/revision remains byte-for-byte unchanged.
@@ -49249,6 +49632,9 @@ async function goalSnapshotForAcceptedTurnInTransaction(
     .limit(1);
   const capturedAt = row.createdAt.toISOString();
   const payload = objective?.payload as Record<string, unknown> | undefined;
+  const parsedRootConstraints = SessionGoalRootConstraintsWrite.safeParse(
+    payload?.rootConstraints ?? [],
+  );
   const lifecycleType = lifecycle?.type;
   const state =
     lifecycleType === "goal.paused"
@@ -49281,6 +49667,7 @@ async function goalSnapshotForAcceptedTurnInTransaction(
                   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
                 )
               : null,
+          rootConstraints: parsedRootConstraints.success ? parsedRootConstraints.data : [],
           mutationPolicy:
             payload.mutationPolicy === "review_changes" ||
             payload.mutationPolicy === "autonomous_adaptation"

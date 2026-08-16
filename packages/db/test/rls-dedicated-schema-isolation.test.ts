@@ -10,8 +10,13 @@ import {
   createApiKey,
   createDb,
   createSession,
+  ensureManagedAccessForUser,
   FORCE_RLS_TABLES,
+  getOrCreateCompanyProfileSnapshot,
+  getOrCreatePreferenceRegistrySnapshot,
+  getOrCreateWorkspaceInstructionPolicySnapshot,
   initializeSessionStartAtomically,
+  inspectCompanyBrainContextReceipts,
   listApiKeys,
   prepareRetainedScreenshotArtifact,
   PROTECTED_NO_DIRECT_DML_TABLES,
@@ -19,11 +24,14 @@ import {
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
   rlsStrategyFor,
+  resolveCompanyBrainContextSelection,
   setSubjectRlsContext,
+  transitionSessionVisibility,
   upsertKnowledgeProvider,
   upsertKnowledgeSource,
   upsertKnowledgeSourceObject,
   withRlsContext,
+  withSessionRlsActorContext,
   withWorkspaceRls,
   type Database,
   type DbClient,
@@ -80,7 +88,10 @@ function quoteIdentifier(value: string): string {
 }
 
 function docker(args: string[]): string {
-  return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return execFileSync("docker", args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 }
 
 function removeContainer(): void {
@@ -121,7 +132,10 @@ let db: Database;
 // Seed a fresh (account, workspace) as the superuser (bypasses RLS) directly in
 // the dedicated schema. We MUST schema-qualify because the admin connection's
 // search_path is the server default (public).
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
+async function freshWorkspace(): Promise<{
+  accountId: string;
+  workspaceId: string;
+}> {
   return await freshWorkspaceIn(admin, SCHEMA);
 }
 
@@ -234,8 +248,8 @@ beforeAll(async () => {
   }
 
   // (A) embedded migrate into the dedicated schema via the SDK entry point.
-  await migrate(ADMIN_URL, SCHEMA);
-  await migrate(ADMIN_URL, SCHEMA);
+  await migrate(ADMIN_URL, SCHEMA, { applicationDatabaseRoles: ["opengeni_app"] });
+  await migrate(ADMIN_URL, SCHEMA, { applicationDatabaseRoles: ["opengeni_app"] });
 
   // Provision the non-owner app role via the REAL provisionRoles SDK entry, in
   // FORCE strategy, against the dedicated schema. This GRANTs opengeni_app DML on
@@ -252,7 +266,11 @@ beforeAll(async () => {
 
   // createDb with the dedicated-schema search_path + force strategy — the exact
   // embedded handle shape (minus userLookup).
-  client = createDb(APP_URL, { max: 1, searchPath: SEARCH_PATH, rlsStrategy: "force" });
+  client = createDb(APP_URL, {
+    max: 1,
+    searchPath: SEARCH_PATH,
+    rlsStrategy: "force",
+  });
   db = client.db;
 }, 180_000);
 
@@ -319,7 +337,12 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     ).toHaveLength(RUNTIME_FULL_DML_TABLES.length);
     expect(
       posture.tables.find((table) => table.name === "nested_agent_depth_configuration"),
-    ).toMatchObject({ select: true, insert: false, update: false, delete: false });
+    ).toMatchObject({
+      select: true,
+      insert: false,
+      update: false,
+      delete: false,
+    });
     expect(posture.tables.find((table) => table.name === "session_spawn_denials")).toMatchObject({
       select: true,
       insert: true,
@@ -418,7 +441,12 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     });
     expect(
       posture.tables.find((table) => table.name === "session_history_items_repair_audit"),
-    ).toMatchObject({ select: false, insert: false, update: false, delete: false });
+    ).toMatchObject({
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    });
 
     const [preferenceFunctions] = await admin<
       Array<{
@@ -536,7 +564,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     for (const routine of taskNoteFunctions) {
       expect(routine.securityDefiner).toBe(true);
       expect(routine.publicExecute).toBe(false);
-      expect(routine.settings).toContain(`search_path=${SCHEMA}, pg_catalog`);
+      expect(routine.settings).toContain(`search_path=pg_catalog, ${SCHEMA}, pg_temp`);
       expect(routine.appExecute).toBe(appExecutableTaskNoteFunctions.has(routine.name));
     }
   });
@@ -658,7 +686,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       securityDefiner: true,
       appExecute: true,
       publicExecute: false,
-      settings: [`search_path=${SCHEMA}, opengeni_private, public`],
+      settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
     });
 
     const [receiptTable] = await admin<
@@ -701,6 +729,211 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     });
   });
 
+  test("migrate-then-provision hardens the exact Task-note promotion capability", async () => {
+    if (!available) return;
+    expect(appRoleExistedBeforeMigration).toBe(false);
+
+    const [routine] = await admin<
+      Array<{
+        arguments: string;
+        securityDefiner: boolean;
+        appExecute: boolean;
+        publicExecute: boolean;
+        settings: string[] | null;
+      }>
+    >`
+      SELECT
+        pg_catalog.oidvectortypes(procedure.proargtypes) AS arguments,
+        procedure.prosecdef AS "securityDefiner",
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') AS "appExecute",
+        exists (
+          SELECT 1
+          FROM aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+        ) AS "publicExecute",
+        procedure.proconfig AS settings
+      FROM pg_proc procedure
+      JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+      WHERE namespace.nspname = ${SCHEMA}
+        AND procedure.proname = 'resolve_task_note_knowledge_promotion_source'`;
+    expect(routine).toEqual({
+      arguments: "uuid, uuid, uuid, uuid, uuid, integer, uuid, integer, text, text, text",
+      securityDefiner: true,
+      appExecute: true,
+      publicExecute: false,
+      settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+    });
+
+    const authorityClosure = await admin<
+      Array<{
+        name: string;
+        arguments: string;
+        securityDefiner: boolean;
+        settings: string[] | null;
+      }>
+    >`
+      SELECT
+        procedure.proname AS name,
+        pg_catalog.oidvectortypes(procedure.proargtypes) AS arguments,
+        procedure.prosecdef AS "securityDefiner",
+        procedure.proconfig AS settings
+      FROM pg_proc procedure
+      JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+      WHERE namespace.nspname = ${SCHEMA}
+        AND procedure.proname IN (
+          'guard_task_note_mutation',
+          'guard_task_note_event_mutation',
+          'resolve_task_note_attempt_authority',
+          'create_task_note_for_attempt',
+          'archive_task_note_for_attempt',
+          'list_task_notes_for_attempt',
+          'session_private_actor_visible',
+          'session_reference_visible'
+        )
+      ORDER BY procedure.proname`;
+    expect(Array.from(authorityClosure)).toEqual([
+      {
+        name: "archive_task_note_for_attempt",
+        arguments: "uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text",
+        securityDefiner: true,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "create_task_note_for_attempt",
+        arguments: "uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, integer",
+        securityDefiner: true,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "guard_task_note_event_mutation",
+        arguments: "",
+        securityDefiner: true,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "guard_task_note_mutation",
+        arguments: "",
+        securityDefiner: true,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "list_task_notes_for_attempt",
+        arguments: "uuid, uuid, uuid, uuid, uuid, integer, boolean, integer",
+        securityDefiner: true,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "resolve_task_note_attempt_authority",
+        arguments: "uuid, uuid, uuid, uuid, uuid, integer",
+        securityDefiner: true,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "session_private_actor_visible",
+        arguments: "uuid, uuid, uuid, text",
+        securityDefiner: true,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "session_reference_visible",
+        arguments: "uuid, uuid, uuid",
+        securityDefiner: false,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+    ]);
+
+    const [capabilityTable] = await admin<
+      Array<{
+        rlsEnabled: boolean;
+        rlsForced: boolean;
+        select: boolean;
+        insert: boolean;
+        update: boolean;
+        delete: boolean;
+      }>
+    >`
+      SELECT
+        relation.relrowsecurity AS "rlsEnabled",
+        relation.relforcerowsecurity AS "rlsForced",
+        has_table_privilege('opengeni_app', relation.oid, 'SELECT') AS select,
+        has_table_privilege('opengeni_app', relation.oid, 'INSERT') AS insert,
+        has_table_privilege('opengeni_app', relation.oid, 'UPDATE') AS update,
+        has_table_privilege('opengeni_app', relation.oid, 'DELETE') AS delete
+      FROM pg_class relation
+      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      WHERE namespace.nspname = ${SCHEMA}
+        AND relation.relname = 'task_note_knowledge_promotion_capabilities'`;
+    expect(capabilityTable).toEqual({
+      rlsEnabled: true,
+      rlsForced: true,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    });
+
+    const [replacementRoutine] = await admin<
+      Array<{
+        arguments: string;
+        securityDefiner: boolean;
+        appExecute: boolean;
+        publicExecute: boolean;
+        settings: string[] | null;
+      }>
+    >`
+      SELECT
+        pg_catalog.oidvectortypes(procedure.proargtypes) AS arguments,
+        procedure.prosecdef AS "securityDefiner",
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') AS "appExecute",
+        exists (
+          SELECT 1 FROM aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+        ) AS "publicExecute",
+        procedure.proconfig AS settings
+      FROM pg_proc procedure
+      JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+      WHERE namespace.nspname = ${SCHEMA}
+        AND procedure.proname = 'replace_task_note_for_attempt'`;
+    expect(replacementRoutine).toEqual({
+      arguments:
+        "uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, integer, text, text, integer, text",
+      securityDefiner: true,
+      appExecute: true,
+      publicExecute: false,
+      settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+    });
+
+    const [replacementReceiptTable] = await admin<
+      Array<{
+        rlsEnabled: boolean;
+        rlsForced: boolean;
+        select: boolean;
+        insert: boolean;
+        update: boolean;
+        delete: boolean;
+      }>
+    >`
+      SELECT
+        relation.relrowsecurity AS "rlsEnabled",
+        relation.relforcerowsecurity AS "rlsForced",
+        has_table_privilege('opengeni_app', relation.oid, 'SELECT') AS select,
+        has_table_privilege('opengeni_app', relation.oid, 'INSERT') AS insert,
+        has_table_privilege('opengeni_app', relation.oid, 'UPDATE') AS update,
+        has_table_privilege('opengeni_app', relation.oid, 'DELETE') AS delete
+      FROM pg_class relation
+      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      WHERE namespace.nspname = ${SCHEMA}
+        AND relation.relname = 'task_note_replacement_receipts'`;
+    expect(replacementReceiptTable).toEqual({
+      rlsEnabled: true,
+      rlsForced: true,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    });
+  });
+
   test("the restricted runtime role can perform Better Auth table DML", async () => {
     if (!available) return;
     const userId = `posture-auth-${crypto.randomUUID()}`;
@@ -725,7 +958,11 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       REVOKE CREATE ON SCHEMA public FROM PUBLIC;
     `);
     const [privileges] = await admin<
-      Array<{ targetCreate: boolean; privateCreate: boolean; publicCreate: boolean }>
+      Array<{
+        targetCreate: boolean;
+        privateCreate: boolean;
+        publicCreate: boolean;
+      }>
     >`
       SELECT
         has_schema_privilege('opengeni_app', ${SCHEMA}, 'CREATE') AS "targetCreate",
@@ -749,7 +986,11 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     });
 
     const [routine] = await admin<
-      Array<{ securityDefiner: boolean; settings: string[] | null; definition: string }>
+      Array<{
+        securityDefiner: boolean;
+        settings: string[] | null;
+        definition: string;
+      }>
     >`
       SELECT
         procedure.prosecdef AS "securityDefiner",
@@ -778,7 +1019,9 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     let upgradeClient: DbClient | null = null;
     try {
       await control.unsafe(`CREATE DATABASE ${quoteIdentifier(databaseName)}`);
-      await migrate(upgradeUrl.toString(), schemaName);
+      await migrate(upgradeUrl.toString(), schemaName, {
+        applicationDatabaseRoles: ["opengeni_app"],
+      });
       upgradeAdmin = postgres(upgradeUrl.toString(), { max: 1 });
       await upgradeAdmin.unsafe(`
         SET search_path = ${quoteIdentifier(schemaName)}, opengeni_private, public;
@@ -845,7 +1088,9 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
           WHERE name = '0180_retained_screenshot_lifecycle_fences.sql';
       `);
 
-      await migrate(upgradeUrl.toString(), schemaName);
+      await migrate(upgradeUrl.toString(), schemaName, {
+        applicationDatabaseRoles: ["opengeni_app"],
+      });
       await provisionRoles(upgradeUrl.toString(), {
         targetSchema: schemaName,
         rlsStrategy: "force",
@@ -921,6 +1166,128 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     if (!available) return;
     expect(rlsStrategyFor(db)).toBe("force");
   });
+
+  test("0266 inspection remains content-free and TEMP-shadow-safe in the dedicated schema", async () => {
+    if (!available) return;
+    const suffix = crypto.randomUUID();
+    const userId = `dedicated-context-${suffix}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Dedicated context owner",
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await withSessionRlsActorContext({ subjectId }, async () =>
+      createSession(db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        initialMessage: "inspect accepted context",
+        resources: [],
+        metadata: {},
+        model: "dedicated-schema-test",
+        sandboxBackend: "none",
+        createdBy: { kind: "subject", subjectId },
+        createdByContext: {},
+      }),
+    );
+    await transitionSessionVisibility(db, {
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      actorSubjectId: subjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: `dedicated-context-private-${suffix}`,
+    });
+    await initializeSessionStartAtomically(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(db, grant.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `company-brain-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`fixture claim failed: ${claimed.reason}`);
+    const claims = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      turnId: claimed.turn.id,
+      attemptId,
+      executionGeneration: claimed.turn.executionGeneration,
+    };
+    await withSessionRlsActorContext(
+      { subjectId: "worker:dedicated-context", initiatingHumanSubjectId: subjectId },
+      async () => {
+        await getOrCreateCompanyProfileSnapshot(db, claims);
+        await getOrCreateWorkspaceInstructionPolicySnapshot(db, claims);
+        await getOrCreatePreferenceRegistrySnapshot(db, claims);
+        await resolveCompanyBrainContextSelection(db, claims);
+      },
+    );
+
+    const expected = await inspectCompanyBrainContextReceipts(db, {
+      workspaceId: grant.workspaceId,
+      subjectId,
+      attemptId,
+    });
+    expect(expected).toHaveLength(1);
+    expect(JSON.stringify(expected)).not.toContain("memorySelections");
+    expect(JSON.stringify(expected)).not.toContain("legacyWorkspaceInstructions");
+
+    const app = postgres(APP_URL, { max: 1, prepare: false });
+    try {
+      const shadowResistant = await app.begin(async (transactionSql) => {
+        await transactionSql`select set_config('search_path', ${SEARCH_PATH}, true)`;
+        await transactionSql`select
+          set_config('opengeni.account_id', ${grant.accountId}, true),
+          set_config('opengeni.workspace_id', ${grant.workspaceId}, true),
+          set_config('opengeni.subject_id', ${subjectId}, true)`;
+        await transactionSql`create temporary table company_brain_context_selection_receipts (
+          id uuid, account_id uuid, workspace_id uuid, session_id uuid,
+          root_session_id uuid, turn_id uuid
+        )`;
+        await transactionSql`create temporary table session_turns (
+          id uuid, account_id uuid, workspace_id uuid, session_id uuid
+        )`;
+        await transactionSql`create temporary table session_turn_attempts (
+          id uuid, account_id uuid, workspace_id uuid, session_id uuid, turn_id uuid
+        )`;
+        return await transactionSql<Array<{ receiptId: string }>>`
+          select receipt_id as "receiptId"
+          from company_brain_inspect_context_receipts(
+            ${grant.accountId}::uuid, ${grant.workspaceId}::uuid,
+            ${subjectId}::text, ${attemptId}::uuid, null, null, 1
+          )
+        `;
+      });
+      expect(shadowResistant.map((row) => row.receiptId)).toEqual(expected.map((row) => row.id));
+
+      const crossSubject = await app.begin(async (transactionSql) => {
+        const otherSubject = `user:other-${crypto.randomUUID()}`;
+        await transactionSql`select set_config('search_path', ${SEARCH_PATH}, true)`;
+        await transactionSql`select
+          set_config('opengeni.account_id', ${grant.accountId}, true),
+          set_config('opengeni.workspace_id', ${grant.workspaceId}, true),
+          set_config('opengeni.subject_id', ${otherSubject}, true)`;
+        return await transactionSql`select * from company_brain_inspect_context_receipts(
+          ${grant.accountId}::uuid, ${grant.workspaceId}::uuid,
+          ${otherSubject}::text, ${attemptId}::uuid, null, null, 1
+        )`;
+      });
+      expect([...crossSubject]).toEqual([]);
+    } finally {
+      await app.end();
+    }
+  }, 180_000);
 
   test("(B) rows written under A's RLS context land in the DEDICATED schema, not public", async () => {
     if (!available) return;
@@ -1035,7 +1402,10 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         select
           current_setting('opengeni.account_id', true) as account_id,
           current_setting('opengeni.workspace_id', true) as workspace_id
-      `)) as unknown as Array<{ account_id: string | null; workspace_id: string | null }>;
+      `)) as unknown as Array<{
+        account_id: string | null;
+        workspace_id: string | null;
+      }>;
       expect(afterReconnect?.account_id ?? "").toBe("");
       expect(afterReconnect?.workspace_id ?? "").toBe("");
     } finally {

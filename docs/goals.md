@@ -27,6 +27,26 @@ in `session_turns.goal_snapshot` when the turn is accepted. Ordinary turns,
 goal continuations, recovery, and both compaction modes compose only that
 snapshot, never a later mutable goal head.
 
+## Migration 0257 deployment boundary
+
+Migration `0257_goal_revision_decisions_and_root_constraints.sql` is a one-way
+maintenance cutover, not a rolling application change. Stop every API,
+control-worker, and turn-worker process before applying it. Set
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` to the comma-separated exact
+database logins used by every old and new API/worker identity, then run the
+migration. The programmatic equivalent is
+`runMigrations(adminUrl, schema, { applicationDatabaseRoles: [...] })`;
+dedicated-schema/scoped deployments must use that explicit option. Only the
+canonical standalone `opengeni_app` topology has a default. Migration 0257
+checks the supplied roles both before and after taking exclusive locks and
+aborts with SQLSTATE `55000` when any listed identity remains connected. Do not
+derive the list from the migration-owner URL or omit a retired identity during
+a role rotation.
+After commit, never restart a pre-0257 image: an old worker does not understand
+the accepted-turn `rootConstraints` snapshot and would execute without that
+frozen authority. Application rollback is valid only before migration
+activation; afterward, recovery is forward-only with a 0257-compatible image.
+
 ## Lifecycle
 
 A goal is `active`, `paused`, or `completed`.
@@ -45,6 +65,11 @@ A goal is `active`, `paused`, or `completed`.
   redirects apply directly. An applied semantic change advances both objective
   and lifecycle revisions but is not execution progress. Proposed content is
   not composed into model instructions until a user applies it.
+- Root constraints are bounded, normalized standing constraints that may be
+  changed only through the direct human/API path. Every accepted turn freezes
+  them with its goal snapshot. A goal-bearing child inherits the calling
+  turn's exact frozen set when the field is omitted, while an explicit array
+  may only narrow that set. Explicit `[]` delegates no root constraints.
 - `goal_progress` records a concrete, attempt-fenced progress fact without
   changing text, criteria, policy, objective revision, or lifecycle version.
   Legacy `goal_update.progressNote` calls route through this separate operation.
@@ -61,8 +86,9 @@ A goal is `active`, `paused`, or `completed`.
   replaced.
 
 New goal text and success criteria are each limited to 8 KiB of UTF-8, rewrite
-and pause rationales to 2 KiB, and progress notes to 4 KiB. Rolling legacy
-goals remain exact and lifecycle-mutable even when larger. Their immutable
+and pause rationales to 2 KiB, and progress notes to 4 KiB. Root constraints
+are limited to 16 items, 512 UTF-8 bytes per item, and 4 KiB in aggregate.
+Pre-0257 goals remain exact and lifecycle-mutable even when larger. Their immutable
 accepted-turn prompt snapshot uses a deterministic UTF-8 prefix with an
 explicit original-byte truncation fact, so ordinary turns, recovery, and
 compaction stay bounded without rewriting canonical history.
@@ -172,7 +198,8 @@ recovery of the same turn, not creation or charging of another continuation.
 ## API
 
 - `POST /v1/workspaces/:id/sessions` accepts `goal: { text, successCriteria?,
-  maxAutoContinuations? }`. A `goal.set` event is appended right after
+  rootConstraints?, maxAutoContinuations?, mutationPolicy? }`. A `goal.set`
+  event is appended right after
   `session.created`.
 - `GET /v1/workspaces/:id/sessions/:sessionId/goal` returns the goal plus a
   `continuation` projection from one repeatable-read Postgres snapshot
@@ -193,13 +220,20 @@ recovery of the same turn, not creation or charging of another continuation.
   because `signalWithStart` restarts a completed workflow. Invalid transitions
   (e.g. resuming a completed goal) return 409.
 - The same `PATCH` accepts a direct semantic redirect with `{ text,
-successCriteria?, mutationPolicy?, rationale, expectedObjectiveRevision }`.
+  successCriteria?, rootConstraints?, mutationPolicy?, rationale,
+  expectedObjectiveRevision }`.
   This user-authoritative path may replace/re-activate a completed goal and
   wakes an otherwise idle session.
-- `GET .../goal/revisions` lists immutable applied/proposed history.
+- `GET .../goal/revisions` preserves the original unbounded raw-array contract
+  for existing clients. `GET .../goal/revisions/page?limit=...&before=...`
+  exposes a separately named bounded keyset page of immutable applied,
+  proposed, and rejected history.
   `POST .../goal/revisions/:revisionId/apply` applies a proposal under an exact
   objective-revision fence; the proposal row remains immutable and the new
-  applied revision links it by `proposalId`.
+  applied revision links it by `proposalId`. `POST .../reject` records an
+  immutable rejection decision and supports safe replay. `POST .../rollback`
+  restores an applied revision as a new applied revision under the same exact
+  comparison-and-swap fence; history is never rewritten.
 - `DELETE /v1/workspaces/:id/sessions/:sessionId/goal` clears the session's
   active goal (`sessions:control`). It deletes the goal row, emits
   `goal.cleared` when a goal existed, and is idempotent when no goal exists.
@@ -213,7 +247,10 @@ re-establishes its objective each time.
 
 ## Agent tool access
 
-The goal tools are session-scoped first-party MCP tools. The worker signs the
+The goal tools are session-scoped first-party MCP tools. Agent `goal_update`
+requires an explicit `changeKind`, non-empty `rationale`, and
+`expectedObjectiveRevision`; execution progress uses the separate
+`goal_progress` tool. The worker signs the
 session id into the delegated access token it uses for first-party MCP calls
 (HMAC, worker-asserted — not agent-controlled), and the API registers
 `goal_set`/`goal_update`/`goal_progress`/`goal_complete`/`goal_pause` only for grants carrying

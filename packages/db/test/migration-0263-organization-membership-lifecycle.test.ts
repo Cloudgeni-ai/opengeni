@@ -304,7 +304,9 @@ describe("migration 0263 organization membership lifecycle", () => {
     const admin = postgres(blank.databaseUrl, { max: 1 });
     let appSql: postgres.Sql | null = null;
     try {
-      await runMigrations(blank.databaseUrl, schemaName);
+      await runMigrations(blank.databaseUrl, schemaName, {
+        applicationDatabaseRoles: [roleName],
+      });
       await provisionRoles(blank.databaseUrl, {
         targetSchema: schemaName,
         rlsStrategy: "force",

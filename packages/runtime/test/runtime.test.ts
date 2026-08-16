@@ -3284,6 +3284,7 @@ describe("runtime event normalization", () => {
       objectiveRevision: 7,
       text: "Ship the durable goal boundary",
       successCriteria: "Recovery sees revision seven",
+      rootConstraints: ["Do not deploy without approval", "Preserve tenant isolation"],
       mutationPolicy: "review_changes",
       capturedAt,
     });
@@ -3291,6 +3292,8 @@ describe("runtime event normalization", () => {
     expect(instructions).toContain("Ship the durable goal boundary");
     expect(instructions).toContain("Semantic changes are proposals until a user applies them");
     expect(instructions).toContain("opengeni__goal_progress");
+    expect(instructions).toContain("Root constraints (must remain satisfied)");
+    expect(instructions).toContain("Preserve tenant isolation");
 
     const completedInstructions = appendSessionGoal("base", {
       state: "completed",
@@ -3298,6 +3301,7 @@ describe("runtime event normalization", () => {
       objectiveRevision: 8,
       text: "Ship the durable goal boundary",
       successCriteria: "Recovery sees revision seven",
+      rootConstraints: [],
       mutationPolicy: "review_changes",
       capturedAt,
     });

@@ -77,6 +77,19 @@ export const TaskNoteMutationResult = z.object({
 });
 export type TaskNoteMutationResult = z.infer<typeof TaskNoteMutationResult>;
 
+/** Atomic correction lineage: archive one exact v1 note and create one v1 replacement. */
+export const TaskNoteReplacementResult = z.object({
+  operationId: z.string().uuid(),
+  inputHash: z.string().regex(/^[0-9a-f]{64}$/),
+  replaces: z.object({
+    noteId: z.string().uuid(),
+    archivedVersion: z.literal(2),
+  }),
+  replacement: TaskNote,
+  replayed: z.boolean(),
+});
+export type TaskNoteReplacementResult = z.infer<typeof TaskNoteReplacementResult>;
+
 export const TaskNoteListResponse = z
   .object({
     notes: z.array(TaskNote).max(TASK_NOTE_LIST_MAX_LIMIT),

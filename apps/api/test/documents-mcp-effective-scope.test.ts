@@ -27,7 +27,11 @@ mock.module("@opengeni/documents", () => ({
     async (...args: Parameters<typeof realSearchEffectiveKnowledge>) => {
       if (args[0] !== fakeDb) return await realSearchEffectiveKnowledge(...args);
       searchInputs.push(args[1]);
-      return { results: [] };
+      return realDocuments.selectKnowledgeSearchResults({
+        candidates: [],
+        rankedCandidateCount: 0,
+        requestedLimit: 5,
+      });
     },
   ),
   listEffectiveIndexedDocuments: mock(
@@ -52,7 +56,10 @@ mock.module("@opengeni/documents", () => ({
     async (...args: Parameters<typeof realBrowseEffectiveKnowledge>) => {
       if (args[0] !== fakeDb) return await realBrowseEffectiveKnowledge(...args);
       browseInputs.push(args[1]);
-      return { records: [], nextCursor: null, hasMore: false };
+      return realDocuments.selectKnowledgeBrowseRecords({
+        entries: [],
+        hasMoreAfterEntries: false,
+      });
     },
   ),
 }));
@@ -132,7 +139,18 @@ test("docs MCP binds effective retrieval to its immutable initiating subject", a
     });
     const text = result.content.find((entry) => entry.type === "text");
     if (!text || text.type !== "text") throw new Error("missing MCP text result");
-    expect(JSON.parse(text.text)).toEqual({ results: [] });
+    expect(JSON.parse(text.text)).toMatchObject({
+      results: [],
+      selection: {
+        candidates: { ranked: 0, rechecked: 0, omittedOnRecheck: 0 },
+        omitted: {
+          belowRelevanceFloor: 0,
+          asDuplicate: 0,
+          forLimit: 0,
+          forResponseBudget: 0,
+        },
+      },
+    });
     expect(searchInputs).toEqual([
       {
         accountId: "11111111-1111-4111-8111-111111111111",
@@ -216,7 +234,15 @@ test("docs MCP rebinds Knowledge fetch and browse to its immutable initiating su
     });
     const text = browseResult.content.find((entry) => entry.type === "text");
     if (!text || text.type !== "text") throw new Error("missing MCP text result");
-    expect(JSON.parse(text.text)).toEqual({ records: [], nextCursor: null, hasMore: false });
+    expect(JSON.parse(text.text)).toMatchObject({
+      records: [],
+      nextCursor: null,
+      hasMore: false,
+      selection: {
+        omitted: { forResponseBudget: 0 },
+        compactedRecordCount: 0,
+      },
+    });
     expect(getInputs).toEqual([
       {
         accountId: "11111111-1111-4111-8111-111111111111",

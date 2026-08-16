@@ -22,7 +22,16 @@ import {
   CircleAlertIcon,
   Clock3Icon,
 } from "lucide-react";
-import { type FormEvent, type ReactNode, useEffect, useState } from "react";
+import {
+  type FormEvent,
+  lazy,
+  type ReactNode,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { ContentPage } from "@/components/ui/content-layout";
@@ -30,14 +39,24 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 
-import { BrainOverview } from "./agent-brain-overview";
+import { BrainOverview, type BrainProposalReview } from "./agent-brain-overview";
 import { AgentBrainPrompt } from "./agent-brain-prompt";
+import { CompanyBrainExportButton } from "./company-brain-export";
 import {
   useCompanyProfileInventory,
   useWorkspaceInstructionPolicyOnboardingProposals,
   useWorkspaceStateInventory,
 } from "./workspace-state-loader";
-import { PreferenceRegistryAdministration } from "./preference-registry-admin";
+import {
+  PreferenceRegistryAdministration,
+  type PreferenceRegistryReviewSummary,
+} from "./preference-registry-admin";
+
+const LazyCompanyBrainInspector = lazy(() =>
+  import("./company-brain-inspector").then(({ CompanyBrainInspector }) => ({
+    default: CompanyBrainInspector,
+  })),
+);
 
 const GAP_LABELS: Record<WorkspaceStateGapCode, string> = {
   no_document_bases: "No document bases are configured.",
@@ -70,6 +89,40 @@ const GOVERNANCE_DRIFT_EXPLANATIONS: Record<WorkspaceStateGovernanceDriftStatus,
   unavailable: "The comparison is unavailable under the accepted-attempt authorization fence.",
 };
 
+type OnboardingProposalReviewSummary = {
+  status: "loading" | "unavailable" | "ready";
+  pendingCount: number;
+  staleCount: number;
+  partial: boolean;
+};
+
+const LOADING_PROPOSAL_REVIEW: OnboardingProposalReviewSummary = {
+  status: "loading",
+  pendingCount: 0,
+  staleCount: 0,
+  partial: false,
+};
+
+const LOADING_PREFERENCE_REVIEW: PreferenceRegistryReviewSummary = {
+  status: "loading",
+  pendingCount: 0,
+  conflictCount: 0,
+  partial: false,
+};
+
+type WorkspaceReviewSummary<T> = {
+  workspaceId: string;
+  summary: T;
+};
+
+export function reviewSummaryForWorkspace<T>(
+  workspaceId: string,
+  review: WorkspaceReviewSummary<T>,
+  loading: T,
+): T {
+  return review.workspaceId === workspaceId ? review.summary : loading;
+}
+
 function comparisonHash(value: string | null): ReactNode {
   return value ? <code className="break-all text-2xs">sha256:{value}</code> : "Unavailable";
 }
@@ -101,7 +154,7 @@ function Metric({ label, value }: { label: string; value: ReactNode }) {
 
 function WorkspaceStateLoading() {
   return (
-    <div aria-label="Loading Agent Brain" className="grid gap-4">
+    <div aria-label="Loading Company Brain" className="grid gap-4">
       <Skeleton className="h-28 w-full" />
       <div className="grid gap-4 lg:grid-cols-2">
         <Skeleton className="h-64 w-full" />
@@ -537,7 +590,7 @@ function onboardingProposalErrorMessage(error: unknown): string {
       case "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_OVERSIZED":
         return "The proposal is larger than the instruction-policy draft limit.";
       case "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_STALE":
-        return "The active policy changed. Refresh Agent Brain and review the new baseline.";
+        return "The active policy changed. Refresh Company Brain and review the new baseline.";
       case "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_CONFLICT":
         return "That source version already proposed a draft for this policy target.";
       case "WORKSPACE_INSTRUCTION_POLICY_OPERATION_REUSED":
@@ -551,10 +604,12 @@ export function OnboardingProposalInventory({
   state,
   workspaceId,
   onWorkspaceStateReload,
+  onReviewSummary,
 }: {
   state: WorkspaceStateResponse;
   workspaceId: string;
   onWorkspaceStateReload: () => Promise<void>;
+  onReviewSummary?: (summary: OnboardingProposalReviewSummary) => void;
 }) {
   const context = useAppContext();
   const { client } = context;
@@ -570,6 +625,49 @@ export function OnboardingProposalInventory({
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [createdProposalId, setCreatedProposalId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!onReviewSummary) return;
+    if (proposals.loading) {
+      onReviewSummary(LOADING_PROPOSAL_REVIEW);
+      return;
+    }
+    if (proposals.error || !proposals.response) {
+      onReviewSummary({ status: "unavailable", pendingCount: 0, staleCount: 0, partial: false });
+      return;
+    }
+    let staleCount = 0;
+    let baselineCoveragePartial = false;
+    for (const proposal of proposals.response.proposals) {
+      const head = state.policy.activeHeads.find(
+        (candidate) =>
+          candidate.kind === proposal.kind &&
+          candidate.scope === proposal.scope &&
+          candidate.roleKey === proposal.roleKey,
+      );
+      if (!head && state.policy.activeHeadsTruncated) {
+        baselineCoveragePartial = true;
+      } else if (
+        (head?.revisionId ?? null) !== (proposal.baseline?.revisionId ?? null) ||
+        (head?.activationVersion ?? 0) !== (proposal.baseline?.activationVersion ?? 0)
+      ) {
+        staleCount += 1;
+      }
+    }
+    onReviewSummary({
+      status: "ready",
+      pendingCount: proposals.response.proposals.length,
+      staleCount,
+      partial: proposals.response.truncated || baselineCoveragePartial,
+    });
+  }, [
+    onReviewSummary,
+    proposals.error,
+    proposals.loading,
+    proposals.response,
+    state.policy.activeHeads,
+    state.policy.activeHeadsTruncated,
+  ]);
 
   const effectiveScope: WorkspaceInstructionPolicyScope = kind === "charter" ? "global" : scope;
   const normalizedRoleKey =
@@ -1253,7 +1351,7 @@ function FocusedInstructions({
         operationId: crypto.randomUUID(),
         expectedCurrentRevisionId: activeHead?.revisionId ?? null,
         expectedActivationVersion: activeHead?.activationVersion ?? 0,
-        reason: "Updated by a workspace admin from Agent Brain",
+        reason: "Updated by a workspace admin from Company Brain",
       });
       await onWorkspaceStateReload();
       setMessage("Saved. New agent turns will use these workspace instructions.");
@@ -1332,6 +1430,38 @@ export function WorkspaceStateRoute({
   const [attemptInput, setAttemptInput] = useState("");
   const [attemptId, setAttemptId] = useState<string | undefined>();
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const activeWorkspaceId = useRef(workspaceId);
+  activeWorkspaceId.current = workspaceId;
+  const [storedPreferenceReview, setStoredPreferenceReview] = useState<
+    WorkspaceReviewSummary<PreferenceRegistryReviewSummary>
+  >(() => ({ workspaceId, summary: LOADING_PREFERENCE_REVIEW }));
+  const [storedOnboardingReview, setStoredOnboardingReview] = useState<
+    WorkspaceReviewSummary<OnboardingProposalReviewSummary>
+  >(() => ({ workspaceId, summary: LOADING_PROPOSAL_REVIEW }));
+  const updatePreferenceReview = useCallback(
+    (summary: PreferenceRegistryReviewSummary) => {
+      if (activeWorkspaceId.current !== workspaceId) return;
+      setStoredPreferenceReview({ workspaceId, summary });
+    },
+    [workspaceId],
+  );
+  const updateOnboardingReview = useCallback(
+    (summary: OnboardingProposalReviewSummary) => {
+      if (activeWorkspaceId.current !== workspaceId) return;
+      setStoredOnboardingReview({ workspaceId, summary });
+    },
+    [workspaceId],
+  );
+  const preferenceReview = reviewSummaryForWorkspace(
+    workspaceId,
+    storedPreferenceReview,
+    LOADING_PREFERENCE_REVIEW,
+  );
+  const onboardingReview = reviewSummaryForWorkspace(
+    workspaceId,
+    storedOnboardingReview,
+    LOADING_PROPOSAL_REVIEW,
+  );
   const companyProfile = useCompanyProfileInventory(client, workspaceId);
   const { state, error, loading, reload } = useWorkspaceStateInventory(
     client,
@@ -1353,6 +1483,41 @@ export function WorkspaceStateRoute({
       : companyProfile.response?.current
         ? { label: "Configured" }
         : { label: "Not configured" };
+  const activatedProfileProposalIds = new Set(
+    companyProfile.response?.activationEvents.flatMap((event) =>
+      event.newRevision ? [event.newRevision.id] : [],
+    ) ?? [],
+  );
+  const pendingProfileProposalCount =
+    companyProfile.response?.revisions.filter(
+      (revision) => revision.intent === "proposal" && !activatedProfileProposalIds.has(revision.id),
+    ).length ?? 0;
+  const profileProposalStatus = companyProfile.loading
+    ? "loading"
+    : companyProfile.error
+      ? "unavailable"
+      : companyProfile.response
+        ? "ready"
+        : "unavailable";
+  const proposalStatuses = [
+    profileProposalStatus,
+    preferenceReview.status,
+    onboardingReview.status,
+  ];
+  const proposalReview: BrainProposalReview = {
+    status: proposalStatuses.includes("unavailable")
+      ? "unavailable"
+      : proposalStatuses.includes("loading")
+        ? "loading"
+        : "ready",
+    pendingCount:
+      pendingProfileProposalCount + preferenceReview.pendingCount + onboardingReview.pendingCount,
+    staleCount: onboardingReview.staleCount,
+    partial:
+      (companyProfile.response?.revisions.length ?? 0) >= 50 ||
+      preferenceReview.partial ||
+      onboardingReview.partial,
+  };
 
   return (
     <ContentPage width="standard">
@@ -1365,7 +1530,7 @@ export function WorkspaceStateRoute({
               ? "Workspace instructions"
               : view === "preferences"
                 ? "Preferences"
-                : "Agent Brain"
+                : "Company Brain"
         }
         description={
           view === "company"
@@ -1374,7 +1539,10 @@ export function WorkspaceStateRoute({
               ? "Set how agents should work in this workspace."
               : view === "preferences"
                 ? "Save reusable instructions agents can apply when relevant."
-                : "What every agent starts with, and what it can find when needed."
+                : "Knowledge, rules, guides, review, and learning - with scope and delivery kept explicit."
+        }
+        actions={
+          view ? undefined : <CompanyBrainExportButton client={client} workspaceId={workspaceId} />
         }
       />
       <div className="mt-6">
@@ -1386,13 +1554,13 @@ export function WorkspaceStateRoute({
             className="mb-4 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
           >
             <ArrowLeftIcon className="size-3" />
-            Back to Agent Brain
+            Back to Company Brain
           </Link>
         ) : null}
         {loading && !state ? <WorkspaceStateLoading /> : null}
         {error && !state ? (
           <LoadErrorState
-            title="Couldn't load Agent Brain"
+            title="Couldn't load Company Brain"
             error={error}
             onRetry={() => void reload()}
           />
@@ -1401,7 +1569,7 @@ export function WorkspaceStateRoute({
           <div className="grid gap-4">
             {error ? (
               <LoadErrorState
-                title="Couldn't refresh Agent Brain"
+                title="Couldn't refresh Company Brain"
                 error={error}
                 onRetry={() => void reload()}
               />
@@ -1439,7 +1607,13 @@ export function WorkspaceStateRoute({
                   state={state}
                   workspaceId={workspaceId}
                   companyProfileStatus={companyProfileStatus}
+                  proposalReview={proposalReview}
+                  preferenceConflictCount={preferenceReview.conflictCount}
+                  inventoryRefreshFailed={Boolean(error)}
                 />
+                <Suspense fallback={<Skeleton className="h-96 w-full" />}>
+                  <LazyCompanyBrainInspector key={workspaceId} workspaceId={workspaceId} />
+                </Suspense>
                 <details
                   id="brain-diagnostics"
                   className="group scroll-mt-4 rounded-lg border border-border bg-surface"
@@ -1461,11 +1635,13 @@ export function WorkspaceStateRoute({
                     <PreferenceRegistryAdministration
                       workspaceId={workspaceId}
                       onWorkspaceStateReload={reload}
+                      onReviewSummary={updatePreferenceReview}
                     />
                     <OnboardingProposalInventory
                       state={state}
                       workspaceId={workspaceId}
                       onWorkspaceStateReload={reload}
+                      onReviewSummary={updateOnboardingReview}
                     />
                     <AttemptGovernanceInventory
                       state={state}

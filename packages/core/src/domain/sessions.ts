@@ -45,6 +45,7 @@ import {
   type SessionAuthorizationPort,
   type SessionToolPolicy,
   type SessionTurn,
+  type SessionGoalSnapshot,
   type ToolRef,
   type TurnInitiator,
   type TurnInitiatorContext,
@@ -69,6 +70,7 @@ import {
   getWorkspaceControlEvent,
   getSessionLineage,
   getSessionTurn,
+  getSessionTurnForAttempt,
   getSessionTurnPersonalConnectionDelegations,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
   getWorkspaceModelPolicy,
@@ -900,8 +902,14 @@ async function finishStartSession(
           ...(input.goal.successCriteria !== undefined
             ? { successCriteria: input.goal.successCriteria }
             : {}),
+          ...(input.goal.rootConstraints !== undefined
+            ? { rootConstraints: input.goal.rootConstraints }
+            : {}),
           ...(input.goal.maxAutoContinuations !== undefined
             ? { maxAutoContinuations: input.goal.maxAutoContinuations }
+            : {}),
+          ...(input.goal.mutationPolicy !== undefined
+            ? { mutationPolicy: input.goal.mutationPolicy }
             : {}),
         }
       : null,
@@ -1289,6 +1297,26 @@ export async function postUserMessageTurn(input: {
  * trusted immediate parent, while explicit arrays (including []) win. A
  * top-level create with omitted tools applies workspace-default capability MCPs.
  */
+export function resolveChildGoalFromAcceptedSnapshot(
+  goal: GoalSpec,
+  parentGoalSnapshot: SessionGoalSnapshot,
+): GoalSpec {
+  const inheritedRootConstraints =
+    parentGoalSnapshot.state === "none" ? [] : parentGoalSnapshot.rootConstraints;
+  const requestedRootConstraints = goal.rootConstraints;
+  if (
+    requestedRootConstraints?.some((constraint) => !inheritedRootConstraints.includes(constraint))
+  ) {
+    throw new Error(
+      "child goal rootConstraints must be an exact subset of the calling turn's frozen root constraints",
+    );
+  }
+  return {
+    ...goal,
+    rootConstraints: requestedRootConstraints ?? inheritedRootConstraints,
+  };
+}
+
 export async function createSessionForRequestWithOutcome(
   deps: ApiRouteDeps,
   grant: AccessGrant,
@@ -1347,7 +1375,12 @@ export async function createSessionForRequestWithOutcome(
   const creationInitiator = creationInitiatorForGrant(grant);
   const parentCallingTurn =
     parentSession && creationInitiator.actor
-      ? await getSessionTurn(db, workspaceId, creationInitiator.actor.turnId)
+      ? await getSessionTurnForAttempt(
+          db,
+          workspaceId,
+          parentSession.id,
+          creationInitiator.actor.attemptId,
+        )
       : null;
   if (
     creationInitiator.actor &&
@@ -1356,6 +1389,19 @@ export async function createSessionForRequestWithOutcome(
     throw new HTTPException(403, {
       message: "caller attempt does not belong to the parent session",
     });
+  }
+  let effectiveGoal = payload.goal;
+  if (parentSession && payload.goal) {
+    try {
+      effectiveGoal = resolveChildGoalFromAcceptedSnapshot(
+        payload.goal,
+        parentCallingTurn?.goalSnapshot ?? { state: "none", capturedAt: "unavailable" },
+      );
+    } catch (error) {
+      throw new HTTPException(422, {
+        message: error instanceof Error ? error.message : "invalid child goal root constraints",
+      });
+    }
   }
   const personalResourceSubjectId = creationInitiator.actor
     ? (await requireLiveAgentAttemptAuthorization(db, grant, creationInitiator.actor.sessionId))
@@ -1638,7 +1684,7 @@ export async function createSessionForRequestWithOutcome(
   // and never gains an unrequested permission. Top-level omission remains the
   // deployment's worker default, which includes the goal tools.
   if (
-    payload.goal &&
+    effectiveGoal &&
     firstPartyMcpPermissions &&
     !firstPartyMcpPermissions.includes("goals:manage")
   ) {
@@ -1683,7 +1729,7 @@ export async function createSessionForRequestWithOutcome(
     googleDrivePublicationEnabled,
     atlassianEnabled,
   });
-  if (payload.goal) {
+  if (effectiveGoal) {
     const missingGoalTools = ["goal_update", "goal_progress", "goal_complete", "goal_pause"].filter(
       (name) => !firstPartyMcpTools.includes(name as FirstPartyMcpToolName),
     );
@@ -1964,7 +2010,7 @@ export async function createSessionForRequestWithOutcome(
       rigId: frozenRigId,
       rigVersionId: frozenRigVersionId,
       channelId,
-      goal: payload.goal ?? null,
+      goal: effectiveGoal ?? null,
       // Per-session persona instructions (already trimmed/validated by the
       // contracts schema). Persisted on the row; composed system-level at turn
       // time. Not surfaced as an event.

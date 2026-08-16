@@ -297,6 +297,11 @@ import type {
   SessionEventPage,
   SessionGoal,
   SessionGoalRevision,
+  ListSessionGoalRevisionsOptions,
+  ListSessionGoalRevisionsResponse,
+  RejectSessionGoalRevisionRequest,
+  RejectSessionGoalRevisionResponse,
+  RollbackSessionGoalRevisionRequest,
   SessionHumanInputRequest,
   SessionLineageResponse,
   SessionRealtimeMutationResponse,
@@ -447,6 +452,7 @@ import type {
   WorkspaceStateGetOptions,
   WorkspaceStateResponse,
 } from "./workspace-state";
+import type { CompanyBrainOkfDownload, CompanyBrainOkfPackage } from "./company-brain";
 import type {
   ActivatePreferenceRegistryRevisionRequest,
   ChangePreferenceRegistryScopeRequest,
@@ -2046,6 +2052,47 @@ export class OpenGeniClient {
     );
   }
 
+  async listGoalRevisionPage(
+    workspaceId: string,
+    sessionId: string,
+    options: ListSessionGoalRevisionsOptions = {},
+  ): Promise<ListSessionGoalRevisionsResponse> {
+    const query = new URLSearchParams();
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.before !== undefined) query.set("before", options.before);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return await this.requestJson<ListSessionGoalRevisionsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions/page${suffix}`,
+    );
+  }
+
+  async rejectGoalRevision(
+    workspaceId: string,
+    sessionId: string,
+    revisionId: string,
+    request: RejectSessionGoalRevisionRequest,
+  ): Promise<RejectSessionGoalRevisionResponse> {
+    return await this.requestJson<RejectSessionGoalRevisionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions/${revisionId}/reject`,
+      request,
+    );
+  }
+
+  async rollbackGoalRevision(
+    workspaceId: string,
+    sessionId: string,
+    revisionId: string,
+    request: RollbackSessionGoalRevisionRequest,
+  ): Promise<SessionGoal> {
+    return await this.requestJson<SessionGoal>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions/${revisionId}/rollback`,
+      request,
+    );
+  }
+
   async applyGoalRevision(
     workspaceId: string,
     sessionId: string,
@@ -3613,6 +3660,28 @@ export class OpenGeniClient {
       "GET",
       `/v1/workspaces/${workspaceId}/workspace-state/export${query}`,
     );
+  }
+
+  /** Permission-filtered Company Brain package with authorized guidance bodies. */
+  getCompanyBrain(workspaceId: string): Promise<CompanyBrainOkfPackage> {
+    return this.requestJson<CompanyBrainOkfPackage>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/company-brain`,
+    );
+  }
+
+  /** Download the deterministic Markdown/YAML Company Brain package. */
+  async exportCompanyBrainOkf(workspaceId: string): Promise<CompanyBrainOkfDownload> {
+    const response = await this.requestResponse(
+      "GET",
+      `/v1/workspaces/${workspaceId}/company-brain/export`,
+    );
+    const headers = response.headers;
+    return {
+      content: await response.text(),
+      contentType: headers.get("content-type") ?? "text/markdown",
+      filename: headers.get("content-disposition")?.split('"')[1] ?? "company-brain.okf.md",
+    };
   }
 
   async updateWorkspace(workspaceId: string, request: UpdateWorkspaceRequest): Promise<Workspace> {

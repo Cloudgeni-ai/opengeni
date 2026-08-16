@@ -101,6 +101,7 @@ import {
   archiveTaskNote,
   createTaskNote,
   listTaskNotes,
+  replaceTaskNote,
 } from "@opengeni/db";
 import {
   appendAndPublishEvents,
@@ -235,6 +236,7 @@ import {
 } from "../integrations/atlassian";
 import { AtlassianConnectionMetadata } from "@opengeni/contracts/atlassian";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
+import { registerCompanyBrainGovernedWriteTools } from "./company-brain-governed-writes";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 
 export type McpServerOptions = {
@@ -385,6 +387,29 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   task_notes_list: { sessionRequired: true, allOf: ["sessions:read"] },
   task_note_save: { sessionRequired: true, allOf: ["sessions:control"] },
   task_note_archive: { sessionRequired: true, allOf: ["sessions:control"] },
+  task_note_replace: { sessionRequired: true, allOf: ["sessions:control"] },
+  knowledge_propose: { sessionRequired: true, allOf: ["documents:search"] },
+  knowledge_correct: { sessionRequired: true, allOf: ["documents:search"] },
+  task_note_promote_knowledge: {
+    sessionRequired: true,
+    allOf: ["documents:search", "sessions:control"],
+  },
+  task_note_promote_instruction_policy: {
+    sessionRequired: true,
+    allOf: ["documents:search", "sessions:control", "workspace:read"],
+  },
+  task_note_promote_preference: {
+    sessionRequired: true,
+    allOf: ["documents:search", "sessions:control", "workspace:read"],
+  },
+  instruction_policy_propose: {
+    sessionRequired: true,
+    allOf: ["documents:search", "workspace:read"],
+  },
+  preference_propose: {
+    sessionRequired: true,
+    allOf: ["documents:search", "workspace:read"],
+  },
   sandboxes_list: { sessionRequired: true, allOf: ["sessions:read"] },
   sandbox_attach: { sessionRequired: true, allOf: ["sessions:control"] },
   sandbox_swap: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -715,6 +740,20 @@ export function buildOpenGeniMcpServer(
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerPreferenceRegistryTools(server, deps, grant, json);
     registerTaskNoteTools(server, deps, grant, sessionId, json);
+    const attempt = exactAgentAttemptClaims(grant)!;
+    registerCompanyBrainGovernedWriteTools({
+      server,
+      db: deps.db,
+      attempt: {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        ...attempt,
+      },
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+    });
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerWorkspaceArtifactTools(server, deps, grant, sessionId, json);
@@ -2394,19 +2433,13 @@ function registerGoalTools(
     "goal_update",
     {
       description:
-        "Propose or apply a semantic goal revision under the session's mutation policy. Retain the standing goal unless explicit user direction or meaningful new evidence justifies the declared refinement, adaptation, or replacement. A rewrite never counts as execution progress; use goal_progress for that.",
+        "Propose or apply a semantic goal revision under the session's mutation policy. Retain the standing goal unless explicit user direction or meaningful new evidence justifies the declared refinement, adaptation, or replacement. Every rewrite must use the exact expected objective revision and a concise rationale. Root constraints cannot be changed by an agent. A rewrite never counts as execution progress; use goal_progress for that.",
       inputSchema: {
         text: goalText.optional(),
         successCriteria: successCriteriaSchema.nullable().optional(),
-        // Optional for rolling compatibility with the former goal_update
-        // surface. Omitted semantic metadata is classified as a refinement of
-        // the currently fenced objective; new callers should always supply it.
-        changeKind: z4.enum(["refinement", "adaptation", "replacement"]).optional(),
-        rationale: goalRationale.optional(),
-        expectedObjectiveRevision: z4.number().int().positive().optional(),
-        // Deprecated compatibility input. It is committed through the new
-        // progress operation and never makes a semantic rewrite count itself.
-        progressNote: progressNoteSchema.optional(),
+        changeKind: z4.enum(["refinement", "adaptation", "replacement"]),
+        rationale: goalRationale,
+        expectedObjectiveRevision: z4.number().int().positive(),
         idempotencyKey: z4.string().uuid(),
       },
     },
@@ -2416,12 +2449,11 @@ function registerGoalTools(
       changeKind,
       rationale,
       expectedObjectiveRevision,
-      progressNote,
       idempotencyKey,
     }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
-      if (text === undefined && successCriteria === undefined && progressNote === undefined) {
-        throw new Error("goal_update requires semantic content or a progressNote");
+      if (text === undefined && successCriteria === undefined) {
+        throw new Error("goal_update requires text or successCriteria");
       }
       const context = exactAgentCommandContext(grant, sessionId);
       const command = {
@@ -2435,36 +2467,22 @@ function registerGoalTools(
         },
         operationKey: idempotencyKey,
       };
-      const semantic =
-        text !== undefined || successCriteria !== undefined
-          ? await updateSessionGoalWithEvent(deps.db, grant.workspaceId, sessionId, {
-              ...(text !== undefined ? { text } : {}),
-              ...(successCriteria !== undefined ? { successCriteria } : {}),
-              changeKind: changeKind ?? "refinement",
-              rationale: rationale ?? "Compatibility refinement from goal_update",
-              ...(expectedObjectiveRevision !== undefined ? { expectedObjectiveRevision } : {}),
-              actor: "agent",
-              command,
-            })
-          : null;
-      const progress = progressNote
-        ? await recordSessionGoalProgressWithEvent(deps.db, grant.workspaceId, sessionId, {
-            progressNote,
-            command,
-          })
-        : null;
-      await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, [
-        ...(semantic?.events ?? []),
-        ...(progress?.events ?? []),
-      ]);
-      const goal = progress?.goal ?? semantic?.goal;
-      if (!goal) throw new Error("goal_update produced no mutation");
+      const semantic = await updateSessionGoalWithEvent(deps.db, grant.workspaceId, sessionId, {
+        ...(text !== undefined ? { text } : {}),
+        ...(successCriteria !== undefined ? { successCriteria } : {}),
+        changeKind,
+        rationale,
+        expectedObjectiveRevision,
+        actor: "agent",
+        command,
+      });
+      await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, semantic.events);
       return json({
-        ...goal,
-        operationId: semantic?.operationId ?? progress?.operationId ?? null,
-        replay: Boolean(semantic?.replay || progress?.replay),
-        outcome: semantic?.outcome ?? "progress_recorded",
-        proposalId: semantic?.proposalId ?? null,
+        ...semantic.goal,
+        operationId: semantic.operationId,
+        replay: semantic.replay,
+        outcome: semantic.outcome,
+        proposalId: semantic.proposalId,
       });
     },
   );
@@ -2955,6 +2973,53 @@ function registerTaskNoteTools(
           operationId,
           noteId,
           expectedVersion,
+          reason,
+        }),
+      );
+    },
+  );
+
+  server.registerTool(
+    "task_note_replace",
+    {
+      description:
+        "Atomically correct one exact active coordination note: archive the old immutable note and create a fresh linked replacement. Exact retries replay safely; stale versions or changed input fail closed.",
+      inputSchema: {
+        operationId: z4.string().uuid(),
+        replacedNoteId: z4.string().uuid(),
+        expectedReplacedVersion: z4.number().int().min(1).max(1),
+        replacementKind: z4.enum([
+          "finding",
+          "decision",
+          "blocker",
+          "ownership",
+          "artifact",
+          "handoff",
+        ]),
+        replacementText: boundedUtf8(TASK_NOTE_TEXT_MAX_BYTES, "Task note replacement text"),
+        replacementExpiresInDays: z4.number().int().min(1).max(TASK_NOTE_MAX_LIFETIME_DAYS),
+        reason: boundedUtf8(TASK_NOTE_REASON_MAX_BYTES, "Task note replacement reason"),
+      },
+    },
+    async ({
+      operationId,
+      replacedNoteId,
+      expectedReplacedVersion,
+      replacementKind,
+      replacementText,
+      replacementExpiresInDays,
+      reason,
+    }) => {
+      await authorize();
+      return json(
+        await replaceTaskNote(deps.db, {
+          ...attemptClaims(),
+          operationId,
+          replacedNoteId,
+          expectedReplacedVersion,
+          replacementKind,
+          replacementText,
+          replacementExpiresInDays,
           reason,
         }),
       );
@@ -4190,7 +4255,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker). Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set or Rig gets its own compatible box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker). Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set or Rig gets its own compatible box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         inputSchema: sessionCreateInput,
       },
       async (args) => {

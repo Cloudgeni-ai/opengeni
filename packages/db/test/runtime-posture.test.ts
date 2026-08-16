@@ -348,14 +348,14 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 252],
+            [FORCE_RLS_TABLES, 257],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 137],
             [RUNTIME_READ_ONLY_TABLES, 17],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 29],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 34],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 39],
             [RUNTIME_DML_TABLES, 229],
           ] as const)
         : ([
@@ -380,7 +380,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 263 : 201;
+      const tableCount = hasCurrentMainActivityLedger ? 268 : 201;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
@@ -441,14 +441,14 @@ describe("runtime database posture evaluator", () => {
     }
 
     const contracts = [
-      [FORCE_RLS_TABLES, 211],
+      [FORCE_RLS_TABLES, 212],
       [NON_RLS_RUNTIME_TABLES, 11],
       [RUNTIME_FULL_DML_TABLES, 133],
       [RUNTIME_READ_ONLY_TABLES, 14],
       [RUNTIME_READ_UPDATE_TABLES, 1],
       [RUNTIME_READ_INSERT_TABLES, 41],
       [RUNTIME_READ_INSERT_UPDATE_TABLES, 18],
-      [PROTECTED_NO_DIRECT_DML_TABLES, 20],
+      [PROTECTED_NO_DIRECT_DML_TABLES, 21],
       [RUNTIME_DML_TABLES, 207],
     ] as const;
     for (const [tables, length] of contracts) {
@@ -458,8 +458,8 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(227);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(222);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(228);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(223);
     expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
       "SELECT",
       "INSERT",
@@ -665,6 +665,24 @@ describe("runtime database posture evaluator", () => {
     expect(RUNTIME_TABLE_PRIVILEGES.company_brain_preference_proposal_receipts).toBeUndefined();
     expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
       "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)",
+    );
+  });
+
+  test("classifies Task-note replacement lineage as FORCE-RLS capability-only state", () => {
+    expect(FORCE_RLS_TABLES).toContain("task_note_replacement_receipts");
+    expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("task_note_replacement_receipts");
+    expect(RUNTIME_TABLE_PRIVILEGES.task_note_replacement_receipts).toBeUndefined();
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
+      "replace_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, integer, text, text, integer, text)",
+    );
+  });
+
+  test("classifies governed-learning receipts as FORCE-RLS capability-only state", () => {
+    expect(FORCE_RLS_TABLES).toContain("governed_learning_decision_receipts");
+    expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("governed_learning_decision_receipts");
+    expect(RUNTIME_TABLE_PRIVILEGES.governed_learning_decision_receipts).toBeUndefined();
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
+      "evaluate_governed_learning_proposal(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, uuid)",
     );
   });
 

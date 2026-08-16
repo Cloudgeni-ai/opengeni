@@ -27,7 +27,7 @@ Revision creation does not activate a policy. Activation and rollback require an
 
 Workspaces without an active revision snapshot deterministically as `off`, with no revision and no source overrides. This default applies only to the future governed derived-learning path; it does not disable existing Memory injection, `memory_search`, `memory_save`, or `memory_correct` behavior.
 
-## Effective resolution and the durable-learning router interface
+## Effective resolution and governed evaluation
 
 `resolveWorkspaceLearningPolicyEffectiveMode(snapshot, source)` is the stable routing seam:
 
@@ -37,7 +37,11 @@ Workspaces without an active revision snapshot deterministically as `off`, with 
 4. Its receipt retains the snapshot id/hash, policy revision identity, activation version, and source reference.
 5. `workspaceLearningPolicyRouterContext(effectiveMode)` projects the exact immutable `{mode,snapshotId,revisionId}` object consumed by the canonical router. A snapshot with no active revision uses the explicit stable `workspace-learning-policy:default-off:v1` revision sentinel, preserving the deterministic `off` policy instead of misrepresenting it as a missing snapshot.
 
-The canonical durable-learning router may consume this result, but this policy domain does not implement routing. Destination ownership remains:
+Migration `0268_governed_learning_decision_receipts.sql` adds the first inert evaluator over this frozen policy state. It accepts only an exact live attempt, its accepted policy snapshot, and one workspace-scoped proposal/claim/supporting-evidence lineage. Before recording a verdict it rechecks current Task-note or scoped-Document authority, the latest review, expiry/staleness, conflicts, and a platform-owned confidence floor. The result is one immutable, content-free receipt with exact IDs, hashes, versions, bounded facts, and canonical reason order.
+
+`automatic` is only an eligibility verdict. The evaluator has no destination-writer call, head privilege, activation grant, or reusable capability. Exact retries converge on the original receipt; a changed operation input, another task tree, another subject, or another proposal for the same accepted snapshot conflicts or denies. The receipt table is FORCE RLS with no direct runtime DML, and the app role can call only the target-schema-local SECURITY DEFINER evaluator.
+
+The future canonical durable-learning controller may consume this verdict, but this policy domain does not implement activation. Destination ownership remains:
 
 - Documents/RAG: evidence and retrieval only.
 - Memory: facts, decisions, observations, and history.
@@ -49,11 +53,11 @@ The canonical durable-learning router may consume this result, but this policy d
 This slice does not implement:
 
 - the canonical durable-learning write router;
-- derived-change evaluation or automatic activation control;
+- automatic activation control or destination mutation;
 - destination Memory, Preference Registry, charter, or policy mutation;
 - explicit session command/tool integration;
 - runtime prompt composition or automatic snapshot installation;
 - Workspace State/API/SDK/UI administration;
 - Slack notification delivery.
 
-Canonical code: `packages/contracts/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy-schema.ts`, and migration `0199_workspace_learning_policy.sql`.
+Canonical policy code: `packages/contracts/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy-schema.ts`, and migration `0199_workspace_learning_policy.sql`. Canonical evaluator code: `packages/contracts/src/governed-learning-evaluator.ts`, `packages/core/src/domain/governed-learning-evaluator.ts`, `packages/db/src/governed-learning-evaluator.ts`, and migration `0268_governed_learning_decision_receipts.sql`.

@@ -818,6 +818,14 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "task_notes_list",
   "task_note_save",
   "task_note_archive",
+  "task_note_replace",
+  "knowledge_propose",
+  "knowledge_correct",
+  "task_note_promote_knowledge",
+  "task_note_promote_instruction_policy",
+  "task_note_promote_preference",
+  "instruction_policy_propose",
+  "preference_propose",
   "sandboxes_list",
   "sandbox_attach",
   "sandbox_swap",
@@ -4836,6 +4844,9 @@ export const SESSION_GOAL_TEXT_MAX_BYTES = 8 * 1024;
 export const SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES = 8 * 1024;
 export const SESSION_GOAL_RATIONALE_MAX_BYTES = 2 * 1024;
 export const SESSION_GOAL_PROGRESS_MAX_BYTES = 4 * 1024;
+export const SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES = 512;
+export const SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES = 4 * 1024;
+export const SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS = 16;
 
 export function sessionGoalUtf8Bytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
@@ -4849,6 +4860,43 @@ function boundedSessionGoalString(maxBytes: number, field: string) {
       message: `${field} exceeds ${maxBytes} UTF-8 bytes`,
     });
 }
+
+function compareUtf8(left: string, right: string): number {
+  const encoder = new TextEncoder();
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  const length = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = leftBytes[index]! - rightBytes[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftBytes.length - rightBytes.length;
+}
+
+export function normalizeSessionGoalRootConstraints(values: readonly string[]): string[] {
+  // PostgreSQL btrim(text) removes U+0020 at both ends. Keep the public
+  // projector byte-equivalent with the storage trigger instead of using
+  // JavaScript trim(), whose Unicode whitespace set is broader.
+  return [...new Set(values.map((value) => value.replace(/^ +| +$/g, "")))].sort(compareUtf8);
+}
+
+export const SessionGoalRootConstraintsWrite = z
+  .array(boundedSessionGoalString(SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES, "goal root constraint"))
+  .transform(normalizeSessionGoalRootConstraints)
+  .pipe(
+    z
+      .array(z.string().min(1))
+      .max(SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS)
+      .refine(
+        (values) =>
+          values.reduce((total, value) => total + sessionGoalUtf8Bytes(value), 0) <=
+          SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES,
+        {
+          message: `goal root constraints exceed ${SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES} aggregate UTF-8 bytes`,
+        },
+      ),
+  );
+export type SessionGoalRootConstraintsWrite = z.infer<typeof SessionGoalRootConstraintsWrite>;
 
 const SessionGoalTextWrite = boundedSessionGoalString(SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
 const SessionGoalSuccessCriteriaWrite = boundedSessionGoalString(
@@ -4868,6 +4916,7 @@ export const SessionGoalSnapshot = z.discriminatedUnion("state", [
     objectiveRevision: z.number().int().positive(),
     text: SessionGoalTextWrite,
     successCriteria: SessionGoalSuccessCriteriaWrite.nullable(),
+    rootConstraints: SessionGoalRootConstraintsWrite.default([]),
     mutationPolicy: SessionGoalMutationPolicy,
     capturedAt: z.string(),
   }),
@@ -4886,21 +4935,56 @@ export const SessionGoalRevision = z.object({
   resultObjectiveRevision: z.number().int().positive().nullable(),
   text: z.string().min(1),
   successCriteria: z.string().nullable(),
+  rootConstraints: z.array(z.string().min(1)).default([]),
   mutationPolicy: SessionGoalMutationPolicy,
   rationale: z.string().min(1),
   actor: z.enum(["agent", "api", "scheduled_task"]),
   actorTurnId: z.string().uuid().nullable(),
   actorAttemptId: z.string().uuid().nullable(),
   proposalId: z.string().uuid().nullable(),
+  rollbackOfRevisionId: z.string().uuid().nullable(),
   createdAt: z.string(),
 });
 export type SessionGoalRevision = z.infer<typeof SessionGoalRevision>;
+
+export const SESSION_GOAL_REVISION_LIST_DEFAULT_LIMIT = 50;
+export const SESSION_GOAL_REVISION_LIST_MAX_LIMIT = 100;
+
+export const ListSessionGoalRevisionsQuery = z.object({
+  limit: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(SESSION_GOAL_REVISION_LIST_MAX_LIMIT)
+    .default(SESSION_GOAL_REVISION_LIST_DEFAULT_LIMIT),
+  before: z.string().uuid().optional(),
+});
+export type ListSessionGoalRevisionsQuery = z.infer<typeof ListSessionGoalRevisionsQuery>;
+
+export const ListSessionGoalRevisionsResponse = z.object({
+  revisions: z.array(SessionGoalRevision),
+  hasMore: z.boolean(),
+  nextCursor: z.string().uuid().nullable(),
+});
+export type ListSessionGoalRevisionsResponse = z.infer<typeof ListSessionGoalRevisionsResponse>;
 
 export const ApplySessionGoalRevisionRequest = z.object({
   expectedObjectiveRevision: z.number().int().positive(),
   rationale: SessionGoalRationaleWrite.optional(),
 });
 export type ApplySessionGoalRevisionRequest = z.infer<typeof ApplySessionGoalRevisionRequest>;
+
+export const RejectSessionGoalRevisionRequest = z.object({
+  expectedObjectiveRevision: z.number().int().positive(),
+  rationale: SessionGoalRationaleWrite,
+});
+export type RejectSessionGoalRevisionRequest = z.infer<typeof RejectSessionGoalRevisionRequest>;
+
+export const RollbackSessionGoalRevisionRequest = z.object({
+  expectedObjectiveRevision: z.number().int().positive(),
+  rationale: SessionGoalRationaleWrite,
+});
+export type RollbackSessionGoalRevisionRequest = z.infer<typeof RollbackSessionGoalRevisionRequest>;
 
 export const SessionGoalPausedReason = z.enum([
   "agent",
@@ -4955,6 +5039,7 @@ export const SessionGoal = z.object({
   status: SessionGoalStatus,
   text: z.string(),
   successCriteria: z.string().nullable(),
+  rootConstraints: z.array(z.string().min(1)).default([]),
   evidence: z.string().nullable(),
   rationale: z.string().nullable(),
   pausedReason: z.string().nullable(),
@@ -4977,6 +5062,7 @@ export type SessionGoal = z.infer<typeof SessionGoal>;
 export const GoalSpec = z.object({
   text: SessionGoalTextWrite,
   successCriteria: SessionGoalSuccessCriteriaWrite.optional(),
+  rootConstraints: SessionGoalRootConstraintsWrite.optional(),
   maxAutoContinuations: z.number().int().positive().optional(),
   mutationPolicy: SessionGoalMutationPolicy.optional(),
 });
@@ -4990,6 +5076,7 @@ export const UpdateSessionGoalRequest = z.union([
   z.object({
     text: SessionGoalTextWrite,
     successCriteria: SessionGoalSuccessCriteriaWrite.nullable().optional(),
+    rootConstraints: SessionGoalRootConstraintsWrite.optional(),
     mutationPolicy: SessionGoalMutationPolicy.optional(),
     rationale: SessionGoalRationaleWrite,
     expectedObjectiveRevision: z.number().int().positive(),
@@ -13517,11 +13604,13 @@ export * from "./codex-fleet-policy";
 export * from "./xai-provider-account-authority";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
+export * from "./company-brain";
 export * from "./workspace-learning-policy";
 export * from "./workspace-state";
 export * from "./preference-registry";
 export * from "./scoped-knowledge";
 export * from "./company-brain-governed-writes";
+export * from "./governed-learning-evaluator";
 export * from "./knowledge";
 export * from "./task-notes";
 export * from "./canonical-human-identities";

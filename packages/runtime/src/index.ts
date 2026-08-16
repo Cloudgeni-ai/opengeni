@@ -1739,8 +1739,11 @@ export function appendSessionInstructions(composed: string, sessionInstructions?
  */
 export function appendSessionGoal(composed: string, snapshot?: SessionGoalSnapshot): string {
   if (!snapshot || snapshot.state === "none") return composed;
+  const rootConstraints = snapshot.rootConstraints.length
+    ? `\nRoot constraints (must remain satisfied):\n${snapshot.rootConstraints.map((constraint) => `- ${constraint}`).join("\n")}`
+    : "";
   if (snapshot.state === "completed") {
-    return `${composed} Previous session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status completed): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}. This goal is complete and remains as historical context. If the user provides a new long-running objective, create it with opengeni__goal_set; goal_update cannot revise a completed goal.`;
+    return `${composed} Previous session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status completed): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints} This goal is complete and remains as historical context. If the user provides a new long-running objective, create it with opengeni__goal_set; goal_update cannot revise a completed goal.`;
   }
   const policy =
     snapshot.mutationPolicy === "review_changes"
@@ -1748,7 +1751,7 @@ export function appendSessionGoal(composed: string, snapshot?: SessionGoalSnapsh
       : snapshot.mutationPolicy === "preserve_intent"
         ? "You may directly refine wording without changing intent; adaptations and replacements are proposals until a user applies them."
         : "You may autonomously refine, adapt, or replace the goal when explicit user direction or material new evidence justifies it.";
-  return `${composed} Standing session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status ${snapshot.state}): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.\nMutation policy: ${snapshot.mutationPolicy}. ${policy} Treat later ordinary messages as additional context unless they explicitly redirect this objective. Record concrete execution progress with opengeni__goal_progress; semantic goal changes use opengeni__goal_update with the expected objective revision, change kind, and rationale and do not count as progress.`;
+  return `${composed} Standing session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status ${snapshot.state}): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints}\nMutation policy: ${snapshot.mutationPolicy}. ${policy} Treat later ordinary messages as additional context unless they explicitly redirect this objective. Root constraints are user/API authority and cannot be widened, removed, or rewritten by an agent. Record concrete execution progress with opengeni__goal_progress; semantic goal changes use opengeni__goal_update with the expected objective revision, change kind, and rationale and do not count as progress.`;
 }
 
 /**

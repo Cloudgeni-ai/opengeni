@@ -662,6 +662,14 @@ async function finalizeSessionActivityGate(
   await db.execute(
     sql`set constraints sessions_activity_insert_commit_guard, sessions_activity_update_commit_guard immediate`,
   );
+  // A restored activity scope can be followed by another workspace scope, or
+  // by a SECURITY DEFINER lifecycle that opens and finalizes its own gate in
+  // the same outer transaction. Keep the guards deferred after proving this
+  // scope's final state so those later writes reach their own finalizer instead
+  // of firing the commit guard at the first session update.
+  await db.execute(
+    sql`set constraints sessions_activity_insert_commit_guard, sessions_activity_update_commit_guard deferred`,
+  );
 }
 
 /**

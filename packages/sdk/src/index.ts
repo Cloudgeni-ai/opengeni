@@ -226,6 +226,28 @@ export type {
   WorkspaceStateSourceKindCounts,
 } from "./workspace-state";
 export type {
+  CompanyBrainContextReceiptListOptions,
+  CompanyBrainContextReceiptPage,
+  CompanyBrainInspectorTransport,
+  CompanyBrainKnowledgeBrowseRequest,
+  CompanyBrainKnowledgeBrowseResponse,
+  CompanyBrainKnowledgeGetResponse,
+  CompanyBrainKnowledgeRecord,
+  CompanyBrainKnowledgeProposalListOptions,
+  CompanyBrainKnowledgeProposalPage,
+  CompanyBrainKnowledgeSearchRequest,
+  CompanyBrainKnowledgeSearchResponse,
+  CompanyBrainOkfDownload,
+  CompanyBrainOkfPackage,
+} from "./company-brain";
+export {
+  browseCompanyBrainKnowledge,
+  getCompanyBrainKnowledge,
+  listCompanyBrainContextReceipts,
+  listCompanyBrainKnowledgeProposals,
+  searchCompanyBrainKnowledge,
+} from "./company-brain";
+export type {
   MemorySlackImportance,
   MemorySlackPublication,
   MemorySlackPublicationActionRequest,
@@ -706,6 +728,12 @@ export type {
   SessionEventSemanticClass,
   SessionEventType,
   SessionGoal,
+  SessionGoalRevision,
+  ListSessionGoalRevisionsOptions,
+  ListSessionGoalRevisionsResponse,
+  RejectSessionGoalRevisionRequest,
+  RejectSessionGoalRevisionResponse,
+  RollbackSessionGoalRevisionRequest,
   SessionGoalCreatedBy,
   SessionGoalStatus,
   SessionHumanInputRequest,

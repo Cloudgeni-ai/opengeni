@@ -58,8 +58,9 @@ describe("documents", () => {
       decodeKnowledgeBrowseCursor(cursor, {
         ...scope,
         parentId: "document:33333333-3333-4333-8333-333333333333",
+        parentRevision: "7",
       }),
-    ).toThrow("different scope");
+    ).toThrow("invalid knowledge browse cursor");
     expect(() => decodeKnowledgeBrowseCursor(cursor, { ...scope, topic: "finance" })).toThrow(
       "different scope",
     );
@@ -73,6 +74,17 @@ describe("documents", () => {
     expect(() => decodeKnowledgeBrowseCursor(oversized, scope)).toThrow(
       "invalid knowledge browse cursor",
     );
+
+    const parentScope = {
+      ...scope,
+      parentId: "document:33333333-3333-4333-8333-333333333333",
+      parentRevision: "7",
+    };
+    const parentCursor = encodeKnowledgeBrowseCursor(parentScope, 2n);
+    expect(decodeKnowledgeBrowseCursor(parentCursor, parentScope)).toBe(2n);
+    expect(() =>
+      decodeKnowledgeBrowseCursor(parentCursor, { ...parentScope, parentRevision: "8" }),
+    ).toThrow("different scope");
   });
 
   test("round-trips document index checkpoints only within their frozen authority scope", () => {

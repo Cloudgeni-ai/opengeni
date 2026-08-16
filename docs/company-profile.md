@@ -19,7 +19,7 @@ Canonical implementation:
   `packages/core/src/domain/company-profile-durable-learning-adapter.ts`;
 - the only prompt composer: `packages/runtime/src/workspace-governance.ts`,
   resolved by `apps/worker/src/activities/agent-turn.ts`;
-- admin presentation: the existing Agent Brain / Workspace State route at
+- admin presentation: the existing Company Brain / Workspace State route at
   `apps/web/src/routes/workspace-state.tsx`.
 
 ## Scope and authority
@@ -89,7 +89,7 @@ that operation. No history row is edited or deleted.
 
 The API below `/v1/workspaces/:workspaceId/company-profile` exposes current and
 historical revisions, one revision, deterministic JSON diff, direct-admin
-update-and-activate, proposal activation, and rollback. The Agent Brain UI uses
+update-and-activate, proposal activation, and rollback. The Company Brain UI uses
 only this API. List responses contain a separate bounded `activeRevision`
 lookup in addition to the bounded newest-revision page, so more than 50 newer
 proposals cannot hide the effective profile or initialize the editor from an

@@ -4118,6 +4118,7 @@ function fabricateGoal(sessionId: string): SessionGoal {
     status: "active",
     text: "Staging live for api + prod drift report delivered",
     successCriteria: "Staging environment reachable and drift report filed",
+    rootConstraints: [],
     evidence: null,
     rationale: null,
     pausedReason: null,

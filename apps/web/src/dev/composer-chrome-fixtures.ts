@@ -216,6 +216,7 @@ function galleryGoalRecord(overrides: Partial<SessionGoal> = {}): SessionGoal {
     createdAt,
     updatedAt,
     ...overrides,
+    rootConstraints: overrides.rootConstraints ?? [],
   };
 }
 

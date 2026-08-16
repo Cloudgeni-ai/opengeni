@@ -4,7 +4,7 @@ async function source(path: string): Promise<string> {
   return Bun.file(`${import.meta.dir}/${path}`).text();
 }
 
-describe("Agent Brain authority surface", () => {
+describe("Company Brain authority surface", () => {
   test("registers a first-class workspace route and rail destination", async () => {
     const [app, navigation] = await Promise.all([
       source("App.tsx"),
@@ -13,34 +13,38 @@ describe("Agent Brain authority surface", () => {
     expect(app).toContain('path: "state"');
     expect(app).toContain('import("@/routes/workspace-state")');
     expect(navigation).toContain('to: "/workspaces/$workspaceId/state"');
-    expect(navigation).toContain('label: "Agent Brain"');
-    expect(navigation).toContain('description: "What agents always know and retrieve"');
+    expect(navigation).toContain('label: "Company Brain"');
+    expect(navigation).toContain('description: "Knowledge, rules, guides, review, and learning"');
   });
 
-  test("keeps the default Agent Brain simple while preserving canonical governance APIs", async () => {
-    const [route, overview, prompt, loader, preferences] = await Promise.all([
+  test("keeps the default Company Brain simple while preserving canonical governance APIs", async () => {
+    const [route, overview, prompt, loader, preferences, exportControl] = await Promise.all([
       source("routes/workspace-state.tsx"),
       source("routes/agent-brain-overview.tsx"),
       source("routes/agent-brain-prompt.tsx"),
       source("routes/workspace-state-loader.ts"),
       source("routes/preference-registry-admin.tsx"),
+      source("routes/company-brain-export.tsx"),
     ]);
     for (const required of [
-      "Loading Agent Brain",
-      "Couldn't load Agent Brain",
-      "What every agent starts with, and what it can find when needed.",
-      "Included automatically",
+      "Loading Company Brain",
+      "Couldn't load Company Brain",
+      "Knowledge, rules, guides, review, and learning",
+      "Always followed",
       "Company profile & goals",
       "Not configured",
       "Workspace instructions",
       "Not set",
-      "Preferences",
+      "Guides & preferences",
       "Short summaries are always known; full instructions are fetched when needed.",
-      "Back to Agent Brain",
+      "Back to Company Brain",
       "Instructions for this workspace",
       "Save instructions",
       "Changes are versioned and can be audited or rolled back.",
       "Available when needed",
+      "Needs attention",
+      "Recent changes",
+      "Export OKF",
       "Documents",
       "Memory",
       "Facts, decisions and observations learned across agent work.",
@@ -64,7 +68,7 @@ describe("Agent Brain authority surface", () => {
       "Proposals never activate themselves",
       "Inactive proposal",
     ]) {
-      expect(`${route}\n${overview}`).toContain(required);
+      expect(`${route}\n${overview}\n${exportControl}`).toContain(required);
     }
     expect(route.indexOf("<BrainOverview")).toBeLessThan(route.indexOf('id="brain-diagnostics"'));
     expect(overview).toContain("search={{ view }}");
@@ -125,6 +129,12 @@ describe("Agent Brain authority surface", () => {
       route.indexOf('id="brain-diagnostics"'),
     );
     expect(route).toContain("createWorkspaceInstructionPolicyOnboardingProposal");
+    expect(route).toContain("onReviewSummary={updatePreferenceReview}");
+    expect(route).toContain("onReviewSummary={updateOnboardingReview}");
+    expect(overview).toContain("deriveBrainAttention");
+    expect(overview).toContain("Proposal review is still loading");
+    expect(overview).toContain("Some learned memories await review");
+    expect(overview).not.toContain("No review needed");
     for (const required of [
       "dedicated organization/workspace/personal registry",
       "not ordinary Memory",
