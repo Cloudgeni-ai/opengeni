@@ -4127,6 +4127,9 @@ export type Rig = {
   id: string;
   accountId: string;
   workspaceId: string;
+  scope: ResourceAuthorityScope;
+  generation: number;
+  status: "active" | "revoked";
   name: string;
   description: string | null;
   createdBy: string | null;
@@ -4171,6 +4174,7 @@ export type RigChange = {
 };
 
 export type CreateRigRequest = {
+  scope?: ResourceAuthorityScope;
   name: string;
   description?: string | undefined;
   image?: string | undefined;
@@ -6288,6 +6292,8 @@ export type UpdateMachineOperationPolicyRequest = {
 export type MachineView = {
   sandboxId: string;
   enrollmentId: string | null;
+  scope: ResourceAuthorityScope;
+  generation: number;
   name: string;
   kind: MachineKind;
   state: MachineState;
@@ -6395,6 +6401,7 @@ export type SwapActiveSandboxResponse = {
 
 /** Mirror of `@opengeni/contracts` EnrollmentOs. */
 export type EnrollmentOs = "linux" | "macos" | "windows";
+export type ResourceAuthorityScope = "organization" | "workspace" | "user";
 
 /** POST /v1/enrollments/device/lookup body. */
 export type DeviceEnrollmentLookupRequest = {
@@ -6422,6 +6429,7 @@ export type DeviceEnrollmentLookupResponse = {
 export type DeviceEnrollmentApproveRequest = {
   userCode: string;
   allowScreenControl?: boolean;
+  scope?: ResourceAuthorityScope;
 };
 
 /** POST /v1/workspaces/:ws/enrollments/device/approve response. */

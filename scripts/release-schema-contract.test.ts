@@ -140,6 +140,7 @@ describe("release schema contract", () => {
       "0253_common_user_resource_authority_lifecycle.sql",
       "0254_scoped_variable_set_authority.sql",
       "0256_connection_authority_delegation.sql",
+      "0262_scoped_connected_machines_and_rigs.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -174,7 +175,9 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0240_model_context_user_messages.sql",
     );
     if (modelContextCutover) {
-      expect(modelContextCutover).toMatchObject({ deploymentMode: "maintenance" });
+      expect(modelContextCutover).toMatchObject({
+        deploymentMode: "maintenance",
+      });
     }
     expect(
       completeSourceContract.migrations.find(
@@ -303,6 +306,14 @@ describe("release schema contract", () => {
       ),
     ).toMatchObject({
       sha256: "c00d29214a9181301fa3076322992a2958ed4d017028a7956a52b97c930af8e6",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0262_scoped_connected_machines_and_rigs.sql",
+      ),
+    ).toMatchObject({
+      sha256: "87901ff0b301b010a18e04ddd2137f291554071c8c9f73bec9b52b69cadd1cb8",
       deploymentMode: "rolling",
     });
     const migrations = new Map(

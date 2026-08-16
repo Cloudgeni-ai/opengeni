@@ -25,15 +25,15 @@ import {
 import {
   advanceEnrollmentAgentUpdate,
   beginEnrollmentAgentUpdate,
-  getEnrollment,
   getLiveEnrollmentConnection,
+  listEnrollments,
   readMachineMetricsSeries,
   requireSession,
   updateEnrollmentOperationPolicy,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "@opengeni/core";
+import { requireAccessGrant, requireAccessGrantAuthorization } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { buildFleetContextForSession, swapActiveSandbox } from "@opengeni/core";
 import { listMachines, metricRowToSample } from "../sandbox/machines";
@@ -65,33 +65,55 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   }
 
+  async function requireScopedEnrollment(
+    grant: Awaited<ReturnType<typeof requireAccessGrant>>,
+    enrollmentId: string,
+  ) {
+    const enrollment = (await listEnrollments(db, grant, { status: "active" })).find(
+      (candidate) => candidate.id === enrollmentId,
+    );
+    if (!enrollment) {
+      throw new HTTPException(404, { message: "machine not found in this access scope" });
+    }
+    return enrollment;
+  }
+
   // ── GET /workspaces/:ws/machines (the dashboard list) ───────────────────────
   app.get("/v1/workspaces/:workspaceId/machines", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
     assertSelfhostedEnabled();
     // sessionId is OPTIONAL: present → an in-session view (synthetic group box +
     // active pointer); absent → the pure workspace dashboard.
     const sessionId = c.req.query("sessionId") ?? null;
-    const response = await listMachines({ db, settings, bus }, { workspaceId, sessionId });
+    const response = await listMachines(
+      { db, settings, bus },
+      {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        sessionId,
+      },
+    );
     return c.json(MachinesResponse.parse(response));
   });
 
   // ── GET /workspaces/:ws/machines/:enrollmentId/metrics/series ───────────────
   app.get("/v1/workspaces/:workspaceId/machines/:enrollmentId/metrics/series", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
     // Validate the machine belongs to this workspace (RLS already scopes the read,
     // but a clear 404 beats an empty series for an unknown/cross-workspace id).
-    const enrollment = await getEnrollment(db, workspaceId, enrollmentId);
-    if (!enrollment || enrollment.status !== "active") {
-      throw new HTTPException(404, { message: "machine not found in this workspace" });
-    }
+    const enrollment = await requireScopedEnrollment(grant, enrollmentId);
     const windowMs = SERIES_WINDOWS_MS[c.req.query("window") ?? ""] ?? DEFAULT_SERIES_WINDOW_MS;
     const since = new Date(Date.now() - windowMs);
-    const rows = await readMachineMetricsSeries(db, { workspaceId, enrollmentId, since });
+    const rows = await readMachineMetricsSeries(db, {
+      workspaceId: enrollment.workspaceId,
+      enrollmentId,
+      since,
+    });
     return c.json(
       MachineMetricsSeriesResponse.parse({
         samples: rows.map(metricRowToSample),
@@ -104,27 +126,40 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // concurrency fence so two operators cannot silently overwrite each other.
   app.patch("/v1/workspaces/:workspaceId/machines/:enrollmentId/operation-policy", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:manage");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "enrollments:manage",
+    );
+    const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
     let json: unknown;
     try {
       json = await c.req.json();
     } catch {
-      throw new HTTPException(400, { message: "operation policy body must be valid JSON" });
+      throw new HTTPException(400, {
+        message: "operation policy body must be valid JSON",
+      });
     }
     const parsed = UpdateMachineOperationPolicyRequest.safeParse(json);
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid machine operation policy" });
+      throw new HTTPException(400, {
+        message: "invalid machine operation policy",
+      });
     }
     const body = parsed.data;
-    const current = await getEnrollment(db, workspaceId, enrollmentId);
-    if (!current || current.status !== "active") {
-      throw new HTTPException(404, { message: "machine not found in this workspace" });
+    const current = await requireScopedEnrollment(grant, enrollmentId);
+    if (
+      current.scope === "organization" &&
+      authorization.accountGrant?.permissions.includes("account:admin") !== true
+    ) {
+      throw new HTTPException(403, { message: "missing permission: account:admin" });
     }
     const updated = await updateEnrollmentOperationPolicy(db, {
       accountId: grant.accountId,
-      workspaceId,
+      workspaceId: current.workspaceId,
       enrollmentId,
       subjectId: grant.subjectId,
       expectedRevision: body.expectedRevision,
@@ -146,12 +181,32 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // successor Hello drive the durable state to completion.
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/update", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:manage");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "enrollments:manage",
+    );
+    const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
-    const live = await getLiveEnrollmentConnection(db, workspaceId, enrollmentId);
+    const visibleEnrollment = await requireScopedEnrollment(grant, enrollmentId);
+    if (
+      visibleEnrollment.scope === "organization" &&
+      authorization.accountGrant?.permissions.includes("account:admin") !== true
+    ) {
+      throw new HTTPException(403, { message: "missing permission: account:admin" });
+    }
+    const originWorkspaceId = visibleEnrollment.workspaceId;
+    const live = await getLiveEnrollmentConnection(
+      db,
+      visibleEnrollment.scope === "user" ? grant : originWorkspaceId,
+      enrollmentId,
+    );
     if (!live?.connectionInstanceId || !live.agentVersion) {
-      throw new HTTPException(409, { message: "machine has no authoritative live agent build" });
+      throw new HTTPException(409, {
+        message: "machine has no authoritative live agent build",
+      });
     }
     const channel = live.agentUpdateChannel ?? "stable";
     const targetVersion =
@@ -170,13 +225,15 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       live.agentVersion === targetVersion &&
       live.agentUpdate?.status !== "failed"
     ) {
-      throw new HTTPException(409, { message: "machine already runs the promoted version" });
+      throw new HTTPException(409, {
+        message: "machine already runs the promoted version",
+      });
     }
     const operationId = reusableRequest?.operationId ?? crypto.randomUUID();
     if (!reusableRequest) {
       const reserved = await beginEnrollmentAgentUpdate(db, {
         accountId: grant.accountId,
-        workspaceId,
+        workspaceId: originWorkspaceId,
         enrollmentId,
         connectionInstanceId: live.connectionInstanceId,
         connectionGeneration: live.connectionGeneration,
@@ -211,7 +268,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       },
     };
     let response = await rpc.request(
-      subjectFor(workspaceId, enrollmentId, live.connectionInstanceId),
+      subjectFor(originWorkspaceId, enrollmentId, live.connectionInstanceId),
       request,
       { timeoutMs: 10_000 },
     );
@@ -219,7 +276,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     // the agent returns the same acceptance and never starts a second update.
     if (response.error?.code === ErrorCode.ERROR_CODE_TIMEOUT) {
       response = await rpc.request(
-        subjectFor(workspaceId, enrollmentId, live.connectionInstanceId),
+        subjectFor(originWorkspaceId, enrollmentId, live.connectionInstanceId),
         request,
         { timeoutMs: 10_000 },
       );
@@ -230,7 +287,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (response.error.code !== ErrorCode.ERROR_CODE_TIMEOUT) {
         await advanceEnrollmentAgentUpdate(db, {
           accountId: grant.accountId,
-          workspaceId,
+          workspaceId: originWorkspaceId,
           enrollmentId,
           connectionInstanceId: live.connectionInstanceId,
           connectionGeneration: live.connectionGeneration,
@@ -254,7 +311,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     ) {
       await advanceEnrollmentAgentUpdate(db, {
         accountId: grant.accountId,
-        workspaceId,
+        workspaceId: originWorkspaceId,
         enrollmentId,
         connectionInstanceId: live.connectionInstanceId,
         connectionGeneration: live.connectionGeneration,
@@ -264,11 +321,13 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
         retryable: true,
         rolledBack: false,
       });
-      throw new HTTPException(502, { message: "agent returned an invalid update response" });
+      throw new HTTPException(502, {
+        message: "agent returned an invalid update response",
+      });
     } else {
       await advanceEnrollmentAgentUpdate(db, {
         accountId: grant.accountId,
-        workspaceId,
+        workspaceId: originWorkspaceId,
         enrollmentId,
         connectionInstanceId: live.connectionInstanceId,
         connectionGeneration: live.connectionGeneration,
@@ -277,7 +336,11 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     return c.json(
-      UpdateMachineAgentResponse.parse({ operationId, accepted: true, targetVersion }),
+      UpdateMachineAgentResponse.parse({
+        operationId,
+        accepted: true,
+        targetVersion,
+      }),
       202,
     );
   });
@@ -298,6 +361,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceId,
       sessionId,
+      subjectId: grant.subjectId,
     });
     const result = await swapActiveSandbox(
       {

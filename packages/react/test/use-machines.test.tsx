@@ -43,6 +43,8 @@ function machine(overrides: Partial<MachineView> & Pick<MachineView, "sandboxId"
     runtime: null,
     metrics: null,
     ...overrides,
+    scope: overrides.scope ?? "workspace",
+    generation: overrides.generation ?? 1,
     operationPolicy: overrides.operationPolicy ?? null,
   };
 }
