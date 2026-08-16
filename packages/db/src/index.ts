@@ -1470,7 +1470,10 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
     const selfOrganizationMembership = existingOrganizationMemberships.find(
       (organizationMembership) => organizationMembership.organizationId === account.id,
     );
-    if (selfOrganizationMembership && selfOrganizationMembership.status !== "active") {
+    if (
+      selfOrganizationMembership?.status === "suspended" ||
+      selfOrganizationMembership?.status === "revoked"
+    ) {
       const activeOrganizationMemberships = existingOrganizationMemberships.flatMap(
         (organizationMembership) =>
           organizationMembership.status === "active" &&
