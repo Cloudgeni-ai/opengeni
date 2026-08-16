@@ -193,7 +193,7 @@ export function EnrollmentConsent({
               data-disabled={disabled ? "true" : "false"}
               className={cn(
                 "flex items-start gap-2.5 rounded-og-md border border-og-border bg-og-bg px-3 py-2.5",
-                disabled ? "cursor-not-allowed opacity-55" : "cursor-pointer",
+                disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer",
               )}
             >
               <input
