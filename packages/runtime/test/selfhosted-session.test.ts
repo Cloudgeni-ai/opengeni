@@ -145,10 +145,10 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
 
     await session.ping();
     await session.writeFile({ path: "/tmp/no-policy-read", content: "ok" });
-    expect(reads).toBe(3);
+    expect(reads).toBe(5);
   });
 
-  test("a retried command retains its original authoritative admission", async () => {
+  test("a provably unstarted physical retry revalidates live authority", async () => {
     const responder = new MockAgentResponder();
     const requests: Array<{ subject: string; req: ControlRequest }> = [];
     let admissionReads = 0;
@@ -206,16 +206,53 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
 
     await session.exec({ cmd: "true" });
 
-    expect(admissionReads).toBe(1);
+    expect(admissionReads).toBe(2);
     expect(requests).toHaveLength(2);
     expect(requests.map((request) => request.subject)).toEqual([
       subjectFor(WS, AGENT, "instance-a"),
-      subjectFor(WS, AGENT, "instance-a"),
+      subjectFor(WS, AGENT, "instance-b"),
     ]);
     expect(requests.map((request) => request.req.resourcePolicy)).toEqual([
       { memoryMaxBytes: "134217728" },
-      { memoryMaxBytes: "134217728" },
+      { memoryMaxBytes: "268435456" },
     ]);
+  });
+
+  test("a revoked live-authority resolver fences every operation family before dispatch", async () => {
+    const operations: Array<(session: SelfhostedSession) => Promise<unknown>> = [
+      (session) => session.exec({ cmd: "true" }),
+      (session) => session.readFile({ path: "/workspace/read.txt" }),
+      (session) => session.writeFile({ path: "/workspace/write.txt", content: "x" }),
+      (session) => session.listFiles({ path: "/workspace" }),
+      (session) => session.statFile({ path: "/workspace/read.txt" }),
+      (session) => session.materializeEntry({ path: "/workspace/staged", entry: {} }),
+      (session) => session.screenshot(),
+      (session) =>
+        session.desktopInput({
+          $case: "key",
+          key: { key: "Escape", isText: false, action: 1 },
+        }),
+      (session) => session.resolveExposedPort(7681),
+      (session) => session.resolveExposedPort(6080),
+    ];
+
+    for (const operation of operations) {
+      const mock = new MockAgentResponder();
+      const session = new SelfhostedSession({
+        workspaceId: WS,
+        agentId: AGENT,
+        connectionInstanceId: "stale-instance",
+        controlRpc: mock,
+        relay: RELAY,
+        resolveOperationAdmission: async () => null,
+      });
+      const failure = await operation(session).catch((error: unknown) => error);
+      expect(failure).toMatchObject({
+        name: "SelfhostedControlError",
+        code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+      });
+      expect(mock.requests).toHaveLength(0);
+    }
   });
 
   test("configured CPU fails closed on capability drift and never reaches the runner", async () => {
@@ -298,7 +335,10 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
           agentId: AGENT,
           controlRpc: new MockAgentResponder(),
           relay: RELAY,
-          operationResourcePolicy: { memoryMaxBytes: 1_000, memoryHighBytes: 1_001 },
+          operationResourcePolicy: {
+            memoryMaxBytes: 1_000,
+            memoryHighBytes: 1_001,
+          },
           operationResourcePolicySupported: true,
         }),
     ).toThrow("memoryHighBytes cannot exceed memoryMaxBytes");
@@ -413,8 +453,16 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     const mock = new MockAgentResponder();
     const session = sessionWith(mock);
 
-    await session.exec({ cmd: "printf non-login", shell: "/bin/bash", login: false });
-    await session.execCommand({ cmd: "printf login", shell: "/bin/zsh", login: true });
+    await session.exec({
+      cmd: "printf non-login",
+      shell: "/bin/bash",
+      login: false,
+    });
+    await session.execCommand({
+      cmd: "printf login",
+      shell: "/bin/zsh",
+      login: true,
+    });
 
     const first = mock.requests[0]?.req.op;
     const second = mock.requests[1]?.req.op;
@@ -435,9 +483,20 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     const mock = new MockAgentResponder();
     const session = sessionWith(mock);
 
-    await session.exec({ cmd: "echo cmd", shell: String.raw`C:\Windows\System32\cmd.exe` });
-    await session.exec({ cmd: "Write-Output profile", shell: "pwsh.exe", login: true });
-    await session.exec({ cmd: "Write-Output clean", shell: "powershell.exe", login: false });
+    await session.exec({
+      cmd: "echo cmd",
+      shell: String.raw`C:\Windows\System32\cmd.exe`,
+    });
+    await session.exec({
+      cmd: "Write-Output profile",
+      shell: "pwsh.exe",
+      login: true,
+    });
+    await session.exec({
+      cmd: "Write-Output clean",
+      shell: "powershell.exe",
+      login: false,
+    });
 
     const requests = mock.requests.map((request) => request.req.op);
     if (requests.some((op) => op?.$case !== "exec")) throw new Error("expected exec requests");
@@ -471,7 +530,10 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
   test("writeFile then readFile round-trips through the mock (binary-safe)", async () => {
     const mock = new MockAgentResponder();
     const session = sessionWith(mock);
-    const wrote = await session.writeFile({ path: "/tmp/marker", content: "hello machine" });
+    const wrote = await session.writeFile({
+      path: "/tmp/marker",
+      content: "hello machine",
+    });
     expect(wrote).toBe("hello machine".length);
     const bytes = await session.readFile({ path: "/tmp/marker" });
     expect(new TextDecoder().decode(bytes)).toBe("hello machine");
@@ -571,7 +633,10 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
       adminToken: "a".repeat(32),
       allowedOrigins: ["https://app.example"],
     });
-    expect(ensured).toEqual({ port: 17_321, sidecarGeneration: "mock-sidecar-1" });
+    expect(ensured).toEqual({
+      port: 17_321,
+      sidecarGeneration: "mock-sidecar-1",
+    });
     const opened = await session.openBrowserFrames({
       scopeId: `${WS}:attached:device-1`,
       scopeGeneration: "connection-1",
@@ -591,7 +656,10 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
       "browserFramesOpen",
     ]);
     expect(opened.channel).toMatchObject({ kind: 3, port: 20_000 });
-    expect(opened.endpoint).toMatchObject({ host: "relay.test", path: "/stream" });
+    expect(opened.endpoint).toMatchObject({
+      host: "relay.test",
+      path: "/stream",
+    });
     expect(opened.endpoint.query).toContain("port=20000");
     expect(opened.endpoint.query).toContain("channel=mock-browser-target-1");
 
@@ -706,7 +774,10 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
       relay: RELAY,
       environment: { HOME: "/workspace", FOO: "bar" },
     });
-    expect(threaded.state.environment).toEqual({ HOME: "/workspace", FOO: "bar" });
+    expect(threaded.state.environment).toEqual({
+      HOME: "/workspace",
+      FOO: "bar",
+    });
     // The negotiation/test path (no env) defaults to `{}` — still a defined object.
     const bare = sessionWith(new MockAgentResponder());
     expect(bare.state.environment).toEqual({});
@@ -719,7 +790,11 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     // validateNoEnvironmentDelta throws "Live sandbox sessions cannot change manifest
     // environment variables" unless the session manifest's environment EQUALS the
     // turn's. The session must carry the run's declared environment for parity.
-    const env = { GIT_AUTHOR_NAME: "OpenGeni Bot", HOME: "/workspace", DEPLOY_TARGET: "vm2" };
+    const env = {
+      GIT_AUTHOR_NAME: "OpenGeni Bot",
+      HOME: "/workspace",
+      DEPLOY_TARGET: "vm2",
+    };
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
@@ -845,7 +920,10 @@ describe("virtual-root → machine-frame path translation (the live-swap exec EN
     expect(mock.fileText(privatePath)).toBeUndefined();
     await expect(session.deletePlacementPrivate(privatePath)).resolves.toBeUndefined();
     await expect(
-      session.writePlacementPrivate({ path: "/workspace/not-private", content: signedUrl }),
+      session.writePlacementPrivate({
+        path: "/workspace/not-private",
+        content: signedUrl,
+      }),
     ).rejects.toThrow(/placement-private path/);
   });
 });
@@ -1083,7 +1161,9 @@ describe("SelfhostedSandboxClient — create/resume bind + serialize round-trips
   });
 
   test("deserialize reads agentId nested under providerState (envelope shape)", async () => {
-    const back = await client().deserializeSessionState({ providerState: { agentId: "nested" } });
+    const back = await client().deserializeSessionState({
+      providerState: { agentId: "nested" },
+    });
     expect(back).toEqual({ agentId: "nested" });
   });
 
@@ -1198,7 +1278,11 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
     }));
     const res = await rpc.request(
       "agent.x.y.rpc",
-      { requestId: "r", epoch: 0, op: { $case: "ping", ping: { nonce: "1" } } } as ControlRequest,
+      {
+        requestId: "r",
+        epoch: 0,
+        op: { $case: "ping", ping: { nonce: "1" } },
+      } as ControlRequest,
       { timeoutMs: 10 },
     );
     expect(res.error?.code).toBe(ErrorCode.ERROR_CODE_AGENT_OFFLINE);
@@ -1215,7 +1299,11 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
     }));
     const res = await rpc.request(
       "agent.x.y.rpc",
-      { requestId: "r", epoch: 0, op: { $case: "ping", ping: { nonce: "1" } } } as ControlRequest,
+      {
+        requestId: "r",
+        epoch: 0,
+        op: { $case: "ping", ping: { nonce: "1" } },
+      } as ControlRequest,
       { timeoutMs: 10 },
     );
     expect(res.error?.code).toBe(ErrorCode.ERROR_CODE_TIMEOUT);

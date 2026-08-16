@@ -64,6 +64,7 @@ import {
   listScheduledTasks,
   listSessionEventPage,
   listSessionDiscoverySummaries,
+  listEnrollments,
   projectEffectiveControlForRelatedAccess,
   projectSessionForRelatedAccess,
   type SessionDiscoveryCursor,
@@ -738,7 +739,7 @@ export function buildOpenGeniMcpServer(
     registerFleetTools(server, deps, grant, sessionId, json);
   }
   if (can("enrollments:manage") && deps.settings.sandboxSelfhostedEnabled) {
-    registerConnectedMachineTools(server, deps, grant, json);
+    registerConnectedMachineTools(server, deps, grant, sessionId, json);
   }
   registerRigTools(server, deps, grant, can, sessionId, json);
   registerSlackBotTools(server, deps, grant, sessionId, json);
@@ -2839,7 +2840,11 @@ function registerTaskNoteTools(
     if (!resolved || resolved.sessionId !== sessionId) {
       throw new Error("Exact signed task-note attempt authority is required.");
     }
-    return { accountId: grant.accountId, workspaceId: grant.workspaceId, ...resolved };
+    return {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      ...resolved,
+    };
   };
   const authorize = async () => {
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
@@ -2873,7 +2878,13 @@ function registerTaskNoteTools(
     },
     async ({ includeArchived, limit }) => {
       await authorize();
-      return json(await listTaskNotes(deps.db, { ...attemptClaims(), includeArchived, limit }));
+      return json(
+        await listTaskNotes(deps.db, {
+          ...attemptClaims(),
+          includeArchived,
+          limit,
+        }),
+      );
     },
   );
 
@@ -3344,12 +3355,28 @@ function registerFleetTools(
   // call-time via the shared helper (same context the user-authenticated swap
   // REST route builds). Throws when the session has no box (backend:none) — the
   // fleet is only meaningful for a session that runs in a sandbox.
-  const fleetContext = async (): Promise<FleetContext> =>
-    await buildFleetContextForSession(deps, {
+  const fleetContext = async (): Promise<FleetContext> => {
+    const claims = exactAgentAttemptClaims(grant);
+    const actor = claims
+      ? await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId)
+      : null;
+    return await buildFleetContextForSession(deps, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId,
+      ...(actor?.initiatingHumanSubjectId ? { subjectId: actor.initiatingHumanSubjectId } : {}),
+      ...(actor?.initiatingHumanSubjectId && claims
+        ? {
+            attemptAuthority: {
+              turnId: claims.turnId,
+              attemptId: claims.attemptId,
+              executionGeneration: claims.executionGeneration,
+              initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
+            },
+          }
+        : {}),
     });
+  };
 
   const oneOffCodemodeEnvironment = async (
     op: RunOnOp,
@@ -3464,6 +3491,7 @@ function registerConnectedMachineTools(
   server: McpServer,
   deps: ApiRouteDeps,
   grant: AccessGrant,
+  sessionId: string | null,
   json: JsonResult,
 ): void {
   server.registerTool(
@@ -3478,13 +3506,31 @@ function registerConnectedMachineTools(
       },
     },
     async ({ enrollmentId, expectedUpdatedAt, idempotencyKey }) => {
+      const resourceGrant =
+        sessionId && exactAgentAttemptClaims(grant)
+          ? {
+              ...grant,
+              subjectId:
+                (await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId))
+                  .initiatingHumanSubjectId ?? grant.subjectId,
+            }
+          : grant;
+      const enrollment = (await listEnrollments(deps.db, resourceGrant, { status: "active" })).find(
+        (candidate) => candidate.id === enrollmentId,
+      );
+      if (!enrollment) {
+        throw new Error("machine enrollment not found in this access scope");
+      }
+      if (enrollment.scope === "organization" && !grant.permissions.includes("account:admin")) {
+        throw new Error("missing permission: account:admin");
+      }
       const result = await removeEnrollment(deps.db, {
         accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
+        workspaceId: enrollment.workspaceId,
         enrollmentId,
         operationKey: idempotencyKey?.trim() || randomUUID(),
         ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}),
-        subjectId: grant.subjectId,
+        subjectId: resourceGrant.subjectId,
       });
       if (!result) {
         throw new Error("machine enrollment not found in this workspace");
@@ -3528,6 +3574,22 @@ function registerRigTools(
   sessionId: string | null,
   json: JsonResult,
 ): void {
+  const resourceGrant = async (): Promise<AccessGrant> => {
+    if (!sessionId || exactAgentAttemptClaims(grant) === null) return grant;
+    const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
+    return actor.initiatingHumanSubjectId
+      ? { ...grant, subjectId: actor.initiatingHumanSubjectId }
+      : grant;
+  };
+  const requireMutableRig = async (rigId: string) => {
+    const rig = await requireRigForApi(deps.db, await resourceGrant(), rigId);
+    if (rig.scope === "organization") {
+      throw new Error(
+        "Organization rig mutation requires account-admin authority through the authenticated REST surface.",
+      );
+    }
+    return rig;
+  };
   if (can("rigs:use")) {
     server.registerTool(
       "rig_list",
@@ -3535,7 +3597,7 @@ function registerRigTools(
         description: "List workspace rigs and their active versions.",
         inputSchema: {},
       },
-      async () => json({ rigs: await listRigs(deps.db, grant.workspaceId) }),
+      async () => json({ rigs: await listRigs(deps.db, await resourceGrant()) }),
     );
 
     server.registerTool(
@@ -3550,17 +3612,17 @@ function registerRigTools(
         },
       },
       async ({ rigId, versionLimit, changeLimit }) => {
-        const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
+        const rig = await requireRigForApi(deps.db, await resourceGrant(), rigId);
         const [versions, changes] = await Promise.all([
           listRigVersionMonitoringSummaries(
             deps.db,
-            grant.workspaceId,
+            rig.workspaceId,
             rig.id,
             boundedRigHistoryLimit(versionLimit),
           ),
           listRigChangeMonitoringSummaries(
             deps.db,
-            grant.workspaceId,
+            rig.workspaceId,
             rig.id,
             boundedRigHistoryLimit(changeLimit),
           ),
@@ -3581,10 +3643,11 @@ function registerRigTools(
         },
       },
       async ({ rigId, command, note }) => {
-        const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
+        const rig = await requireMutableRig(rigId);
+        const originGrant = { ...(await resourceGrant()), workspaceId: rig.workspaceId };
         const change = await proposeRigChangeForApi(
           { db: deps.db },
-          grant,
+          originGrant,
           rig,
           {
             kind: "setup_append",
@@ -3592,11 +3655,11 @@ function registerRigTools(
           },
           sessionId ? { proposedBy: `session:${sessionId}` } : {},
         );
-        const verifying = await beginMcpRigVerificationAttempt(deps, grant.workspaceId, change.id);
+        const verifying = await beginMcpRigVerificationAttempt(deps, rig.workspaceId, change.id);
         const attempt = verificationAttempt(verifying);
         try {
           await deps.workflowClient.startRigVerification({
-            workspaceId: grant.workspaceId,
+            workspaceId: rig.workspaceId,
             changeId: change.id,
             workflowId: `rig-verification-change-${change.id}-attempt-${attempt}`,
           });
@@ -3661,18 +3724,14 @@ function registerRigTools(
         },
       },
       async ({ rigId, changeId }) => {
-        const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
+        const rig = await requireMutableRig(rigId);
         if (changeId) {
-          const change = await requireRigChangeForApi(deps.db, grant.workspaceId, rig.id, changeId);
-          const verifying = await beginMcpRigVerificationAttempt(
-            deps,
-            grant.workspaceId,
-            change.id,
-          );
+          const change = await requireRigChangeForApi(deps.db, rig.workspaceId, rig.id, changeId);
+          const verifying = await beginMcpRigVerificationAttempt(deps, rig.workspaceId, change.id);
           const attempt = verificationAttempt(verifying);
           try {
             await deps.workflowClient.startRigVerification({
-              workspaceId: grant.workspaceId,
+              workspaceId: rig.workspaceId,
               changeId: change.id,
               workflowId: `rig-verification-change-${change.id}-attempt-${attempt}`,
             });
@@ -3731,7 +3790,7 @@ function registerRigTools(
           throw new Error("rig has no active version");
         }
         await deps.workflowClient.startRigVerification({
-          workspaceId: grant.workspaceId,
+          workspaceId: rig.workspaceId,
           versionId: rig.activeVersion.id,
           workflowId: `rig-verification-version-${rig.activeVersion.id}-${crypto.randomUUID()}`,
         });
@@ -3768,11 +3827,12 @@ function registerRigTools(
         },
       },
       async ({ rigId, changeId }) => {
-        const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
-        const change = await requireRigChangeForApi(deps.db, grant.workspaceId, rig.id, changeId);
+        const rig = await requireMutableRig(rigId);
+        const change = await requireRigChangeForApi(deps.db, rig.workspaceId, rig.id, changeId);
+        const originGrant = { ...(await resourceGrant()), workspaceId: rig.workspaceId };
         const promoted = await promoteVerifiedDefinitionEditChangeForApi(
           { db: deps.db },
-          grant,
+          originGrant,
           rig,
           change,
         );
@@ -4221,7 +4281,11 @@ function registerWorkspaceOrchestrationTools(
               },
               relatedResources: [
                 { type: "session", id: targetSessionId },
-                { type: "session_event", id: accepted.id, state: accepted.type },
+                {
+                  type: "session_event",
+                  id: accepted.id,
+                  state: accepted.type,
+                },
               ],
               timestamp: accepted.occurredAt,
               idempotency: { status: replay ? "replayed" : "applied" },

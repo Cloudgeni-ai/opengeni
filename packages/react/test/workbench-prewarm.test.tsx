@@ -723,6 +723,8 @@ describe("workbench prewarm gating (Refinement 1)", () => {
           {
             sandboxId: "modal-box",
             enrollmentId: null,
+            scope: "workspace",
+            generation: 1,
             name: "Cloud sandbox",
             kind: "modal",
             state: "reconnecting",
