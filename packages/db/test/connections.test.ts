@@ -126,6 +126,7 @@ function personalConnectionUseAuthority() {
     scope: "user",
     ownerSubjectId: "user:owner",
     ownerOrganizationMembershipId: "00000000-0000-4000-8000-000000000107",
+    ownerMembershipAuthorizationRevision: 2,
     authoritySource: "user_delegation",
     userDelegation: {
       authorityId: "00000000-0000-4000-8000-000000000108",

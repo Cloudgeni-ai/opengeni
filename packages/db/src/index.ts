@@ -461,7 +461,10 @@ import {
   type ConnectionCredentialForBroker,
   type ConnectionTokenResolverOptions,
 } from "./connection-token-resolver";
-import { resolveConnectionUseAuthority } from "./connection-authority";
+import {
+  resolveAcceptedConnectionUse,
+  resolveConnectionUseAuthority,
+} from "./connection-authority";
 import { resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./xai-subscription";
 
 function parsedPersonalConnectionDelegations(
@@ -48116,9 +48119,12 @@ export async function materializeGoalContinuation(
           )
           .limit(1);
         const personalConnectionDelegations = causalTurn
-          ? parsedPersonalConnectionDelegations(
-              causalTurn.personalConnectionDelegations,
-              `session_turns:${input.workspaceId}:${input.sessionId}:${causalTurn.id}`,
+          ? personalConnectionDelegationsForSameSessionSuccessor(
+              parsedPersonalConnectionDelegations(
+                causalTurn.personalConnectionDelegations,
+                `session_turns:${input.workspaceId}:${input.sessionId}:${causalTurn.id}`,
+              ),
+              input.sessionId,
             )
           : [];
         const xaiProviderAccountAuthoritySnapshot = causalTurn
@@ -48171,6 +48177,12 @@ export async function materializeGoalContinuation(
                     goalId: decision.goal.id,
                     goalWakeRevision,
                     ...(causalTurn ? { causalTurnId: causalTurn.id } : {}),
+                    ...(causalTurn?.initiatingHumanSubjectId &&
+                    personalConnectionDelegations.some((delegation) => delegation.userDelegation)
+                      ? {
+                          connectionAuthoritySubjectId: causalTurn.initiatingHumanSubjectId,
+                        }
+                      : {}),
                     ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
                   },
                   personalConnectionDelegations,
@@ -48646,6 +48658,52 @@ export async function initializeSessionStartAtomically(
         let insertedTurn = false;
         let queueTailPosition = Number(session.queueTailPosition);
         if (!turn) {
+          const initialPersonalConnectionDelegations = parsedPersonalConnectionDelegations(
+            session.initialPersonalConnectionDelegations,
+            `sessions:${session.workspaceId}:${session.id}:initial`,
+          );
+          let initialTurnInitiatingHumanSubjectId =
+            creator.initiator.kind === "subject" ? creator.initiator.subjectId : null;
+          if (session.parentSessionId && session.parentTurnId) {
+            const [causalParentTurn] = await tx
+              .select({
+                initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+                initiatorKind: schema.sessionTurns.initiatorKind,
+                initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+              })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.accountId, session.accountId),
+                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurns.sessionId, session.parentSessionId),
+                  eq(schema.sessionTurns.id, session.parentTurnId),
+                ),
+              )
+              .limit(1);
+            if (!causalParentTurn) {
+              throw new Error(`Causal parent turn not found: ${session.parentTurnId}`);
+            }
+            initialTurnInitiatingHumanSubjectId =
+              causalParentTurn.initiatingHumanSubjectId ??
+              (causalParentTurn.initiatorKind === "subject"
+                ? causalParentTurn.initiatorSubjectId
+                : null);
+          }
+          if (
+            initialPersonalConnectionDelegations.some((delegation) => delegation.userDelegation)
+          ) {
+            if (!initialTurnInitiatingHumanSubjectId) {
+              throw new Error("Activated connection acceptance requires an initiating human");
+            }
+            await tx.execute(sql`
+              SELECT set_config(
+                'opengeni.initiating_human_subject_id',
+                ${initialTurnInitiatingHumanSubjectId},
+                true
+              )
+            `);
+          }
           queueTailPosition += 1;
           const acceptedAt = new Date();
           [turn] = await tx
@@ -48681,12 +48739,8 @@ export async function initializeSessionStartAtomically(
                     : {},
                   lineage: {},
                   ...initiatorColumns(creator),
-                  initiatingHumanSubjectId:
-                    creator.initiator.kind === "subject" ? creator.initiator.subjectId : null,
-                  personalConnectionDelegations: parsedPersonalConnectionDelegations(
-                    session.initialPersonalConnectionDelegations,
-                    `sessions:${session.workspaceId}:${session.id}:initial`,
-                  ),
+                  initiatingHumanSubjectId: initialTurnInitiatingHumanSubjectId,
+                  personalConnectionDelegations: initialPersonalConnectionDelegations,
                   xaiProviderAccountAuthoritySnapshot:
                     session.initialXaiProviderAccountAuthoritySnapshot,
                   createdAt: acceptedAt,
@@ -48856,6 +48910,20 @@ export async function enqueueSessionTurn(
           ? Number(lockedSession.queueHeadPosition) - 1
           : Number(lockedSession.queueTailPosition) + 1;
         const acceptedAt = new Date();
+        const initiatingHumanSubjectId =
+          input.initiator.kind === "subject" ? input.initiator.subjectId : null;
+        if (input.personalConnectionDelegations?.some((delegation) => delegation.userDelegation)) {
+          if (!initiatingHumanSubjectId) {
+            throw new Error("Activated connection acceptance requires an initiating human");
+          }
+          await tx.execute(sql`
+            SELECT set_config(
+              'opengeni.initiating_human_subject_id',
+              ${initiatingHumanSubjectId},
+              true
+            )
+          `);
+        }
         const [row] = await tx
           .insert(schema.sessionTurns)
           .values(
@@ -48885,8 +48953,7 @@ export async function enqueueSessionTurn(
                   initiator: input.initiator,
                   context: input.initiatorContext ?? {},
                 }),
-                initiatingHumanSubjectId:
-                  input.initiator.kind === "subject" ? input.initiator.subjectId : null,
+                initiatingHumanSubjectId,
                 personalConnectionDelegations: input.personalConnectionDelegations ?? [],
                 xaiProviderAccountAuthoritySnapshot:
                   input.xaiProviderAccountAuthoritySnapshot ??
@@ -48973,13 +49040,35 @@ function frozenXaiExecutionAuthorityKey(authority: FrozenXaiExecutionAuthority):
 }
 
 function systemUpdateExecutionAuthorityKey(update: BoundedSystemUpdate): string {
+  const personalConnectionDelegations = parsedPersonalConnectionDelegations(
+    update.personalConnectionDelegations,
+    `session_system_updates:${update.id}`,
+  );
   return stableJson({
-    personalConnectionDelegations: parsedPersonalConnectionDelegations(
-      update.personalConnectionDelegations,
-      `session_system_updates:${update.id}`,
-    ),
+    personalConnectionDelegations,
     xai: frozenXaiExecutionAuthority(update),
+    connectionAuthoritySubjectId: personalConnectionDelegations.some(
+      (delegation) => delegation.userDelegation,
+    )
+      ? (update.lineage.connectionAuthoritySubjectId ?? null)
+      : null,
     scheduledTaskRunId: update.scheduledTaskRunId,
+  });
+}
+
+function personalConnectionDelegationsForSameSessionSuccessor(
+  delegations: McpPersonalConnectionDelegation[],
+  targetSessionId: string,
+): McpPersonalConnectionDelegation[] {
+  // A continuation/internal turn is new accepted work. Session and always
+  // grants may be re-admitted under the live DB fences; once remains bound to
+  // its original accepted turn and is never copied forward.
+  return delegations.filter((delegation) => {
+    const authority = delegation.userDelegation;
+    if (!authority) return true;
+    if (authority.mode === "once") return false;
+    if (authority.mode === "session") return authority.sessionId === targetSessionId;
+    return true;
   });
 }
 
@@ -50506,9 +50595,32 @@ export async function claimSessionWorkForAttempt(
               })
             : null;
           let initiatingHumanSubjectId =
-            internalInitiator.initiator.kind === "subject"
+            internalInitiator.initiatingHumanSubjectId ??
+            (internalInitiator.initiator.kind === "subject"
               ? internalInitiator.initiator.subjectId
+              : null);
+          const connectionAuthoritySubjectValue =
+            authorityUpdate.lineage &&
+            typeof authorityUpdate.lineage === "object" &&
+            !Array.isArray(authorityUpdate.lineage)
+              ? (authorityUpdate.lineage as Record<string, unknown>).connectionAuthoritySubjectId
               : null;
+          const connectionAuthoritySubjectId =
+            typeof connectionAuthoritySubjectValue === "string" &&
+            connectionAuthoritySubjectValue.trim().length > 0
+              ? connectionAuthoritySubjectValue
+              : null;
+          if (connectionAuthoritySubjectId) {
+            if (
+              initiatingHumanSubjectId &&
+              initiatingHumanSubjectId !== connectionAuthoritySubjectId
+            ) {
+              throw new Error(
+                "system-update connection authority subject does not match turn provenance",
+              );
+            }
+            initiatingHumanSubjectId = connectionAuthoritySubjectId;
+          }
           if (!initiatingHumanSubjectId && routingGoalUpdate) {
             const causalTurnIdValue =
               routingGoalUpdate.lineage &&
@@ -50552,6 +50664,31 @@ export async function claimSessionWorkForAttempt(
               throw new Error("scheduled personal-resource subject does not match turn provenance");
             }
             initiatingHumanSubjectId = scheduledTaskCausalHuman;
+          }
+          if (
+            internalPersonalConnectionDelegations.some((delegation) => delegation.userDelegation)
+          ) {
+            if (!initiatingHumanSubjectId) {
+              throw new Error("Activated connection acceptance requires an initiating human");
+            }
+            if (
+              internalPersonalConnectionDelegations.some(
+                (delegation) =>
+                  delegation.userDelegation &&
+                  delegation.ownerSubjectId !== initiatingHumanSubjectId,
+              )
+            ) {
+              throw new Error(
+                "Activated connection owner does not match the causal initiating human",
+              );
+            }
+            await tx.execute(sql`
+              SELECT set_config(
+                'opengeni.initiating_human_subject_id',
+                ${initiatingHumanSubjectId},
+                true
+              )
+            `);
           }
           await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
           const [internalTurn] = await tx
@@ -52975,11 +53112,14 @@ export async function settleSessionIdleWithParentOutbox(
       }
       const dedupeKey = `child-completion:${session.id}:${episodeKey}`;
       const personalConnectionDelegations = session.parentTurnId
-        ? await personalConnectionDelegationsForTurnInTransaction(
-            tx as unknown as Database,
-            workspaceId,
+        ? personalConnectionDelegationsForSameSessionSuccessor(
+            await personalConnectionDelegationsForTurnInTransaction(
+              tx as unknown as Database,
+              workspaceId,
+              session.parentSessionId,
+              session.parentTurnId,
+            ),
             session.parentSessionId,
-            session.parentTurnId,
           )
         : [];
       const xaiProviderAccountAuthoritySnapshot = session.parentTurnId
@@ -53015,6 +53155,15 @@ export async function settleSessionIdleWithParentOutbox(
       if (xaiProviderAccountAuthoritySnapshot.scope === "user" && !xaiAuthoritySubjectId) {
         throw new Error("Child idle outbox lost its parent xAI authority subject");
       }
+      const connectionAuthoritySubjectId =
+        parentTurn?.initiatingHumanSubjectId ??
+        (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null);
+      if (
+        personalConnectionDelegations.some((delegation) => delegation.userDelegation) &&
+        !connectionAuthoritySubjectId
+      ) {
+        throw new Error("Child idle outbox lost its parent connection authority subject");
+      }
       await tx
         .insert(schema.sessionSystemUpdateOutbox)
         .values(
@@ -53039,6 +53188,10 @@ export async function settleSessionIdleWithParentOutbox(
                   childSessionId: session.id,
                   parentSessionId: session.parentSessionId,
                   ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
+                  ...(connectionAuthoritySubjectId &&
+                  personalConnectionDelegations.some((delegation) => delegation.userDelegation)
+                    ? { connectionAuthoritySubjectId }
+                    : {}),
                   ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
                 },
                 personalConnectionDelegations,
@@ -55749,11 +55902,14 @@ async function enqueueFailedChildOutboxTx(
 ): Promise<void> {
   if (!session.parentSessionId) return;
   const personalConnectionDelegations = session.parentTurnId
-    ? await personalConnectionDelegationsForTurnInTransaction(
-        tx,
-        workspaceId,
+    ? personalConnectionDelegationsForSameSessionSuccessor(
+        await personalConnectionDelegationsForTurnInTransaction(
+          tx,
+          workspaceId,
+          session.parentSessionId,
+          session.parentTurnId,
+        ),
         session.parentSessionId,
-        session.parentTurnId,
       )
     : [];
   const xaiProviderAccountAuthoritySnapshot = session.parentTurnId
@@ -55789,6 +55945,15 @@ async function enqueueFailedChildOutboxTx(
   if (xaiProviderAccountAuthoritySnapshot.scope === "user" && !xaiAuthoritySubjectId) {
     throw new Error("Failed child outbox lost its parent xAI authority subject");
   }
+  const connectionAuthoritySubjectId =
+    parentTurn?.initiatingHumanSubjectId ??
+    (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null);
+  if (
+    personalConnectionDelegations.some((delegation) => delegation.userDelegation) &&
+    !connectionAuthoritySubjectId
+  ) {
+    throw new Error("Failed child outbox lost its parent connection authority subject");
+  }
   await tx
     .insert(schema.sessionSystemUpdateOutbox)
     .values(
@@ -55815,6 +55980,10 @@ async function enqueueFailedChildOutboxTx(
               parentSessionId: session.parentSessionId,
               ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
               ...(input.turnId ? { turnId: input.turnId } : {}),
+              ...(connectionAuthoritySubjectId &&
+              personalConnectionDelegations.some((delegation) => delegation.userDelegation)
+                ? { connectionAuthoritySubjectId }
+                : {}),
               ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
             },
             personalConnectionDelegations,
@@ -56444,6 +56613,9 @@ export async function getOrCreateSessionSystemUpdateOutbox(
     const inputXaiSubjectId = input.lineage.xaiAuthoritySubjectId;
     if (storedXaiSubjectId !== inputXaiSubjectId) {
       throw new Error("System-update outbox replay changed its xAI authority subject");
+    }
+    if (row.lineage.connectionAuthoritySubjectId !== input.lineage.connectionAuthoritySubjectId) {
+      throw new Error("System-update outbox replay changed its connection authority subject");
     }
     return {
       id: row.id,
@@ -59201,6 +59373,7 @@ function connectionBrokerDeps(): ConnectionBrokerDeps {
     keyBytes: environmentsEncryptionKeyBytes,
     now: () => new Date(),
     authorizeUse: resolveConnectionUseAuthority,
+    authorizeAcceptedUse: resolveAcceptedConnectionUse,
   };
 }
 

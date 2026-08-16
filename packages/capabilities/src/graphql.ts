@@ -428,6 +428,22 @@ async function sendGraphqlRequest(
   headers.set("accept", "application/json");
   headers.set("content-type", "application/json");
   if (credential) applyCredentialPlacements(endpoint, headers, credential);
+  if (credential?.authorizeProviderRequest) {
+    let authorized = false;
+    try {
+      authorized = await credential.authorizeProviderRequest();
+    } catch {
+      authorized = false;
+    }
+    if (!authorized) {
+      throw new IntegrationInvocationError(
+        "authorization_rejected",
+        "The connected account is no longer authorized for this operation",
+        "not_started",
+        false,
+      );
+    }
+  }
   return await fetchWithDeadline(
     options.transport,
     endpoint,

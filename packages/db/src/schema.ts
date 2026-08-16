@@ -50,6 +50,12 @@ const vector = customType<{ data: number[]; driverData: string }>({
   },
 });
 
+const bytea = customType<{ data: Uint8Array; driverData: Uint8Array }>({
+  dataType() {
+    return "bytea";
+  },
+});
+
 export type ConnectorActionPolicyDecision = "allow" | "ask" | "block";
 
 export type ConnectorActionPolicySnapshotEntry = {
@@ -5361,6 +5367,133 @@ export const sessionTurnAttempts = pgTable(
       columns: [table.authorityOwnerOrganizationMembershipId, table.accountId],
       foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
     }).onDelete("restrict"),
+  }),
+);
+
+// Credential-free authority captured with the accepted logical turn. Runtime
+// credential resolution loads this canonical row by exact turn + tool surface;
+// a caller-provided snapshot is never authority.
+export const turnConnectionAuthoritySnapshots = pgTable(
+  "turn_connection_authority_snapshots",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    serverId: text("server_id").notNull(),
+    connectionId: uuid("connection_id").notNull(),
+    connectionGeneration: bigint("connection_generation", { mode: "number" }).notNull(),
+    originWorkspaceId: uuid("origin_workspace_id").notNull(),
+    providerDomain: text("provider_domain").notNull(),
+    connectionKind: text("connection_kind").notNull(),
+    authorityScope: text("authority_scope").notNull(),
+    authoritySource: text("authority_source").notNull(),
+    ownerSubjectId: text("owner_subject_id"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    membershipAuthorizationRevision: bigint("membership_authorization_revision", {
+      mode: "number",
+    }),
+    authorityId: uuid("authority_id"),
+    authorityGeneration: bigint("authority_generation", { mode: "number" }),
+    grantId: uuid("grant_id"),
+    grantGeneration: bigint("grant_generation", { mode: "number" }),
+    grantMode: text("grant_mode"),
+    grantContext: text("grant_context"),
+    grantSessionId: uuid("grant_session_id"),
+    grantAuthorityEpoch: integer("grant_authority_epoch"),
+    sessionVisibility: text("session_visibility").notNull(),
+    sessionAuthorityEpoch: integer("session_authority_epoch").notNull(),
+    canonicalSnapshot: jsonb("canonical_snapshot").$type<Record<string, unknown>>().notNull(),
+    snapshotDigest: bytea("snapshot_digest").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    identity: primaryKey({ columns: [table.turnId, table.serverId] }),
+    turn: foreignKey({
+      name: "turn_connection_authority_turn_fk",
+      columns: [table.workspaceId, table.turnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("cascade"),
+    connection: foreignKey({
+      name: "turn_connection_authority_connection_fk",
+      columns: [table.connectionId],
+      foreignColumns: [connections.id],
+    }).onDelete("restrict"),
+    membership: foreignKey({
+      name: "turn_connection_authority_membership_fk",
+      columns: [table.ownerOrganizationMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    authority: foreignKey({
+      name: "turn_connection_authority_authority_fk",
+      columns: [table.authorityId, table.accountId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+      ],
+    }).onDelete("restrict"),
+    grant: foreignKey({
+      name: "turn_connection_authority_grant_fk",
+      columns: [table.grantId, table.accountId],
+      foreignColumns: [organizationUserResourceGrants.id, organizationUserResourceGrants.accountId],
+    }).onDelete("restrict"),
+    connectionLookup: index("turn_connection_authority_connection_idx").on(
+      table.accountId,
+      table.connectionId,
+      table.turnId,
+      table.serverId,
+    ),
+    serverValid: check(
+      "turn_connection_authority_server_check",
+      sql`octet_length(${table.serverId}) between 1 and 256`,
+    ),
+    generationValid: check(
+      "turn_connection_authority_generation_check",
+      sql`${table.connectionGeneration} > 0 and ${table.sessionAuthorityEpoch} > 0`,
+    ),
+  }),
+);
+
+// One metadata-only authorization fact per caller-preallocated physical
+// provider request. No credential, header, body, provider response, or content
+// is retained in this table.
+export const connectionUseAuditFacts = pgTable(
+  "connection_use_audit_facts",
+  {
+    physicalRequestId: uuid("physical_request_id").primaryKey(),
+    usePhase: text("use_phase").notNull(),
+    requestDigest: bytea("request_digest").notNull(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
+    serverId: text("server_id").notNull(),
+    connectionId: uuid("connection_id"),
+    connectionGeneration: bigint("connection_generation", { mode: "number" }),
+    authorityScope: text("authority_scope"),
+    ownerSubjectId: text("owner_subject_id"),
+    authorityId: uuid("authority_id"),
+    grantId: uuid("grant_id"),
+    outcome: text("outcome").notNull(),
+    denialReason: text("denial_reason"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    attempt: index("connection_use_audit_attempt_idx").on(
+      table.workspaceId,
+      table.attemptId,
+      table.occurredAt,
+    ),
+    shapeValid: check(
+      "connection_use_audit_shape_check",
+      sql`octet_length(${table.serverId}) between 1 and 256
+        and octet_length(${table.requestDigest}) = 32
+        and ${table.executionGeneration} > 0
+        and ${table.usePhase} in ('credential_resolution', 'provider_request')
+        and ${table.outcome} in ('authorized', 'denied')`,
+    ),
   }),
 );
 

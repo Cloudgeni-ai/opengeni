@@ -53,6 +53,7 @@ const userAuthority: UserConnectionAuthorityCandidate = {
   originWorkspaceId,
   ownerSubjectId: "user:alice",
   ownerOrganizationMembershipId: membershipId,
+  ownerMembershipAuthorizationRevision: 11,
   generation: 2,
   status: "active",
 };
@@ -91,6 +92,7 @@ function personalLive(): LiveConnectionUseState {
       organizationId,
       subjectId: "user:alice",
       status: "active",
+      authorizationRevision: 11,
     },
     userAuthority: { ...userAuthority },
     grant: {

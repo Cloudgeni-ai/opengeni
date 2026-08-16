@@ -27,6 +27,7 @@ import {
   type GoalSpec,
   type FirstPartyMcpToolName,
   type McpPersonalConnectionDelegation,
+  type McpConnectionAuthoritySelection,
   type Permission,
   type ReasoningEffort,
   type ResourceRef,
@@ -68,6 +69,7 @@ import {
   getWorkspaceControlEvent,
   getSessionLineage,
   getSessionTurn,
+  getSessionTurnPersonalConnectionDelegations,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
   getWorkspaceModelPolicy,
   initializeSessionStartAtomically,
@@ -1368,13 +1370,23 @@ export async function createSessionForRequestWithOutcome(
           creationInitiator.actor.turnId,
         )
       : undefined;
+  const connectionDelegationSource = personalConnectionDelegationSourceForGrant(grant);
+  const inheritedPersonalConnectionDelegations =
+    connectionDelegationSource.kind === "turn"
+      ? await getSessionTurnPersonalConnectionDelegations(
+          db,
+          workspaceId,
+          connectionDelegationSource.sessionId,
+          connectionDelegationSource.turnId,
+        )
+      : null;
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
     db,
     workspaceId,
     settings,
-    {
-      subjectId: grant.subjectId,
-    },
+    inheritedPersonalConnectionDelegations
+      ? { personalConnectionDelegations: inheritedPersonalConnectionDelegations }
+      : { subjectId: grant.subjectId },
   );
   const sessionMcpServers = hasOwnProperty(rawPayload, "mcpServers")
     ? validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers)
@@ -1448,13 +1460,6 @@ export async function createSessionForRequestWithOutcome(
   // tool's permission/target authorization predicate, so attachment alone
   // exposes nothing.
   const tools = withFirstPartyTools(selectedTools, runtimeSettings);
-  const personalConnectionDelegations = await freezePersonalConnectionDelegations({
-    db,
-    workspaceId,
-    settings: runtimeSettings,
-    tools,
-    source: personalConnectionDelegationSourceForGrant(grant),
-  });
   await validateGitHubRepositorySelection(db, workspaceId, resources);
   if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
     throw new HTTPException(503, {
@@ -1659,6 +1664,25 @@ export async function createSessionForRequestWithOutcome(
     parentSession ? parentSession.firstPartyMcpTools : undefined,
     deploymentFirstPartyMcpToolPolicy,
   );
+  const googleDrivePublicationEnabled =
+    firstPartyMcpTools.includes("editable_artifact_export") &&
+    firstPartyMcpTools.includes("editable_artifact_export_status") &&
+    (!firstPartyMcpPermissions?.length ||
+      (firstPartyMcpPermissions.includes("artifacts:read") &&
+        firstPartyMcpPermissions.includes("artifacts:publish")));
+  const atlassianEnabled =
+    firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
+    (!firstPartyMcpPermissions?.length || firstPartyMcpPermissions.includes("connections:read"));
+  const personalConnectionDelegations = await freezePersonalConnectionDelegations({
+    db,
+    workspaceId,
+    settings: runtimeSettings,
+    tools,
+    source: connectionDelegationSource,
+    authoritySelections: payload.connectionAuthorities,
+    googleDrivePublicationEnabled,
+    atlassianEnabled,
+  });
   if (payload.goal) {
     const missingGoalTools = ["goal_update", "goal_progress", "goal_complete", "goal_pause"].filter(
       (name) => !firstPartyMcpTools.includes(name as FirstPartyMcpToolName),
@@ -2058,6 +2082,7 @@ export async function acceptSessionUserMessageWithOutcome(
     latencyMode?: "standard" | "priority" | "fast" | null;
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
+    connectionAuthorities?: McpConnectionAuthoritySelection[];
     delivery?: "send" | "steer";
     origin?: "human" | "operator";
     controlEtag?: string | null;
@@ -2146,15 +2171,42 @@ export async function acceptSessionUserMessageWithOutcome(
     session: existingSession,
     updates: input.mcpCredentialUpdates ?? [],
   });
-  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings, {
-    subjectId: grant.subjectId,
-  });
+  const connectionDelegationSource = personalConnectionDelegationSourceForGrant(grant);
+  const inheritedPersonalConnectionDelegations =
+    connectionDelegationSource.kind === "turn"
+      ? await getSessionTurnPersonalConnectionDelegations(
+          db,
+          workspaceId,
+          connectionDelegationSource.sessionId,
+          connectionDelegationSource.turnId,
+        )
+      : null;
+  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
+    db,
+    workspaceId,
+    settings,
+    inheritedPersonalConnectionDelegations
+      ? { personalConnectionDelegations: inheritedPersonalConnectionDelegations }
+      : { subjectId: grant.subjectId },
+  );
   const personalConnectionDelegations = await freezePersonalConnectionDelegations({
     db,
     workspaceId,
     settings: runtimeSettings,
     tools: existingSession.tools,
-    source: personalConnectionDelegationSourceForGrant(grant),
+    source: connectionDelegationSource,
+    targetSessionId: sessionId,
+    googleDrivePublicationEnabled:
+      existingSession.firstPartyMcpTools.includes("editable_artifact_export") &&
+      existingSession.firstPartyMcpTools.includes("editable_artifact_export_status") &&
+      (!existingSession.firstPartyMcpPermissions?.length ||
+        (existingSession.firstPartyMcpPermissions.includes("artifacts:read") &&
+          existingSession.firstPartyMcpPermissions.includes("artifacts:publish"))),
+    atlassianEnabled:
+      existingSession.firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
+      (!existingSession.firstPartyMcpPermissions?.length ||
+        existingSession.firstPartyMcpPermissions.includes("connections:read")),
+    ...(input.connectionAuthorities ? { authoritySelections: input.connectionAuthorities } : {}),
   });
   const { accepted, turn, interruptionCount, replay } = await postUserMessageTurn({
     db,

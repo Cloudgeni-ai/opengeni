@@ -2262,6 +2262,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       reasoningEffort: payload.reasoningEffort ?? null,
       latencyMode: payload.latencyMode ?? null,
       mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
+      connectionAuthorities: payload.connectionAuthorities,
       delivery: "steer",
       origin: "human",
       ...(payload.controlEtag !== undefined ? { controlEtag: payload.controlEtag } : {}),
@@ -2305,6 +2306,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         reasoningEffort: event.payload.reasoningEffort ?? null,
         latencyMode: event.payload.latencyMode ?? null,
         mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
+        connectionAuthorities: event.payload.connectionAuthorities,
         ...(event.payload.controlEtag !== undefined
           ? { controlEtag: event.payload.controlEtag }
           : {}),

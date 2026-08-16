@@ -361,6 +361,7 @@ describe("Google Drive editable artifact publication", () => {
   test("creates once and a retry converges through the provider idempotency marker", async () => {
     let providerFile: Record<string, unknown> | null = null;
     let createCalls = 0;
+    let providerAuthorizations = 0;
     const credentialScopes: Array<string[] | undefined> = [];
     const fetch = async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
@@ -418,6 +419,10 @@ describe("Google Drive editable artifact publication", () => {
               connectionId,
               connectionVersion: 3,
               expiresAt: null,
+              authorizeProviderRequest: async () => {
+                providerAuthorizations += 1;
+                return true;
+              },
             } as never;
           },
         },
@@ -439,9 +444,14 @@ describe("Google Drive editable artifact publication", () => {
     expect(replayed).toMatchObject({ providerFileId: "drive-file-1", replayed: true });
     expect(fullDriveReplay).toMatchObject({ providerFileId: "drive-file-1", replayed: true });
     expect(createCalls).toBe(1);
+    expect(providerAuthorizations).toBe(credentialScopes.length);
     expect(credentialScopes).toEqual([
       [GOOGLE_DRIVE_FILE_SCOPE],
       [GOOGLE_DRIVE_FILE_SCOPE],
+      [GOOGLE_DRIVE_FILE_SCOPE],
+      [GOOGLE_DRIVE_FILE_SCOPE],
+      [GOOGLE_DRIVE_FILE_SCOPE],
+      [GOOGLE_DRIVE_FULL_SCOPE],
       [GOOGLE_DRIVE_FULL_SCOPE],
     ]);
   });
@@ -509,7 +519,55 @@ describe("Google Drive editable artifact publication", () => {
       },
     );
     expect(receipt).toMatchObject({ providerFileId: "drive-file-refreshed", replayed: false });
-    expect(connectionReads).toBe(2);
+    expect(connectionReads).toBe(4);
+  });
+
+  test("reauthorizes before every physical request and stops after mid-publication revocation", async () => {
+    let credentialCalls = 0;
+    let providerCalls = 0;
+    await expect(
+      executeGoogleDrivePublication(
+        {
+          db: {} as Database,
+          objectStorage: objectStorage(),
+          identity,
+          subjectId: "subject-a",
+          target,
+          request,
+          resolveCredential: async () => {
+            credentialCalls += 1;
+            if (credentialCalls === 2) {
+              return {
+                status: "auth_needed",
+                reason: "personal_authority_unavailable",
+                providerDomain: "googleapis.com",
+              };
+            }
+            return {
+              status: "ok",
+              headers: { authorization: "Bearer exact-use" },
+              connectionId,
+              connectionVersion: 3,
+              expiresAt: null,
+            } as never;
+          },
+        },
+        executionPorts(async (url) => {
+          providerCalls += 1;
+          expect(new URL(url.toString()).pathname).toBe("/drive/v3/files/folder-1");
+          return Response.json({
+            id: destination.folderId,
+            name: destination.folderName,
+            mimeType: "application/vnd.google-apps.folder",
+            driveId: null,
+            trashed: false,
+            capabilities: { canAddChildren: true },
+          });
+        }),
+      ),
+    ).rejects.toThrow("credential is unavailable");
+    expect(credentialCalls).toBe(2);
+    expect(providerCalls).toBe(1);
   });
 
   test("rejects a local authority change after credential resolution before provider access", async () => {

@@ -3440,6 +3440,12 @@ export const McpPersonalConnectionDelegation = z
     providerDomain: z.string().min(1).max(2048),
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
     connectionType: z.enum(["mcp", "social", "atlassian"]).optional(),
+    /**
+     * Explicit common-authority grant selected by the owning human. Omission is
+     * retained only for legacy_user connections that cannot yet participate in
+     * the organization-user authority lifecycle.
+     */
+    userDelegation: UserResourceDelegation.optional(),
   })
   .strict();
 export type McpPersonalConnectionDelegation = z.infer<typeof McpPersonalConnectionDelegation>;
@@ -3472,6 +3478,36 @@ export const McpPersonalConnectionSummary = McpPersonalConnectionDelegation.pick
 });
 export type McpPersonalConnectionSummary = z.infer<typeof McpPersonalConnectionSummary>;
 
+/**
+ * Public, credential-free selection of one exact personal connection grant for
+ * one selected MCP/first-party server. The owner is always derived server-side.
+ */
+export const McpConnectionAuthoritySelection = z
+  .object({
+    serverId: z.string().min(1).max(256),
+    connectionId: z.string().uuid(),
+    userDelegation: UserResourceDelegation,
+  })
+  .strict();
+export type McpConnectionAuthoritySelection = z.infer<typeof McpConnectionAuthoritySelection>;
+
+export const McpConnectionAuthoritySelections = z
+  .array(McpConnectionAuthoritySelection)
+  .max(128)
+  .superRefine((selections, context) => {
+    const seen = new Set<string>();
+    for (const [index, selection] of selections.entries()) {
+      if (seen.has(selection.serverId)) {
+        context.addIssue({
+          code: "custom",
+          message: "connection authority selections must be unique by serverId",
+          path: [index, "serverId"],
+        });
+      }
+      seen.add(selection.serverId);
+    }
+  });
+
 export type McpCredentialsRequest = {
   accountId: string;
   workspaceId: string;
@@ -3502,6 +3538,10 @@ export type McpCredentialsRequest = {
   toolName?: string;
   connectionRef: McpServerConnectionRef;
   forceRefresh: boolean;
+  /** Canonical credential-free authority frozen on the accepted turn. */
+  connectionUseAuthority?: unknown;
+  /** Stable idempotency key for this one physical provider request. */
+  connectionUseRequestId?: string;
 };
 
 export type McpCredentialAuthNeededReason =
@@ -11706,6 +11746,8 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // permission. Credential headers are write-only: create responses and events
     // expose only SessionMcpServerMetadata.
     mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
+    /** Explicit personal-connection grants for the initial accepted turn. */
+    connectionAuthorities: McpConnectionAuthoritySelections.default([]),
     // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
     // today's behavior (a context-dependent default resolved server-side: from
     // inside a session → "shared" with the creator's box, top-level → "new").
@@ -11748,6 +11790,14 @@ export const CreateSessionRequest = withVariableSetIdAlias(
       code: z.ZodIssueCode.custom,
       path: ["modelContext"],
       message: "modelContext requires an initialMessage; attach it to a realtime entry instead",
+    });
+  }
+  if (value.startMode === "realtime" && value.connectionAuthorities.length > 0) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["connectionAuthorities"],
+      message:
+        "connectionAuthorities require an accepted initial turn and are not supported by realtime session staging",
     });
   }
 });
@@ -11948,6 +11998,8 @@ export const SessionUserMessagePayload = z
     // Header-value rotation only. URL/name/tool settings are immutable after
     // session create; persisted events expose metadata, never header values.
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+    /** Explicit personal-connection grants for this exact logical turn. */
+    connectionAuthorities: McpConnectionAuthoritySelections.default([]),
   })
   .strict()
   .superRefine(requireMessageTextOrAnnotations);
@@ -11993,6 +12045,8 @@ export const SteerSessionMessageRequest = z
     controlEtag: z.string().min(1).optional(),
     expectedDraftRevision: z.number().int().nonnegative().optional(),
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+    /** Explicit personal-connection grants for this exact steered turn. */
+    connectionAuthorities: McpConnectionAuthoritySelections.default([]),
   })
   .strict()
   .superRefine(requireMessageTextOrAnnotations);

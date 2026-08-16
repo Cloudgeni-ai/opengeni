@@ -10,6 +10,7 @@ import {
 import type { ResolveConnectionCredentialInput } from "@opengeni/db";
 import {
   googleDrivePublicationDelegationFromVisibleConnections,
+  personalAtlassianDelegationsFromVisibleConnections,
   personalConnectionDelegationSourceForGrant,
   personalConnectionDelegationsFromParent,
   personalConnectionDelegationsFromVisibleConnections,
@@ -142,6 +143,77 @@ describe("personal MCP connection delegation", () => {
     ]);
   });
 
+  test("requires an exact explicit grant for an activated common connection", () => {
+    const authorityId = crypto.randomUUID();
+    const active: ConnectionMetadata = {
+      id: crypto.randomUUID(),
+      accountId: crypto.randomUUID(),
+      workspaceId: crypto.randomUUID(),
+      subjectId: "user:owner",
+      providerDomain: "linear.app",
+      kind: "oauth2",
+      status: "active",
+      grantedScopes: [],
+      expiresAt: null,
+      lastRefreshAt: null,
+      lastUsedAt: null,
+      lastError: null,
+      version: 1,
+      metadata: {},
+      authorityId,
+      createdBySubjectId: "user:owner",
+      updatedBySubjectId: "user:owner",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    expect(
+      personalConnectionDelegationsFromVisibleConnections({
+        servers: [personalServer],
+        subjectId: "user:owner",
+        connections: [active],
+      }),
+    ).toEqual([]);
+    expect(() =>
+      personalConnectionDelegationsFromVisibleConnections({
+        servers: [personalServer],
+        subjectId: "user:owner",
+        connections: [active],
+        rejectUnselectedActivatedConnections: true,
+      }),
+    ).toThrow("scheduled connection authority selection is required for activated server linear");
+
+    const userDelegation = {
+      organizationId: active.accountId,
+      authorityId,
+      authorityGeneration: 2,
+      workspaceId: active.workspaceId,
+      sessionId: null,
+      action: "connection.use" as const,
+      mode: "always" as const,
+      context: "workspace_shared" as const,
+      authorityEpoch: null,
+      grantId: crypto.randomUUID(),
+      grantGeneration: 3,
+    };
+    expect(
+      personalConnectionDelegationsFromVisibleConnections({
+        servers: [personalServer],
+        subjectId: "user:owner",
+        connections: [active],
+        authoritySelections: [{ serverId: "linear", connectionId: active.id, userDelegation }],
+      }),
+    ).toEqual([
+      {
+        serverId: "linear",
+        connectionId: active.id,
+        ownerSubjectId: "user:owner",
+        providerDomain: "linear.app",
+        kind: "oauth2",
+        userDelegation,
+      },
+    ]);
+  });
+
   test("uses the same deterministic active-row order as runtime resolution", () => {
     const base: ConnectionMetadata = {
       id: crypto.randomUUID(),
@@ -203,6 +275,67 @@ describe("personal MCP connection delegation", () => {
     ).toEqual([parent[0]]);
   });
 
+  test("projects once, session, and always grants to the exact successor target", () => {
+    const sessionId = crypto.randomUUID();
+    const delegationFor = (
+      serverId: string,
+      mode: "once" | "session" | "always",
+    ): McpPersonalConnectionDelegation => ({
+      serverId,
+      connectionId: crypto.randomUUID(),
+      ownerSubjectId: "user:owner",
+      providerDomain: `${serverId}.example`,
+      kind: "oauth2",
+      userDelegation: {
+        organizationId: crypto.randomUUID(),
+        authorityId: crypto.randomUUID(),
+        authorityGeneration: 1,
+        workspaceId: crypto.randomUUID(),
+        sessionId: mode === "session" ? sessionId : null,
+        action: "connection.use",
+        mode,
+        context: "workspace_shared",
+        authorityEpoch: mode === "session" ? 1 : null,
+        grantId: crypto.randomUUID(),
+        grantGeneration: 1,
+      },
+    });
+    const once = delegationFor("once-server", "once");
+    const session = delegationFor("session-server", "session");
+    const always = delegationFor("always-server", "always");
+    const servers = [once, session, always].map((delegation) => ({
+      ...personalServer,
+      id: delegation.serverId,
+      connectionRef: {
+        ...personalServer.connectionRef,
+        providerDomain: delegation.providerDomain,
+      },
+    }));
+
+    expect(
+      personalConnectionDelegationsFromParent({
+        servers,
+        parentDelegations: [once, session, always],
+        targetSessionId: sessionId,
+      }),
+    ).toEqual([session, always]);
+    expect(
+      personalConnectionDelegationsFromParent({
+        servers,
+        parentDelegations: [once, session, always],
+        targetSessionId: crypto.randomUUID(),
+      }),
+    ).toEqual([always]);
+    expect(() =>
+      personalConnectionDelegationsFromParent({
+        servers,
+        parentDelegations: [always],
+        targetSessionId: crypto.randomUUID(),
+        rejectActivatedConnections: true,
+      }),
+    ).toThrow("task occurrence authority");
+  });
+
   test("children retain frozen first-party social authority alongside selected MCP grants", () => {
     const social: McpPersonalConnectionDelegation = {
       serverId: "social:x",
@@ -218,6 +351,30 @@ describe("personal MCP connection delegation", () => {
         parentDelegations: [social],
       }),
     ).toEqual([social]);
+  });
+
+  test("keeps separate-store social compatibility but omits activated Atlassian until its adapter is fenced", () => {
+    const authorityId = crypto.randomUUID();
+    const atlassian = googleDriveConnection({
+      id: crypto.randomUUID(),
+      providerDomain: "api.atlassian.com",
+      grantedScopes: [],
+      metadata: {},
+      authorityId,
+    });
+    expect(
+      personalAtlassianDelegationsFromVisibleConnections({
+        subjectId: "user:owner",
+        connections: [atlassian],
+      }),
+    ).toEqual([]);
+    expect(() =>
+      personalAtlassianDelegationsFromVisibleConnections({
+        subjectId: "user:owner",
+        connections: [atlassian],
+        rejectActivatedConnections: true,
+      }),
+    ).toThrow("selection is required for activated Atlassian access");
   });
 
   test("freezes, inherits, and composes one exact Google Drive publication connection", async () => {
@@ -288,6 +445,45 @@ describe("personal MCP connection delegation", () => {
         connections: [googleDriveConnection(), googleDriveConnection()],
       }),
     ).toBeNull();
+    const authorityId = crypto.randomUUID();
+    const activatedDrive = googleDriveConnection({ authorityId });
+    expect(
+      googleDrivePublicationDelegationFromVisibleConnections({
+        subjectId: "user:owner",
+        connections: [activatedDrive],
+      }),
+    ).toBeNull();
+    expect(() =>
+      googleDrivePublicationDelegationFromVisibleConnections({
+        subjectId: "user:owner",
+        connections: [activatedDrive],
+        rejectUnselectedActivatedConnection: true,
+      }),
+    ).toThrow("selection is required for activated Google Drive publication");
+    const userDelegation = {
+      organizationId: activatedDrive.accountId,
+      authorityId,
+      authorityGeneration: 1,
+      workspaceId: activatedDrive.workspaceId,
+      sessionId: null,
+      action: "connection.use" as const,
+      mode: "always" as const,
+      context: "workspace_shared" as const,
+      authorityEpoch: null,
+      grantId: crypto.randomUUID(),
+      grantGeneration: 1,
+    };
+    expect(
+      googleDrivePublicationDelegationFromVisibleConnections({
+        subjectId: "user:owner",
+        connections: [activatedDrive],
+        authoritySelection: {
+          serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+          connectionId: activatedDrive.id,
+          userDelegation,
+        },
+      }),
+    ).toMatchObject({ connectionId: activatedDrive.id, userDelegation });
   });
 
   test("pins every caller surface to the same exact owner, UUID, provider, and kind", async () => {

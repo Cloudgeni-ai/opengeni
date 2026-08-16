@@ -96,7 +96,35 @@ export async function materializeConnectorAttachmentsInChannel(
       };
     });
     const replayedFiles = await channel.inspectWorkspaceFiles(imports);
-    const importExactBytes = async () => await channel.importWorkspaceFiles(imports);
+    const importExactBytes = async () => {
+      const importedFiles = [];
+      if (imports.length === 0) return await channel.importWorkspaceFiles([]);
+      for (const item of imports) {
+        try {
+          if (request.authorizeProviderRequest) {
+            let authorized = false;
+            try {
+              authorized = await request.authorizeProviderRequest();
+            } catch {
+              authorized = false;
+            }
+            if (!authorized) throw new ConnectorAttachmentMaterializationError();
+          }
+          const [imported] = await channel.importWorkspaceFiles([item]);
+          if (!imported) throw new ConnectorAttachmentMaterializationError();
+          importedFiles.push(imported);
+        } catch (error) {
+          if (importedFiles.length > 0 && !(error instanceof RoutingMutationOutcomeUnknownError)) {
+            throw new ChannelAPartialMutationError(
+              "connector attachment materialization committed an earlier exact file",
+              { cause: error },
+            );
+          }
+          throw error;
+        }
+      }
+      return importedFiles;
+    };
     const importedFiles =
       replayedFiles ??
       (options.runMutation

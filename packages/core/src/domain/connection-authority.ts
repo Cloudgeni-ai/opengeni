@@ -36,6 +36,7 @@ export type UserConnectionAuthorityCandidate = {
   originWorkspaceId: string;
   ownerSubjectId: string;
   ownerOrganizationMembershipId: string;
+  ownerMembershipAuthorizationRevision: number;
   generation: number;
   status: "active" | "retained" | "revoked";
 };
@@ -126,6 +127,8 @@ export function captureConnectionUseAuthority(input: {
     scope: authority.scope,
     ownerSubjectId: connection.subjectId,
     ownerOrganizationMembershipId: connection.ownerOrganizationMembershipId,
+    ownerMembershipAuthorizationRevision:
+      authority.scope === "user" ? input.userAuthority!.ownerMembershipAuthorizationRevision : null,
     authoritySource,
     selectionSources: input.selectionSources,
     userDelegation,
@@ -150,6 +153,7 @@ export type LiveConnectionUseState = {
     organizationId: string;
     subjectId: string;
     status: "provisioning" | "active" | "suspended" | "revoked";
+    authorizationRevision: number;
   } | null;
   userAuthority: UserConnectionAuthorityCandidate | null;
   grant: {
@@ -256,7 +260,8 @@ export function revalidateConnectionUseAuthority(input: {
     membership.status !== "active" ||
     membership.id !== snapshot.ownerOrganizationMembershipId ||
     membership.organizationId !== snapshot.organizationId ||
-    membership.subjectId !== snapshot.ownerSubjectId
+    membership.subjectId !== snapshot.ownerSubjectId ||
+    membership.authorizationRevision !== snapshot.ownerMembershipAuthorizationRevision
   ) {
     return denied("owner_membership_inactive");
   }
