@@ -254,6 +254,14 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       // migration boundary. Advance the populated database to the current
       // schema before opening current application connections so unrelated
       // future session columns cannot invalidate this compatibility test.
+      // This raw migration loop intentionally bypasses the canonical runner.
+      // Keep its exact application-role authority on the same max=1 admin
+      // session so maintenance migration 0257 retains its fail-closed contract.
+      await admin`select set_config(
+        'opengeni.migration_application_roles',
+        ${JSON.stringify(["opengeni_app"])},
+        false
+      )`;
       for (const file of files.filter((entry) => entry.localeCompare(migrationFile) > 0)) {
         await admin.unsafe(await readFile(join(migrationsDir, file), "utf8"));
         await admin`

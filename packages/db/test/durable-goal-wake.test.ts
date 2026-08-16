@@ -51,6 +51,7 @@ afterAll(async () => {
 async function runningGoalFixture(
   options: {
     withAncestor?: boolean;
+    mutationPolicy?: "review_changes" | "preserve_intent" | "autonomous_adaptation";
     personalConnectionDelegations?:
       | McpPersonalConnectionDelegation[]
       | ((subjectId: string) => McpPersonalConnectionDelegation[]);
@@ -103,7 +104,10 @@ async function runningGoalFixture(
     clientEventId: `initial:${session.id}`,
     reasoningEffortFallback: "low",
     createdEventPayload: {},
-    goal: { text: "Finish the durable wake proof" },
+    goal: {
+      text: "Finish the durable wake proof",
+      mutationPolicy: options.mutationPolicy ?? "preserve_intent",
+    },
   });
   const attemptId = crypto.randomUUID();
   const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
@@ -1074,7 +1078,7 @@ describe("durable active-goal wake", () => {
   });
 
   test("a recovered attempt reconciles an ambiguously committed goal update without overwriting newer truth", async () => {
-    const ctx = await runningGoalFixture();
+    const ctx = await runningGoalFixture({ mutationPolicy: "autonomous_adaptation" });
     const firstKey = crypto.randomUUID();
     const secondKey = crypto.randomUUID();
 
@@ -1083,6 +1087,9 @@ describe("durable active-goal wake", () => {
         await updateSessionGoalWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
           text: "Committed before the caller lost its response",
           progressNote: "first attempt persisted",
+          changeKind: "refinement",
+          rationale: "preserve the accepted objective while recording recovery evidence",
+          expectedObjectiveRevision: 1,
           actor: "agent",
           command: goalCommand(ctx, {
             attemptId: ctx.attemptId,
@@ -1123,6 +1130,9 @@ describe("durable active-goal wake", () => {
       {
         text: "Committed before the caller lost its response",
         progressNote: "first attempt persisted",
+        changeKind: "refinement",
+        rationale: "preserve the accepted objective while recording recovery evidence",
+        expectedObjectiveRevision: 1,
         actor: "agent",
         command: goalCommand(ctx, {
           attemptId: replacementAttemptId,
@@ -1145,6 +1155,9 @@ describe("durable active-goal wake", () => {
       {
         text: "Newer recovered-attempt direction remains authoritative",
         progressNote: "replacement attempt advanced the goal",
+        changeKind: "adaptation",
+        rationale: "the recovered attempt received newer authoritative direction",
+        expectedObjectiveRevision: 2,
         actor: "agent",
         command: goalCommand(ctx, {
           attemptId: replacementAttemptId,
@@ -1166,6 +1179,9 @@ describe("durable active-goal wake", () => {
       {
         text: "Committed before the caller lost its response",
         progressNote: "first attempt persisted",
+        changeKind: "refinement",
+        rationale: "preserve the accepted objective while recording recovery evidence",
+        expectedObjectiveRevision: 1,
         actor: "agent",
         command: goalCommand(ctx, {
           attemptId: replacementAttemptId,
@@ -1191,6 +1207,9 @@ describe("durable active-goal wake", () => {
     await expect(
       updateSessionGoalWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
         text: "Conflicting reuse must not apply",
+        changeKind: "replacement",
+        rationale: "exercise conflicting receipt reuse",
+        expectedObjectiveRevision: 3,
         actor: "agent",
         command: goalCommand(ctx, {
           attemptId: replacementAttemptId,

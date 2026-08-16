@@ -6,6 +6,9 @@ import postgres from "postgres";
 const DEFAULT_DATABASE_URL = "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni";
 const DEFAULT_MAX_NESTED_AGENT_DEPTH = 3;
 const MAX_NESTED_AGENT_DEPTH = 2_147_483_647;
+const DEFAULT_APPLICATION_DATABASE_ROLE = "opengeni_app";
+const GOAL_REVISION_CUTOVER_MIGRATION = "0257_goal_revision_decisions_and_root_constraints.sql";
+const MAX_MIGRATION_APPLICATION_ROLES = 16;
 const batchedBackfillDirective =
   /^-- opengeni:batched-backfill batch-size=(\d+) lock-timeout=(\d+(?:ms|s|min)) statement-timeout=(\d+(?:ms|s|min))$/;
 const concurrentIndexDirective = /^-- opengeni:concurrent-index lock-timeout=(\d+(?:ms|s|min))$/;
@@ -30,6 +33,12 @@ export interface ConcurrentIndexMigration {
 
 export type MigrationRuntimeOptions = {
   maxNestedAgentDepth?: number;
+  /**
+   * Exact database login roles that may run an OpenGeni API or worker against
+   * this target. Maintenance cutovers use this list to reject a live mixed-
+   * version fleet. Dedicated-schema and custom-role deployments must supply it.
+   */
+  applicationDatabaseRoles?: string[];
 };
 
 type DeploymentDepthPolicy = {
@@ -230,6 +239,53 @@ function deploymentDepthPolicy(
   return { maxNestedAgentDepth: value, source: "deployment" };
 }
 
+function migrationApplicationRoles(
+  schema: string | undefined,
+  options: MigrationRuntimeOptions | undefined,
+): string[] {
+  const configured = options?.applicationDatabaseRoles;
+  const environment = process.env.OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES?.trim();
+  const explicit =
+    configured !== undefined
+      ? configured
+      : environment
+        ? environment.split(",").map((role) => role.trim())
+        : undefined;
+
+  if (!explicit) {
+    const configuredRuntimeRoles = [
+      process.env.OPENGENI_APP_DATABASE_USER?.trim(),
+      process.env.OPENGENI_RUNTIME_DATABASE_ROLE?.trim(),
+    ].filter((role): role is string => Boolean(role) && role !== DEFAULT_APPLICATION_DATABASE_ROLE);
+    if (schema || configuredRuntimeRoles.length > 0) {
+      throw new Error(
+        "Migration 0257 requires the exact application database roles via " +
+          "MigrationRuntimeOptions.applicationDatabaseRoles or " +
+          "OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES for dedicated-schema or custom-role deployments",
+      );
+    }
+    return [DEFAULT_APPLICATION_DATABASE_ROLE];
+  }
+
+  if (explicit.length < 1 || explicit.length > MAX_MIGRATION_APPLICATION_ROLES) {
+    throw new Error(
+      `Migration application database roles must contain 1-${MAX_MIGRATION_APPLICATION_ROLES} entries`,
+    );
+  }
+  const normalized = [...new Set(explicit)].sort((left, right) =>
+    Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")),
+  );
+  if (
+    normalized.length !== explicit.length ||
+    normalized.some((role) => role.length === 0 || Buffer.byteLength(role, "utf8") > 63)
+  ) {
+    throw new Error(
+      "Migration application database roles must be unique, non-empty Postgres role names of at most 63 UTF-8 bytes",
+    );
+  }
+  return normalized;
+}
+
 async function persistDeploymentDepthPolicy(
   sql: postgres.Sql,
   policy: DeploymentDepthPolicy,
@@ -277,6 +333,9 @@ async function persistDeploymentDepthPolicy(
  *   2. `public` stays LAST on the path so `gen_random_uuid()` (pgcrypto) and the
  *      `vector` type — both installed into `public` by 0000 — still resolve. The
  *      `opengeni_private.*` helpers are always called with an absolute prefix.
+ * Dedicated-schema callers must also pass the exact API/worker database login
+ * identities in `applicationDatabaseRoles`; maintenance cutovers cannot infer
+ * host-managed or scoped runtime roles from the admin connection.
  *
  * `OPENGENI_DB_SCHEMA` defaults UNSET → `public` → standalone, so the default
  * binding never regresses.
@@ -312,6 +371,14 @@ export async function migrate(
     );
     const appliedRows = await sql`SELECT "name" FROM "schema_migrations"`;
     const applied = new Set(appliedRows.map((row) => row.name as string));
+    if (!applied.has(GOAL_REVISION_CUTOVER_MIGRATION)) {
+      const applicationRoles = migrationApplicationRoles(schema, runtimeOptions);
+      await sql`select set_config(
+        'opengeni.migration_application_roles',
+        ${JSON.stringify(applicationRoles)},
+        false
+      )`;
+    }
     for (const file of files) {
       if (applied.has(file)) {
         continue;
@@ -332,7 +399,8 @@ export async function migrate(
  * SDK entry point (Step I): run the migration chain over a host-supplied admin
  * connection string against an explicit target schema. This is the embedded
  * topology's named entry — a host calls `runMigrations(adminConnection,
- * targetSchema)` from its own provisioning code instead of relying on env vars.
+ * targetSchema, { applicationDatabaseRoles })` from its own provisioning code
+ * instead of relying on env vars.
  * `targetSchema` undefined → `public` → standalone behavior. Thin wrapper over
  * `migrate` so there is one migration engine.
  */

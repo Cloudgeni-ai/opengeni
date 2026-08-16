@@ -2393,19 +2393,13 @@ function registerGoalTools(
     "goal_update",
     {
       description:
-        "Propose or apply a semantic goal revision under the session's mutation policy. Retain the standing goal unless explicit user direction or meaningful new evidence justifies the declared refinement, adaptation, or replacement. A rewrite never counts as execution progress; use goal_progress for that.",
+        "Propose or apply a semantic goal revision under the session's mutation policy. Retain the standing goal unless explicit user direction or meaningful new evidence justifies the declared refinement, adaptation, or replacement. Every rewrite must use the exact expected objective revision and a concise rationale. Root constraints cannot be changed by an agent. A rewrite never counts as execution progress; use goal_progress for that.",
       inputSchema: {
         text: goalText.optional(),
         successCriteria: successCriteriaSchema.nullable().optional(),
-        // Optional for rolling compatibility with the former goal_update
-        // surface. Omitted semantic metadata is classified as a refinement of
-        // the currently fenced objective; new callers should always supply it.
-        changeKind: z4.enum(["refinement", "adaptation", "replacement"]).optional(),
-        rationale: goalRationale.optional(),
-        expectedObjectiveRevision: z4.number().int().positive().optional(),
-        // Deprecated compatibility input. It is committed through the new
-        // progress operation and never makes a semantic rewrite count itself.
-        progressNote: progressNoteSchema.optional(),
+        changeKind: z4.enum(["refinement", "adaptation", "replacement"]),
+        rationale: goalRationale,
+        expectedObjectiveRevision: z4.number().int().positive(),
         idempotencyKey: z4.string().uuid(),
       },
     },
@@ -2415,12 +2409,11 @@ function registerGoalTools(
       changeKind,
       rationale,
       expectedObjectiveRevision,
-      progressNote,
       idempotencyKey,
     }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
-      if (text === undefined && successCriteria === undefined && progressNote === undefined) {
-        throw new Error("goal_update requires semantic content or a progressNote");
+      if (text === undefined && successCriteria === undefined) {
+        throw new Error("goal_update requires text or successCriteria");
       }
       const context = exactAgentCommandContext(grant, sessionId);
       const command = {
@@ -2434,36 +2427,22 @@ function registerGoalTools(
         },
         operationKey: idempotencyKey,
       };
-      const semantic =
-        text !== undefined || successCriteria !== undefined
-          ? await updateSessionGoalWithEvent(deps.db, grant.workspaceId, sessionId, {
-              ...(text !== undefined ? { text } : {}),
-              ...(successCriteria !== undefined ? { successCriteria } : {}),
-              changeKind: changeKind ?? "refinement",
-              rationale: rationale ?? "Compatibility refinement from goal_update",
-              ...(expectedObjectiveRevision !== undefined ? { expectedObjectiveRevision } : {}),
-              actor: "agent",
-              command,
-            })
-          : null;
-      const progress = progressNote
-        ? await recordSessionGoalProgressWithEvent(deps.db, grant.workspaceId, sessionId, {
-            progressNote,
-            command,
-          })
-        : null;
-      await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, [
-        ...(semantic?.events ?? []),
-        ...(progress?.events ?? []),
-      ]);
-      const goal = progress?.goal ?? semantic?.goal;
-      if (!goal) throw new Error("goal_update produced no mutation");
+      const semantic = await updateSessionGoalWithEvent(deps.db, grant.workspaceId, sessionId, {
+        ...(text !== undefined ? { text } : {}),
+        ...(successCriteria !== undefined ? { successCriteria } : {}),
+        changeKind,
+        rationale,
+        expectedObjectiveRevision,
+        actor: "agent",
+        command,
+      });
+      await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, semantic.events);
       return json({
-        ...goal,
-        operationId: semantic?.operationId ?? progress?.operationId ?? null,
-        replay: Boolean(semantic?.replay || progress?.replay),
-        outcome: semantic?.outcome ?? "progress_recorded",
-        proposalId: semantic?.proposalId ?? null,
+        ...semantic.goal,
+        operationId: semantic.operationId,
+        replay: semantic.replay,
+        outcome: semantic.outcome,
+        proposalId: semantic.proposalId,
       });
     },
   );
@@ -4130,7 +4109,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker). Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set or Rig gets its own compatible box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker). Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set or Rig gets its own compatible box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         inputSchema: sessionCreateInput,
       },
       async (args) => {

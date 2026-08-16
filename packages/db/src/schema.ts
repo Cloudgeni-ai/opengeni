@@ -5905,6 +5905,7 @@ export const sessionGoals = pgTable(
     status: text("status").notNull().default("active"), // active | paused | completed
     text: text("text").notNull(),
     successCriteria: text("success_criteria"),
+    rootConstraints: jsonb("root_constraints").$type<string[]>().notNull().default([]),
     evidence: text("evidence"), // set by goal_complete
     rationale: text("rationale"), // set by goal_pause
     pausedReason: text("paused_reason"), // agent | user_pause | api | no_progress | max_auto_continuations | limits
@@ -5978,12 +5979,14 @@ export const sessionGoalRevisions = pgTable(
     resultObjectiveRevision: integer("result_objective_revision"),
     text: text("text").notNull(),
     successCriteria: text("success_criteria"),
+    rootConstraints: jsonb("root_constraints").$type<string[]>().notNull().default([]),
     mutationPolicy: text("mutation_policy").$type<SessionGoalMutationPolicy>().notNull(),
     rationale: text("rationale").notNull(),
     actor: text("actor").$type<"agent" | "api" | "scheduled_task">().notNull(),
     actorTurnId: uuid("actor_turn_id"),
     actorAttemptId: uuid("actor_attempt_id"),
     proposalId: uuid("proposal_id"),
+    rollbackOfRevisionId: uuid("rollback_of_revision_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -6012,6 +6015,11 @@ export const sessionGoalRevisions = pgTable(
       columns: [table.workspaceId, table.proposalId],
       foreignColumns: [table.workspaceId, table.id],
     }).onDelete("restrict"),
+    rollbackOfRevision: foreignKey({
+      name: "session_goal_revisions_rollback_of_revision_fk",
+      columns: [table.workspaceId, table.rollbackOfRevisionId],
+      foreignColumns: [table.workspaceId, table.id],
+    }).onDelete("restrict"),
     appliedRevision: uniqueIndex("session_goal_revisions_applied_revision_uq")
       .on(table.workspaceId, table.goalId, table.resultObjectiveRevision)
       .where(sql`${table.disposition} = 'applied'`),
@@ -6021,6 +6029,14 @@ export const sessionGoalRevisions = pgTable(
       table.createdAt,
       table.id,
     ),
+    proposalDecision: uniqueIndex("session_goal_revisions_proposal_decision_uq")
+      .on(table.workspaceId, table.proposalId)
+      .where(
+        sql`${table.proposalId} is not null and ${table.disposition} in ('applied', 'rejected')`,
+      ),
+    rollbackRequest: uniqueIndex("session_goal_revisions_rollback_request_uq")
+      .on(table.workspaceId, table.goalId, table.rollbackOfRevisionId, table.baseObjectiveRevision)
+      .where(sql`${table.disposition} = 'applied' and ${table.rollbackOfRevisionId} is not null`),
     dispositionValid: check(
       "session_goal_revisions_disposition_chk",
       sql`${table.disposition} in ('applied', 'proposed', 'rejected')`,
@@ -6037,6 +6053,12 @@ export const sessionGoalRevisions = pgTable(
       "session_goal_revisions_revision_shape_chk",
       sql`(${table.disposition} = 'applied' and ${table.resultObjectiveRevision} = ${table.baseObjectiveRevision} + 1)
         or (${table.disposition} in ('proposed', 'rejected') and ${table.resultObjectiveRevision} is null)`,
+    ),
+    lineageShape: check(
+      "session_goal_revisions_lineage_shape_chk",
+      sql`(${table.disposition} = 'proposed' and ${table.proposalId} is null and ${table.rollbackOfRevisionId} is null)
+        or (${table.disposition} = 'rejected' and ${table.proposalId} is not null and ${table.rollbackOfRevisionId} is null)
+        or (${table.disposition} = 'applied' and not (${table.proposalId} is not null and ${table.rollbackOfRevisionId} is not null))`,
     ),
   }),
 );

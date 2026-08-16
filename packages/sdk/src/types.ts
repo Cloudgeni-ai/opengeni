@@ -529,6 +529,7 @@ export type SessionEffectiveToolPolicy = {
 export type GoalSpec = {
   text: string;
   successCriteria?: string | undefined;
+  rootConstraints?: string[] | undefined;
   maxAutoContinuations?: number | undefined;
   mutationPolicy?: SessionGoalMutationPolicy | undefined;
 };
@@ -3491,18 +3492,46 @@ export type SessionGoalRevision = {
   resultObjectiveRevision: number | null;
   text: string;
   successCriteria: string | null;
+  rootConstraints: string[];
   mutationPolicy: SessionGoalMutationPolicy;
   rationale: string;
   actor: "agent" | "api" | "scheduled_task";
   actorTurnId: string | null;
   actorAttemptId: string | null;
   proposalId: string | null;
+  rollbackOfRevisionId: string | null;
   createdAt: string;
 };
 
 export type ApplySessionGoalRevisionRequest = {
   expectedObjectiveRevision: number;
   rationale?: string | undefined;
+};
+
+export type ListSessionGoalRevisionsOptions = {
+  limit?: number | undefined;
+  before?: string | undefined;
+};
+
+export type ListSessionGoalRevisionsResponse = {
+  revisions: SessionGoalRevision[];
+  hasMore: boolean;
+  nextCursor: string | null;
+};
+
+export type RejectSessionGoalRevisionRequest = {
+  expectedObjectiveRevision: number;
+  rationale: string;
+};
+
+export type RejectSessionGoalRevisionResponse = {
+  revision: SessionGoalRevision;
+  replay: boolean;
+};
+
+export type RollbackSessionGoalRevisionRequest = {
+  expectedObjectiveRevision: number;
+  rationale: string;
 };
 
 export type SessionGoalContinuationState =
@@ -3543,6 +3572,7 @@ export type SessionGoal = {
   status: SessionGoalStatus;
   text: string;
   successCriteria: string | null;
+  rootConstraints: string[];
   evidence: string | null;
   rationale: string | null;
   pausedReason: string | null;
@@ -3568,6 +3598,7 @@ export type UpdateSessionGoalRequest =
   | {
       text: string;
       successCriteria?: string | null | undefined;
+      rootConstraints?: string[] | undefined;
       mutationPolicy?: SessionGoalMutationPolicy | undefined;
       rationale: string;
       expectedObjectiveRevision: number;

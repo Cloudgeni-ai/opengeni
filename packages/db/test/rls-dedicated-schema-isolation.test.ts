@@ -234,8 +234,8 @@ beforeAll(async () => {
   }
 
   // (A) embedded migrate into the dedicated schema via the SDK entry point.
-  await migrate(ADMIN_URL, SCHEMA);
-  await migrate(ADMIN_URL, SCHEMA);
+  await migrate(ADMIN_URL, SCHEMA, { applicationDatabaseRoles: ["opengeni_app"] });
+  await migrate(ADMIN_URL, SCHEMA, { applicationDatabaseRoles: ["opengeni_app"] });
 
   // Provision the non-owner app role via the REAL provisionRoles SDK entry, in
   // FORCE strategy, against the dedicated schema. This GRANTs opengeni_app DML on
@@ -778,7 +778,9 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     let upgradeClient: DbClient | null = null;
     try {
       await control.unsafe(`CREATE DATABASE ${quoteIdentifier(databaseName)}`);
-      await migrate(upgradeUrl.toString(), schemaName);
+      await migrate(upgradeUrl.toString(), schemaName, {
+        applicationDatabaseRoles: ["opengeni_app"],
+      });
       upgradeAdmin = postgres(upgradeUrl.toString(), { max: 1 });
       await upgradeAdmin.unsafe(`
         SET search_path = ${quoteIdentifier(schemaName)}, opengeni_private, public;
@@ -845,7 +847,9 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
           WHERE name = '0180_retained_screenshot_lifecycle_fences.sql';
       `);
 
-      await migrate(upgradeUrl.toString(), schemaName);
+      await migrate(upgradeUrl.toString(), schemaName, {
+        applicationDatabaseRoles: ["opengeni_app"],
+      });
       await provisionRoles(upgradeUrl.toString(), {
         targetSchema: schemaName,
         rlsStrategy: "force",

@@ -275,6 +275,14 @@ describe("release schema contract", () => {
     });
     expect(
       completeSourceContract.migrations.find(
+        (migration) => migration.path === "0257_goal_revision_decisions_and_root_constraints.sql",
+      ),
+    ).toMatchObject({
+      sha256: "457f7ae4bdaaf6f65bc5245f5f3c0ee7b28de94aafce284bb80bfbb4fb690da4",
+      deploymentMode: "maintenance",
+    });
+    expect(
+      completeSourceContract.migrations.find(
         (migration) => migration.path === "0256_connection_authority_delegation.sql",
       ),
     ).toMatchObject({
@@ -293,10 +301,23 @@ describe("release schema contract", () => {
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
+      if (
+        migrations.has("0258_three_scope_document_knowledge_authority.sql") &&
+        migrations.has("0257_goal_revision_decisions_and_root_constraints.sql")
+      ) {
+        return includesActivation
+          ? "1997fbda36325fff330f3a34870148f1acf77d27fc1c541c67dd26f61e1d9ca5"
+          : "bb3497f077a68c8ecb9b1b385067456ea3aa894d282ad0b820d97b55d2d25cc6";
+      }
       if (migrations.has("0258_three_scope_document_knowledge_authority.sql")) {
         return includesActivation
           ? "119d394b27853a7c9edfa65be82793cd6e1bac684a32fc2e6524bdd8a8fa225a"
           : "9d0bc49c13b78936d8d8248efe388f15449f87033792a97ec78148dfd047979e";
+      }
+      if (migrations.has("0257_goal_revision_decisions_and_root_constraints.sql")) {
+        return includesActivation
+          ? "895bfe1b39d54afff3d8e52cc9beb50ae32d3d7d1e9be6e0a7bc30e39161d427"
+          : "72379299ecfe8e35b1f25eed4ec2a37582cbe9efaf93b0c0d26ba28246f3c2aa";
       }
       if (migrations.has("0255_company_brain_governed_write_proposals.sql")) {
         return includesActivation
@@ -418,10 +439,23 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
+      if (
+        migrations.has("0258_three_scope_document_knowledge_authority.sql") &&
+        migrations.has("0257_goal_revision_decisions_and_root_constraints.sql")
+      ) {
+        return includesActivation
+          ? "1997fbda36325fff330f3a34870148f1acf77d27fc1c541c67dd26f61e1d9ca5"
+          : "bb3497f077a68c8ecb9b1b385067456ea3aa894d282ad0b820d97b55d2d25cc6";
+      }
       if (migrations.has("0258_three_scope_document_knowledge_authority.sql")) {
         return includesActivation
           ? "119d394b27853a7c9edfa65be82793cd6e1bac684a32fc2e6524bdd8a8fa225a"
           : "9d0bc49c13b78936d8d8248efe388f15449f87033792a97ec78148dfd047979e";
+      }
+      if (migrations.has("0257_goal_revision_decisions_and_root_constraints.sql")) {
+        return includesActivation
+          ? "895bfe1b39d54afff3d8e52cc9beb50ae32d3d7d1e9be6e0a7bc30e39161d427"
+          : "72379299ecfe8e35b1f25eed4ec2a37582cbe9efaf93b0c0d26ba28246f3c2aa";
       }
       if (migrations.has("0255_company_brain_governed_write_proposals.sql")) {
         return includesActivation
@@ -759,11 +793,13 @@ describe("release schema contract", () => {
         (migrations.has("0245_model_context_contribution_facts.sql") ? 1 : 0) +
         (migrations.has("0246_integration_personal_instance_authority.sql") ? 1 : 0) +
         (migrations.has("0255_company_brain_governed_write_proposals.sql") ? 1 : 0) +
+        (migrations.has("0257_goal_revision_decisions_and_root_constraints.sql") ? 1 : 0) +
         (migrations.has("0258_three_scope_document_knowledge_authority.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
       "0258_three_scope_document_knowledge_authority.sql",
+      "0257_goal_revision_decisions_and_root_constraints.sql",
       "0255_company_brain_governed_write_proposals.sql",
       "0246_integration_personal_instance_authority.sql",
       "0245_model_context_contribution_facts.sql",
@@ -794,13 +830,15 @@ describe("release schema contract", () => {
     expect(contract.latestMigration).toBe(
       migrations.has("0258_three_scope_document_knowledge_authority.sql")
         ? "0258_three_scope_document_knowledge_authority.sql"
-        : migrations.has("0255_company_brain_governed_write_proposals.sql")
-          ? "0255_company_brain_governed_write_proposals.sql"
-          : migrations.has("0248_terraform_stacks_component_resolution_fence.sql")
-            ? "0248_terraform_stacks_component_resolution_fence.sql"
-            : migrations.has("0247_terraform_stacks_provenance_repair.sql")
-              ? "0247_terraform_stacks_provenance_repair.sql"
-              : latestCompatibleMigration,
+        : migrations.has("0257_goal_revision_decisions_and_root_constraints.sql")
+          ? "0257_goal_revision_decisions_and_root_constraints.sql"
+          : migrations.has("0255_company_brain_governed_write_proposals.sql")
+            ? "0255_company_brain_governed_write_proposals.sql"
+            : migrations.has("0248_terraform_stacks_component_resolution_fence.sql")
+              ? "0248_terraform_stacks_component_resolution_fence.sql"
+              : migrations.has("0247_terraform_stacks_provenance_repair.sql")
+                ? "0247_terraform_stacks_provenance_repair.sql"
+                : latestCompatibleMigration,
     );
     expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
       sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",

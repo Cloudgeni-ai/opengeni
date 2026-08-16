@@ -86,6 +86,8 @@ import {
   GoalSpec,
   UpdateSessionGoalRequest,
   SESSION_GOAL_TEXT_MAX_BYTES,
+  SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES,
+  SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS,
 } from "../src";
 
 describe("contracts", () => {
@@ -122,6 +124,30 @@ describe("contracts", () => {
         expectedObjectiveRevision: 1,
       }).success,
     ).toBe(false);
+  });
+
+  test("goal root constraints normalize deterministically and enforce bounded UTF-8 input", () => {
+    const parsed = GoalSpec.parse({
+      text: "delegate",
+      rootConstraints: [" beta ", "alpha", "beta", "éclair"],
+    });
+    expect(parsed.rootConstraints).toEqual(["alpha", "beta", "éclair"]);
+    expect(
+      GoalSpec.safeParse({
+        text: "delegate",
+        rootConstraints: ["é".repeat(SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES / 2 + 1)],
+      }).success,
+    ).toBe(false);
+    expect(
+      GoalSpec.safeParse({
+        text: "delegate",
+        rootConstraints: Array.from(
+          { length: SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS + 1 },
+          (_, index) => `constraint-${index}`,
+        ),
+      }).success,
+    ).toBe(false);
+    expect(GoalSpec.safeParse({ text: "delegate", rootConstraints: ["   "] }).success).toBe(false);
   });
 
   const turnExecutionPolicy = TurnExecutionPolicyV1.parse({

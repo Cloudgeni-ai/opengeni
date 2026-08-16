@@ -285,6 +285,11 @@ import type {
   SessionEventPage,
   SessionGoal,
   SessionGoalRevision,
+  ListSessionGoalRevisionsOptions,
+  ListSessionGoalRevisionsResponse,
+  RejectSessionGoalRevisionRequest,
+  RejectSessionGoalRevisionResponse,
+  RollbackSessionGoalRevisionRequest,
   SessionHumanInputRequest,
   SessionLineageResponse,
   SessionRealtimeMutationResponse,
@@ -2030,6 +2035,47 @@ export class OpenGeniClient {
     return await this.requestJson<SessionGoalRevision[]>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions`,
+    );
+  }
+
+  async listGoalRevisionPage(
+    workspaceId: string,
+    sessionId: string,
+    options: ListSessionGoalRevisionsOptions = {},
+  ): Promise<ListSessionGoalRevisionsResponse> {
+    const query = new URLSearchParams();
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.before !== undefined) query.set("before", options.before);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return await this.requestJson<ListSessionGoalRevisionsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions/page${suffix}`,
+    );
+  }
+
+  async rejectGoalRevision(
+    workspaceId: string,
+    sessionId: string,
+    revisionId: string,
+    request: RejectSessionGoalRevisionRequest,
+  ): Promise<RejectSessionGoalRevisionResponse> {
+    return await this.requestJson<RejectSessionGoalRevisionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions/${revisionId}/reject`,
+      request,
+    );
+  }
+
+  async rollbackGoalRevision(
+    workspaceId: string,
+    sessionId: string,
+    revisionId: string,
+    request: RollbackSessionGoalRevisionRequest,
+  ): Promise<SessionGoal> {
+    return await this.requestJson<SessionGoal>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions/${revisionId}/rollback`,
+      request,
     );
   }
 
