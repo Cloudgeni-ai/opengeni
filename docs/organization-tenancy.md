@@ -196,8 +196,18 @@ retains resource authority and physical data. Owned-session authority epochs
 advance with content-free audit events; unrelated users' shared-session state
 is not changed. `retain` has no deletion deadline;
 `delete_after` accepts the initial 30–90 day policy window and stamps a bounded
-future deadline, but this slice has no
-destructive sweeper.
+future deadline. Destructive expiry is an explicit operator lifecycle, not an
+API request or background service. The command
+`bun run db:sweep-organization-retention --organization-id <uuid> --dry-run`
+previews at most 100 due memberships, and
+the same command without `--dry-run` processes a bounded batch (`--limit`,
+default 10). Each member is claimed independently with `SKIP LOCKED`, exact
+operation and lease fences, so one provider failure records immutable
+content-free failure evidence without rolling back successful members.
+Object-storage keys are deleted before the matching SHA-256 receipt permits the
+database transaction to erase that user's personal workspace and supported
+personal resources. Unknown resource kinds fail closed; membership, lifecycle,
+grant/authority, object-receipt, and deletion-event evidence is retained.
 
 Invitation, operation-receipt, and lifecycle-event tables are FORCE RLS with
 zero direct application-role DML. Target-schema-local SECURITY DEFINER routines
@@ -301,10 +311,11 @@ the Legacy behavior section.
 
 ### C. Membership lifecycle (0263 current)
 
-The invitation, role, suspension, reactivation, offboarding, retention, and
-multi-organization access projection described above are active. Provider email
-delivery, unregistered-recipient invitations, a destructive retention sweeper,
-and member-management UI remain deferred.
+The invitation, role, suspension, reactivation, offboarding, retention,
+operator-driven destructive expiry, and multi-organization access projection
+described above are active. Provider email delivery, unregistered-recipient
+invitations, automatic scheduling of the operator command, and member-management
+UI remain deferred.
 
 ### D. Backfill
 
@@ -352,5 +363,6 @@ rewritten in the same release that first activates user authority.
   runtime;
 - Connected Machine, rig, variable-set, connection, Codex, or Document
   materialization changes;
-- retention deletion workers (0263 records policy/deadline only);
+- an always-on retention deletion worker (0263 exposes a supported bounded
+  operator command instead);
 - provider, cloud, or deployment changes.

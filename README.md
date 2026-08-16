@@ -388,6 +388,18 @@ Core endpoints:
 - `GET /v1/workspaces/:workspaceId/sessions/:sessionId/events/stream`
 - `POST /v1/workspaces/:workspaceId/sessions/:sessionId/events`
 
+Expired offboarded personal data is removed through the explicit bounded
+operator command. Preview first, then execute the same organization-scoped
+batch (default 10, maximum 100):
+
+```bash
+bun run db:sweep-organization-retention --organization-id <uuid> --dry-run
+bun run db:sweep-organization-retention --organization-id <uuid> --limit 10
+```
+
+The command is retry-safe, continues past independently recorded member
+failures, and requires configured object storage for destructive execution.
+
 GitHub endpoints:
 
 - `GET /v1/workspaces/:workspaceId/github/app`

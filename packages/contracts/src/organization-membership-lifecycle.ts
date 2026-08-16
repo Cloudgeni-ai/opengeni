@@ -54,6 +54,49 @@ export const OrganizationRetentionPolicy = z
   });
 export type OrganizationRetentionPolicy = z.infer<typeof OrganizationRetentionPolicy>;
 
+export const OrganizationRetentionDeletionClaim = z.object({
+  organizationId: z.string().uuid(),
+  membershipId: z.string().uuid(),
+  operationId: z.string().uuid(),
+  retentionUntil: z.string().datetime({ offset: true }),
+  claimExpiresAt: z.string().datetime({ offset: true }),
+  personalWorkspaceId: z.string().uuid().nullable(),
+  objectCount: z.number().int().nonnegative(),
+  deletedObjectCount: z.number().int().nonnegative(),
+});
+export type OrganizationRetentionDeletionClaim = z.infer<typeof OrganizationRetentionDeletionClaim>;
+
+export const OrganizationRetentionDeletionObject = z.object({
+  fileId: z.string().uuid(),
+  objectKey: z.string().min(1),
+});
+export type OrganizationRetentionDeletionObject = z.infer<
+  typeof OrganizationRetentionDeletionObject
+>;
+
+export const OrganizationRetentionDeletionResult = z.object({
+  organizationId: z.string().uuid(),
+  membershipId: z.string().uuid(),
+  operationId: z.string().uuid(),
+  outcome: z.enum(["completed", "already_completed"]),
+  deletedResources: z.record(z.string(), z.number().int().nonnegative()),
+  completedAt: z.string().datetime({ offset: true }),
+});
+export type OrganizationRetentionDeletionResult = z.infer<
+  typeof OrganizationRetentionDeletionResult
+>;
+
+export const OrganizationRetentionDeletionPreview = z.object({
+  membershipId: z.string().uuid(),
+  retentionUntil: z.string().datetime({ offset: true }),
+  personalWorkspaceId: z.string().uuid().nullable(),
+  resourceCount: z.number().int().nonnegative(),
+  objectCount: z.number().int().nonnegative(),
+});
+export type OrganizationRetentionDeletionPreview = z.infer<
+  typeof OrganizationRetentionDeletionPreview
+>;
+
 export const CreateOrganizationInvitationRequest = z.object({
   email: z.string().email().max(320),
   role: OrganizationMembershipRole.default("member"),

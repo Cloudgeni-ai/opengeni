@@ -305,9 +305,13 @@ removes persisted shared-workspace grants, revokes user-resource grants, fences
 membership-owned sessions, and interrupts shared-session attempts whose frozen
 initiating human matches the subject. Offboarding applies the same canonical
 workspace/session/turn/attempt teardown, then terminally revokes membership
-while retaining physical data and authority. Organization invitation enumeration is an
-admin-only, bounded `(created_at,id)` keyset page. Retention policy may stamp a
-future deadline, but no destructive sweeper is part of this slice. Active
+while retaining physical data and authority until expiry. Organization invitation enumeration is an
+admin-only, bounded `(created_at,id)` keyset page. Expired offboarded personal
+resources are deleted only by the explicit bounded
+`db:sweep-organization-retention` operator command: provider-object deletion is
+receipt-fenced before database erasure, each member has an independent expiring
+claim, and immutable content-free evidence survives cleanup. There is no new
+always-on service. Active
 memberships are re-read on managed access refresh to derive role-bounded account
 grants and only the human's own personal-workspace projections. Long-lived
 session, workspace-control, live, and interaction SSE responses bypass the

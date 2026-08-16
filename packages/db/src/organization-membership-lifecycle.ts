@@ -5,10 +5,18 @@ import {
   ListSelfOrganizationMembershipsResponse,
   OrganizationInvitation,
   OrganizationMember,
+  OrganizationRetentionDeletionClaim,
+  OrganizationRetentionDeletionObject,
+  OrganizationRetentionDeletionPreview,
+  OrganizationRetentionDeletionResult,
   OrganizationRetentionPolicy,
   type OrganizationInvitation as OrganizationInvitationType,
   type OrganizationMember as OrganizationMemberType,
   type OrganizationMembershipRole,
+  type OrganizationRetentionDeletionClaim as OrganizationRetentionDeletionClaimType,
+  type OrganizationRetentionDeletionObject as OrganizationRetentionDeletionObjectType,
+  type OrganizationRetentionDeletionPreview as OrganizationRetentionDeletionPreviewType,
+  type OrganizationRetentionDeletionResult as OrganizationRetentionDeletionResultType,
   type OrganizationRetentionPolicy as OrganizationRetentionPolicyType,
   type UpdateOrganizationMemberRequest,
 } from "@opengeni/contracts";
@@ -250,4 +258,147 @@ export async function updateOrganizationRetentionPolicy(
   },
 ): Promise<OrganizationRetentionPolicyType> {
   return OrganizationRetentionPolicy.parse(await runCommand(db, { action: "retention", ...input }));
+}
+
+async function runRetentionCapability<T>(
+  db: Database,
+  organizationId: string,
+  query: (scopedDb: Database) => Promise<T>,
+): Promise<T> {
+  return await withRlsContext(
+    db,
+    { accountId: organizationId, workspaceId: null },
+    async (scopedDb) => await query(scopedDb),
+  );
+}
+
+export async function previewOrganizationRetentionDeletions(
+  db: Database,
+  input: { organizationId: string; limit?: number },
+): Promise<OrganizationRetentionDeletionPreviewType[]> {
+  return await runRetentionCapability(db, input.organizationId, async (scopedDb) => {
+    const [row] = await rawRows<{ result: unknown }>(
+      scopedDb,
+      sql`select preview_organization_retention_deletions(
+        ${input.organizationId}::uuid, ${input.limit ?? 25}
+      ) as result`,
+    );
+    return OrganizationRetentionDeletionPreview.array().parse(row?.result ?? []);
+  });
+}
+
+export async function claimOrganizationRetentionDeletion(
+  db: Database,
+  input: { organizationId: string; operationId: string; excludedMembershipIds?: string[] },
+): Promise<OrganizationRetentionDeletionClaimType | null> {
+  return await runRetentionCapability(db, input.organizationId, async (scopedDb) => {
+    const excludedMembershipIds = input.excludedMembershipIds ?? [];
+    const excludedMembershipArray =
+      excludedMembershipIds.length === 0
+        ? sql`ARRAY[]::uuid[]`
+        : sql`ARRAY[${sql.join(
+            excludedMembershipIds.map((membershipId) => sql`${membershipId}::uuid`),
+            sql`, `,
+          )}]::uuid[]`;
+    const [row] = await rawRows<{ result: unknown }>(
+      scopedDb,
+      sql`select claim_organization_retention_deletion(
+        ${input.organizationId}::uuid, ${input.operationId}::uuid,
+        ${excludedMembershipArray}
+      ) as result`,
+    );
+    return row?.result === null || row?.result === undefined
+      ? null
+      : OrganizationRetentionDeletionClaim.parse(row.result);
+  });
+}
+
+export async function listOrganizationRetentionDeletionObjects(
+  db: Database,
+  input: {
+    organizationId: string;
+    membershipId: string;
+    operationId: string;
+    afterFileId?: string;
+    limit?: number;
+  },
+): Promise<OrganizationRetentionDeletionObjectType[]> {
+  return await runRetentionCapability(db, input.organizationId, async (scopedDb) => {
+    const [row] = await rawRows<{ result: unknown }>(
+      scopedDb,
+      sql`select list_organization_retention_deletion_objects(
+        ${input.organizationId}::uuid,
+        ${input.membershipId}::uuid,
+        ${input.operationId}::uuid,
+        ${input.afterFileId ?? null}::uuid,
+        ${input.limit ?? 100}
+      ) as result`,
+    );
+    return OrganizationRetentionDeletionObject.array().parse(row?.result ?? []);
+  });
+}
+
+export async function recordOrganizationRetentionObjectDeleted(
+  db: Database,
+  input: {
+    organizationId: string;
+    membershipId: string;
+    operationId: string;
+    fileId: string;
+    objectKey: string;
+  },
+): Promise<boolean> {
+  return await runRetentionCapability(db, input.organizationId, async (scopedDb) => {
+    const [row] = await rawRows<{ result: boolean }>(
+      scopedDb,
+      sql`select record_organization_retention_object_deleted(
+        ${input.organizationId}::uuid,
+        ${input.membershipId}::uuid,
+        ${input.operationId}::uuid,
+        ${input.fileId}::uuid,
+        ${input.objectKey}
+      ) as result`,
+    );
+    return row?.result === true;
+  });
+}
+
+export async function failOrganizationRetentionDeletion(
+  db: Database,
+  input: {
+    organizationId: string;
+    membershipId: string;
+    operationId: string;
+    reasonCode: string;
+  },
+): Promise<boolean> {
+  return await runRetentionCapability(db, input.organizationId, async (scopedDb) => {
+    const [row] = await rawRows<{ result: boolean }>(
+      scopedDb,
+      sql`select fail_organization_retention_deletion(
+        ${input.organizationId}::uuid,
+        ${input.membershipId}::uuid,
+        ${input.operationId}::uuid,
+        ${input.reasonCode}
+      ) as result`,
+    );
+    return row?.result === true;
+  });
+}
+
+export async function finalizeOrganizationRetentionDeletion(
+  db: Database,
+  input: { organizationId: string; membershipId: string; operationId: string },
+): Promise<OrganizationRetentionDeletionResultType> {
+  return await runRetentionCapability(db, input.organizationId, async (scopedDb) => {
+    const [row] = await rawRows<{ result: unknown }>(
+      scopedDb,
+      sql`select finalize_organization_retention_deletion(
+        ${input.organizationId}::uuid,
+        ${input.membershipId}::uuid,
+        ${input.operationId}::uuid
+      ) as result`,
+    );
+    return OrganizationRetentionDeletionResult.parse(row?.result);
+  });
 }

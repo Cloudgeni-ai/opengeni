@@ -491,6 +491,12 @@ async function grantAppRoleIfSchemaExists(
     "list_organization_invitations(uuid,text,uuid,integer)",
     "organization_membership_command(jsonb)",
     "get_organization_retention_policy(uuid,text)",
+    "preview_organization_retention_deletions(uuid,integer)",
+    "claim_organization_retention_deletion(uuid,uuid,uuid[])",
+    "list_organization_retention_deletion_objects(uuid,uuid,uuid,uuid,integer)",
+    "record_organization_retention_object_deleted(uuid,uuid,uuid,uuid,text)",
+    "fail_organization_retention_deletion(uuid,uuid,uuid,text)",
+    "finalize_organization_retention_deletion(uuid,uuid,uuid)",
   ]
     .map(literal)
     .join(", ")}]`;

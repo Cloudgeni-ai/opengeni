@@ -75,6 +75,12 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "list_organization_members(uuid, text)",
   "organization_membership_command(jsonb)",
   "get_organization_retention_policy(uuid, text)",
+  "preview_organization_retention_deletions(uuid, integer)",
+  "claim_organization_retention_deletion(uuid, uuid, uuid[])",
+  "list_organization_retention_deletion_objects(uuid, uuid, uuid, uuid, integer)",
+  "record_organization_retention_object_deleted(uuid, uuid, uuid, uuid, text)",
+  "fail_organization_retention_deletion(uuid, uuid, uuid, text)",
+  "finalize_organization_retention_deletion(uuid, uuid, uuid)",
 ] as const;
 const PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE =
   "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)";
@@ -391,6 +397,9 @@ export const FORCE_RLS_TABLES = [
   "organization_memberships",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
+  "organization_user_retention_deletion_events",
+  "organization_user_retention_deletions",
+  "organization_user_retention_object_receipts",
   "organization_user_retention_policies",
   "pack_installation_components",
   "pack_installations",
@@ -806,6 +815,9 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_memberships",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
+  "organization_user_retention_deletion_events",
+  "organization_user_retention_deletions",
+  "organization_user_retention_object_receipts",
   "organization_user_retention_policies",
   "personal_document_once_consumption_receipts",
   "personal_resource_once_consumption_receipts",

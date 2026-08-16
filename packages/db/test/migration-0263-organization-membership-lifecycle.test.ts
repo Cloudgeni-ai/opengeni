@@ -9,18 +9,24 @@ import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
   acceptOrganizationInvitation,
+  claimOrganizationRetentionDeletion,
+  createConnection,
   createSession,
   createDb,
   createOrganizationInvitation,
   ensureManagedAccessForUser,
   ensureManagedAccessForUserWithOrganizationMemberships,
+  failOrganizationRetentionDeletion,
+  finalizeOrganizationRetentionDeletion,
   getSelfOrganizationInvitation,
   listOrganizationMembers,
+  listOrganizationRetentionDeletionObjects,
   listOrganizationInvitations,
   listSelfOrganizationInvitations,
   listSelfOrganizationMemberships,
   nestedPostgresSqlState,
   provisionRoles,
+  recordOrganizationRetentionObjectDeleted,
   revokeOrganizationInvitation,
   transitionSessionVisibility,
   updateOrganizationMember,
@@ -74,8 +80,8 @@ describe("migration 0263 organization membership lifecycle", () => {
   test("declares a closed lifecycle capability and immutable FORCE-RLS evidence", async () => {
     const migration = await readFile(migrationUrl, "utf8");
     expect(migration.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
-    expect(migration.match(/ENABLE ROW LEVEL SECURITY/gu)).toHaveLength(3);
-    expect(migration.match(/FORCE ROW LEVEL SECURITY/gu)).toHaveLength(3);
+    expect(migration.match(/ENABLE ROW LEVEL SECURITY/gu)).toHaveLength(6);
+    expect(migration.match(/FORCE ROW LEVEL SECURITY/gu)).toHaveLength(6);
     expect(migration).toContain("organization_membership_command(p_command jsonb)");
     expect(migration).toContain("invitation.target_subject_id IS DISTINCT FROM actor_subject");
     expect(migration).toContain("organization operation id was reused with different input");
@@ -84,7 +90,7 @@ describe("migration 0263 organization membership lifecycle", () => {
     expect(migration).toContain("organization_membership_operation_receipts_immutable");
     expect(migration).toContain("organization_membership_lifecycle_events_immutable");
     expect(migration).toContain("REVOKE ALL ON TABLE organization_memberships FROM opengeni_app");
-    expect(migration).not.toContain("DELETE FROM workspaces");
+    expect(migration).toContain("DELETE FROM workspaces");
     expect(migration).not.toContain("DELETE FROM sessions");
     const offboard = migration.slice(
       migration.indexOf("ELSIF action_name IN ('suspend', 'offboard')"),
@@ -127,8 +133,11 @@ describe("migration 0263 organization membership lifecycle", () => {
       const [posture] = await admin<
         Array<{
           execute: boolean;
+          executeRetention: boolean;
           directInsert: boolean;
+          directRetentionInsert: boolean;
           searchPath: string | null;
+          retentionSearchPath: string | null;
         }>
       >`
         select
@@ -137,11 +146,21 @@ describe("migration 0263 organization membership lifecycle", () => {
             format('%I.organization_membership_command(jsonb)', ${schemaName}::text),
             'EXECUTE'
           ) as execute,
+          has_function_privilege(
+            ${roleName}::text,
+            format('%I.claim_organization_retention_deletion(uuid,uuid,uuid[])', ${schemaName}::text),
+            'EXECUTE'
+          ) as "executeRetention",
           has_table_privilege(
             ${roleName}::text,
             format('%I.organization_membership_operation_receipts', ${schemaName}::text),
             'INSERT'
           ) as "directInsert",
+          has_table_privilege(
+            ${roleName}::text,
+            format('%I.organization_user_retention_deletions', ${schemaName}::text),
+            'INSERT'
+          ) as "directRetentionInsert",
           (
             select config
             from pg_proc procedure
@@ -150,11 +169,23 @@ describe("migration 0263 organization membership lifecycle", () => {
             where namespace.nspname = ${schemaName}::text
               and procedure.proname = 'organization_membership_command'
               and config like 'search_path=%'
-          ) as "searchPath"`;
+          ) as "searchPath",
+          (
+            select config
+            from pg_proc procedure
+            join pg_namespace namespace on namespace.oid = procedure.pronamespace
+            cross join lateral unnest(coalesce(procedure.proconfig, array[]::text[])) config
+            where namespace.nspname = ${schemaName}::text
+              and procedure.proname = 'claim_organization_retention_deletion'
+              and config like 'search_path=%'
+          ) as "retentionSearchPath"`;
       expect(posture).toEqual({
         execute: true,
+        executeRetention: true,
         directInsert: false,
+        directRetentionInsert: false,
         searchPath: `search_path=pg_catalog, ${schemaName}, pg_temp`,
+        retentionSearchPath: `search_path=pg_catalog, ${schemaName}, pg_temp`,
       });
 
       const accountId = crypto.randomUUID();
@@ -198,6 +229,27 @@ describe("migration 0263 organization membership lifecycle", () => {
           status: "active",
         }),
       ]);
+
+      const revokedMembershipId = crypto.randomUUID();
+      await admin`
+        insert into organization_memberships (
+          id, account_id, subject_id, role, status, revoked_at, personal_retention_until
+        ) values (
+          ${revokedMembershipId}::uuid, ${accountId}::uuid,
+          ${`user:${crypto.randomUUID()}`}, 'member', 'revoked', now(), now() - interval '1 day'
+        )`;
+      const claimOperationId = crypto.randomUUID();
+      const claimRows = await appSql.begin(async (transaction) => {
+        await transaction`select set_config('opengeni.account_id', ${accountId}, true)`;
+        await transaction`create temporary table organization_user_retention_deletions (
+          account_id uuid, membership_id uuid, state text, claim_operation_id uuid
+        )`;
+        return await transaction.unsafe<Array<{ result: { membershipId: string } }>>(
+          `select "${schemaName}".claim_organization_retention_deletion($1, $2, array[]::uuid[]) as result`,
+          [accountId, claimOperationId],
+        );
+      });
+      expect(claimRows[0]?.result.membershipId).toBe(revokedMembershipId);
     } finally {
       await appSql?.end().catch(() => undefined);
       await admin.unsafe(`drop owned by "${roleName}"`).catch(() => undefined);
@@ -856,6 +908,242 @@ describe("migration 0263 organization membership lifecycle", () => {
           expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
         }),
       "P0002",
+    );
+    await expectSqlState(
+      () =>
+        withRlsContext(
+          client!.db,
+          { accountId: owner!.organizationId, workspaceId: null },
+          async (scopedDb) => {
+            await rawRows(
+              scopedDb,
+              sql`insert into organization_user_retention_deletions (
+                account_id, membership_id, retention_until, claim_operation_id,
+                claim_expires_at
+              ) values (
+                ${owner!.organizationId}::uuid, ${owner!.id}::uuid, now(),
+                ${crypto.randomUUID()}::uuid, now() + interval '15 minutes'
+              )`,
+            );
+          },
+        ),
+      "42501",
+    );
+  });
+
+  test("deletes an expired personal workspace only after exact object proof and preserves audit", async () => {
+    if (!shared || !client) return;
+    const ownerId = `retention-owner-${crypto.randomUUID()}`;
+    const targetId = `retention-target-${crypto.randomUUID()}`;
+    const ownerSubject = `user:${ownerId}`;
+    const targetSubject = `user:${targetId}`;
+    await provisionSelf(ownerId);
+    const [owner] = await listSelfOrganizationMemberships(client.db, ownerSubject);
+    const invitation = await createOrganizationInvitation(client.db, {
+      organizationId: owner!.organizationId,
+      actorSubjectId: ownerSubject,
+      operationId: crypto.randomUUID(),
+      targetSubjectId: targetSubject,
+      targetEmail: `${targetId}@example.test`,
+      role: "member",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    let member = (
+      await acceptOrganizationInvitation(client.db, {
+        organizationId: owner!.organizationId,
+        actorSubjectId: targetSubject,
+        operationId: crypto.randomUUID(),
+        invitationId: invitation.id,
+        expectedRevision: invitation.revision,
+      })
+    ).membership;
+    const personalWorkspaceId = member.personalWorkspaceId!;
+    const fileId = crypto.randomUUID();
+    const objectKey = `retention/${crypto.randomUUID()}`;
+    await shared.admin`
+      insert into files (
+        id, account_id, workspace_id, status, filename, safe_filename,
+        content_type, size_bytes, bucket, object_key
+      ) values (
+        ${fileId}, ${owner!.organizationId}, ${personalWorkspaceId}, 'ready',
+        'retained.txt', 'retained.txt', 'text/plain', 8, 'test', ${objectKey}
+      )`;
+    const personalConnection = await createConnection(client.db, {
+      accountId: owner!.organizationId,
+      workspaceId: personalWorkspaceId,
+      subjectId: targetSubject,
+      providerDomain: "retention.example.test",
+      kind: "api_key",
+      credentialEncrypted: "retention-test-ciphertext",
+      grantedScopes: ["read"],
+      createdBySubjectId: targetSubject,
+    });
+    member = await updateOrganizationMember(client.db, {
+      organizationId: owner!.organizationId,
+      actorSubjectId: ownerSubject,
+      operationId: crypto.randomUUID(),
+      membershipId: member.id,
+      transition: {
+        kind: "offboard",
+        expectedAuthorizationRevision: member.authorizationRevision,
+        operationId: crypto.randomUUID(),
+        reason: "retention test",
+      },
+    });
+    await shared.admin`update organization_memberships
+      set personal_retention_until = now() - interval '1 second'
+      where account_id = ${owner!.organizationId} and id = ${member.id}`;
+
+    const operationId = crypto.randomUUID();
+    const claim = await claimOrganizationRetentionDeletion(client.db, {
+      organizationId: owner!.organizationId,
+      operationId,
+    });
+    expect(claim).toMatchObject({
+      membershipId: member.id,
+      operationId,
+      personalWorkspaceId,
+      objectCount: 1,
+    });
+    expect(
+      await claimOrganizationRetentionDeletion(client.db, {
+        organizationId: owner!.organizationId,
+        operationId,
+      }),
+    ).toEqual(claim);
+    const objects = await listOrganizationRetentionDeletionObjects(client.db, {
+      organizationId: owner!.organizationId,
+      membershipId: member.id,
+      operationId,
+      limit: 100,
+    });
+    expect(objects).toEqual([{ fileId, objectKey }]);
+    await expectSqlState(
+      () =>
+        finalizeOrganizationRetentionDeletion(client!.db, {
+          organizationId: owner!.organizationId,
+          membershipId: member.id,
+          operationId,
+        }),
+      "55000",
+    );
+    await expectSqlState(
+      () =>
+        recordOrganizationRetentionObjectDeleted(client!.db, {
+          organizationId: owner!.organizationId,
+          membershipId: member.id,
+          operationId,
+          fileId,
+          objectKey: `${objectKey}-forged`,
+        }),
+      "42501",
+    );
+    expect(
+      await recordOrganizationRetentionObjectDeleted(client.db, {
+        organizationId: owner!.organizationId,
+        membershipId: member.id,
+        operationId,
+        fileId,
+        objectKey,
+      }),
+    ).toBe(true);
+    expect(
+      await recordOrganizationRetentionObjectDeleted(client.db, {
+        organizationId: owner!.organizationId,
+        membershipId: member.id,
+        operationId,
+        fileId,
+        objectKey,
+      }),
+    ).toBe(false);
+    const completed = await finalizeOrganizationRetentionDeletion(client.db, {
+      organizationId: owner!.organizationId,
+      membershipId: member.id,
+      operationId,
+    });
+    expect(completed).toMatchObject({
+      membershipId: member.id,
+      operationId,
+      outcome: "completed",
+      deletedResources: { files: 1, connections: 1, personalWorkspaces: 1 },
+    });
+    expect(
+      await finalizeOrganizationRetentionDeletion(client.db, {
+        organizationId: owner!.organizationId,
+        membershipId: member.id,
+        operationId,
+      }),
+    ).toEqual(completed);
+    const [evidence] = await shared.admin<
+      Array<{
+        workspaceCount: number;
+        membershipCount: number;
+        personalWorkspaceId: string | null;
+        lifecycleEvents: number;
+        retentionEvents: number;
+        objectReceipts: number;
+        connectionCount: number;
+      }>
+    >`
+      select
+        (select count(*)::int from workspaces where id = ${personalWorkspaceId}) as "workspaceCount",
+        (select count(*)::int from organization_memberships where id = ${member.id}) as "membershipCount",
+        (select personal_workspace_id from organization_memberships where id = ${member.id}) as "personalWorkspaceId",
+        (select count(*)::int from organization_membership_lifecycle_events
+          where target_membership_id = ${member.id}) as "lifecycleEvents",
+        (select count(*)::int from organization_user_retention_deletion_events
+          where membership_id = ${member.id}) as "retentionEvents",
+        (select count(*)::int from organization_user_retention_object_receipts
+          where membership_id = ${member.id}) as "objectReceipts",
+        (select count(*)::int from connections where id = ${personalConnection.id}) as "connectionCount"`;
+    expect(evidence).toEqual({
+      workspaceCount: 0,
+      membershipCount: 1,
+      personalWorkspaceId: null,
+      lifecycleEvents: 2,
+      retentionEvents: 2,
+      objectReceipts: 1,
+      connectionCount: 0,
+    });
+  });
+
+  test("claims due memberships concurrently without duplicate ownership", async () => {
+    if (!shared || !client) return;
+    const ownerId = `claim-owner-${crypto.randomUUID()}`;
+    const ownerSubject = `user:${ownerId}`;
+    await provisionSelf(ownerId);
+    const [owner] = await listSelfOrganizationMemberships(client.db, ownerSubject);
+    const membershipIds = [crypto.randomUUID(), crypto.randomUUID()];
+    for (const membershipId of membershipIds) {
+      await shared.admin`
+        insert into organization_memberships (
+          id, account_id, subject_id, role, status, revoked_at, personal_retention_until
+        ) values (
+          ${membershipId}, ${owner!.organizationId}, ${`user:${crypto.randomUUID()}`},
+          'member', 'revoked', now(), now() - interval '1 day'
+        )`;
+    }
+    const operationIds = [crypto.randomUUID(), crypto.randomUUID()];
+    const claims = await Promise.all(
+      operationIds.map(
+        async (operationId) =>
+          await claimOrganizationRetentionDeletion(client!.db, {
+            organizationId: owner!.organizationId,
+            operationId,
+          }),
+      ),
+    );
+    expect(new Set(claims.map((claim) => claim?.membershipId))).toEqual(new Set(membershipIds));
+    await Promise.all(
+      claims.map(
+        async (claim) =>
+          await failOrganizationRetentionDeletion(client!.db, {
+            organizationId: owner!.organizationId,
+            membershipId: claim!.membershipId,
+            operationId: claim!.operationId,
+            reasonCode: "test_cleanup",
+          }),
+      ),
     );
   });
 
