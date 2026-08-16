@@ -218,8 +218,8 @@ Still required outside this workspace-local slice:
 
 - Personal/Organization promotion and explicit scope commands after their
   canonical cross-workspace authorities are active;
-- destination-owned automatic activation/undo controllers beyond inactive
-  proposal creation; and
+- automatic activation destinations beyond the workspace-scoped Knowledge,
+  Instruction Policy, and Preference lifecycles owned by migration 0269; and
 - bounded expiry cleanup and user-facing Advanced/search/export surfaces.
 
 Canonical implementation: `packages/contracts/src/task-notes.ts`,

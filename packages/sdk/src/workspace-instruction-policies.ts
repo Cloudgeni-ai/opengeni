@@ -11,7 +11,10 @@ export type WorkspaceInstructionPolicyDraftProvenanceSource = Exclude<
   WorkspaceInstructionPolicyProvenanceSource,
   "legacy_import"
 >;
-export type WorkspaceInstructionPolicyActivationType = "activate" | "rollback";
+export type WorkspaceInstructionPolicyActivationType =
+  | "activate"
+  | "rollback"
+  | "automatic_deactivate";
 
 export function normalizeWorkspaceInstructionPolicyRoleKey(value: string): string {
   return value.normalize("NFKC").trim().toLowerCase().replace(/\s+/gu, "-").replace(/-+/g, "-");
@@ -61,7 +64,7 @@ export type WorkspaceInstructionPolicyActivationEvent = WorkspaceInstructionPoli
   type: WorkspaceInstructionPolicyActivationType;
   activationVersion: number;
   oldRevision: WorkspaceInstructionPolicyRevisionIdentity | null;
-  newRevision: WorkspaceInstructionPolicyRevisionIdentity;
+  newRevision: WorkspaceInstructionPolicyRevisionIdentity | null;
   actorSubjectId: string;
   reason: string;
   createdAt: string;

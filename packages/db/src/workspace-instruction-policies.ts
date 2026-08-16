@@ -508,11 +508,14 @@ function eventFromRow(row: EventRow): WorkspaceInstructionPolicyActivationEvent 
             revision: row.oldRevision!,
             contentHash: row.oldContentHash!,
           },
-    newRevision: {
-      id: row.newRevisionId,
-      revision: row.newRevision,
-      contentHash: row.newContentHash,
-    },
+    newRevision:
+      row.newRevisionId === null
+        ? null
+        : {
+            id: row.newRevisionId,
+            revision: row.newRevision!,
+            contentHash: row.newContentHash!,
+          },
     actorSubjectId: row.actorSubjectId,
     reason: row.reason,
     createdAt: iso(row.createdAt),
@@ -558,6 +561,11 @@ function onboardingProposalFromRow(
 }
 
 function headFromEventRow(row: EventRow): WorkspaceInstructionPolicyHead {
+  if (row.newRevisionId === null || row.newRevision === null || row.newContentHash === null) {
+    throw new WorkspaceInstructionPolicyInvalidOperationError(
+      "A deactivation event cannot be replayed as an active instruction-policy head",
+    );
+  }
   return {
     workspaceId: row.workspaceId,
     kind: row.kind as WorkspaceInstructionPolicyKind,

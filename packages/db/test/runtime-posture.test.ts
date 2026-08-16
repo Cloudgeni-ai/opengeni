@@ -348,25 +348,25 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 257],
+            [FORCE_RLS_TABLES, 260],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 137],
-            [RUNTIME_READ_ONLY_TABLES, 17],
+            [RUNTIME_READ_ONLY_TABLES, 18],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 29],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 39],
-            [RUNTIME_DML_TABLES, 229],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 41],
+            [RUNTIME_DML_TABLES, 230],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 190],
+            [FORCE_RLS_TABLES, 192],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 112],
             [RUNTIME_READ_ONLY_TABLES, 16],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 38],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 23],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 25],
             [RUNTIME_DML_TABLES, 178],
           ] as const);
       for (const [tables, length] of contracts) {
@@ -380,7 +380,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 268 : 201;
+      const tableCount = hasCurrentMainActivityLedger ? 271 : 203;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
@@ -441,14 +441,14 @@ describe("runtime database posture evaluator", () => {
     }
 
     const contracts = [
-      [FORCE_RLS_TABLES, 212],
+      [FORCE_RLS_TABLES, 214],
       [NON_RLS_RUNTIME_TABLES, 11],
       [RUNTIME_FULL_DML_TABLES, 133],
       [RUNTIME_READ_ONLY_TABLES, 14],
       [RUNTIME_READ_UPDATE_TABLES, 1],
       [RUNTIME_READ_INSERT_TABLES, 41],
       [RUNTIME_READ_INSERT_UPDATE_TABLES, 18],
-      [PROTECTED_NO_DIRECT_DML_TABLES, 21],
+      [PROTECTED_NO_DIRECT_DML_TABLES, 23],
       [RUNTIME_DML_TABLES, 207],
     ] as const;
     for (const [tables, length] of contracts) {
@@ -458,8 +458,8 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(228);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(223);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(230);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(225);
     expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
       "SELECT",
       "INSERT",
@@ -678,12 +678,29 @@ describe("runtime database posture evaluator", () => {
   });
 
   test("classifies governed-learning receipts as FORCE-RLS capability-only state", () => {
-    expect(FORCE_RLS_TABLES).toContain("governed_learning_decision_receipts");
-    expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("governed_learning_decision_receipts");
-    expect(RUNTIME_TABLE_PRIVILEGES.governed_learning_decision_receipts).toBeUndefined();
+    for (const table of [
+      "governed_learning_decision_receipts",
+      "governed_learning_activation_receipts",
+      "governed_learning_activation_undo_receipts",
+    ] as const) {
+      expect(FORCE_RLS_TABLES).toContain(table);
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
+      expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
+    }
     expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
       "evaluate_governed_learning_proposal(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, uuid)",
     );
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
+      "activate_governed_learning_decision(uuid, uuid, uuid, uuid)",
+    );
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
+      "undo_governed_learning_activation(uuid, uuid, uuid, uuid)",
+    );
+    expect(FORCE_RLS_TABLES).toContain("workspace_instruction_policy_deactivation_events");
+    expect(RUNTIME_READ_ONLY_TABLES).toContain("workspace_instruction_policy_deactivation_events");
+    expect(RUNTIME_TABLE_PRIVILEGES.workspace_instruction_policy_deactivation_events).toEqual([
+      "SELECT",
+    ]);
   });
 
   test("requires same-owner Company Brain preference proposal authority", () => {

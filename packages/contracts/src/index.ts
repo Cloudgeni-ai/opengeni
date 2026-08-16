@@ -13611,6 +13611,7 @@ export * from "./preference-registry";
 export * from "./scoped-knowledge";
 export * from "./company-brain-governed-writes";
 export * from "./governed-learning-evaluator";
+export * from "./governed-learning-activation";
 export * from "./knowledge";
 export * from "./task-notes";
 export * from "./canonical-human-identities";

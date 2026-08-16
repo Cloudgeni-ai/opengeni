@@ -32,7 +32,11 @@ export type WorkspaceInstructionPolicyDraftProvenanceSource = z.infer<
   typeof WorkspaceInstructionPolicyDraftProvenanceSource
 >;
 
-export const WorkspaceInstructionPolicyActivationType = z.enum(["activate", "rollback"]);
+export const WorkspaceInstructionPolicyActivationType = z.enum([
+  "activate",
+  "rollback",
+  "automatic_deactivate",
+]);
 export type WorkspaceInstructionPolicyActivationType = z.infer<
   typeof WorkspaceInstructionPolicyActivationType
 >;
@@ -212,20 +216,36 @@ export type ResolvedWorkspaceInstructionPolicySnapshot = z.infer<
   typeof ResolvedWorkspaceInstructionPolicySnapshot
 >;
 
-export const WorkspaceInstructionPolicyActivationEvent = z.object({
-  id: z.string().uuid(),
-  operationId: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  ...targetShape,
-  type: WorkspaceInstructionPolicyActivationType,
-  activationVersion: z.number().int().positive(),
-  oldRevision: WorkspaceInstructionPolicyRevisionIdentity.nullable(),
-  newRevision: WorkspaceInstructionPolicyRevisionIdentity,
-  actorSubjectId: z.string().min(1),
-  reason: z.string().min(1).max(WORKSPACE_INSTRUCTION_POLICY_REASON_MAX_CHARS),
-  createdAt: z.string().datetime(),
-});
+export const WorkspaceInstructionPolicyActivationEvent = z
+  .object({
+    id: z.string().uuid(),
+    operationId: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    ...targetShape,
+    type: WorkspaceInstructionPolicyActivationType,
+    activationVersion: z.number().int().positive(),
+    oldRevision: WorkspaceInstructionPolicyRevisionIdentity.nullable(),
+    newRevision: WorkspaceInstructionPolicyRevisionIdentity.nullable(),
+    actorSubjectId: z.string().min(1),
+    reason: z.string().min(1).max(WORKSPACE_INSTRUCTION_POLICY_REASON_MAX_CHARS),
+    createdAt: z.string().datetime(),
+  })
+  .superRefine((event, ctx) => {
+    if (event.type === "automatic_deactivate") {
+      if (event.oldRevision === null || event.newRevision !== null) {
+        ctx.addIssue({
+          code: "custom",
+          message: "automatic deactivation requires an old revision and a null new revision",
+        });
+      }
+    } else if (event.newRevision === null) {
+      ctx.addIssue({
+        code: "custom",
+        message: "activation and rollback require a new revision",
+      });
+    }
+  });
 export type WorkspaceInstructionPolicyActivationEvent = z.infer<
   typeof WorkspaceInstructionPolicyActivationEvent
 >;

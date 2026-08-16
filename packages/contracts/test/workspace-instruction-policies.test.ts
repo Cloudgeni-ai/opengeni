@@ -142,6 +142,28 @@ describe("workspace instruction-policy contracts", () => {
     expect(event.type).toBe("rollback");
     expect(event.operationId).toBe("00000000-0000-4000-8000-000000000006");
     expect(event.oldRevision?.revision).toBe(11);
-    expect(event.newRevision.revision).toBe(7);
+    expect(event.newRevision!.revision).toBe(7);
+    expect(
+      WorkspaceInstructionPolicyActivationEvent.safeParse({
+        ...event,
+        type: "automatic_deactivate",
+        newRevision: null,
+      }).success,
+    ).toBe(true);
+    expect(
+      WorkspaceInstructionPolicyActivationEvent.safeParse({
+        ...event,
+        type: "automatic_deactivate",
+        oldRevision: null,
+        newRevision: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      WorkspaceInstructionPolicyActivationEvent.safeParse({
+        ...event,
+        type: "activate",
+        newRevision: null,
+      }).success,
+    ).toBe(false);
   });
 });

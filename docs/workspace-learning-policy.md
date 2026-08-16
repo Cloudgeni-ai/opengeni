@@ -41,7 +41,24 @@ Migration `0268_governed_learning_decision_receipts.sql` adds the first inert ev
 
 `automatic` is only an eligibility verdict. The evaluator has no destination-writer call, head privilege, activation grant, or reusable capability. Exact retries converge on the original receipt; a changed operation input, another task tree, another subject, or another proposal for the same accepted snapshot conflicts or denies. The receipt table is FORCE RLS with no direct runtime DML, and the app role can call only the target-schema-local SECURITY DEFINER evaluator.
 
-The future canonical durable-learning controller may consume this verdict, but this policy domain does not implement activation. Destination ownership remains:
+Migration `0269_governed_learning_activation_controller.sql` adds the separate,
+inert controller that may consume one final `automatic` receipt. It revalidates
+the accepted attempt and initiating human, current policy head and source
+override, current evidence ACL/lifecycle/hash, latest Knowledge review, inactive
+proposal, conflict facts, and destination CAS before invoking the destination's
+native lifecycle. A service actor performs the mutation while the causal human
+remains explicit; neither identity substitutes for the other. Immutable
+content-free activation and undo receipts bind every source/destination hash,
+version, event, and effective boundary.
+
+Undo is compensation, not history deletion. It succeeds only while both the
+automatic Knowledge review and destination head remain current. Knowledge adds
+an append-only revocation review, Preference uses its native deactivation
+lifecycle, and instruction policy restores the exact prior head. A first policy
+activation can therefore return to no head through the service-only
+`automatic_deactivate` event; accepted-turn event reconstruction observes that
+later null boundary. Human activation and rollback semantics are unchanged.
+Destination ownership remains:
 
 - Documents/RAG: evidence and retrieval only.
 - Memory: facts, decisions, observations, and history.
@@ -50,14 +67,13 @@ The future canonical durable-learning controller may consume this verdict, but t
 
 ## Explicit non-goals
 
-This slice does not implement:
+The controller deliberately does not implement:
 
-- the canonical durable-learning write router;
-- automatic activation control or destination mutation;
-- destination Memory, Preference Registry, charter, or policy mutation;
+- automatic Memory or company-profile mutation;
+- Personal or Organization scope expansion;
 - explicit session command/tool integration;
 - runtime prompt composition or automatic snapshot installation;
 - Workspace State/API/SDK/UI administration;
 - Slack notification delivery.
 
-Canonical policy code: `packages/contracts/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy-schema.ts`, and migration `0199_workspace_learning_policy.sql`. Canonical evaluator code: `packages/contracts/src/governed-learning-evaluator.ts`, `packages/core/src/domain/governed-learning-evaluator.ts`, `packages/db/src/governed-learning-evaluator.ts`, and migration `0268_governed_learning_decision_receipts.sql`.
+Canonical policy code: `packages/contracts/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy-schema.ts`, and migration `0199_workspace_learning_policy.sql`. Canonical evaluator code: `packages/contracts/src/governed-learning-evaluator.ts`, `packages/core/src/domain/governed-learning-evaluator.ts`, `packages/db/src/governed-learning-evaluator.ts`, and migration `0268_governed_learning_decision_receipts.sql`. Canonical activation code: `packages/contracts/src/governed-learning-activation.ts`, `packages/core/src/domain/governed-learning-activation.ts`, `packages/db/src/governed-learning-activation.ts`, and migration `0269_governed_learning_activation_controller.sql`.

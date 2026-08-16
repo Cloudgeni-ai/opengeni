@@ -128,6 +128,16 @@ writes the head plus an immutable event containing:
 - new revision id, number, and content hash;
 - activation version and timestamp.
 
+Migration `0269_governed_learning_activation_controller.sql` adds one narrow
+service-only compensation operation for an instruction policy activated from a
+final governed-learning `automatic` receipt. It cannot be called as the generic
+human lifecycle and does not change human activation or rollback. Exact undo is
+CAS-fenced to the controller's still-current activation. When that activation
+replaced no prior head, the operation removes only that exact head and appends
+an immutable `automatic_deactivate` event with a null new revision. Canonical
+accepted-turn reconstruction treats that later event as no active policy; the
+automatic activation remains in history and no evidence is deleted.
+
 Rollback never mutates history. Its target must be a revision that was previously
 active for the same target, and rollback creates a new activation event and a new
 head version.

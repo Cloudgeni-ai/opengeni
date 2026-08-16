@@ -358,7 +358,9 @@ Memory editor: `knowledge_memories.kind = preference` remains legacy,
 non-authoritative observation metadata. Documents, Memory, connectors, and
 imported sources remain evidence or inactive proposals and never directly
 activate registry state. The separately authorized governed-learning controller
-is the sole future automatic-activation seam.
+is the sole automatic-activation seam; it consumes only a final eligible
+decision receipt and revalidates the current destination head before calling
+the destination-native lifecycle.
 
 There is no instruction-policy activation/rollback UI, Memory promotion,
 Documents promotion, or general policy editor. The default overview links only
