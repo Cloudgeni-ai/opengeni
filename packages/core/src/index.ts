@@ -78,6 +78,7 @@ export * from "./domain/fiken";
 export * from "./domain/workspace-members";
 export * from "./domain/video-generation";
 export * from "./domain/video-generation-capabilities";
+export * from "./domain/organization-membership-lifecycle";
 export * from "./application/new-session-drafts";
 export * from "./application/session-commands";
 

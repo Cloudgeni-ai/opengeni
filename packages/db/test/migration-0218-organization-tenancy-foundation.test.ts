@@ -31,10 +31,10 @@ const tenancyTables = [
 // reflects migration 0219's managed-human lifecycle activation instead.
 const historicalTenancySystemOnlyPolicy = "organization_tenancy_system_only";
 const currentLedgerTenancyLifecyclePolicy = "organization_tenancy_lifecycle";
-const managedHumanTenancyLifecycleExpression =
-  "(current_setting('opengeni.organization_tenancy_lifecycle'::text, true) = 'managed_human_provisioning'::text)";
-const sessionVisibilityTenancyLifecycleExpression =
-  "(current_setting('opengeni.organization_tenancy_lifecycle'::text, true) = ANY (ARRAY['managed_human_provisioning'::text, 'session_visibility_activation'::text]))";
+const currentManagedHumanTenancyLifecycleExpression =
+  "(current_setting('opengeni.organization_tenancy_lifecycle'::text, true) = ANY (ARRAY['managed_human_provisioning'::text, 'organization_membership_lifecycle'::text]))";
+const currentSessionVisibilityTenancyLifecycleExpression =
+  "(current_setting('opengeni.organization_tenancy_lifecycle'::text, true) = ANY (ARRAY['managed_human_provisioning'::text, 'session_visibility_activation'::text, 'organization_membership_lifecycle'::text]))";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -140,7 +140,7 @@ describe("migration 0218 organization tenancy foundation", () => {
       `"session_id" IS NOT NULL\n      AND "authority_epoch" IS NOT NULL\n      AND "authority_epoch" > 0`,
     );
     expect(schema).toMatch(
-      /organization_user_retention_policies_duration_check[\s\S]*?\$\{table\.mode\} = 'delete_after'\s+and \$\{table\.retentionDays\} is not null\s+and \$\{table\.retentionDays\} between 1 and 3650/u,
+      /organization_user_retention_policies_duration_check[\s\S]*?\$\{table\.mode\} = 'delete_after'\s+and \$\{table\.retentionDays\} is not null\s+and \$\{table\.retentionDays\} between 30 and 90/u,
     );
     expect(schema).toMatch(
       /sessions_fork_provenance_check[\s\S]*?\$\{table\.forkedFromSessionId\} is not null\s+and \$\{table\.forkedFromAuthorityEpoch\} is not null\s+and \$\{table\.forkedFromAuthorityEpoch\} > 0/u,
@@ -517,17 +517,17 @@ describe("migration 0218 organization tenancy foundation", () => {
     `;
     // This shared database contains the complete current migration ledger, not
     // an isolated replay stopped at 0218. Therefore the live catalog must
-    // assert 0219's lifecycle policy while the static checks above preserve
-    // 0218's historical deny-all contract. Later migrations may add separate,
-    // narrowly scoped owner-only policies; their own migration tests own those
-    // contracts, while the direct app privilege checks below remain deny-all.
+    // assert the current lifecycle policy while the static checks above preserve
+    // 0218's historical deny-all contract. Migration 0263 retains managed-human
+    // provisioning and session-visibility activation while adding only its exact
+    // organization-membership capability; direct app privileges remain deny-all.
     expect([...policyRows]).toEqual(
       [...tenancyTables].sort().map((tableName) => {
         const lifecycleExpression =
           tableName === "organization_memberships" ||
           tableName === "organization_user_resource_grants"
-            ? sessionVisibilityTenancyLifecycleExpression
-            : managedHumanTenancyLifecycleExpression;
+            ? currentSessionVisibilityTenancyLifecycleExpression
+            : currentManagedHumanTenancyLifecycleExpression;
         return {
           tableName,
           rlsEnabled: true,

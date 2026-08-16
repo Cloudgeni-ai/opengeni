@@ -5325,7 +5325,12 @@ export type WorkspaceRealtimeModelCatalogResponse = z.infer<
 export const SessionRealtimeState = z.enum(["active", "ended"]);
 export type SessionRealtimeState = z.infer<typeof SessionRealtimeState>;
 
-export const SessionRealtimeEndReason = z.enum(["user_stop", "browser_unload", "lease_expired"]);
+export const SessionRealtimeEndReason = z.enum([
+  "user_stop",
+  "browser_unload",
+  "lease_expired",
+  "authority_revoked",
+]);
 export type SessionRealtimeEndReason = z.infer<typeof SessionRealtimeEndReason>;
 
 export const SessionRealtimeMode = z.object({
@@ -13459,3 +13464,4 @@ export * from "./company-brain-governed-writes";
 export * from "./knowledge";
 export * from "./task-notes";
 export * from "./canonical-human-identities";
+export * from "./organization-membership-lifecycle";

@@ -149,6 +149,97 @@ bearers, configured/local access, and missing or terminal memberships fail
 closed. The response intentionally omits subjects, retention state, grants,
 resource authority, and the runtime grant itself.
 
+## Organization membership lifecycle (0263)
+
+Migration `0263_organization_membership_lifecycle.sql` activates the bounded
+managed-human administration plane without making organization membership a
+workspace grant. Owners may invite an already-registered human as owner,
+administrator, or member; administrators may invite and manage members only.
+Acceptance is bound to the exact authenticated `user:<id>` named by the
+invitation. Pending invitations can be revoked. Role changes, suspension,
+reactivation, offboarding, and retention-policy changes require an exact
+revision plus an input-bound operation id. Exact retries return the immutable
+receipt; changed reuse and stale revisions fail closed. The last active owner
+cannot be demoted, suspended, or offboarded. Suspension is reversible only
+through an explicit owner-authorized reactivation. Offboarding is terminal: a
+revoked membership cannot be re-invited or accepted again. A future rejoin
+contract would need a new generation identity propagated through the immutable
+retention ledger; 0263 deliberately does not reset or reuse that evidence.
+
+The managed-human API surface is:
+
+- `GET /v1/organization-invitations` (bounded to 100 with the same deterministic
+  keyset cursor) and
+  `POST /v1/organization-invitations/:invitationId/accept` for the invited
+  human. Acceptance resolves only the exact subject-bound invitation id; it
+  never scans invitation history;
+- `GET|POST /v1/organizations/:organizationId/invitations` and its explicit
+  `/revoke` operation for owners/administrators. Listing is capped at 100 and
+  uses a deterministic `(created_at,id)` keyset represented by the last
+  returned invitation UUID; ordinary members and cross-organization callers
+  cannot enumerate invitation metadata;
+- `GET /v1/organizations/:organizationId/members` and
+  `PATCH /v1/organizations/:organizationId/members/:membershipId`; and
+- `GET|PATCH /v1/organizations/:organizationId/retention-policy`.
+
+These routes require a direct managed-human cookie session; API keys and
+delegated bearer requests are rejected. Provider email delivery and invitations
+for people who have not registered remain separate integrations.
+
+Suspension immediately removes persisted shared-workspace grants, revokes
+personal-resource grants, fences membership-owned sessions, terminally cancels
+their nonterminal work, and cancels shared-session work whose frozen initiating
+human is the suspended subject. Active realtime modes owned by that subject are
+ended with `authority_revoked`; their connections close and the durable workflow
+wake makes teardown repairable.
+Session, workspace-control, combined live, and interaction SSE connections
+re-resolve the current human access projection before every emitted frame and
+also on the bounded idle timer. A buffered or replayed event therefore fails
+closed after suspension or offboarding instead of retaining the grant captured
+when the HTTP request began.
+Reactivation restores only active organization and personal-workspace access,
+never old grants. Offboarding applies the same canonical
+workspace/session/turn/attempt teardown, then terminally revokes membership and
+retains resource authority and physical data. Owned-session authority epochs
+advance with content-free audit events; unrelated users' shared-session state
+is not changed. The lifecycle does not infer membership ownership for retained
+processes or other direct provider operations that lack an exact membership
+authority field; adding that attribution and stream-token invalidation belongs
+to the separate live-access hardening program. `retain` has no deletion deadline;
+`delete_after` accepts the initial 30–90 day policy window and stamps a bounded
+future deadline. Destructive expiry is an explicit operator lifecycle, not an
+API request or background service. The command
+`bun run db:sweep-organization-retention --organization-id <uuid> --dry-run`
+previews at most 100 due memberships, and
+the same command without `--dry-run` processes a bounded batch (`--limit`,
+default 10). Each member is claimed independently with `SKIP LOCKED`, exact
+operation and lease fences, so one provider failure records immutable
+content-free failure evidence without rolling back successful members.
+Database finalization first locks the personal workspace and every known
+storage-key source, materializes an immutable exact-key cleanup-obligation set,
+freezes the configured storage bucket, rejects any mismatched File bucket, and
+erases that user's personal workspace and supported personal resources.
+Foreign-key checks therefore serialize concurrent retained consumers and abort
+before external bytes are touched. The operator then deletes only those
+prepared objects and records separate content-free completion receipts; a
+provider failure retries only unfinished obligations, and every resume must
+present the same frozen bucket before deletion. The closed inventory
+covers Files, session recordings, browser-state uploads/artifacts,
+transcription and video staging objects, workspace artifact/editable blobs, and
+workspace-capture manifest/tree/blob payloads. Provider-native sandbox
+checkpoints remain under their surviving global GC authority. Unknown resource
+kinds or malformed/unrepresentable storage facts fail closed. Membership,
+lifecycle, grant/authority, cleanup-obligation, deletion-receipt, and event
+evidence is retained.
+
+Invitation, operation-receipt, and lifecycle-event tables are FORCE RLS with
+zero direct application-role DML. Target-schema-local SECURITY DEFINER routines
+are PUBLIC-revoked, explicitly granted, and pinned to
+`pg_catalog,<target-schema>,pg_temp`. Managed access refresh re-reads all active
+memberships for the subject and derives role-bounded account plus owner-only
+personal-workspace grants; inactive organizations disappear on the next
+request.
+
 ## Canonical human identity and login bindings
 
 Migration `0235_canonical_human_login_bindings.sql` adds a separate,
@@ -229,7 +320,7 @@ the access path.
 
 ## Later migration phases
 
-### B. Dual-write and first access projection (0219 current)
+### B. Dual-write and first access projection (0219)
 
 Managed-human membership and personal-workspace lifecycle metadata now use the
 narrow provisioning seam described above. The first disjoint activation adds
@@ -241,7 +332,15 @@ work; old writers remain accepted. Migration 0222 separately delivers the
 accepted-attempt authority snapshot and stale activity-write fence described in
 the Legacy behavior section.
 
-### C. Backfill
+### C. Membership lifecycle (0263 current)
+
+The invitation, role, suspension, reactivation, offboarding, retention,
+operator-driven destructive expiry, and multi-organization access projection
+described above are active. Provider email delivery, unregistered-recipient
+invitations, automatic scheduling of the operator command, and member-management
+UI remain deferred.
+
+### D. Backfill
 
 Classify every existing resource explicitly as workspace-owned unless there is
 reviewed, deterministic evidence for user ownership. Never infer user authority
@@ -250,7 +349,7 @@ or current access. Provision personal workspaces for active memberships through
 an idempotent lifecycle operation. Record backfill receipts and unresolved rows
 without widening access.
 
-### D. Validate
+### E. Validate
 
 Verify organization/membership/workspace consistency, one personal workspace
 per active membership, stable authority uniqueness, provider-account collision
@@ -258,7 +357,7 @@ rules, session ownership, and zero partial delegations. Add read-only shadow
 comparisons between legacy and proposed effective scopes. No mismatch may fall
 back to user authority.
 
-### E. Activate
+### F. Activate
 
 Add exact organization+subject+workspace RLS policies and narrowly scoped
 security-definer lifecycle functions. Switch one subsystem at a time to
@@ -268,23 +367,24 @@ session visibility mutation, visibility-aware reads, sharing/fork copying,
 cancellation, cache/pin stripping, and owner-only grants before enabling
 personal attachment to shared sessions.
 
-### F. Retire
+### G. Retire
 
 Only after all writers/readers are activated and audited may legacy
 workspace-owned assumptions be removed. Resource FKs are never destructively
 rewritten in the same release that first activates user authority.
 
-## Non-goals in Slices A and B
+## Remaining non-goals
 
-- organization invitation, role/admin, offboarding, or member-management UI;
+- member-management UI and provider invitation email;
+- invitations for unregistered humans;
 - a personal `workspace_memberships` row or delegated personal-workspace access;
 - user-resource authority/grant writes, discovery, or sharing;
 - resource CRUD or discovery changes;
 - session sharing/fork runtime;
-- turn/task cancellation;
 - session visibility mutation, visibility-aware reads, or independent fork
   runtime;
 - Connected Machine, rig, variable-set, connection, Codex, or Document
   materialization changes;
-- retention deletion workers;
+- an always-on retention deletion worker (0263 exposes a supported bounded
+  operator command instead);
 - provider, cloud, or deployment changes.

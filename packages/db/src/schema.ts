@@ -437,6 +437,7 @@ export const organizationMemberships = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     subjectId: text("subject_id").notNull(),
+    role: text("role").notNull().default("member"),
     status: text("status").notNull().default("provisioning"),
     personalWorkspaceId: uuid("personal_workspace_id"),
     authorizationRevision: bigint("authorization_revision", { mode: "number" })
@@ -461,6 +462,9 @@ export const organizationMemberships = pgTable(
     personalWorkspace: uniqueIndex("organization_memberships_personal_workspace_idx")
       .on(table.accountId, table.personalWorkspaceId)
       .where(sql`${table.personalWorkspaceId} is not null`),
+    retentionDue: index("organization_memberships_retention_due_idx")
+      .on(table.accountId, table.personalRetentionUntil, table.id)
+      .where(sql`${table.status} = 'revoked' and ${table.personalRetentionUntil} is not null`),
     personalWorkspaceAccount: foreignKey({
       name: "organization_memberships_personal_workspace_account_fk",
       columns: [table.personalWorkspaceId, table.accountId],
@@ -469,6 +473,10 @@ export const organizationMemberships = pgTable(
     statusValid: check(
       "organization_memberships_status_check",
       sql`${table.status} in ('provisioning', 'active', 'suspended', 'revoked')`,
+    ),
+    roleValid: check(
+      "organization_memberships_role_check",
+      sql`${table.role} in ('owner', 'admin', 'member')`,
     ),
     activePersonalWorkspace: check(
       "organization_memberships_active_personal_workspace_check",
@@ -518,12 +526,331 @@ export const organizationUserRetentionPolicies = pgTable(
         or (
           ${table.mode} = 'delete_after'
           and ${table.retentionDays} is not null
-          and ${table.retentionDays} between 1 and 3650
+          and ${table.retentionDays} between 30 and 90
         )`,
     ),
     versionValid: check(
       "organization_user_retention_policies_version_check",
       sql`${table.version} > 0`,
+    ),
+  }),
+);
+
+export const organizationMembershipInvitations = pgTable(
+  "organization_membership_invitations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    targetSubjectId: text("target_subject_id").notNull(),
+    targetEmail: text("target_email").notNull(),
+    role: text("role").notNull().default("member"),
+    status: text("status").notNull().default("pending"),
+    revision: bigint("revision", { mode: "number" }).notNull().default(1),
+    createdByMembershipId: uuid("created_by_membership_id").notNull(),
+    acceptedMembershipId: uuid("accepted_membership_id"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountIdentity: uniqueIndex("organization_membership_invitations_id_account_idx").on(
+      table.id,
+      table.accountId,
+    ),
+    pendingTarget: uniqueIndex("organization_membership_invitations_pending_target_uq")
+      .on(table.accountId, table.targetSubjectId)
+      .where(sql`${table.status} = 'pending'`),
+    accountCreated: index("organization_membership_invitations_account_created_idx").on(
+      table.accountId,
+      table.createdAt.desc(),
+      table.id.desc(),
+    ),
+    subjectCreated: index("organization_membership_invitations_subject_created_idx").on(
+      table.targetSubjectId,
+      table.createdAt.desc(),
+      table.id.desc(),
+    ),
+    creator: foreignKey({
+      name: "organization_membership_invitations_creator_fk",
+      columns: [table.createdByMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    acceptedMembership: foreignKey({
+      name: "organization_membership_invitations_accepted_membership_fk",
+      columns: [table.acceptedMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    roleValid: check(
+      "organization_membership_invitations_role_check",
+      sql`${table.role} in ('owner', 'admin', 'member')`,
+    ),
+    statusValid: check(
+      "organization_membership_invitations_status_check",
+      sql`${table.status} in ('pending', 'accepted', 'revoked', 'expired')`,
+    ),
+    revisionValid: check(
+      "organization_membership_invitations_revision_check",
+      sql`${table.revision} > 0`,
+    ),
+    acceptanceValid: check(
+      "organization_membership_invitations_acceptance_check",
+      sql`(${table.status} = 'accepted' and ${table.acceptedMembershipId} is not null)
+        or (${table.status} <> 'accepted' and ${table.acceptedMembershipId} is null)`,
+    ),
+  }),
+);
+
+export const organizationMembershipOperationReceipts = pgTable(
+  "organization_membership_operation_receipts",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    operationId: uuid("operation_id").notNull(),
+    action: text("action").notNull(),
+    inputHash: text("input_hash").notNull(),
+    result: jsonb("result").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    identity: primaryKey({ columns: [table.accountId, table.operationId] }),
+    actionValid: check(
+      "organization_membership_operation_receipts_action_check",
+      sql`${table.action} in ('invite', 'accept', 'revoke_invitation', 'change_role', 'suspend', 'reactivate', 'offboard', 'retention')`,
+    ),
+    inputHashValid: check(
+      "organization_membership_operation_receipts_input_hash_check",
+      sql`${table.inputHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+  }),
+);
+
+export const organizationMembershipLifecycleEvents = pgTable(
+  "organization_membership_lifecycle_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    operationId: uuid("operation_id").notNull(),
+    actorMembershipId: uuid("actor_membership_id").notNull(),
+    targetMembershipId: uuid("target_membership_id"),
+    kind: text("kind").notNull(),
+    priorAuthorizationRevision: bigint("prior_authorization_revision", {
+      mode: "number",
+    }),
+    resultingAuthorizationRevision: bigint("resulting_authorization_revision", {
+      mode: "number",
+    }),
+    reason: text("reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    operation: uniqueIndex("organization_membership_lifecycle_events_operation_uq").on(
+      table.accountId,
+      table.operationId,
+    ),
+    actor: foreignKey({
+      name: "organization_membership_lifecycle_events_actor_fk",
+      columns: [table.actorMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    target: foreignKey({
+      name: "organization_membership_lifecycle_events_target_fk",
+      columns: [table.targetMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    kindValid: check(
+      "organization_membership_lifecycle_events_kind_check",
+      sql`${table.kind} in ('invite', 'accept', 'revoke_invitation', 'change_role', 'suspend', 'reactivate', 'offboard', 'retention')`,
+    ),
+  }),
+);
+
+export const organizationUserRetentionDeletions = pgTable(
+  "organization_user_retention_deletions",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    membershipId: uuid("membership_id").notNull(),
+    retentionUntil: timestamp("retention_until", { withTimezone: true }).notNull(),
+    state: text("state").notNull().default("claimed"),
+    claimOperationId: uuid("claim_operation_id").notNull(),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }).notNull(),
+    attemptCount: integer("attempt_count").notNull().default(1),
+    databaseResult: jsonb("database_result").$type<Record<string, unknown>>(),
+    databaseFinalizedAt: timestamp("database_finalized_at", { withTimezone: true }),
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    identity: primaryKey({ columns: [table.accountId, table.membershipId] }),
+    operation: uniqueIndex("organization_user_retention_deletions_operation_uq").on(
+      table.claimOperationId,
+    ),
+    claim: index("organization_user_retention_deletions_claim_idx").on(
+      table.accountId,
+      table.state,
+      table.claimExpiresAt,
+    ),
+    membership: foreignKey({
+      name: "organization_user_retention_deletions_membership_fk",
+      columns: [table.membershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    stateValid: check(
+      "organization_user_retention_deletions_state_check",
+      sql`${table.state} in ('claimed', 'failed', 'completed')`,
+    ),
+    attemptValid: check(
+      "organization_user_retention_deletions_attempt_check",
+      sql`${table.attemptCount} > 0`,
+    ),
+    completionValid: check(
+      "organization_user_retention_deletions_completion_check",
+      sql`(${table.state} = 'completed' and ${table.completedAt} is not null and ${table.result} is not null)
+        or (${table.state} <> 'completed' and ${table.completedAt} is null and ${table.result} is null)`,
+    ),
+    databaseFinalizationValid: check(
+      "organization_retention_deletions_db_finalized_chk",
+      sql`(${table.databaseFinalizedAt} is null and ${table.databaseResult} is null)
+        or (${table.databaseFinalizedAt} is not null and ${table.databaseResult} is not null)`,
+    ),
+  }),
+);
+
+export const organizationUserRetentionObjectObligations = pgTable(
+  "organization_user_retention_object_obligations",
+  {
+    accountId: uuid("account_id").notNull(),
+    membershipId: uuid("membership_id").notNull(),
+    objectKind: text("object_kind").notNull(),
+    sourceId: text("source_id").notNull(),
+    objectBucket: text("object_bucket").notNull(),
+    objectKey: text("object_key").notNull(),
+    preparedOperationId: uuid("prepared_operation_id").notNull(),
+    objectKeyHash: text("object_key_hash").notNull(),
+    preparedAt: timestamp("prepared_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    identity: primaryKey({
+      columns: [
+        table.accountId,
+        table.membershipId,
+        table.objectKind,
+        table.sourceId,
+        table.objectBucket,
+      ],
+    }),
+    deletion: foreignKey({
+      name: "organization_retention_object_obligations_deletion_fk",
+      columns: [table.accountId, table.membershipId],
+      foreignColumns: [
+        organizationUserRetentionDeletions.accountId,
+        organizationUserRetentionDeletions.membershipId,
+      ],
+    }).onDelete("restrict"),
+    hashValid: check(
+      "organization_user_retention_object_obligations_hash_check",
+      sql`${table.objectKeyHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    shapeValid: check(
+      "organization_user_retention_object_obligations_shape_check",
+      sql`${table.objectKind} in (
+          'file', 'session_recording', 'browser_state_artifact', 'browser_state_upload',
+          'transcription_recording_object', 'video_staging_reference',
+          'workspace_artifact_version', 'editable_artifact_blob',
+          'workspace_capture_manifest', 'workspace_capture_tree_index',
+          'workspace_capture_blob'
+        )
+        and octet_length(${table.sourceId}) between 1 and 2048
+        and octet_length(${table.objectBucket}) between 1 and 1024
+        and octet_length(${table.objectKey}) between 1 and 4096`,
+    ),
+  }),
+);
+
+export const organizationUserRetentionObjectDeletionReceipts = pgTable(
+  "organization_user_retention_object_deletion_receipts",
+  {
+    accountId: uuid("account_id").notNull(),
+    membershipId: uuid("membership_id").notNull(),
+    objectKind: text("object_kind").notNull(),
+    sourceId: text("source_id").notNull(),
+    objectBucket: text("object_bucket").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    identity: primaryKey({
+      columns: [
+        table.accountId,
+        table.membershipId,
+        table.objectKind,
+        table.sourceId,
+        table.objectBucket,
+      ],
+    }),
+    obligation: foreignKey({
+      name: "organization_retention_object_deletions_obligation_fk",
+      columns: [
+        table.accountId,
+        table.membershipId,
+        table.objectKind,
+        table.sourceId,
+        table.objectBucket,
+      ],
+      foreignColumns: [
+        organizationUserRetentionObjectObligations.accountId,
+        organizationUserRetentionObjectObligations.membershipId,
+        organizationUserRetentionObjectObligations.objectKind,
+        organizationUserRetentionObjectObligations.sourceId,
+        organizationUserRetentionObjectObligations.objectBucket,
+      ],
+    }).onDelete("restrict"),
+  }),
+);
+
+export const organizationUserRetentionDeletionEvents = pgTable(
+  "organization_user_retention_deletion_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    membershipId: uuid("membership_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    kind: text("kind").notNull(),
+    reasonCode: text("reason_code"),
+    result: jsonb("result").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    operationKind: uniqueIndex("organization_user_retention_deletion_events_operation_kind_uq").on(
+      table.accountId,
+      table.operationId,
+      table.kind,
+    ),
+    membershipCreated: index("organization_retention_events_member_created_idx").on(
+      table.accountId,
+      table.membershipId,
+      table.createdAt,
+      table.id,
+    ),
+    membership: foreignKey({
+      name: "organization_user_retention_deletion_events_membership_fk",
+      columns: [table.membershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    kindValid: check(
+      "organization_user_retention_deletion_events_kind_check",
+      sql`${table.kind} in ('claimed', 'failed', 'completed')`,
+    ),
+    reasonValid: check(
+      "organization_user_retention_deletion_events_reason_check",
+      sql`${table.reasonCode} is null or ${table.reasonCode} ~ '^[a-z0-9_]{1,64}$'`,
     ),
   }),
 );
@@ -3156,7 +3483,7 @@ export const sessionRealtimeModes = pgTable(
     ),
     endReasonValid: check(
       "session_realtime_modes_end_reason_check",
-      sql`${table.endReason} is null or ${table.endReason} in ('user_stop', 'browser_unload', 'lease_expired')`,
+      sql`${table.endReason} is null or ${table.endReason} in ('user_stop', 'browser_unload', 'lease_expired', 'authority_revoked')`,
     ),
     versionValid: check("session_realtime_modes_version_check", sql`${table.version} >= 1`),
     epochValid: check("session_realtime_modes_epoch_check", sql`${table.connectionEpoch} >= 1`),
@@ -5574,7 +5901,7 @@ export const sessionAttemptInterruptions = pgTable(
       .where(sql`${table.state} in ('pending', 'delivered', 'acknowledged')`),
     kindValid: check(
       "session_attempt_interruptions_kind_check",
-      sql`${table.kind} in ('session_pause', 'workspace_pause', 'steer', 'maintenance')`,
+      sql`${table.kind} in ('session_pause', 'workspace_pause', 'steer', 'maintenance', 'authority_change', 'organization_membership_revoked')`,
     ),
     stateValid: check(
       "session_attempt_interruptions_state_check",

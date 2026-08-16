@@ -5,6 +5,7 @@ import {
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
   ModelContextContributionSummaries,
+  OrganizationMember,
   SessionGoalSnapshot,
   sessionGoalUtf8Bytes,
 } from "@opengeni/contracts";
@@ -373,6 +374,8 @@ export * from "./capability-integrations";
 export * from "./integration-bindings";
 export * from "./integration-facets";
 export * from "./insights";
+export * from "./organization-membership-lifecycle";
+import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
 export { memoryTextForStorage } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
 // The `@opengeni/db/migrate` subpath stays available too (internal callers + the
@@ -1175,6 +1178,14 @@ export const allAccountPermissions: Permission[] = [
   "api_keys:manage",
 ];
 
+function accountPermissionsForOrganizationRole(role: "owner" | "admin" | "member"): Permission[] {
+  if (role === "owner") return allAccountPermissions;
+  if (role === "admin") {
+    return ["account:read", "members:manage", "workspace:create", "billing:read"];
+  }
+  return ["account:read"];
+}
+
 export type BootstrapWorkspaceInput = {
   accountExternalSource: string;
   accountExternalId: string;
@@ -1444,6 +1455,117 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
     if (!account) {
       throw new Error("Failed to ensure managed account");
     }
+    await setRlsContext(tx as unknown as Database, {
+      accountId: account.id,
+      workspaceId: null,
+    });
+    await setSubjectRlsContext(tx as unknown as Database, subjectId);
+    const [existingOrganizationMembershipResult] = await rawRows<{ result: unknown }>(
+      tx,
+      sql`select list_self_organization_memberships(${subjectId}) as result`,
+    );
+    const existingOrganizationMemberships = OrganizationMember.array().parse(
+      existingOrganizationMembershipResult?.result ?? [],
+    );
+    const selfOrganizationMembership = existingOrganizationMemberships.find(
+      (organizationMembership) => organizationMembership.organizationId === account.id,
+    );
+    if (
+      selfOrganizationMembership?.status === "suspended" ||
+      selfOrganizationMembership?.status === "revoked"
+    ) {
+      const activeOrganizationMemberships = existingOrganizationMemberships.flatMap(
+        (organizationMembership) =>
+          organizationMembership.status === "active" &&
+          organizationMembership.personalWorkspaceId !== null
+            ? [
+                {
+                  ...organizationMembership,
+                  status: "active" as const,
+                  personalWorkspaceId: organizationMembership.personalWorkspaceId,
+                },
+              ]
+            : [],
+      );
+      if (activeOrganizationMemberships.length === 0) {
+        await assertActiveManagedHumanOrganizationMembership(tx as unknown as Database, {
+          accountId: account.id,
+          subjectId,
+        });
+        throw new Error("Inactive managed organization unexpectedly passed active membership");
+      }
+      const workspaceGrants: AccessGrant[] = [];
+      for (const organizationMembership of activeOrganizationMemberships) {
+        await setRlsContext(tx as unknown as Database, {
+          accountId: organizationMembership.organizationId,
+          workspaceId: null,
+        });
+        const persistedMemberships = await tx
+          .select({
+            membership: schema.workspaceMemberships,
+            workspace: schema.workspaces,
+          })
+          .from(schema.workspaceMemberships)
+          .innerJoin(
+            schema.workspaces,
+            eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
+          )
+          .where(eq(schema.workspaceMemberships.subjectId, subjectId))
+          .orderBy(desc(schema.workspaces.createdAt));
+        workspaceGrants.push(
+          ...persistedMemberships.map((row) => ({
+            workspaceId: row.workspace.id,
+            accountId: row.workspace.accountId,
+            subjectId,
+            subjectLabel,
+            permissions: row.membership.permissions as Permission[],
+            principalKind: "human_session" as const,
+          })),
+        );
+      }
+      for (const organizationMembership of activeOrganizationMemberships) {
+        if (
+          !workspaceGrants.some(
+            (grant) => grant.workspaceId === organizationMembership.personalWorkspaceId,
+          )
+        ) {
+          workspaceGrants.push({
+            workspaceId: organizationMembership.personalWorkspaceId,
+            accountId: organizationMembership.organizationId,
+            subjectId,
+            subjectLabel,
+            permissions: managedPersonalWorkspacePermissions,
+            principalKind: "human_session",
+          });
+        }
+      }
+      const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
+      const defaultWorkspaceId =
+        workspaceGrants.find((grant) => grant.accountId === defaultAccountId)?.workspaceId ?? null;
+      return {
+        accessContext: {
+          mode: "managed",
+          subjectId,
+          subjectLabel,
+          accountGrants: activeOrganizationMemberships.map((organizationMembership) => ({
+            accountId: organizationMembership.organizationId,
+            subjectId,
+            subjectLabel,
+            role: organizationMembership.role,
+            permissions: accountPermissionsForOrganizationRole(organizationMembership.role),
+          })),
+          workspaceGrants,
+          defaultAccountId,
+          defaultWorkspaceId,
+        },
+        organizationMemberships: activeOrganizationMemberships.map((organizationMembership) => ({
+          id: organizationMembership.id,
+          organizationId: organizationMembership.organizationId,
+          status: "active" as const,
+          personalWorkspaceId: organizationMembership.personalWorkspaceId,
+        })),
+      };
+    }
     let [defaultWorkspace] = await tx
       .select()
       .from(schema.workspaces)
@@ -1642,6 +1764,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       accountId: account.id,
       workspaceId: null,
     });
+    await setSubjectRlsContext(tx as unknown as Database, subjectId);
     const memberships = await tx
       .select({
         membership: schema.workspaceMemberships,
@@ -1662,40 +1785,104 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       permissions: row.membership.permissions as Permission[],
       principalKind: "human_session",
     }));
-    workspaceGrants.push({
-      workspaceId: provisionedMembership.personal_workspace_id,
-      accountId: account.id,
-      subjectId,
-      subjectLabel,
-      permissions: managedPersonalWorkspacePermissions,
-      principalKind: "human_session",
-    });
+    const [organizationMembershipResult] = await rawRows<{ result: unknown }>(
+      tx,
+      sql`select list_self_organization_memberships(${subjectId}) as result`,
+    );
+    const projectedOrganizationMemberships = OrganizationMember.array().parse(
+      organizationMembershipResult?.result ?? [],
+    );
+    const inactiveOrganizationIds = new Set(
+      projectedOrganizationMemberships
+        .filter((organizationMembership) => organizationMembership.status !== "active")
+        .map((organizationMembership) => organizationMembership.organizationId),
+    );
+    for (let index = workspaceGrants.length - 1; index >= 0; index -= 1) {
+      if (inactiveOrganizationIds.has(workspaceGrants[index]!.accountId)) {
+        workspaceGrants.splice(index, 1);
+      }
+    }
+    const activeOrganizationMemberships = projectedOrganizationMemberships.flatMap(
+      (organizationMembership) =>
+        organizationMembership.status === "active" &&
+        organizationMembership.personalWorkspaceId !== null
+          ? [
+              {
+                ...organizationMembership,
+                status: "active" as const,
+                personalWorkspaceId: organizationMembership.personalWorkspaceId,
+              },
+            ]
+          : [],
+    );
+    for (const organizationMembership of activeOrganizationMemberships) {
+      if (organizationMembership.organizationId === account.id) continue;
+      await setRlsContext(tx as unknown as Database, {
+        accountId: organizationMembership.organizationId,
+        workspaceId: null,
+      });
+      const persistedOrganizationMemberships = await tx
+        .select({
+          membership: schema.workspaceMemberships,
+          workspace: schema.workspaces,
+        })
+        .from(schema.workspaceMemberships)
+        .innerJoin(
+          schema.workspaces,
+          eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
+        )
+        .where(eq(schema.workspaceMemberships.subjectId, subjectId))
+        .orderBy(desc(schema.workspaces.createdAt));
+      for (const row of persistedOrganizationMemberships) {
+        if (workspaceGrants.some((grant) => grant.workspaceId === row.workspace.id)) continue;
+        workspaceGrants.push({
+          workspaceId: row.workspace.id,
+          accountId: row.workspace.accountId,
+          subjectId,
+          subjectLabel,
+          permissions: row.membership.permissions as Permission[],
+          principalKind: "human_session",
+        });
+      }
+    }
+    for (const organizationMembership of activeOrganizationMemberships) {
+      if (
+        !workspaceGrants.some(
+          (grant) => grant.workspaceId === organizationMembership.personalWorkspaceId,
+        )
+      ) {
+        workspaceGrants.push({
+          workspaceId: organizationMembership.personalWorkspaceId,
+          accountId: organizationMembership.organizationId,
+          subjectId,
+          subjectLabel,
+          permissions: managedPersonalWorkspacePermissions,
+          principalKind: "human_session",
+        });
+      }
+    }
     return {
       accessContext: {
         mode: "managed",
         subjectId,
         subjectLabel,
-        accountGrants: [
-          {
-            accountId: account.id,
-            subjectId,
-            subjectLabel,
-            role: "owner",
-            permissions: allAccountPermissions,
-          },
-        ],
+        accountGrants: activeOrganizationMemberships.map((organizationMembership) => ({
+          accountId: organizationMembership.organizationId,
+          subjectId,
+          subjectLabel,
+          role: organizationMembership.role,
+          permissions: accountPermissionsForOrganizationRole(organizationMembership.role),
+        })),
         workspaceGrants,
         defaultAccountId: account.id,
         defaultWorkspaceId: defaultWorkspace.id,
       },
-      organizationMemberships: [
-        {
-          id: provisionedMembership.organization_membership_id,
-          organizationId: account.id,
-          status: "active",
-          personalWorkspaceId: provisionedMembership.personal_workspace_id,
-        },
-      ],
+      organizationMemberships: activeOrganizationMemberships.map((organizationMembership) => ({
+        id: organizationMembership.id,
+        organizationId: organizationMembership.organizationId,
+        status: "active" as const,
+        personalWorkspaceId: organizationMembership.personalWorkspaceId,
+      })),
     };
   });
 }
@@ -24370,6 +24557,20 @@ async function createSessionInTransaction(
     input.workspaceId,
     input.accountId,
   );
+  if (
+    input.createdBy?.kind === "subject" &&
+    input.subjectId !== null &&
+    input.subjectId !== undefined
+  ) {
+    if (input.subjectId !== input.createdBy.subjectId) {
+      throw new Error("Managed-human session creator does not match authenticated subject");
+    }
+    await setSubjectRlsContext(tx, input.createdBy.subjectId);
+    await assertActiveManagedHumanOrganizationMembership(tx, {
+      accountId: input.accountId,
+      subjectId: input.createdBy.subjectId,
+    });
+  }
   if (createIdempotencyKey !== null) {
     // Keyed admission retains the control -> advisory order used by old
     // binaries during the rolling migration. The database depth trigger takes
@@ -48629,6 +48830,13 @@ export async function enqueueSessionTurn(
           input.sessionId,
           { lock: "share" },
         );
+        if (input.initiator.kind === "subject") {
+          await setSubjectRlsContext(tx as unknown as Database, input.initiator.subjectId);
+          await assertActiveManagedHumanOrganizationMembership(tx as unknown as Database, {
+            accountId: input.accountId,
+            subjectId: input.initiator.subjectId,
+          });
+        }
         const [lockedSession] = await tx
           .select()
           .from(schema.sessions)
@@ -51353,9 +51561,13 @@ export async function settleSessionAttemptInterruptions(
       }
 
       const terminalCancel = session.status === "cancelled";
+      const membershipAuthorityRevoked = interruptions.some(
+        (interruption) => interruption.kind === "organization_membership_revoked",
+      );
+      const terminalTurnCancel = terminalCancel || membershipAuthorityRevoked;
       const steer =
-        !terminalCancel && interruptions.some((interruption) => interruption.kind === "steer");
-      const outcome: SessionTurnAttemptOutcome = terminalCancel
+        !terminalTurnCancel && interruptions.some((interruption) => interruption.kind === "steer");
+      const outcome: SessionTurnAttemptOutcome = terminalTurnCancel
         ? "cancelled"
         : steer
           ? "superseded"
@@ -51369,14 +51581,16 @@ export async function settleSessionAttemptInterruptions(
         attempt.quiescedAt !== null;
       const reason = terminalCancel
         ? "session_cancelled"
-        : steer
-          ? "steer"
-          : interruptions.some((interruption) => interruption.kind === "workspace_pause")
-            ? "workspace_pause"
-            : interruptions.some((interruption) => interruption.kind === "maintenance")
-              ? "maintenance"
-              : "session_pause";
-      if (terminalCancel || steer) {
+        : membershipAuthorityRevoked
+          ? "authority_changed"
+          : steer
+            ? "steer"
+            : interruptions.some((interruption) => interruption.kind === "workspace_pause")
+              ? "workspace_pause"
+              : interruptions.some((interruption) => interruption.kind === "maintenance")
+                ? "maintenance"
+                : "session_pause";
+      if (terminalTurnCancel || steer) {
         await cancelTurnInteractionInterventionsInTransaction(tx as unknown as Database, {
           accountId: session.accountId,
           workspaceId,
@@ -51408,7 +51622,7 @@ export async function settleSessionAttemptInterruptions(
         outcome,
         closedAt: now,
       });
-      const eventValues: SessionEventInsertWithPayload[] = terminalCancel
+      const eventValues: SessionEventInsertWithPayload[] = terminalTurnCancel
         ? [
             {
               accountId: session.accountId,
@@ -51505,12 +51719,14 @@ export async function settleSessionAttemptInterruptions(
       await tx
         .update(schema.sessionTurns)
         .set(
-          terminalCancel
+          terminalTurnCancel
             ? {
                 status: "cancelled",
                 activeAttemptId: null,
                 metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
-                cancelledBy: "system:session_cancelled",
+                cancelledBy: terminalCancel
+                  ? "system:session_cancelled"
+                  : "system:authority_changed",
                 cancelReason: reason,
                 version: turn.version + 1,
                 finishedAt: turn.finishedAt ?? now,
@@ -51537,21 +51753,60 @@ export async function settleSessionAttemptInterruptions(
                 },
         )
         .where(eq(schema.sessionTurns.id, turn.id));
-      await tx
-        .update(schema.sessions)
-        .set({
-          status: terminalCancel
-            ? "cancelled"
-            : steer
-              ? "queued"
-              : pausedRecoveryAlreadyQuiesced
-                ? "idle"
-                : "recovering",
-          activeTurnId: terminalCancel || steer ? null : turn.id,
-          lastSequence: sequence,
-          updatedAt: now,
-        })
-        .where(eq(schema.sessions.id, sessionId));
+      if (membershipAuthorityRevoked && !terminalCancel) {
+        await tx.execute(sql`
+          update sessions session_row
+          set status = case
+                when exists (
+                  select 1 from session_turns queued_turn
+                  where queued_turn.account_id = session_row.account_id
+                    and queued_turn.workspace_id = session_row.workspace_id
+                    and queued_turn.session_id = session_row.id
+                    and queued_turn.status = 'queued'
+                ) then 'queued'
+                else 'idle'
+              end,
+              active_turn_id = null,
+              queue_head_position = coalesce((
+                select min(queued_turn.position)
+                from session_turns queued_turn
+                where queued_turn.account_id = session_row.account_id
+                  and queued_turn.workspace_id = session_row.workspace_id
+                  and queued_turn.session_id = session_row.id
+                  and queued_turn.status = 'queued'
+              ), 0),
+              queue_tail_position = coalesce((
+                select max(queued_turn.position)
+                from session_turns queued_turn
+                where queued_turn.account_id = session_row.account_id
+                  and queued_turn.workspace_id = session_row.workspace_id
+                  and queued_turn.session_id = session_row.id
+                  and queued_turn.status = 'queued'
+              ), 0),
+              queue_version = session_row.queue_version + 1,
+              last_sequence = ${sequence},
+              updated_at = clock_timestamp()
+          where session_row.account_id = ${session.accountId}
+            and session_row.workspace_id = ${workspaceId}
+            and session_row.id = ${sessionId}
+        `);
+      } else {
+        await tx
+          .update(schema.sessions)
+          .set({
+            status: terminalCancel
+              ? "cancelled"
+              : steer
+                ? "queued"
+                : pausedRecoveryAlreadyQuiesced
+                  ? "idle"
+                  : "recovering",
+            activeTurnId: terminalCancel || steer ? null : turn.id,
+            lastSequence: sequence,
+            updatedAt: now,
+          })
+          .where(eq(schema.sessions.id, sessionId));
+      }
       await tx
         .update(schema.sessionAttemptInterruptions)
         .set({

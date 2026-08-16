@@ -710,6 +710,47 @@ export async function withWorkspaceSessionActivityRls<T>(
 }
 
 /**
+ * Run one of several ordered workspace activity scopes inside a caller-owned
+ * transaction. Each scope is fully finalized before restoring the caller's
+ * gate GUCs, so the next workspace can reuse the same outer transaction.
+ */
+export async function withRestoredSessionActivityRlsContext<T>(
+  db: Database,
+  context: RlsContext & { workspaceId: string },
+  fn: (db: SessionActivityDatabase) => Promise<T>,
+): Promise<T> {
+  if (!isTransactionHandle(db)) {
+    throw new Error("Sequential workspace activity scopes require a caller-owned transaction");
+  }
+  const [prior] = await rawRows<{ state: string; workspace_id: string }>(
+    db,
+    sql`select
+      coalesce(current_setting('opengeni.session_activity_gate_state', true), '') as state,
+      coalesce(
+        current_setting('opengeni.session_activity_gate_workspace_id', true), ''
+      ) as workspace_id`,
+  );
+  try {
+    return await withRlsContext(db, context, async (scopedDb) => {
+      const gate = await beginSessionActivityGate(scopedDb, context.workspaceId);
+      if (!gate.owner) {
+        throw new Error("Sequential workspace activity scope unexpectedly reused an open gate");
+      }
+      const value = await fn(gate.db);
+      await assertRlsContextApplied(gate.db, context);
+      await finalizeSessionActivityGate(gate.db, context.workspaceId);
+      return value;
+    });
+  } finally {
+    await db.execute(sql`select
+      set_config('opengeni.session_activity_gate_state', ${prior?.state ?? ""}, true),
+      set_config(
+        'opengeni.session_activity_gate_workspace_id', ${prior?.workspace_id ?? ""}, true
+      )`);
+  }
+}
+
+/**
  * Open one nested savepoint without losing the gate brand. Drizzle correctly
  * preserves the backend-local gate GUCs, but its structural transaction type
  * cannot express that provenance; keep the single trusted rebrand here.
