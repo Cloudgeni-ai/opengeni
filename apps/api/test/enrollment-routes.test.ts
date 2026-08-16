@@ -312,6 +312,65 @@ describe("M5 authz: unauthenticated + cross-workspace approve are rejected", () 
     expect(res.status).toBe(403);
   }, 60_000);
 
+  test("organization publication requires account admin while an account admin can approve it", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const app = appFor();
+    const start = async (publicKey: string) =>
+      (await (
+        await app.request("/v1/enrollments/device/start", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ publicKey, workspaceId }),
+        })
+      ).json()) as { userCode: string };
+
+    const deniedStart = await start("ed25519:ORG-DENIED");
+    const denied = await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/approve`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}`,
+      },
+      body: JSON.stringify({
+        userCode: deniedStart.userCode,
+        allowScreenControl: false,
+        scope: "organization",
+      }),
+    });
+    expect(denied.status).toBe(403);
+
+    const approvedStart = await start("ed25519:ORG-APPROVED");
+    const approved = await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/approve`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await bearer(accountId, workspaceId, [
+          "enrollments:manage",
+          "enrollments:read",
+          "account:admin",
+        ])}`,
+      },
+      body: JSON.stringify({
+        userCode: approvedStart.userCode,
+        allowScreenControl: false,
+        scope: "organization",
+      }),
+    });
+    expect(approved.status).toBe(201);
+    const list = await app.request(`/v1/workspaces/${workspaceId}/enrollments`, {
+      headers: {
+        authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`,
+      },
+    });
+    expect(list.status).toBe(200);
+    expect(
+      ((await list.json()) as { enrollments: Array<{ scope: string }> }).enrollments.some(
+        (enrollment) => enrollment.scope === "organization",
+      ),
+    ).toBe(true);
+  }, 90_000);
+
   test("a workspace-B bearer cannot approve a flow started for workspace A (rejected)", async () => {
     if (!available) return;
     const a = await freshWorkspace();

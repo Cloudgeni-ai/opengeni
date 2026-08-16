@@ -50,7 +50,11 @@ import {
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  requirePermission,
+} from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   approveDeviceEnrollment,
@@ -88,7 +92,10 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   const lookupLimiter = new TokenBucket({ capacity: 30, refillPerSecond: 1 });
   // The headless token exchange (UNAUTHENTICATED — the token is the auth). Bounded
   // against an enroll-token brute force; the `oget_` HMAC is the real boundary.
-  const exchangeLimiter = new TokenBucket({ capacity: 20, refillPerSecond: 0.5 });
+  const exchangeLimiter = new TokenBucket({
+    capacity: 20,
+    refillPerSecond: 0.5,
+  });
 
   function rateLimit(c: Context, limiter: TokenBucket): void {
     const ip = clientIp(c);
@@ -156,7 +163,9 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     rateLimit(c, lookupLimiter);
     const parsed = DeviceEnrollmentLookupRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid device-lookup request" });
+      throw new HTTPException(400, {
+        message: "invalid device-lookup request",
+      });
     }
     const record = await lookupDeviceEnrollment(
       { db, settings },
@@ -165,7 +174,9 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!record) {
       // Unknown / terminal / expired code → 404 (indistinguishable from an
       // unauthorized one below, by design).
-      throw new HTTPException(404, { message: "no pending enrollment for that code" });
+      throw new HTTPException(404, {
+        message: "no pending enrollment for that code",
+      });
     }
     // Authorize the caller against the RESOLVED workspace. A missing grant throws
     // 403/404 from requireAccessGrant; we normalize that to 404 so a caller cannot
@@ -173,7 +184,9 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     try {
       await requireAccessGrant(c, deps, record.workspaceId, "enrollments:read");
     } catch {
-      throw new HTTPException(404, { message: "no pending enrollment for that code" });
+      throw new HTTPException(404, {
+        message: "no pending enrollment for that code",
+      });
     }
     return c.json(DeviceEnrollmentLookupResponse.parse(toLookupResponse(record)), 200);
   });
@@ -189,7 +202,9 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     rateLimit(c, exchangeLimiter);
     const parsed = EnrollTokenExchangeRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid enroll-token-exchange request" });
+      throw new HTTPException(400, {
+        message: "invalid enroll-token-exchange request",
+      });
     }
     const body = parsed.data;
     const result = await exchangeEnrollToken(
@@ -206,10 +221,14 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!result.ok) {
       if (result.reason === "disabled") {
         // The credential plane is off for this deployment (no signing secret).
-        throw new HTTPException(503, { message: "enrollment credential plane is not configured" });
+        throw new HTTPException(503, {
+          message: "enrollment credential plane is not configured",
+        });
       }
       // An invalid / expired / wrong-typ token — the token is the auth, so 401.
-      throw new HTTPException(401, { message: "invalid or expired enroll token" });
+      throw new HTTPException(401, {
+        message: "invalid or expired enroll token",
+      });
     }
     return c.json(EnrollTokenExchangeResponse.parse({ credentials: result.credentials }), 201);
   });
@@ -218,18 +237,48 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // The LOUD CONSENT step. requireAccessGrant BEFORE the Zod parse.
   app.post("/v1/workspaces/:workspaceId/enrollments/device/approve", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:manage");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const grant = authorization.grant;
+    requirePermission(grant, "enrollments:manage");
     assertSelfhostedEnabled();
-    const parsed = DeviceEnrollmentApproveRequest.safeParse(await c.req.json().catch(() => null));
+    const rawBody = await c.req.json().catch(() => null);
+    const parsed = DeviceEnrollmentApproveRequest.safeParse(rawBody);
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid device-approve request" });
+      throw new HTTPException(400, {
+        message: "invalid device-approve request",
+      });
     }
     const body = parsed.data;
+    const scopeWasExplicit =
+      typeof rawBody === "object" &&
+      rawBody !== null &&
+      Object.prototype.hasOwnProperty.call(rawBody, "scope");
+    // Managed browser humans get the personal default. Legacy/delegated
+    // principals predate organization-user ownership and retain the compatible
+    // workspace default when the caller omitted scope; an explicit scope is
+    // never silently rewritten.
+    const effectiveScope =
+      scopeWasExplicit ||
+      (grant.principalKind === "human_session" &&
+        authorization.contextIntegrity &&
+        grant.metadata?.delegated !== true)
+        ? body.scope
+        : undefined;
+    const allowOrganization =
+      effectiveScope === "organization" &&
+      authorization.accountGrant?.permissions.includes("account:admin") === true;
+    if (effectiveScope === "organization" && !allowOrganization) {
+      throw new HTTPException(403, {
+        message: "missing permission: account:admin",
+      });
+    }
     const approved = await approveDeviceEnrollment(
       { db, settings },
       {
         accountId: grant.accountId,
         workspaceId,
+        ...(effectiveScope ? { scope: effectiveScope } : {}),
+        allowOrganization,
         userCode: body.userCode,
         allowScreenControl: body.allowScreenControl,
         // The LOUD consent record: WHO consented (the authenticated subject + label).
@@ -239,7 +288,9 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     if (!approved) {
       // An unknown / expired / already-terminal user_code in this workspace.
-      throw new HTTPException(404, { message: "no pending enrollment for that code" });
+      throw new HTTPException(404, {
+        message: "no pending enrollment for that code",
+      });
     }
     return c.json(
       DeviceEnrollmentApproveResponse.parse({
@@ -286,7 +337,9 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     // allowScreenControl=false). Coalesce a missing/empty body to {} before parse.
     const parsed = MintEnrollTokenRequest.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid mint-enroll-token request" });
+      throw new HTTPException(400, {
+        message: "invalid mint-enroll-token request",
+      });
     }
     const minted = await mintEnrollToken(
       { db, settings },
@@ -298,7 +351,9 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     if (!minted) {
       // The credential plane is off (no signing secret) — mirror poll's disabled path.
-      throw new HTTPException(503, { message: "enrollment credential plane is not configured" });
+      throw new HTTPException(503, {
+        message: "enrollment credential plane is not configured",
+      });
     }
     return c.json(MintEnrollTokenResponse.parse(minted), 201);
   });
@@ -306,13 +361,15 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // ── GET /workspaces/:workspaceId/enrollments (user-authed) ──────────────────
   app.get("/v1/workspaces/:workspaceId/enrollments", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
     assertSelfhostedEnabled();
     const statusFilter = c.req.query("status");
     if (statusFilter !== undefined && statusFilter !== "active" && statusFilter !== "revoked") {
-      throw new HTTPException(400, { message: "status must be active or revoked" });
+      throw new HTTPException(400, {
+        message: "status must be active or revoked",
+      });
     }
-    const rows = await listEnrollments(db, workspaceId, {
+    const rows = await listEnrollments(db, grant, {
       status: statusFilter === "revoked" ? "revoked" : "active",
     });
     return c.json(
@@ -320,6 +377,8 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         enrollments: rows.map((row) =>
           EnrollmentSummary.parse({
             id: row.id,
+            scope: row.scope,
+            generation: row.generation,
             pubkey: row.pubkey,
             exposure: row.exposure,
             hasDisplay: row.hasDisplay,
@@ -340,19 +399,40 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // ── POST /workspaces/:workspaceId/enrollments/:id/revoke (user-authed) ──────
   app.post("/v1/workspaces/:workspaceId/enrollments/:enrollmentId/revoke", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:manage");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const grant = authorization.grant;
+    requirePermission(grant, "enrollments:manage");
     assertSelfhostedEnabled();
     const parsed = RemoveEnrollmentRequest.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid machine removal request" });
+      throw new HTTPException(400, {
+        message: "invalid machine removal request",
+      });
     }
     const idempotencyKey =
       parsed.data.idempotencyKey?.trim() || c.req.header("idempotency-key")?.trim() || randomUUID();
     try {
+      const enrollmentId = c.req.param("enrollmentId");
+      const enrollment = (await listEnrollments(db, grant, { status: "active" })).find(
+        (candidate) => candidate.id === enrollmentId,
+      );
+      if (!enrollment) {
+        throw new HTTPException(404, {
+          message: "machine enrollment not found",
+        });
+      }
+      if (
+        enrollment.scope === "organization" &&
+        authorization.accountGrant?.permissions.includes("account:admin") !== true
+      ) {
+        throw new HTTPException(403, {
+          message: "missing permission: account:admin",
+        });
+      }
       const result = await removeEnrollment(db, {
         accountId: grant.accountId,
-        workspaceId,
-        enrollmentId: c.req.param("enrollmentId"),
+        workspaceId: enrollment.workspaceId,
+        enrollmentId,
         operationKey: idempotencyKey,
         ...(parsed.data.expectedUpdatedAt
           ? { expectedUpdatedAt: parsed.data.expectedUpdatedAt }
@@ -360,7 +440,9 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         subjectId: grant.subjectId,
       });
       if (!result) {
-        throw new HTTPException(404, { message: "machine enrollment not found" });
+        throw new HTTPException(404, {
+          message: "machine enrollment not found",
+        });
       }
       return c.json(
         RevokeEnrollmentResponse.parse({
@@ -376,7 +458,10 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (error instanceof MachineRemovalRevisionConflictError) {
         throw new HTTPException(409, {
           message: error.message,
-          cause: { code: "stale_revision", currentUpdatedAt: error.currentUpdatedAt },
+          cause: {
+            code: "stale_revision",
+            currentUpdatedAt: error.currentUpdatedAt,
+          },
         });
       }
       throw error;
@@ -410,7 +495,10 @@ class TokenBucket {
   }
 
   take(key: string, now = Date.now()): boolean {
-    const bucket = this.buckets.get(key) ?? { tokens: this.capacity, updatedAt: now };
+    const bucket = this.buckets.get(key) ?? {
+      tokens: this.capacity,
+      updatedAt: now,
+    };
     const elapsedSeconds = Math.max(0, (now - bucket.updatedAt) / 1000);
     bucket.tokens = Math.min(this.capacity, bucket.tokens + elapsedSeconds * this.refillPerSecond);
     bucket.updatedAt = now;
