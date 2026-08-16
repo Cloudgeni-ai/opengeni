@@ -33,10 +33,11 @@ const budgets = {
   // Company Brain base at 2,039,311/2,039,328/2,039,329 raw bytes for
   // default/4-digit/5-digit API URLs; that integration already exceeded the old
   // cap. The lazy residual inspector adds 769 raw bytes in every case. The
-  // reconciled 0262 stack adds another 270 bytes, yielding
-  // 2,040,350/2,040,367/2,040,368 raw bytes on the same default/4-digit/5-digit
-  // matrix. A 1,994 KiB envelope leaves 1,488 raw bytes of worst-case headroom
-  // without relaxing gzip. Linux produces a slightly larger gzip graph than
+  // reconciled 0262 stack adds another 270 bytes. The current-main OPE-195 and
+  // OPE-199 authority integration brings the combined default/4-digit/5-digit
+  // graph to a worst observed 2,042,520 raw bytes. A 1,996 KiB envelope leaves
+  // 1,384 raw bytes of worst-case headroom without relaxing gzip. Linux
+  // produces a slightly larger gzip graph than
   // macOS for identical sources: the reconciled matrix's worst configured graph
   // is 568,585 bytes. The unchanged 558 KiB envelope leaves 2,807 bytes of Linux
   // headroom while preserving a narrow regression fence.
@@ -47,7 +48,7 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 1994 * kib,
+  directSessionRaw: 1996 * kib,
   directSessionGzip: 558 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
