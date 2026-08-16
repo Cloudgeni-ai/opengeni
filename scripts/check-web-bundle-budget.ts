@@ -32,13 +32,14 @@ const budgets = {
   // one-byte margin. Canonical Bun 1.3.14 Linux/x64 measured the combined
   // Company Brain base at 2,039,311/2,039,328/2,039,329 raw bytes for
   // default/4-digit/5-digit API URLs; that integration already exceeded the old
-  // cap. The lazy residual inspector adds 769 raw bytes in every case, yielding
-  // a 2,040,098-byte worst case. A 1,994 KiB envelope leaves 1,758 raw bytes of
-  // worst-case headroom without relaxing gzip. Linux produces a slightly
-  // larger gzip graph than macOS for identical sources: the residual matrix's
-  // worst configured graph is 568,496 bytes. The unchanged 558 KiB envelope
-  // leaves 2,896 bytes of Linux headroom while preserving a narrow regression
-  // fence.
+  // cap. The lazy residual inspector adds 769 raw bytes in every case. The
+  // reconciled 0262 stack adds another 270 bytes, yielding
+  // 2,040,350/2,040,367/2,040,368 raw bytes on the same default/4-digit/5-digit
+  // matrix. A 1,994 KiB envelope leaves 1,488 raw bytes of worst-case headroom
+  // without relaxing gzip. Linux produces a slightly larger gzip graph than
+  // macOS for identical sources: the reconciled matrix's worst configured graph
+  // is 568,585 bytes. The unchanged 558 KiB envelope leaves 2,807 bytes of Linux
+  // headroom while preserving a narrow regression fence.
   initialRaw: 1448 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
