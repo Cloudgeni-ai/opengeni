@@ -163,7 +163,9 @@ export async function listActivatedCompanyBrainPolicyRevisionIds(
           inArray(schema.workspaceInstructionPolicyActivationEvents.newRevisionId, revisionIds),
         ),
       );
-    return [...new Set(rows.map((row) => row.revisionId))].sort();
+    return [
+      ...new Set(rows.map((row) => row.revisionId).filter((id): id is string => id !== null)),
+    ].sort();
   });
 }
 

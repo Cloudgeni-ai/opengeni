@@ -53,6 +53,12 @@ export type WorkspaceInstructionPolicyHead = WorkspaceInstructionPolicyTarget & 
   activatedAt: string;
 };
 
+export type WorkspaceInstructionPolicyInactiveHead = WorkspaceInstructionPolicyTarget & {
+  workspaceId: string;
+  activationVersion: number;
+  deactivatedAt: string;
+};
+
 export type WorkspaceInstructionPolicyActivationEvent = WorkspaceInstructionPolicyTarget & {
   id: string;
   operationId: string;
@@ -62,6 +68,19 @@ export type WorkspaceInstructionPolicyActivationEvent = WorkspaceInstructionPoli
   activationVersion: number;
   oldRevision: WorkspaceInstructionPolicyRevisionIdentity | null;
   newRevision: WorkspaceInstructionPolicyRevisionIdentity;
+  actorSubjectId: string;
+  reason: string;
+  createdAt: string;
+};
+
+export type WorkspaceInstructionPolicyDeactivationEvent = WorkspaceInstructionPolicyTarget & {
+  id: string;
+  operationId: string;
+  accountId: string;
+  workspaceId: string;
+  type: "automatic_deactivate";
+  activationVersion: number;
+  oldRevision: WorkspaceInstructionPolicyRevisionIdentity;
   actorSubjectId: string;
   reason: string;
   createdAt: string;
@@ -91,7 +110,12 @@ export type WorkspaceInstructionPolicyListOptions = {
 export type WorkspaceInstructionPolicyListResponse = {
   revisions: WorkspaceInstructionPolicyRevision[];
   activeHeads: WorkspaceInstructionPolicyHead[];
+  /** Additive current inactive target boundaries; absent on pre-controller servers. */
+  inactiveHeads?: WorkspaceInstructionPolicyInactiveHead[];
+  inactiveHeadsTruncated?: boolean;
   activationEvents: WorkspaceInstructionPolicyActivationEvent[];
+  /** Additive lifecycle history; absent on pre-controller servers. */
+  deactivationEvents?: WorkspaceInstructionPolicyDeactivationEvent[];
   nextAfterRevision: number | null;
 };
 

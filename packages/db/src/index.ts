@@ -59917,3 +59917,4 @@ export * from "./attached-browser-devices";
 export * from "./interaction-revisions";
 export * from "./canonical-human-identities";
 export * from "./session-tenancy";
+export * from "./governed-learning-activation";
