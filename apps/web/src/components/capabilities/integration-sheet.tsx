@@ -162,14 +162,26 @@ function Block({
   );
 }
 
+/**
+ * Stable keys for lists whose entries have no id: the entry's own content,
+ * with an ordinal suffix only for exact duplicates. Content-derived, so
+ * reordering or removing unrelated entries never remounts a row.
+ */
+function contentKeys(contents: string[]): string[] {
+  const seen = new Map<string, number>();
+  return contents.map((content) => {
+    const occurrence = seen.get(content) ?? 0;
+    seen.set(content, occurrence + 1);
+    return occurrence === 0 ? content : `${content}#${occurrence}`;
+  });
+}
+
 function ConnectionFacts({ facts }: { facts: IntegrationFact[] }) {
+  const keys = contentKeys(facts.map((fact) => `${fact.label}:${fact.value}`));
   return (
     <dl className="divide-y divide-border overflow-hidden rounded-lg border border-border bg-surface">
       {facts.map((fact, index) => (
-        <div
-          key={`${index}:${fact.label}`}
-          className="flex items-start justify-between gap-4 px-3 py-2 text-xs"
-        >
+        <div key={keys[index]} className="flex items-start justify-between gap-4 px-3 py-2 text-xs">
           <dt className="shrink-0 text-fg-muted">{fact.label}</dt>
           <dd className="min-w-0 break-words text-right font-medium text-fg">{fact.value}</dd>
         </div>
@@ -179,6 +191,7 @@ function ConnectionFacts({ facts }: { facts: IntegrationFact[] }) {
 }
 
 function AccessBlock({ access }: { access: IntegrationAccess }) {
+  const itemKeys = contentKeys(access.items.map((item) => `${item.name}:${item.meta ?? ""}`));
   return (
     <Block
       title={access.title}
@@ -202,18 +215,21 @@ function AccessBlock({ access }: { access: IntegrationAccess }) {
         </p>
       ) : (
         <ul className="space-y-1.5">
-          {access.items.map((item, index) => (
-            <li
-              key={`${index}:${item.name}`}
-              className="flex items-center gap-2.5 rounded-lg border border-border bg-surface px-3 py-2 text-xs"
-            >
-              <FolderIcon className="size-3.5 shrink-0 text-fg-subtle" aria-hidden="true" />
-              <span className="min-w-0 flex-1 truncate font-medium text-fg">{item.name}</span>
-              {item.meta ? (
-                <span className="shrink-0 text-2xs text-fg-subtle">{item.meta}</span>
-              ) : null}
-            </li>
-          ))}
+          {itemKeys.map((itemKey, index) => {
+            const item = access.items[index]!;
+            return (
+              <li
+                key={itemKey}
+                className="flex items-center gap-2.5 rounded-lg border border-border bg-surface px-3 py-2 text-xs"
+              >
+                <FolderIcon className="size-3.5 shrink-0 text-fg-subtle" aria-hidden="true" />
+                <span className="min-w-0 flex-1 truncate font-medium text-fg">{item.name}</span>
+                {item.meta ? (
+                  <span className="shrink-0 text-2xs text-fg-subtle">{item.meta}</span>
+                ) : null}
+              </li>
+            );
+          })}
         </ul>
       )}
     </Block>
