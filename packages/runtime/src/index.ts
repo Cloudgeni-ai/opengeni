@@ -172,7 +172,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath } from "node:path";
 
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
-import { installCodexToolSearch } from "./codex-tool-search";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
   CompactionProviderResponseError,
@@ -2445,7 +2444,7 @@ type ApprovalCapableAgent = {
  * (LONGEST prefix first — see {@link applyMcpApprovalPolicy}), then the
  * unprefixed tool name.
  *
- * CLONE SURVIVAL (mirrors {@link installCodexToolSearch}): the sandbox runtime
+ * CLONE SURVIVAL (mirrors `installCodexToolSearch`): the sandbox runtime
  * resolves tools not on the agent we build here but on a FRESH clone —
  * `prepareSandboxAgent` calls `agent.clone(...)`, and `SandboxAgent.clone`
  * reconstructs from a FIXED field list (name/tools/mcpServers/…), so an
