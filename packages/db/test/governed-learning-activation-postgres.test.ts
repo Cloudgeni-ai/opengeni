@@ -3,7 +3,9 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { createHash } from "node:crypto";
 import postgres from "postgres";
 import {
+  GovernedLearningActivationAuthorityError,
   activateGovernedLearningDecision,
+  activateHumanConfirmedLearningDecision,
   activateWorkspaceInstructionPolicyRevision,
   activateWorkspaceLearningPolicyRevision,
   appendKnowledgeClaim,
@@ -62,7 +64,7 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
   expect(nestedPostgresSqlState(failure)).toBe(state);
 }
 
-async function fixture() {
+async function fixture(mode: "off" | "suggest" | "automatic" = "automatic") {
   if (!shared || !client) throw new Error("test database unavailable");
   const suffix = crypto.randomUUID();
   const ownerUserId = `learning-activation-${suffix}`;
@@ -89,7 +91,7 @@ async function fixture() {
   const learningRevision = await createWorkspaceLearningPolicyRevision(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
-    workspaceMode: "automatic",
+    workspaceMode: mode,
     actorSubjectId: ownerSubjectId,
     principalKind: "human_session",
   });
@@ -147,7 +149,7 @@ async function fixture() {
   };
   const caller = { workspaceId: grant.workspaceId, subjectId: ownerSubjectId };
   const snapshot = await getOrCreateWorkspaceLearningPolicySnapshot(client.db, writerAttempt);
-  return { grant, ownerSubjectId, session, writerAttempt, caller, snapshot };
+  return { grant, ownerSubjectId, session, writerAttempt, caller, snapshot, mode };
 }
 
 async function decision(
@@ -219,8 +221,60 @@ async function decision(
       evidenceId: write.evidenceId,
     },
   });
-  expect(receipt.automaticEligible).toBe(true);
+  expect(receipt.automaticEligible).toBe(f.mode === "automatic");
   return { write, receipt };
+}
+
+async function answeredRememberInput(
+  f: Awaited<ReturnType<typeof fixture>>,
+  proposalId: string,
+  overrides: {
+    respondedBy?: string;
+    answer?: string[];
+    questionId?: string;
+    status?: string;
+    turnGeneration?: number;
+  } = {},
+): Promise<string> {
+  const id = crypto.randomUUID();
+  const questionId = overrides.questionId ?? `remember:${proposalId}`;
+  const questions = [
+    {
+      id: questionId,
+      kind: "single_select",
+      prompt: "Save this as a workspace preference?",
+      options: [
+        { id: "save", label: "Save" },
+        { id: "skip", label: "Don't save" },
+      ],
+      required: true,
+      allowOther: false,
+    },
+  ];
+  const status = overrides.status ?? "answered";
+  const response =
+    status === "answered"
+      ? {
+          outcome: "answered",
+          answers: [{ questionId, values: overrides.answer ?? ["save"] }],
+        }
+      : null;
+  await shared!.admin`
+    insert into session_human_input_requests (
+      id, account_id, workspace_id, session_id, turn_id, turn_generation,
+      creation_attempt_id, tool_call_id, status, questions, allow_skip,
+      response, responded_by, responded_at
+    ) values (
+      ${id}, ${f.grant.accountId}, ${f.grant.workspaceId}, ${f.session.id},
+      ${f.writerAttempt.turnId}, ${overrides.turnGeneration ?? 1},
+      ${f.writerAttempt.attemptId}, ${`call-${id}`}, ${status},
+      ${shared!.admin.json(questions)}::jsonb, false,
+      ${response ? shared!.admin.json(response) : null}::jsonb,
+      ${status === "answered" ? (overrides.respondedBy ?? f.ownerSubjectId) : null},
+      ${status === "answered" ? new Date() : null}
+    )
+  `;
+  return id;
 }
 
 async function documentDecision(f: Awaited<ReturnType<typeof fixture>>) {
@@ -912,5 +966,150 @@ describe("governed-learning activation PostgreSQL authority", () => {
     } finally {
       await app.end();
     }
+  });
+  test("human confirmation survives the human-input resume onto a new attempt of the same turn", async () => {
+    if (!shared || !client) return;
+    const f = await fixture("suggest");
+    const d = await decision(f, "preference");
+    const answered = await answeredRememberInput(f, d.write.knowledgeChangeProposalId!);
+    // Simulate the worker closing the minting attempt for human input and
+    // claiming a new attempt on the same turn and execution generation.
+    const resumedAttemptId = crypto.randomUUID();
+    await shared.admin.begin(async (sql) => {
+      await sql`select set_config('opengeni.session_inference_claim', '1', true)`;
+      await sql`update session_turn_attempts set state = 'closed', outcome = 'interrupted_recoverable',
+        closed_at = now() where workspace_id = ${f.grant.workspaceId} and id = ${f.writerAttempt.attemptId}`;
+      await sql`update session_turns set active_attempt_id = ${resumedAttemptId}, status = 'running'
+        where workspace_id = ${f.grant.workspaceId} and id = ${f.writerAttempt.turnId}`;
+      await sql`
+        insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id, execution_generation,
+          state, temporal_workflow_id, temporal_workflow_run_id,
+          temporal_activity_id, verified_control_revision, authority_epoch,
+          authority_visibility, authority_owner_organization_membership_id,
+          mcp_approval_policies
+        ) values (
+          ${resumedAttemptId}, ${f.grant.accountId}, ${f.grant.workspaceId}, ${f.session.id},
+          ${f.writerAttempt.turnId}, 1, 'running', ${`activation-${f.writerAttempt.turnId}`},
+          ${`run-${resumedAttemptId}`}, ${`activity-${resumedAttemptId}`}, 0,
+          (select authority_epoch from sessions where id = ${f.session.id}),
+          (select visibility from sessions where id = ${f.session.id}),
+          (select owner_organization_membership_id from sessions where id = ${f.session.id}),
+          '{}'::jsonb
+        )
+      `;
+    });
+    // The automatic controller still requires the exact minting attempt.
+    const activation = await activateHumanConfirmedLearningDecision(client.db, {
+      caller: f.caller,
+      request: {
+        operationId: crypto.randomUUID(),
+        decisionReceiptId: d.receipt.id,
+        humanInputRequestId: answered,
+      },
+    });
+    expect(activation).toMatchObject({
+      authorityKind: "human_confirmed",
+      humanInputRequestId: answered,
+      destination: "preference",
+    });
+  });
+
+  test("activates a suggest-mode preference only with the exact human's bound `save` answer", async () => {
+    if (!shared || !client) return;
+    const f = await fixture("suggest");
+    const d = await decision(f, "preference");
+    expect(d.receipt.outcome).toBe("suggest");
+    const proposalId = d.write.knowledgeChangeProposalId!;
+    // The automatic controller refuses a non-final receipt.
+    await expect(
+      activateGovernedLearningDecision(client.db, {
+        caller: f.caller,
+        request: { operationId: crypto.randomUUID(), decisionReceiptId: d.receipt.id },
+      }),
+    ).rejects.toThrow();
+
+    const wrongSubject = await answeredRememberInput(f, proposalId, {
+      respondedBy: "user:someone-else",
+    });
+    const skipped = await answeredRememberInput(f, proposalId, { answer: ["skip"] });
+    const otherProposal = await answeredRememberInput(f, proposalId, {
+      questionId: `remember:${crypto.randomUUID()}`,
+    });
+    const pending = await answeredRememberInput(f, proposalId, { status: "pending" });
+    const staleGeneration = await answeredRememberInput(f, proposalId, { turnGeneration: 2 });
+    for (const humanInputRequestId of [
+      wrongSubject,
+      skipped,
+      otherProposal,
+      pending,
+      staleGeneration,
+      crypto.randomUUID(),
+    ]) {
+      await expect(
+        activateHumanConfirmedLearningDecision(client!.db, {
+          caller: f.caller,
+          request: {
+            operationId: crypto.randomUUID(),
+            decisionReceiptId: d.receipt.id,
+            humanInputRequestId,
+          },
+        }),
+      ).rejects.toBeInstanceOf(GovernedLearningActivationAuthorityError);
+    }
+    // Another human's session context cannot consume the owner's answer.
+    const answered = await answeredRememberInput(f, proposalId);
+    await expect(
+      activateHumanConfirmedLearningDecision(client!.db, {
+        caller: { workspaceId: f.grant.workspaceId, subjectId: "user:someone-else" },
+        request: {
+          operationId: crypto.randomUUID(),
+          decisionReceiptId: d.receipt.id,
+          humanInputRequestId: answered,
+        },
+      }),
+    ).rejects.toBeInstanceOf(GovernedLearningActivationAuthorityError);
+
+    const request = {
+      operationId: crypto.randomUUID(),
+      decisionReceiptId: d.receipt.id,
+      humanInputRequestId: answered,
+    };
+    const [activation, replay] = await Promise.all([
+      activateHumanConfirmedLearningDecision(client.db, { caller: f.caller, request }),
+      activateHumanConfirmedLearningDecision(client.db, { caller: f.caller, request }),
+    ]);
+    expect(replay).toEqual(activation);
+    expect(activation).toMatchObject({
+      destination: "preference",
+      outcome: "activated",
+      authorityKind: "human_confirmed",
+      humanInputRequestId: answered,
+      initiatingHumanSubjectId: f.ownerSubjectId,
+      destinationNewVersion: 1,
+    });
+    // A second confirmation of the same decision conflicts; undo still works.
+    await expect(
+      activateHumanConfirmedLearningDecision(client.db, {
+        caller: f.caller,
+        request: { ...request, operationId: crypto.randomUUID() },
+      }),
+    ).rejects.toThrow("conflicted");
+    const undo = await undoGovernedLearningActivation(client.db, {
+      caller: f.caller,
+      request: { operationId: crypto.randomUUID(), activationReceiptId: activation.id },
+    });
+    expect(undo.outcome).toBe("undone");
+    expect(
+      await listGovernedLearningActivationHistory(client.db, {
+        workspaceId: f.grant.workspaceId,
+        subjectId: f.ownerSubjectId,
+        principalKind: "human_session",
+        limit: 10,
+      }),
+    ).toMatchObject({
+      activations: [{ id: activation.id, authorityKind: "human_confirmed" }],
+      undos: [{ id: undo.id }],
+    });
   });
 });

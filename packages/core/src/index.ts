@@ -74,6 +74,7 @@ export * from "./domain/company-profile-durable-learning-adapter";
 export * from "./domain/company-brain-governed-writes";
 export * from "./domain/governed-learning-evaluator";
 export * from "./domain/governed-learning-activation";
+export * from "./domain/remember";
 export * from "./domain/slack-bot";
 export * from "./domain/conversation-integrations";
 export * from "./domain/fiken";

@@ -2482,6 +2482,8 @@ export type FirstPartyMcpToolName =
   | "task_note_promote_preference"
   | "instruction_policy_propose"
   | "preference_propose"
+  | "remember"
+  | "remember_confirm"
   | "sandboxes_list"
   | "sandbox_attach"
   | "sandbox_swap"

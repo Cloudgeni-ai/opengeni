@@ -694,6 +694,9 @@ describe("runtime database posture evaluator", () => {
       "activate_governed_learning_decision(uuid, uuid, uuid, uuid)",
     );
     expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
+      "activate_human_confirmed_learning_decision(uuid, uuid, uuid, uuid, uuid)",
+    );
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
       "undo_governed_learning_activation(uuid, uuid, uuid, uuid)",
     );
     expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toEqual(

@@ -4,6 +4,10 @@ const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
 const boundedActor = z.string().trim().min(1).max(1_024);
 
 export const GovernedLearningActivationDestination = z.enum(["instruction_policy", "preference"]);
+export const GovernedLearningActivationAuthorityKind = z.enum(["automatic", "human_confirmed"]);
+export type GovernedLearningActivationAuthorityKind = z.infer<
+  typeof GovernedLearningActivationAuthorityKind
+>;
 export type GovernedLearningActivationDestination = z.infer<
   typeof GovernedLearningActivationDestination
 >;
@@ -79,6 +83,13 @@ export const GovernedLearningActivationReceipt = z
     ...destinationBoundary,
     outcome: z.literal("activated"),
     effectiveAt: z.string().datetime(),
+    /**
+     * `automatic`: a final eligible evaluator receipt under an automatic policy.
+     * `human_confirmed`: the exact initiating human answered the bound
+     * `remember:<proposalId>` structured human-input question with `save`.
+     */
+    authorityKind: GovernedLearningActivationAuthorityKind,
+    humanInputRequestId: z.string().uuid().nullable(),
     rollback: z
       .object({
         supported: z.literal(true),
@@ -89,6 +100,17 @@ export const GovernedLearningActivationReceipt = z
   })
   .strict();
 export type GovernedLearningActivationReceipt = z.infer<typeof GovernedLearningActivationReceipt>;
+
+export const ActivateHumanConfirmedLearningDecisionRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    decisionReceiptId: z.string().uuid(),
+    humanInputRequestId: z.string().uuid(),
+  })
+  .strict();
+export type ActivateHumanConfirmedLearningDecisionRequest = z.infer<
+  typeof ActivateHumanConfirmedLearningDecisionRequest
+>;
 
 /** Append-only compensation proof. Undo never deletes prior evidence. */
 export const GovernedLearningActivationUndoReceipt = z

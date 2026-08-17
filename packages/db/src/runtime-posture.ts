@@ -215,6 +215,7 @@ const GOVERNED_LEARNING_EVALUATION_ROUTINE =
   "evaluate_governed_learning_proposal(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, uuid)";
 const GOVERNED_LEARNING_ACTIVATION_ROUTINES = [
   "activate_governed_learning_decision(uuid, uuid, uuid, uuid)",
+  "activate_human_confirmed_learning_decision(uuid, uuid, uuid, uuid, uuid)",
   "undo_governed_learning_activation(uuid, uuid, uuid, uuid)",
 ] as const;
 const GOVERNED_LEARNING_INSPECTION_ROUTINES = [
@@ -258,6 +259,7 @@ const GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES = [
   "preference_registry_events",
   "preference_registry_preferences",
   "preference_registry_revisions",
+  "session_human_input_requests",
   "workspace_instruction_policy_activation_events",
   "workspace_instruction_policy_deactivation_events",
   "workspace_instruction_policy_heads",

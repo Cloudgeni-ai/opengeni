@@ -237,6 +237,7 @@ import {
 import { AtlassianConnectionMetadata } from "@opengeni/contracts/atlassian";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyBrainGovernedWriteTools } from "./company-brain-governed-writes";
+import { registerRememberTools } from "./remember";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 
 export type McpServerOptions = {
@@ -409,6 +410,16 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   preference_propose: {
     sessionRequired: true,
     allOf: ["documents:search", "workspace:read"],
+  },
+  // Explicit user-directed remember composes task-note evidence with the
+  // governed promotion path, so it needs the union of both permission sets.
+  remember: {
+    sessionRequired: true,
+    allOf: ["documents:search", "sessions:control", "workspace:read"],
+  },
+  remember_confirm: {
+    sessionRequired: true,
+    allOf: ["documents:search", "sessions:control", "workspace:read"],
   },
   sandboxes_list: { sessionRequired: true, allOf: ["sessions:read"] },
   sandbox_attach: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -742,6 +753,19 @@ export function buildOpenGeniMcpServer(
     registerTaskNoteTools(server, deps, grant, sessionId, json);
     const attempt = exactAgentAttemptClaims(grant)!;
     registerCompanyBrainGovernedWriteTools({
+      server,
+      db: deps.db,
+      attempt: {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        ...attempt,
+      },
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+    });
+    registerRememberTools({
       server,
       db: deps.db,
       attempt: {
