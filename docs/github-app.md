@@ -5,6 +5,12 @@ repository-scoped Git credentials. App server configuration and workspace
 authority are separate facts: configured App credentials do not make a
 workspace binding healthy.
 
+This document covers OpenGeni's ordinary workspace GitHub integration. The
+`opengeni-lens` PR-review Pack deliberately uses a separate, workspace-registered
+GitHub App with read-only Contents and write Pull requests permissions; it does
+not inherit this platform App or its workspace bindings. See
+[`opengeni-lens.md`](opengeni-lens.md).
+
 ## Status contract
 
 `GET /v1/workspaces/:workspaceId/github/app` and the

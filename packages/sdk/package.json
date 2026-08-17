@@ -38,6 +38,10 @@
       "types": "./src/memory-slack.ts",
       "default": "./src/memory-slack.ts"
     },
+    "./lens": {
+      "types": "./src/lens.ts",
+      "default": "./src/lens.ts"
+    },
     "./realtime": {
       "types": "./src/realtime.ts",
       "default": "./src/realtime.ts"

@@ -6415,8 +6415,8 @@ export class OpenGeniClient {
     return response;
   }
 
-  /** Like `requestJson` for endpoints that respond with no body (204). */
-  private async requestVoid(method: string, path: string, body?: unknown): Promise<void> {
+  /** Contract-checked transport shared by opt-in typed SDK clients for 204 responses. */
+  async requestVoid(method: string, path: string, body?: unknown): Promise<void> {
     const correlationId = crypto.randomUUID();
     let response: Response;
     try {

@@ -882,6 +882,7 @@ function gitCredentialRepositoryRef(
     ...(resource.access ? { access: resource.access } : {}),
     uri: resource.uri,
     ref: resource.ref,
+    ...(resource.expectedCommitSha ? { expectedCommitSha: resource.expectedCommitSha } : {}),
     ...(resource.repositoryId !== undefined
       ? { repositoryId: resource.repositoryId }
       : resource.githubRepositoryId !== undefined

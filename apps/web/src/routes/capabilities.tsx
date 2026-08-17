@@ -78,6 +78,11 @@ const IntegrationControlCenter = lazy(async () => {
   return { default: module.IntegrationControlCenter };
 });
 
+const LensSetupCard = lazy(async () => {
+  const module = await import("@/components/capabilities/lens-setup-card");
+  return { default: module.LensSetupCard };
+});
+
 import type {
   AccessContext,
   CapabilityCatalogItem,
@@ -1331,27 +1336,41 @@ export function CapabilitiesRoute({
 
           {/* Packs. */}
           {showPacks ? (
-            <PacksSection
-              packs={packs}
-              variableSets={variableSets.variableSets.map((variableSet) => ({
-                id: variableSet.id,
-                name: variableSet.name,
-              }))}
-              rigs={rigs.rigs.map((rig) => ({
-                id: rig.id,
-                name: rig.name,
-                image: rig.activeVersion?.image ?? null,
-                available: rig.activeVersion !== null,
-                verified: rig.activeVersionHealth?.checkHealth === "passing",
-              }))}
-              busyPackId={packBusyId}
-              onRegister={registerPackManifest}
-              onPreviewInstall={previewPackInstallation}
-              onInstall={installPack}
-              onPreviewUninstall={previewPackUninstall}
-              onUninstall={uninstallPack}
-              onUnregister={unregisterPack}
-            />
+            <>
+              <PacksSection
+                packs={packs}
+                variableSets={variableSets.variableSets.map((variableSet) => ({
+                  id: variableSet.id,
+                  name: variableSet.name,
+                }))}
+                rigs={rigs.rigs.map((rig) => ({
+                  id: rig.id,
+                  name: rig.name,
+                  image: rig.activeVersion?.image ?? null,
+                  available: rig.activeVersion !== null,
+                  verified: rig.activeVersionHealth?.checkHealth === "passing",
+                }))}
+                busyPackId={packBusyId}
+                onRegister={registerPackManifest}
+                onPreviewInstall={previewPackInstallation}
+                onInstall={installPack}
+                onPreviewUninstall={previewPackUninstall}
+                onUninstall={uninstallPack}
+                onUnregister={unregisterPack}
+              />
+              {packs.installationFor("opengeni-lens")?.status === "active" ? (
+                <Suspense fallback={<Skeleton className="h-64 w-full rounded-xl" />}>
+                  <LensSetupCard
+                    client={client}
+                    workspaceId={workspaceId}
+                    canManage={
+                      canManageApiIntegrationInstances &&
+                      hasWorkspacePermission(context.accessContext, workspaceId, "secrets:write")
+                    }
+                  />
+                </Suspense>
+              ) : null}
+            </>
           ) : null}
 
           {showCatalog ? (

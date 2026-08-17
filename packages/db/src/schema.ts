@@ -9111,6 +9111,221 @@ export const githubInstallationRepositories = pgTable(
   }),
 );
 
+export const lensAppRegistrations = pgTable(
+  "lens_app_registrations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    provider: text("provider").notNull(),
+    providerBaseUrl: text("provider_base_url").notNull(),
+    appId: text("app_id"),
+    credentialKind: text("credential_kind").notNull(),
+    credentialEncrypted: text("credential_encrypted"),
+    accessTokenExpiresAt: timestamp("access_token_expires_at", { withTimezone: true }),
+    webhookAuthKind: text("webhook_auth_kind").notNull(),
+    webhookSecretEncrypted: text("webhook_secret_encrypted").notNull(),
+    webhookUsername: text("webhook_username"),
+    status: text("status").notNull().default("active"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceRegistration: uniqueIndex("lens_app_registrations_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    workspaceRegistrationProvider: uniqueIndex(
+      "lens_app_registrations_workspace_id_provider_uq",
+    ).on(table.workspaceId, table.id, table.provider),
+    workspaceProviderName: uniqueIndex("lens_app_registrations_workspace_provider_name_uq").on(
+      table.workspaceId,
+      table.provider,
+      table.name,
+    ),
+    workspaceStatus: index("lens_app_registrations_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+    ),
+    providerCheck: check(
+      "lens_app_registrations_provider_chk",
+      sql`${table.provider} in ('github', 'gitlab', 'azure_devops')`,
+    ),
+    credentialCheck: check(
+      "lens_app_registrations_credential_chk",
+      sql`(
+        (${table.provider} = 'github' and ${table.credentialKind} = 'github_app' and ${table.credentialEncrypted} is not null and ${table.appId} is not null)
+        or
+        (${table.provider} in ('gitlab', 'azure_devops') and ${table.credentialKind} = 'provider_token' and ${table.credentialEncrypted} is not null)
+      )`,
+    ),
+    webhookAuthCheck: check(
+      "lens_app_registrations_webhook_auth_chk",
+      sql`(
+        (${table.provider} = 'github' and ${table.webhookAuthKind} = 'hmac_sha256')
+        or (${table.provider} = 'gitlab' and ${table.webhookAuthKind} = 'shared_token')
+        or (${table.provider} = 'azure_devops' and ${table.webhookAuthKind} = 'basic' and ${table.webhookUsername} is not null)
+      )`,
+    ),
+    statusCheck: check(
+      "lens_app_registrations_status_chk",
+      sql`${table.status} in ('active', 'disabled')`,
+    ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "lens_app_registrations_workspace_account_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+export const lensRepositoryBindings = pgTable(
+  "lens_repository_bindings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    registrationId: uuid("registration_id").notNull(),
+    provider: text("provider").notNull(),
+    repositoryUri: text("repository_uri").notNull(),
+    repositoryFullName: text("repository_full_name").notNull(),
+    providerRepositoryId: text("provider_repository_id").notNull(),
+    installationId: text("installation_id"),
+    projectId: text("project_id"),
+    model: text("model"),
+    additionalInstructions: text("additional_instructions"),
+    status: text("status").notNull().default("active"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceBinding: uniqueIndex("lens_repository_bindings_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    workspaceBindingRegistrationProvider: uniqueIndex(
+      "lens_repository_bindings_workspace_id_registration_provider_uq",
+    ).on(table.workspaceId, table.id, table.registrationId, table.provider),
+    registrationRepository: uniqueIndex("lens_repository_bindings_registration_repo_uq").on(
+      table.registrationId,
+      table.providerRepositoryId,
+    ),
+    workspaceStatus: index("lens_repository_bindings_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+    ),
+    providerCheck: check(
+      "lens_repository_bindings_provider_chk",
+      sql`${table.provider} in ('github', 'gitlab', 'azure_devops')`,
+    ),
+    statusCheck: check(
+      "lens_repository_bindings_status_chk",
+      sql`${table.status} in ('active', 'disabled')`,
+    ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "lens_repository_bindings_workspace_account_fk",
+    }).onDelete("cascade"),
+    registration: foreignKey({
+      columns: [table.workspaceId, table.registrationId, table.provider],
+      foreignColumns: [
+        lensAppRegistrations.workspaceId,
+        lensAppRegistrations.id,
+        lensAppRegistrations.provider,
+      ],
+      name: "lens_repository_bindings_registration_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+export const lensWebhookDeliveries = pgTable(
+  "lens_webhook_deliveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    registrationId: uuid("registration_id").notNull(),
+    repositoryBindingId: uuid("repository_binding_id").notNull(),
+    provider: text("provider").notNull(),
+    deliveryKey: text("delivery_key").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    eventName: text("event_name").notNull(),
+    action: text("action"),
+    pullRequestId: text("pull_request_id"),
+    headSha: text("head_sha"),
+    baseSha: text("base_sha"),
+    status: text("status").notNull().default("pending"),
+    ignoredReason: text("ignored_reason"),
+    errorCode: text("error_code"),
+    sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    registrationDelivery: uniqueIndex("lens_webhook_deliveries_registration_delivery_uq").on(
+      table.registrationId,
+      table.deliveryKey,
+    ),
+    workspaceStatus: index("lens_webhook_deliveries_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+      table.createdAt,
+    ),
+    providerCheck: check(
+      "lens_webhook_deliveries_provider_chk",
+      sql`${table.provider} in ('github', 'gitlab', 'azure_devops')`,
+    ),
+    statusCheck: check(
+      "lens_webhook_deliveries_status_chk",
+      sql`${table.status} in ('pending', 'dispatched', 'ignored', 'failed')`,
+    ),
+    digestCheck: check(
+      "lens_webhook_deliveries_digest_chk",
+      sql`${table.requestDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "lens_webhook_deliveries_workspace_account_fk",
+    }).onDelete("cascade"),
+    registration: foreignKey({
+      columns: [table.workspaceId, table.registrationId, table.provider],
+      foreignColumns: [
+        lensAppRegistrations.workspaceId,
+        lensAppRegistrations.id,
+        lensAppRegistrations.provider,
+      ],
+      name: "lens_webhook_deliveries_registration_fk",
+    }).onDelete("cascade"),
+    repositoryBinding: foreignKey({
+      columns: [table.workspaceId, table.repositoryBindingId, table.registrationId, table.provider],
+      foreignColumns: [
+        lensRepositoryBindings.workspaceId,
+        lensRepositoryBindings.id,
+        lensRepositoryBindings.registrationId,
+        lensRepositoryBindings.provider,
+      ],
+      name: "lens_webhook_deliveries_repository_binding_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
 export const usageEvents = pgTable(
   "usage_events",
   {

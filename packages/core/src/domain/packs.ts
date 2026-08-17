@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   CapabilityPack,
+  OPENGENI_LENS_PACK_ID,
   stableJson,
   type CapabilityPackSkill,
   type PackComponentResolution,
@@ -23,6 +24,7 @@ import {
 } from "@opengeni/db";
 import { buildPortableSkillArtifact } from "@opengeni/runtime/skill-library";
 import { HTTPException } from "hono/http-exception";
+import { OPENGENI_LENS_SKILL } from "./lens";
 
 export const MARKETING_SOCIAL_PACK_ID = "marketing-social-daily-analysis";
 
@@ -176,7 +178,74 @@ const marketingSocialPack: CapabilityPack = {
   },
 };
 
-const packs = [marketingSocialPack] satisfies CapabilityPack[];
+const openGeniLensPack: CapabilityPack = {
+  id: OPENGENI_LENS_PACK_ID,
+  name: "OpenGeni Lens",
+  description:
+    "Run provider-neutral, exact-head pull-request reviews from GitHub, GitLab, or Azure DevOps webhooks.",
+  role: "software-engineering",
+  category: "code-review",
+  version: "0.2.0",
+  skills: [OPENGENI_LENS_SKILL],
+  components: [],
+  tools: [],
+  connectors: [
+    {
+      id: "github",
+      name: "GitHub App",
+      category: "source-control",
+      authModel: "credential_ref",
+      providers: ["github"],
+      scopes: ["metadata:read", "contents:read", "pull_requests:write"],
+      required: false,
+      metadata: {
+        oneOf: "source-control-provider",
+        setupPath: "/lens/registrations",
+        webhookEvents: ["pull_request"],
+        credentialMode: "short_lived_installation_token",
+      },
+    },
+    {
+      id: "gitlab",
+      name: "GitLab project token",
+      category: "source-control",
+      authModel: "credential_ref",
+      providers: ["gitlab"],
+      scopes: ["api"],
+      required: false,
+      metadata: {
+        oneOf: "source-control-provider",
+        setupPath: "/lens/registrations",
+        webhookEvents: ["Merge Request Hook"],
+        credentialMode: "provider_token",
+      },
+    },
+    {
+      id: "azure-devops",
+      name: "Azure DevOps identity token",
+      category: "source-control",
+      authModel: "credential_ref",
+      providers: ["azure_devops"],
+      scopes: ["vso.code", "vso.code_write"],
+      required: false,
+      metadata: {
+        oneOf: "source-control-provider",
+        setupPath: "/lens/registrations",
+        webhookEvents: ["git.pullrequest.created", "git.pullrequest.updated"],
+        credentialMode: "provider_token",
+      },
+    },
+  ],
+  knowledge: [],
+  scheduledTaskTemplates: [],
+  metadata: {
+    automation: "pull_request_review",
+    providers: ["github", "gitlab", "azure_devops"],
+    sessionRole: "pull_request_review",
+  },
+};
+
+const packs = [marketingSocialPack, openGeniLensPack] satisfies CapabilityPack[];
 
 export function listCapabilityPacks(): CapabilityPack[] {
   return packs;

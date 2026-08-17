@@ -47,6 +47,29 @@ async function attemptBearer(secret: string, expiresAt = Math.floor(Date.now() /
 }
 
 describe("configured deployment perimeter authentication", () => {
+  test("exempts only the exact POST Lens webhook shape", async () => {
+    const app = new Hono();
+    app.use(
+      "*",
+      requireAccessKey(
+        testSettings({ productAccessMode: "configured", authRequired: true, accessKey }),
+      ),
+    );
+    app.all("*", (context) => context.json({ ok: true }));
+    const registrationId = "00000000-0000-4000-8000-000000000106";
+    const path = `/v1/webhooks/lens/${accountId}/${workspaceId}/${registrationId}`;
+    expect((await app.request(path, { method: "POST" })).status).toBe(200);
+    expect((await app.request(path)).status).toBe(401);
+    expect((await app.request(`${path}/extra`, { method: "POST" })).status).toBe(401);
+    expect(
+      (
+        await app.request(`/v1/webhooks/lens/${accountId}/${workspaceId}/not-a-uuid`, {
+          method: "POST",
+        })
+      ).status,
+    ).toBe(401);
+  });
+
   test("continues to accept the static deployment key in either supported header", async () => {
     const app = protectedApp({ delegationSecret });
     for (const headers of [
