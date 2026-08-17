@@ -132,6 +132,7 @@ RUN printf '%s  %s\n' \
 FROM debian:13-slim
 
 ARG TERRAFORM_VERSION=1.13.3
+ARG GLAB_VERSION=1.109.0
 ARG CHECKOV_VERSION=3.2.526
 ARG NOVNC_REF=v1.5.0
 ARG WEBSOCKIFY_REF=v0.12.0
@@ -332,6 +333,11 @@ RUN set -eux; \
     ln -s /opt/checkov/bin/checkov /usr/local/bin/checkov; \
     checkov --version
 RUN set -eux; curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL https://aka.ms/InstallAzureCLIDeb | bash; az version
+ENV AZURE_EXTENSION_DIR=/opt/az/extensions
+RUN set -eux; \
+    install -d -m 0755 "$AZURE_EXTENSION_DIR"; \
+    az extension add --name azure-devops; \
+    az repos --help >/dev/null
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \
     install -d -m 0755 /etc/apt/keyrings; \
@@ -347,6 +353,22 @@ RUN set -eux; \
     done; \
     rm -rf /var/lib/apt/lists/*; \
     gh --version
+RUN set -eux; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "${arch}" in \
+      amd64) glab_arch="amd64"; expected="67b4a8557727a058f44e0839babdcf214ea6f6f829062cf0bae02f7b25814e5d" ;; \
+      arm64|aarch64) glab_arch="arm64"; expected="288155229b7a0824aaca5fbdc36000d0c41fe5d8b4a4c3cbe9908e75f4e4ec2e" ;; \
+      *) echo "unsupported architecture=${arch}" >&2; exit 1 ;; \
+    esac; \
+    archive="/tmp/glab_${GLAB_VERSION}_linux_${glab_arch}.tar.gz"; \
+    curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL \
+      "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${glab_arch}.tar.gz" \
+      -o "$archive"; \
+    echo "$expected  $archive" | sha256sum -c -; \
+    tar -xzf "$archive" -C /tmp bin/glab; \
+    install -m 0755 /tmp/bin/glab /usr/local/bin/glab; \
+    rm -rf "$archive" /tmp/bin; \
+    glab --version
 
 # ---- Layer 6b: ttyd static binary (REAL PTY-over-websocket; Channel-B terminal) ----
 # Pinned static build from the upstream release. The PTY

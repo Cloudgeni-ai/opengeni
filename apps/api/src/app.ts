@@ -99,6 +99,7 @@ import { registerInstallRoutes } from "./routes/install";
 import { registerApiIntegrationRoutes } from "./routes/api-integrations";
 import { registerIntegrationFacetRoutes } from "./routes/integration-facets";
 import { registerInteractionResourceRoutes } from "./routes/interaction-resources";
+import { registerLensRoutes } from "./routes/lens";
 import { registerPackRoutes } from "./routes/packs";
 import { registerPluginRoutes } from "./routes/plugins";
 import { registerSkillRoutes } from "./routes/skills";
@@ -701,6 +702,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerChannelRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
   registerPackRoutes(app, routeDeps);
+  registerLensRoutes(app, routeDeps);
   registerPluginRoutes(app, routeDeps);
   registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
@@ -1181,6 +1183,14 @@ const routeLabelPatterns: Array<{
     label: "/v1/billing/entitlements",
   },
   { pattern: /^\/v1\/webhooks\/stripe$/, label: "/v1/webhooks/stripe" },
+  {
+    pattern: /^\/v1\/webhooks\/lens\/[^/]+\/[^/]+\/[^/]+$/,
+    label: "/v1/webhooks/lens/:accountId/:workspaceId/:registrationId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/lens\/(registrations|repositories)(?:\/[^/]+)?$/,
+    label: (match) => `/v1/workspaces/:workspaceId/lens/${match[1]}`,
+  },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/mcp$/,
     label: "/v1/workspaces/:workspaceId/mcp",

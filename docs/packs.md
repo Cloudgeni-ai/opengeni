@@ -11,6 +11,12 @@ Capability Packs are role-oriented bundles that compose existing OpenGeni primit
 
 The built-in `marketing-social-daily-analysis` Pack connects social accounts, attaches marketing knowledge, and creates an ordinary scheduled agent run. It has no component or Rig plan, so it remains compatible with the dedicated simple Pack enable route.
 
+The built-in `opengeni-lens` Pack installs the ordinary `pr-review` Skill, then
+uses provider app registrations and authenticated webhooks to create ordinary
+exact-head review sessions. The Pack is packaging and activation authority; the
+provider registration and repository binding remain separate credential and
+resource authorities. See [`opengeni-lens.md`](opengeni-lens.md).
+
 ## Product model
 
 The user-facing model is intentionally simpler than the storage model:
@@ -215,6 +221,18 @@ curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/packs/marketing-
 
 Registering provider accounts and creating its scheduled task continue through the ordinary social and scheduled-task APIs.
 
+## OpenGeni Lens Pack
+
+Lens declares an inline Skill and therefore uses the reviewed Pack
+preview/install lifecycle rather than the simple compatibility enable route.
+After installation, workspace administrators register a dedicated GitHub App
+or provider-scoped GitLab/Azure DevOps credential and explicitly bind each
+reviewable repository. Authenticated webhook deliveries create ordinary
+sessions; uninstalling or disabling the Pack removes dispatch authority without
+deleting provider registrations or historical sessions. Provider permissions,
+setup, exact-head fencing, and webhook semantics are documented in
+[`opengeni-lens.md`](opengeni-lens.md).
+
 ## Client surfaces
 
 The SDK exposes:
@@ -236,3 +254,4 @@ The SDK exposes:
 - schema and rolling migration: `packages/db/src/schema.ts`, `packages/db/drizzle/0216_pack_component_ownership.sql`
 - legacy worker compatibility: `apps/worker/src/activities/packs.ts`
 - web review UI: `apps/web/src/components/capabilities/packs-section.tsx`
+- Lens event automation: `apps/api/src/routes/lens.ts`, `packages/db/src/lens.ts`, `apps/worker/src/lens-credentials.ts`

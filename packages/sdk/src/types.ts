@@ -453,6 +453,8 @@ export type RepositoryResourceRef = {
   kind: "repository";
   uri: string;
   ref: string;
+  /** Exact immutable commit that repository materialization must produce. */
+  expectedCommitSha?: string | undefined;
   /**
    * Optional workspace-relative override. When omitted, OpenGeni persists
    * `repos/<encoded-host>/<owner>/<repo>` so equal names on different Git
@@ -5154,6 +5156,98 @@ export type PackInstallation = {
   metadata: Record<string, unknown>;
   enabledAt: string;
   updatedAt: string;
+};
+
+// --- OpenGeni Lens ------------------------------------------------------------
+
+export type LensProvider = GitCredentialProvider;
+export type LensCredentialKind = "github_app" | "provider_token";
+export type LensWebhookAuthKind = "hmac_sha256" | "shared_token" | "basic";
+
+export type CreateLensAppRegistrationRequest = {
+  name: string;
+  provider: LensProvider;
+  providerBaseUrl?: string | undefined;
+  appId?: string | undefined;
+  credentialKind: LensCredentialKind;
+  privateKey?: string | undefined;
+  accessToken?: string | undefined;
+  accessTokenExpiresAt?: string | null | undefined;
+  webhookSecret: string;
+  webhookUsername?: string | undefined;
+};
+
+export type UpdateLensAppRegistrationRequest = {
+  name?: string | undefined;
+  privateKey?: string | undefined;
+  accessToken?: string | undefined;
+  accessTokenExpiresAt?: string | null | undefined;
+  webhookSecret?: string | undefined;
+  webhookUsername?: string | undefined;
+  status?: "active" | "disabled" | undefined;
+};
+
+export type LensAppRegistration = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  name: string;
+  provider: LensProvider;
+  providerBaseUrl: string;
+  appId: string | null;
+  credentialKind: LensCredentialKind;
+  hasCredential: boolean;
+  accessTokenExpiresAt: string | null;
+  webhookAuthKind: LensWebhookAuthKind;
+  hasWebhookSecret: boolean;
+  webhookUsername: string | null;
+  webhookPath: string;
+  status: "active" | "disabled";
+  createdBySubjectId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateLensRepositoryBindingRequest = {
+  registrationId: string;
+  repositoryUri: string;
+  repositoryFullName: string;
+  providerRepositoryId: string | number;
+  installationId?: string | number | undefined;
+  projectId?: string | number | undefined;
+  model?: string | null | undefined;
+  additionalInstructions?: string | null | undefined;
+  status?: "active" | "disabled" | undefined;
+};
+
+export type UpdateLensRepositoryBindingRequest = {
+  model?: string | null | undefined;
+  additionalInstructions?: string | null | undefined;
+  status?: "active" | "disabled" | undefined;
+};
+
+export type LensRepositoryBinding = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  registrationId: string;
+  provider: LensProvider;
+  repositoryUri: string;
+  repositoryFullName: string;
+  providerRepositoryId: string;
+  installationId: string | null;
+  projectId: string | null;
+  model: string | null;
+  additionalInstructions: string | null;
+  status: "active" | "disabled";
+  createdBySubjectId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ListLensConfigurationResponse = {
+  registrations: LensAppRegistration[];
+  repositories: LensRepositoryBinding[];
 };
 
 export type EnablePackRequest = {

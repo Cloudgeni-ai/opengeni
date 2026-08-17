@@ -5,6 +5,7 @@ import { createObservability } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import type { ActivityDependencies, SharedActivityServices } from "./activities/types";
 import { observabilityEventLogger } from "./observability-metrics";
+import { createStandaloneConnectionCredentialsPort } from "./lens-credentials";
 
 /**
  * Build the dependency graph common to both worker roles exactly once.
@@ -32,10 +33,11 @@ export function createSharedActivityServices(
             rlsStrategy: settings.rlsStrategy,
           });
       const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
+      const serviceDb = dependencies.db ?? dbClient!.db;
 
       return {
         settings,
-        db: dependencies.db ?? dbClient!.db,
+        db: serviceDb,
         bus:
           dependencies.bus ??
           (await createNatsEventBus(
@@ -54,7 +56,9 @@ export function createSharedActivityServices(
         startSandboxReaperWorkflow: dependencies.startSandboxReaperWorkflow ?? null,
         startVideoGenerationWorkflow: dependencies.startVideoGenerationWorkflow ?? null,
         entitlements: dependencies.entitlements ?? null,
-        connectionCredentials: dependencies.connectionCredentials ?? null,
+        connectionCredentials:
+          dependencies.connectionCredentials ??
+          createStandaloneConnectionCredentialsPort(settings, serviceDb),
       };
     })();
     return await servicesPromise;

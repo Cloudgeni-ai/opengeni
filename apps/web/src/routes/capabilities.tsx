@@ -29,6 +29,7 @@ import {
 } from "@/components/capabilities/featured-connectors";
 import { IntegrationRow } from "@/components/capabilities/integration-row";
 import { IntegrationSheet } from "@/components/capabilities/integration-sheet";
+import { LensSetupCard } from "@/components/capabilities/lens-setup-card";
 import { PacksSection } from "@/components/capabilities/packs-section";
 import { isWorkspaceImportedSkill } from "@/components/capabilities/source-import-flow";
 import { SourcePackagesSection } from "@/components/capabilities/source-packages-section";
@@ -1331,27 +1332,39 @@ export function CapabilitiesRoute({
 
           {/* Packs. */}
           {showPacks ? (
-            <PacksSection
-              packs={packs}
-              variableSets={variableSets.variableSets.map((variableSet) => ({
-                id: variableSet.id,
-                name: variableSet.name,
-              }))}
-              rigs={rigs.rigs.map((rig) => ({
-                id: rig.id,
-                name: rig.name,
-                image: rig.activeVersion?.image ?? null,
-                available: rig.activeVersion !== null,
-                verified: rig.activeVersionHealth?.checkHealth === "passing",
-              }))}
-              busyPackId={packBusyId}
-              onRegister={registerPackManifest}
-              onPreviewInstall={previewPackInstallation}
-              onInstall={installPack}
-              onPreviewUninstall={previewPackUninstall}
-              onUninstall={uninstallPack}
-              onUnregister={unregisterPack}
-            />
+            <>
+              <PacksSection
+                packs={packs}
+                variableSets={variableSets.variableSets.map((variableSet) => ({
+                  id: variableSet.id,
+                  name: variableSet.name,
+                }))}
+                rigs={rigs.rigs.map((rig) => ({
+                  id: rig.id,
+                  name: rig.name,
+                  image: rig.activeVersion?.image ?? null,
+                  available: rig.activeVersion !== null,
+                  verified: rig.activeVersionHealth?.checkHealth === "passing",
+                }))}
+                busyPackId={packBusyId}
+                onRegister={registerPackManifest}
+                onPreviewInstall={previewPackInstallation}
+                onInstall={installPack}
+                onPreviewUninstall={previewPackUninstall}
+                onUninstall={uninstallPack}
+                onUnregister={unregisterPack}
+              />
+              {packs.installationFor("opengeni-lens")?.status === "active" ? (
+                <LensSetupCard
+                  client={client}
+                  workspaceId={workspaceId}
+                  canManage={
+                    canManageApiIntegrationInstances &&
+                    hasWorkspacePermission(context.accessContext, workspaceId, "secrets:write")
+                  }
+                />
+              ) : null}
+            </>
           ) : null}
 
           {showCatalog ? (

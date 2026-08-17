@@ -5,6 +5,8 @@ import { installExactPaths, isInstallRedirectPath } from "../routes/install";
 
 const githubConnectPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/connect$/;
 const githubInstallationLinkPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/installations$/;
+const lensWebhookPathPattern =
+  /^\/v1\/webhooks\/lens\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export function requireAccessKey(settings: Settings): MiddlewareHandler {
   return async (c, next) => {
@@ -38,6 +40,9 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
     return true;
   }
   if (path === "/v1/webhooks/stripe") {
+    return true;
+  }
+  if (c.req.method === "POST" && lensWebhookPathPattern.test(path)) {
     return true;
   }
   if (

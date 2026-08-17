@@ -60,7 +60,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           !line.startsWith("start_repository_clone '") && line !== "wait_repository_clone_batch",
       )
       .join("\n");
-    return `${withoutInvocations}\nclone_repository '${target}' '${uri}' 'main' ''`;
+    return `${withoutInvocations}\nclone_repository '${target}' '${uri}' 'main' '' '${resource.expectedCommitSha ?? ""}'`;
   }
 
   function setupScript(
@@ -134,6 +134,41 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         },
       ]),
     ).toThrow("claimed by multiple credential bindings");
+  });
+
+  test("fails closed when a repository ref does not resolve to the expected immutable commit", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-exact-head-"));
+    try {
+      const origin = makeOrigin(root);
+      const actual = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+      }).trim();
+      const target = join(root, "workspace", "repo");
+      const resource = {
+        kind: "repository" as const,
+        uri: "https://github.com/opengeni/exact-head-fixture.git",
+        ref: "main",
+        expectedCommitSha: "f".repeat(40),
+      };
+      const mismatch = runScript(cloneScriptWithTarget(target, `file://${origin}`, resource), {});
+      expect(mismatch.status).not.toBe(0);
+      expect(mismatch.output).toContain("resolved to an unexpected commit");
+      expect(existsSync(target)).toBe(false);
+
+      const matched = runScript(
+        cloneScriptWithTarget(target, `file://${origin}`, {
+          ...resource,
+          expectedCommitSha: actual,
+        }),
+        {},
+      );
+      expect(matched.status).toBe(0);
+      expect(
+        execFileSync("git", ["-C", target, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+      ).toBe(actual);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("keeps exact-path provider remotes distinct when one name ends in .git", () => {
