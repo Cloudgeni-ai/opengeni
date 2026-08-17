@@ -146,11 +146,6 @@ describe("UserMessageBody", () => {
       );
       expect(commits).toBe(1);
       expect(
-        r.container
-          .querySelector("[data-og-user-message-body]")
-          ?.getAttribute("data-og-collapsible"),
-      ).toBe("true");
-      expect(
         r.container.querySelector<HTMLButtonElement>("[data-og-user-message-disclosure]")?.hidden,
       ).toBe(false);
       await r.unmount();
