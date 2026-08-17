@@ -1,20 +1,34 @@
 import { describe, expect, test } from "bun:test";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import {
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
+} from "@opengeni/contracts";
+import {
   captureScheduledTaskRestoreState,
   ScheduledTaskSyncError,
   syncUpdatedScheduledTask,
 } from "@opengeni/core";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import {
   createDb,
+  addSessionSystemUpdateWithSourceMutation,
   createScheduledTask,
-  createScheduledTaskRun,
+  createScheduledTaskRun as createScheduledTaskRunRaw,
   createSession,
+  bindScheduledTaskRunSessionInTransaction,
   getScheduledTask,
+  getScheduledTaskRunAcceptedExecution,
+  getNestedAgentDepthDeploymentPolicy,
+  getScheduledTargetSessionExecution,
   getScheduledTaskRunPersonalResourceAuthority,
+  getScheduledTaskPersonalResourceAuthoritySubject,
+  getScheduledTaskRevisionAuthority,
   materializeScheduledTaskReusableSessionFromRun,
+  settleScheduledTaskRunInTransaction,
   updateScheduledTask,
 } from "../src";
 import { migrate } from "../src/migrate";
@@ -23,6 +37,7 @@ const migrationUrl = new URL(
   "../drizzle/0252_scheduled_personal_resource_delegation.sql",
   import.meta.url,
 );
+const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const explicitAdminDatabaseUrl = process.env.OPENGENI_MIGRATION_0252_TEST_DATABASE_ADMIN_URL;
 
@@ -258,7 +273,7 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
         cloneFunction: true,
         materializeFunction: true,
         executionFenceFunction: true,
-        hardenedSearchPaths: 11,
+        hardenedSearchPaths: 6,
         executionFenceTrigger: true,
         runTrigger: true,
         attemptTrigger: true,
@@ -311,7 +326,7 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
       }
       expect((scopeError as { code?: string } | undefined)?.code).toBe("42501");
       expect(await rejectedErrorChain(Promise.reject(scopeError))).toContain(
-        "scheduled personal-resource clone scope mismatch",
+        "scheduled connection clone scope or revision mismatch",
       );
       const [ledger] = await admin<Array<{ targetHeaders: number; capabilities: number }>>`
         select
@@ -328,7 +343,40 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
     }
   }, 180_000);
 
-  test("allows ordinary paused run history without personal-resource admission", async () => {
+  test("resolves a cross-workspace personal Variable Set through the app-role authority seam", async () => {
+    const blank = await acquireMigrationTestDatabase("app-role-cross-workspace-variable-set");
+    if (!blank) return;
+    const admin = postgres(blank.databaseUrl, { max: 2, prepare: false });
+    try {
+      await migrate(blank.databaseUrl);
+      const fixture = await createAuthorityFixture(admin);
+      const [resolved] = await admin.begin(async (tx) => {
+        await tx.unsafe("set local role opengeni_app");
+        await tx`select set_config('opengeni.account_id', ${fixture.accountId}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${fixture.targetWorkspaceId}, true)`;
+        await tx`select set_config('opengeni.subject_id', ${fixture.subjectId}, true)`;
+        return await tx<Array<{ value: { id: string; workspaceId: string; generation: number } }>>`
+          select value from list_scoped_variable_sets(
+            ${fixture.accountId}::uuid,
+            ${fixture.targetWorkspaceId}::uuid,
+            ${fixture.variableSetId}::uuid,
+            null,
+            null
+          ) value
+        `;
+      });
+      expect(resolved?.value).toMatchObject({
+        id: fixture.variableSetId,
+        workspaceId: fixture.personalWorkspaceId,
+        generation: 1,
+      });
+    } finally {
+      await admin.end({ timeout: 5 }).catch(() => undefined);
+      await blank.release();
+    }
+  }, 180_000);
+
+  test("rejects new paused run history without creating authority evidence", async () => {
     const blank = await acquireMigrationTestDatabase("paused-non-personal-history");
     if (!blank) {
       if (requireRealDatabase) {
@@ -356,26 +404,27 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
         createdBy: { kind: "subject", subjectId: fixture.subjectId },
         metadata: {},
       });
-      const run = await createScheduledTaskRun(client.db, {
-        workspaceId: fixture.targetWorkspaceId,
-        taskId: task.id,
-        ...executionBinding(task),
-        triggerType: "manual",
-        producerKey: "paused-non-personal-history",
-      });
-      expect(run).toMatchObject({
-        status: "queued",
-        taskAuthorityRevision: task.authorityRevision,
-        taskExecutionDigest: task.executionDigest,
-      });
-      const [counts] = await admin<Array<{ admissions: number; snapshots: number }>>`
+      expect(
+        await rejectedErrorChain(
+          createScheduledTaskRun(client.db, {
+            workspaceId: fixture.targetWorkspaceId,
+            taskId: task.id,
+            ...executionBinding(task),
+            triggerType: "manual",
+            producerKey: "paused-non-personal-history",
+          }),
+        ),
+      ).toContain("scheduled agent run task changed before producer admission");
+      const [counts] = await admin<Array<{ runs: number; admissions: number; snapshots: number }>>`
         select
+          (select count(*)::int from scheduled_task_runs
+            where task_id = ${task.id}) as runs,
           (select count(*)::int from scheduled_task_run_personal_resource_admissions
-            where run_id = ${run.id}) as admissions,
+            where task_id = ${task.id}) as admissions,
           (select count(*)::int from scheduled_task_run_personal_resource_snapshots
-            where run_id = ${run.id}) as snapshots
+            where task_id = ${task.id}) as snapshots
       `;
-      expect(counts).toEqual({ admissions: 0, snapshots: 0 });
+      expect(counts).toEqual({ runs: 0, admissions: 0, snapshots: 0 });
     } finally {
       await client.close().catch(() => undefined);
       await admin.end({ timeout: 5 }).catch(() => undefined);
@@ -537,7 +586,7 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
             producerKey: "scheduled-personal-legacy-execution-fence",
           }),
         ),
-      ).toContain("scheduled personal-resource task has no authority snapshot");
+      ).toContain("scheduled task accepted execution binding changed");
       const [residue] = await admin<
         Array<{ runs: number; admissions: number; capabilities: number }>
       >`
@@ -637,7 +686,7 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
             producerKey: "scheduled-personal-paused-stale-worker",
           }),
         ),
-      ).toContain("scheduled task is not active");
+      ).toContain("scheduled agent run task changed before producer admission");
 
       const [state] = await admin<
         Array<{
@@ -702,16 +751,8 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
     if (!blank) return;
     const admin = postgres(blank.databaseUrl, { max: 2, prepare: false });
     const client = createDb(blank.databaseUrl, { max: 2 });
-    const migrationName = "0252_scheduled_personal_resource_delegation.sql";
     try {
-      await admin`
-        create table if not exists schema_migrations (
-          name text primary key,
-          applied_at timestamptz not null default now()
-        )
-      `;
-      await admin`insert into schema_migrations (name) values (${migrationName})`;
-      await migrate(blank.databaseUrl);
+      await applyThrough0251(admin);
       const fixture = await createAuthorityFixture(admin);
       const [legacyTask] = await admin<Array<{ id: string }>>`
         insert into scheduled_tasks (
@@ -727,7 +768,6 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
         ) returning id
       `;
 
-      await admin`delete from schema_migrations where name = ${migrationName}`;
       await migrate(blank.databaseUrl);
 
       const [paused] = await admin<
@@ -748,7 +788,7 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
             producerKey: "scheduled-personal-pre-migration-paused",
           }),
         ),
-      ).toContain("scheduled task is not active");
+      ).toContain("scheduled task accepted execution binding changed");
 
       // A rolling old writer can still issue the pre-0250 status update, but it
       // cannot manufacture the new immutable authority ledger. The database
@@ -763,7 +803,7 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
             producerKey: "scheduled-personal-old-writer-reactivated",
           }),
         ),
-      ).toContain("scheduled personal-resource task has no authority snapshot");
+      ).toContain("scheduled task accepted execution binding changed");
       const [runCount] = await admin<Array<{ count: number }>>`
         select count(*)::int as count from scheduled_task_runs where task_id = ${legacyTask!.id}
       `;
@@ -956,16 +996,17 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
         where id = ${fixture.grantId}
       `;
       expect(
-        await rejectedErrorChain(
-          createScheduledTaskRun(client.db, {
-            workspaceId: fixture.targetWorkspaceId,
-            taskId: task.id,
-            ...executionBinding(task),
-            triggerType: "scheduled",
-            producerKey: "scheduled-personal-revoked",
-          }),
-        ),
-      ).toContain("scheduled personal-resource authority snapshot is no longer live");
+        await createScheduledTaskRun(client.db, {
+          workspaceId: fixture.targetWorkspaceId,
+          taskId: task.id,
+          ...executionBinding(task),
+          triggerType: "scheduled",
+          producerKey: "scheduled-personal-revoked",
+        }),
+      ).toMatchObject({
+        status: "failed",
+        error: "scheduled_run_authority_proof_rejected",
+      });
 
       await admin`
         update organization_user_resource_grants
@@ -978,16 +1019,17 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
           and subject_id = ${fixture.subjectId}
       `;
       expect(
-        await rejectedErrorChain(
-          createScheduledTaskRun(client.db, {
-            workspaceId: fixture.targetWorkspaceId,
-            taskId: task.id,
-            ...executionBinding(task),
-            triggerType: "scheduled",
-            producerKey: "scheduled-personal-membership-lost",
-          }),
-        ),
-      ).toContain("scheduled personal-resource authority snapshot is no longer live");
+        await createScheduledTaskRun(client.db, {
+          workspaceId: fixture.targetWorkspaceId,
+          taskId: task.id,
+          ...executionBinding(task),
+          triggerType: "scheduled",
+          producerKey: "scheduled-personal-membership-lost",
+        }),
+      ).toMatchObject({
+        status: "failed",
+        error: "scheduled_run_authority_proof_rejected",
+      });
       await admin`
         insert into workspace_memberships (account_id, workspace_id, subject_id)
         values (${fixture.accountId}, ${fixture.targetWorkspaceId}, ${fixture.subjectId})
@@ -1010,7 +1052,7 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
             producerKey: "scheduled-personal-stale-worker-binding",
           }),
         ),
-      ).toContain("scheduled task changed after worker read");
+      ).toContain("scheduled task accepted execution binding changed");
       const revisedRun = await createScheduledTaskRun(client.db, {
         workspaceId: fixture.targetWorkspaceId,
         taskId: task.id,
@@ -1090,19 +1132,7 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
         triggerType: "scheduled",
         producerKey: "scheduled-personal-reusable-admitted",
       });
-      const session = await createSession(client.db, {
-        accountId: fixture.accountId,
-        workspaceId: fixture.targetWorkspaceId,
-        initialMessage: "personal reusable target",
-        resources: [],
-        tools: [],
-        metadata: {},
-        createdBy: { kind: "subject", subjectId: fixture.subjectId },
-        model: "test-model",
-        sandboxBackend: "modal",
-        variableSetId: fixture.variableSetId,
-        subjectId: fixture.subjectId,
-      });
+      const session = await createExactGeneratedSessionForRun(client.db, task, run);
       const nextRevision = await materializeScheduledTaskReusableSessionFromRun(client.db, {
         accountId: fixture.accountId,
         workspaceId: fixture.targetWorkspaceId,
@@ -1129,18 +1159,16 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
         executionDigest: reboundTask?.executionDigest,
       });
       expect(
-        await rejectedErrorChain(
-          materializeScheduledTaskReusableSessionFromRun(client.db, {
-            accountId: fixture.accountId,
-            workspaceId: fixture.targetWorkspaceId,
-            taskId: task.id,
-            runId: run.id,
-            sessionId: session.id,
-            sourceTaskAuthorityRevision: task.authorityRevision,
-            sourceExecutionDigest: task.executionDigest,
-          }),
-        ),
-      ).toContain("scheduled reusable-session");
+        await materializeScheduledTaskReusableSessionFromRun(client.db, {
+          accountId: fixture.accountId,
+          workspaceId: fixture.targetWorkspaceId,
+          taskId: task.id,
+          runId: run.id,
+          sessionId: session.id,
+          sourceTaskAuthorityRevision: task.authorityRevision,
+          sourceExecutionDigest: task.executionDigest,
+        }),
+      ).toBe(nextRevision);
     } finally {
       await client.close().catch(() => undefined);
       await admin.end({ timeout: 5 }).catch(() => undefined);
@@ -1209,6 +1237,12 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
         triggerType: "scheduled",
         producerKey: "scheduled-personal-once-run",
       });
+      await bindScheduledTaskRunSessionInTransaction(client.db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.targetWorkspaceId,
+        runId: run.id,
+        sessionId: session.id,
+      });
       expect(await grantAndReceiptState(admin, fixture.grantId)).toEqual({
         status: "consumed",
         scheduledReceipts: 1,
@@ -1216,38 +1250,106 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
         attemptId: null,
       });
 
+      const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+        workspaceId: fixture.targetWorkspaceId,
+        runId: run.id,
+      });
+      const targetExecution = accepted?.targetSessionExecution;
+      if (!targetExecution) {
+        throw new Error("scheduled once run is missing its target execution snapshot");
+      }
       const turnId = crypto.randomUUID();
-      await admin`
-        insert into session_turns (
+      const updateResult = await addSessionSystemUpdateWithSourceMutation(
+        client.db,
+        {
+          accountId: fixture.accountId,
+          workspaceId: fixture.targetWorkspaceId,
+          sessionId: session.id,
+          kind: "scheduled_occurrence",
+          classification: "info",
+          sourceId: run.id,
+          dedupeKey: `scheduled-task-run:${run.id}`,
+          summary: task.agentConfig.prompt,
+          payload: {
+            type: "scheduled_occurrence",
+            text: task.agentConfig.prompt,
+            scheduledTaskId: task.id,
+            scheduledTaskRunId: run.id,
+          },
+          lineage: {
+            scheduledTaskId: task.id,
+            scheduledTaskRunId: run.id,
+            causalHumanSubjectId: accepted.causalHumanSubjectId,
+          },
+          personalConnectionDelegations: accepted.personalConnectionDelegations,
+          xaiProviderAccountAuthoritySnapshot: accepted.xaiProviderAccountAuthoritySnapshot,
+          scheduledTaskRunId: run.id,
+        },
+        async (tx, wakeEventId) => {
+          if (!wakeEventId) throw new Error("scheduled once update produced no wake event");
+          await settleScheduledTaskRunInTransaction(tx, {
+            workspaceId: fixture.targetWorkspaceId,
+            runId: run.id,
+            sessionId: session.id,
+            triggerEventId: wakeEventId,
+            status: "dispatched",
+          });
+        },
+      );
+      if (!updateResult.added) throw new Error("scheduled once update was not added");
+      const updateId = updateResult.update.id;
+      await admin.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${fixture.accountId}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${fixture.targetWorkspaceId}, true)`;
+        await tx`
+          insert into session_turns (
           id, account_id, workspace_id, session_id, trigger_event_id,
           temporal_workflow_id, status, execution_generation, position, prompt,
-          model, reasoning_effort, latency_mode, sandbox_backend, initiator_kind,
-          initiator_subject_id, initiating_human_subject_id
-        ) values (
-          ${turnId}, ${fixture.accountId}, ${fixture.targetWorkspaceId}, ${session.id},
-          ${crypto.randomUUID()}, 'scheduled-personal-once-workflow', 'running', 1, 1,
-          'scheduled once attempt', 'test-model', 'medium', 'standard', 'modal',
-          'service', 'scheduler', ${fixture.subjectId}
-        )
-      `;
-      const scheduledPayload = JSON.stringify({
-        type: "scheduled_occurrence",
-        text: "scheduled once attempt",
-        scheduledTaskId: task.id,
-        scheduledTaskRunId: run.id,
-      });
-      await admin`
-        insert into session_system_updates (
-          account_id, workspace_id, session_id, kind, classification, source_id,
-          dedupe_key, summary, payload, lineage, state, delivered_turn_id,
+          model, reasoning_effort, latency_mode, tools, sandbox_backend, sandbox_os,
+          initiator_kind, initiator_subject_id, initiating_human_subject_id,
+          personal_connection_delegations, xai_provider_account_authority_snapshot,
           scheduled_task_run_id
-        ) values (
-          ${fixture.accountId}, ${fixture.targetWorkspaceId}, ${session.id},
-          'scheduled_occurrence', 'info', ${run.id}, ${`scheduled-personal-once:${run.id}`},
-          'scheduled once attempt', ${scheduledPayload}::jsonb,
-          '{}'::jsonb, 'pending', ${turnId}, ${run.id}
-        )
-      `;
+          ) values (
+          ${turnId}, ${fixture.accountId}, ${fixture.targetWorkspaceId}, ${session.id},
+          ${updateId}, 'scheduled-personal-once-workflow', 'running', 1, 1,
+          ${task.agentConfig.prompt}, ${targetExecution.model},
+          ${targetExecution.reasoningEffort},
+          ${targetExecution.latencyMode},
+          ${admin.json(targetExecution.tools)}::jsonb,
+          ${targetExecution.sandboxBackend},
+          ${targetExecution.sandboxOs},
+          'service', 'scheduler', ${fixture.subjectId},
+          ${admin.json(accepted.personalConnectionDelegations)}::jsonb,
+          ${admin.json(accepted.xaiProviderAccountAuthoritySnapshot)}::jsonb,
+          ${run.id}
+          )
+        `;
+        const [history] = await tx<Array<{ id: string }>>`
+          insert into session_history_items (
+            account_id, workspace_id, session_id, turn_id, position, item
+          ) values (
+            ${fixture.accountId}, ${fixture.targetWorkspaceId}, ${session.id}, ${turnId},
+            (
+              select coalesce(max(item.position), -1) + 1
+              from session_history_items item
+              where item.workspace_id = ${fixture.targetWorkspaceId}
+                and item.session_id = ${session.id}
+            ),
+            ${admin.json({
+              type: "message",
+              role: "user",
+              content: task.agentConfig.prompt,
+            })}::jsonb
+          ) returning id
+        `;
+        if (!history) throw new Error("scheduled once delivery history was not created");
+        await tx`
+          update session_system_updates
+          set state = 'delivered', delivered_turn_id = ${turnId},
+            delivered_history_item_id = ${history.id}, delivered_at = now()
+          where id = ${updateId}
+        `;
+      });
       const firstAttemptId = crypto.randomUUID();
       await insertScheduledAttempt(admin, {
         fixture,
@@ -1328,6 +1430,168 @@ function executionBinding(task: { authorityRevision: number; executionDigest: st
     taskAuthorityRevision: task.authorityRevision,
     taskExecutionDigest: task.executionDigest,
   };
+}
+
+async function createScheduledTaskRun(
+  db: Parameters<typeof createScheduledTaskRunRaw>[0],
+  input: Parameters<typeof createScheduledTaskRunRaw>[1],
+) {
+  if (input.acceptedExecutionSnapshot) {
+    return await createScheduledTaskRunRaw(db, input);
+  }
+  const task = await getScheduledTask(db, input.workspaceId, input.taskId);
+  if (!task) throw new Error(`Scheduled task not found: ${input.taskId}`);
+  const runId = input.runId ?? crypto.randomUUID();
+  const targetSessionId =
+    task.status !== "active"
+      ? null
+      : task.runMode === "existing_session"
+        ? task.targetSessionId
+        : task.runMode === "reusable_session"
+          ? task.reusableSessionId
+          : null;
+  const personalResourceAuthoritySubjectId = await getScheduledTaskPersonalResourceAuthoritySubject(
+    db,
+    {
+      accountId: task.accountId,
+      workspaceId: task.workspaceId,
+      taskId: task.id,
+      taskAuthorityRevision: task.authorityRevision,
+    },
+  );
+  const targetSessionExecution = targetSessionId
+    ? await getScheduledTargetSessionExecution(
+        db,
+        task.workspaceId,
+        targetSessionId,
+        personalResourceAuthoritySubjectId,
+      )
+    : null;
+  const depthPolicy = targetSessionExecution ? null : await getNestedAgentDepthDeploymentPolicy(db);
+  const causalHumanAuthority = await getScheduledTaskRevisionAuthority(db, {
+    accountId: task.accountId,
+    workspaceId: task.workspaceId,
+    taskId: task.id,
+    taskAuthorityRevision: task.authorityRevision,
+  });
+  return await createScheduledTaskRunRaw(db, {
+    ...input,
+    runId,
+    acceptedExecutionSnapshot: {
+      version: 1,
+      task,
+      resolvedModel: targetSessionExecution?.model ?? task.agentConfig.model ?? "test-model",
+      resolvedReasoningEffort:
+        targetSessionExecution?.reasoningEffort ?? task.agentConfig.reasoningEffort ?? "medium",
+      resolvedLatencyMode: targetSessionExecution?.latencyMode ?? "standard",
+      resolvedSandboxBackend:
+        targetSessionExecution?.sandboxBackend ?? task.agentConfig.sandboxBackend ?? "modal",
+      resolvedSandboxOs: targetSessionExecution?.sandboxOs ?? "linux",
+      resolvedTools: targetSessionExecution?.tools ?? task.agentConfig.tools,
+      resolvedFirstPartyMcpTools: targetSessionExecution?.firstPartyMcpTools ?? [
+        ...DEFAULT_FIRST_PARTY_MCP_TOOLS,
+      ],
+      resolvedFirstPartyMcpPermissions: targetSessionExecution?.firstPartyMcpPermissions ?? [
+        ...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+      ],
+      resolvedVariableSet: task.variableSetId ? { id: task.variableSetId, generation: 1 } : null,
+      resolvedRig:
+        targetSessionExecution?.rigId && targetSessionExecution.rigVersionId
+          ? {
+              id: targetSessionExecution.rigId,
+              versionId: targetSessionExecution.rigVersionId,
+              defaultVariableSets: targetSessionExecution.rigDefaultVariableSets,
+            }
+          : null,
+      resolvedSlackBotConnection: null,
+      targetSessionExecution,
+      generatedSessionBinding: depthPolicy
+        ? {
+            createIdempotencyKey: `migration-0252-run:${input.producerKey ?? runId}`,
+            effectiveMaxNestedAgentDepth: depthPolicy.maxNestedAgentDepth,
+            nestedAgentDepthPolicySource: depthPolicy.policySource,
+            codexCompactionMode: "portable",
+          }
+        : null,
+      personalConnectionDelegations: [],
+      personalResourceAuthoritySubjectId,
+      causalHumanSubjectId:
+        personalResourceAuthoritySubjectId ??
+        causalHumanAuthority?.subjectId ??
+        ((task.variableSetId || task.rigId) && task.createdBy.kind === "subject"
+          ? task.createdBy.subjectId
+          : null),
+      causalHumanAuthority,
+      xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+      xaiAuthoritySubjectId: null,
+      connectionAuthoritySubjectId: null,
+      triggerInitiator: { kind: "service", subjectId: "scheduler" },
+      agentRunUsageIdempotencyKey: null,
+      incidentPreflightRequired: false,
+      alertOccurrenceLabels: null,
+    },
+  });
+}
+
+async function createExactGeneratedSessionForRun(
+  db: Parameters<typeof createSession>[0],
+  task: NonNullable<Awaited<ReturnType<typeof getScheduledTask>>>,
+  run: Awaited<ReturnType<typeof createScheduledTaskRunRaw>>,
+) {
+  const accepted = await getScheduledTaskRunAcceptedExecution(db, {
+    workspaceId: task.workspaceId,
+    runId: run.id,
+  });
+  if (!accepted?.generatedSessionBinding) {
+    throw new Error("scheduled generated run is missing its accepted binding");
+  }
+  return await createSession(db, {
+    accountId: task.accountId,
+    workspaceId: task.workspaceId,
+    initialMessage: task.agentConfig.prompt,
+    resources: task.agentConfig.resources,
+    tools: accepted.resolvedTools,
+    firstPartyMcpTools: accepted.resolvedFirstPartyMcpTools,
+    firstPartyMcpPermissions: accepted.resolvedFirstPartyMcpPermissions,
+    metadata: {
+      ...task.agentConfig.metadata,
+      model: accepted.resolvedModel,
+      reasoningEffort: accepted.resolvedReasoningEffort,
+      scheduledTaskId: task.id,
+      scheduledTaskRunMode: task.runMode,
+      scheduledTaskRunId: run.id,
+    },
+    createdBy: {
+      kind: "service",
+      subjectId: "scheduler",
+      label: "OpenGeni scheduler",
+    },
+    createdByContext: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
+    model: accepted.resolvedModel,
+    sandboxBackend: accepted.resolvedSandboxBackend,
+    sandboxOs: accepted.resolvedSandboxOs,
+    variableSetId: accepted.resolvedVariableSet?.id ?? null,
+    rigId: accepted.resolvedRig?.id ?? null,
+    rigVersionId: accepted.resolvedRig?.versionId ?? null,
+    personalConnectionDelegations: [],
+    initialXaiProviderAccountAuthoritySnapshot: accepted.xaiProviderAccountAuthoritySnapshot,
+    maxNestedAgentDepthOverride: task.agentConfig.maxNestedAgentDepth ?? null,
+    frozenNestedAgentDepthPolicy: {
+      effectiveMaxNestedAgentDepth: accepted.generatedSessionBinding.effectiveMaxNestedAgentDepth,
+      nestedAgentDepthPolicySource: accepted.generatedSessionBinding.nestedAgentDepthPolicySource,
+    },
+    frozenCodexCompactionMode: accepted.generatedSessionBinding.codexCompactionMode,
+    subjectId: `scheduled_task:${task.id}`,
+    createIdempotencyKey: accepted.generatedSessionBinding.createIdempotencyKey,
+    beforeCreateCommit: async (tx, sessionId) => {
+      await bindScheduledTaskRunSessionInTransaction(tx, {
+        accountId: task.accountId,
+        workspaceId: task.workspaceId,
+        runId: run.id,
+        sessionId,
+      });
+    },
+  });
 }
 
 async function createOncePersonalScheduledTask(
@@ -1494,6 +1758,8 @@ async function insertScheduledAttempt(
   },
 ): Promise<void> {
   await sql.begin(async (tx) => {
+    await tx`select set_config('opengeni.account_id', ${input.fixture.accountId}, true)`;
+    await tx`select set_config('opengeni.workspace_id', ${input.fixture.targetWorkspaceId}, true)`;
     await tx.unsafe("set local opengeni.session_inference_claim = '1'");
     await tx`
       update sessions
@@ -1553,6 +1819,22 @@ async function grantAndReceiptState(
     where grant_value.id = ${grantId}
   `;
   return row!;
+}
+
+async function applyThrough0251(admin: postgres.Sql): Promise<void> {
+  const files = (await readdir(migrationsDir))
+    .filter((file) => file.endsWith(".sql") && file < "0252_")
+    .sort();
+  await admin.unsafe(`
+    create table if not exists schema_migrations (
+      name text primary key,
+      applied_at timestamptz not null default now()
+    )
+  `);
+  for (const file of files) {
+    await admin.unsafe(await readFile(join(migrationsDir, file), "utf8"));
+    await admin`insert into schema_migrations (name) values (${file}) on conflict do nothing`;
+  }
 }
 
 async function acquireMigrationTestDatabase(label: string): Promise<BlankTestDatabase | null> {

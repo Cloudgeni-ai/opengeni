@@ -1279,6 +1279,137 @@ BEGIN
         ${literal(schema)},
         ${literal(role)}
       );
+      IF to_regprocedure(
+        format(
+          '%I.refresh_scheduled_task_personal_resources_clone_connections(uuid,uuid,uuid,bigint,bigint)',
+          ${literal(schema)}
+        )
+      ) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.refresh_scheduled_task_personal_resources_clone_connections(uuid, uuid, uuid, bigint, bigint) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.refresh_scheduled_task_personal_resources_clone_connections(uuid, uuid, uuid, bigint, bigint) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.create_scheduled_agent_run_with_admission(uuid, uuid, uuid, uuid, bigint, text, text, text, timestamp with time zone, timestamp with time zone, jsonb) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.create_scheduled_agent_run_with_admission(uuid, uuid, uuid, uuid, bigint, text, text, text, timestamp with time zone, timestamp with time zone, jsonb) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.scheduled_task_run_connection_authority_subject(uuid, uuid, uuid) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.scheduled_task_run_connection_authority_subject(uuid, uuid, uuid) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.scheduled_task_personal_resource_authority_subject(uuid, uuid, uuid, bigint) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.scheduled_task_personal_resource_authority_subject(uuid, uuid, uuid, bigint) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.record_scheduled_task_revision_authority(uuid, uuid, uuid, bigint) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.record_scheduled_task_revision_authority(uuid, uuid, uuid, bigint) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.clone_scheduled_task_revision_authority(uuid, uuid, uuid, bigint, bigint) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.clone_scheduled_task_revision_authority(uuid, uuid, uuid, bigint, bigint) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.scheduled_task_revision_authority_subject(uuid, uuid, uuid, bigint) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.scheduled_task_revision_authority_subject(uuid, uuid, uuid, bigint) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.scheduled_task_revision_authority_snapshot(uuid, uuid, uuid, bigint) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.scheduled_task_revision_authority_snapshot(uuid, uuid, uuid, bigint) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.validate_scheduled_agent_run_live_authority(uuid, uuid, uuid) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.validate_scheduled_agent_run_live_authority(uuid, uuid, uuid) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.scheduled_scoped_rig_version_metadata(uuid, uuid, text, uuid, uuid) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.scheduled_scoped_rig_version_metadata(uuid, uuid, text, uuid, uuid) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.scheduled_variable_set_expected_generation_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.scheduled_variable_set_expected_generation_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.bind_scheduled_task_run_session(uuid, uuid, uuid, uuid) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.bind_scheduled_task_run_session(uuid, uuid, uuid, uuid) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.transition_scheduled_agent_run(uuid, uuid, uuid, uuid, uuid, text, text) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.transition_scheduled_agent_run(uuid, uuid, uuid, uuid, uuid, text, text) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE DELETE ON TABLE %I.scheduled_tasks, %I.scheduled_task_runs FROM %I',
+          ${literal(schema)}, ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL PRIVILEGES ON TABLE %I.scheduled_task_connection_authority_snapshots FROM %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL PRIVILEGES ON TABLE %I.scheduled_task_run_connection_authority_snapshots FROM %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL PRIVILEGES ON TABLE %I.scheduled_task_reusable_connection_materializations FROM %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL PRIVILEGES ON TABLE %I.scheduled_task_revision_authorities FROM %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+      END IF;
       EXECUTE format(
         'REVOKE ALL ON FUNCTION %I.materialize_scheduled_task_reusable_session_from_run(uuid, uuid, uuid, uuid, uuid, bigint, text) FROM PUBLIC',
         ${literal(schema)}
@@ -1470,6 +1601,23 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'complete_temporal_schedule_connector_cleanup(uuid,uuid)',
+      'upgrade_temporal_schedule_connector_cleanup(uuid,uuid,text,uuid,text,jsonb,uuid)',
+      'complete_workspace_temporal_connector_cleanups(uuid,uuid)'
+    ] LOOP
+      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION opengeni_private.%s FROM PUBLIC',
+          routine_signature
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION opengeni_private.%s TO %I',
+          routine_signature,
+          ${literal(role)}
+        );
+      END IF;
+    END LOOP;
   END IF;
 END $$;
 `);

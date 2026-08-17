@@ -56,7 +56,12 @@ export function captureConnectionUseAuthority(input: {
   targetSessionAuthorityEpoch: number;
   acceptedWork:
     | { kind: "turn"; turnId: string }
-    | { kind: "scheduled_task"; taskId: string; taskAuthorityRevision: number };
+    | {
+        kind: "scheduled_task";
+        taskId: string;
+        taskAuthorityRevision: number;
+        runId: string;
+      };
   connection: ConnectionAuthorityCandidate;
   authority?: unknown;
   authorityWasOmitted?: boolean;

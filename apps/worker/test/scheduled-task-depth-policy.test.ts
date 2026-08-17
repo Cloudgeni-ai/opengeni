@@ -91,6 +91,7 @@ describe("scheduled-task nested-agent policy dispatch (real PostgreSQL)", () => 
         workspaceId: workspace!.id,
         taskId: task.id,
         triggerType: "scheduled",
+        producerKey: `depth-policy-${crypto.randomUUID()}`,
       });
 
       expect(result.action).toBe("start");
@@ -105,11 +106,15 @@ describe("scheduled-task nested-agent policy dispatch (real PostgreSQL)", () => 
         nestedAgentDepthPolicySource: "session",
         nestedAgentDepthPolicySessionId: result.sessionId,
       });
-      expect(
-        (await listSessionEvents(client.db, workspace!.id, result.sessionId, 0, 10)).map(
-          (event) => event.type,
-        ),
-      ).toEqual(["session.created", "session.status.changed", "system.update.pending"]);
+      // A generated scheduled session starts through the atomic deferred path:
+      // session.created carries the public "queued" status directly, so no
+      // separate session.status.changed event is emitted before the wake.
+      const events = await listSessionEvents(client.db, workspace!.id, result.sessionId, 0, 10);
+      expect(events.map((event) => event.type)).toEqual([
+        "session.created",
+        "system.update.pending",
+      ]);
+      expect(events[0]?.payload).toMatchObject({ status: "queued" });
       expect(wakeups).toEqual([
         {
           accountId: account!.id,

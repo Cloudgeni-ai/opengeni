@@ -11,6 +11,7 @@ import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 import { MediaGenerationResult } from "./video-generation";
 import { KnowledgeProviderCitation } from "./knowledge";
+import { XaiProviderAccountAuthoritySnapshotV1 } from "./xai-provider-account-authority";
 
 export * from "./slack-bot-scopes";
 export * from "./slack-task-policy";
@@ -3283,6 +3284,12 @@ export type SandboxSecretsRequest = {
   initiator: TurnInitiator;
   initiatingHumanSubjectId: string | null;
   variableSetId: string;
+  /**
+   * Exact accepted scheduled-occurrence generation. Present only for scheduled
+   * attempts; ordinary live turns omit it, so hosts that predate this field keep
+   * working unchanged for those.
+   */
+  expectedGeneration?: number | null;
 };
 
 export type SandboxSecrets = {
@@ -3299,6 +3306,8 @@ export type SandboxSecrets = {
   attemptId: string;
   executionGeneration: number;
   variableSetId: string;
+  /** Must echo the request's `expectedGeneration` when one was supplied. */
+  expectedGeneration?: number | null;
   scope: VariableSetScope;
   generation: number;
   // Optional variableSet metadata; when omitted the activity uses the
@@ -7214,17 +7223,124 @@ export const IncidentTelemetryPreflight = z
   });
 export type IncidentTelemetryPreflight = z.infer<typeof IncidentTelemetryPreflight>;
 
-export const ScheduledTaskAgentConfig = /* @__PURE__ */ z
-  .object({
-    prompt: z.string().min(1),
-    resources: z.array(ResourceRef).default([]),
-    tools: z.array(ToolRef).default([]),
-    metadata: z.record(z.string(), z.unknown()).default({}),
+/**
+ * Canonical UTF-8 ingress limits for newly written scheduled execution truth.
+ * They bound create/update requests and freshly accepted occurrence snapshots;
+ * already-stored tasks are read back through the unbounded storage shape so a
+ * legacy row can never become unreadable or undispatchable by a later cap.
+ */
+export const SCHEDULED_TASK_NAME_MAX_BYTES = 512;
+export const SCHEDULED_TASK_PROMPT_MAX_BYTES = 64 * 1024;
+export const SCHEDULED_TASK_METADATA_MAX_BYTES = 32 * 1024;
+export const SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES = 128 * 1024;
+export const SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES = 512 * 1024;
+/**
+ * A scheduled occurrence is delivered as one durable internal update whose
+ * payload (`scheduled_occurrence` text + resources + tools + ids) must fit the
+ * canonical internal-update bound. Bounding it here at ingress means every
+ * stored task that passed validation can also be delivered.
+ */
+export const SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES = 64 * 1024;
+/**
+ * Ingress reserves headroom below that bound for what the worker adds to the
+ * delivered payload (the first-party `opengeni` MCP tool ref and real ids), so
+ * a request that passes validation can always be delivered.
+ */
+export const SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES = 1024;
+export const SCHEDULED_TASK_PRODUCER_KEY_MAX_BYTES = 512;
+export const SCHEDULED_TASK_RESOURCE_MAX_COUNT = 100;
+export const SCHEDULED_TASK_TOOL_MAX_COUNT = 128;
+
+const scheduledTaskUtf8Encoder = new TextEncoder();
+
+function scheduledTaskUtf8Bytes(value: string): number {
+  return scheduledTaskUtf8Encoder.encode(value).byteLength;
+}
+
+function scheduledTaskJsonUtf8Bytes(value: unknown): number {
+  try {
+    const encoded = JSON.stringify(value);
+    return encoded === undefined ? Number.POSITIVE_INFINITY : scheduledTaskUtf8Bytes(encoded);
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+/**
+ * UTF-8 size of the exact `scheduled_occurrence` internal-update payload the
+ * worker delivers for one occurrence of this agent config (ids use fixed-width
+ * placeholder UUIDs). Shared by ingress validation and worker admission.
+ */
+export function scheduledOccurrencePayloadUtf8Bytes(agentConfig: {
+  prompt: string;
+  resources?: readonly unknown[] | undefined;
+  tools?: readonly unknown[] | undefined;
+}): number {
+  const placeholder = "00000000-0000-4000-8000-000000000000";
+  return scheduledTaskJsonUtf8Bytes({
+    type: "scheduled_occurrence",
+    text: agentConfig.prompt,
+    scheduledTaskId: placeholder,
+    scheduledTaskRunId: placeholder,
+    ...(agentConfig.resources?.length ? { resources: agentConfig.resources } : {}),
+    ...(agentConfig.tools?.length ? { tools: agentConfig.tools } : {}),
+  });
+}
+
+function scheduledTaskBoundedJsonObject(maxBytes: number, label: string) {
+  return z.record(z.string(), z.unknown()).superRefine((value, context) => {
+    if (scheduledTaskJsonUtf8Bytes(value) > maxBytes) {
+      context.addIssue({ code: "custom", message: `${label} exceeds ${maxBytes} UTF-8 bytes` });
+    }
+  });
+}
+
+function scheduledTaskBoundedString(maxBytes: number, label: string) {
+  return z
+    .string()
+    .min(1)
+    .superRefine((value, context) => {
+      if (scheduledTaskUtf8Bytes(value) > maxBytes) {
+        context.addIssue({ code: "custom", message: `${label} exceeds ${maxBytes} UTF-8 bytes` });
+      }
+    });
+}
+
+/** Ingress-bounded task name for create/update requests. */
+export const ScheduledTaskNameInput = /* @__PURE__ */ scheduledTaskBoundedString(
+  SCHEDULED_TASK_NAME_MAX_BYTES,
+  "scheduled task name",
+);
+/** Ingress-bounded task metadata for create/update requests. */
+export const ScheduledTaskMetadataInput = /* @__PURE__ */ scheduledTaskBoundedJsonObject(
+  SCHEDULED_TASK_METADATA_MAX_BYTES,
+  "scheduled task metadata",
+);
+
+function scheduledTaskAgentConfigShape(bounded: boolean) {
+  return {
+    prompt: bounded
+      ? scheduledTaskBoundedString(SCHEDULED_TASK_PROMPT_MAX_BYTES, "scheduled task prompt")
+      : z.string().min(1),
+    resources: bounded
+      ? z.array(ResourceRef).max(SCHEDULED_TASK_RESOURCE_MAX_COUNT).default([])
+      : z.array(ResourceRef).default([]),
+    tools: bounded
+      ? z
+          .array(ToolRef)
+          .max(SCHEDULED_TASK_TOOL_MAX_COUNT - 1)
+          .default([])
+      : z.array(ToolRef).default([]),
+    metadata: bounded
+      ? ScheduledTaskMetadataInput.default({})
+      : z.record(z.string(), z.unknown()).default({}),
     // Explicit workspace-shared OpenGeni Slack bot binding for scheduled runs.
     // The worker copies this non-secret pointer into session metadata; the
     // first-party Slack tools never fall back to a personal hosted-MCP grant.
     slackBotConnectionId: z.string().uuid().optional(),
-    model: z.string().min(1).optional(),
+    model: bounded
+      ? scheduledTaskBoundedString(512, "scheduled task model").optional()
+      : z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
     sandboxBackend: SandboxBackend.optional(),
     goal: GoalSpec.optional(),
@@ -7235,24 +7351,58 @@ export const ScheduledTaskAgentConfig = /* @__PURE__ */ z
     // Durable task override. Scheduled dispatch is trusted to preserve this
     // snapshot even if the workspace/deployment policy narrows later.
     maxNestedAgentDepth: NestedAgentDepthValue.optional(),
-  })
-  .superRefine((value, context) => {
-    if (value.executionClass === "incident_telemetry" && !value.incidentTelemetryPreflight) {
-      context.addIssue({
-        code: "custom",
-        path: ["incidentTelemetryPreflight"],
-        message: "incident telemetry tasks require incidentTelemetryPreflight",
-      });
-    }
-    if (value.executionClass !== "incident_telemetry" && value.incidentTelemetryPreflight) {
-      context.addIssue({
-        code: "custom",
-        path: ["executionClass"],
-        message: "incidentTelemetryPreflight requires executionClass=incident_telemetry",
-      });
-    }
-  });
+  };
+}
+
+function refineScheduledTaskAgentConfig(
+  value: { executionClass?: unknown; incidentTelemetryPreflight?: unknown },
+  context: z.RefinementCtx,
+): void {
+  if (value.executionClass === "incident_telemetry" && !value.incidentTelemetryPreflight) {
+    context.addIssue({
+      code: "custom",
+      path: ["incidentTelemetryPreflight"],
+      message: "incident telemetry tasks require incidentTelemetryPreflight",
+    });
+  }
+  if (value.executionClass !== "incident_telemetry" && value.incidentTelemetryPreflight) {
+    context.addIssue({
+      code: "custom",
+      path: ["executionClass"],
+      message: "incidentTelemetryPreflight requires executionClass=incident_telemetry",
+    });
+  }
+}
+
+/** Storage/projection shape. Deliberately unbounded so stored rows always parse. */
+export const ScheduledTaskAgentConfig = /* @__PURE__ */ z
+  .object(scheduledTaskAgentConfigShape(false))
+  .superRefine(refineScheduledTaskAgentConfig);
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
+
+/** Ingress-bounded agent config for create/update requests. */
+export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ z
+  .object(scheduledTaskAgentConfigShape(true))
+  .superRefine((value, context) => {
+    if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES) {
+      context.addIssue({
+        code: "custom",
+        message: `scheduled task agent config exceeds ${SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+    if (
+      scheduledOccurrencePayloadUtf8Bytes(value) >
+      SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES -
+        SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: `scheduled task prompt, resources, and tools exceed the ${SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES - SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES} UTF-8 byte occurrence payload`,
+      });
+    }
+    refineScheduledTaskAgentConfig(value, context);
+  });
+export type ScheduledTaskAgentConfigInput = z.infer<typeof ScheduledTaskAgentConfigInput>;
 
 export const ScheduledTask = /* @__PURE__ */ z.object({
   id: z.string().uuid(),
@@ -7288,6 +7438,139 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   updatedAt: z.string(),
 });
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
+
+/**
+ * Complete credential-free execution truth accepted for one scheduled agent
+ * occurrence. Retries consume this immutable snapshot instead of a mutable
+ * scheduled-task head.
+ */
+export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
+  .object({
+    version: z.literal(1),
+    task: ScheduledTask,
+    resolvedModel: z.string().min(1),
+    resolvedReasoningEffort: ReasoningEffort,
+    resolvedLatencyMode: LatencyMode,
+    resolvedSandboxBackend: SandboxBackend,
+    resolvedSandboxOs: SandboxOs,
+    resolvedTools: z.array(ToolRef).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
+    resolvedFirstPartyMcpTools: z.array(FirstPartyMcpToolName),
+    resolvedFirstPartyMcpPermissions: z.array(Permission),
+    resolvedVariableSet: z
+      .object({ id: z.string().uuid(), generation: z.number().int().positive() })
+      .strict()
+      .nullable(),
+    resolvedRig: z
+      .object({
+        id: z.string().uuid(),
+        versionId: z.string().uuid(),
+        defaultVariableSets: z
+          .array(
+            z.object({ id: z.string().uuid(), generation: z.number().int().positive() }).strict(),
+          )
+          .max(25),
+      })
+      .strict()
+      .nullable(),
+    resolvedSlackBotConnection: z
+      .object({
+        id: z.string().uuid(),
+        version: z.number().int().positive(),
+        verifiedInstallVersion: z.number().int().positive(),
+        metadata: z
+          .object({
+            credentialRole: z.literal("opengeni_slack_bot"),
+            credentialLabel: z.literal("OpenGeni Slack bot"),
+            slackTeamId: z.string().min(1).max(64),
+            slackTeamName: z.string().min(1).max(256),
+            botUserId: z.string().min(1).max(64),
+            botId: z.string().min(1).max(64),
+            botDisplayName: z.literal("OpenGeni"),
+            verifiedAt: z.string().datetime({ offset: true }),
+          })
+          .passthrough(),
+      })
+      .strict()
+      .nullable(),
+    /**
+     * The effective policy that an existing or already-materialized reusable
+     * session will execute. Generated sessions carry null because their
+     * accepted task policy is used to create the session itself.
+     */
+    targetSessionExecution: z
+      .object({
+        sessionId: z.string().uuid(),
+        visibility: z.enum(["user_private", "workspace_shared"]),
+        authorityEpoch: z.number().int().positive(),
+        model: z.string().min(1),
+        reasoningEffort: ReasoningEffort,
+        latencyMode: LatencyMode,
+        tools: z.array(ToolRef).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
+        sandboxBackend: SandboxBackend,
+        sandboxOs: SandboxOs,
+        firstPartyMcpTools: z.array(FirstPartyMcpToolName),
+        firstPartyMcpPermissions: z.array(Permission).nullable(),
+        toolPolicy: SessionToolPolicy,
+        mcpServerIds: z.array(z.string().min(1).max(256)).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
+        effectiveMcpServerIds: z
+          .array(z.string().min(1).max(256))
+          .max(SCHEDULED_TASK_TOOL_MAX_COUNT),
+        toolPolicyVersion: z.number().int().nonnegative(),
+        variableSetId: z.string().uuid().nullable(),
+        variableSetGeneration: z.number().int().positive().nullable(),
+        rigId: z.string().uuid().nullable(),
+        rigVersionId: z.string().uuid().nullable(),
+        rigDefaultVariableSets: z
+          .array(
+            z.object({ id: z.string().uuid(), generation: z.number().int().positive() }).strict(),
+          )
+          .max(25),
+        maxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
+        effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
+      })
+      .strict()
+      .nullable(),
+    generatedSessionBinding: z
+      .object({
+        createIdempotencyKey: z.string().min(1).max(512),
+        effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
+        nestedAgentDepthPolicySource: NestedAgentDepthPolicySource,
+        codexCompactionMode: CodexCompactionMode,
+      })
+      .strict()
+      .nullable(),
+    personalConnectionDelegations: McpPersonalConnectionDelegations,
+    personalResourceAuthoritySubjectId: z.string().min(1).nullable(),
+    /** One accepted human principal for every resource-bearing scheduled run. */
+    causalHumanSubjectId: z.string().min(1).nullable().default(null),
+    /** Exact revision-bound human membership proof; never inferred at execution. */
+    causalHumanAuthority: z
+      .object({
+        subjectId: z.string().min(1),
+        organizationMembershipId: z.string().uuid(),
+        membershipAuthorizationRevision: z.number().int().positive(),
+      })
+      .strict()
+      .nullable()
+      .default(null),
+    xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1,
+    xaiAuthoritySubjectId: z.string().min(1).nullable(),
+    connectionAuthoritySubjectId: z.string().min(1).nullable(),
+    triggerInitiator: TurnInitiator,
+    agentRunUsageIdempotencyKey: z.string().min(1).max(512).nullable(),
+    incidentPreflightRequired: z.boolean(),
+    alertOccurrenceLabels: z.record(z.string(), z.string()).nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES) {
+      context.addIssue({
+        code: "custom",
+        message: `scheduled accepted execution exceeds ${SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+  });
+export type ScheduledTaskRunAcceptedExecution = z.infer<typeof ScheduledTaskRunAcceptedExecution>;
 
 export const KnowledgeSourceSyncFailure = /* @__PURE__ */ z.object({
   externalObjectId: KnowledgeSourceSyncSubject,
@@ -7362,7 +7645,7 @@ export const ScheduledTaskRun = /* @__PURE__ */ z.object({
 export type ScheduledTaskRun = z.infer<typeof ScheduledTaskRun>;
 
 const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
-  name: z.string().min(1),
+  name: ScheduledTaskNameInput,
   schedule: ScheduledTaskScheduleSpec,
   action: z
     .object({ kind: z.literal("agent_turn") })
@@ -7371,13 +7654,14 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
   runMode: ScheduledTaskRunMode.default("new_session_per_run"),
   overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
   targetSessionId: z.string().uuid().nullable().optional(),
-  agentConfig: ScheduledTaskAgentConfig,
+  connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+  agentConfig: ScheduledTaskAgentConfigInput,
   status: ScheduledTaskStatus.default("active"),
   variableSetId: z.string().uuid().nullable().optional(),
   environmentId: z.string().uuid().nullable().optional(),
   // The rig each run binds to (M3); its active version is resolved per fire.
   rigId: z.string().uuid().nullable().optional(),
-  metadata: z.record(z.string(), z.unknown()).default({}),
+  metadata: ScheduledTaskMetadataInput.default({}),
 }).superRefine((value, context) => {
   if (value.runMode === "existing_session" && !value.targetSessionId) {
     context.addIssue({
@@ -7425,6 +7709,7 @@ const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ z
     variableSetId: null,
     environmentId: null,
     rigId: null,
+    connectionAuthorities: [],
   }));
 
 export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
@@ -7435,13 +7720,14 @@ export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskReque
 
 export const UpdateScheduledTaskRequest =
   /* @__PURE__ */ withVariableSetIdAlias({
-    name: z.string().min(1).optional(),
+    name: ScheduledTaskNameInput.optional(),
     schedule: ScheduledTaskScheduleSpec.optional(),
     runMode: ScheduledTaskRunMode.optional(),
     overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
     action: ScheduledTaskAction.optional(),
     targetSessionId: z.string().uuid().nullable().optional(),
-    agentConfig: ScheduledTaskAgentConfig.optional(),
+    connectionAuthorities: McpConnectionAuthoritySelections.optional(),
+    agentConfig: ScheduledTaskAgentConfigInput.optional(),
     status: ScheduledTaskStatus.optional(),
     variableSetId: z.string().uuid().nullable().optional(),
     environmentId: z.string().uuid().nullable().optional(),

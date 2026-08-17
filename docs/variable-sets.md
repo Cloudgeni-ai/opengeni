@@ -127,7 +127,7 @@ Practically: attaching a variable set shapes what a managed sandbox sees; it doe
 
 ## Deletion semantics
 
-- A variable set attached to scheduled tasks cannot be deleted (409 from the API; `ON DELETE RESTRICT` as the database backstop). Detach the tasks first.
+- A variable set attached to live scheduled tasks cannot be deleted (409 from the API; `ON DELETE RESTRICT` as the database backstop). Detach or delete those tasks first. Scheduled-task deletion is a one-way tombstone that atomically clears the live Variable Set attachment while retained run snapshots keep their credential-free audit evidence, so a deleted task does not consume attachment quota or block later Variable Set deletion.
 - A variable set attached to sessions in a non-terminal state (`queued`, `running`, `requires_action`, `recovering`, `waiting_capacity`) cannot be deleted (409). Wait for them to finish or cancel them.
 - Sessions in `idle`, `failed`, or `cancelled` state do **not** block deletion; their `variable_set_id` is set to NULL (`ON DELETE SET NULL`) so run history is preserved. An idle **reusable** session cannot be silently detached this way: its scheduled task holds its own RESTRICT-backed attachment (and the API refuses to change a live reusable task's attachment), so deletion stays blocked until the task is detached or deleted — and a deleted task never re-dispatches. Be aware of the consequence: sending a new message to a formerly-attached idle session after its variable set was deleted runs **without** workspace variable set injection, indistinguishable from a never-attached session. If the work depends on the secrets, create a new session with a current attachment.
 

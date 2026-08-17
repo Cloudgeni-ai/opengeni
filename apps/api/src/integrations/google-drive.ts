@@ -80,6 +80,7 @@ import {
   updateScheduledTask,
   upsertKnowledgeProvider,
   upsertKnowledgeSource,
+  withWorkspaceSubjectRls,
   recordKnowledgeLifecycleEvent,
   type PermanentConnectionRefreshFailure,
 } from "@opengeni/db";
@@ -1411,6 +1412,7 @@ async function materializeGoogleDriveKnowledgeSchedules(
           action,
           runMode: "new_session_per_run",
           targetSessionId: null,
+          connectionAuthorities: [],
           agentConfig: {
             prompt: "Knowledge source synchronization",
             resources: [],
@@ -1484,6 +1486,35 @@ async function materializeGoogleDriveKnowledgeSchedules(
   }
 }
 
+export async function preflightKnowledgeSourceScheduleAuthorization(
+  deps: ApiRouteDeps,
+  input: { task: ScheduledTask; subjectId: string },
+): Promise<void> {
+  const { task } = input;
+  if (task.action.kind !== "knowledge_source_sync") return;
+  if (
+    task.action.initiatingSubjectId !== input.subjectId ||
+    task.action.connection.ownerSubjectId !== input.subjectId
+  ) {
+    throw new HTTPException(403, {
+      message: "knowledge source schedule requires the exact initiating subject",
+    });
+  }
+  if (task.metadata.connectorKind !== "google_drive") {
+    throw new HTTPException(409, {
+      message: "knowledge source schedule connector cannot be durably disabled",
+    });
+  }
+  const externalSourceId =
+    typeof task.metadata.externalSourceId === "string" ? task.metadata.externalSourceId.trim() : "";
+  if (!externalSourceId) {
+    throw new HTTPException(409, { message: "knowledge source schedule identity is incomplete" });
+  }
+  // A deselected/disconnected source still owns a retained task that must be
+  // deletable. The row-locked task revision below freezes this descriptor;
+  // cleanup mutates only its exact accepted generations.
+}
+
 export async function revokeKnowledgeSourceScheduleAuthorization(
   deps: ApiRouteDeps,
   input: { task: ScheduledTask; subjectId: string },
@@ -1508,65 +1539,109 @@ export async function revokeKnowledgeSourceScheduleAuthorization(
   if (!externalSourceId) {
     throw new HTTPException(409, { message: "knowledge source schedule identity is incomplete" });
   }
-  const connection = await getConnectionMetadata(
-    deps.db,
-    task.workspaceId,
-    task.action.connection.connectionId,
-    input.subjectId,
-  );
-  if (!connection) {
-    throw new HTTPException(409, {
-      message: "knowledge source connection is unavailable for durable disable",
-    });
-  }
-  const metadata = requireGoogleDriveConnection(connection, input.subjectId);
-  const sources =
-    metadata.selectedSources ?? (metadata.selectedSource ? [metadata.selectedSource] : []);
-  const selected = sources.find((source) => source.id === externalSourceId);
-  let revocationVersion = connection.version;
-  if (selected?.syncEnabled) {
-    const updated = await transitionConnectionState(deps.db, {
-      workspaceId: task.workspaceId,
-      connectionId: connection.id,
-      visibleToSubjectId: input.subjectId,
-      expectedVersion: connection.version,
-      metadata: GoogleDriveConnectionMetadata.parse({
-        ...metadata,
-        selectedSource: null,
-        selectedSources: sources.map((source) =>
-          source.id === externalSourceId
-            ? {
-                ...source,
-                syncEnabled: false,
-                configGeneration: source.configGeneration + 1,
-              }
-            : source,
-        ),
-      }),
-      updatedBySubjectId: input.subjectId,
-    });
-    if (!updated) {
-      throw new HTTPException(409, {
-        message: "knowledge source connection changed; retry schedule deletion",
-      });
-    }
-    revocationVersion = updated.version;
-  }
-  const resolved = await getKnowledgeSourceForSyncAuthority(deps.db, {
+  await cleanupKnowledgeSourceScheduleAuthorization(deps, {
+    taskId: task.id,
     accountId: task.accountId,
     workspaceId: task.workspaceId,
+    connectionId: task.action.connection.connectionId,
+    connectionVersion: task.action.connection.connectionVersion,
     sourceId: task.action.sourceId,
+    sourceLifecycleGeneration: task.action.sourceLifecycleGeneration,
+    sourceConfigGeneration: task.action.sourceConfigGeneration,
+    externalSourceId,
+    subjectId: input.subjectId,
+  });
+}
+
+export async function cleanupKnowledgeSourceScheduleAuthorization(
+  deps: ApiRouteDeps,
+  input: {
+    taskId: string;
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    connectionVersion: number;
+    sourceId: string;
+    sourceLifecycleGeneration: number;
+    sourceConfigGeneration: number;
+    externalSourceId: string;
+    subjectId: string;
+  },
+): Promise<void> {
+  const resolvedBeforeLock = await getKnowledgeSourceForSyncAuthority(deps.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sourceId: input.sourceId,
     initiatingSubjectId: input.subjectId,
   });
-  if (resolved?.source.lifecycleState === "active") {
-    await recordKnowledgeLifecycleEvent(deps.db, {
-      accountId: task.accountId,
-      workspaceId: task.workspaceId,
+  if (
+    resolvedBeforeLock?.source.lifecycleState !== "active" ||
+    resolvedBeforeLock.source.lifecycleGeneration !== input.sourceLifecycleGeneration
+  ) {
+    return;
+  }
+  await withWorkspaceSubjectRls(deps.db, input.workspaceId, input.subjectId, async (tx) => {
+    const connection = await getConnectionMetadata(
+      tx,
+      input.workspaceId,
+      input.connectionId,
+      input.subjectId,
+    );
+    let revocationVersion = input.connectionVersion;
+    if (connection) {
+      const metadata = requireGoogleDriveConnection(connection, input.subjectId);
+      const sources =
+        metadata.selectedSources ?? (metadata.selectedSource ? [metadata.selectedSource] : []);
+      revocationVersion = connection.version;
+      const updated = await transitionConnectionState(tx, {
+        workspaceId: input.workspaceId,
+        connectionId: connection.id,
+        visibleToSubjectId: input.subjectId,
+        expectedVersion: connection.version,
+        metadata: GoogleDriveConnectionMetadata.parse({
+          ...metadata,
+          selectedSource: null,
+          selectedSources: sources.map((source) =>
+            source.id === input.externalSourceId
+              ? {
+                  ...source,
+                  syncEnabled: false,
+                  configGeneration: source.configGeneration + 1,
+                }
+              : source,
+          ),
+        }),
+        updatedBySubjectId: input.subjectId,
+      });
+      if (!updated) {
+        throw new HTTPException(409, {
+          message: "knowledge source connection changed; retry schedule deletion",
+        });
+      }
+      revocationVersion = updated.version;
+    }
+    const resolved = await getKnowledgeSourceForSyncAuthority(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sourceId: input.sourceId,
+      initiatingSubjectId: input.subjectId,
+    });
+    if (
+      resolved?.source.lifecycleState !== "active" ||
+      resolved.source.lifecycleGeneration !== input.sourceLifecycleGeneration
+    ) {
+      throw new HTTPException(409, {
+        message: "knowledge source changed; retry schedule deletion",
+      });
+    }
+    await recordKnowledgeLifecycleEvent(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
       targetKind: "source",
       targetId: resolved.source.id,
       eventType: "deleted",
       expectedGeneration: resolved.source.lifecycleGeneration,
-      operationId: `knowledge-schedule-delete:${task.id}:${revocationVersion}`,
+      operationId: `knowledge-schedule-delete:${input.taskId}:${revocationVersion}`,
       reasonCode: "schedule_deleted",
       actor: {
         kind: "human",
@@ -1574,7 +1649,7 @@ export async function revokeKnowledgeSourceScheduleAuthorization(
         initiatingHumanSubjectId: input.subjectId,
       },
     });
-  }
+  });
 }
 
 function knowledgeSourceScheduleControl(task: ScheduledTask): {

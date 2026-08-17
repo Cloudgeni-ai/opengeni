@@ -11,6 +11,13 @@ const migrationPath = join(
   "../drizzle/0184_sandbox_drain_teardown_fence.sql",
 );
 
+const withheldMigrationNames = [
+  "0184_sandbox_drain_teardown_fence.sql",
+  "0185_temporal_schedule_cleanup_outbox.sql",
+  "0186_sandbox_capture_provider_contract.sql",
+  "0275_scheduled_connection_authority.sql",
+];
+
 describe("migration 0184 sandbox drain teardown fence", () => {
   test("is an online old/new-writer bridge around the exact drain capture claim", async () => {
     const sql = await readFile(migrationPath, "utf8");
@@ -80,12 +87,12 @@ describe("migration 0184 sandbox drain teardown fence", () => {
           applied_at timestamptz not null default now()
         )
       `);
+      // 0275 rewrites the 0185 cleanup outbox, so it must be withheld together
+      // with the pre-0184 bridge and replayed through the real filename ledger
+      // in dependency order once the legacy claim exists.
       await sql`
         insert into schema_migrations (name)
-        values
-          ('0184_sandbox_drain_teardown_fence.sql'),
-          ('0185_temporal_schedule_cleanup_outbox.sql'),
-          ('0186_sandbox_capture_provider_contract.sql')`;
+        select unnest(${withheldMigrationNames}::text[])`;
       await migrate(blank.databaseUrl);
 
       const [account] = await sql<{ id: string }[]>`
@@ -120,8 +127,13 @@ describe("migration 0184 sandbox drain teardown fence", () => {
 
       await sql`
         delete from schema_migrations
-        where name = '0184_sandbox_drain_teardown_fence.sql'`;
+        where name = any(${withheldMigrationNames}::text[])`;
       await migrate(blank.databaseUrl);
+      const receipts = await sql<Array<{ name: string }>>`
+        select name from schema_migrations
+        where name = any(${withheldMigrationNames}::text[])
+        order by name`;
+      expect(receipts.map((receipt) => receipt.name)).toEqual(withheldMigrationNames);
 
       const [backfilled] = await sql<
         Array<{

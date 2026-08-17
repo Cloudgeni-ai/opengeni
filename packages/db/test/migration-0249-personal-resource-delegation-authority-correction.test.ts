@@ -11,6 +11,7 @@ const commonAuthorityMigrationName = "0253_common_user_resource_authority_lifecy
 const connectionAuthorityMigrationName = "0256_connection_authority_delegation.sql";
 const connectionAuthorityActivationMigrationName =
   "0264_connection_authority_runtime_activation.sql";
+const scheduledConnectionAuthorityMigrationName = "0275_scheduled_connection_authority.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 const migration0241Url = new URL(
   "../drizzle/0241_atomic_personal_resource_delegation.sql",
@@ -164,7 +165,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           (${migrationName}),
           (${commonAuthorityMigrationName}),
           (${connectionAuthorityMigrationName}),
-          (${connectionAuthorityActivationMigrationName})
+          (${connectionAuthorityActivationMigrationName}),
+          (${scheduledConnectionAuthorityMigrationName})
       `;
       await migrate(databaseUrl);
       await sql`
@@ -173,7 +175,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           ${migrationName},
           ${commonAuthorityMigrationName},
           ${connectionAuthorityMigrationName},
-          ${connectionAuthorityActivationMigrationName}
+          ${connectionAuthorityActivationMigrationName},
+          ${scheduledConnectionAuthorityMigrationName}
         )
       `;
 
@@ -193,7 +196,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           ${migrationName},
           ${commonAuthorityMigrationName},
           ${connectionAuthorityMigrationName},
-          ${connectionAuthorityActivationMigrationName}
+          ${connectionAuthorityActivationMigrationName},
+          ${scheduledConnectionAuthorityMigrationName}
         )
         order by name
       `;
@@ -202,6 +206,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         commonAuthorityMigrationName,
         connectionAuthorityMigrationName,
         connectionAuthorityActivationMigrationName,
+        scheduledConnectionAuthorityMigrationName,
       ]);
       expect(await countWorkspaceMemberships(sql, ids)).toBe(0);
       await insertAttempt(sql, ids, ids.attemptId);

@@ -53,6 +53,7 @@ import {
   updateScheduledTask,
   upsertKnowledgeProvider,
   upsertKnowledgeSource,
+  withWorkspaceSubjectRls,
 } from "@opengeni/db";
 import { atlassianKnowledgeSourceIdentity } from "@opengeni/documents/atlassian";
 import { createSignedState, readSignedState } from "@opengeni/github";
@@ -719,6 +720,28 @@ export async function disconnectAtlassian(
   }
 }
 
+export async function preflightAtlassianScheduleAuthorization(
+  deps: ApiRouteDeps,
+  input: { task: ScheduledTask; subjectId: string },
+): Promise<void> {
+  const { task } = input;
+  if (task.action.kind !== "knowledge_source_sync") return;
+  if (
+    task.action.initiatingSubjectId !== input.subjectId ||
+    task.action.connection.ownerSubjectId !== input.subjectId
+  ) {
+    throw new HTTPException(403, {
+      message: "knowledge source schedule requires the exact initiating subject",
+    });
+  }
+  const externalSourceId = optionalString(task.metadata.externalSourceId);
+  if (!externalSourceId) {
+    throw new HTTPException(409, { message: "Atlassian schedule identity is incomplete" });
+  }
+  // Current connector attachment is not deletion authority. The frozen task
+  // revision and generation-fenced cleanup descriptor are.
+}
+
 export async function revokeAtlassianScheduleAuthorization(
   deps: ApiRouteDeps,
   input: { task: ScheduledTask; subjectId: string },
@@ -737,50 +760,96 @@ export async function revokeAtlassianScheduleAuthorization(
   if (!externalSourceId) {
     throw new HTTPException(409, { message: "Atlassian schedule identity is incomplete" });
   }
-  const connection = await getConnectionMetadata(
-    deps.db,
-    task.workspaceId,
-    task.action.connection.connectionId,
-    input.subjectId,
-  );
-  if (!connection) throw new HTTPException(409, { message: "Atlassian connection is unavailable" });
-  const metadata = requireAtlassianConnection(connection, input.subjectId);
-  const selected = metadata.selectedSources.find((source) => source.id === externalSourceId);
-  let authorityVersion = connection.version;
-  if (selected?.syncEnabled) {
-    const updated = await transitionConnectionState(deps.db, {
-      workspaceId: task.workspaceId,
-      connectionId: connection.id,
-      visibleToSubjectId: input.subjectId,
-      expectedVersion: connection.version,
-      metadata: AtlassianConnectionMetadata.parse({
-        ...metadata,
-        selectedSources: metadata.selectedSources.map((source) =>
-          source.id === externalSourceId
-            ? { ...source, syncEnabled: false, configGeneration: source.configGeneration + 1 }
-            : source,
-        ),
-      }),
-      updatedBySubjectId: input.subjectId,
-    });
-    if (!updated) throw new HTTPException(409, { message: "Atlassian connection changed" });
-    authorityVersion = updated.version;
-  }
-  const resolved = await getKnowledgeSourceForSyncAuthority(deps.db, {
+  await cleanupAtlassianScheduleAuthorization(deps, {
+    taskId: task.id,
     accountId: task.accountId,
     workspaceId: task.workspaceId,
+    connectionId: task.action.connection.connectionId,
+    connectionVersion: task.action.connection.connectionVersion,
     sourceId: task.action.sourceId,
+    sourceLifecycleGeneration: task.action.sourceLifecycleGeneration,
+    sourceConfigGeneration: task.action.sourceConfigGeneration,
+    externalSourceId,
+    subjectId: input.subjectId,
+  });
+}
+
+export async function cleanupAtlassianScheduleAuthorization(
+  deps: ApiRouteDeps,
+  input: {
+    taskId: string;
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    connectionVersion: number;
+    sourceId: string;
+    sourceLifecycleGeneration: number;
+    sourceConfigGeneration: number;
+    externalSourceId: string;
+    subjectId: string;
+  },
+): Promise<void> {
+  const resolvedBeforeLock = await getKnowledgeSourceForSyncAuthority(deps.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sourceId: input.sourceId,
     initiatingSubjectId: input.subjectId,
   });
-  if (resolved?.source.lifecycleState === "active") {
-    await recordKnowledgeLifecycleEvent(deps.db, {
-      accountId: task.accountId,
-      workspaceId: task.workspaceId,
+  if (
+    resolvedBeforeLock?.source.lifecycleState !== "active" ||
+    resolvedBeforeLock.source.lifecycleGeneration !== input.sourceLifecycleGeneration
+  ) {
+    return;
+  }
+  await withWorkspaceSubjectRls(deps.db, input.workspaceId, input.subjectId, async (tx) => {
+    const connection = await getConnectionMetadata(
+      tx,
+      input.workspaceId,
+      input.connectionId,
+      input.subjectId,
+    );
+    let authorityVersion = input.connectionVersion;
+    if (connection) {
+      const metadata = requireAtlassianConnection(connection, input.subjectId);
+      authorityVersion = connection.version;
+      const updated = await transitionConnectionState(tx, {
+        workspaceId: input.workspaceId,
+        connectionId: connection.id,
+        visibleToSubjectId: input.subjectId,
+        expectedVersion: connection.version,
+        metadata: AtlassianConnectionMetadata.parse({
+          ...metadata,
+          selectedSources: metadata.selectedSources.map((source) =>
+            source.id === input.externalSourceId
+              ? { ...source, syncEnabled: false, configGeneration: source.configGeneration + 1 }
+              : source,
+          ),
+        }),
+        updatedBySubjectId: input.subjectId,
+      });
+      if (!updated) throw new HTTPException(409, { message: "Atlassian connection changed" });
+      authorityVersion = updated.version;
+    }
+    const resolved = await getKnowledgeSourceForSyncAuthority(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sourceId: input.sourceId,
+      initiatingSubjectId: input.subjectId,
+    });
+    if (
+      resolved?.source.lifecycleState !== "active" ||
+      resolved.source.lifecycleGeneration !== input.sourceLifecycleGeneration
+    ) {
+      throw new HTTPException(409, { message: "Atlassian knowledge source changed" });
+    }
+    await recordKnowledgeLifecycleEvent(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
       targetKind: "source",
       targetId: resolved.source.id,
       eventType: "deleted",
       expectedGeneration: resolved.source.lifecycleGeneration,
-      operationId: `atlassian-schedule-delete:${task.id}:${authorityVersion}`,
+      operationId: `atlassian-schedule-delete:${input.taskId}:${authorityVersion}`,
       reasonCode: "schedule_deleted",
       actor: {
         kind: "human",
@@ -788,7 +857,7 @@ export async function revokeAtlassianScheduleAuthorization(
         initiatingHumanSubjectId: input.subjectId,
       },
     });
-  }
+  });
 }
 
 async function materializeSchedules(
@@ -972,6 +1041,7 @@ async function materializeSchedules(
           action,
           runMode: "new_session_per_run",
           targetSessionId: null,
+          connectionAuthorities: [],
           agentConfig: {
             prompt: "Knowledge source synchronization",
             resources: [],
