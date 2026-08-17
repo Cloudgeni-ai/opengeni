@@ -268,26 +268,27 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
               () => placement,
             );
           } catch (error) {
-            if (
+            const retryableRequestFailure =
+              error instanceof BrowserControlRequestError &&
+              error.retryable &&
+              error.error.code !== "machine_locked";
+            const outcomeUnknown =
+              error instanceof BrowserControlProtocolError ||
               error instanceof BrowserControlTransportError ||
-              (error instanceof BrowserControlRequestError &&
-                error.retryable &&
-                error.error.code !== "machine_locked") ||
-              isAbort(error)
-            ) {
-              throw error;
-            }
+              isAbort(error);
+            const rethrowAfterFailure =
+              error instanceof BrowserControlTransportError ||
+              retryableRequestFailure ||
+              isAbort(error);
             const failed = await failComputerSessionOperation(deps.db, {
               accountId: grant.accountId,
               workspaceId,
               operationId: request.operationId,
               computerSessionId: preparedSession.id,
-              ...(error instanceof BrowserControlProtocolError
-                ? { state: "outcome_unknown" as const }
-                : {}),
+              ...(outcomeUnknown ? { state: "outcome_unknown" as const } : {}),
               error: interactionFailure(error),
             });
-            if (interactionHeld && !(error instanceof BrowserControlProtocolError)) {
+            if (interactionHeld && !outcomeUnknown) {
               await releaseInteractionHolder(
                 grant,
                 workspaceId,
@@ -295,6 +296,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
                 placement.placement,
               ).catch(() => undefined);
             }
+            if (rethrowAfterFailure) throw error;
             return failed;
           }
           // These facts come from the physical adapter after its native helper

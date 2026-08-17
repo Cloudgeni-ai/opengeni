@@ -113,6 +113,12 @@ describe("ComputerSession route discipline", () => {
       create.indexOf("client.createComputerSession"),
     );
     expect(create).toContain('state: "outcome_unknown" as const');
+    expect(create).toContain("const rethrowAfterFailure =");
+    expect(create).toContain("error instanceof BrowserControlTransportError");
+    expect(create).toContain("isAbort(error)");
+    expect(create.indexOf("failComputerSessionOperation")).toBeLessThan(
+      create.indexOf("if (rethrowAfterFailure) throw error"),
+    );
 
     const end = source.slice(
       source.indexOf('"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/end"'),
