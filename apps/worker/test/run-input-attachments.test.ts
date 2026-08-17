@@ -16,14 +16,6 @@ const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes)
 const ACCOUNT_ID = "00000000-0000-4000-8000-000000000000";
 const SUBJECT_ID = "user:attachment-authority";
 
-function fileAuthority(workspaceId: string): {
-  accountId: string;
-  workspaceId: string;
-  subjectId: string;
-} {
-  return { accountId: ACCOUNT_ID, workspaceId, subjectId: SUBJECT_ID };
-}
-
 const file = (
   id: string,
   contentType: string,
