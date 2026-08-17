@@ -1442,10 +1442,12 @@ describe("standalone context compaction execution", () => {
     );
     expect(historyAfter.at(-1)?.item).toMatchObject({
       type: "message",
-      role: "system",
+      role: "user",
     });
-    expect(String(historyAfter.at(-1)?.item.content)).toContain(ordinary.update.id);
-    expect(String(historyAfter.at(-1)?.item.content)).toContain(goalContinuation.update.id);
+    const continuationInput = JSON.stringify(historyAfter.at(-1)?.item);
+    expect(continuationInput).toContain(ordinary.update.id);
+    expect(continuationInput).toContain("Continue the goal");
+    expect(continuationInput).not.toContain(goalContinuation.update.id);
     expect(
       await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id),
     ).toEqual([]);
