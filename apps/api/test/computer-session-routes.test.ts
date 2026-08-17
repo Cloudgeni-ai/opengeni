@@ -43,6 +43,8 @@ describe("ComputerSession route discipline", () => {
     expect(attachment).toContain('record.session.platform === "linux"');
     expect(attachment).toContain("client.computerRfbStreamUrl");
     expect(attachment).toContain("COMPUTER_RFB_WEBSOCKET_PROTOCOL");
+    expect(attachment).toContain('placement.lease?.backend === "docker"');
+    expect(attachment).toContain("createInteractionFrameProxyAttachment");
     expect(await readFile(appUrl, "utf8")).toContain(
       "registerComputerSessionRoutes(app, routeDeps)",
     );

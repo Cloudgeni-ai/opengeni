@@ -197,6 +197,7 @@ import {
 import { managedNetworkRouteForPlacement } from "../browser-network-route";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { interactionControlApiError } from "../http/interaction-control-error";
+import { createInteractionFrameProxyAttachment } from "../interaction-frame-proxy";
 import {
   observeAuthMutation,
   observeBrowserActionResult,
@@ -1760,14 +1761,32 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                   },
                 };
               })()
-            : {
-                kind: "direct_websocket" as const,
-                url: await client.frameStreamUrl(reference, request.targetId, request.stream),
-                protocols: [
+            : await (async () => {
+                const protocols = [
                   BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
                   `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
-                ],
-              };
+                ] as const;
+                const upstreamUrl = await client.frameStreamUrl(
+                  reference,
+                  request.targetId,
+                  request.stream,
+                );
+                const attachment =
+                  placement.lease?.backend === "docker"
+                    ? createInteractionFrameProxyAttachment({
+                        requestUrl: context.req.url,
+                        rootSecret,
+                        upstreamUrl,
+                        upstreamProtocols: protocols,
+                        origin,
+                        expiresAt,
+                      })
+                    : { url: upstreamUrl, protocols };
+                return {
+                  kind: "direct_websocket" as const,
+                  ...attachment,
+                };
+              })();
           return BrowserSessionAttachment.parse({
             browserSessionId,
             controllerGeneration: binding.controllerGeneration,
