@@ -48,6 +48,40 @@
         "unlabel_thread"
       ],
       "connectionOwnership": "personal_only",
+      "presentation": {
+        "providerName": "Google",
+        "icon": "mail",
+        "introduction": "Let agents work with the Gmail account you choose through Google's official hosted MCP server.",
+        "capabilities": [
+          {
+            "title": "Find and understand mail",
+            "description": "Search messages and threads, then use them as context for your work."
+          },
+          {
+            "title": "Draft replies",
+            "description": "Prepare drafts for your review; sending stays in your hands."
+          },
+          {
+            "title": "Organize the mailbox",
+            "description": "Work with labels, drafts, messages, and threads through the reviewed tools."
+          }
+        ],
+        "permissionSummary": "Google asks for read, compose, and organize access to the mailbox you approve. OpenGeni exposes only the reviewed tools listed for this connector.",
+        "scopeLabels": {
+          "https://www.googleapis.com/auth/gmail.readonly": {
+            "label": "Read your mail",
+            "description": "Search and read messages and threads in the account you approve."
+          },
+          "https://www.googleapis.com/auth/gmail.compose": {
+            "label": "Draft messages",
+            "description": "Create and update drafts; nothing is sent without you."
+          },
+          "https://www.googleapis.com/auth/gmail.modify": {
+            "label": "Organize your mailbox",
+            "description": "Apply and remove labels on messages and threads."
+          }
+        }
+      },
       "logoSourceUrl": null,
       "homepageUrl": "https://developers.google.com/workspace/gmail/api/reference/mcp",
       "installUrl": "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",

@@ -5603,6 +5603,20 @@ export type IntegrationFacetRemovalResult = {
   remainingOwners: CapabilityComponentOwner[];
 };
 
+/**
+ * Presentation-only consent copy served with an integration or connector.
+ * Never grants a scope or replaces server-side authorization; the UI keeps a
+ * generic fallback for any omitted field.
+ */
+export type IntegrationPresentation = {
+  providerName?: string | undefined;
+  icon?: "calendar" | "cloud" | "contacts" | "files" | "mail" | undefined;
+  introduction?: string | undefined;
+  capabilities?: { title: string; description: string }[] | undefined;
+  permissionSummary?: string | undefined;
+  scopeLabels?: Record<string, { label: string; description: string }> | undefined;
+};
+
 export type IntegrationDefinitionSummary = {
   id: string;
   name: string;
@@ -5616,6 +5630,7 @@ export type IntegrationDefinitionSummary = {
     kind: "oauth2";
     scopes: string[];
   };
+  presentation?: IntegrationPresentation | undefined;
   facets: IntegrationFacetDefinitionSummary[];
 };
 

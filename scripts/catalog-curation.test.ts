@@ -119,6 +119,68 @@ describe("curated catalog overlay document", () => {
     }
   });
 
+  test("parses presentation copy and rejects malformed shapes loudly", () => {
+    const parsed = parseCuratedCatalog({
+      version: 1,
+      entries: [
+        {
+          mcpUrl: "https://mcp.copy.example/mcp",
+          presentation: {
+            providerName: "Copy",
+            icon: "files",
+            introduction: "Let agents work with Copy.",
+            capabilities: [{ title: "Find things", description: "Search your Copy content." }],
+            permissionSummary: "Copy asks for access you approve.",
+            scopeLabels: { "copy:read": { label: "Read Copy", description: "Read your content." } },
+          },
+        },
+      ],
+    });
+    expect(parsed.entries[0]!.presentation).toEqual({
+      providerName: "Copy",
+      icon: "files",
+      introduction: "Let agents work with Copy.",
+      capabilities: [{ title: "Find things", description: "Search your Copy content." }],
+      permissionSummary: "Copy asks for access you approve.",
+      scopeLabels: { "copy:read": { label: "Read Copy", description: "Read your content." } },
+    });
+
+    const entry = (presentation: unknown) => ({
+      version: 1,
+      entries: [{ mcpUrl: "https://a.example/mcp", presentation }],
+    });
+    expect(() => parseCuratedCatalog(entry("copy"))).toThrow(/must be an object/);
+    expect(() => parseCuratedCatalog(entry({ surprise: true }))).toThrow(/unknown key "surprise"/);
+    expect(() => parseCuratedCatalog(entry({ icon: "rocket" }))).toThrow(/icon must be one of/);
+    expect(() => parseCuratedCatalog(entry({ capabilities: [] }))).toThrow(/1 to 8/);
+    expect(() => parseCuratedCatalog(entry({ capabilities: [{ title: "x" }] }))).toThrow(
+      /title, description/,
+    );
+    expect(() => parseCuratedCatalog(entry({ scopeLabels: { s: { label: "x" } } }))).toThrow(
+      /label, description/,
+    );
+    expect(() => parseCuratedCatalog(entry({ introduction: " " }))).toThrow(/non-empty string/);
+    // Contract bounds are enforced at review time, matching the definitions lane.
+    expect(() => parseCuratedCatalog(entry({ introduction: "x".repeat(501) }))).toThrow(
+      /at most 500/,
+    );
+    expect(() => parseCuratedCatalog(entry({ providerName: "x".repeat(121) }))).toThrow(
+      /at most 120/,
+    );
+    expect(() =>
+      parseCuratedCatalog(
+        entry({
+          capabilities: Array.from({ length: 9 }, (_, index) => ({
+            title: `t${index}`,
+            description: "d",
+          })),
+        }),
+      ),
+    ).toThrow(/1 to 8/);
+    // An empty presentation is a reviewer error, not a silent no-op.
+    expect(() => parseCuratedCatalog(entry({}))).toThrow(/at least one field/);
+  });
+
   test("preserves an explicit null logoSourceUrl and distinguishes it from omission", () => {
     const parsed = parseCuratedCatalog({
       version: 1,
@@ -245,6 +307,42 @@ describe("curated fields flow through import normalization", () => {
     // OAuth client resolves at start time.
     expect(linear.oauthProfile).toEqual({ clientSource: "dcr" });
     expect(dbInput.metadata).toMatchObject({ oauthProfile: { clientSource: "dcr" } });
+  });
+
+  test("the curated Gmail presentation flows through normalization into the DB metadata", () => {
+    const normalized = normalizeCatalogSnapshot({
+      generatedAt: "2026-08-17T00:00:00.000Z",
+      importRows: [
+        {
+          domain: "gmailmcp.googleapis.com",
+          name: "gmail",
+          mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+          transport: "streamable-http",
+          authKind: "oauth2",
+          probe: { status: "real", reason: "auth_challenge", httpStatus: 401 },
+        },
+      ],
+    });
+    const gmail = normalized.rows[0]!;
+    expect(gmail.presentation).toMatchObject({
+      providerName: "Google",
+      icon: "mail",
+    });
+    const dbInput = catalogRowToDbInput(gmail, { importBatchId: "batch-1" });
+    expect(dbInput.metadata).toMatchObject({
+      presentation: {
+        providerName: "Google",
+        icon: "mail",
+        introduction:
+          "Let agents work with the Gmail account you choose through Google's official hosted MCP server.",
+      },
+    });
+    // The three curated scope labels cover exactly the row's scopesHint, so
+    // every requested scope renders with a human label.
+    const presentation = dbInput.metadata.presentation as {
+      scopeLabels: Record<string, unknown>;
+    };
+    expect(Object.keys(presentation.scopeLabels).sort()).toEqual([...gmail.scopesHint].sort());
   });
 
   test("an uncurated row carries no category, no curation, and no metadata curation key", () => {
