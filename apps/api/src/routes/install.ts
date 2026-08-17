@@ -62,6 +62,16 @@ const TEXT_ASSETS: Record<string, { file: string; contentType: string }> = {
   },
 };
 
+// Non-executable resources needed to assemble a complete platform bundle. These
+// stay committed beside the installer rather than depending on a release/CDN so
+// an exact-SHA local or private deployment remains self-contained.
+const COMMITTED_BINARY_ASSETS: Record<string, { file: string; contentType: string }> = {
+  "OpenGeni-Agent.icns": {
+    file: "OpenGeni-Agent.icns",
+    contentType: "image/icns",
+  },
+};
+
 const assetCache = new Map<string, string>();
 
 async function loadAsset(file: string): Promise<string> {
@@ -196,6 +206,18 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
   // un-baked asset). The baked path makes the agent the API enrolls against
   // identical to the API that serves it — no version skew, no extra hop.
   async function serveAsset(asset: string, redirectUrl: string): Promise<Response> {
+    const committed = COMMITTED_BINARY_ASSETS[asset];
+    if (committed) {
+      const buf = await readFile(new URL(committed.file, INSTALL_DIR));
+      return new Response(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), {
+        status: 200,
+        headers: {
+          "content-type": committed.contentType,
+          "cache-control": "public, max-age=3600",
+          "x-opengeni-agent-source": "committed",
+        },
+      });
+    }
     const baked = await readBaked(asset);
     if (baked !== null) {
       return new Response(baked, {

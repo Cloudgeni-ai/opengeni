@@ -969,6 +969,12 @@ describe("release image workflow contract", () => {
       expect(agentRelease.slice(finalBundleValidation)).toContain(executable);
     }
     expect(agentRelease.slice(finalBundleValidation)).toContain(
+      "Contents/Resources/OpenGeni-Agent.icns",
+    );
+    expect(agentRelease).toContain(
+      "<key>CFBundleIconFile</key><string>OpenGeni-Agent.icns</string>",
+    );
+    expect(agentRelease.slice(finalBundleValidation)).toContain(
       'codesign --verify --deep --strict "$VERIFY_DIR/$APP"',
     );
     expect(agentRelease).not.toContain("manifest publish is wired via");
