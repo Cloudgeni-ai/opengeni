@@ -6,6 +6,7 @@ import {
   createConnection,
   createDb,
   createSocialConnection,
+  enableCapabilityInstallation,
   encryptEnvironmentValue,
   getCapabilityInstallation,
   listEnabledMcpCapabilityServers,
@@ -387,6 +388,44 @@ describe("subject-owned capability connection references", () => {
     const projected = JSON.stringify({ installation, servers, catalog });
     expect(projected).not.toContain(alice.id);
     expect(projected).not.toContain(bob.id);
+  });
+
+  test("a legacy workspace-scoped Slack MCP installation is not runnable at runtime", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const capabilityId = `mcp:legacy-workspace-slack-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId);
+    const legacy = await createConnection(db, {
+      ...workspace,
+      subjectId: null,
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptedFixture(),
+    });
+    // enableCapability now rejects this shape, so write the installation the
+    // way an earlier release did: directly, with a workspace-scoped ref.
+    await enableCapabilityInstallation(db, {
+      ...workspace,
+      capabilityId,
+      kind: "mcp",
+      config: {
+        connectionRef: {
+          providerDomain: "slack.com",
+          kind: "oauth2",
+          subjectScope: "workspace",
+          connectionId: legacy.id,
+        },
+      },
+      metadata: { mcpConnectivity: { status: "ok" } },
+    });
+
+    const installation = await getCapabilityInstallation(db, workspace.workspaceId, capabilityId);
+    expect(installation?.status).toBe("active");
+
+    // The row exists and is active, but the runtime fence omits it: no shared
+    // human token executes for the hosted Slack MCP.
+    const servers = await listEnabledMcpCapabilityServers(db, workspace.workspaceId);
+    expect(servers.find((server) => server.capabilityId === capabilityId)).toBeUndefined();
   });
 
   test("keeps Gmail personal even when a workspace-owned mailbox row exists", async () => {

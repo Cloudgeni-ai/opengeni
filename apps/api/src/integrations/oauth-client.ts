@@ -312,7 +312,12 @@ async function startMcpOAuthWithinDeadline(
     : canonicalProviderDomain(context.payload.providerDomain ?? new URL(mcpUrl).hostname);
   const hostedSlackMcp = officialSlackResource || providerDomain === "slack.com";
   assertHostedSlackMcpOAuthStart(settings, context.payload, mcpUrl, hostedSlackMcp);
-  const requestedOwnership: ConnectionOwnership = context.payload.ownership ?? "workspace";
+  // Personal-only resources default an omitted ownership to personal, matching
+  // the fence that existed before #1240; an explicit non-personal value is the
+  // only thing rejected. Everything else defaults to workspace as before.
+  const personalOnlyResource = officialGmailResource || hostedSlackMcp;
+  const requestedOwnership: ConnectionOwnership =
+    context.payload.ownership ?? (personalOnlyResource ? "personal" : "workspace");
   assertOfficialGmailPersonalOwnership(mcpUrl, requestedOwnership);
   assertHostedSlackMcpPersonalOwnership(hostedSlackMcp, requestedOwnership);
   const returnPath = safeReturnPath(context.payload.returnPath ?? "/integrations");

@@ -1718,13 +1718,17 @@ describe("connections routes", () => {
         },
       );
 
-    // Explicit workspace ownership and the generic "omitted means workspace"
-    // default both fail closed before discovery contacts Slack.
-    for (const body of [{ ownership: "workspace" }, {}]) {
-      const response = await start(body);
-      expect(response.status).toBe(422);
-      expect(await response.text()).toContain("Slack's hosted MCP connection is personal only");
-    }
+    // Explicit workspace ownership fails closed before discovery contacts
+    // Slack. An omitted ownership is NOT rejected: for a personal-only resource
+    // it defaults to personal, matching the fence that existed before #1240 and
+    // keeping the optional SDK field backward compatible.
+    const explicitWorkspace = await start({ ownership: "workspace" });
+    expect(explicitWorkspace.status).toBe(422);
+    expect(await explicitWorkspace.text()).toContain(
+      "Slack's hosted MCP connection is personal only",
+    );
+    const omitted = await start({});
+    expect(omitted.status).not.toBe(422);
 
     // A legacy workspace-owned row cannot be renewed through reconnect either.
     const legacy = await createConnection(client.db, {

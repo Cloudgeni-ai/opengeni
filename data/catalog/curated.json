@@ -98,8 +98,10 @@
       ],
       "notes": [
         "Slack's tools/list is grant-dependent. scopesHint is the complete set advertised by its official OAuth protected-resource metadata.",
-        "This is the personal hosted Slack MCP. The separate OpenGeni Slack bot is an Integration, not a catalog connector."
-      ]
+        "This is the personal hosted Slack MCP. The separate OpenGeni Slack bot is an Integration, not a catalog connector.",
+        "connectionOwnership is personal_only: the hosted Slack MCP is a human's grant. Shared workspace access is the OpenGeni bot, never a shared user token."
+      ],
+      "connectionOwnership": "personal_only"
     },
     {
       "mcpUrl": "https://api.mobbin.com/mcp",
