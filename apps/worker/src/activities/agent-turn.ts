@@ -2491,8 +2491,8 @@ export function lazyToolTransportForTurn(
   return "generic_dispatch";
 }
 
-/** Only brand-new lazy-capable turns may overlap optional tool preparation. */
-export function shouldDeferBestEffortToolPreparation(args: {
+/** Only brand-new lazy-capable turns may overlap non-eager tool preparation. */
+export function shouldDeferNonEagerToolPreparation(args: {
   lazyToolTransport: LazyToolTransport | null;
   progressiveDisclosureEnabled: boolean;
   artifactRuntimeAvailable: boolean;
@@ -8166,7 +8166,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         lazyToolTransport === "codex_native"
           ? runSettings.codexToolSearchEnabled
           : runSettings.lazyToolSearchEnabled;
-      const deferBestEffortToolPreparation = shouldDeferBestEffortToolPreparation({
+      const deferNonEagerToolPreparation = shouldDeferNonEagerToolPreparation({
         lazyToolTransport,
         progressiveDisclosureEnabled,
         artifactRuntimeAvailable: sandboxArtifactRuntime.available,
@@ -8231,7 +8231,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             onAuthNeeded: publishToolAuthNeeded,
             materializeConnectorAttachments,
             localMcpServers,
-            ...(deferBestEffortToolPreparation ? { deferBestEffortUntilModelResponse: true } : {}),
+            ...(deferNonEagerToolPreparation ? { deferNonEagerUntilToolDemand: true } : {}),
             onPreparationPhase: (measurement) => {
               recordTurnStartupPhase(observability, {
                 phase: `tool_${measurement.phase}`,

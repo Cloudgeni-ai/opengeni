@@ -1049,6 +1049,24 @@ describe("sandbox preparation profiles", () => {
     );
   });
 
+  test("keeps worker-internal first-party MCP routing separate from sandbox routing", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_MCP_INTERNAL_URL:
+          "http://opengeni-api.opengeni.svc.cluster.local:8000/v1/workspaces/{workspaceId}/mcp",
+        OPENGENI_MCP_URL: "https://sandbox-edge.example/v1/workspaces/{workspaceId}/mcp",
+      },
+      () => getSettings(),
+    );
+
+    expect(settings.opengeniMcpInternalUrl).toBe(
+      "http://opengeni-api.opengeni.svc.cluster.local:8000/v1/workspaces/{workspaceId}/mcp",
+    );
+    expect(settings.opengeniMcpUrl).toBe(
+      "https://sandbox-edge.example/v1/workspaces/{workspaceId}/mcp",
+    );
+  });
+
   test("adds Codemode pointers whenever exact-attempt signing authority is available", () => {
     const local = withEnv({}, () => getSettings());
     expect(local.codemodeMaxCallsPerTurn).toBe(200);

@@ -25,12 +25,12 @@ into authority. All first-party OpenGeni, Files, Docs, Codex Apps, capability,
 pack, interaction, and per-session MCP tools admitted to the attempt can enter
 the catalog. Codemode never rediscovers or reconnects an MCP server.
 
-The catalog is persisted in `session_attempt_tool_catalogs` before any model
-tool can execute, before Codemode is activated, and before the terminal model
-response can settle. On a fresh progressive-disclosure turn, required MCPs and
-in-process tools are prepared eagerly while best-effort connector discovery may
-overlap the first provider request and streamed text; the same single readiness
-fence then publishes the combined immutable catalog. Resume and
+The catalog is persisted in `session_attempt_tool_catalogs` before Codemode is
+activated. On a fresh progressive-disclosure turn, only exact session refs with
+`eager: true` plus in-process tools are prepared before the first model request;
+all other MCPs build the same combined immutable catalog concurrently. A plain
+model response may settle without Codemode ever activating, while search,
+deferred invocation, or Codemode joins the catalog promise. Resume and
 editable-artifact turns prepare it fully before model execution. A recovery or
 successor attempt receives its own catalog and digest.
 

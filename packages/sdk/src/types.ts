@@ -488,6 +488,7 @@ export type ToolRef = {
   kind: "mcp";
   id: string;
   optional?: boolean | undefined;
+  eager?: boolean | undefined;
 };
 
 export type SessionToolPolicy = {

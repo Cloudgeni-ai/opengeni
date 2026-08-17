@@ -799,6 +799,35 @@ describe("generic lazy tool dispatch", () => {
 });
 
 describe("OpenAI/Azure native client tool search", () => {
+  test("plain model output never waits for non-eager MCP preparation", async () => {
+    for (const transport of ["openai_native", "generic_dispatch"] as const) {
+      let releasePreparation!: () => void;
+      const preparation = new Promise<void>((resolve) => {
+        releasePreparation = resolve;
+      });
+      const model = new CapturingModel();
+      const agent = agentWith(weatherTool());
+      const runtime = installLazyToolRuntime(
+        agent,
+        transport,
+        new Set([SERVER_ID]),
+        preparation,
+        new Set([SERVER_ID]),
+      );
+      const result = new Runner({
+        modelProvider: new LazyToolModelProvider(providerFor(model), runtime),
+      }).run(agent, "Say hello without tools", { maxTurns: 2 });
+      const outcome = await Promise.race([
+        result.then(() => "completed" as const),
+        Bun.sleep(500).then(() => "timed_out" as const),
+      ]);
+      releasePreparation();
+      expect(outcome).toBe("completed");
+      await result;
+      expect(model.requests).toHaveLength(1);
+    }
+  });
+
   test("survives the real SandboxAgent clone path", async () => {
     const agent = new SandboxAgent({
       name: "sandbox-lazy-test",
@@ -832,7 +861,7 @@ describe("OpenAI/Azure native client tool search", () => {
     const requiredServerId = "required_tools";
     const requiredTool = tool({
       name: `${requiredServerId}__status`,
-      description: "Read required service status",
+      description: "Read required weather service status",
       parameters: { type: "object", properties: {}, additionalProperties: false },
       strict: false,
       execute: () => "ready",
@@ -878,7 +907,10 @@ describe("OpenAI/Azure native client tool search", () => {
     await Bun.sleep(0);
 
     expect(model.requests).toHaveLength(1);
-    expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual(["tool_search"]);
+    expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
+      `${requiredServerId}__status`,
+      "tool_search",
+    ]);
     expect(executions).toBe(0);
 
     releasePreparation();
@@ -887,6 +919,7 @@ describe("OpenAI/Azure native client tool search", () => {
     expect(result.finalOutput).toBe("done");
     expect(executions).toBe(1);
     expect(JSON.stringify(model.requests[1]!.input)).toContain(WEATHER_TOOL);
+    expect(JSON.stringify(model.requests[1]!.input)).not.toContain(`${requiredServerId}__status`);
     expect(
       (await agent.getAllTools(undefined as never)).map((candidate) => candidate.name),
     ).toEqual([`${requiredServerId}__status`, "tool_search"]);

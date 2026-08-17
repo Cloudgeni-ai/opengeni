@@ -155,8 +155,8 @@ it never gives an endpoint provider an object-store URL.
 
 DeepSeek V4 Flash 0731 and Kimi K3 use OpenGeni's provider-neutral lazy-tool
 dispatcher on the Responses wire. Their initial tool block contains the stable
-ordinary `tool_search` and `tool_invoke` schemas plus eager control tools, never
-the selected deferred MCP catalogue. A search result carries only bounded
+ordinary `tool_search` and `tool_invoke` schemas plus local control tools and
+exact session MCP refs marked `eager: true`, never the deferred MCP catalogue. A search result carries only bounded
 matching definitions. A valid `tool_invoke` call is rewritten inside the runtime
 to the real authorized tool before the Agents SDK performs approval, guardrail,
 timeout, MCP error, and event handling. Provider history is restored to the

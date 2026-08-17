@@ -153,7 +153,7 @@ export class LazyToolRuntime {
     readonly transport: LazyToolTransport,
     private readonly mcpServerIds: ReadonlySet<string>,
     private readonly toolPreparationReady?: Promise<void>,
-    private readonly deferredMcpServerIds: ReadonlySet<string> = new Set(),
+    private readonly deferredMcpServerIds: ReadonlySet<string> = mcpServerIds,
   ) {
     this.controlTools =
       transport !== "generic_dispatch"
@@ -247,8 +247,10 @@ export class LazyToolRuntime {
       if (!isFunctionTool(tool)) continue;
       this.functionTools.set(tool.name, tool);
       const lazy =
-        this.transport === "generic_dispatch" ||
-        isSearchableMcpFunctionTool(tool, this.mcpServerIds);
+        this.transport === "generic_dispatch"
+          ? !isSearchableMcpFunctionTool(tool, this.mcpServerIds) ||
+            isSearchableMcpFunctionTool(tool, this.deferredMcpServerIds)
+          : isSearchableMcpFunctionTool(tool, this.deferredMcpServerIds);
       if (lazy) {
         // Native OpenAI client search and generic dispatch keep the real tool
         // in Runner's registry but deliberately do not use the SDK's deferred
@@ -274,7 +276,9 @@ export class LazyToolRuntime {
     // on the following model turn creates a routed-identity collision in the
     // SDK. Required/eager tools remain configured; deferred tools remain
     // available exclusively through their exact disclosed runtime objects.
-    return tools.filter((tool) => !isSearchableMcpFunctionTool(tool, this.deferredMcpServerIds));
+    return tools.filter(
+      (tool) => !isFunctionTool(tool) || !this.searchableToolNames.has(tool.name),
+    );
   }
 
   resolveFunctionTool(name: string): Tool | undefined {
@@ -298,7 +302,7 @@ export class LazyToolRuntime {
           ),
           rawArguments,
         )
-      : searchMcpTools(this.currentTools, rawArguments, this.mcpServerIds);
+      : searchMcpTools(this.currentTools, rawArguments, this.deferredMcpServerIds);
   }
 
   genericSearchOutput(rawArguments: unknown): string {
@@ -327,7 +331,10 @@ export class LazyToolRuntime {
         const tools = args.agent
           ? await this.preparedToolsForAgent(args.agent, args.runContext, args.availableTools ?? [])
           : (args.availableTools ?? []);
-        return searchMcpTools(tools, args.toolCall?.arguments, this.mcpServerIds);
+        // Eager MCP tools are already direct configured tools on this request.
+        // Search may disclose only the exact deferred server set; returning an
+        // eager tool again would create a second routed identity for one tool.
+        return searchMcpTools(tools, args.toolCall?.arguments, this.deferredMcpServerIds);
       }) as never,
     }) as unknown as Tool;
   }
@@ -338,7 +345,10 @@ export class LazyToolRuntime {
       description: SEARCH_DESCRIPTION,
       parameters: SEARCH_PARAMETERS as never,
       strict: false,
-      execute: (input: unknown) => this.genericSearchOutput(input),
+      execute: async (input: unknown) => {
+        await this.ensurePrepared();
+        return this.genericSearchOutput(input);
+      },
     }) as unknown as Tool;
   }
 
@@ -374,7 +384,7 @@ export function installLazyToolRuntime(
   transport: LazyToolTransport,
   mcpServerIds: ReadonlySet<string>,
   toolPreparationReady?: Promise<void>,
-  deferredMcpServerIds: ReadonlySet<string> = new Set(),
+  deferredMcpServerIds: ReadonlySet<string> = mcpServerIds,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -589,7 +599,12 @@ class LazyToolModel implements Model {
 
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
     const response = await this.inner.getResponse(prepareLazyToolRequest(request, this.runtime));
-    await this.runtime.ensurePrepared();
+    if (
+      this.runtime.transport === "generic_dispatch" &&
+      responseRequestsGenericToolPreparation(response)
+    ) {
+      await this.runtime.ensurePrepared();
+    }
     return this.runtime.transport === "generic_dispatch"
       ? transformGenericDispatchResponse(response, this.runtime)
       : response;
@@ -600,10 +615,12 @@ class LazyToolModel implements Model {
       prepareLazyToolRequest(request, this.runtime),
     )) {
       if (event.type === "response_done") {
-        // Remote optional MCP discovery overlaps the model request and streamed
-        // text, but the terminal response cannot cross the exact-attempt tool
-        // boundary until catalog persistence and Codemode activation complete.
-        await this.runtime.ensurePrepared();
+        if (
+          this.runtime.transport === "generic_dispatch" &&
+          responseRequestsGenericToolPreparation(event.response)
+        ) {
+          await this.runtime.ensurePrepared();
+        }
       }
       if (this.runtime.transport === "generic_dispatch" && event.type === "response_done") {
         yield {
@@ -627,6 +644,17 @@ class LazyToolModel implements Model {
       request: prepareLazyToolRequest(args.request, this.runtime),
     });
   }
+}
+
+function responseRequestsGenericToolPreparation(response: {
+  output: ModelResponse["output"];
+}): boolean {
+  return response.output.some(
+    (item) =>
+      isRecord(item) &&
+      item.type === "function_call" &&
+      (item.name === TOOL_SEARCH_NAME || item.name === TOOL_INVOKE_NAME),
+  );
 }
 
 /** Wrap per-run model resolution without changing any provider client or SDK tool object. */

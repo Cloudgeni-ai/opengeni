@@ -2128,6 +2128,14 @@ describe("contracts", () => {
         [{ kind: "mcp", id: "cap-notebook", optional: true }],
       ),
     ).toEqual([{ kind: "mcp", id: "cap-notebook", optional: true }]);
+    // Eager is an affirmative startup request and survives policy/default
+    // merging regardless of which source contributed it.
+    expect(
+      mergeToolRefs(
+        [{ kind: "mcp", id: "cap-notebook", eager: true }],
+        [{ kind: "mcp", id: "cap-notebook", optional: true }],
+      ),
+    ).toEqual([{ kind: "mcp", id: "cap-notebook", eager: true }]);
   });
 });
 
