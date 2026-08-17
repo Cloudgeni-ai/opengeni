@@ -24972,8 +24972,11 @@ export async function completeConnectorActionExecution(
         if (!existing) throw new Error("Connector action request not found for completion");
         // A not-executed completion is a terminal failure whose provider
         // request never happened; it keeps the existing status vocabulary.
+        // Reaching the terminal status is idempotent even when a concurrent
+        // begin already settled the row with a different uncertain outcome
+        // (retry_after_execution_started).
         const terminalStatus = input.outcome === "not_executed" ? "failed" : input.outcome;
-        if (existing.status === terminalStatus && existing.outcome === input.outcome) return;
+        if (existing.status === terminalStatus) return;
         if (existing.status !== "executing") {
           throw new Error(`Connector action request cannot complete from ${existing.status}`);
         }

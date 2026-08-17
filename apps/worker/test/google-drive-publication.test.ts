@@ -735,15 +735,16 @@ describe("Google Drive editable artifact publication", () => {
     });
   });
 
-  test("model callers hit the same durable fence and an uncertain retry surfaces an unknown outcome", async () => {
+  test("model callers never double-register the fence the wrapper already owns", async () => {
     let begins = 0;
+    const completions: string[] = [];
     const tool = createGoogleDrivePublicationAttemptTool({
       db: {} as Database,
       objectStorage: objectStorage(),
       identity,
       subjectId: "subject-a",
       target,
-      resolveCredential: async () => ({ status: "ok" }) as never,
+      resolveCredential: async () => ({ status: "auth_needed" }) as never,
       ports: {
         getConnection: async () => connection() as never,
         getMembership: async () => ({}) as never,
@@ -752,21 +753,25 @@ describe("Google Drive editable artifact publication", () => {
         prepare: async () => ({ managed: true, decision: "allow" }),
         begin: async () => {
           begins += 1;
-          return { allowed: false, managed: true, requestId: "r", reason: "uncertain_retry" };
+          return { allowed: true, managed: true, requestId: "must-not-exist" };
         },
-        complete: async () => {
-          throw new Error("a denied admission must not complete");
+        complete: async (_db, completion) => {
+          completions.push(completion.outcome);
         },
         fetch: async () => new Response("must not call provider", { status: 500 }),
       },
     });
+    // The attempt connector-action wrapper already registered this model call
+    // under its durable SDK call id; a second inner begin would mint a second
+    // ledger row and deadlock the default ask policy.
     await expect(
       tool.execute(request, {
         operationId: "99999999-9999-4999-8999-999999999999",
         caller: { kind: "model", subjectId: "agent:test" },
       }),
-    ).rejects.toThrow("outcome is unknown");
-    expect(begins).toBe(1);
+    ).rejects.toThrow("was not executed: no request reached Google Drive");
+    expect(begins).toBe(0);
+    expect(completions).toEqual([]);
   });
 
   test("a failure before any provider request completes not_executed with a retry-safe message", async () => {
@@ -794,7 +799,7 @@ describe("Google Drive editable artifact publication", () => {
     await expect(
       tool.execute(request, {
         operationId: "99999999-9999-4999-8999-999999999999",
-        caller: { kind: "model", subjectId: "agent:test" },
+        caller: { kind: "codemode", subjectId: "agent:test" },
       }),
     ).rejects.toThrow("was not executed: no request reached Google Drive");
     expect(completions).toEqual(["not_executed"]);
@@ -826,7 +831,22 @@ describe("Google Drive editable artifact publication", () => {
         complete: async (_db, completion) => {
           completions.push(completion.outcome);
         },
-        fetch: async () => {
+        // Read-only verify and idempotency-lookup GETs succeed; the first
+        // mutating request (the multipart create POST) dies mid-upload.
+        fetch: async (url, init) => {
+          const method = (init?.method ?? "GET").toUpperCase();
+          if (method === "GET") {
+            const href = url instanceof Request ? url.url : url.toString();
+            return href.includes("/files/")
+              ? Response.json({
+                  id: destination.folderId,
+                  name: destination.folderName,
+                  mimeType: "application/vnd.google-apps.folder",
+                  trashed: false,
+                  capabilities: { canAddChildren: true },
+                })
+              : Response.json({ files: [] });
+          }
           throw new Error("socket reset mid-upload");
         },
       },
@@ -834,7 +854,7 @@ describe("Google Drive editable artifact publication", () => {
     await expect(
       tool.execute(request, {
         operationId: "99999999-9999-4999-8999-999999999999",
-        caller: { kind: "model", subjectId: "agent:test" },
+        caller: { kind: "codemode", subjectId: "agent:test" },
       }),
     ).rejects.toThrow("outcome is unknown");
     expect(completions).toEqual(["uncertain"]);

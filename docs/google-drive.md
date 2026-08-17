@@ -63,10 +63,13 @@ contract:
   output folder is copied into the accepted delegation, and a later
   connection-settings change fails the already-accepted turn's publication
   closed instead of silently redirecting it (pre-freeze turns keep the bounded
-  legacy live resolution). Every publication - model or Codemode caller -
-  registers a durable execute-once fence before any provider request; a
-  failure before the first request settles `not_executed` (safe to retry),
-  while a failure after it settles `uncertain` and the tool surfaces the
+  legacy live resolution). Every publication sits behind exactly one durable
+  execute-once fence: model callers are registered by the attempt
+  connector-action wrapper under the durable SDK call id, and Codemode
+  callers by the tool itself under the shared Codemode operation id - never
+  both. A failure before the first mutating provider request settles
+  `not_executed` (safe to retry; read-only verify/lookup calls stay
+  retry-safe), while a failure after it settles `uncertain` and surfaces the
   unknown outcome so nobody blindly retries a POST that may have landed.
 - OAuth tokens remain encrypted and server-side. They do not enter browser
   persistence, model context, agent sandboxes, source metadata, logs, or webhook
