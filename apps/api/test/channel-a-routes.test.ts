@@ -267,6 +267,7 @@ describe("P4.4 Channel-A route discipline", () => {
       expect((mapped as HTTPException).message).toBe(
         "sandbox runtime changed while this session still has active operations; retry",
       );
+      expect(mapped).toMatchObject({ code: "conflict", retryable: true });
     }
   });
 

@@ -52,6 +52,7 @@ import {
   type Observability,
 } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "../http/api-error";
 
 import {
   buildSelfhostedBackendSession,
@@ -821,8 +822,10 @@ async function withChannelAOperation<T>(
                   payload: { sandboxId: live.instanceId },
                 },
               ]).catch(() => undefined);
-              mappedError = new HTTPException(409, {
+              mappedError = new ApiHttpError(409, {
+                code: "conflict",
                 message: "sandbox instance was lost; retry to restore it",
+                retryable: true,
               });
             }
           }
@@ -912,8 +915,10 @@ async function withChannelAOperation<T>(
           },
         ]);
       }
-      throw new HTTPException(409, {
+      throw new ApiHttpError(409, {
+        code: "conflict",
         message: `sandbox instance was lost; retry to restore it`,
+        retryable: true,
       });
     }
   };
@@ -1149,8 +1154,10 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
   if (error instanceof SandboxProviderReadLockUnavailableError)
     return new HTTPException(503, { message: error.message });
   if (error instanceof SandboxImageConflictError || error instanceof SandboxRigConflictError)
-    return new HTTPException(409, {
+    return new ApiHttpError(409, {
+      code: "conflict",
       message: "sandbox runtime changed while this session still has active operations; retry",
+      retryable: true,
     });
   if (error instanceof SelfhostedControlError && error.agentOffline)
     return new HTTPException(409, { message: error.message, cause: error });
