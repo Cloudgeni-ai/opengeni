@@ -37507,7 +37507,7 @@ async function advanceWorkspaceGenerationForAuthority(
   operationInput: string,
   captureWaitMs = 0,
   waitSignal?: AbortSignal,
-  onCaptureWait?: (durationMs: number) => void,
+  onCaptureWait?: (observation: { durationMs: number; outcome: "completed" | "failed" }) => void,
 ): Promise<SandboxWorkspaceMutationAdmission> {
   if (!Number.isSafeInteger(captureWaitMs) || captureWaitMs < 0 || captureWaitMs > 60 * 60_000) {
     throw new Error("Workspace archive capture wait is invalid");
@@ -37515,10 +37515,17 @@ async function advanceWorkspaceGenerationForAuthority(
   const deadline = performance.now() + captureWaitMs;
   let delayMs = 25;
   let captureWaitStartedAt: number | undefined;
+  let captureWaitOutcome: "completed" | "failed" = "failed";
   try {
     for (;;) {
       try {
-        return await advanceWorkspaceGenerationForAuthorityOnce(db, authority, operationInput);
+        const admission = await advanceWorkspaceGenerationForAuthorityOnce(
+          db,
+          authority,
+          operationInput,
+        );
+        captureWaitOutcome = "completed";
+        return admission;
       } catch (error) {
         if (
           !(error instanceof SandboxWorkspaceMutationFencedError) ||
@@ -37539,7 +37546,10 @@ async function advanceWorkspaceGenerationForAuthority(
   } finally {
     if (captureWaitStartedAt !== undefined && onCaptureWait) {
       try {
-        onCaptureWait(Math.max(0, performance.now() - captureWaitStartedAt));
+        onCaptureWait({
+          durationMs: Math.max(0, performance.now() - captureWaitStartedAt),
+          outcome: captureWaitOutcome,
+        });
       } catch {
         // Diagnostics must never alter mutation admission authority.
       }
@@ -37573,9 +37583,8 @@ export async function advanceWorkspaceGeneration(
     captureWaitMs?: number;
     /** Cancel the bounded transition wait without creating an admission. */
     waitSignal?: AbortSignal;
-    /** Observe only time spent retrying while a provider archive capture owns
-     * the lease. Diagnostics are fail-open and never affect admission. */
-    onCaptureWait?: (durationMs: number) => void;
+    /** Observe only time actually spent blocked behind an archive capture. */
+    onCaptureWait?: (observation: { durationMs: number; outcome: "completed" | "failed" }) => void;
     /** Active-routed mutations bind to the exact session pointer. Omitted means
      * an intentional home-provider write outside the routing surface. */
     routeKind?: "home" | "active";

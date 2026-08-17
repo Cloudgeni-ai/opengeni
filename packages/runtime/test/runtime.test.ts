@@ -4037,7 +4037,7 @@ describe("runtime event normalization", () => {
     expect(command).toContain("ensure_git");
     expect(command).toContain("apt-get install -y --no-install-recommends ca-certificates git");
     expect(command).toContain(
-      "clone_repository '/workspace/repos/github.com/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'",
+      "start_repository_clone '/workspace/repos/github.com/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'",
     );
     expect(command).not.toContain("githubInstallationId");
     expect(command).not.toContain("githubRepositoryId");
@@ -4047,6 +4047,30 @@ describe("runtime event normalization", () => {
     // token-carrying env assignment ever rides the command text.
     expect(command).not.toContain("GITHUB_TOKEN=");
     expect(command).not.toContain("ghs_liveToken123");
+  });
+
+  test("runs independent repository clones in bounded batches of four", () => {
+    const resources = Array.from({ length: 5 }, (_, index) => ({
+      kind: "repository" as const,
+      uri: `https://github.com/acme/repo-${index}.git`,
+      ref: "main",
+    }));
+    const command = repositoryCloneCommand(resources);
+    const lines = command.split("\n");
+    const starts = lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.startsWith("start_repository_clone "));
+    const waits = lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line === "wait_repository_clone_batch");
+
+    expect(starts).toHaveLength(5);
+    expect(waits).toHaveLength(2);
+    expect(waits[0]!.index).toBeGreaterThan(starts[3]!.index);
+    expect(waits[0]!.index).toBeLessThan(starts[4]!.index);
+    expect(waits[1]!.index).toBeGreaterThan(starts[4]!.index);
+    expect(command).toContain('if ! wait "$clone_pid"; then');
+    expect(command).toContain('if [ "$clone_failed" -ne 0 ]; then');
   });
 
   test("TOKEN-BROKER (B1/B2): the clone command writes provider token FILES and provisions askpass + CLI wrappers before the clone", () => {

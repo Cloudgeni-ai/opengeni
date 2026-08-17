@@ -317,7 +317,10 @@ export type {
   ModelPreparationMeasurement,
   ModelPreparationPhase,
 } from "./model-preparation-diagnostics";
-export { recordModelPreparationMeasurement } from "./model-preparation-diagnostics";
+export {
+  markModelPreparationFirstSandboxOperation,
+  recordModelPreparationMeasurement,
+} from "./model-preparation-diagnostics";
 export {
   CodexSubscriptionUnavailableError,
   MultiProviderModelProvider,
@@ -8718,6 +8721,7 @@ export function repositoryCloneCommand(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   bindings: GitCredentialBindingSeed[] = [],
 ): string {
+  const cloneConcurrency = 4;
   assertUniqueResourceMountPaths(resources);
   const commands = [
     "set +x",
@@ -8810,18 +8814,38 @@ export function repositoryCloneCommand(
     "  fi",
     '  echo "Repository resource ready at $target"',
     "}",
+    "clone_pids=''",
+    "clone_failed=0",
+    "start_repository_clone() {",
+    '  clone_repository "$@" &',
+    '  clone_pids="$clone_pids $!"',
+    "}",
+    "wait_repository_clone_batch() {",
+    "  for clone_pid in $clone_pids; do",
+    '    if ! wait "$clone_pid"; then',
+    "      clone_failed=1",
+    "    fi",
+    "  done",
+    "  clone_pids=''",
+    '  if [ "$clone_failed" -ne 0 ]; then',
+    "    return 1",
+    "  fi",
+    "}",
   ];
-  for (const resource of resources) {
+  for (const [index, resource] of resources.entries()) {
     const mountPath = resourceMountPath(resource);
     commands.push(
       [
-        "clone_repository",
+        "start_repository_clone",
         shellQuote(posixPath.join("/workspace", mountPath)),
         shellQuote(resource.uri),
         shellQuote(resource.ref),
         shellQuote(resource.subpath ? normalizeRepositorySubpath(resource.subpath) : ""),
       ].join(" "),
     );
+    if ((index + 1) % cloneConcurrency === 0 || index === resources.length - 1) {
+      commands.push("wait_repository_clone_batch");
+    }
   }
   return commands.join("\n");
 }

@@ -158,6 +158,7 @@ import {
   isMcpRequestTimeoutError,
   isMcpTransportConnectivityError,
   runOwnedSandboxSetup,
+  markModelPreparationFirstSandboxOperation,
   recordModelPreparationMeasurement,
   RoutingMutationOutcomeUnknownError,
   SandboxConfigError,
@@ -3579,6 +3580,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // aggregates it together with every machine reached after a mid-turn swap.
     let machinePrimarySession: import("@opengeni/runtime").SelfhostedSession | null = null;
     let lazyOwnedSandbox: EstablishedSandboxSession | null = null;
+    let firstModelPreparationNestedSandboxMs = 0;
+    const firstModelPreparationNestedSandboxPhases: Array<{
+      phase: "admission" | "provider" | "settlement" | "snapshot_wait";
+      outcome: "completed" | "failed";
+      durationSeconds: number;
+    }> = [];
     let turnSandboxProvisioner: TurnSandboxProvisioner<ResumedTurnSandbox> | null = null;
     // The UN-PROXIED established box session, captured BEFORE wrapTurnBoxWithRouting.
     // Platform setup (beforeAgentStart hooks + file materialization) execs against
@@ -3632,17 +3639,36 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       operation: string,
       mutation: () => Promise<T>,
       observePhase?: (measurement: {
-        phase: "admission" | "settlement";
+        phase: "admission" | "provider" | "settlement" | "snapshot_wait";
         outcome: "completed" | "failed";
         durationSeconds: number;
       }) => void,
     ): Promise<T> => {
+      const observeMutationPhase = (
+        phase: "admission" | "provider" | "settlement" | "snapshot_wait",
+        outcome: "completed" | "failed",
+        durationMs: number,
+      ): void => {
+        try {
+          observePhase?.({
+            phase,
+            outcome,
+            durationSeconds: Math.max(0, durationMs) / 1_000,
+          });
+        } catch {
+          // Diagnostics must never alter workspace mutation authority.
+        }
+      };
       // Connected machines are the user's own persistence and never dirty the
       // cloud home archive. Every persistable raw-session write batch is fenced
       // against the exact current lease/provider before the provider sees it.
       if (sandbox.established.backendId === "selfhosted") {
+        const providerStartedAt = performance.now();
+        let providerOutcome: "completed" | "failed" = "failed";
         try {
-          return await mutation();
+          const result = await mutation();
+          providerOutcome = "completed";
+          return result;
         } catch (error) {
           if (error instanceof ChannelAPartialMutationError) {
             throw new RoutingMutationOutcomeUnknownError(
@@ -3652,11 +3678,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             );
           }
           throw error;
+        } finally {
+          observeMutationPhase("provider", providerOutcome, performance.now() - providerStartedAt);
         }
       }
       if (!sandboxGroupId || !sandboxHolderId || !turnId || executionGeneration <= 0) {
         throw new Error("Workspace mutation attempted before exact turn sandbox admission");
       }
+      let admissionCaptureWaitMs = 0;
       const identity = {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -3671,21 +3700,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         operation,
         captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
         ...(cancellationSignal ? { waitSignal: cancellationSignal } : {}),
-      };
-      const observeMutationPhase = (
-        phase: "admission" | "settlement",
-        outcome: "completed" | "failed",
-        startedAt: number,
-      ): void => {
-        try {
-          observePhase?.({
-            phase,
-            outcome,
-            durationSeconds: Math.max(0, performance.now() - startedAt) / 1_000,
-          });
-        } catch {
-          // Diagnostics must never alter workspace mutation authority.
-        }
+        ...(observePhase
+          ? {
+              onCaptureWait: (observation: {
+                durationMs: number;
+                outcome: "completed" | "failed";
+              }) => {
+                admissionCaptureWaitMs += Math.max(0, observation.durationMs);
+                observeMutationPhase("snapshot_wait", observation.outcome, observation.durationMs);
+              },
+            }
+          : {}),
       };
       const admissionStartedAt = performance.now();
       let admissionOutcome: "completed" | "failed" = "failed";
@@ -3694,7 +3719,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         admission = await advanceWorkspaceGeneration(db, identity);
         admissionOutcome = "completed";
       } finally {
-        observeMutationPhase("admission", admissionOutcome, admissionStartedAt);
+        observeMutationPhase(
+          "admission",
+          admissionOutcome,
+          Math.max(0, performance.now() - admissionStartedAt - admissionCaptureWaitMs),
+        );
       }
       const settleMutation = async (outcome: "resolved" | "rejected"): Promise<void> => {
         const settlementStartedAt = performance.now();
@@ -3707,13 +3736,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           });
           settlementOutcome = "completed";
         } finally {
-          observeMutationPhase("settlement", settlementOutcome, settlementStartedAt);
+          observeMutationPhase(
+            "settlement",
+            settlementOutcome,
+            performance.now() - settlementStartedAt,
+          );
         }
       };
       let result: T;
+      const providerStartedAt = performance.now();
+      let providerOutcome: "completed" | "failed" = "failed";
       try {
         result = await mutation();
+        providerOutcome = "completed";
       } catch (providerError) {
+        observeMutationPhase("provider", providerOutcome, performance.now() - providerStartedAt);
         const partialMutation = providerError instanceof ChannelAPartialMutationError;
         try {
           await settleMutation(partialMutation ? "resolved" : "rejected");
@@ -3735,6 +3772,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         throw providerError;
       }
+      observeMutationPhase("provider", providerOutcome, performance.now() - providerStartedAt);
       try {
         await settleMutation("resolved");
       } catch (settlementError) {
@@ -9036,14 +9074,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   ),
                 (measurement) => {
                   if (firstModelRequestPreparationRecorded) return;
-                  recordModelPreparationMeasurement({
-                    phase:
-                      measurement.phase === "admission"
-                        ? "sandbox_workspace_mutation_admission"
-                        : "sandbox_workspace_mutation_settlement",
-                    outcome: measurement.outcome,
-                    durationSeconds: measurement.durationSeconds,
-                  });
+                  firstModelPreparationNestedSandboxMs += measurement.durationSeconds * 1_000;
+                  firstModelPreparationNestedSandboxPhases.push(measurement);
                 },
               );
               await attachCodemodeTokenRenewal(
@@ -9157,37 +9189,81 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             },
             onFirstOperation: (measurement) => {
               if (firstModelRequestPreparationRecorded) return;
-              const outcome = measurement.outcome;
-              recordModelPreparationMeasurement({
-                phase: "sandbox_first_routed_operation",
-                outcome,
-                durationSeconds: measurement.durationMs / 1_000,
-              });
-              recordModelPreparationMeasurement({
-                phase: "sandbox_first_routed_resolution",
-                outcome,
-                durationSeconds: measurement.resolutionMs / 1_000,
-              });
-              recordModelPreparationMeasurement({
-                phase: "sandbox_first_routed_mutation_admission",
-                outcome,
-                durationSeconds: measurement.mutationAdmissionMs / 1_000,
-              });
-              recordModelPreparationMeasurement({
-                phase: "sandbox_first_routed_provider_operation",
-                outcome,
-                durationSeconds: measurement.providerOperationMs / 1_000,
-              });
-              recordModelPreparationMeasurement({
-                phase: "sandbox_first_routed_mutation_settlement",
-                outcome,
-                durationSeconds: measurement.mutationSettlementMs / 1_000,
-              });
-              recordModelPreparationMeasurement({
-                phase: "sandbox_snapshot_wait",
-                outcome,
-                durationSeconds: measurement.snapshotWaitMs / 1_000,
-              });
+              markModelPreparationFirstSandboxOperation(measurement.durationMs / 1_000);
+
+              for (const nested of firstModelPreparationNestedSandboxPhases) {
+                if (nested.phase === "snapshot_wait") continue;
+                recordModelPreparationMeasurement({
+                  phase:
+                    nested.phase === "admission"
+                      ? "sandbox_workspace_mutation_admission"
+                      : nested.phase === "provider"
+                        ? "sandbox_workspace_mutation_provider"
+                        : "sandbox_workspace_mutation_settlement",
+                  outcome: nested.outcome,
+                  durationSeconds: nested.durationSeconds,
+                });
+              }
+
+              const resolution = measurement.phases.resolution;
+              if (resolution) {
+                recordModelPreparationMeasurement({
+                  phase: "sandbox_first_routed_resolution_other",
+                  outcome: resolution.outcome,
+                  durationSeconds:
+                    Math.max(0, resolution.durationMs - firstModelPreparationNestedSandboxMs) /
+                    1_000,
+                });
+              }
+
+              const routedPhaseNames = [
+                ["mutationAdmission", "sandbox_first_routed_mutation_admission"],
+                ["providerOperation", "sandbox_first_routed_provider_operation"],
+                ["mutationSettlement", "sandbox_first_routed_mutation_settlement"],
+              ] as const;
+              for (const [phaseName, metricPhase] of routedPhaseNames) {
+                const phase = measurement.phases[phaseName];
+                if (!phase) continue;
+                recordModelPreparationMeasurement({
+                  phase: metricPhase,
+                  outcome: phase.outcome,
+                  durationSeconds: phase.durationMs / 1_000,
+                });
+              }
+
+              const nestedSnapshotPhases = firstModelPreparationNestedSandboxPhases.filter(
+                (phase) => phase.phase === "snapshot_wait",
+              );
+              const routedSnapshot = measurement.phases.snapshotWait;
+              const snapshotWaitMs =
+                nestedSnapshotPhases.reduce(
+                  (total, phase) => total + phase.durationSeconds * 1_000,
+                  0,
+                ) + (routedSnapshot?.durationMs ?? 0);
+              if (snapshotWaitMs > 0) {
+                recordModelPreparationMeasurement({
+                  phase: "sandbox_snapshot_wait",
+                  outcome:
+                    routedSnapshot?.outcome === "failed" ||
+                    nestedSnapshotPhases.some((phase) => phase.outcome === "failed")
+                      ? "failed"
+                      : "completed",
+                  durationSeconds: snapshotWaitMs / 1_000,
+                });
+              }
+
+              const routedMeasuredMs = Object.values(measurement.phases).reduce(
+                (total, phase) => total + (phase?.durationMs ?? 0),
+                0,
+              );
+              const routedOtherMs = Math.max(0, measurement.durationMs - routedMeasuredMs);
+              if (routedOtherMs > 0) {
+                recordModelPreparationMeasurement({
+                  phase: "sandbox_first_routed_other",
+                  outcome: measurement.outcome,
+                  durationSeconds: routedOtherMs / 1_000,
+                });
+              }
             },
           },
         );

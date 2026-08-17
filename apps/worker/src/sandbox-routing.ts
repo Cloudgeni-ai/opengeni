@@ -60,6 +60,7 @@ import {
   type RoutingMutationSettlementResult,
   type RoutingSandboxFirstOperationObserver,
   type RoutingSandboxOperationObserver,
+  type RoutingSandboxWaitObservation,
   type RoutingRetainedProcess,
   type RoutingRetainedProcessTerminalProof,
   type SelfhostedOpObserver,
@@ -419,7 +420,7 @@ function beforePersistableHomeMutation(
   | ((input: {
       op: string;
       backend: ResolvedActiveBackend;
-      onCaptureWait?: (durationMs: number) => void;
+      onCaptureWait?: (observation: RoutingSandboxWaitObservation) => void;
     }) => Promise<PersistableMutationAdmission | null>)
   | undefined {
   const fence = ids.workspaceMutationFence;

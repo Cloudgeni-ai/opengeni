@@ -28,15 +28,13 @@ describe("sandbox provider operation gate", () => {
       await captureBlocked;
       order.push("capture:end");
     });
-    let captureWaitMs: number | null = null;
+    const waits: Array<{ durationMs: number; outcome: string }> = [];
     const second = withSandboxProviderOperation(
       session,
       async () => {
         order.push("second");
       },
-      (durationMs) => {
-        captureWaitMs = durationMs;
-      },
+      (observation) => waits.push(observation),
     );
     await Bun.sleep(0);
     expect(order).toEqual(["first:start"]);
@@ -50,10 +48,12 @@ describe("sandbox provider operation gate", () => {
     await capture;
     await second;
     expect(order).toEqual(["first:start", "first:end", "capture:start", "capture:end", "second"]);
-    expect(captureWaitMs).toBeGreaterThan(0);
+    expect(waits).toHaveLength(1);
+    expect(waits[0]).toMatchObject({ outcome: "completed" });
+    expect(waits[0]!.durationMs).toBeGreaterThan(0);
   });
 
-  test("does not report a capture wait when operation admission is immediate", async () => {
+  test("omits capture-wait telemetry when operation admission is immediate", async () => {
     let observed = false;
     await withSandboxProviderOperation(
       {},
