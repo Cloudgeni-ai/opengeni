@@ -7484,7 +7484,7 @@ export const sandboxWorkspaceMutationActorKindValues = ["turn", "direct", "proce
 export const sandboxWorkspaceMutationHolderKindValues = ["turn", "direct", "process"] as const;
 // The causal principal behind an admitted workspace writer. `subject`/`service`
 // are the canonical `session_turns` initiator vocabulary; `legacy_unattributed`
-// exists only for rows written before migration 0276 recorded any authority.
+// exists only for rows written before migration 0277 recorded any authority.
 export const sandboxWorkspaceMutationInitiatorKindValues = [
   "subject",
   "service",
@@ -7534,10 +7534,10 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
     routeEpoch: integer("route_epoch").notNull(),
     workspaceGeneration: integer("workspace_generation").notNull(),
     operation: text("operation").notNull(),
-    // Exact authority admitted with this operation (migration 0276). Identities
+    // Exact authority admitted with this operation (migration 0277). Identities
     // and epochs only, never a secret value. `legacy_unattributed` marks a
-    // pre-0276 `direct`/`process` row whose authority was never recorded; a
-    // post-0276 writer never produces it and new admission refuses it.
+    // pre-0277 `direct`/`process` row whose authority was never recorded; a
+    // post-0277 writer never produces it and new admission refuses it.
     initiatorKind: text("initiator_kind", {
       enum: sandboxWorkspaceMutationInitiatorKindValues,
     })
@@ -7760,7 +7760,7 @@ export const sandboxRetainedProcesses = pgTable(
     routeTargetId: uuid("route_target_id"),
     routeEpoch: integer("route_epoch").notNull(),
     providerSessionId: integer("provider_session_id").notNull(),
-    // Authority frozen when the process was retained (migration 0276). A
+    // Authority frozen when the process was retained (migration 0277). A
     // `legacy_unattributed` process keeps running; only its next workspace
     // mutation is refused, because nothing may invent an owner for it.
     initiatorKind: text("initiator_kind", {

@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Migration 0276: every admitted persistable /workspace writer and every
+-- Migration 0277: every admitted persistable /workspace writer and every
 -- retained process carries its own exact authority tuple - causal initiator,
 -- initiating human, organization membership (the grant identity) and its
 -- observed authorization revision, plus the session tenancy epoch/visibility
@@ -15,12 +15,12 @@
 -- value.
 --
 -- Rolling window. The new columns are nullable or carry the explicit
--- `legacy_unattributed` / `unattributed-legacy` sentinels, so a pre-0276
+-- `legacy_unattributed` / `unattributed-legacy` sentinels, so a pre-0277
 -- API/worker image keeps inserting admissions and retained processes exactly
 -- as before and lands on the sentinel. Historical and mixed-window rows are
 -- promoted only where the frozen turn/attempt snapshot makes the authority
 -- unambiguous; nothing is inferred for a `direct` or `process` row that never
--- had an owner. A sentinel row is refused by NEW admission in the post-0276
+-- had an owner. A sentinel row is refused by NEW admission in the post-0277
 -- application (fail closed), but the live provider process behind it is never
 -- terminated by this migration or by that refusal - the user sees a typed
 -- rejection on the next write instead of losing a running shell.
@@ -381,9 +381,9 @@ CREATE INDEX IF NOT EXISTS "sandbox_retained_processes_initiating_human_idx"
 
 COMMENT ON COLUMN "sandbox_workspace_mutation_admissions"."initiator_kind" IS
   'Causal principal kind for this admission: subject | service, or the '
-  'legacy_unattributed sentinel for a pre-0276 row whose authority was never '
+  'legacy_unattributed sentinel for a pre-0277 row whose authority was never '
   'recorded. The sentinel is refused by new admission and is never written by '
-  'a post-0276 writer.';
+  'a post-0277 writer.';
 COMMENT ON COLUMN "sandbox_workspace_mutation_admissions"."authority_epoch" IS
   'Session tenancy authority epoch observed when the operation was admitted. '
   'Identity and epoch only - never a secret value.';

@@ -37554,7 +37554,7 @@ export class SandboxWorkspaceMutationFencedError extends Error {
       | "admission_fenced"
       | "operation_invalid"
       | "generation_exhausted"
-      // The writer predates migration 0276 and therefore carries no recorded
+      // The writer predates migration 0277 and therefore carries no recorded
       // authority. Nothing may invent one, so a NEW mutation is refused; the
       // live provider process behind it is deliberately left running.
       | "authority_unattributed"
@@ -37800,7 +37800,7 @@ type DirectWorkspaceMutationAuthority = {
 };
 
 /** Identity-and-epoch attribution recorded with an admitted workspace writer
- * (migration 0276). Never contains a secret value. */
+ * (migration 0277). Never contains a secret value. */
 type AdmittedWorkspaceMutationAuthority = {
   /** `legacy_unattributed` is honest, not broken: a turn frozen before
    * migration 0096 has no causal initiator to copy, and inventing one would be
@@ -38033,7 +38033,7 @@ async function resolveWorkspaceMutationGrantIdentityTx(
   input: { accountId: string; humanSubjectId: string | null },
 ): Promise<{ membershipId: string | null; authorizationRevision: number | null }> {
   if (!input.humanSubjectId) return { membershipId: null, authorizationRevision: null };
-  // `organization_memberships` has no runtime SELECT (0263). Migration 0276
+  // `organization_memberships` has no runtime SELECT (0263). Migration 0277
   // installs one narrow tenant-fenced SECURITY DEFINER seam that returns only
   // this identity/status/revision triple.
   const rows = await tx.execute<{
@@ -38317,7 +38317,7 @@ async function lockWorkspaceMutationAuthorityTx(
   }
   // A retained process outlives the request or turn that started it, so its
   // frozen authority is the only thing that can license a further write. It is
-  // never re-derived: an unattributed (pre-0276) process is refused rather than
+  // never re-derived: an unattributed (pre-0277) process is refused rather than
   // adopted, and the running provider process is deliberately left alone.
   const processAuthority = assertRetainedProcessAuthority(process);
   const processGrant = await resolveWorkspaceMutationGrantIdentityTx(tx, {
@@ -38369,10 +38369,10 @@ async function lockWorkspaceMutationAuthorityTx(
   };
 }
 
-/** Read the frozen authority of a retained process, refusing a pre-0276 row.
+/** Read the frozen authority of a retained process, refusing a pre-0277 row.
  * The refusal is a write fence only: the caller never terminates the process.
  *
- * The MISSING TENANCY HALF is what marks a pre-0276 row. A recorded but
+ * The MISSING TENANCY HALF is what marks a pre-0277 row. A recorded but
  * `legacy_unattributed` initiator is not the same thing: that process still has
  * a real session epoch and visibility to be fenced against, and refusing it
  * would fence ordinary work on sessions whose turns predate migration 0096. */
@@ -38740,7 +38740,7 @@ type AdmissionIdentityRow = {
   route_epoch: number | string;
   workspace_generation: number | string;
   operation: string;
-  // Migration 0276 attribution. A row admitted by a pre-0276 writer carries the
+  // Migration 0277 attribution. A row admitted by a pre-0277 writer carries the
   // sentinel and null epochs; it is never upgraded in place.
   initiator_kind: "subject" | "service" | "legacy_unattributed";
   initiator_subject_id: string;

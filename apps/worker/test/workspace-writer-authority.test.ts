@@ -1,6 +1,6 @@
 // Every persistable /workspace writer records its exact authority tuple, and
 // the two actors that previously had none - `direct` (API request) and
-// `process` (retained yielded shell) - are fenced by it (migration 0276).
+// `process` (retained yielded shell) - are fenced by it (migration 0277).
 //
 // The load-bearing asymmetry: an unattributed or revoked writer is refused a
 // NEW mutation, but the running provider process behind it is never terminated
@@ -408,7 +408,7 @@ describe("workspace writer authority attribution", () => {
     expect(inherited!.initiator_subject_id).toBe("subject:retained-owner");
     expect(inherited!.authority_epoch).toBeGreaterThan(0);
 
-    // Simulate the pre-0276 row a rolling deploy leaves behind.
+    // Simulate the pre-0277 row a rolling deploy leaves behind.
     await admin`
       update sandbox_retained_processes set
         initiator_kind = 'legacy_unattributed',

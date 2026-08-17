@@ -1,4 +1,4 @@
-// Migration 0276: every persistable /workspace writer admission and retained
+// Migration 0277: every persistable /workspace writer admission and retained
 // process carries its own authority tuple. The rolling backfill promotes only
 // rows whose frozen turn/attempt snapshot makes the authority unambiguous;
 // `direct` and `process` rows that never had an owner keep the honest
@@ -15,14 +15,14 @@ import { fileURLToPath } from "node:url";
 import postgres, { type Sql } from "postgres";
 
 const migrationUrl = new URL(
-  "../drizzle/0276_workspace_writer_authority_attribution.sql",
+  "../drizzle/0277_workspace_writer_authority_attribution.sql",
   import.meta.url,
 );
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 
-async function applyThrough0275(admin: Sql): Promise<void> {
+async function applyThrough0276(admin: Sql): Promise<void> {
   const files = (await readdir(migrationsDir))
-    .filter((file) => file.endsWith(".sql") && file < "0276_")
+    .filter((file) => file.endsWith(".sql") && file < "0277_")
     .sort();
   await admin.unsafe(
     `CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -52,14 +52,14 @@ async function expectPostgresRejection(query: PromiseLike<unknown>, label: strin
 }
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0276-writer-authority");
+  shared = await acquireSharedTestDatabase("migration-0277-writer-authority");
 });
 
 afterAll(async () => {
   await shared?.release();
 });
 
-describe("migration 0276 workspace writer authority attribution", () => {
+describe("migration 0277 workspace writer authority attribution", () => {
   test("declares one rolling writer-attribution protocol", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -80,7 +80,7 @@ describe("migration 0276 workspace writer authority attribution", () => {
     // Expand online: every constraint lands NOT VALID first.
     expect((source.match(/NOT VALID/gu) ?? []).length).toBe(8);
     // The two halves stay independent: only the missing tenancy half marks a
-    // pre-0276 row.
+    // pre-0277 row.
     expect(source).toContain("two INDEPENDENT halves");
     // The grant seam is the only new runtime surface, and it is tenant-fenced.
     expect(source).toContain("CREATE FUNCTION resolve_workspace_writer_grant_identity(");
@@ -102,13 +102,13 @@ describe("migration 0276 workspace writer authority attribution", () => {
   test("the grant seam resolves only the caller's own tenant", async () => {
     if (!shared) return;
     const [tenantA] = await shared.admin<{ id: string }[]>`
-      insert into managed_accounts (name) values ('0276 seam tenant a') returning id`;
+      insert into managed_accounts (name) values ('0277 seam tenant a') returning id`;
     const [tenantB] = await shared.admin<{ id: string }[]>`
-      insert into managed_accounts (name) values ('0276 seam tenant b') returning id`;
-    const subjectId = `user:0276-seam-${crypto.randomUUID()}`;
+      insert into managed_accounts (name) values ('0277 seam tenant b') returning id`;
+    const subjectId = `user:0277-seam-${crypto.randomUUID()}`;
     const [personal] = await shared.admin<{ id: string }[]>`
       insert into workspaces (account_id, name)
-      values (${tenantB!.id}, '0276 seam personal') returning id`;
+      values (${tenantB!.id}, '0277 seam personal') returning id`;
     const [membership] = await shared.admin<{ id: string }[]>`
       insert into organization_memberships (
         account_id, subject_id, role, status, personal_workspace_id, authorization_revision
@@ -148,23 +148,23 @@ describe("migration 0276 workspace writer authority attribution", () => {
   });
 
   test("promotes only unambiguous turn-owned rows and preserves direct sentinels on replay", async () => {
-    const blank = await acquireBlankTestDatabase("migration-0276-backfill-replay");
+    const blank = await acquireBlankTestDatabase("migration-0277-backfill-replay");
     if (!blank) return;
     const admin = postgres(blank.databaseUrl, { max: 1, prepare: false });
     try {
-      await applyThrough0275(admin);
+      await applyThrough0276(admin);
       const [account] = await admin<{ id: string }[]>`
-        insert into managed_accounts (name) values ('0276 backfill account') returning id`;
+        insert into managed_accounts (name) values ('0277 backfill account') returning id`;
       const [workspace] = await admin<{ id: string }[]>`
         insert into workspaces (account_id, name)
-        values (${account!.id}, '0276 backfill workspace') returning id`;
+        values (${account!.id}, '0277 backfill workspace') returning id`;
       await admin`
         insert into workspace_inference_controls (workspace_id, account_id)
         values (${workspace!.id}, ${account!.id})`;
-      const humanSubject = "user:0276-backfill-human";
+      const humanSubject = "user:0277-backfill-human";
       const [personal] = await admin<{ id: string }[]>`
         insert into workspaces (account_id, name)
-        values (${account!.id}, '0276 backfill personal') returning id`;
+        values (${account!.id}, '0277 backfill personal') returning id`;
       const [membership] = await admin<{ id: string }[]>`
         insert into organization_memberships (
           account_id, subject_id, role, status, personal_workspace_id, authorization_revision
@@ -202,13 +202,13 @@ describe("migration 0276 workspace writer authority attribution", () => {
         ) values
         (
           ${attributedTurnId}, ${account!.id}, ${workspace!.id}, ${sessionId},
-          ${crypto.randomUUID()}, ${`0276-${attributedTurnId}`}, 'completed', 1,
+          ${crypto.randomUUID()}, ${`0277-${attributedTurnId}`}, 'completed', 1,
           'attributed', 'test-model', 'medium', 'none', 'subject', ${humanSubject},
           ${humanSubject}, now()
         ),
         (
           ${sentinelTurnId}, ${account!.id}, ${workspace!.id}, ${sessionId},
-          ${crypto.randomUUID()}, ${`0276-${sentinelTurnId}`}, 'completed', 2,
+          ${crypto.randomUUID()}, ${`0277-${sentinelTurnId}`}, 'completed', 2,
           'pre-0096', 'test-model', 'medium', 'none', 'service',
           'unattributed-legacy', null, now()
         )`;
@@ -228,7 +228,7 @@ describe("migration 0276 workspace writer authority attribution", () => {
             authority_epoch, authority_visibility
           ) values (
             ${attemptId}, ${account!.id}, ${workspace!.id}, ${sessionId}, ${turnId},
-            1, 'closed', 'completed', now(), ${`0276-${turnId}`}, ${`run-${attemptId}`},
+            1, 'closed', 'completed', now(), ${`0277-${turnId}`}, ${`run-${attemptId}`},
             ${`activity-${attemptId}`}, 0, '{}'::jsonb, 1, 'workspace_shared'
           )`;
       }
@@ -240,15 +240,15 @@ describe("migration 0276 workspace writer authority attribution", () => {
           resume_backend_id, resume_state, expires_at
         ) values (
           ${account!.id}, ${workspace!.id}, ${groupId}, 'warm', 1, 1, 0,
-          '0276-backfill-box', 'local', 3, 'local',
+          '0277-backfill-box', 'local', 3, 'local',
           ${admin.json({ backendId: "local" })}::jsonb, now() + interval '10 minutes'
         ) returning id`;
 
-      // Four pre-0276 admissions on the same lease: two settled turn-owned
+      // Four pre-0277 admissions on the same lease: two settled turn-owned
       // ones (attributed and sentinel-initiator), plus one turn-owned and one
       // direct admission still open behind a retained yielded process.
       const directActorId = crypto.randomUUID();
-      const admitPre0276 = async (input: {
+      const admitPre0277 = async (input: {
         actor: "turn" | "direct";
         actorId: string;
         turnId?: string;
@@ -269,13 +269,13 @@ describe("migration 0276 workspace writer authority attribution", () => {
             ${input.turnId ?? null}, ${input.attemptId ?? null},
             ${input.actor === "turn" ? 1 : null}, ${input.actor},
             ${input.actor === "turn" ? `turn-attempt:${input.attemptId}` : `direct:${input.actorId}`},
-            3, 'local', '0276-backfill-box', 'home', 0, ${input.generation},
-            ${`0276-op-${input.generation}`}, ${input.outcome},
+            3, 'local', '0277-backfill-box', 'home', 0, ${input.generation},
+            ${`0277-op-${input.generation}`}, ${input.outcome},
             ${input.outcome === "resolved" ? admin`now()` : null}
           ) returning id`;
         return row!.id;
       };
-      const attributedAdmissionId = await admitPre0276({
+      const attributedAdmissionId = await admitPre0277({
         actor: "turn",
         actorId: attributedAttemptId,
         turnId: attributedTurnId,
@@ -283,7 +283,7 @@ describe("migration 0276 workspace writer authority attribution", () => {
         generation: 1,
         outcome: "resolved",
       });
-      const sentinelAdmissionId = await admitPre0276({
+      const sentinelAdmissionId = await admitPre0277({
         actor: "turn",
         actorId: sentinelAttemptId,
         turnId: sentinelTurnId,
@@ -291,7 +291,7 @@ describe("migration 0276 workspace writer authority attribution", () => {
         generation: 2,
         outcome: "resolved",
       });
-      const yieldedAdmissionId = await admitPre0276({
+      const yieldedAdmissionId = await admitPre0277({
         actor: "turn",
         actorId: attributedAttemptId,
         turnId: attributedTurnId,
@@ -299,14 +299,14 @@ describe("migration 0276 workspace writer authority attribution", () => {
         generation: 3,
         outcome: "retained",
       });
-      const directAdmissionId = await admitPre0276({
+      const directAdmissionId = await admitPre0277({
         actor: "direct",
         actorId: directActorId,
         generation: 4,
         outcome: "retained",
       });
 
-      // A pre-0276 retained process yielded by the attributed turn, plus one
+      // A pre-0277 retained process yielded by the attributed turn, plus one
       // retained by the ownerless direct request. Both keep the live holder
       // rows the v2 validator requires of an active process.
       const insertProcess = async (input: {
@@ -337,7 +337,7 @@ describe("migration 0276 workspace writer authority attribution", () => {
             ${input.admissionId}, ${holderId}, ${input.owner},
             ${input.actorId}, ${input.turnId ?? null},
             ${input.attemptId ?? null}, ${input.owner === "turn" ? 1 : null},
-            3, 'local', '0276-backfill-box', 'home', 0, ${input.providerSessionId}
+            3, 'local', '0277-backfill-box', 'home', 0, ${input.providerSessionId}
           ) returning id`;
         return row!.id;
       };
