@@ -7,6 +7,11 @@ import {
   PreferenceRegistryConflictStrategy,
   PreferenceRegistryStableKey,
 } from "./preference-registry";
+import { GovernedLearningActivationDestination } from "./governed-learning-activation";
+import {
+  GovernedLearningDecisionOutcome,
+  GovernedLearningDecisionReason,
+} from "./governed-learning-evaluator";
 import {
   WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
   WorkspaceInstructionPolicyTarget,
@@ -279,8 +284,35 @@ export const CompanyBrainLearningPolicyDecision = z.enum([
   "blocked",
   "proposal_created",
   "activation_requested",
+  "activated",
 ]);
 export type CompanyBrainLearningPolicyDecision = z.infer<typeof CompanyBrainLearningPolicyDecision>;
+
+/**
+ * Content-free summary of the governed-learning decision receipt recorded for
+ * a Ways-of-working proposal (instruction policy or preference). Knowledge
+ * destinations create no `knowledge_change_proposals` row and are therefore
+ * never evaluated; they report `null`.
+ */
+export const CompanyBrainLearningDecisionSummary = z.object({
+  receiptId: z.string().uuid(),
+  outcome: GovernedLearningDecisionOutcome,
+  automaticEligible: z.boolean(),
+  reasons: z.array(GovernedLearningDecisionReason).max(16),
+});
+export type CompanyBrainLearningDecisionSummary = z.infer<
+  typeof CompanyBrainLearningDecisionSummary
+>;
+
+/**
+ * Bounded, content-free reason why evaluation or activation did not complete.
+ * The proposal write itself remains durable regardless.
+ */
+export const CompanyBrainLearningStepFailure = z.object({
+  stage: z.enum(["evaluation", "activation"]),
+  code: z.enum(["authority", "conflict", "invalid_operation", "unavailable"]),
+});
+export type CompanyBrainLearningStepFailure = z.infer<typeof CompanyBrainLearningStepFailure>;
 
 export const CompanyBrainLearningPolicyRouteReceipt = z.object({
   operationId,
@@ -288,10 +320,23 @@ export const CompanyBrainLearningPolicyRouteReceipt = z.object({
   effectivePolicy: WorkspaceLearningPolicyEffectiveMode,
   decision: CompanyBrainLearningPolicyDecision,
   write: CompanyBrainGovernedWriteReceipt.nullable(),
+  learning: CompanyBrainLearningDecisionSummary.nullable().default(null),
+  learningFailure: CompanyBrainLearningStepFailure.nullable().default(null),
   activation: z.object({
     requested: z.boolean(),
-    activated: z.literal(false),
-    boundary: z.enum(["policy_off", "human_review", "destination_authority"]),
+    activated: z.boolean(),
+    boundary: z.enum([
+      "policy_off",
+      "human_review",
+      "destination_authority",
+      "not_eligible",
+      "human_activation_required",
+      "activated",
+    ]),
+    receiptId: z.string().uuid().nullable().default(null),
+    destination: GovernedLearningActivationDestination.nullable().default(null),
+    destinationRevisionId: z.string().uuid().nullable().default(null),
+    effectiveAt: z.string().datetime().nullable().default(null),
   }),
 });
 export type CompanyBrainLearningPolicyRouteReceipt = z.infer<

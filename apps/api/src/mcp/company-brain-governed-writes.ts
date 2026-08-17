@@ -67,7 +67,7 @@ export function registerCompanyBrainGovernedWriteTools(
     "knowledge_propose",
     {
       description:
-        "Propose one existing evidence-backed workspace Knowledge claim through the frozen learning policy. Off creates nothing; Review creates an inactive proposal; Automatic requests destination-owned activation without bypassing review authority.",
+        "Propose one existing evidence-backed workspace Knowledge claim through the frozen learning policy. Off creates nothing; Suggest and Automatic both create a proposal that only the human Knowledge review lifecycle can accept.",
       inputSchema: { ...evidence, reason },
     },
     async (request) => {
@@ -121,7 +121,7 @@ export function registerCompanyBrainGovernedWriteTools(
     "task_note_promote_instruction_policy",
     {
       description:
-        "Atomically promote one still-active note from this exact root task tree into an inactive workspace instruction-policy draft. The note bytes remain exact evidence and draft content; this never activates mandatory behavior or widens scope.",
+        "Atomically promote one still-active note from this exact root task tree into an inactive workspace instruction-policy draft. The note bytes remain exact evidence and draft content. The frozen learning policy records a decision receipt, but mandatory policy still requires human activation even under Automatic; this never widens scope.",
       inputSchema: {
         ...taskNotePromotion,
         target: WorkspaceInstructionPolicyTarget,
@@ -144,7 +144,7 @@ export function registerCompanyBrainGovernedWriteTools(
     "task_note_promote_preference",
     {
       description:
-        "Atomically promote one still-active note from this exact root task tree into an inactive workspace preference proposal. The note bytes remain exact evidence and full proposal content; this never activates behavior or widens scope.",
+        "Atomically promote one still-active note from this exact root task tree into a workspace preference proposal. The note bytes remain exact evidence and full proposal content. Under Suggest the proposal waits for human review; under Automatic an eligible decision is activated through the preference lifecycle and remains undoable. This never widens scope.",
       inputSchema: {
         ...taskNotePromotion,
         stableKey: z.string().trim().min(1).max(PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS),
@@ -178,7 +178,7 @@ export function registerCompanyBrainGovernedWriteTools(
     "instruction_policy_propose",
     {
       description:
-        "Materialize an evidence-backed inactive workspace instruction-policy draft. This tool cannot activate mandatory behavior, including when learning mode is Automatic.",
+        "Materialize an evidence-backed inactive workspace instruction-policy draft. The frozen learning policy records a decision receipt, but this tool cannot activate mandatory behavior, including when learning mode is Automatic; a human must activate the draft.",
       inputSchema: {
         ...evidence,
         target: WorkspaceInstructionPolicyTarget,
@@ -203,7 +203,7 @@ export function registerCompanyBrainGovernedWriteTools(
     "preference_propose",
     {
       description:
-        "Materialize an evidence-backed inactive workspace preference proposal. This tool cannot silently create active behavioral authority.",
+        "Materialize an evidence-backed workspace preference proposal. Under Suggest it stays inactive for human review; under Automatic an eligible decision is activated through the governed preference lifecycle with an undoable receipt. It never creates mandatory authority.",
       inputSchema: {
         ...evidence,
         stableKey: z.string().trim().min(1).max(PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS),

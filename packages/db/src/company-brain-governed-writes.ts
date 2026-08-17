@@ -892,13 +892,22 @@ async function materializeWaysOfWorkingProposal(
  * Route one explicit workspace-local proposal. This owns write admission only;
  * selector snapshots, logical-turn receipts, tools, and activation remain out of scope.
  */
+/**
+ * Write result: the agent-facing receipt plus the exact initiating human the
+ * accepted attempt froze. The subject id is internal routing authority for the
+ * governed-learning evaluator/controller and is stripped from public receipts.
+ */
+export type CompanyBrainGovernedWriteResult = CompanyBrainGovernedWriteReceiptType & {
+  initiatingHumanSubjectId: string;
+};
+
 export async function writeCompanyBrainGovernedProposal(
   db: Database,
   rawInput: {
     attempt: CompanyBrainGovernedWriteAttempt;
     request: CompanyBrainGovernedWriteRequestType;
   },
-): Promise<CompanyBrainGovernedWriteReceiptType> {
+): Promise<CompanyBrainGovernedWriteResult> {
   const attempt = CompanyBrainGovernedWriteAttempt.parse(rawInput.attempt);
   const request = CompanyBrainGovernedWriteRequest.parse(rawInput.request);
   const inputHash = scopedKnowledgeInputHash({ attempt, request });
@@ -926,7 +935,32 @@ export async function writeCompanyBrainGovernedProposal(
         actorSubjectId,
       );
     },
-    async (scopedDb, authority, prelockedSource) => {
+    async (scopedDb, authority, prelockedSource) => ({
+      ...(await writeGovernedProposalBody(scopedDb, authority, prelockedSource)),
+      initiatingHumanSubjectId: authority.initiatingHumanSubjectId,
+    }),
+  ).catch((error: unknown) => {
+    if (
+      error instanceof CompanyBrainGovernedWriteAuthorityError ||
+      error instanceof CompanyBrainGovernedWriteInvalidOperationError
+    ) {
+      throw error;
+    }
+    if (error instanceof ScopedKnowledgeAuthorityError) {
+      throw new CompanyBrainGovernedWriteAuthorityError(error.message);
+    }
+    if (error instanceof ScopedKnowledgeInvalidOperationError) {
+      throw new CompanyBrainGovernedWriteInvalidOperationError(error.message);
+    }
+    throw error;
+  });
+
+  async function writeGovernedProposalBody(
+    scopedDb: Database,
+    authority: AttemptAuthority,
+    prelockedSource: TaskNotePromotionSource | null,
+  ): Promise<CompanyBrainGovernedWriteReceiptType> {
+    {
       const actor: ScopedKnowledgeActor = {
         kind: "service",
         subjectId: actorSubjectId,
@@ -1068,20 +1102,6 @@ export async function writeCompanyBrainGovernedProposal(
         actor,
         inputHash,
       });
-    },
-  ).catch((error: unknown) => {
-    if (
-      error instanceof CompanyBrainGovernedWriteAuthorityError ||
-      error instanceof CompanyBrainGovernedWriteInvalidOperationError
-    ) {
-      throw error;
     }
-    if (error instanceof ScopedKnowledgeAuthorityError) {
-      throw new CompanyBrainGovernedWriteAuthorityError(error.message);
-    }
-    if (error instanceof ScopedKnowledgeInvalidOperationError) {
-      throw new CompanyBrainGovernedWriteInvalidOperationError(error.message);
-    }
-    throw error;
-  });
+  }
 }
