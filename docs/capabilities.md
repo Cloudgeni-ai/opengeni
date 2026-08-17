@@ -652,6 +652,18 @@ and the UI must never label a connector as reviewed or verified. Every entry
 must be backed by the provider's own current documentation, and its `notes`
 field records the reasoning for reviewers. Editing the overlay is the same PR
 workflow as the snapshot: change the file, re-run the import, review the diff.
+The overlay's canonical parsed form is part of the `--if-changed` import
+fingerprint, so an overlay-only change lands on the next deploy while a
+whitespace-only reformat does not trigger a re-import. Every entry must be
+written in canonical MCP URL form and must match an importable snapshot row;
+the import fails loudly on an unknown key, a non-canonical URL, or a curated
+entry that matches nothing, because each of those would otherwise silently
+ship the raw aggregator row.
+
+Curated `category` values are grouping slugs rendered through a display-label
+map in the web app; the catalog sort key is `kind`, then `category`, then
+`name`, so assigning a category moves a row into that group in the merged
+listing.
 
 Imported logos are fetched during import, validated as images below 512KB, and
 stored through OpenGeni object storage under `catalog-assets/...`; catalog rows

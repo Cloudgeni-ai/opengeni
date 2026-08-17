@@ -139,6 +139,36 @@ const STRING_ARRAY_FIELDS = [
   "notes",
 ] as const satisfies readonly (keyof CuratedCatalogEntry)[];
 
+const KNOWN_KEYS: ReadonlySet<string> = new Set<string>([
+  "mcpUrl",
+  ...STRING_FIELDS,
+  ...BOOLEAN_FIELDS,
+  ...STRING_ARRAY_FIELDS,
+  "authKind",
+  "tier",
+  "connectionOwnership",
+  "logoSourceUrl",
+  "requireApproval",
+]);
+
+/**
+ * Mirrors the importer's canonicalization exactly. Kept local so this module
+ * has no dependency on the importer, which imports it.
+ */
+export function canonicalMcpUrl(value: string): string {
+  const url = new URL(value);
+  url.hash = "";
+  url.hostname = url.hostname.toLowerCase();
+  if (
+    (url.protocol === "https:" && url.port === "443") ||
+    (url.protocol === "http:" && url.port === "80")
+  ) {
+    url.port = "";
+  }
+  url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+  return url.toString();
+}
+
 const AUTH_KINDS: ReadonlySet<string> = new Set(["oauth2", "api_key", "none", "unknown"]);
 const TIERS: ReadonlySet<string> = new Set(["verified", "community"]);
 
@@ -151,6 +181,24 @@ function parseEntry(value: unknown, index: number): CuratedCatalogEntry {
     throw new CuratedCatalogError(`entries[${index}]: mcpUrl is required`);
   }
   const where = mcpUrl;
+
+  // The importer looks entries up by canonical MCP URL. Storing anything else
+  // would silently curate nothing, so the file itself must stay canonical.
+  const canonical = canonicalMcpUrl(mcpUrl);
+  if (canonical !== mcpUrl) {
+    throw new CuratedCatalogError(
+      `${where}: mcpUrl must be written in canonical form "${canonical}"`,
+    );
+  }
+
+  // Unknown keys are almost always typos ("offical", "feature"). Dropping them
+  // would be exactly the silent curation loss this parser exists to prevent.
+  for (const key of Object.keys(record)) {
+    if (!KNOWN_KEYS.has(key)) {
+      throw new CuratedCatalogError(`${where}: unknown key "${key}"`);
+    }
+  }
+
   const entry: Mutable<CuratedCatalogEntry> = { mcpUrl };
 
   const assign = <K extends keyof CuratedCatalogEntry>(
@@ -196,8 +244,8 @@ function parseEntry(value: unknown, index: number): CuratedCatalogEntry {
     entry.connectionOwnership = connectionOwnership;
   }
 
-  // `logoSourceUrl: null` is meaningful — it suppresses the logo fetch and
-  // keeps the monogram — so the omitted and explicitly-null cases differ.
+  // `logoSourceUrl: null` is meaningful: it suppresses the logo fetch and
+  // keeps the monogram, so the omitted and explicitly-null cases differ.
   if ("logoSourceUrl" in record) {
     const raw = record.logoSourceUrl;
     if (raw !== null && (typeof raw !== "string" || raw.trim().length === 0)) {
@@ -259,3 +307,20 @@ export const CURATED_CATALOG: CuratedCatalog = parseCuratedCatalog(curatedDocume
 
 export const curatedCatalogEntriesByMcpUrl: ReadonlyMap<string, CuratedCatalogEntry> =
   curatedCatalogByMcpUrl(CURATED_CATALOG);
+
+/**
+ * Canonical serialization used by the import fingerprint. Whitespace and key
+ * order in the source file are irrelevant; any semantic change is not.
+ */
+export function curatedCatalogFingerprintInput(catalog: CuratedCatalog): string {
+  const sorted = [...catalog.entries].sort((a, b) => a.mcpUrl.localeCompare(b.mcpUrl));
+  return JSON.stringify({ version: catalog.version, entries: sorted.map(sortKeys) });
+}
+
+function sortKeys(entry: CuratedCatalogEntry): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(entry).sort()) {
+    out[key] = (entry as Record<string, unknown>)[key];
+  }
+  return out;
+}

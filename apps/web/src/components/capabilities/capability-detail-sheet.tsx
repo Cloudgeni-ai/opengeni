@@ -30,6 +30,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import {
+  capabilityCategoryLabel,
   capabilityConnectPlan,
   capabilityItemKindLabel,
   capabilityReconnectPlan,
@@ -266,7 +267,9 @@ export function DetailBody({
             <SheetTitle className="truncate text-base">{item.name}</SheetTitle>
             <SheetDescription className="mt-0.5 text-xs text-fg-subtle">
               {capabilityItemKindLabel(item)}
-              {item.category && item.category !== "custom" ? ` · ${item.category}` : ""}
+              {capabilityCategoryLabel(item.category)
+                ? ` · ${capabilityCategoryLabel(item.category)}`
+                : ""}
             </SheetDescription>
           </div>
         </div>

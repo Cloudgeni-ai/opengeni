@@ -145,7 +145,9 @@ export function filterCapabilityCatalogItems(
       item.homepageUrl,
       item.installUrl,
       ...item.tags,
-      JSON.stringify(item.metadata),
+      // Curation flags are presentation facts, not search terms; typing
+      // "official" must not match every curated connector.
+      JSON.stringify(metadataForSearch(item.metadata)),
     ]
       .filter(Boolean)
       .join(" ")
@@ -305,6 +307,48 @@ export function sortFeaturedFirst<T extends Pick<CapabilityCatalogItem, "metadat
     (capabilityCuration(item).featured ? featured : rest).push(item);
   }
   return [...featured, ...rest];
+}
+
+function metadataForSearch(metadata: Record<string, unknown>): Record<string, unknown> {
+  if (!("curation" in metadata)) return metadata;
+  const { curation: _curation, ...rest } = metadata;
+  return rest;
+}
+
+const CATEGORY_LABELS: Readonly<Record<string, string>> = {
+  analytics: "Analytics",
+  automation: "Automation",
+  communication: "Communication",
+  configured: "Configured",
+  data: "Data",
+  design: "Design",
+  "developer-tools": "Developer tools",
+  files: "Files",
+  finance: "Finance",
+  integrations: "Integrations",
+  marketing: "Marketing",
+  productivity: "Productivity",
+  "project-management": "Project management",
+  "public-mcp": "Public MCP",
+  sales: "Sales",
+  scheduling: "Scheduling",
+  "social-media": "Social media",
+  "source-control": "Source control",
+  web: "Web",
+};
+
+/** Human label for a catalog category slug; unknown slugs are title-cased. */
+export function capabilityCategoryLabel(category: string | null | undefined): string | null {
+  if (!category || category === "custom") return null;
+  const known = CATEGORY_LABELS[category];
+  if (known) return known;
+  return category
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((word, index) =>
+      index === 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word.toLowerCase(),
+    )
+    .join(" ");
 }
 
 /** Short auth hint for a tile ("OAuth" / "API key"), or null when none applies. */

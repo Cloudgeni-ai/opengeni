@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   apiKeyConnectionRef,
   capabilityAuthHint,
+  capabilityCategoryLabel,
   capabilityConnectPlan,
   capabilityCuration,
   capabilityFilterLabel,
@@ -1143,5 +1144,34 @@ describe("sortFeaturedFirst", () => {
     const sorted = sortFeaturedFirst(input);
     expect(sorted).not.toBe(input);
     expect(input.map((entry) => entry.id)).toEqual(["x", "y"]);
+  });
+});
+
+describe("capabilityCategoryLabel", () => {
+  test("maps known slugs to human labels and hides custom", () => {
+    expect(capabilityCategoryLabel("project-management")).toBe("Project management");
+    expect(capabilityCategoryLabel("developer-tools")).toBe("Developer tools");
+    expect(capabilityCategoryLabel("integrations")).toBe("Integrations");
+    expect(capabilityCategoryLabel("custom")).toBeNull();
+    expect(capabilityCategoryLabel(null)).toBeNull();
+  });
+
+  test("title-cases an unknown slug instead of leaking it raw", () => {
+    expect(capabilityCategoryLabel("knowledge-graphs")).toBe("Knowledge graphs");
+    expect(capabilityCategoryLabel("weird_thing")).toBe("Weird thing");
+  });
+});
+
+describe("filterCapabilityCatalogItems ignores curation flags", () => {
+  test("typing official does not match every curated connector", () => {
+    const curated = item({
+      id: "cur",
+      name: "Linear",
+      description: "Issues",
+      metadata: { curation: { featured: true, official: true } },
+    });
+    const plain = item({ id: "plain", name: "Official Widgets", description: "Widgets" });
+    const hits = filterCapabilityCatalogItems([curated, plain], "all", "official");
+    expect(hits.map((entry) => entry.id)).toEqual(["plain"]);
   });
 });

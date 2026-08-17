@@ -153,7 +153,7 @@
       "mcpUrl": "https://mcp.stripe.com/",
       "name": "Stripe",
       "description": "Look up customers, subscriptions, invoices, and payments.",
-      "category": "payments",
+      "category": "finance",
       "featured": true,
       "official": true,
       "notes": ["Snapshot name was lowercase 'stripe'."]
@@ -180,8 +180,10 @@
       "description": "Errors, issues, and releases across your projects.",
       "category": "developer-tools",
       "featured": true,
-      "official": true,
-      "notes": ["Snapshot name was 'sentry-cli', which is the CLI, not the hosted server."]
+      "notes": [
+        "Snapshot name was 'sentry-cli', which is the CLI, not the hosted server.",
+        "Not marked official: the server is Sentry's own but lives on sentry.dev, which is not mechanically checkable against the snapshot domain sentry.io. official must stay a checkable claim."
+      ]
     },
     {
       "mcpUrl": "https://mcp.vercel.com/",
@@ -207,7 +209,7 @@
       "mcpUrl": "https://mcp.paypal.com/mcp",
       "name": "PayPal",
       "description": "Orders, invoices, and payouts.",
-      "category": "payments",
+      "category": "finance",
       "official": true
     },
     {
@@ -332,9 +334,9 @@
       "name": "Front",
       "description": "Shared inbox conversations and contacts.",
       "category": "communication",
-      "official": true,
       "notes": [
-        "Snapshot name was the bare domain 'front.com'. Snapshot tier is community only because the aggregator could not confirm PRM."
+        "Snapshot name was the bare domain 'front.com'. Snapshot tier is community only because the aggregator could not confirm PRM.",
+        "Not marked official: the server is Front's own but lives on frontapp.com, not the snapshot domain front.com. official must stay a checkable claim."
       ]
     },
     {

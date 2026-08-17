@@ -1,11 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import {
   CURATED_CATALOG,
+  canonicalMcpUrl,
   curatedCatalogByMcpUrl,
   curatedCatalogEntriesByMcpUrl,
+  curatedCatalogFingerprintInput,
   parseCuratedCatalog,
 } from "./catalog-curation";
-import { catalogRowToDbInput, normalizeCatalogSnapshot } from "./import-integrations-catalog";
+import {
+  catalogImportFingerprint,
+  catalogRowToDbInput,
+  normalizeCatalogSnapshot,
+  readSnapshotFile,
+} from "./import-integrations-catalog";
+
+const snapshotPath = new URL("../data/catalog/integrations-snapshot.json", import.meta.url)
+  .pathname;
 
 describe("curated catalog overlay document", () => {
   test("the committed overlay parses and keys entries by exact MCP URL", () => {
@@ -16,12 +26,34 @@ describe("curated catalog overlay document", () => {
     }
   });
 
-  test("every committed entry that claims official is served from the provider domain family", () => {
-    // `official` is a checkable claim, not a review. Keep it checkable.
+  test("every committed entry matches an importable row of the committed snapshot", async () => {
+    // A curated entry that matches nothing silently curates nothing. Keep the
+    // committed overlay and snapshot in lockstep.
+    const normalized = normalizeCatalogSnapshot(await readSnapshotFile(snapshotPath));
+    expect(normalized.unmatchedCurated).toEqual([]);
+  });
+
+  test("every committed entry that claims official is served from the row's own provider domain", async () => {
+    // `official` is a checkable claim, not a review. Check it the same way the
+    // importer's quality score does: endpoint host is the domain or a subdomain.
+    const normalized = normalizeCatalogSnapshot(await readSnapshotFile(snapshotPath));
+    const rowsByUrl = new Map(normalized.rows.map((row) => [row.mcpUrl, row]));
     for (const entry of CURATED_CATALOG.entries) {
       if (!entry.official) continue;
+      const row = rowsByUrl.get(entry.mcpUrl);
+      expect(row, entry.mcpUrl).toBeDefined();
       const host = new URL(entry.mcpUrl).hostname;
-      expect(host.includes(".")).toBe(true);
+      const domain = row!.domain;
+      expect(
+        host === domain || host.endsWith(`.${domain}`),
+        `${entry.mcpUrl} is marked official but ${host} is not under ${domain}`,
+      ).toBe(true);
+    }
+  });
+
+  test("every committed entry is written in canonical MCP URL form", () => {
+    for (const entry of CURATED_CATALOG.entries) {
+      expect(canonicalMcpUrl(entry.mcpUrl)).toBe(entry.mcpUrl);
     }
   });
 
@@ -89,6 +121,31 @@ describe("curated catalog overlay document", () => {
       { version: 1, entries: [{ mcpUrl: "https://a.example/mcp", requireApproval: 3 }] },
       /requireApproval must be/,
     ],
+    [
+      "unknown key (typo of official)",
+      { version: 1, entries: [{ mcpUrl: "https://a.example/mcp", offical: true }] },
+      /unknown key "offical"/,
+    ],
+    [
+      "unknown key (typo of featured)",
+      { version: 1, entries: [{ mcpUrl: "https://a.example/mcp", feature: true }] },
+      /unknown key "feature"/,
+    ],
+    [
+      "non-canonical mcpUrl (trailing slash)",
+      { version: 1, entries: [{ mcpUrl: "https://a.example/mcp/", name: "A" }] },
+      /canonical form "https:\/\/a.example\/mcp"/,
+    ],
+    [
+      "non-canonical mcpUrl (surrounding whitespace)",
+      { version: 1, entries: [{ mcpUrl: "  https://a.example/mcp  ", name: "A" }] },
+      /canonical form/,
+    ],
+    [
+      "non-canonical mcpUrl (upper-case host)",
+      { version: 1, entries: [{ mcpUrl: "https://A.EXAMPLE/mcp", name: "A" }] },
+      /canonical form "https:\/\/a.example\/mcp"/,
+    ],
   ])("rejects a malformed overlay: %s", (_label, document, message) => {
     expect(() => parseCuratedCatalog(document)).toThrow(message);
   });
@@ -153,5 +210,53 @@ describe("curated fields flow through import normalization", () => {
     const dbInput = catalogRowToDbInput(plain, { importBatchId: "batch-1" });
     expect(dbInput).not.toHaveProperty("category");
     expect(dbInput.metadata).not.toHaveProperty("curation");
+  });
+});
+
+describe("curated overlay participates in the import fingerprint", () => {
+  test("a semantic overlay change invalidates --if-changed while reformatting does not", async () => {
+    const base = parseCuratedCatalog({
+      version: 1,
+      entries: [{ mcpUrl: "https://a.example/mcp", name: "A", featured: true }],
+    });
+    const reordered = parseCuratedCatalog({
+      version: 1,
+      entries: [{ featured: true, name: "A", mcpUrl: "https://a.example/mcp" }],
+    });
+    const changed = parseCuratedCatalog({
+      version: 1,
+      entries: [{ mcpUrl: "https://a.example/mcp", name: "A", featured: false }],
+    });
+
+    expect(curatedCatalogFingerprintInput(reordered)).toBe(curatedCatalogFingerprintInput(base));
+    expect(curatedCatalogFingerprintInput(changed)).not.toBe(curatedCatalogFingerprintInput(base));
+
+    const input = { snapshotPath, skipLogos: true };
+    const fpBase = await catalogImportFingerprint({ ...input, curatedCatalog: base });
+    const fpReordered = await catalogImportFingerprint({ ...input, curatedCatalog: reordered });
+    const fpChanged = await catalogImportFingerprint({ ...input, curatedCatalog: changed });
+    expect(fpReordered).toBe(fpBase);
+    expect(fpChanged).not.toBe(fpBase);
+  });
+});
+
+describe("unmatched curated entries are reported", () => {
+  test("a curated URL that matches no importable row is listed, not dropped", () => {
+    const normalized = normalizeCatalogSnapshot({
+      generatedAt: "2026-08-17T00:00:00.000Z",
+      importRows: [
+        {
+          domain: "plain.example",
+          name: "Plain",
+          mcpUrl: "https://plain.example/mcp",
+          transport: "streamable-http",
+          authKind: "none",
+          probe: { status: "real", reason: "mcp_sse", httpStatus: 200 },
+        },
+      ],
+    });
+    // Every committed curated URL is absent from this one-row snapshot.
+    expect(normalized.unmatchedCurated).toEqual([...curatedCatalogEntriesByMcpUrl.keys()].sort());
+    expect(normalized.rows).toHaveLength(1);
   });
 });

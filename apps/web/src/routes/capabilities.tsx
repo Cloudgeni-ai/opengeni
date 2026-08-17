@@ -422,8 +422,9 @@ export function CapabilitiesRoute({
   // The Enabled strip is the daily-management surface; Browse shows the rest of
   // the catalog so an enabled item never appears in both places.
   const enabledItems = useMemo(() => filtered.filter((item) => item.enabled), [filtered]);
-  // Curated featured connectors lead the browse grid; the rest keep their
-  // existing relative order so nothing else on the page reshuffles.
+  // Curated featured connectors lead the browse grid. The partition is stable,
+  // so within the featured and non-featured groups the server order (kind,
+  // category, name) is preserved.
   const browseItems = useMemo(
     () => sortFeaturedFirst(filtered.filter((item) => !item.enabled)),
     [filtered],

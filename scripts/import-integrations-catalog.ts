@@ -14,7 +14,13 @@ import {
   type RegistryCapabilityCatalogItemInput,
 } from "@opengeni/db";
 import { createObjectStorage, type ObjectStorage } from "../packages/storage/src/index";
-import { curatedCatalogEntriesByMcpUrl } from "./catalog-curation";
+import {
+  CURATED_CATALOG,
+  canonicalMcpUrl,
+  curatedCatalogEntriesByMcpUrl,
+  curatedCatalogFingerprintInput,
+  type CuratedCatalog,
+} from "./catalog-curation";
 
 const SOURCE = "integrations.sh";
 const MIT_ATTRIBUTION =
@@ -119,6 +125,12 @@ export type NormalizedCatalogSnapshot = {
     reason: string;
   }>;
   quarantined: Array<{ row: CatalogIntegrationRow; reason: string }>;
+  /**
+   * Curated overlay entries whose MCP URL matched no surviving snapshot row.
+   * A dead entry means a reviewed contract silently applies to nothing, so it
+   * is reported like a skip rather than dropped.
+   */
+  unmatchedCurated: string[];
   cleaning: {
     inputRows: number;
     outputRows: number;
@@ -415,9 +427,15 @@ export function normalizeCatalogSnapshot(
       left.mcpUrl.localeCompare(right.mcpUrl),
   );
 
+  const matchedCurated = new Set(rows.map((row) => row.mcpUrl));
+  const unmatchedCurated = [...curatedCatalogEntriesByMcpUrl.keys()]
+    .filter((mcpUrl) => !matchedCurated.has(mcpUrl))
+    .sort();
+
   return {
     generatedAt,
     rows,
+    unmatchedCurated,
     skipped,
     quarantined,
     cleaning: {
@@ -882,19 +900,7 @@ function normalizeDomain(value: unknown): string | null {
   return raw || null;
 }
 
-export function canonicalMcpUrl(value: string): string {
-  const url = new URL(value);
-  url.hash = "";
-  url.hostname = url.hostname.toLowerCase();
-  if (
-    (url.protocol === "https:" && url.port === "443") ||
-    (url.protocol === "http:" && url.port === "80")
-  ) {
-    url.port = "";
-  }
-  url.pathname = url.pathname.replace(/\/+$/, "") || "/";
-  return url.toString();
-}
+export { canonicalMcpUrl };
 
 function normalizeAuthContract(value: unknown): Record<string, unknown> | null {
   const record = asRecord(value);
@@ -1157,6 +1163,8 @@ export async function catalogImportFingerprint(input: {
   snapshotRef?: string;
   skipLogos?: boolean;
   semanticVersion?: number;
+  /** Test seam. Production always fingerprints the committed overlay. */
+  curatedCatalog?: CuratedCatalog;
 }): Promise<string> {
   const semanticVersion = input.semanticVersion ?? CATALOG_IMPORT_SEMANTIC_VERSION;
   if (!Number.isSafeInteger(semanticVersion) || semanticVersion < 1 || semanticVersion > 9999) {
@@ -1165,6 +1173,12 @@ export async function catalogImportFingerprint(input: {
   const snapshotSha256 = createHash("sha256")
     .update(await readFile(input.snapshotPath))
     .digest("hex");
+  // The curated overlay is bundled into the importer, so it is part of the
+  // effective input. Hash its canonical parsed form: an overlay-only PR must
+  // invalidate `--if-changed`, while whitespace-only reformatting must not.
+  const curatedSha256 = createHash("sha256")
+    .update(curatedCatalogFingerprintInput(input.curatedCatalog ?? CURATED_CATALOG))
+    .digest("hex");
   const digest = createHash("sha256")
     .update(
       JSON.stringify({
@@ -1172,6 +1186,7 @@ export async function catalogImportFingerprint(input: {
         skipLogos: input.skipLogos === true,
         snapshotRef: input.snapshotRef ?? null,
         snapshotSha256,
+        curatedSha256,
       }),
     )
     .digest("hex");
@@ -1205,6 +1220,24 @@ if (import.meta.main) {
   const args = parseArgs(process.argv.slice(2));
   const snapshot = await readSnapshotFile(args.snapshotPath);
   const normalized = normalizeCatalogSnapshot(snapshot);
+  if (normalized.unmatchedCurated.length > 0) {
+    // A reviewed contract that matches no row would silently apply to nothing.
+    // Fail the import so the mismatch is fixed at review time, not discovered
+    // when a user sees the raw aggregator name.
+    console.error(
+      JSON.stringify(
+        {
+          error: "curated_entries_unmatched",
+          detail:
+            "data/catalog/curated.json has entries whose mcpUrl matches no importable snapshot row",
+          unmatchedCurated: normalized.unmatchedCurated,
+        },
+        null,
+        2,
+      ),
+    );
+    process.exit(1);
+  }
   if (args.dryRun) {
     console.log(
       JSON.stringify(
