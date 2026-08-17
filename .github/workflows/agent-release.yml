@@ -373,7 +373,7 @@ jobs:
           set -euo pipefail
           APP="OpenGeni Agent.app"
           rm -rf "$APP"
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
           # The universal binary built above becomes the bundle's executable. Its
           # CFBundleExecutable is `opengeni-agent` (matches install.sh's local path).
           cp "${{ matrix.asset }}" "$APP/Contents/MacOS/opengeni-agent"
@@ -382,6 +382,7 @@ jobs:
           cp "opengeni-agent-browser-${{ matrix.target }}" "$APP/Contents/Helpers/agent-browser"
           cp "opengeni-computer-native-${{ matrix.target }}" \
             "$APP/Contents/Helpers/opengeni-computer-native"
+          cp agent/install/OpenGeni-Agent.icns "$APP/Contents/Resources/OpenGeni-Agent.icns"
           chmod 0755 "$APP/Contents/Helpers/"*
           # Info.plist kept in sync with install.sh's write_info_plist (same keys +
           # STABLE bundle id ai.opengeni.agent; LSUIElement hides the Dock icon).
@@ -394,6 +395,7 @@ jobs:
               <key>CFBundleDisplayName</key><string>OpenGeni Agent</string>
               <key>CFBundleIdentifier</key><string>ai.opengeni.agent</string>
               <key>CFBundleExecutable</key><string>opengeni-agent</string>
+              <key>CFBundleIconFile</key><string>OpenGeni-Agent.icns</string>
               <key>CFBundleShortVersionString</key><string>${VERSION}</string>
               <key>CFBundleVersion</key><string>${VERSION}</string>
               <key>CFBundlePackageType</key><string>APPL</string>
@@ -436,6 +438,9 @@ jobs:
             fi
           done
           test -f "$VERIFY_DIR/$APP/Contents/Info.plist"
+          test -f "$VERIFY_DIR/$APP/Contents/Resources/OpenGeni-Agent.icns"
+          test "$(plutil -extract CFBundleIconFile raw \
+            "$VERIFY_DIR/$APP/Contents/Info.plist")" = "OpenGeni-Agent.icns"
           codesign --verify --deep --strict "$VERIFY_DIR/$APP"
           rm -rf "$VERIFY_DIR"
           rm -f /tmp/cert.p12 /tmp/asc.json
@@ -669,6 +674,7 @@ jobs:
             agent/install/install.ps1
             agent/install/uninstall.sh
             agent/install/opengeni-agent-minisign.pub
+            agent/install/OpenGeni-Agent.icns
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
