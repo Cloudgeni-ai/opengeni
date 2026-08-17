@@ -7,6 +7,7 @@ import {
   createSession,
   createWorkspaceLearningPolicyRevision,
   ensureManagedAccessForUser,
+  getWorkspaceInstructionPolicyBaseline,
   listGovernedLearningActivationHistory,
   withSessionRlsActorContext,
   type DbClient,
@@ -459,5 +460,38 @@ describe("remember router (real PostgreSQL)", () => {
     if (rule.status !== "confirmation_required") return;
     expect(rule.proposalId).not.toBeNull();
     expect(rule.humanInput.questions[0]!.prompt).toContain("mandatory workspace rule");
+
+    // The bug this covers is "the rule cannot be saved", so drive it all the way
+    // through activation: the confirmation re-checks the stored baseline against
+    // the live head, and the head must advance past the seeded revision.
+    const humanInputRequestId = await answeredRememberInput(
+      f,
+      rule.proposalId!,
+      "Never push directly to main.",
+      ["save"],
+      "Save this as a mandatory workspace rule for everyone in this workspace?",
+    );
+    const confirmed = await router.confirm({
+      attempt: f.attempt,
+      request: {
+        target: "proposal",
+        operationId: crypto.randomUUID(),
+        proposalId: rule.proposalId!,
+        decisionReceiptId: rule.learning!.receiptId,
+        humanInputRequestId,
+      },
+    });
+    expect(confirmed.status).toBe("activated");
+    if (confirmed.status !== "activated") return;
+    expect(confirmed.activation).toMatchObject({
+      destination: "instruction_policy",
+      authorityKind: "human_confirmed",
+    });
+    const head = await getWorkspaceInstructionPolicyBaseline(client.db, {
+      workspaceId: f.grant.workspaceId,
+      target: { kind: "policy", scope: "global", roleKey: null },
+    });
+    expect(head.expectedActivationVersion).toBe(2);
+    expect(head.expectedCurrentRevisionId).not.toBe(existing.id);
   }, 180_000);
 });
