@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 
 const migrationUrl = new URL(
-  "../drizzle/0272_scheduled_variable_set_materialization.sql",
+  "../drizzle/0273_scheduled_variable_set_materialization.sql",
   import.meta.url,
 );
 
-describe("migration 0272 scheduled Variable Set materialization", () => {
+describe("migration 0273 scheduled Variable Set materialization", () => {
   test("separates exact service materialization from human-only personal authority", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
