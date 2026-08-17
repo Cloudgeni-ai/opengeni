@@ -1,16 +1,30 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   activateWorkspaceLearningPolicyRevision,
+  appendKnowledgeClaim,
+  appendKnowledgeClaimEvidence,
+  appendKnowledgeDocumentVersion,
+  appendKnowledgeSourceAclVersion,
   createDb,
+  createMemorySlackPublicationConfiguration,
   createSession,
   createTaskNote,
   createWorkspaceLearningPolicyRevision,
   ensureManagedAccessForUser,
   listGovernedLearningActivationHistory,
   listGovernedLearningDecisionReceipts,
+  listMemorySlackPublications,
+  resolveGovernedLearningEvidenceOrigin,
+  upsertKnowledgeEntity,
+  upsertKnowledgeFact,
+  upsertKnowledgeProvider,
+  upsertKnowledgeSource,
+  upsertKnowledgeSourceObject,
   withSessionRlsActorContext,
   type DbClient,
 } from "@opengeni/db";
+import { governedLearningEvidenceIsSlackDerived } from "../src/domain/governed-learning-slack-publication";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { createCompanyBrainLearningPolicyRouter } from "../src/domain/company-brain-governed-writes";
 
@@ -281,5 +295,175 @@ describe("Company Brain learning-policy router (real PostgreSQL)", () => {
       limit: 10,
     });
     expect(decisions.receipts).toEqual([]);
+  }, 180_000);
+});
+
+async function documentEvidence(f: Awaited<ReturnType<typeof fixture>>, providerKey: string) {
+  const scope = { kind: "workspace" as const, workspaceId: f.grant.workspaceId, subjectId: null };
+  const actor = {
+    kind: "service" as const,
+    subjectId: f.ownerSubjectId,
+    initiatingHumanSubjectId: f.ownerSubjectId,
+  };
+  const base = { accountId: f.grant.accountId, workspaceId: f.grant.workspaceId, actor };
+  const provider = await upsertKnowledgeProvider(client!.db, {
+    ...base,
+    scope,
+    operationId: crypto.randomUUID(),
+    providerKey,
+    externalTenantId: `tenant-${crypto.randomUUID()}`,
+  });
+  const source = await upsertKnowledgeSource(client!.db, {
+    ...base,
+    scope,
+    operationId: crypto.randomUUID(),
+    providerId: provider.id,
+    externalSourceId: `source-${crypto.randomUUID()}`,
+    sourceKind: "test",
+  });
+  const acl = await appendKnowledgeSourceAclVersion(client!.db, {
+    ...base,
+    operationId: crypto.randomUUID(),
+    sourceId: source.id,
+    audience: scope,
+    expectedSourceLifecycleGeneration: source.lifecycleGeneration,
+    expectedAclGeneration: 0,
+    aclVersion: "v1",
+    agentAccess: true,
+    reasonCode: "origin-fixture",
+  });
+  const object = await upsertKnowledgeSourceObject(client!.db, {
+    ...base,
+    operationId: crypto.randomUUID(),
+    sourceId: source.id,
+    externalObjectId: `object-${crypto.randomUUID()}`,
+  });
+  const contentHash = createHash("sha256").update(crypto.randomUUID()).digest("hex");
+  const version = await appendKnowledgeDocumentVersion(client!.db, {
+    ...base,
+    operationId: crypto.randomUUID(),
+    objectId: object.id,
+    expectedSourceLifecycleGeneration: source.lifecycleGeneration,
+    expectedObjectLifecycleGeneration: object.lifecycleGeneration,
+    expectedVersionGeneration: 0,
+    externalVersionId: "v1",
+    contentSha256: contentHash,
+    ingestionKey: `ingestion-${crypto.randomUUID()}`,
+    aclVersionId: acl.id,
+    aclGeneration: acl.generation,
+    reasonCode: "origin-fixture",
+  });
+  const entity = await upsertKnowledgeEntity(client!.db, {
+    ...base,
+    scope,
+    operationId: crypto.randomUUID(),
+    entityType: "ways-of-working",
+    normalizedKey: crypto.randomUUID(),
+    displayName: "Origin fixture",
+  });
+  const fact = await upsertKnowledgeFact(client!.db, {
+    ...base,
+    operationId: crypto.randomUUID(),
+    subjectEntityId: entity.id,
+    predicateKey: "ways.origin-fixture",
+    object: { kind: "text", value: "Origin fixture" },
+  });
+  const claim = await appendKnowledgeClaim(client!.db, {
+    ...base,
+    operationId: crypto.randomUUID(),
+    factId: fact.id,
+    origin: "inferred",
+    confidenceBps: 9_000,
+    effectiveAt: new Date(Date.now() - 1_000).toISOString(),
+    extractionMethod: "test",
+  });
+  const evidence = await appendKnowledgeClaimEvidence(client!.db, {
+    ...base,
+    operationId: crypto.randomUUID(),
+    claimId: claim.id,
+    documentVersionId: version.id,
+    polarity: "supports",
+    contentHash,
+  });
+  return evidence;
+}
+
+describe("governed-learning Slack publication (real PostgreSQL)", () => {
+  test("resolves evidence origin under workspace RLS and flags Slack-derived documents", async () => {
+    if (!shared || !client) return;
+    const f = await fixture("suggest");
+    const other = await fixture("suggest");
+    const router = createCompanyBrainLearningPolicyRouter({ db: client.db });
+    const note = await router.write({
+      attempt: f.attempt,
+      request: await noteRequest(f, "preference"),
+    });
+    expect(
+      await resolveGovernedLearningEvidenceOrigin(client.db, {
+        workspaceId: f.grant.workspaceId,
+        evidenceId: note.write!.evidenceId,
+      }),
+    ).toEqual({ kind: "task-note" });
+
+    const drive = await documentEvidence(f, "google-drive");
+    const driveOrigin = await resolveGovernedLearningEvidenceOrigin(client.db, {
+      workspaceId: f.grant.workspaceId,
+      evidenceId: drive.id,
+    });
+    expect(driveOrigin).toEqual({ kind: "document", providerKey: "google-drive" });
+    expect(governedLearningEvidenceIsSlackDerived(driveOrigin!)).toBe(false);
+
+    const slack = await documentEvidence(f, "slack-channels");
+    const slackOrigin = await resolveGovernedLearningEvidenceOrigin(client.db, {
+      workspaceId: f.grant.workspaceId,
+      evidenceId: slack.id,
+    });
+    expect(slackOrigin).toEqual({ kind: "document", providerKey: "slack-channels" });
+    expect(governedLearningEvidenceIsSlackDerived(slackOrigin!)).toBe(true);
+
+    // Another workspace cannot resolve this workspace's evidence.
+    expect(
+      await resolveGovernedLearningEvidenceOrigin(client.db, {
+        workspaceId: other.grant.workspaceId,
+        evidenceId: slack.id,
+      }),
+    ).toBeNull();
+  }, 180_000);
+
+  test("an automatic preference activation enqueues one idempotent Slack publication end to end", async () => {
+    if (!shared || !client) return;
+    const f = await fixture("automatic");
+    await createMemorySlackPublicationConfiguration(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      expectedRevision: 0,
+      enabled: true,
+      connectionId: crypto.randomUUID(),
+      slackTeamId: "T_LEARNING",
+      slackChannelId: "C_LEARNING",
+      slackChannelName: "learning",
+      autoImportances: ["major", "normal"],
+      reviewImportances: [],
+      subjectId: f.ownerSubjectId,
+    });
+    const router = createCompanyBrainLearningPolicyRouter({ db: client.db });
+    const request = await noteRequest(f, "preference");
+    const first = await router.write({ attempt: f.attempt, request });
+    expect(first.decision).toBe("activated");
+    await router.write({ attempt: f.attempt, request });
+    const rows = await listMemorySlackPublications(client.db, f.grant.workspaceId, { limit: 10 });
+    expect(rows).toHaveLength(1);
+    const [row] = rows;
+    expect(row).toMatchObject({
+      sourceType: "durable_learning",
+      sourceId: first.activation.receiptId,
+      importance: "normal",
+      deliveryMode: "auto",
+      state: "queued",
+    });
+    expect(row!.summary).toContain("Automatically activated a workspace preference");
+    // Provenance stays on the outbox row; the Slack-bound summary is content-free.
+    expect(row!.initiatingHumanSubjectId).toBe(f.ownerSubjectId);
+    expect(row!.summary).not.toContain(f.ownerSubjectId.replace("user:", ""));
   }, 180_000);
 });

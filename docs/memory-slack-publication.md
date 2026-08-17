@@ -33,7 +33,9 @@ Slack-sourced knowledge can never republish itself. The idempotency key is
 `governed-learning:<activated|undone>:<receiptId>` and the actor is the
 receipt's service actor with the causal human retained as provenance.
 
-Both source paths pass only their allowlisted summary/owner/destination text
+The Workspace Memory path passes its allowlisted summary/owner/destination
+text (the governed-learning path emits only a fixed template with enum labels
+and numbers, so it has no free text to sanitize)
 through the deterministic sink-local credential-shape boundary in
 `packages/core/src/domain/slack-publication-secret-safety.ts` before the
 projection is hashed or persisted. The final Slack formatter applies the same

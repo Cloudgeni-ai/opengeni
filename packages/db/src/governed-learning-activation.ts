@@ -328,7 +328,9 @@ export async function resolveGovernedLearningEvidenceOrigin(
           LEFT JOIN knowledge_providers provider
             ON provider.account_id = source.account_id
            AND provider.id = source.provider_id
-          WHERE evidence.workspace_id = ${input.workspaceId}::uuid
+          WHERE evidence.account_id = current_setting('opengeni.account_id')::uuid
+            AND evidence.scope_kind = 'workspace'
+            AND evidence.scope_workspace_id = ${input.workspaceId}::uuid
             AND evidence.id = ${input.evidenceId}::uuid
           LIMIT 1`,
     );
