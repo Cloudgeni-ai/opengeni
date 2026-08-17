@@ -145,8 +145,28 @@ describe("remember router under the first-party MCP service subject (real Postgr
     );
     expect(rule.status).toBe("confirmation_required");
     if (rule.status !== "confirmation_required") return;
-    expect(rule.proposalId).not.toBeNull();
+    expect(typeof rule.proposalId).toBe("string");
     expect(rule.humanInput.questions[0]!.prompt).toContain("mandatory workspace rule");
+    // The durable artifacts must exist and bind the frozen human, not the
+    // service subject: the knowledge-change proposal carries the initiating
+    // human, and the onboarding-proposal row the trigger guards references it.
+    const [claimProposal] = await shared!.admin<
+      { status: string; initiating_human_subject_id: string; actor_kind: string }[]
+    >`
+      select status, initiating_human_subject_id, actor_kind
+      from knowledge_change_proposals
+      where id = ${rule.proposalId} and scope_workspace_id = ${f.attempt.workspaceId}
+    `;
+    expect(claimProposal).toMatchObject({
+      status: "proposed",
+      initiating_human_subject_id: f.ownerSubjectId,
+      actor_kind: "service",
+    });
+    const [onboarding] = await shared!.admin<{ status: string }[]>`
+      select status from workspace_instruction_policy_onboarding_proposals
+      where workspace_id = ${f.attempt.workspaceId} and source_id = ${rule.proposalId}
+    `;
+    expect(onboarding).toMatchObject({ status: "proposed" });
   }, 180_000);
 
   // A direct human writer (subject GUC = the human, no initiating-human GUC)
@@ -170,6 +190,6 @@ describe("remember router under the first-party MCP service subject (real Postgr
     );
     expect(rule.status).toBe("confirmation_required");
     if (rule.status !== "confirmation_required") return;
-    expect(rule.proposalId).not.toBeNull();
+    expect(typeof rule.proposalId).toBe("string");
   }, 180_000);
 });
