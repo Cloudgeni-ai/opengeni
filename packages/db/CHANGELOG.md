@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 1.2.0
+
+### Minor Changes
+
+- a65505d: Connection-use audit facts record the frozen causal initiator and session authority epoch/visibility/owner of every authorized or denied use, and variable-set materialization/secret-read audit events carry the causal human, attempt authority triple, and owner authority identity (migration 0280). Variable-set authority denials are now recorded as metadata-only audit facts from a fresh transaction while the fail-closed rejection is preserved.
+
 ## 1.1.0
 
 ### Minor Changes
