@@ -614,7 +614,21 @@ The integrations catalog import pipeline is offline and reviewable. It never
 live-consumes integrations.sh at request time. The reviewed source of truth is
 the committed snapshot at `data/catalog/integrations-snapshot.json`. Updating it
 is a PR workflow: run `bun run catalog:refresh`, review the snapshot diff, then
-merge. Standard Helm installs and upgrades import that committed snapshot by
+merge. The refresh reads the integrations.sh index (`api.json`), hydrates one
+per-domain discovery document (`/api/{domain}/discovery`) for every distinct MCP
+domain it lists because the index no longer embeds MCP endpoints itself, and
+then probes every candidate endpoint with an MCP `initialize` request. Only
+endpoints that answer as MCP (a JSON-RPC or SSE reply, or a `WWW-Authenticate`
+challenge) survive; a transient connection error, timeout, or 5xx is retried a
+bounded number of times before it evicts a row, while a definitive 404 or
+non-MCP body is never retried. Committed rows whose endpoint upstream no longer
+lists stay candidates and are re-probed like every other row (`--no-retain`
+disables this), so a reviewed first-party endpoint that integrations.sh never
+indexed survives exactly as long as it still answers. A refresh that yields
+zero upstream candidates fails instead of rewriting the committed file, and
+`--input <raw.json>` accepts either an already-hydrated upstream document or a
+precomputed `importRows` snapshot for offline reruns.
+Standard Helm installs and upgrades import that committed snapshot by
 default through the `catalogImport` hook Job; set `catalogImport.enabled=false`
 to opt out. The default `catalogImport.skipLogos=true` keeps deployment success
 independent of third-party logo hosts and uses generic monograms; set it to

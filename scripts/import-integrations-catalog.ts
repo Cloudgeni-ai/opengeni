@@ -214,7 +214,7 @@ export function normalizeCatalogSnapshot(
   const cleanedSnapshot = stripControlCharacters(snapshot, controlCharacters);
   const root = asRecord(cleanedSnapshot);
   const generatedAt = stringValue(root?.generatedAt) ?? stringValue(root?.snapshotDate) ?? null;
-  const candidates = precomputedRows(root ?? cleanedSnapshot) ?? rawSurfaceRows(root);
+  const candidates = catalogCandidateRows(cleanedSnapshot);
   const skipped: NormalizedCatalogSnapshot["skipped"] = [];
   const quarantined: NormalizedCatalogSnapshot["quarantined"] = [];
   const candidatesByDomainName = new Map<string, CatalogIntegrationRow>();
@@ -678,6 +678,15 @@ export async function storeLogoForRow(
 
 export function catalogCapabilityId(domain: string, mcpUrl: string): string {
   return `mcp:integrations-sh:${slugify(domain)}-${shortHash(`${domain}:${mcpUrl}`)}`;
+}
+
+/**
+ * The pre-normalization candidate rows of any accepted snapshot shape: a
+ * precomputed `importRows`/`rows` list (or bare array), else the raw
+ * integrations.sh index plus per-domain surface documents.
+ */
+export function catalogCandidateRows(snapshot: unknown): UnknownRecord[] {
+  return precomputedRows(snapshot) ?? rawSurfaceRows(asRecord(snapshot));
 }
 
 function precomputedRows(snapshot: unknown): UnknownRecord[] | null {

@@ -1051,6 +1051,7 @@ describe("integrations.sh MCP endpoint probe", () => {
     );
     const probed = await probeCatalogSnapshot(normalized, {
       concurrency: 2,
+      transientRetries: 0,
       fetchImpl: async (input) => {
         const url = String(input);
         if (url.includes("real.example")) {
@@ -1089,6 +1090,61 @@ describe("integrations.sh MCP endpoint probe", () => {
       mcpUrl: null,
       reason: "probe_http_status",
     });
+  });
+
+  test("retries transient probe outcomes before evicting a row", async () => {
+    // A live endpoint that flakes once under probe concurrency must survive;
+    // a permanently failing one is still dropped after the bounded retries.
+    const normalized = normalizeCatalogSnapshot(
+      {
+        generatedAt: "2026-07-03T00:00:00.000Z",
+        importRows: [
+          row({ domain: "flaky.example", mcpUrl: "https://flaky.example/mcp" }),
+          row({ domain: "dead.example", mcpUrl: "https://dead.example/mcp" }),
+          row({ domain: "gone.example", mcpUrl: "https://gone.example/mcp" }),
+        ],
+      },
+      { allowUnprobedCandidates: true },
+    );
+    const attempts = new Map<string, number>();
+    const sleeps: number[] = [];
+    const probed = await probeCatalogSnapshot(normalized, {
+      concurrency: 1,
+      transientRetries: 2,
+      transientRetryDelayMs: 10,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+      fetchImpl: async (input) => {
+        const url = String(input);
+        const attempt = (attempts.get(url) ?? 0) + 1;
+        attempts.set(url, attempt);
+        if (url.includes("flaky.example")) {
+          if (attempt === 1) {
+            throw new Error("getaddrinfo EAI_AGAIN flaky.example");
+          }
+          return new Response("", {
+            status: 401,
+            headers: { "www-authenticate": 'Bearer realm="mcp"' },
+          });
+        }
+        if (url.includes("dead.example")) {
+          throw new Error("connect ECONNREFUSED");
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+
+    expect(probed.rows.map((candidate) => candidate.domain)).toEqual(["flaky.example"]);
+    expect(attempts.get("https://flaky.example/mcp")).toBe(2);
+    expect(attempts.get("https://dead.example/mcp")).toBe(3);
+    // A definitive 404 is not transient and is never retried.
+    expect(attempts.get("https://gone.example/mcp")).toBe(1);
+    expect(sleeps).toEqual([10, 20, 10]);
+    expect(probed.skipped).toEqual([
+      { domain: "dead.example", mcpUrl: null, reason: "probe_connection_error" },
+      { domain: "gone.example", mcpUrl: null, reason: "probe_http_not_found" },
+    ]);
   });
 });
 

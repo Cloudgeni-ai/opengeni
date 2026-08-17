@@ -345,6 +345,58 @@
       "description": "Meeting transcripts and summaries.",
       "category": "productivity",
       "official": true
+    },
+    {
+      "mcpUrl": "https://mcp.notion.com/mcp",
+      "name": "Notion",
+      "description": "Search, read, and update pages and databases in the Notion workspaces you connect.",
+      "category": "productivity",
+      "featured": true,
+      "official": true,
+      "documentationUrl": "https://developers.notion.com/guides/mcp/overview",
+      "notes": [
+        "Snapshot name came from the aggregator index ('Notion'; an earlier snapshot said 'Notion API'). Tier, provenance, auth kind, and scopes stay snapshot-derived: integrations.sh detected the server and its OAuth metadata directly.",
+        "official is checkable: mcp.notion.com is under the snapshot domain notion.com. Notion documents this hosted server at developers.notion.com/guides/mcp/overview."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.hubspot.com/anthropic",
+      "name": "HubSpot",
+      "description": "CRM contacts, companies, deals, and tickets from the HubSpot account you connect.",
+      "category": "sales",
+      "featured": true,
+      "official": true,
+      "documentationUrl": "https://developers.hubspot.com/docs/apps/developer-platform/build-apps/integrate-with-the-remote-hubspot-mcp-server",
+      "notes": [
+        "Name only plus docs. Tier, provenance, auth kind, and scopes stay snapshot-derived: integrations.sh detected the server (mcp:initialize) and its OAuth metadata.",
+        "official is checkable: mcp.hubspot.com is under the snapshot domain hubspot.com. The /anthropic path is the endpoint integrations.sh detected; HubSpot's remote MCP server documentation is linked as documentationUrl.",
+        "Earlier snapshots skipped hubspot.com as auth_unknown because the aggregator had no credential entry for the surface. The refreshed upstream discovery document now carries hubspot_mcp_oauth_app (oauth2)."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.atlassian.com/v1/mcp/authv2",
+      "name": "Atlassian",
+      "description": "Jira issues and Confluence pages through Atlassian's hosted Rovo MCP server, scoped to what you can already see.",
+      "category": "project-management",
+      "featured": true,
+      "documentationUrl": "https://support.atlassian.com/rovo/docs/getting-started-with-the-atlassian-remote-mcp-server/",
+      "notes": [
+        "Snapshot name was the bare domain 'jira.com'. Upstream discovery for atlassian.com no longer lists an MCP surface, so the Rovo server row is keyed to jira.com; the earlier atlassian.net row for the same endpoint is superseded by this one.",
+        "Not marked official: the server is Atlassian's own but lives on mcp.atlassian.com, which is not mechanically checkable against the snapshot domain jira.com. official must stay a checkable claim."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.intercom.com/mcp",
+      "name": "Intercom",
+      "description": "Conversations, contacts, and help center content from the Intercom workspace you connect.",
+      "category": "communication",
+      "authKind": "oauth2",
+      "documentationUrl": "https://developers.intercom.com/docs/guides/mcp",
+      "notes": [
+        "authKind is curated because the aggregator surface has no credential entry (auth status unknown), which would skip the row as auth_unknown. Intercom's own MCP guide documents the OAuth flow as the recommended authentication for mcp.intercom.com/mcp, and the server publishes RFC 8414 authorization-server metadata with dynamic client registration at https://mcp.intercom.com/.well-known/oauth-authorization-server. The row itself is upstream evidence with a real probe result; only the auth kind is overlaid.",
+        "Not marked official: the server is Intercom's own but the snapshot domain is intercom.io while the server lives on mcp.intercom.com. official must stay a checkable claim.",
+        "Not featured: Intercom was not on the reviewed featured list."
+      ]
     }
   ]
 }

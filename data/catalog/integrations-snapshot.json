@@ -1,23 +1,23 @@
 {
-  "generatedAt": "2026-07-03T23:41:44.132Z",
+  "generatedAt": "2026-07-08T01:44:23.703Z",
   "source": "integrations.sh",
-  "cleanedAt": "2026-07-25T06:53:44.741Z",
+  "cleanedAt": "2026-08-17T11:18:21.937Z",
   "cleaning": {
-    "inputRows": 885,
-    "outputRows": 621,
-    "skippedRows": 264,
-    "quarantinedRows": 0,
-    "duplicateDomainNameRows": 0,
-    "duplicateEndpointRows": 21,
+    "inputRows": 1334,
+    "outputRows": 644,
+    "skippedRows": 687,
+    "quarantinedRows": 3,
+    "duplicateDomainNameRows": 109,
+    "duplicateEndpointRows": 18,
     "unverifiedRows": 0,
     "controlCharacterFields": 0
   },
   "probe": {
-    "kept": 621,
-    "dropped": 125,
-    "real": 621,
-    "unverified": 121,
-    "googleapisDropped": 0
+    "kept": 644,
+    "dropped": 142,
+    "real": 644,
+    "unverified": 111,
+    "googleapisDropped": 2
   },
   "importRows": [
     {
@@ -148,7 +148,7 @@
     },
     {
       "domain": "adobe.io",
-      "name": "Adobe Acrobat",
+      "name": "Adobe Marketing Agent",
       "mcpUrl": "https://ajo-mcp.adobe.io/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -290,6 +290,9 @@
     {
       "domain": "ahrefs.com",
       "name": "Ahrefs",
+      "description": "Backlinks, keywords, and site audits.",
+      "category": "marketing",
+      "official": true,
       "mcpUrl": "https://api.ahrefs.com/mcp/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -397,6 +400,10 @@
     {
       "domain": "airtable.com",
       "name": "Airtable",
+      "description": "Bases, tables, and records.",
+      "category": "data",
+      "featured": true,
+      "official": true,
       "mcpUrl": "https://mcp.airtable.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -413,6 +420,38 @@
       "tier": "verified",
       "provenance": "detected",
       "logoSourceUrl": "https://integrations.sh/logo/airtable.com",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
+      "domain": "airwallex.com",
+      "name": "Airwallex Developer",
+      "mcpUrl": "https://mcp-demo.airwallex.com/developer",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "sandbox_oauth_user",
+          "type": "oauth2",
+          "generateUrl": "https://demo.airwallex.com/signup/sandbox",
+          "setup": "Create a sandbox account at [Airwallex Sandbox signup](https://demo.airwallex.com/signup/sandbox), then connect from your MCP client or the Airwallex CLI and complete the browser-based OAuth flow. For CLI access use `airwallex auth login`; for the Developer MCP, point your MCP client at `https://mcp-demo.airwallex.com/developer` and approve the Airwallex OAuth consent flow.",
+          "fields": null
+        },
+        {
+          "id": "api_key_client",
+          "type": "compound",
+          "generateUrl": "https://www.airwallex.com/docs/developer-tools/api/manage-api-keys",
+          "setup": "In the [Airwallex web app](https://airwallex.com/app/), go to **Settings > Developer > API keys**. Generate either an admin API key or a scoped API key for your organization/account, then copy the API key and note the associated `Client ID` shown in the Developer app. Airwallex uses this pair to obtain an access token via the Authentication API. Only users with Owner, Admin, or Developer access to the Developer app can manage API keys.",
+          "fields": null
+        }
+      ],
+      "tier": "community",
+      "provenance": "discovered",
+      "logoSourceUrl": "https://integrations.sh/logo/airwallex.com",
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -632,6 +671,9 @@
     {
       "domain": "amplitude.com",
       "name": "Amplitude",
+      "description": "Product analytics: charts, cohorts, and events.",
+      "category": "analytics",
+      "official": true,
       "mcpUrl": "https://mcp.amplitude.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -682,6 +724,23 @@
       "tier": "verified",
       "provenance": "detected",
       "logoSourceUrl": "https://integrations.sh/logo/androidmanagement.googleapis.com",
+      "probe": {
+        "status": "real",
+        "reason": "mcp_json_rpc",
+        "httpStatus": 200
+      }
+    },
+    {
+      "domain": "api-and-you.com",
+      "name": "SecretBox",
+      "mcpUrl": "https://mcp.api-and-you.com/mcp",
+      "transport": "streamable-http",
+      "authKind": "none",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "community",
+      "provenance": "discovered",
+      "logoSourceUrl": "https://integrations.sh/logo/api-and-you.com",
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -790,6 +849,9 @@
     {
       "domain": "apollo.io",
       "name": "Apollo.io",
+      "description": "Contacts, companies, and sequences.",
+      "category": "sales",
+      "official": true,
       "mcpUrl": "https://mcp.apollo.io/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -907,21 +969,25 @@
     {
       "domain": "asana.com",
       "name": "Asana",
+      "description": "Tasks, projects, and portfolios in the workspaces you can already see.",
+      "category": "project-management",
+      "featured": true,
+      "official": true,
       "mcpUrl": "https://mcp.asana.com/v2/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
       "scopesHint": [],
       "credentialFacts": [
         {
-          "id": "asana_oauth_app",
+          "id": "asana_mcp_oauth_app",
           "type": "oauth2",
           "generateUrl": "https://app.asana.com/0/my-apps",
-          "setup": "Create an app in the Asana [developer console](https://app.asana.com/0/my-apps). Use the app's client ID and client secret with Asana's OAuth 2.0 authorization code flow. The docs list the authorize endpoint as `GET https://app.asana.com/-/oauth_authorize`, token endpoint as `POST https://app.asana.com/-/oauth_token`, and revoke endpoint as `POST https://app.asana.com/-/oauth_revoke`. The resulting access token is sent as `Authorization: Bearer <token>`.",
+          "setup": "Create an `MCP app` in the Asana [developer console](https://app.asana.com/0/my-apps). Asana's MCP integration docs say to click **Create new app**, choose **MCP app**, then use the resulting `client_id` and `client_secret` with the V2 MCP server. Tokens issued for MCP apps only work with the MCP server, not the standard REST API.",
           "fields": null
         }
       ],
-      "tier": "community",
-      "provenance": "discovered",
+      "tier": "verified",
+      "provenance": "detected",
       "logoSourceUrl": "https://integrations.sh/logo/asana.com",
       "probe": {
         "status": "real",
@@ -948,31 +1014,6 @@
       "tier": "community",
       "provenance": "discovered",
       "logoSourceUrl": "https://integrations.sh/logo/assetvision.com.au",
-      "probe": {
-        "status": "real",
-        "reason": "auth_challenge",
-        "httpStatus": 401
-      }
-    },
-    {
-      "domain": "atlassian.net",
-      "name": "Atlassian Rovo MCP Server",
-      "mcpUrl": "https://mcp.atlassian.com/v1/mcp/authv2",
-      "transport": "streamable-http",
-      "authKind": "oauth2",
-      "scopesHint": [],
-      "credentialFacts": [
-        {
-          "id": "atlassian_oauth_app",
-          "type": "oauth2",
-          "generateUrl": null,
-          "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
-          "fields": null
-        }
-      ],
-      "tier": "verified",
-      "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/atlassian.net",
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -1124,7 +1165,7 @@
     },
     {
       "domain": "awesomize.ai",
-      "name": "Apixel",
+      "name": "TalkGen",
       "mcpUrl": "https://bananagen.awesomize.ai/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -1174,7 +1215,7 @@
     },
     {
       "domain": "azurecontainerapps.io",
-      "name": "Soul Family AI",
+      "name": "Inviton",
       "mcpUrl": "https://soulfamily-gpt-api.purplegrass-5a3c53cc.eastus2.azurecontainerapps.io/mcp",
       "transport": "streamable-http",
       "authKind": "none",
@@ -1266,6 +1307,31 @@
       }
     },
     {
+      "domain": "barcelo-mcp.com",
+      "name": "Barceló Hotel Group",
+      "mcpUrl": "https://barcelo-mcp.com/mcp",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "barcelo_oauth_client",
+          "type": "oauth2",
+          "generateUrl": null,
+          "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoSourceUrl": "https://integrations.sh/logo/barcelo-mcp.com",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
       "domain": "base44.com",
       "name": "Base44",
       "mcpUrl": "https://app.base44.com/mcp",
@@ -1342,6 +1408,23 @@
       }
     },
     {
+      "domain": "bestcolleges.com",
+      "name": "BestColleges.com",
+      "mcpUrl": "https://gpt.bestcolleges.com/mcp",
+      "transport": "streamable-http",
+      "authKind": "none",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "community",
+      "provenance": "discovered",
+      "logoSourceUrl": "https://integrations.sh/logo/bestcolleges.com",
+      "probe": {
+        "status": "real",
+        "reason": "mcp_sse",
+        "httpStatus": 200
+      }
+    },
+    {
       "domain": "bestlawyers.com",
       "name": "Best Lawyers",
       "mcpUrl": "https://mcp.bestlawyers.com/",
@@ -1386,11 +1469,19 @@
     {
       "domain": "betterstack.com",
       "name": "betterstack.com",
-      "mcpUrl": "https://betterstack.com/mcp",
+      "mcpUrl": "https://mcp.betterstack.com/",
       "transport": "streamable-http",
-      "authKind": "none",
+      "authKind": "oauth2",
       "scopesHint": [],
-      "credentialFacts": [],
+      "credentialFacts": [
+        {
+          "id": "mcp_oauth",
+          "type": "oauth2",
+          "generateUrl": null,
+          "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
+          "fields": null
+        }
+      ],
       "tier": "verified",
       "provenance": "detected",
       "logoSourceUrl": "https://integrations.sh/logo/betterstack.com",
@@ -1710,17 +1801,27 @@
     },
     {
       "domain": "box.com",
-      "name": "Box Platform API",
+      "name": "Box",
+      "description": "Files and folders in the Box account you connect.",
+      "category": "files",
+      "official": true,
       "mcpUrl": "https://mcp.box.com/",
       "transport": "streamable-http",
       "authKind": "oauth2",
       "scopesHint": [],
       "credentialFacts": [
         {
+          "id": "box_mcp_integration_credentials",
+          "type": "oauth2",
+          "generateUrl": "https://app.box.com",
+          "setup": "In the Box Admin Console, go to **Integrations**, find **Box MCP server**, click **Configure**, then in **Additional Configuration** click **+ Add Integration Credentials**. Save the entry, expand it, copy the generated `Client ID` and `Client Secret`, enter the external MCP client's redirect URI, and select access scopes, as documented in [Set up the MCP server](https://developer.box.com/guides/box-mcp/setup).",
+          "fields": null
+        },
+        {
           "id": "box_oauth_app",
           "type": "oauth2",
-          "generateUrl": "https://cloud.app.box.com/developers/console",
-          "setup": "Create or open an app in the [Box Developer Console](https://cloud.app.box.com/developers/console). Choose a Platform App using **Standard OAuth 2.0**, set your redirect URI, choose scopes, save changes, then copy the `Client ID` and `Client Secret`. Users then authorize via Box OAuth in the browser. For MCP, Box Admin Console can also generate integration credentials with a `Client ID` and `Client Secret` for the Box MCP server as documented in [Set up the MCP server](https://developer.box.com/guides/box-mcp/setup).",
+          "generateUrl": "https://app.box.com/developers/console",
+          "setup": "Create a Platform App in the [Box Developer Console](https://app.box.com/developers/console) (or [account.box.com/developers/console](https://account.box.com/developers/console)), choose **Standard OAuth 2.0**, configure a redirect URI, select scopes, then copy the app's `Client ID` and `Client Secret` from the app configuration as described in [Setup with OAuth 2.0](https://developer.box.com/guides/authentication/oauth2/oauth2-setup).",
           "fields": null
         }
       ],
@@ -1946,6 +2047,9 @@
     {
       "domain": "calendly.com",
       "name": "Calendly",
+      "description": "Event types, scheduled events, and availability.",
+      "category": "scheduling",
+      "official": true,
       "mcpUrl": "https://mcp.calendly.com/",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -1987,7 +2091,7 @@
     },
     {
       "domain": "campfire.ai",
-      "name": "campfire.ai",
+      "name": "Campfire",
       "mcpUrl": "https://api.meetcampfire.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -2063,13 +2167,17 @@
     {
       "domain": "canva.com",
       "name": "Canva",
+      "description": "Find and work with designs and brand kits.",
+      "category": "design",
+      "featured": true,
+      "official": true,
       "mcpUrl": "https://mcp.canva.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
       "scopesHint": [],
       "credentialFacts": [
         {
-          "id": "canva_oauth_app",
+          "id": "connect_oauth_app",
           "type": "oauth2",
           "generateUrl": null,
           "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server accepts a Client ID Metadata Document (CIMD), so the client authenticates with its own hosted URL as the `client_id` — nothing to register.",
@@ -2539,7 +2647,10 @@
     },
     {
       "domain": "clickup.com",
-      "name": "clickup20",
+      "name": "ClickUp",
+      "description": "Tasks, lists, and spaces.",
+      "category": "project-management",
+      "official": true,
       "mcpUrl": "https://mcp.clickup.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -2623,14 +2734,18 @@
     },
     {
       "domain": "cloudflare.com",
-      "name": "wrangler",
+      "name": "Cloudflare",
+      "description": "Workers bindings, KV, R2, and D1 for your account.",
+      "category": "developer-tools",
+      "featured": true,
+      "official": true,
       "mcpUrl": "https://bindings.mcp.cloudflare.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
       "scopesHint": [],
       "credentialFacts": [
         {
-          "id": "cf_mcp_oauth",
+          "id": "oauth",
           "type": "oauth2",
           "generateUrl": null,
           "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
@@ -2766,7 +2881,7 @@
     },
     {
       "domain": "coches.net",
-      "name": "Milanuncios",
+      "name": "motos.net",
       "mcpUrl": "https://llms-apps.gw.coches.net/coches/mcp",
       "transport": "streamable-http",
       "authKind": "none",
@@ -3035,16 +3150,30 @@
       "credentialFacts": [
         {
           "id": "context7_api_key",
-          "type": "bearer",
+          "type": "api_key",
           "generateUrl": "https://context7.com/dashboard",
-          "setup": "Go to the [Context7 dashboard](https://context7.com/dashboard), open the API Keys card, click **Create API Key**, optionally name it, and copy the key immediately. Keys are shown only once and have the format `ctx7sk-...`. Use it as a bearer token in `Authorization: Bearer ...`, or for the hosted MCP server send it in the `CONTEXT7_API_KEY` header.",
+          "setup": "Create an account in the [Context7 dashboard](https://context7.com/dashboard), open **Create API Key** in the API Keys card, name the key, and copy it immediately; keys are only shown once. The key format is `ctx7sk-...`. See [Manage API Keys](https://context7.com/docs/howto/api-keys) and the [API Guide](https://context7.com/docs/api-guide).",
           "fields": null
         },
         {
-          "id": "context7_mcp_oauth",
+          "id": "context7_oauth",
           "type": "oauth2",
-          "generateUrl": "https://context7.com/api/oauth/authorize",
-          "setup": "For the hosted MCP server's OAuth mode, your MCP client self-registers with Context7 using Dynamic Client Registration and then opens the browser for you to sign in and approve access. Configure the MCP server at `https://mcp.context7.com/mcp/oauth` in an MCP client that supports the MCP OAuth spec; then use the client's **Authenticate** action. Context7 publishes OAuth endpoints at [authorize](https://context7.com/api/oauth/authorize), [token](https://context7.com/api/oauth/token), and [dynamic client registration](https://context7.com/api/oauth/register). Documented scopes are `profile` and `email`.",
+          "generateUrl": null,
+          "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
+          "fields": null
+        },
+        {
+          "id": "apiKey",
+          "type": "api_key",
+          "generateUrl": "https://context7.com/dashboard",
+          "setup": "Create a free account at [context7.com/dashboard](https://context7.com/dashboard) and generate an API key. Search and docs endpoints also work anonymously at low rate limits, but a key is required for higher rate limits, some endpoints (e.g. adding libraries), and private repositories. On the REST API send it as `Authorization: Bearer <key>`; on the MCP server send it as a `CONTEXT7_API_KEY` header; for the CLI run `ctx7 login` or `ctx7 setup --api-key <key>`. See the [API guide](https://context7.com/docs/api-guide).",
+          "fields": null
+        },
+        {
+          "id": "oauth",
+          "type": "oauth2",
+          "generateUrl": null,
+          "setup": "MCP clients can authenticate interactively via OAuth 2.0 instead of an API key. Discovery is standard: the MCP endpoint publishes RFC 9728 metadata at `https://mcp.context7.com/.well-known/oauth-protected-resource`, pointing at the authorization server `https://context7.com` (RFC 8414 metadata at `/.well-known/oauth-authorization-server`). See [Set Up OAuth](https://context7.com/docs/howto/oauth).",
           "fields": null
         }
       ],
@@ -3771,7 +3900,10 @@
     },
     {
       "domain": "dropbox.com",
-      "name": "Dropbox Dash",
+      "name": "Dropbox",
+      "description": "Search and read files in the Dropbox account you connect.",
+      "category": "files",
+      "official": true,
       "mcpUrl": "https://mcp.dropbox.com/chatgpt_app_mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -4114,20 +4246,28 @@
       }
     },
     {
-      "domain": "experiancs.co.uk",
-      "name": "Experian UK",
-      "mcpUrl": "https://openai-app.experiancs.co.uk/mcp",
+      "domain": "explorium.ai",
+      "name": "Vibe Prospecting",
+      "mcpUrl": "https://vibeprospecting.explorium.ai/mcp",
       "transport": "streamable-http",
-      "authKind": "none",
+      "authKind": "oauth2",
       "scopesHint": [],
-      "credentialFacts": [],
+      "credentialFacts": [
+        {
+          "id": "explorium_mcp_oauth",
+          "type": "oauth2",
+          "generateUrl": null,
+          "setup": "For MCP clients that support OAuth login, connect to Explorium's MCP server and complete the provider-hosted sign-in/consent flow when prompted. The MCP endpoint is documented on [AgentSource MCP](https://developers.explorium.ai/mcp-docs/agentsource-mcp), and the curated registry identifies the `https://vibeprospecting.explorium.ai/mcp` server as OAuth-protected. The exact authorize/token endpoints were not exposed in the retrieved public docs, so use the client's built-in MCP OAuth flow against the server.",
+          "fields": null
+        }
+      ],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/experiancs.co.uk",
+      "logoSourceUrl": "https://integrations.sh/logo/explorium.ai",
       "probe": {
         "status": "real",
-        "reason": "mcp_sse",
-        "httpStatus": 200
+        "reason": "auth_challenge",
+        "httpStatus": 401
       }
     },
     {
@@ -4164,7 +4304,7 @@
       "scopesHint": [],
       "credentialFacts": [
         {
-          "id": "faces_mcp_oauth",
+          "id": "faces_oauth",
           "type": "oauth2",
           "generateUrl": null,
           "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
@@ -4316,7 +4456,7 @@
     },
     {
       "domain": "fellow.ai",
-      "name": "fellow.ai",
+      "name": "Fellow.ai",
       "mcpUrl": "https://fellow.app/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -4401,6 +4541,10 @@
     {
       "domain": "figma.com",
       "name": "Figma",
+      "description": "Read frames, components, and comments straight from a design file.",
+      "category": "design",
+      "featured": true,
+      "official": true,
       "mcpUrl": "https://mcp.figma.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -4498,6 +4642,31 @@
       }
     },
     {
+      "domain": "fireflies.ai",
+      "name": "Fireflies",
+      "mcpUrl": "https://api.fireflies.ai/mcp",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "fireflies_mcp_oauth",
+          "type": "oauth2",
+          "generateUrl": null,
+          "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoSourceUrl": "https://integrations.sh/logo/fireflies.ai",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
       "domain": "firestore.googleapis.com",
       "name": "firestore.googleapis.com",
       "mcpUrl": "https://firestore.googleapis.com/mcp",
@@ -4537,6 +4706,23 @@
         "status": "real",
         "reason": "auth_challenge",
         "httpStatus": 401
+      }
+    },
+    {
+      "domain": "flaerobotics.ai",
+      "name": "BE-A",
+      "mcpUrl": "https://beamcpserverprod.flaerobotics.ai/mcp",
+      "transport": "streamable-http",
+      "authKind": "none",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "community",
+      "provenance": "discovered",
+      "logoSourceUrl": "https://integrations.sh/logo/flaerobotics.ai",
+      "probe": {
+        "status": "real",
+        "reason": "mcp_sse",
+        "httpStatus": 200
       }
     },
     {
@@ -4725,7 +4911,9 @@
     },
     {
       "domain": "front.com",
-      "name": "front.com",
+      "name": "Front",
+      "description": "Shared inbox conversations and contacts.",
+      "category": "communication",
       "mcpUrl": "https://mcp.frontapp.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -4926,20 +5114,13 @@
         {
           "id": "guru_oauth_client",
           "type": "oauth2",
-          "generateUrl": "https://developer.getguru.com/docs/oauth2-clients",
-          "setup": "To use Guru OAuth2 on behalf of users, first request access by emailing [support@getguru.com](mailto:support@getguru.com) as described in [OAuth2 Clients](https://developer.getguru.com/docs/oauth2-clients). Once enabled, create a client via Guru's OAuth2 client maintenance flow; Guru returns a `clientId` and `clientSecret`, and you configure your `redirectUris` and scopes such as `read:*` or `*:*`.",
-          "fields": null
-        },
-        {
-          "id": "guru_api_token",
-          "type": "compound",
-          "generateUrl": "https://help.getguru.com/s/article/how-to-obtain-your-api-credentials",
-          "setup": "In Guru, generate API credentials from the product/admin UI as described in [How to Obtain Your API Credentials](https://help.getguru.com/s/article/how-to-obtain-your-api-credentials). For the REST API and API-token-based MCP auth, Guru uses HTTP Basic auth with an identifier plus token: either `USER_EMAIL:TOKEN` for a user token, or `COLLECTION_ID:TOKEN` for a collection token. See [Guru API Overview](https://developer.getguru.com/docs/getting-started) and [User Tokens vs Collection Tokens](https://developer.getguru.com/docs/user-tokens-vs-collection-tokens) for the two token types and their permissions.",
+          "generateUrl": null,
+          "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
           "fields": null
         }
       ],
-      "tier": "community",
-      "provenance": "discovered",
+      "tier": "verified",
+      "provenance": "detected",
       "logoSourceUrl": "https://integrations.sh/logo/getguru.com",
       "probe": {
         "status": "real",
@@ -4982,6 +5163,23 @@
       }
     },
     {
+      "domain": "glama.ai",
+      "name": "glama.ai",
+      "mcpUrl": "https://mcp-test.glama.ai/mcp",
+      "transport": "streamable-http",
+      "authKind": "none",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "community",
+      "provenance": "discovered",
+      "logoSourceUrl": "https://integrations.sh/logo/glama.ai",
+      "probe": {
+        "status": "real",
+        "reason": "mcp_sse",
+        "httpStatus": 200
+      }
+    },
+    {
       "domain": "glean.com",
       "name": "glean.com",
       "mcpUrl": "https://developers.glean.com/mcp",
@@ -4992,6 +5190,61 @@
       "tier": "community",
       "provenance": "discovered",
       "logoSourceUrl": "https://integrations.sh/logo/glean.com",
+      "probe": {
+        "status": "real",
+        "reason": "mcp_json_rpc",
+        "httpStatus": 200
+      }
+    },
+    {
+      "domain": "gmailmcp.googleapis.com",
+      "name": "Gmail",
+      "description": "Search and read Gmail, create drafts, and organize messages through Google's official hosted MCP server.",
+      "category": "communication",
+      "featured": true,
+      "official": true,
+      "mcpUrl": "https://gmailmcp.googleapis.com/mcp/v1",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/gmail.modify"
+      ],
+      "allowedTools": [
+        "create_draft",
+        "get_message",
+        "get_thread",
+        "label_message",
+        "label_thread",
+        "list_drafts",
+        "list_labels",
+        "search_threads",
+        "unlabel_message",
+        "unlabel_thread"
+      ],
+      "requireApproval": [
+        "create_draft",
+        "label_message",
+        "label_thread",
+        "unlabel_message",
+        "unlabel_thread"
+      ],
+      "connectionOwnership": "personal_only",
+      "credentialFacts": [
+        {
+          "id": "google_oauth_client",
+          "type": "oauth2",
+          "generateUrl": "https://console.cloud.google.com/auth/clients",
+          "setup": "Create a Google OAuth web client for OpenGeni's integration callback, enable the Gmail API and Gmail MCP API, and approve the documented Gmail read-only, compose, and modify scopes."
+        }
+      ],
+      "tier": "verified",
+      "provenance": "official:developers.google.com/workspace/gmail/api/reference/mcp",
+      "logoSourceUrl": null,
+      "homepageUrl": "https://developers.google.com/workspace/gmail/api/reference/mcp",
+      "installUrl": "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
+      "documentationUrl": "https://developers.google.com/workspace/gmail/api/reference/mcp",
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -5031,8 +5284,8 @@
       "authKind": "none",
       "scopesHint": [],
       "credentialFacts": [],
-      "tier": "community",
-      "provenance": "discovered",
+      "tier": "verified",
+      "provenance": "detected",
       "logoSourceUrl": "https://integrations.sh/logo/godaddy.com",
       "probe": {
         "status": "real",
@@ -5225,6 +5478,31 @@
       }
     },
     {
+      "domain": "granola.ai",
+      "name": "Granola",
+      "mcpUrl": "https://mcp.granola.ai/mcp",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "granola_mcp_oauth",
+          "type": "oauth2",
+          "generateUrl": null,
+          "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server accepts a Client ID Metadata Document (CIMD), so the client authenticates with its own hosted URL as the `client_id` — nothing to register.",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoSourceUrl": "https://integrations.sh/logo/granola.ai",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
       "domain": "grantedai.com",
       "name": "Granted",
       "mcpUrl": "https://grantedai.com/api/mcp/mcp",
@@ -5298,58 +5576,6 @@
         "status": "real",
         "reason": "auth_challenge",
         "httpStatus": 401
-      }
-    },
-    {
-      "domain": "gmailmcp.googleapis.com",
-      "name": "Gmail",
-      "description": "Search and read Gmail, create drafts, and organize messages through Google's official hosted MCP server.",
-      "mcpUrl": "https://gmailmcp.googleapis.com/mcp/v1",
-      "transport": "streamable-http",
-      "authKind": "oauth2",
-      "scopesHint": [
-        "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/gmail.compose",
-        "https://www.googleapis.com/auth/gmail.modify"
-      ],
-      "allowedTools": [
-        "create_draft",
-        "get_message",
-        "get_thread",
-        "label_message",
-        "label_thread",
-        "list_drafts",
-        "list_labels",
-        "search_threads",
-        "unlabel_message",
-        "unlabel_thread"
-      ],
-      "requireApproval": [
-        "create_draft",
-        "label_message",
-        "label_thread",
-        "unlabel_message",
-        "unlabel_thread"
-      ],
-      "connectionOwnership": "personal_only",
-      "credentialFacts": [
-        {
-          "id": "google_oauth_client",
-          "type": "oauth2",
-          "generateUrl": "https://console.cloud.google.com/auth/clients",
-          "setup": "Create a Google OAuth web client for OpenGeni's integration callback, enable the Gmail API and Gmail MCP API, and approve the documented Gmail read-only, compose, and modify scopes."
-        }
-      ],
-      "tier": "verified",
-      "provenance": "official:developers.google.com/workspace/gmail/api/reference/mcp",
-      "logoSourceUrl": null,
-      "homepageUrl": "https://developers.google.com/workspace/gmail/api/reference/mcp",
-      "installUrl": "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
-      "documentationUrl": "https://developers.google.com/workspace/gmail/api/reference/mcp",
-      "probe": {
-        "status": "real",
-        "reason": "mcp_json_rpc",
-        "httpStatus": 200
       }
     },
     {
@@ -5694,6 +5920,36 @@
       }
     },
     {
+      "domain": "hubspot.com",
+      "name": "HubSpot",
+      "description": "CRM contacts, companies, deals, and tickets from the HubSpot account you connect.",
+      "category": "sales",
+      "featured": true,
+      "official": true,
+      "mcpUrl": "https://mcp.hubspot.com/anthropic",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "hubspot_mcp_oauth_app",
+          "type": "oauth2",
+          "generateUrl": "https://developers.hubspot.com/docs/apps/developer-platform/build-apps/integrate-with-the-remote-hubspot-mcp-server",
+          "setup": "Create an MCP auth app in your HubSpot account following [Integrate AI tools with the HubSpot MCP server](https://developers.hubspot.com/docs/apps/developer-platform/build-apps/integrate-with-the-remote-hubspot-mcp-server). Configure your MCP client to connect to `https://mcp.hubspot.com` using the app's OAuth credentials. Your MCP client must support OAuth with `PKCE`; users grant access during installation, and available scopes are determined by the MCP tools and the permissions granted.",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoSourceUrl": "https://integrations.sh/logo/hubspot.com",
+      "documentationUrl": "https://developers.hubspot.com/docs/apps/developer-platform/build-apps/integrate-with-the-remote-hubspot-mcp-server",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
       "domain": "idoctor.md",
       "name": "Kokiko",
       "mcpUrl": "https://kokiko.idoctor.md/mcp",
@@ -5701,8 +5957,8 @@
       "authKind": "none",
       "scopesHint": [],
       "credentialFacts": [],
-      "tier": "community",
-      "provenance": "discovered",
+      "tier": "verified",
+      "provenance": "detected",
       "logoSourceUrl": "https://integrations.sh/logo/idoctor.md",
       "probe": {
         "status": "real",
@@ -5786,6 +6042,31 @@
       }
     },
     {
+      "domain": "indeed.com",
+      "name": "Indeed",
+      "mcpUrl": "https://mcp.indeed.com/claude/mcp",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "indeed_oauth_app",
+          "type": "oauth2",
+          "generateUrl": null,
+          "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server accepts a Client ID Metadata Document (CIMD), so the client authenticates with its own hosted URL as the `client_id` — nothing to register.",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoSourceUrl": "https://integrations.sh/logo/indeed.com",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
       "domain": "inline.chat",
       "name": "inline.chat",
       "mcpUrl": "https://mcp.inline.chat/mcp",
@@ -5842,6 +6123,26 @@
         "status": "real",
         "reason": "mcp_json_rpc",
         "httpStatus": 200
+      }
+    },
+    {
+      "domain": "intercom.io",
+      "name": "Intercom",
+      "description": "Conversations, contacts, and help center content from the Intercom workspace you connect.",
+      "category": "communication",
+      "mcpUrl": "https://mcp.intercom.com/mcp",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "community",
+      "provenance": "discovered",
+      "logoSourceUrl": "https://integrations.sh/logo/intercom.io",
+      "documentationUrl": "https://developers.intercom.com/docs/guides/mcp",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
       }
     },
     {
@@ -6078,6 +6379,35 @@
       "tier": "verified",
       "provenance": "detected",
       "logoSourceUrl": "https://integrations.sh/logo/jimdo.com",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
+      "domain": "jira.com",
+      "name": "Atlassian",
+      "description": "Jira issues and Confluence pages through Atlassian's hosted Rovo MCP server, scoped to what you can already see.",
+      "category": "project-management",
+      "featured": true,
+      "mcpUrl": "https://mcp.atlassian.com/v1/mcp/authv2",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "atlassian_oauth_3lo_app",
+          "type": "oauth2",
+          "generateUrl": null,
+          "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoSourceUrl": "https://integrations.sh/logo/jira.com",
+      "documentationUrl": "https://support.atlassian.com/rovo/docs/getting-started-with-the-atlassian-remote-mcp-server/",
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -6493,7 +6823,7 @@
     },
     {
       "domain": "lambus.ai",
-      "name": "Tourlane",
+      "name": "Lambus",
       "mcpUrl": "https://mcp.lambus.ai/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -6517,16 +6847,16 @@
       }
     },
     {
-      "domain": "lastminute.com",
-      "name": "lastminute.com",
-      "mcpUrl": "https://mcp.lastminute.com/mcp",
+      "domain": "langfuse.com",
+      "name": "langfuse.com",
+      "mcpUrl": "https://langfuse.com/api/mcp",
       "transport": "streamable-http",
       "authKind": "none",
       "scopesHint": [],
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/lastminute.com",
+      "logoSourceUrl": "https://integrations.sh/logo/langfuse.com",
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -6712,6 +7042,9 @@
     {
       "domain": "linear.app",
       "name": "Linear",
+      "category": "project-management",
+      "featured": true,
+      "official": true,
       "mcpUrl": "https://mcp.linear.app/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -6785,8 +7118,33 @@
       }
     },
     {
+      "domain": "listingforgeai.it",
+      "name": "ListingForgeAI",
+      "mcpUrl": "https://services.listingforgeai.it/api/mcp",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "lf_oauth_client",
+          "type": "oauth2",
+          "generateUrl": null,
+          "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoSourceUrl": "https://integrations.sh/logo/listingforgeai.it",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
       "domain": "listoai.co",
-      "name": "Remedy Legal",
+      "name": "Valpas Hotels",
       "mcpUrl": "https://valpas-mcp-3b7e1c9d-5a42-4f8e-b6d1-9c2a7e4f1b8a.listoai.co/mcp",
       "transport": "streamable-http",
       "authKind": "none",
@@ -6795,6 +7153,23 @@
       "tier": "community",
       "provenance": "discovered",
       "logoSourceUrl": "https://integrations.sh/logo/listoai.co",
+      "probe": {
+        "status": "real",
+        "reason": "mcp_sse",
+        "httpStatus": 200
+      }
+    },
+    {
+      "domain": "ll-mcp.replit.app",
+      "name": "API Lessons",
+      "mcpUrl": "https://ll-mcp.replit.app/mcp",
+      "transport": "streamable-http",
+      "authKind": "none",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "community",
+      "provenance": "discovered",
+      "logoSourceUrl": "https://integrations.sh/logo/ll-mcp.replit.app",
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -7362,6 +7737,31 @@
       }
     },
     {
+      "domain": "masbasbas.com",
+      "name": "masbasbas.com",
+      "mcpUrl": "https://masbasbas.com/api/ucp/mcp",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "shopify_customer_oauth",
+          "type": "oauth2",
+          "generateUrl": "https://account.masbasbas.com/authentication/oauth/authorize",
+          "setup": "This store exposes customer-account OAuth endpoints on `account.masbasbas.com`. To obtain client credentials, a developer would need to register or provision a BASBAS/Shopify customer account app that is authorized for this store's customer APIs and request scopes such as `openid`, `email`, `customer-account-api:full`, or `customer-account-mcp-api:full`. The automated probe confirmed the authorization endpoint at [account.masbasbas.com/authentication/oauth/authorize](https://account.masbasbas.com/authentication/oauth/authorize) and token endpoint `https://account.masbasbas.com/authentication/oauth/token`, but the public BASBAS site did not expose developer-facing app registration steps.",
+          "fields": null
+        }
+      ],
+      "tier": "community",
+      "provenance": "discovered",
+      "logoSourceUrl": "https://integrations.sh/logo/masbasbas.com",
+      "probe": {
+        "status": "real",
+        "reason": "mcp_json_rpc",
+        "httpStatus": 200
+      }
+    },
+    {
       "domain": "massive.com",
       "name": "massive.com",
       "mcpUrl": "https://mcp.massive.com/",
@@ -7663,6 +8063,23 @@
       }
     },
     {
+      "domain": "mermaid.ai",
+      "name": "Mermaid Chart",
+      "mcpUrl": "https://chatgpt.mermaid.ai/anthropic/mcp",
+      "transport": "streamable-http",
+      "authKind": "none",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "community",
+      "provenance": "discovered",
+      "logoSourceUrl": "https://integrations.sh/logo/mermaid.ai",
+      "probe": {
+        "status": "real",
+        "reason": "mcp_json_rpc",
+        "httpStatus": 200
+      }
+    },
+    {
       "domain": "mervia.ai",
       "name": "Ovios Home",
       "mcpUrl": "https://mcp.mervia.ai/mcp/s/ovios-furn-b85c0919",
@@ -7677,31 +8094,6 @@
         "status": "real",
         "reason": "mcp_sse",
         "httpStatus": 200
-      }
-    },
-    {
-      "domain": "messagebird.com",
-      "name": "messagebird.com",
-      "mcpUrl": "https://mcp.platform.bird.com/",
-      "transport": "streamable-http",
-      "authKind": "oauth2",
-      "scopesHint": [],
-      "credentialFacts": [
-        {
-          "id": "bird_mcp_oauth",
-          "type": "oauth2",
-          "generateUrl": null,
-          "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
-          "fields": null
-        }
-      ],
-      "tier": "verified",
-      "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/messagebird.com",
-      "probe": {
-        "status": "real",
-        "reason": "auth_challenge",
-        "httpStatus": 401
       }
     },
     {
@@ -7723,7 +8115,7 @@
     },
     {
       "domain": "microsoft.com",
-      "name": "microsoft.com – graph-beta",
+      "name": "Microsoft Learn",
       "mcpUrl": "https://learn.microsoft.com/api/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -7871,6 +8263,31 @@
       }
     },
     {
+      "domain": "miro.com",
+      "name": "Miro",
+      "mcpUrl": "https://mcp.miro.com/",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "miro_oauth_app",
+          "type": "oauth2",
+          "generateUrl": null,
+          "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoSourceUrl": "https://integrations.sh/logo/miro.com",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
       "domain": "mixmax.com",
       "name": "Mixmax",
       "mcpUrl": "https://mcp.mixmax.com/mcp",
@@ -7899,6 +8316,8 @@
       "domain": "mobbin.com",
       "name": "Mobbin",
       "description": "Search Mobbin’s library for real-world product screens, flows, and UI/UX references. Requires a paid Mobbin plan (Pro, Team, or Enterprise). Provider-managed usage credits apply.",
+      "category": "design",
+      "official": true,
       "mcpUrl": "https://api.mobbin.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -7926,8 +8345,8 @@
     },
     {
       "domain": "modelcontextprotocol.io",
-      "name": "Play Sheet Music",
-      "mcpUrl": "https://mcp.main-kill-isr.mintlify.me/mcp",
+      "name": "Three.js 3D Viewer",
+      "mcpUrl": "https://modelcontextprotocol.io/mcp",
       "transport": "streamable-http",
       "authKind": "none",
       "scopesHint": [],
@@ -7969,13 +8388,16 @@
     {
       "domain": "monday.com",
       "name": "monday.com",
+      "description": "Boards, items, and updates.",
+      "category": "project-management",
+      "official": true,
       "mcpUrl": "https://mcp.monday.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
       "scopesHint": [],
       "credentialFacts": [
         {
-          "id": "monday_mcp_oauth_client",
+          "id": "monday_oauth_app",
           "type": "oauth2",
           "generateUrl": null,
           "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
@@ -8461,7 +8883,7 @@
     },
     {
       "domain": "neon.com",
-      "name": "neon.com",
+      "name": "Neon Postgres",
       "mcpUrl": "https://mcp.neon.tech/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -8646,7 +9068,11 @@
     },
     {
       "domain": "notion.com",
-      "name": "Notion API",
+      "name": "Notion",
+      "description": "Search, read, and update pages and databases in the Notion workspaces you connect.",
+      "category": "productivity",
+      "featured": true,
+      "official": true,
       "mcpUrl": "https://mcp.notion.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -8663,6 +9089,7 @@
       "tier": "verified",
       "provenance": "detected",
       "logoSourceUrl": "https://integrations.sh/logo/notion.com",
+      "documentationUrl": "https://developers.notion.com/guides/mcp/overview",
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -8789,7 +9216,7 @@
     },
     {
       "domain": "olutely.com",
-      "name": "ABC Word Search",
+      "name": "A-Z Bible",
       "mcpUrl": "https://affirmations.widgets.widget.olutely.com/affirmations/mcp",
       "transport": "streamable-http",
       "authKind": "none",
@@ -9016,7 +9443,7 @@
     },
     {
       "domain": "optiversal.com",
-      "name": "Tillys",
+      "name": "Hibbett",
       "mcpUrl": "https://hibbett.mcp.optiversal.com/mcp",
       "transport": "streamable-http",
       "authKind": "none",
@@ -9093,6 +9520,9 @@
     {
       "domain": "otter.ai",
       "name": "Otter.ai",
+      "description": "Meeting transcripts and summaries.",
+      "category": "productivity",
+      "official": true,
       "mcpUrl": "https://mcp.otter.ai/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -9158,8 +9588,53 @@
       }
     },
     {
+      "domain": "ovios-home.com",
+      "name": "ovios-home.com",
+      "mcpUrl": "https://www.ovios-home.com/api/ucp/mcp",
+      "transport": "streamable-http",
+      "authKind": "none",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "community",
+      "provenance": "discovered",
+      "logoSourceUrl": "https://integrations.sh/logo/ovios-home.com",
+      "probe": {
+        "status": "real",
+        "reason": "mcp_json_rpc",
+        "httpStatus": 200
+      }
+    },
+    {
+      "domain": "paddle.com",
+      "name": "paddle.com",
+      "mcpUrl": "https://paddlehq.mcp.kapa.ai/",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "kapa_mcp_login",
+          "type": "oauth2",
+          "generateUrl": "https://developer.paddle.com/sdks/ai/docs-mcp",
+          "setup": "Configure the Paddle docs MCP server from [Docs MCP server](https://developer.paddle.com/sdks/ai/docs-mcp). Some clients then prompt you to authenticate with Kapa.ai; in Codex the docs show running `codex mcp login paddle-docs --scopes openid` and opening the printed authorization URL after appending `&resource=https%3A%2F%2Fpaddle-docs.mcp.kapa.ai%2F`. Complete that browser login flow when prompted by your MCP client.",
+          "fields": null
+        }
+      ],
+      "tier": "community",
+      "provenance": "discovered",
+      "logoSourceUrl": "https://integrations.sh/logo/paddle.com",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
       "domain": "pagerduty.com",
       "name": "PagerDuty",
+      "description": "Incidents, services, and on-call schedules.",
+      "category": "developer-tools",
+      "official": true,
       "mcpUrl": "https://mcp.pagerduty.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -9324,6 +9799,9 @@
     {
       "domain": "paypal.com",
       "name": "PayPal",
+      "description": "Orders, invoices, and payouts.",
+      "category": "finance",
+      "official": true,
       "mcpUrl": "https://mcp.paypal.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -9398,7 +9876,7 @@
     },
     {
       "domain": "pendo.io",
-      "name": "Pendo Feedback API",
+      "name": "Pendo",
       "mcpUrl": "https://app.pendo.io/mcp/v0/shttp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -9469,23 +9947,6 @@
         "status": "real",
         "reason": "auth_challenge",
         "httpStatus": 401
-      }
-    },
-    {
-      "domain": "pga.com",
-      "name": "PGA – Play Golf",
-      "mcpUrl": "https://mcp.pga.com/mcp",
-      "transport": "streamable-http",
-      "authKind": "none",
-      "scopesHint": [],
-      "credentialFacts": [],
-      "tier": "community",
-      "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/pga.com",
-      "probe": {
-        "status": "real",
-        "reason": "mcp_json_rpc",
-        "httpStatus": 200
       }
     },
     {
@@ -9590,6 +10051,31 @@
       }
     },
     {
+      "domain": "polar.sh",
+      "name": "polar.sh",
+      "mcpUrl": "https://mcp.polar.sh/mcp/polar-mcp",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "polar_oauth_client",
+          "type": "oauth2",
+          "generateUrl": "https://polar.sh/settings#oauth",
+          "setup": "For partner integrations acting on behalf of Polar users, create an OAuth client in [User Settings → OAuth](https://polar.sh/settings#oauth). Provide an application name, client type, `https://` redirect URI(s) (or `http://localhost` for local development), requested scopes, and homepage URL. After creation, copy the `client_id` and `client_secret` (public clients may omit a secret and must use PKCE). Use this client to run the authorization-code flow against Polar’s OpenID Connect endpoints discovered from [OpenID Configuration](https://api.polar.sh/.well-known/openid-configuration).",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoSourceUrl": "https://integrations.sh/logo/polar.sh",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
       "domain": "policynote.com",
       "name": "PolicyNote",
       "mcpUrl": "https://data.policynote.com/v0/mcp",
@@ -9634,13 +10120,17 @@
     {
       "domain": "posthog.com",
       "name": "PostHog",
+      "description": "Product analytics, feature flags, and session insights.",
+      "category": "analytics",
+      "featured": true,
+      "official": true,
       "mcpUrl": "https://mcp.posthog.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
       "scopesHint": [],
       "credentialFacts": [
         {
-          "id": "posthog_oauth_access_token",
+          "id": "oauth",
           "type": "oauth2",
           "generateUrl": null,
           "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server accepts a Client ID Metadata Document (CIMD), so the client authenticates with its own hosted URL as the `client_id` — nothing to register.",
@@ -10049,7 +10539,7 @@
     },
     {
       "domain": "pyxl.pro",
-      "name": "Code Tytor: Python",
+      "name": "Draw Gen: Pyxl",
       "mcpUrl": "https://www.pyxl.pro/api/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -10240,7 +10730,7 @@
       "scopesHint": [],
       "credentialFacts": [
         {
-          "id": "ramp_user_oauth",
+          "id": "ramp_dev_app",
           "type": "oauth2",
           "generateUrl": null,
           "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
@@ -10334,7 +10824,7 @@
     },
     {
       "domain": "rbictg.com",
-      "name": "Popeyes",
+      "name": "Firehouse Subs",
       "mcpUrl": "https://use1-prod-bk-chatgpt-app.rbictg.com/api/mcp",
       "transport": "streamable-http",
       "authKind": "none",
@@ -10490,6 +10980,23 @@
         "status": "real",
         "reason": "auth_challenge",
         "httpStatus": 401
+      }
+    },
+    {
+      "domain": "reducto.ai",
+      "name": "reducto.ai",
+      "mcpUrl": "https://docs.reducto.ai/mcp",
+      "transport": "streamable-http",
+      "authKind": "none",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoSourceUrl": "https://integrations.sh/logo/reducto.ai",
+      "probe": {
+        "status": "real",
+        "reason": "mcp_sse",
+        "httpStatus": 200
       }
     },
     {
@@ -10935,23 +11442,6 @@
       }
     },
     {
-      "domain": "scrimba.com",
-      "name": "Scrimba",
-      "mcpUrl": "https://scrimba.com/mcp/v2",
-      "transport": "streamable-http",
-      "authKind": "none",
-      "scopesHint": [],
-      "credentialFacts": [],
-      "tier": "community",
-      "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/scrimba.com",
-      "probe": {
-        "status": "real",
-        "reason": "mcp_sse",
-        "httpStatus": 200
-      }
-    },
-    {
       "domain": "searchconsole.googleapis.com",
       "name": "searchconsole.googleapis.com",
       "mcpUrl": "https://searchconsole.googleapis.com/mcp",
@@ -11044,6 +11534,9 @@
     {
       "domain": "semrush.com",
       "name": "Semrush",
+      "description": "Keyword and domain research.",
+      "category": "marketing",
+      "official": true,
       "mcpUrl": "https://mcp.semrush.com/openai/v1/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -11093,7 +11586,10 @@
     },
     {
       "domain": "sentry.io",
-      "name": "sentry-cli",
+      "name": "Sentry",
+      "description": "Errors, issues, and releases across your projects.",
+      "category": "developer-tools",
+      "featured": true,
       "mcpUrl": "https://mcp.sentry.dev/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -11209,6 +11705,23 @@
       }
     },
     {
+      "domain": "share.eu",
+      "name": "share.eu",
+      "mcpUrl": "https://share-gmbh.myshopify.com/api/ucp/mcp",
+      "transport": "streamable-http",
+      "authKind": "none",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "community",
+      "provenance": "discovered",
+      "logoSourceUrl": "https://integrations.sh/logo/share.eu",
+      "probe": {
+        "status": "real",
+        "reason": "mcp_json_rpc",
+        "httpStatus": 200
+      }
+    },
+    {
       "domain": "shop.app",
       "name": "Shop",
       "mcpUrl": "https://shop.app/mcp",
@@ -11268,23 +11781,6 @@
       }
     },
     {
-      "domain": "shoppingcontent.googleapis.com",
-      "name": "shoppingcontent.googleapis.com",
-      "mcpUrl": "https://shoppingcontent.googleapis.com/mcp",
-      "transport": "streamable-http",
-      "authKind": "none",
-      "scopesHint": [],
-      "credentialFacts": [],
-      "tier": "verified",
-      "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/shoppingcontent.googleapis.com",
-      "probe": {
-        "status": "real",
-        "reason": "mcp_json_rpc",
-        "httpStatus": 200
-      }
-    },
-    {
       "domain": "shortcut.com",
       "name": "shortcut.com",
       "mcpUrl": "https://mcp.shortcut.com/mcp",
@@ -11311,7 +11807,7 @@
     },
     {
       "domain": "shutterstock.com",
-      "name": "Shutterstock API Explorer",
+      "name": "Shutterstock",
       "mcpUrl": "https://www.shutterstock.com/gciq/mcp",
       "transport": "streamable-http",
       "authKind": "none",
@@ -11328,7 +11824,7 @@
     },
     {
       "domain": "sider.ai",
-      "name": "Sider Recorder & Transcriber",
+      "name": "Sider Scholar",
       "mcpUrl": "https://knowledge-graph.chatgptapps.sider.ai/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -11387,6 +11883,31 @@
       "tier": "verified",
       "provenance": "detected",
       "logoSourceUrl": "https://integrations.sh/logo/signnow.com",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
+      "domain": "signoz.io",
+      "name": "signoz.io",
+      "mcpUrl": "https://mcp.us.signoz.cloud/mcp",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "signoz_mcp_oauth",
+          "type": "oauth2",
+          "generateUrl": null,
+          "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoSourceUrl": "https://integrations.sh/logo/signoz.io",
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -11510,6 +12031,23 @@
       }
     },
     {
+      "domain": "skywatch.ai",
+      "name": "SkyWatch.ai",
+      "mcpUrl": "https://renters-mcp.skywatch.ai/mcp",
+      "transport": "streamable-http",
+      "authKind": "none",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "community",
+      "provenance": "discovered",
+      "logoSourceUrl": "https://integrations.sh/logo/skywatch.ai",
+      "probe": {
+        "status": "real",
+        "reason": "mcp_json_rpc",
+        "httpStatus": 200
+      }
+    },
+    {
       "domain": "skywatch.co",
       "name": "SkyWatch",
       "mcpUrl": "https://api.skywatch.co/mcp",
@@ -11529,21 +12067,51 @@
     {
       "domain": "slack.com",
       "name": "Slack",
+      "category": "communication",
+      "featured": true,
+      "official": true,
       "mcpUrl": "https://mcp.slack.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
-      "scopesHint": [],
+      "scopesHint": [
+        "search:read.public",
+        "search:read.private",
+        "search:read.mpim",
+        "search:read.im",
+        "search:read.files",
+        "search:read.users",
+        "chat:write",
+        "channels:history",
+        "groups:history",
+        "mpim:history",
+        "im:history",
+        "canvases:read",
+        "canvases:write",
+        "users:read",
+        "users:read.email",
+        "reactions:write",
+        "reactions:read",
+        "emoji:read",
+        "files:read",
+        "channels:write",
+        "groups:write",
+        "im:write",
+        "mpim:write",
+        "channels:read",
+        "groups:read",
+        "mpim:read"
+      ],
       "credentialFacts": [
         {
-          "id": "slack_oauth_app",
+          "id": "slack_oauth_token",
           "type": "oauth2",
-          "generateUrl": "https://api.slack.com/apps",
-          "setup": "Create an app in [Your Apps](https://api.slack.com/apps), configure the scopes your integration needs under OAuth & Permissions, then install the app to a workspace or Enterprise org to obtain Slack access tokens. For Slack's standard install flow, follow [Installing with OAuth](https://api.slack.com/authentication/oauth-v2); the authorize URL is `https://slack.com/oauth/v2/authorize` and the app's `client_id` comes from your app settings.",
+          "generateUrl": "https://api.slack.com/apps?new_app=1&manifest_json=%7B%22display_information%22%3A%7B%22name%22%3A%22Slack%20MCP%20client%22%7D%2C%22oauth_config%22%3A%7B%22scopes%22%3A%7B%22user%22%3A%5B%22search%3Aread.public%22%2C%22search%3Aread.private%22%2C%22search%3Aread.mpim%22%2C%22search%3Aread.im%22%2C%22search%3Aread.files%22%2C%22search%3Aread.users%22%2C%22chat%3Awrite%22%2C%22channels%3Ahistory%22%2C%22groups%3Ahistory%22%2C%22mpim%3Ahistory%22%2C%22im%3Ahistory%22%2C%22canvases%3Aread%22%2C%22canvases%3Awrite%22%2C%22users%3Aread%22%2C%22users%3Aread.email%22%2C%22reactions%3Awrite%22%2C%22reactions%3Aread%22%2C%22emoji%3Aread%22%2C%22files%3Aread%22%2C%22channels%3Awrite%22%2C%22groups%3Awrite%22%2C%22im%3Awrite%22%2C%22mpim%3Awrite%22%2C%22channels%3Aread%22%2C%22groups%3Aread%22%2C%22mpim%3Aread%22%5D%7D%7D%2C%22settings%22%3A%7B%22org_deploy_enabled%22%3Afalse%2C%22socket_mode_enabled%22%3Afalse%2C%22token_rotation_enabled%22%3Afalse%2C%22is_mcp_enabled%22%3Atrue%7D%7D",
+          "setup": "## OAuth 2.0 — pre-registered app required\nThis server does not support automatic client registration (no DCR or CIMD), so the MCP client cannot register itself. Create an OAuth app in the provider's developer settings, allow-list your MCP client's OAuth callback URL as a redirect URL, and give the client that app's client ID and secret. Then connect and approve access in the browser.\n\nThe Slack app must also have **Slack MCP server access** enabled (`settings.is_mcp_enabled: true` in the app manifest) — Slack rejects tokens from apps without it, and clients typically surface that as a generic connection failure.\n\nFastest path: [create a pre-configured Slack app](https://api.slack.com/apps?new_app=1&manifest_json=%7B%22display_information%22%3A%7B%22name%22%3A%22Slack%20MCP%20client%22%7D%2C%22oauth_config%22%3A%7B%22scopes%22%3A%7B%22user%22%3A%5B%22search%3Aread.public%22%2C%22search%3Aread.private%22%2C%22search%3Aread.mpim%22%2C%22search%3Aread.im%22%2C%22search%3Aread.files%22%2C%22search%3Aread.users%22%2C%22chat%3Awrite%22%2C%22channels%3Ahistory%22%2C%22groups%3Ahistory%22%2C%22mpim%3Ahistory%22%2C%22im%3Ahistory%22%2C%22canvases%3Aread%22%2C%22canvases%3Awrite%22%2C%22users%3Aread%22%2C%22users%3Aread.email%22%2C%22reactions%3Awrite%22%2C%22reactions%3Aread%22%2C%22emoji%3Aread%22%2C%22files%3Aread%22%2C%22channels%3Awrite%22%2C%22groups%3Awrite%22%2C%22im%3Awrite%22%2C%22mpim%3Awrite%22%2C%22channels%3Aread%22%2C%22groups%3Aread%22%2C%22mpim%3Aread%22%5D%7D%7D%2C%22settings%22%3A%7B%22org_deploy_enabled%22%3Afalse%2C%22socket_mode_enabled%22%3Afalse%2C%22token_rotation_enabled%22%3Afalse%2C%22is_mcp_enabled%22%3Atrue%7D%7D) — the manifest pre-fills the MCP flag and all `search:read.*`, history, and write scopes; you add your client's callback URL under **OAuth & Permissions** after creation, then copy the client ID and secret from **Basic Information**.",
           "fields": null
         }
       ],
-      "tier": "community",
-      "provenance": "discovered",
+      "tier": "verified",
+      "provenance": "official:docs.slack.dev/ai/slack-mcp-server",
       "logoSourceUrl": "https://integrations.sh/logo/slack.com",
       "probe": {
         "status": "real",
@@ -11612,7 +12180,7 @@
     },
     {
       "domain": "sonicapply.com",
-      "name": "U.S. Secret Service Careers",
+      "name": "SonicJobs",
       "mcpUrl": "https://gptapp.sonicapply.com/mcp",
       "transport": "streamable-http",
       "authKind": "none",
@@ -11848,7 +12416,7 @@
     },
     {
       "domain": "squareup.com",
-      "name": "Square Connect API",
+      "name": "Cash App",
       "mcpUrl": "https://connect.squareup.com/v2/mcp/cash-app",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -12081,7 +12649,11 @@
     },
     {
       "domain": "stripe.com",
-      "name": "stripe",
+      "name": "Stripe",
+      "description": "Look up customers, subscriptions, invoices, and payments.",
+      "category": "finance",
+      "featured": true,
+      "official": true,
       "mcpUrl": "https://mcp.stripe.com/",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -12091,14 +12663,14 @@
           "id": "stripe_mcp_oauth",
           "type": "oauth2",
           "generateUrl": null,
-          "setup": "Configure your MCP client to connect to `https://mcp.stripe.com`. Per Stripe’s [MCP docs](https://docs.stripe.com/mcp), the server uses OAuth to connect MCP clients according to the MCP spec; the MCP client handles the OAuth flow and the user approves access in the browser. After installation, you can manage MCP client sessions in your Stripe Dashboard settings.",
+          "setup": "Use an MCP client that supports OAuth and add the Stripe MCP server URL `https://mcp.stripe.com` (for example from the [Stripe MCP docs](https://docs.stripe.com/mcp)). The client handles the OAuth flow; you sign in to Stripe in the browser and approve access. After installing, MCP client sessions can be managed in Stripe Dashboard settings.",
           "fields": null
         },
         {
           "id": "stripe_api_key",
           "type": "api_key",
           "generateUrl": "https://dashboard.stripe.com/test/apikeys",
-          "setup": "Create or sign in to your Stripe account, then open the [API keys page](https://dashboard.stripe.com/test/apikeys) in the Developers Dashboard to create, reveal, rotate, or delete keys. Stripe documents account-level secret keys (`sk_...`), restricted keys (`rk_...`), publishable keys (`pk_...`), and organization keys (`sk_org_...`) on the [API keys guide](https://docs.stripe.com/keys). For server-side integrations, use a restricted or secret key; for Connect requests on behalf of a connected account, also send the `Stripe-Account` header when needed.",
+          "setup": "Create or reveal a key in the [API keys page](https://dashboard.stripe.com/test/apikeys) of the Stripe Dashboard. Stripe issues publishable keys (`pk_...`), restricted keys (`rk_...`), secret keys (`sk_...`), and organization keys (`sk_org_...`). For server-side integrations, Stripe recommends creating a restricted API key or using a secret key; for browser/mobile publishable operations use a publishable key where supported.",
           "fields": null
         }
       ],
@@ -12239,7 +12811,11 @@
     },
     {
       "domain": "supabase.com",
-      "name": "supabase",
+      "name": "Supabase",
+      "description": "Projects, tables, and SQL for your Supabase organisation.",
+      "category": "developer-tools",
+      "featured": true,
+      "official": true,
       "mcpUrl": "https://mcp.supabase.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -12780,6 +13356,31 @@
       }
     },
     {
+      "domain": "trufflejournal.com",
+      "name": "Truffle Journal",
+      "mcpUrl": "https://mcp.trufflejournal.com/api/v1/mcp",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "truffle_oauth",
+          "type": "oauth2",
+          "generateUrl": "https://www.trufflejournal.com/setup",
+          "setup": "Create a Truffle Journal account in the iPhone app via [Setup Guide](https://www.trufflejournal.com/setup), then in ChatGPT Developer mode create an app pointing at `https://mcp.trufflejournal.com/api/v1/mcp` with Authentication set to `OAuth`. After app creation, ChatGPT redirects you to a Truffle Journal login page; sign in with the same email and password you created for your Truffle Journal account. The docs say to leave OAuth client ID and secret blank in ChatGPT.",
+          "fields": null
+        }
+      ],
+      "tier": "community",
+      "provenance": "discovered",
+      "logoSourceUrl": "https://integrations.sh/logo/trufflejournal.com",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
       "domain": "trustrebound.com",
       "name": "Rebound Scam Assistant",
       "mcpUrl": "https://trustrebound.com/api/mcp",
@@ -12974,7 +13575,7 @@
     },
     {
       "domain": "udemy.com",
-      "name": "Udemy",
+      "name": "Udemy Business",
       "mcpUrl": "https://api.udemy.com/mcp-chatgpt/2025-10",
       "transport": "streamable-http",
       "authKind": "none",
@@ -13291,7 +13892,11 @@
     },
     {
       "domain": "vercel.com",
-      "name": "vercel",
+      "name": "Vercel",
+      "description": "Deployments, projects, and logs.",
+      "category": "developer-tools",
+      "featured": true,
+      "official": true,
       "mcpUrl": "https://mcp.vercel.com/",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -13316,7 +13921,7 @@
     },
     {
       "domain": "viator.com",
-      "name": "Viator API Documentation &amp; Specification – Merchant Partners",
+      "name": "Viator",
       "mcpUrl": "https://exp-app-mcp.prod.ep.viator.com/mcp",
       "transport": "streamable-http",
       "authKind": "none",
@@ -13459,7 +14064,7 @@
     },
     {
       "domain": "walmart.com",
-      "name": "walmart.com – price",
+      "name": "Walmart",
       "mcpUrl": "https://bixby.prod.walmart.com/v1/client/oai/tenant/walmart-us/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -13526,7 +14131,10 @@
     },
     {
       "domain": "webflow.com",
-      "name": "Lucidtech API",
+      "name": "Webflow",
+      "description": "Sites, pages, and CMS collections.",
+      "category": "web",
+      "official": true,
       "mcpUrl": "https://mcp.webflow.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -13602,6 +14210,31 @@
       "tier": "verified",
       "provenance": "detected",
       "logoSourceUrl": "https://integrations.sh/logo/whimsical.com",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
+      "domain": "windsor.ai",
+      "name": "Windsor.ai",
+      "mcpUrl": "https://mcp.windsor.ai/",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "windsor_mcp_oauth",
+          "type": "oauth2",
+          "generateUrl": null,
+          "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server accepts a Client ID Metadata Document (CIMD), so the client authenticates with its own hosted URL as the `client_id` — nothing to register.",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoSourceUrl": "https://integrations.sh/logo/windsor.ai",
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -13701,6 +14334,38 @@
       }
     },
     {
+      "domain": "x.com",
+      "name": "x.com",
+      "mcpUrl": "https://api.x.com/mcp",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "x_bearer_token",
+          "type": "bearer",
+          "generateUrl": "https://developer.x.com",
+          "setup": "Create an app in the [X Developer Portal](https://developer.x.com) / [console](https://console.x.com), then copy the app-only Bearer token from the app’s **Keys and tokens** page. The docs say this is used for app-only requests and for the direct-header route to the hosted X MCP.",
+          "fields": null
+        },
+        {
+          "id": "x_oauth2_app",
+          "type": "oauth2",
+          "generateUrl": "https://developer.x.com",
+          "setup": "Create an app with OAuth 2.0 enabled in the [X Developer Portal](https://developer.x.com) / [console](https://console.x.com). Register `http://localhost:8080/callback` as a redirect URI (or another redirect URI if your client supports it), then copy the app’s `CLIENT_ID` and `CLIENT_SECRET` from **Keys and tokens**. Use them to start the browser-based OAuth 2.0 login; tools like `xurl auth oauth2` and `xurl mcp` handle the user consent flow and token refresh for you.",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoSourceUrl": "https://integrations.sh/logo/x.com",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
       "domain": "yoshi.ai",
       "name": "Yoshi",
       "mcpUrl": "https://agents.yoshi.ai/mcp",
@@ -13751,7 +14416,10 @@
     },
     {
       "domain": "zapier.com",
-      "name": "zapier.com – nla",
+      "name": "Zapier",
+      "description": "Run actions across the apps connected to your Zapier account.",
+      "category": "automation",
+      "official": true,
       "mcpUrl": "https://mcp.zapier.com/api/v1/connect",
       "transport": "streamable-http",
       "authKind": "oauth2",
@@ -13834,6 +14502,31 @@
       }
     },
     {
+      "domain": "zoom.com",
+      "name": "Zoom for Claude",
+      "mcpUrl": "https://mcp.zoom.us/mcp/zoom/streamable",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "zoom_oauth_app",
+          "type": "oauth2",
+          "generateUrl": "https://marketplace.zoom.us/",
+          "setup": "In the [Zoom App Marketplace](https://marketplace.zoom.us/), click **Develop** > **Build App**, choose **General app**, and create the app. On **Basic Info**, Zoom generates a development `client_id` and `client_secret`; configure your `OAuth redirect URL` and allow lists there. Use these credentials with the OAuth endpoints at `https://zoom.us/oauth/authorize` and `https://zoom.us/oauth/token`.",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoSourceUrl": "https://integrations.sh/logo/zoom.com",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
       "domain": "zumba.com",
       "name": "Zumba",
       "mcpUrl": "https://mcp.zumba.com/mcp",
@@ -13853,7 +14546,127 @@
   ],
   "skipped": [
     {
+      "domain": "12andus.com",
+      "mcpUrl": null,
+      "reason": "credential_query_parameter"
+    },
+    {
+      "domain": "1800flowers.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "abema-tv.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "accessoticketing.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "accor.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "agiflow.io",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "agentichoteldistribution.com",
+      "mcpUrl": null,
+      "reason": "credential_query_parameter"
+    },
+    {
+      "domain": "agenta.ai",
+      "mcpUrl": null,
+      "reason": "opaque_path_segment"
+    },
+    {
+      "domain": "agentsitecms.com",
+      "mcpUrl": null,
+      "reason": "credential_query_parameter"
+    },
+    {
+      "domain": "agilitycms.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "adobe.io",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "adobe.io",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "adobe.io",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "adobe.io",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "adobe.io",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "12go.asia",
+      "mcpUrl": null,
+      "reason": "credential_query_parameter"
+    },
+    {
+      "domain": "airport-pickups-london.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "airwallex.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "airwallex.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "algolia.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "alpic.live",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "americanexpress.com",
+      "mcpUrl": null,
+      "reason": "auth_unknown"
+    },
+    {
+      "domain": "altmatter.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "angi.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "api.aws",
       "mcpUrl": null,
       "reason": "auth_unknown"
     },
@@ -13863,14 +14676,24 @@
       "reason": "auth_unknown"
     },
     {
+      "domain": "apddev.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "apify.com",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
     },
     {
-      "domain": "apitoolkit.io",
+      "domain": "api7.ai",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "applyboard.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "apple.com",
@@ -13878,12 +14701,32 @@
       "reason": "auth_unknown"
     },
     {
+      "domain": "argorand.io",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "artue.io",
       "mcpUrl": null,
       "reason": "auth_unknown"
     },
     {
-      "domain": "audible.com",
+      "domain": "att.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "atlys.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "athome.lu",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "autodesk.com",
       "mcpUrl": null,
       "reason": "auth_unknown"
     },
@@ -13893,14 +14736,69 @@
       "reason": "auth_unknown"
     },
     {
+      "domain": "audible.com",
+      "mcpUrl": null,
+      "reason": "auth_unknown"
+    },
+    {
+      "domain": "autoscout24.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "authzed.com",
       "mcpUrl": null,
       "reason": "auth_unknown"
     },
     {
-      "domain": "autodesk.com",
+      "domain": "authzed.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "avalara.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "avalara.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "autotrader.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "awesomize.ai",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "awesomize.ai",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "azurecontainerapps.io",
       "mcpUrl": null,
       "reason": "auth_unknown"
+    },
+    {
+      "domain": "base44.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "benevity.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "bestsolo401k.app",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "bigdata.com",
@@ -13908,9 +14806,29 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
+      "domain": "bigdatacloud.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "blazesql.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "blabla.tech",
+      "mcpUrl": null,
+      "reason": "credential_query_parameter"
+    },
+    {
       "domain": "blackbaud.com",
       "mcpUrl": null,
       "reason": "auth_unknown"
+    },
+    {
+      "domain": "boxoffice.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
     },
     {
       "domain": "browser-use.com",
@@ -13918,14 +14836,34 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
+      "domain": "browser-use.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "bridebook.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "brightdata.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
       "domain": "browserbase.com",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
     },
     {
-      "domain": "buser.com.br",
+      "domain": "bump.sh",
       "mcpUrl": null,
-      "reason": "auth_unknown"
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "bump.sh",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
     },
     {
       "domain": "bygravity.com",
@@ -13933,9 +14871,104 @@
       "reason": "auth_unknown"
     },
     {
+      "domain": "buser.com.br",
+      "mcpUrl": null,
+      "reason": "auth_unknown"
+    },
+    {
+      "domain": "calorieappguide.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "candidhealth.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "candidhealth.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "caloriegptapp.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "carbonarc.ai",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "cardchain.ai",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "carsguide.com.au",
+      "mcpUrl": null,
+      "reason": "opaque_path_segment"
+    },
+    {
       "domain": "carta.com",
       "mcpUrl": null,
       "reason": "auth_unknown"
+    },
+    {
+      "domain": "cashbackhive.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "cdata.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "checkatrade.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "chargebee.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "chargebee.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "chargebee.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "chargebee.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "chatgptmcpzip.replit.app",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "cheat-database.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "chronograph.pe",
+      "mcpUrl": null,
+      "reason": "auth_unknown"
+    },
+    {
+      "domain": "checkr.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
     },
     {
       "domain": "chroma.com",
@@ -13943,9 +14976,14 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
-      "domain": "chronograph.pe",
+      "domain": "chronosphere.io",
       "mcpUrl": null,
-      "reason": "auth_unknown"
+      "reason": "templated_url"
+    },
+    {
+      "domain": "chronosphere.io",
+      "mcpUrl": null,
+      "reason": "missing_url"
     },
     {
       "domain": "clarity.ai",
@@ -13958,9 +14996,34 @@
       "reason": "auth_unknown"
     },
     {
+      "domain": "clidrive.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "cloudinary.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "coches.net",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "coches.net",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
       "domain": "collegenation.com",
       "mcpUrl": null,
       "reason": "auth_unknown"
+    },
+    {
+      "domain": "cmcp.shop",
+      "mcpUrl": null,
+      "reason": "opaque_path_segment"
     },
     {
       "domain": "columnapi.com",
@@ -13968,14 +15031,34 @@
       "reason": "auth_unknown"
     },
     {
+      "domain": "cometchat.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "composio.dev",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "colossyan.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "confident-ai.com",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
     },
     {
-      "domain": "context.dev",
+      "domain": "contentful.com",
       "mcpUrl": null,
-      "reason": "api_key_metadata_unactionable"
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "context7.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
     },
     {
       "domain": "corrently.de",
@@ -13985,7 +15068,32 @@
     {
       "domain": "cosmicjs.com",
       "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "cosmicjs.com",
+      "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "cortenoi-mcp-299405366082.europe-west1.run.app",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "cortenoi-mcp-drmpaogcjq-ew.a.run.app",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "context.dev",
+      "mcpUrl": null,
+      "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "cottages.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "courier.com",
@@ -13993,9 +15101,74 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
+      "domain": "cowboy-model-finder-mcp-app-8b3709a7529a.herokuapp.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "craime.se",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "crbonfree-mcp-server.vercel.app",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "createstate.ai",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "cruisebound.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "crowdstrike.com",
+      "mcpUrl": null,
+      "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "csnglobal.net",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "cvpop-mcp-server.fly.dev",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "daft.ie",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "decolar.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "deel.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "deepgram.com",
       "mcpUrl": null,
       "reason": "auth_unknown"
+    },
+    {
+      "domain": "deepgram.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "deepgram.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
     },
     {
       "domain": "devcycle.com",
@@ -14008,9 +15181,44 @@
       "reason": "auth_unknown"
     },
     {
+      "domain": "dewa.gov.ae",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "docusign.com",
       "mcpUrl": null,
+      "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "domotz.app",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "doordash.com",
+      "mcpUrl": null,
       "reason": "auth_unknown"
+    },
+    {
+      "domain": "dremio.cloud",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "dremio.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "dremio.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "dropbox.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
     },
     {
       "domain": "dub.co",
@@ -14018,9 +15226,29 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
+      "domain": "dub.co",
+      "mcpUrl": null,
+      "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "eodhd.com",
+      "mcpUrl": null,
+      "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "every.ai",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
       "domain": "explorium.ai",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "experteer.com",
+      "mcpUrl": null,
+      "reason": "opaque_path_segment"
     },
     {
       "domain": "factset.io",
@@ -14028,14 +15256,64 @@
       "reason": "auth_unknown"
     },
     {
-      "domain": "fireflies.ai",
+      "domain": "fastmcp.cloud",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "fastmcp.cloud",
       "mcpUrl": null,
       "reason": "auth_unknown"
     },
     {
-      "domain": "freshdesk.com",
+      "domain": "fintual.com",
       "mcpUrl": null,
-      "reason": "api_key_metadata_unactionable"
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "fiscal.ai",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "flix.tech",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "formulagenius.co",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "framagit.org",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "fotocasa.es",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "frontegg.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "fullstackgtm.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "fullstackgtm.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "fulfilling-productivity.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "galileo.ai",
@@ -14043,14 +15321,69 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
-      "domain": "gamma.app",
+      "domain": "garchi.co.uk",
       "mcpUrl": null,
-      "reason": "auth_unknown"
+      "reason": "transport_not_streamable_http"
     },
     {
-      "domain": "granola.ai",
+      "domain": "genspark.ai",
       "mcpUrl": null,
-      "reason": "auth_unknown"
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "dbt.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "dbt.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "getyourguide.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "zep.ai",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "zep.ai",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "glama.ai",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "gitmcp.io",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "gojinko.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "gogs.io",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "goupword.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "goupword.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "greptile.com",
@@ -14063,9 +15396,39 @@
       "reason": "auth_unknown"
     },
     {
+      "domain": "gumtree.com.au",
+      "mcpUrl": null,
+      "reason": "opaque_path_segment"
+    },
+    {
+      "domain": "gumloop.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "gteng.co",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "headout.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "hellosign.com",
       "mcpUrl": null,
       "reason": "auth_unknown"
+    },
+    {
+      "domain": "hemnet.workers.dev",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "hookdeck.com",
+      "mcpUrl": null,
+      "reason": "non_http_url"
     },
     {
       "domain": "hostinger.com",
@@ -14073,17 +15436,17 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
-      "domain": "hubspot.com",
+      "domain": "hot100.ai",
       "mcpUrl": null,
-      "reason": "auth_unknown"
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "houstonian.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "hyperping.com",
-      "mcpUrl": null,
-      "reason": "api_key_metadata_unactionable"
-    },
-    {
-      "domain": "ibm.com",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
     },
@@ -14093,9 +15456,34 @@
       "reason": "auth_unknown"
     },
     {
-      "domain": "indeed.com",
+      "domain": "ibm.com",
       "mcpUrl": null,
-      "reason": "auth_unknown"
+      "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "hygraph.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "huggingface.co",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "huggingface.co",
+      "mcpUrl": null,
+      "reason": "credential_query_parameter"
+    },
+    {
+      "domain": "immobilienscout24.de",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "infoseek.ai",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "instacart.com",
@@ -14103,14 +15491,24 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
+      "domain": "insurify.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "internshala.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "intercom.io",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
     },
     {
-      "domain": "intercom.io",
+      "domain": "intsig.net",
       "mcpUrl": null,
-      "reason": "auth_unknown"
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "ipinfo.io",
@@ -14118,14 +15516,79 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
-      "domain": "jina.ai",
+      "domain": "invideo.io",
       "mcpUrl": null,
-      "reason": "api_key_metadata_unactionable"
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "invideo.io",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "ixigo.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "italki.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "jitty.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "jobkorea.co.kr",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "jobtome.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "jn4hi3zv94.execute-api.us-east-1.amazonaws.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "jobright.ai",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "jooble.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "jotform.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
     },
     {
       "domain": "kakao.com",
       "mcpUrl": null,
       "reason": "auth_unknown"
+    },
+    {
+      "domain": "kakao.golf",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "kensho.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "kbb.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "kartikay-dhar.workers.dev",
@@ -14138,14 +15601,59 @@
       "reason": "auth_unknown"
     },
     {
+      "domain": "khanacademy.org",
+      "mcpUrl": null,
+      "reason": "opaque_path_segment"
+    },
+    {
+      "domain": "kindora.co",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "kickresume.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "jina.ai",
+      "mcpUrl": null,
+      "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "kit.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
       "domain": "kiwi.com",
       "mcpUrl": null,
       "reason": "auth_unknown"
     },
     {
-      "domain": "kynapp.ca",
+      "domain": "klaviyo.com",
       "mcpUrl": null,
-      "reason": "auth_unknown"
+      "reason": "credential_query_parameter"
+    },
+    {
+      "domain": "konghq.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "kredit.ae",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "lambus.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "kubera.com",
+      "mcpUrl": null,
+      "reason": "api_key_metadata_unactionable"
     },
     {
       "domain": "langfuse.com",
@@ -14153,9 +15661,64 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
+      "domain": "kynapp.ca",
+      "mcpUrl": null,
+      "reason": "auth_unknown"
+    },
+    {
+      "domain": "lambus.ai",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "lckqhyftgouenpercpjk.supabase.co",
+      "mcpUrl": null,
+      "reason": "auth_unknown"
+    },
+    {
       "domain": "learningcommons.org",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "lefigaro.fr",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "ldccai.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "ldccai.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "ldccai.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "ldccai.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "ldccai.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "lfmall.co.kr",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "linktr.ee",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "list-manage.com",
@@ -14168,9 +15731,39 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
+      "domain": "littlecaesars.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "listoai.co",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "listoai.co",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "lobehub.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "lobehub.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "lmnr.ai",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "loft.com.br",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "logto.io",
@@ -14178,9 +15771,79 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
+      "domain": "lumeimobiliaria.com.br",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "lunarcrush.com",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "luxauto.lu",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "maersk.io",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "mainfunc.ai",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "makegov.com",
+      "mcpUrl": null,
+      "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "makemytrip.com",
+      "mcpUrl": null,
+      "reason": "credential_query_parameter"
+    },
+    {
+      "domain": "mcp-hnh4eph34q-uc.a.run.app",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "mcp.adobeaemcloud.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "mcp.adobeaemcloud.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "mcp.adobeaemcloud.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "mcp.adobeaemcloud.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "mcp.adobeaemcloud.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "mediaalpha.com",
+      "mcpUrl": null,
+      "reason": "opaque_path_segment"
+    },
+    {
+      "domain": "meetup.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "melon.com",
@@ -14188,9 +15851,34 @@
       "reason": "auth_unknown"
     },
     {
+      "domain": "merano.eu",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "mercuryinsurance.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "mermaid.ai",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "mermaid.ai",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "messagebird.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "meterplan.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
     },
     {
       "domain": "middesk.com",
@@ -14198,9 +15886,29 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
-      "domain": "miro.com",
+      "domain": "microverselabs.com",
       "mcpUrl": null,
-      "reason": "auth_unknown"
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "midify.app",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "mintmcp.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "mintmcp.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "mobile.de",
+      "mcpUrl": null,
+      "reason": "credential_query_parameter"
     },
     {
       "domain": "mixedbread.com",
@@ -14208,14 +15916,369 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
-      "domain": "mixpanel.com",
+      "domain": "modal.run",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "mirai.com",
+      "mcpUrl": null,
+      "reason": "credential_query_parameter"
+    },
+    {
+      "domain": "modelcontextprotocol.io",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "modelcontextprotocol.io",
       "mcpUrl": null,
       "reason": "auth_unknown"
+    },
+    {
+      "domain": "modelcontextprotocol.io",
+      "mcpUrl": null,
+      "reason": "auth_unknown"
+    },
+    {
+      "domain": "monitoring.googleapis.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "apitoolkit.io",
+      "mcpUrl": null,
+      "reason": "api_key_metadata_unactionable"
     },
     {
       "domain": "moneysupermarket.com",
       "mcpUrl": null,
       "reason": "auth_unknown"
+    },
+    {
+      "domain": "mycolive.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "natoma.ai",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "neilpatelapi.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "naturalint.com",
+      "mcpUrl": null,
+      "reason": "opaque_path_segment"
+    },
+    {
+      "domain": "netatmo.com",
+      "mcpUrl": null,
+      "reason": "auth_unknown"
+    },
+    {
+      "domain": "nesha.ai",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "noodleseed.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "noodleseed.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "noodleseed.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "noodleseed.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "noodleseed.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "noodleseed.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "noodleseed.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "noodleseed.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "noodleseed.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "nexafin.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "noteithub.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "novu.co",
+      "mcpUrl": null,
+      "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "nutrimindz.ai",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "oakbrook-gpt-api-432296117705.europe-west2.run.app",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "olutely.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "okx.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "omio.ai",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "omnisend.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
     },
     {
       "domain": "onepeloton.com",
@@ -14233,6 +16296,21 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
+      "domain": "optiversal.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "oracle.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "oracle.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
       "domain": "ory.sh",
       "mcpUrl": null,
       "reason": "auth_unknown"
@@ -14241,6 +16319,11 @@
       "domain": "owkin.com",
       "mcpUrl": null,
       "reason": "auth_unknown"
+    },
+    {
+      "domain": "paardplaats.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "pacvue.com",
@@ -14253,14 +16336,54 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
+      "domain": "paddle.com",
+      "mcpUrl": null,
+      "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "palomaparties.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "payone.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "payabli.com",
       "mcpUrl": null,
       "reason": "auth_unknown"
     },
     {
-      "domain": "pitchbook.com",
+      "domain": "petirico.workers.dev",
       "mcpUrl": null,
-      "reason": "auth_unknown"
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "phish.in",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "phish.in",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "petprojectcofounder.ai",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "petprojectcofounder.ai",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "pigment.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
     },
     {
       "domain": "pixelesq.com",
@@ -14268,14 +16391,59 @@
       "reason": "auth_unknown"
     },
     {
+      "domain": "plaid.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "polar.sh",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "plane.so",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
     },
     {
-      "domain": "postman.com",
+      "domain": "port.io",
       "mcpUrl": null,
-      "reason": "auth_unknown"
+      "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "portkey.ai",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "postman.co",
+      "mcpUrl": null,
+      "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "primitive.dev",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "primitive.dev",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "primitive.dev",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "privatemdlabs.com",
+      "mcpUrl": null,
+      "reason": "opaque_path_segment"
+    },
+    {
+      "domain": "producthunt.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "pulumi.com",
@@ -14283,12 +16451,82 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
-      "domain": "reducto.ai",
+      "domain": "pyxl.pro",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "pyxl.pro",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "pumadb.ai",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "qrc-chatgpt-app.vercel.app",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "rabbu.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "ramp.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "ramp.com",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
     },
     {
-      "domain": "render.com",
+      "domain": "ranked.ai",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "rakhys.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "realestateapi.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "realestateapi.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "realtor.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "recorrido.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "recommerce.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "recommerce.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "reducto.ai",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
     },
@@ -14298,14 +16536,64 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
+      "domain": "render.com",
+      "mcpUrl": null,
+      "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "replit-mcp.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "rbictg.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "rbictg.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "replicate.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "researchsolutions.com",
+      "mcpUrl": null,
+      "reason": "auth_unknown"
+    },
+    {
+      "domain": "rifo.co",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "rightmove.co.uk",
+      "mcpUrl": null,
+      "reason": "opaque_path_segment"
+    },
+    {
+      "domain": "rootly.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "rootly.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
       "domain": "saleor.io",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
     },
     {
-      "domain": "scholarxiv.com",
+      "domain": "scalar.com",
       "mcpUrl": null,
-      "reason": "api_key_metadata_unactionable"
+      "reason": "templated_url"
     },
     {
       "domain": "scrapingbee.com",
@@ -14313,9 +16601,109 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
+      "domain": "scispace.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "scrimba.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "scholarxiv.com",
+      "mcpUrl": null,
+      "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "seatgeek.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "securelend.ai",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "semparar.com.br",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "send.co",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "serpapi.com",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "shazam.com",
+      "mcpUrl": null,
+      "reason": "credential_query_parameter"
+    },
+    {
+      "domain": "sider.ai",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "sider.ai",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "sider.ai",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "sider.ai",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "sider.ai",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "sider.ai",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "sigmacomputing.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "sierra.chat",
+      "mcpUrl": null,
+      "reason": "opaque_path_segment"
+    },
+    {
+      "domain": "sierra.chat",
+      "mcpUrl": null,
+      "reason": "opaque_path_segment"
+    },
+    {
+      "domain": "sierra.chat",
+      "mcpUrl": null,
+      "reason": "opaque_path_segment"
+    },
+    {
+      "domain": "simcardo.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "simcardo.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "similarweb.com",
@@ -14323,9 +16711,44 @@
       "reason": "auth_unknown"
     },
     {
-      "domain": "smarty.com",
+      "domain": "skywatch.ai",
       "mcpUrl": null,
-      "reason": "auth_unknown"
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "skillshare.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "skipcalls.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "slevomat.cz",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "sleepcycle.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "slack.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "smartbear.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "smallpdf.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "smtp2go.com",
@@ -14333,14 +16756,44 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
+      "domain": "smarty.com",
+      "mcpUrl": null,
+      "reason": "auth_unknown"
+    },
+    {
+      "domain": "spaceship.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "sonicapply.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "sonicapply.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "speechify.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
       "domain": "splice.com",
       "mcpUrl": null,
       "reason": "auth_unknown"
     },
     {
-      "domain": "storage.googleapis.com",
+      "domain": "spreedly.com",
       "mcpUrl": null,
-      "reason": "auth_unknown"
+      "reason": "missing_url"
+    },
+    {
+      "domain": "squareup.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "storyblok.com",
@@ -14348,9 +16801,59 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
+      "domain": "storage.googleapis.com",
+      "mcpUrl": null,
+      "reason": "auth_unknown"
+    },
+    {
+      "domain": "strapi.io",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "success.co",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "success.co",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "superserve.ai",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "surrealdb.com",
+      "mcpUrl": null,
+      "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "surrealdb.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "swyftfilings.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "symbol.chat",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "systembolaget.se",
+      "mcpUrl": null,
+      "reason": "credential_query_parameter"
+    },
+    {
+      "domain": "tamg.cloud",
+      "mcpUrl": null,
+      "reason": "opaque_path_segment"
     },
     {
       "domain": "targetvalidation.org",
@@ -14361,6 +16864,26 @@
       "domain": "taskrabbit.com",
       "mcpUrl": null,
       "reason": "auth_unknown"
+    },
+    {
+      "domain": "thecompaniesapi.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "thirdbridge.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "thoughtspot.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "thoughtspot.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
     },
     {
       "domain": "tickettailor.ai",
@@ -14383,12 +16906,97 @@
       "reason": "auth_unknown"
     },
     {
+      "domain": "tomba.io",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "tomba.io",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "tourradar.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "toolpipe.ai",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "toolpipe.ai",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "toolpipe.ai",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "tonita.co",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "traktorpool.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "transloadit.com",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
     },
     {
+      "domain": "transloadit.com",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "trademeai.co.nz",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "toolzy.io",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "trashpandaapp.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "travelimpactmodel.googleapis.com",
+      "mcpUrl": null,
+      "reason": "api_key_metadata_unactionable"
+    },
+    {
+      "domain": "travexpserver-1-5480123242.us-central1.run.app",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "trustoo.nl",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "trychannel3.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "trymalcolm.com",
+      "mcpUrl": null,
+      "reason": "opaque_path_segment"
+    },
+    {
+      "domain": "trymalcolm.com",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
     },
@@ -14398,9 +17006,39 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
-      "domain": "unified.to",
+      "domain": "trykopi.ai",
       "mcpUrl": null,
-      "reason": "api_key_metadata_unactionable"
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "udemy.com",
+      "mcpUrl": null,
+      "reason": "auth_unknown"
+    },
+    {
+      "domain": "unthread.io",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "unthread.io",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "upwork.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "vantage.sh",
+      "mcpUrl": null,
+      "reason": "missing_url"
+    },
+    {
+      "domain": "vectorize.io",
+      "mcpUrl": null,
+      "reason": "templated_url"
     },
     {
       "domain": "vendr.com",
@@ -14408,9 +17046,44 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
+      "domain": "venturu.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "visier.com",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
       "domain": "virtuoso.ai",
       "mcpUrl": null,
       "reason": "auth_unknown"
+    },
+    {
+      "domain": "visualping.io",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "von-poll.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "waldo.fyi",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "waldo.fyi",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "unified.to",
+      "mcpUrl": null,
+      "reason": "api_key_metadata_unactionable"
     },
     {
       "domain": "wandb.ai",
@@ -14418,14 +17091,54 @@
       "reason": "api_key_metadata_unactionable"
     },
     {
+      "domain": "webex.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "webex.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "webex.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "wesur.fr",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "wednesday.app",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "wikiloc.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "windmill.dev",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
     },
     {
-      "domain": "windsor.ai",
+      "domain": "wyndhamhotels.com",
       "mcpUrl": null,
       "reason": "auth_unknown"
+    },
+    {
+      "domain": "x.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "yango.com",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
     },
     {
       "domain": "yepcode.io",
@@ -14433,14 +17146,39 @@
       "reason": "auth_unknown"
     },
     {
+      "domain": "zohomcp.ca",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
       "domain": "zohomcp.ae",
       "mcpUrl": null,
       "reason": "api_key_metadata_unactionable"
     },
     {
-      "domain": "zoominfo.com",
+      "domain": "zumper.com",
       "mcpUrl": null,
-      "reason": "auth_unknown"
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "zuplo.work",
+      "mcpUrl": null,
+      "reason": "templated_url"
+    },
+    {
+      "domain": "zoopla.co.uk",
+      "mcpUrl": null,
+      "reason": "transport_not_streamable_http"
+    },
+    {
+      "domain": "betterstack.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
+    },
+    {
+      "domain": "resend.com",
+      "mcpUrl": null,
+      "reason": "duplicate_domain_name"
     },
     {
       "domain": "brexapis.com",
@@ -14453,22 +17191,12 @@
       "reason": "duplicate_endpoint"
     },
     {
-      "domain": "domotz.app",
-      "mcpUrl": null,
-      "reason": "duplicate_endpoint"
-    },
-    {
       "domain": "driftless.icu",
       "mcpUrl": null,
       "reason": "duplicate_endpoint"
     },
     {
       "domain": "fugle.ai",
-      "mcpUrl": null,
-      "reason": "duplicate_endpoint"
-    },
-    {
-      "domain": "jira.com",
       "mcpUrl": null,
       "reason": "duplicate_endpoint"
     },
@@ -14493,12 +17221,12 @@
       "reason": "duplicate_endpoint"
     },
     {
-      "domain": "notion.so",
+      "domain": "notiondevs.notion.site",
       "mcpUrl": null,
       "reason": "duplicate_endpoint"
     },
     {
-      "domain": "notiondevs.notion.site",
+      "domain": "notion.so",
       "mcpUrl": null,
       "reason": "duplicate_endpoint"
     },
@@ -14519,11 +17247,6 @@
     },
     {
       "domain": "replit.com",
-      "mcpUrl": null,
-      "reason": "duplicate_endpoint"
-    },
-    {
-      "domain": "skywatch.ai",
       "mcpUrl": null,
       "reason": "duplicate_endpoint"
     },
@@ -14558,9 +17281,9 @@
       "reason": "probe_http_status"
     },
     {
-      "domain": "airwallex.com",
+      "domain": "ai-stats.phaseo.app",
       "mcpUrl": null,
-      "reason": "probe_http_status"
+      "reason": "probe_http_not_found"
     },
     {
       "domain": "akqa-emea-starbucks-chatgpt-app.vercel.app",
@@ -14568,29 +17291,19 @@
       "reason": "probe_http_status"
     },
     {
+      "domain": "all-ten-chat-gpt-app.replit.app",
+      "mcpUrl": null,
+      "reason": "probe_http_not_found"
+    },
+    {
       "domain": "apartmentlist.io",
       "mcpUrl": null,
       "reason": "probe_http_status"
     },
     {
-      "domain": "api-and-you.com",
-      "mcpUrl": null,
-      "reason": "probe_connection_error"
-    },
-    {
       "domain": "bandsintown.com",
       "mcpUrl": null,
       "reason": "probe_http_status"
-    },
-    {
-      "domain": "barcelo-mcp.com",
-      "mcpUrl": null,
-      "reason": "probe_timeout"
-    },
-    {
-      "domain": "bestcolleges.com",
-      "mcpUrl": null,
-      "reason": "probe_timeout"
     },
     {
       "domain": "bitdj.com",
@@ -14618,9 +17331,19 @@
       "reason": "probe_http_status"
     },
     {
+      "domain": "booking.com",
+      "mcpUrl": null,
+      "reason": "probe_http_status"
+    },
+    {
       "domain": "boxoffice.com",
       "mcpUrl": null,
       "reason": "probe_http_status"
+    },
+    {
+      "domain": "boyner.com.tr",
+      "mcpUrl": null,
+      "reason": "probe_http_not_found"
     },
     {
       "domain": "braintrust.dev",
@@ -14630,7 +17353,7 @@
     {
       "domain": "builder.io",
       "mcpUrl": null,
-      "reason": "probe_http_status"
+      "reason": "probe_http_not_found"
     },
     {
       "domain": "busbud-int.com",
@@ -14650,7 +17373,7 @@
     {
       "domain": "carmax.com",
       "mcpUrl": null,
-      "reason": "probe_http_status"
+      "reason": "probe_timeout"
     },
     {
       "domain": "carrefour.fr",
@@ -14698,14 +17421,19 @@
       "reason": "probe_http_status"
     },
     {
+      "domain": "creditkarma.com",
+      "mcpUrl": null,
+      "reason": "probe_html_response"
+    },
+    {
       "domain": "ctmers.io",
       "mcpUrl": null,
       "reason": "probe_http_status"
     },
     {
-      "domain": "directbooker.ai",
+      "domain": "domotz.app",
       "mcpUrl": null,
-      "reason": "probe_http_status"
+      "reason": "probe_connection_error"
     },
     {
       "domain": "dowjones.io",
@@ -14726,6 +17454,11 @@
       "domain": "edreams.com",
       "mcpUrl": null,
       "reason": "probe_http_status"
+    },
+    {
+      "domain": "email-creation-mcp-node-production.up.railway.app",
+      "mcpUrl": null,
+      "reason": "probe_http_not_found"
     },
     {
       "domain": "employers.com",
@@ -14753,9 +17486,14 @@
       "reason": "probe_http_status"
     },
     {
-      "domain": "flaerobotics.ai",
+      "domain": "experiancs.co.uk",
       "mcpUrl": null,
-      "reason": "probe_timeout"
+      "reason": "probe_http_status"
+    },
+    {
+      "domain": "flowerdiary.xyz",
+      "mcpUrl": null,
+      "reason": "probe_http_not_found"
     },
     {
       "domain": "fos.tui",
@@ -14773,14 +17511,24 @@
       "reason": "probe_http_status"
     },
     {
-      "domain": "glama.ai",
+      "domain": "gmail.googleapis.com",
       "mcpUrl": null,
-      "reason": "probe_timeout"
+      "reason": "probe_http_not_found"
+    },
+    {
+      "domain": "gosure.ai",
+      "mcpUrl": null,
+      "reason": "probe_non_mcp_text"
     },
     {
       "domain": "govtribe.com",
       "mcpUrl": null,
       "reason": "probe_http_status"
+    },
+    {
+      "domain": "heepsy.com",
+      "mcpUrl": null,
+      "reason": "probe_http_not_found"
     },
     {
       "domain": "hemlak.com",
@@ -14803,12 +17551,12 @@
       "reason": "probe_http_status"
     },
     {
-      "domain": "inpost-group.com",
+      "domain": "inngest.com",
       "mcpUrl": null,
-      "reason": "probe_http_status"
+      "reason": "probe_connection_error"
     },
     {
-      "domain": "intuit.com",
+      "domain": "inpost-group.com",
       "mcpUrl": null,
       "reason": "probe_http_status"
     },
@@ -14823,19 +17571,24 @@
       "reason": "probe_http_status"
     },
     {
+      "domain": "kactus.com",
+      "mcpUrl": null,
+      "reason": "probe_non_mcp_text"
+    },
+    {
+      "domain": "lastminute.com",
+      "mcpUrl": null,
+      "reason": "probe_http_status"
+    },
+    {
       "domain": "lesfurets.com",
       "mcpUrl": null,
       "reason": "probe_http_status"
     },
     {
-      "domain": "listingforgeai.it",
+      "domain": "liblab.com",
       "mcpUrl": null,
-      "reason": "probe_timeout"
-    },
-    {
-      "domain": "ll-mcp.replit.app",
-      "mcpUrl": null,
-      "reason": "probe_timeout"
+      "reason": "probe_non_mcp_text"
     },
     {
       "domain": "localiza.com",
@@ -14846,6 +17599,11 @@
       "domain": "lona.agency",
       "mcpUrl": null,
       "reason": "probe_http_status"
+    },
+    {
+      "domain": "loomalabs.ai",
+      "mcpUrl": null,
+      "reason": "probe_http_not_found"
     },
     {
       "domain": "loveholidays.com",
@@ -14878,11 +17636,6 @@
       "reason": "probe_http_status"
     },
     {
-      "domain": "masbasbas.com",
-      "mcpUrl": null,
-      "reason": "probe_http_status"
-    },
-    {
       "domain": "mavriq.com",
       "mcpUrl": null,
       "reason": "probe_http_status"
@@ -14898,6 +17651,11 @@
       "reason": "probe_html_response"
     },
     {
+      "domain": "messagebird.com",
+      "mcpUrl": null,
+      "reason": "probe_connection_error"
+    },
+    {
       "domain": "metaview.ai",
       "mcpUrl": null,
       "reason": "probe_http_status"
@@ -14908,12 +17666,27 @@
       "reason": "probe_http_status"
     },
     {
+      "domain": "mozilla.org",
+      "mcpUrl": null,
+      "reason": "probe_http_not_found"
+    },
+    {
       "domain": "myfitnesspal.com",
       "mcpUrl": null,
       "reason": "probe_http_status"
     },
     {
+      "domain": "neartail.com",
+      "mcpUrl": null,
+      "reason": "probe_http_not_found"
+    },
+    {
       "domain": "neptuneflood.com",
+      "mcpUrl": null,
+      "reason": "probe_http_status"
+    },
+    {
+      "domain": "networksolutions.com",
       "mcpUrl": null,
       "reason": "probe_http_status"
     },
@@ -14923,14 +17696,24 @@
       "reason": "probe_http_status"
     },
     {
-      "domain": "ovios-home.com",
+      "domain": "otseek.com",
       "mcpUrl": null,
-      "reason": "probe_http_status"
+      "reason": "probe_connection_error"
     },
     {
       "domain": "pcexpress.ca",
       "mcpUrl": null,
       "reason": "probe_http_status"
+    },
+    {
+      "domain": "pga.com",
+      "mcpUrl": null,
+      "reason": "probe_non_mcp_text"
+    },
+    {
+      "domain": "phantombuster.com",
+      "mcpUrl": null,
+      "reason": "probe_non_mcp_text"
     },
     {
       "domain": "pier-luma.vercel.app",
@@ -14993,17 +17776,17 @@
       "reason": "probe_http_status"
     },
     {
+      "domain": "scrimba.com",
+      "mcpUrl": null,
+      "reason": "probe_http_not_found"
+    },
+    {
       "domain": "seatunique.com",
       "mcpUrl": null,
       "reason": "probe_http_status"
     },
     {
       "domain": "securelend.ai",
-      "mcpUrl": null,
-      "reason": "probe_http_status"
-    },
-    {
-      "domain": "share.eu",
       "mcpUrl": null,
       "reason": "probe_http_status"
     },
@@ -15016,6 +17799,11 @@
       "domain": "shipt.com",
       "mcpUrl": null,
       "reason": "probe_http_status"
+    },
+    {
+      "domain": "shoppingcontent.googleapis.com",
+      "mcpUrl": null,
+      "reason": "probe_http_not_found"
     },
     {
       "domain": "shuftipro.com",
@@ -15078,17 +17866,12 @@
       "reason": "probe_http_status"
     },
     {
-      "domain": "trufflejournal.com",
-      "mcpUrl": null,
-      "reason": "probe_timeout"
-    },
-    {
-      "domain": "turo.com",
+      "domain": "tubi.io",
       "mcpUrl": null,
       "reason": "probe_http_status"
     },
     {
-      "domain": "uber.com",
+      "domain": "turo.com",
       "mcpUrl": null,
       "reason": "probe_http_status"
     },
@@ -15123,6 +17906,21 @@
       "reason": "probe_http_status"
     },
     {
+      "domain": "wear.jp",
+      "mcpUrl": null,
+      "reason": "probe_connection_error"
+    },
+    {
+      "domain": "webjet.com.au",
+      "mcpUrl": null,
+      "reason": "probe_html_response"
+    },
+    {
+      "domain": "wego.com",
+      "mcpUrl": null,
+      "reason": "probe_http_not_found"
+    },
+    {
       "domain": "wizehire.com",
       "mcpUrl": null,
       "reason": "probe_http_status"
@@ -15138,12 +17936,12 @@
       "reason": "probe_http_status"
     },
     {
-      "domain": "wyndhamhotels.com",
+      "domain": "ww.com",
       "mcpUrl": null,
-      "reason": "probe_http_status"
+      "reason": "probe_http_not_found"
     },
     {
-      "domain": "x.com",
+      "domain": "wyndhamhotels.com",
       "mcpUrl": null,
       "reason": "probe_http_status"
     },
@@ -15151,6 +17949,11 @@
       "domain": "yahooapis.jp",
       "mcpUrl": null,
       "reason": "probe_http_status"
+    },
+    {
+      "domain": "yardimcp.com",
+      "mcpUrl": null,
+      "reason": "probe_http_not_found"
     },
     {
       "domain": "yelp.com",
@@ -15171,7 +17974,74 @@
       "domain": "zohomcp.sa",
       "mcpUrl": null,
       "reason": "probe_http_status"
+    },
+    {
+      "domain": "zola.com",
+      "mcpUrl": null,
+      "reason": "probe_http_status"
     }
   ],
-  "quarantined": []
+  "quarantined": [
+    {
+      "row": {
+        "domain": "activepieces.com",
+        "name": "activepieces.com",
+        "mcpUrl": "https://www.activepieces.com/.well-known/mcp/server-card.json",
+        "transport": "streamable-http",
+        "authKind": "api_key",
+        "scopesHint": [],
+        "credentialFacts": [
+          {
+            "id": "mcp_embed_token",
+            "type": "bearer",
+            "generateUrl": "https://www.activepieces.com/docs/embedding/embeddable-mcp",
+            "setup": "First set up embedding using a signing key and embed JWT per [Provision Users](https://www.activepieces.com/docs/embedding/provision-users). Then, from the embedded frontend SDK, call `activepieces.generateMcpToken()` as shown in [Embeddable MCP](https://www.activepieces.com/docs/embedding/embeddable-mcp) to obtain `mcpToken` and `mcpServerUrl`. The token is scoped to that user's project and lasts 15 minutes.",
+            "fields": null
+          }
+        ],
+        "tier": "verified",
+        "provenance": "detected",
+        "logoSourceUrl": "https://integrations.sh/logo/activepieces.com"
+      },
+      "reason": "server-card JSON URL needs manual confirmation before enablement"
+    },
+    {
+      "row": {
+        "domain": "natwest.com",
+        "name": "NatWest Mortgages",
+        "mcpUrl": "https://openapi.natwest.com/mortgages/v1/mcp-server-mortgages/mcp",
+        "transport": "streamable-http",
+        "authKind": "none",
+        "scopesHint": [],
+        "credentialFacts": [],
+        "tier": "community",
+        "provenance": "discovered",
+        "logoSourceUrl": "https://integrations.sh/logo/natwest.com"
+      },
+      "reason": "banking API URL needs manual confirmation before enablement"
+    },
+    {
+      "row": {
+        "domain": "smartbear.com",
+        "name": "smartbear.com",
+        "mcpUrl": "https://swagger.mcp.smartbear.com/mcp",
+        "transport": "streamable-http",
+        "authKind": "oauth2",
+        "scopesHint": [],
+        "credentialFacts": [
+          {
+            "id": "smartbear_id_oauth",
+            "type": "oauth2",
+            "generateUrl": null,
+            "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
+            "fields": null
+          }
+        ],
+        "tier": "verified",
+        "provenance": "detected",
+        "logoSourceUrl": "https://integrations.sh/logo/smartbear.com"
+      },
+      "reason": "SmartBear Swagger endpoint needs manual confirmation before enablement"
+    }
+  ]
 }
