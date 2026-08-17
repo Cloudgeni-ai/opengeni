@@ -1,5 +1,74 @@
 # @opengeni/api-router
 
+## 0.32.0
+
+### Minor Changes
+
+- c297fc0: Add permission-first Company Brain guidance, Knowledge, proposal, and content-free accepted-turn context inspection surfaces.
+- c297fc0: Add the permission-filtered Company Brain read and deterministic OKF export
+  surface, subject-scoped full guidance history, and the Company Brain discovery
+  and export experience.
+- c297fc0: Route derived Company Brain proposals through the immutable workspace learning-policy snapshot before destination admission.
+  Add exact rooted Task-note to proposed workspace Knowledge promotion with immutable value-free provenance and replay-safe MCP tools.
+  Add atomic Task-note correction/revert with immutable old/new lineage, strict attempt/version fencing, and replay-safe first-party tooling.
+- e9aabaa: Wire the governed-learning evaluator and activation controller into the Company Brain learning-policy router. Ways-of-working proposals now record a content-free decision receipt after they commit; under `automatic`, an eligible preference decision is activated through the destination lifecycle (instruction policy keeps a human activation boundary). The route receipt gains `learning`, `learningFailure`, and activation receipt/destination facts; `activation.activated` is no longer always `false`.
+- 1f860f0: Add durable publication and authenticated download support for session sandbox files. Agents can publish bounded `/workspace` outputs through a first-party tool, raw sandbox links can recover through the session API, retained file receipts render with downloads, and retained screenshots expose an explicit download action.
+- c297fc0: Add atomic rooted Task-note promotion into inactive instruction-policy and
+  preference proposals while preserving exact source evidence, replay identity,
+  and human-only activation.
+- 4eb7abd: `remember` with `lane: knowledge` now returns `confirmation_required` bound to the Knowledge claim, and `remember_confirm` (`claimId`) approves the claim through the Knowledge review lifecycle after the exact initiating human answered the bound canonical question with `save` (rolling migration 0274, `confirm_remember_knowledge_claim`, immutable `remember_knowledge_confirmation_receipts`). `remember_confirm` accepts either `proposalId` + `decisionReceiptId` (preference / instruction policy) or `claimId` (knowledge); the confirm receipt carries `claimId` and a `knowledge` activation summary with `undo: knowledge_review`.
+- 89d4ab3: Add the explicit user-directed `remember` / `remember_confirm` agent tools. Content becomes exact task-note evidence promoted through the learning-policy router; a preference activates immediately under `automatic`, Knowledge stays proposal-only, and everything else returns a bound `request_human_input` payload whose `save` answer authorizes activation through the new rolling migration 0272 `activate_human_confirmed_learning_decision` capability (`authority_kind = human_confirmed`, human-input request id recorded on the receipt).
+- 7454580: Retire the legacy Memory V1 `memory_save` agent tool from the default retrieval-only surface: it is now compatibility-only, excluded from the default first-party tool catalog, and registered only when a workspace opts into the `legacy_standing` rollback mode. Agents save user-directed knowledge through `remember` and their own findings through task notes and governed promotion; `memory_search` and `memory_correct` remain.
+- f72563d: Slack now has exactly two authorities: the personal hosted Slack MCP grant and the OpenGeni workspace bot. The workspace-owned hosted Slack MCP connection is removed: OAuth start, reconnect, the callback fence, and capability enablement reject an explicit non-personal ownership for `https://mcp.slack.com/mcp`, an omitted ownership on that resource defaults to personal, and `listEnabledMcpCapabilityServers` no longer runs a workspace-scoped Slack MCP installation enabled by an earlier release. The bot manifest and canonical bot allowlist gain the bot-token Real-time Search scopes `search:read.public`, `search:read.files`, and `search:read.users` as requested-but-not-required extras; apply them to the Slack app before deploying, since the install URL requests every requested scope. The bot search tool itself is a separate change.
+- c297fc0: Complete governed goal rewrites with strict agent change metadata, immutable
+  proposal rejection and CAS-fenced rollback, bounded revision pagination, and
+  accepted-turn root constraints that child agents may inherit or narrow. The
+  original raw-array goal-revision list remains unchanged; bounded pagination is
+  available through a separately named API and SDK surface.
+
+### Patch Changes
+
+- db758f3: Publish governed-learning activations and undos to the configured workspace Slack channel through the existing durable publication outbox. The dead durable-learning adapter (`publishDurableLearningOutcomeToSlack`) is replaced by `publishGovernedLearningEventToSlack`, which projects only content-free receipt facts, uses `governed-learning:<event>:<receiptId>` idempotency, and fails closed for Slack-derived evidence.
+- 16cbd7b: Make `retrieval_only` the default Company Brain memory prompt mode. An absent or unrecognized workspace `memoryPromptMode` now removes the broad Memory V1 standing block, excludes legacy preference-kind rows from agent search, and omits the company profile from child prompts; an explicit `legacy_standing` remains the per-workspace rollback opt-out. Rolling migration 0271 applies the same fallback at turn acceptance so frozen snapshots and the contracts resolver agree.
+- 6860c5f: Add organization, workspace, and owner-private scopes for Rigs and Connected Machines. Personal machine use and Rig materialization now revalidate exact-attempt grants, membership, workspace access, authority epochs, and generations before runtime access.
+- Updated dependencies [ca75ed9]
+- Updated dependencies [c297fc0]
+- Updated dependencies [91d5caf]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [02e21fa]
+- Updated dependencies [c297fc0]
+- Updated dependencies [987742d]
+- Updated dependencies [987742d]
+- Updated dependencies [db758f3]
+- Updated dependencies [e9aabaa]
+- Updated dependencies [1f860f0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [22c0c21]
+- Updated dependencies [4eb7abd]
+- Updated dependencies [89d4ab3]
+- Updated dependencies [7454580]
+- Updated dependencies [16cbd7b]
+- Updated dependencies [30ba620]
+- Updated dependencies [d168b8f]
+- Updated dependencies [6860c5f]
+- Updated dependencies [f72563d]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+  - @opengeni/contracts@1.2.0
+  - @opengeni/core@1.2.0
+  - @opengeni/db@1.1.0
+  - @opengeni/documents@0.6.0
+  - @opengeni/runtime@1.0.3
+  - @opengeni/artifact-tool@0.2.12
+  - @opengeni/codemode@0.4.6
+  - @opengeni/config@0.16.6
+  - @opengeni/events@0.3.114
+  - @opengeni/github@0.4.61
+  - @opengeni/observability@0.7.9
+  - @opengeni/storage@0.2.98
+
 ## 0.31.2
 
 ### Patch Changes
