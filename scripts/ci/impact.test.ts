@@ -59,6 +59,7 @@ describe("fail-closed change impact", () => {
     expect(plan.unitTests.length).toBeGreaterThan(100);
     expect(plan.typecheckProjects).toEqual(typecheckProjects());
     expect(plan.guards).toContain("public-hygiene");
+    expect(plan.guards).toContain("migration-ordinals");
     expect(plan.reasons.some((reason) => reason.path === path)).toBe(true);
   });
 

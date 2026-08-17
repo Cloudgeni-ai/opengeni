@@ -449,6 +449,9 @@ function fullPlan(
       "docs-refs",
       "generated-fonts",
       "public-hygiene",
+      // A migration ordinal that protected main has meanwhile assigned to
+      // another file is a real conflict; catch it while the fix is one command.
+      "migration-ordinals",
       "publish-closure",
       ...(examples.length > 0 ? ["example-builds"] : []),
     ],
