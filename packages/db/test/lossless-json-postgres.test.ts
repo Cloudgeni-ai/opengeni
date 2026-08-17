@@ -472,7 +472,6 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         workspaceId: workspace!.id,
         sessionId,
         workflowId: `session-${sessionId}`,
-        noProgressLimit: 3,
         policy: {
           model: "test-model",
           reasoningEffort: "low",
@@ -486,7 +485,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       if (materialized.action !== "continue") {
         throw new Error(`goal continuation did not materialize: ${materialized.action}`);
       }
-      expect(materialized.update.summary).toBe(newUnsafePrompt);
+      expect(materialized.update.summary).toBe("Continue active session goal");
       if (materialized.update.payload.type !== "goal_continuation") {
         throw new Error("goal continuation materialized with the wrong payload kind");
       }
@@ -539,7 +538,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       expect(newStorage!.payloadVersion).toBe(1);
       expect(newStorage!.type).toBe("goal_continuation");
       expect(fromPostgresLosslessText(newStorage!.summary, newStorage!.summaryVersion)).toBe(
-        newUnsafePrompt,
+        "Continue active session goal",
       );
       expect(
         fromPostgresLosslessJson(newStorage!.payload, newStorage!.payloadVersion),

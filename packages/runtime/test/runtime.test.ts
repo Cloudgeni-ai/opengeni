@@ -3306,7 +3306,7 @@ describe("runtime event normalization", () => {
     expect(goalContext).toContain("objective revision 7");
     expect(goalContext).toContain("Ship the durable goal boundary");
     expect(goalContext).toContain("Semantic changes are proposals until a user applies them");
-    expect(goalContext).toContain("opengeni__goal_progress");
+    expect(goalContext).not.toContain("opengeni__goal_progress");
     expect(goalContext).toContain("Root constraints (must remain satisfied)");
     expect(goalContext).toContain("Preserve tenant isolation");
     expect(appendSessionGoal("base", snapshot)).toBe(`base ${goalContext}`);

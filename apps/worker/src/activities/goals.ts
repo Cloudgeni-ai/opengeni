@@ -131,7 +131,6 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       sessionId: input.sessionId,
       workflowId: input.workflowId,
       defaultMaxAutoContinuations: settings.goalMaxAutoContinuations ?? null,
-      noProgressLimit: settings.goalNoProgressLimit,
       // A model-policy block takes precedence: it is deterministic (a budget
       // pause can clear on its own; a policy pause needs a model/policy change)
       // and rides the same visible-pause channel.
@@ -158,19 +157,46 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
 }
 
 export function goalContinuationPrompt(
-  goal: SessionGoal,
-  autoContinuation: number,
-  cap: number | null,
+  _goal: SessionGoal,
+  _autoContinuation: number,
+  _cap: number | null,
 ): string {
-  const counter = cap === null ? `${autoContinuation}` : `${autoContinuation}/${cap}`;
   return [
-    `[GOAL CONTINUATION ${counter}] The session goal is not done. Goal: ${goal.text}.`,
-    `Success criteria: ${goal.successCriteria ?? "none specified"}.`,
-    `Objective revision: ${goal.objectiveRevision}. Mutation policy: ${goal.mutationPolicy}.`,
-    "Continue from the existing conversation state. Do not repeat completed session setup, persistent metadata settings, or context checks merely because this is a new continuation turn.",
-    "Continue working toward the goal now. If it is actually complete, call opengeni__goal_complete with concrete evidence.",
-    "If you are blocked or continuing is not productive, call opengeni__goal_pause with your rationale.",
-    "Record concrete progress with opengeni__goal_progress. Revise the goal only when explicit user direction or material new evidence justifies the declared change kind; use opengeni__goal_update with this objective revision and a rationale. A rewrite alone is not progress. Do not stop without goal_complete, goal_pause, or concrete continued work.",
+    "Continue working toward the active session goal.",
+    "",
+    "Continuation behavior:",
+    "- This goal persists across turns. Ending this turn does not require shrinking the objective to what fits now.",
+    "- Keep the full objective intact. If it cannot be finished now, make concrete progress toward the real requested end state, leave the goal active, and do not redefine success around a smaller or easier task.",
+    "- Temporary rough edges are acceptable while the work is moving in the right direction. Completion still requires the requested end state to be true and verified.",
+    "",
+    "Work from evidence:",
+    "Use the current workspace and external state as authoritative. Previous conversation context can help locate relevant work, but inspect the current state before relying on it. Improve, replace, or remove existing work as needed to satisfy the actual objective.",
+    "",
+    "Progress visibility:",
+    "If a planning tool is available and the next work is meaningfully multi-step, use it to show a concise plan tied to the real objective. Keep the plan current as steps complete or the next best action changes. Skip planning overhead for trivial one-step progress, and do not treat a plan update as a substitute for doing the work.",
+    "",
+    "Fidelity:",
+    "- Optimize each turn for movement toward the requested end state, not for the smallest stable-looking subset or easiest passing change.",
+    "- Do not substitute a narrower, safer, smaller, merely compatible, or easier-to-test solution because it is more likely to pass current tests.",
+    "- Treat alignment as movement toward the requested end state. An edit is aligned only if it makes the requested final state more true; useful-looking behavior that preserves a different end state is misaligned.",
+    "",
+    "Completion audit:",
+    "Before deciding that the goal is achieved, treat completion as unproven and verify it against the actual current state:",
+    "- Derive concrete requirements from the objective and any referenced files, plans, specifications, issues, or user instructions.",
+    "- Preserve the original scope; do not redefine success around the work that already exists.",
+    "- For every explicit requirement, named artifact, command, test, gate, invariant, and deliverable, identify and inspect the authoritative evidence that would prove it.",
+    "- Match verification scope to requirement scope. Treat uncertain, indirect, incomplete, or missing evidence as not achieved and continue working.",
+    "- The audit must prove completion, not merely fail to find obvious remaining work.",
+    "",
+    "Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Call opengeni__goal_complete with concrete evidence only when the full objective is actually achieved and no required work remains.",
+    "",
+    "Blocked audit:",
+    "- Do not call opengeni__goal_pause the first time a blocker appears.",
+    "- Pause only when the same blocking condition has repeated for at least three consecutive goal turns and meaningful progress is impossible without user input or an external-state change.",
+    "- Do not pause merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
+    "- Once that threshold is satisfied, call opengeni__goal_pause with the concrete blocker instead of repeatedly reporting it while leaving the goal active.",
+    "",
+    "Do not call opengeni__goal_complete or opengeni__goal_pause unless the corresponding audit above is satisfied.",
   ].join("\n");
 }
 

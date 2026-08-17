@@ -76,7 +76,6 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     googleDriveProviderRetryBudgetMs: 15_000,
     socialOauthClientsJson: "{}",
     goalMaxAutoContinuations: 20,
-    goalNoProgressLimit: 3,
     agentMaxModelCallsPerTurn: 40,
     contextWindowTokens: 1_050_000,
     contextCompactionThresholdRatio: 0.9,

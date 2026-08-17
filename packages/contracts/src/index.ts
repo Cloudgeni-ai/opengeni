@@ -5924,7 +5924,7 @@ export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string
       : snapshot.mutationPolicy === "preserve_intent"
         ? "You may directly refine wording without changing intent; adaptations and replacements are proposals until a user applies them."
         : "You may autonomously refine, adapt, or replace the goal when explicit user direction or material new evidence justifies it.";
-  return `Standing session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status ${snapshot.state}): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints}\nMutation policy: ${snapshot.mutationPolicy}. ${policy} Treat later ordinary messages as additional context unless they explicitly redirect this objective. Root constraints are user/API authority and cannot be widened, removed, or rewritten by an agent. Record concrete execution progress with opengeni__goal_progress; semantic goal changes use opengeni__goal_update with the expected objective revision, change kind, and rationale and do not count as progress.`;
+  return `Standing session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status ${snapshot.state}): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints}\nMutation policy: ${snapshot.mutationPolicy}. ${policy} Treat later ordinary messages as additional context unless they explicitly redirect this objective. Root constraints are user/API authority and cannot be widened, removed, or rewritten by an agent. Semantic goal changes use opengeni__goal_update with the expected objective revision, change kind, and rationale.`;
 }
 
 /**

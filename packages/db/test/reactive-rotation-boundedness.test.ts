@@ -202,7 +202,7 @@ describe("session goal clearing", () => {
 });
 
 describe("Finding 2 — evaluateGoalContinuation freezes the rotation-wait on BOTH paths", () => {
-  const CONFIG = { noProgressLimit: 3, defaultMaxAutoContinuations: 100 } as const;
+  const CONFIG = { defaultMaxAutoContinuations: 100 } as const;
 
   test("(3) a rotated:true continuation FREEZES autoContinuations (reactive AND proactive all-capped, post-fix)", async () => {
     if (!available) return;

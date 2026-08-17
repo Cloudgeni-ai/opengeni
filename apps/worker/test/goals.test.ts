@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { goalContinuationPrompt } from "../src/activities/goals";
 
 describe("goalContinuationPrompt", () => {
-  test("continues from durable context instead of restarting turn housekeeping", () => {
+  test("continues from frozen goal context without duplicating mutable goal fields", () => {
     const prompt = goalContinuationPrompt(
       {
         text: "Ship the fix",
@@ -12,9 +12,14 @@ describe("goalContinuationPrompt", () => {
       null,
     );
 
-    expect(prompt).toContain("[GOAL CONTINUATION 3]");
-    expect(prompt).toContain(
-      "Do not repeat completed session setup, persistent metadata settings, or context checks",
-    );
+    expect(prompt).toContain("Continue working toward the active session goal");
+    expect(prompt).toContain("Completion audit:");
+    expect(prompt).toContain("Blocked audit:");
+    expect(prompt).toContain("opengeni__goal_complete");
+    expect(prompt).toContain("opengeni__goal_pause");
+    expect(prompt).not.toContain("Ship the fix");
+    expect(prompt).not.toContain("Tests pass");
+    expect(prompt).not.toContain("GOAL CONTINUATION 3");
+    expect(prompt).not.toContain("goal_progress");
   });
 });
