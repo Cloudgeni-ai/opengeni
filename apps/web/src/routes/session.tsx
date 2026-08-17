@@ -1210,6 +1210,7 @@ function SessionChatPane(props: {
     sendBlocked: () => attachments.hasUnresolved || repositories.error !== null,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     onDraftApplied: applyComposerSettings,
+    isPolicyTouched: () => pickerTouchedRef.current,
     // Ordinary Send is acknowledged locally. Clear only resources captured in
     // that immutable optimistic operation; later additions belong to the next
     // draft, while retry keeps the original resource refs in the failed bubble.
