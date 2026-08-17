@@ -55,7 +55,10 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     ]);
     const withoutInvocations = generated
       .split("\n")
-      .filter((line) => !line.startsWith("clone_repository '"))
+      .filter(
+        (line) =>
+          !line.startsWith("start_repository_clone '") && line !== "wait_repository_clone_batch",
+      )
       .join("\n");
     return `${withoutInvocations}\nclone_repository '${target}' '${uri}' 'main' ''`;
   }
@@ -66,7 +69,10 @@ describe("lifecycle scripts — real sh execution semantics", () => {
   ): string {
     return repositoryCloneCommand(resources, bindings)
       .split("\n")
-      .filter((line) => !line.startsWith("clone_repository '"))
+      .filter(
+        (line) =>
+          !line.startsWith("start_repository_clone '") && line !== "wait_repository_clone_batch",
+      )
       .join("\n");
   }
 
