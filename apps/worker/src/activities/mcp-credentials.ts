@@ -45,7 +45,8 @@ export function connectionTokenResolverForTurn(input: {
         delegation.serverId === request.serverId &&
         delegation.connectionId === request.connectionRef.connectionId,
     );
-    const subjectScope = request.connectionRef.subjectScope === "subject" ? "subject" : "workspace";
+    const subjectScope: "subject" | "workspace" =
+      request.connectionRef.subjectScope === "subject" ? "subject" : "workspace";
     // Every subject-scoped request must match an exact connection frozen on the
     // accepted turn. This also hard-fences pre-cutover common-user turns that
     // lack a userDelegation: the DB resolver denies those rows because only a
@@ -82,7 +83,10 @@ export function connectionTokenResolverForTurn(input: {
     };
     const authorityBinding = {
       serverId: request.serverId,
-      connectionId: request.connectionRef.connectionId,
+      // Both lane guards above require an exact connection id at this point.
+      ...(request.connectionRef.connectionId
+        ? { connectionId: request.connectionRef.connectionId }
+        : {}),
       providerDomain: request.connectionRef.providerDomain,
       ...(request.connectionRef.kind ? { connectionKind: request.connectionRef.kind } : {}),
       subjectScope,
