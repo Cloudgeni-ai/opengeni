@@ -300,6 +300,7 @@ import {
   defaultSessionMcpServerIds,
   directPersonalConnectionSubjectId,
   rigProviderImageContentHash,
+  resolveRigProviderImageForRun,
   resolveCodexAppsCredentialIdForRun,
   withFrozenPersonalConnectionDelegations,
   resolveSessionToolPolicy,
@@ -353,7 +354,6 @@ import {
   resolveWorkspaceInstalledSkillRuntime,
   settingsWithPackSandboxImage,
   settingsWithRigImage,
-  settingsWithRigProviderImage,
 } from "./packs";
 import { deliverFailedChildTurnToParent } from "./parent-wake";
 import {
@@ -5881,11 +5881,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ),
         rigVersion?.image ?? null,
       );
-      const providerImageSettings = await settingsWithRigProviderImage(
+      const providerImageSelection = await resolveRigProviderImageForRun(
         logicalSandboxSettings,
         rigVersion,
         turn.sandboxBackend,
       );
+      const providerImageSettings = providerImageSelection.settings;
+      const verifiedRigProviderImageId =
+        providerImageSelection.reason === "selected"
+          ? (providerImageSelection.imageId ?? undefined)
+          : undefined;
       const baseRunSettings = {
         // IMAGE PRECEDENCE: rig > pre-V2 Pack compatibility > deployment.
         // resolveWorkspacePackRuntime returns no image for V2 Pack rows, so
@@ -8719,6 +8724,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                             ),
                             definition: rigVersion,
                           }),
+                          ...(verifiedRigProviderImageId
+                            ? { verifiedProviderImageId: verifiedRigProviderImageId }
+                            : {}),
                         },
                       }
                     : {}),

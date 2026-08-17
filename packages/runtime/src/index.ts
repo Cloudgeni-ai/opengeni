@@ -7395,6 +7395,9 @@ export type RigSetupDescriptor = {
   script: string;
   timeoutMs: number;
   contentHash?: string;
+  /** Exact provider image selected only after the existing content, source,
+   * provider-binding, and independent cold-boot checks all pass. */
+  verifiedProviderImageId?: string;
 };
 
 export type SandboxLifecycleHook = {
@@ -8950,6 +8953,21 @@ export async function runRigSetupHook(
     rigName: rigSetup.rigName,
   };
   await context.onRuntimeEvent?.({ type: "rig.setup.started", payload });
+  const sessionImageId =
+    session.state &&
+    typeof session.state === "object" &&
+    "imageId" in session.state &&
+    typeof session.state.imageId === "string"
+      ? session.state.imageId
+      : null;
+  if (
+    rigSetup.contentHash &&
+    rigSetup.verifiedProviderImageId &&
+    sessionImageId === rigSetup.verifiedProviderImageId
+  ) {
+    await context.onRuntimeEvent?.({ type: "rig.setup.skipped", payload });
+    return;
+  }
   const commandOptions = {
     timeoutMs: rigSetup.timeoutMs,
     markerRoot: RIG_SETUP_RUNTIME_MARKER_ROOT,
