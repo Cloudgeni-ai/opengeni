@@ -6,7 +6,7 @@
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
 import { act as reactAct } from "react";
-import { startTransition, Suspense, useState } from "react";
+import { startTransition, Suspense, useEffect, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import type {
@@ -2170,6 +2170,81 @@ describe("useComposer durable draft and control binding", () => {
 
     expect(hook.result.current.value).toBe("restored text");
     expect(applied).toEqual([]);
+    await hook.unmount();
+  });
+
+  test("automatic policy initialization does not overwrite the durable draft", async () => {
+    let resolveDraft!: (draft: ComposerDraft) => void;
+    const saved: unknown[] = [];
+    const applied: ComposerDraft[] = [];
+    const client = fakeClient({
+      getComposerDraft: async () =>
+        await new Promise<ComposerDraft>((resolve) => {
+          resolveDraft = resolve;
+        }),
+      saveComposerDraft: async (_workspaceId, _sessionId, request) => {
+        saved.push(request);
+        return {
+          revision: request.expectedRevision + 1,
+          text: request.text,
+          resources: request.resources,
+          annotations: request.annotations ?? [],
+          model: request.model,
+          reasoningEffort: request.reasoningEffort,
+          latencyMode: request.latencyMode,
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    const remoteDraft: ComposerDraft = {
+      revision: 7,
+      text: "durable draft",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    type Props = { seededLatency: "standard" | "fast" };
+    const hook = await renderHook(
+      (props: Props) => {
+        const [latencyMode, setLatencyMode] = useState<"standard" | "fast">(props.seededLatency);
+        useEffect(() => setLatencyMode(props.seededLatency), [props.seededLatency]);
+        return useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: {
+            model: "model-x",
+            reasoningEffort: "medium",
+            latencyMode,
+          },
+          isPolicyTouched: () => false,
+          onDraftApplied: (draft) => {
+            applied.push(draft);
+            setLatencyMode(draft.latencyMode === "fast" ? "fast" : "standard");
+          },
+        });
+      },
+      { seededLatency: "standard" },
+    );
+
+    await flush();
+    await hook.rerender({ seededLatency: "fast" });
+    await flush();
+    await flushing(async () => {
+      resolveDraft(remoteDraft);
+      await Promise.resolve();
+    });
+    await flush(600);
+
+    expect(applied).toHaveLength(1);
+    expect(applied[0]?.latencyMode).toBe("standard");
+    expect(hook.result.current.value).toBe("durable draft");
+    expect(saved).toEqual([]);
     await hook.unmount();
   });
 
