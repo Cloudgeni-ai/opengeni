@@ -32,7 +32,11 @@ import {
   boundModelToolOutputItems,
   DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
 } from "@opengeni/codex";
-import { MODEL_ATTACHMENT_REFS_FIELD, MODEL_TIMELINE_ANNOTATIONS_FIELD } from "@opengeni/contracts";
+import {
+  MODEL_ATTACHMENT_CATALOG_MARKER,
+  MODEL_ATTACHMENT_REFS_FIELD,
+  MODEL_TIMELINE_ANNOTATIONS_FIELD,
+} from "@opengeni/contracts";
 
 /** A history item is any JSON object; we only inspect a few discriminator fields. */
 export type HistoryItem = Record<string, unknown>;
@@ -274,12 +278,14 @@ export const INTERNAL_RESUME_MESSAGE_MARKER = "opengeni_internal_resume";
 export function stripInternalModelMetadata<T extends HistoryItem>(item: T): T {
   const withoutResume = stripInternalResumeMarker(item);
   if (
+    !(MODEL_ATTACHMENT_CATALOG_MARKER in withoutResume) &&
     !(MODEL_ATTACHMENT_REFS_FIELD in withoutResume) &&
     !(MODEL_TIMELINE_ANNOTATIONS_FIELD in withoutResume)
   ) {
     return withoutResume;
   }
   const clone = { ...withoutResume } as Record<string, unknown>;
+  delete clone[MODEL_ATTACHMENT_CATALOG_MARKER];
   delete clone[MODEL_ATTACHMENT_REFS_FIELD];
   delete clone[MODEL_TIMELINE_ANNOTATIONS_FIELD];
   return clone as T;

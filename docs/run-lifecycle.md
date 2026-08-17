@@ -564,8 +564,10 @@ as bounded model context and reconnect UI. Only the first actual sandbox
 operation enters the existing single-flight provisioner, writes that exact
 resolved material to the lease before the waiting operation, and starts renewal.
 A model-only turn therefore owns no credential write, renewal, lease, box, or
-exact-generation cleanup work. Signed file resources and generated-video files
-remain eager because their verified sandbox paths must exist before model dispatch.
+exact-generation cleanup work. Signed file resources are eager only on the exact
+turn that attached them; historical attachment ids do not cause sandbox or
+object-storage work. Generated-video files remain eager because their verified
+sandbox paths must exist before model dispatch.
 
 One model response's parallel tool calls are tracked as an in-memory settlement
 batch while its stream is active; batch identity is not durable schema. A
@@ -1140,6 +1142,15 @@ audit reads may return it, so it is never a secret boundary.
    model request projects that receipt to a deterministic artifact fact without
    provider identity, signed URLs, object keys, or base64. See
    [`image-generation.md`](image-generation.md).
+   User attachments use a separate one-turn delivery rule. The accepted user
+   row stores private stable file references beside the message. Only that
+   triggering turn resolves metadata, optionally inlines supported bytes, and
+   materializes the files into active compute. Later model requests project the
+   references as compact `fileId` receipts without file metadata reads,
+   object-storage reads, filesystem checks, remounts, or downloads. Compaction
+   preserves omitted references in one compact catalog. When old bytes are
+   actually needed, the model uses the existing dedicated Files MCP download
+   URL plus shell instead of startup rematerialization.
 2. **`agent_run_states` — requires-action resume only.** The serialized SDK `RunState`
    blob is an opaque, SDK-version-gated process checkpoint. Its one legitimate
    job is resuming a turn that paused mid-flight for a human approval or
@@ -1199,8 +1210,10 @@ provider calls first cross a durable prepared/provider-started fence; after the
 provider may have run, recovery may finish an existing deterministic upload but
 must not repeat generation. Native hosted generation stays inside the ordinary
 model-call crash boundary. Successful bytes are validated and retained once,
-then materialized into the active sandbox from object storage. A sandbox-copy
-failure never invalidates the permanent artifact or replays paid work. Canonical:
+then materialized into the active sandbox for that turn. Historical receipts do
+not trigger later eager copies; an agent retrieves the workspace file explicitly
+when needed. A sandbox-copy failure never invalidates the permanent artifact or
+replays paid work. Canonical:
 [`image-generation.md`](image-generation.md).
 
 Structured human input adds a durable control checkpoint, not a fourth memory

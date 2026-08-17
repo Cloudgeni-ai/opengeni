@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { MODEL_TIMELINE_ANNOTATIONS_FIELD } from "@opengeni/contracts";
+import {
+  MODEL_ATTACHMENT_CATALOG_MARKER,
+  MODEL_ATTACHMENT_REFS_FIELD,
+  MODEL_TIMELINE_ANNOTATIONS_FIELD,
+} from "@opengeni/contracts";
 import {
   computerCallNormalizingFetch,
   elideSupersededViewImagePairs,
@@ -75,6 +79,20 @@ describe("sanitizeHistoryItemsForModel", () => {
     const [sanitized] = sanitizeHistoryItemsForModel([item]);
     expect(sanitized).toEqual(userMessage("annotated model text"));
     expect(item).toHaveProperty(MODEL_TIMELINE_ANNOTATIONS_FIELD);
+  });
+
+  test("strips compact attachment catalog metadata at the provider boundary", () => {
+    const item = {
+      ...userMessage("[OpenGeni retained attachment references]"),
+      [MODEL_ATTACHMENT_CATALOG_MARKER]: true,
+      [MODEL_ATTACHMENT_REFS_FIELD]: [
+        { kind: "file", fileId: "00000000-0000-4000-8000-000000000099" },
+      ],
+    };
+    const [sanitized] = sanitizeHistoryItemsForModel([item]);
+    expect(sanitized).toEqual(userMessage("[OpenGeni retained attachment references]"));
+    expect(item).toHaveProperty(MODEL_ATTACHMENT_CATALOG_MARKER);
+    expect(item).toHaveProperty(MODEL_ATTACHMENT_REFS_FIELD);
   });
 
   test("drops an orphaned function_call_result whose function_call is absent", () => {

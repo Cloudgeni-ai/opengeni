@@ -242,7 +242,7 @@ describe("modelAttachmentContentForFiles", () => {
 });
 
 describe("durable attachment history projection", () => {
-  test("rehydrates image/PDF refs once per turn while keeping other files sandbox-only", async () => {
+  test("keeps historical refs as receipts and inlines only explicitly current files", async () => {
     const imageBytes = new TextEncoder().encode("image");
     const pdfBytes = new TextEncoder().encode("pdf");
     const textBytes = new TextEncoder().encode("notes");
@@ -285,14 +285,21 @@ describe("durable attachment history projection", () => {
     );
 
     try {
-      const first = await projector(history);
-      const second = await projector(history);
+      const historical = await projector(history);
+      expect(JSON.stringify(historical)).not.toContain(";base64,");
+      expect(JSON.stringify(historical)).toContain(`fileId=${image.id}`);
+      expect(reads).toEqual([]);
+      expect(getFilesForSubject).not.toHaveBeenCalled();
+
+      const inlineFileIds = new Set([image.id, pdf.id]);
+      const first = await projector(history, { inlineFileIds });
+      const second = await projector(history, { inlineFileIds });
       const json = JSON.stringify(first);
 
       expect(json).toContain("data:image/png;base64");
       expect(json).toContain("data:application/pdf;base64");
       expect(json).not.toContain("data:text/plain;base64");
-      expect(json).toContain("c.txt (text/plain)");
+      expect(json).toContain(`fileId=${notes.id}`);
       expect(json).not.toContain(MODEL_ATTACHMENT_REFS_FIELD);
       expect(second).toEqual(first);
       expect(new Set(reads)).toEqual(new Set([image.id, pdf.id]));
@@ -304,7 +311,7 @@ describe("durable attachment history projection", () => {
     }
   });
 
-  test("text-only projection reads metadata once and never reads object bytes", async () => {
+  test("historical projection reads neither metadata nor object bytes", async () => {
     const imageBytes = new TextEncoder().encode("image");
     const image = {
       ...file("00000000-0000-4000-8000-000000000064", "image/png", imageBytes.length, "a.png"),
@@ -332,9 +339,9 @@ describe("durable attachment history projection", () => {
       const projected = await projector(history);
       await projector(history);
       expect(JSON.stringify(projected)).not.toContain("data:image");
-      expect(JSON.stringify(projected)).toContain("a.png (image/png)");
+      expect(JSON.stringify(projected)).toContain(`fileId=${image.id}`);
       expect(reads).toBe(0);
-      expect(getFilesForSubject).toHaveBeenCalledTimes(1);
+      expect(getFilesForSubject).not.toHaveBeenCalled();
 
       const restored = await createModelHistoryAttachmentProjector(
         {} as Database,
@@ -344,11 +351,11 @@ describe("durable attachment history projection", () => {
           reads += 1;
           return imageBytes;
         },
-      )(history);
+      )(history, { inlineFileIds: new Set([image.id]) });
       expect(JSON.stringify(restored)).toContain("data:image/png;base64,aW1hZ2U=");
       expect(history[0]?.[MODEL_ATTACHMENT_REFS_FIELD]).toHaveLength(1);
       expect(reads).toBe(1);
-      expect(getFilesForSubject).toHaveBeenCalledTimes(2);
+      expect(getFilesForSubject).toHaveBeenCalledTimes(1);
     } finally {
       getFilesForSubject.mockRestore();
     }
@@ -560,6 +567,13 @@ describe("turnInput attachment projection", () => {
             role: "user",
             content: [
               { type: "input_text", text: "inspect the diagram" },
+              {
+                type: "input_text",
+                text:
+                  `[Attachment: diagram.png; fileId=${image.id}; type=image/png; bytes=5; ` +
+                  `path=/workspace/.opengeni/files/${image.id}/diagram.png. If the local path is absent, ` +
+                  "call files__files_get_download_url with this fileId and download it with the shell.]",
+              },
               { type: "input_image", image: "data:image/png;base64,aW1hZ2U=" },
             ],
           },
@@ -567,7 +581,7 @@ describe("turnInput attachment projection", () => {
       });
       expect(storedUser).toEqual(user("inspect the diagram"));
       expect(requireFileForSubject).toHaveBeenCalledTimes(1);
-      expect(getFilesForSubject).toHaveBeenCalledTimes(1);
+      expect(getFilesForSubject).not.toHaveBeenCalled();
     } finally {
       requireFileForSubject.mockRestore();
       getFilesForSubject.mockRestore();
@@ -577,7 +591,7 @@ describe("turnInput attachment projection", () => {
     }
   });
 
-  test("system-update turns project durable attachment refs before model replay", async () => {
+  test("system-update turns retain historical receipts without reloading bytes", async () => {
     const imageBytes = new TextEncoder().encode("image");
     const image = {
       ...file("00000000-0000-4000-8000-000000000054", "image/png", 5, "update.png"),
@@ -644,11 +658,17 @@ describe("turnInput attachment projection", () => {
           role: "user",
           content: [
             { type: "input_text", text: "inspect the update" },
-            { type: "input_image", image: "data:image/png;base64,aW1hZ2U=" },
+            {
+              type: "input_text",
+              text:
+                `[Earlier attachment: fileId=${image.id}; ` +
+                `mountDirectory=/workspace/.opengeni/files/${image.id}. Use the existing file there, or ` +
+                "call files__files_get_download_url with this fileId and download it with the shell.]",
+            },
           ],
         },
       ]);
-      expect(getFilesForSubject).toHaveBeenCalledTimes(1);
+      expect(getFilesForSubject).not.toHaveBeenCalled();
       expect(storedUser[MODEL_ATTACHMENT_REFS_FIELD]).toEqual([{ kind: "file", fileId: image.id }]);
     } finally {
       listUpdates.mockRestore();
