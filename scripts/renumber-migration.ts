@@ -17,11 +17,12 @@
  * (drain messages, comments); the release contract's per-migration and chain
  * hash pins are re-pinned from the resulting bytes.
  */
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   MIGRATIONS_DIR,
+  MIGRATION_TESTS_DIR,
   RELEASE_CONTRACT_TEST,
   companionTestFiles,
   formatOrdinal,
@@ -225,6 +226,10 @@ async function main(): Promise<void> {
     from,
     local.filter((migration) => migration.ordinal === from.ordinal),
   );
+  const unclaimedPrefixTests = readdirSync(join(root, MIGRATION_TESTS_DIR))
+    .filter((file) => file.startsWith(`migration-${from.ordinal}-`) && file.endsWith(".test.ts"))
+    .map((file) => `${MIGRATION_TESTS_DIR}/${file}`)
+    .filter((path) => !companions.includes(path));
   const files = await repoTextFiles(root);
   const plan = planRenumber({
     from,
@@ -248,6 +253,11 @@ async function main(): Promise<void> {
   for (const path of args.also) {
     if (!files.has(path))
       console.log(`  warn   --also ${path} matches no tracked or untracked file`);
+  }
+  for (const path of unclaimedPrefixTests) {
+    console.log(
+      `  review ${path} carries the ${plan.from.ordinal} prefix but references neither this migration nor its slug; rename it by hand if it is its companion`,
+    );
   }
   for (const path of plan.unrewrittenBare) {
     console.log(
@@ -281,7 +291,20 @@ async function main(): Promise<void> {
   }
   const formatTargets = touched.filter((path) => /\.(ts|tsx|js|mjs|json|md)$/.test(path));
   if (formatTargets.length > 0) {
-    const format = Bun.spawn(["bunx", "oxfmt", ...formatTargets], {
+    // Use the repository's own formatter binary; never resolve one from the
+    // registry (offline CI, no version drift). Skip quietly when absent.
+    const oxfmt = [
+      join(root, "node_modules/.bin/oxfmt"),
+      join(import.meta.dir, "../node_modules/.bin/oxfmt"),
+    ].find((candidate) => existsSync(candidate));
+    if (!oxfmt) {
+      console.log("  note   oxfmt not installed here; run bun run format on the touched files");
+      console.log(
+        `done: ${plan.renames.length} rename(s), ${plan.edits.length} edited file(s); review with git status / git diff`,
+      );
+      return;
+    }
+    const format = Bun.spawn([oxfmt, ...formatTargets], {
       cwd: root,
       stdout: "ignore",
       stderr: "pipe",
