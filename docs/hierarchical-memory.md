@@ -145,12 +145,13 @@ The typed foundation still leaves these surfaces for later slices:
 
 Workspace Memory V1 continues to own the existing data, correction, export, and
 write surfaces until a later contract/runtime slice adopts typed selectors. The
-workspace setting `memoryPromptMode` controls a reversible model-context
-candidate:
+workspace setting `memoryPromptMode` controls how that store reaches the
+model:
 
-- absent or `legacy_standing` preserves the existing pinned/recency working-set
-  block and agent search behavior;
-- `retrieval_only` removes that broad standing block from every agent prompt;
+- absent or `retrieval_only` (the default since migration 0271)
+  removes the broad standing pinned/recency block from every agent prompt;
+- an explicit `legacy_standing` opt-out preserves the old working-set block and
+  agent search behavior for rollback;
 - in `retrieval_only`, first-party agent `memory_search` excludes legacy
   `kind = preference` rows, while authorized human search, audit, correction,
   export, and the canonical rows remain unchanged;
@@ -158,8 +159,10 @@ candidate:
   composition, but roots retain it and all children retain mandatory instruction
   policy plus always-visible structured preference and Skill descriptors.
 
-This setting is stored in the existing workspace settings JSON, defaults to the
-legacy path, and can be rolled back without a database migration. It does not
+This setting is stored in the existing workspace settings JSON, defaults to
+`retrieval_only`, and can be rolled back per workspace by setting
+`legacy_standing` without a database migration. Both modes read the same
+`knowledge_memories` rows; only prompt composition differs. It does not
 create session notes, select typed scopes, change memory writes, or activate
 observations as policy. The structured preference registry remains the only
 active preference authority, and workspace instruction policies remain the only

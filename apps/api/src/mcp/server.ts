@@ -734,7 +734,7 @@ export function buildOpenGeniMcpServer(
       grant,
       sessionId,
       json,
-      options.workspaceMemoryPromptMode ?? "legacy_standing",
+      options.workspaceMemoryPromptMode ?? "retrieval_only",
     );
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
