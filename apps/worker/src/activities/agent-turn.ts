@@ -1,4 +1,5 @@
 import {
+  getScheduledVariableSetExpectedGenerationForAttempt,
   advanceWorkspaceGeneration,
   verifyWorkspaceMutationSettlement,
   applySessionTurnSettlement,
@@ -6773,11 +6774,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // sessions follow the current configured MCP set,
       // while explicit, inherited-fixed, and legacy sessions remain narrowed
       // to their stored materialized allow-list.
+      const scheduledEffectiveMcpServerIds = (() => {
+        const value =
+          turn.metadata && typeof turn.metadata === "object" && !Array.isArray(turn.metadata)
+            ? (turn.metadata as Record<string, unknown>).scheduledEffectiveMcpServerIds
+            : null;
+        return Array.isArray(value) && value.every((id) => typeof id === "string")
+          ? [...new Set(value)].sort()
+          : null;
+      })();
+      const currentMcpServerIds = new Set(runSettings.mcpServers.map((server) => server.id));
       const resolvedToolPolicy = resolveSessionToolPolicy({
         toolPolicy: session.toolPolicy,
-        sessionTools: session.tools,
-        availableMcpServerIds: runSettings.mcpServers.map((server) => server.id),
-        defaultMcpServerIds: defaultSessionMcpServerIds(capabilitySettings.mcpServers),
+        sessionTools: scheduledEffectiveMcpServerIds ? turn.tools : session.tools,
+        availableMcpServerIds: scheduledEffectiveMcpServerIds
+          ? scheduledEffectiveMcpServerIds.filter((id) => currentMcpServerIds.has(id))
+          : [...currentMcpServerIds],
+        defaultMcpServerIds:
+          scheduledEffectiveMcpServerIds ??
+          defaultSessionMcpServerIds(capabilitySettings.mcpServers),
       });
       const mcpAvailabilityNote = unavailableMcpOperationalContext({
         droppedIds: resolvedToolPolicy.effectivePolicy.droppedIds,
@@ -6808,15 +6823,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           initiator: turn.initiator,
           initiatingHumanSubjectId: fileAuthoritySubjectId,
         };
+        // A scheduled attempt may materialize only the exact generation frozen
+        // on its accepted occurrence; ordinary turns resolve to null.
+        const expectedVariableSetGeneration = async (
+          candidateVariableSetId: string,
+        ): Promise<number | null> =>
+          await getScheduledVariableSetExpectedGenerationForAttempt(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: fileAuthoritySubjectId ?? turn.initiator.subjectId,
+            initiatingHumanSubjectId: fileAuthoritySubjectId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            attemptId: input.attemptId,
+            executionGeneration: turn.executionGeneration,
+            variableSetId: candidateVariableSetId,
+          });
         workspaceVariableSet = await waitForTurnOperation(
-          loadWorkspaceEnvironmentForRunWithCredentials(
-            db,
-            runSettings,
-            connectionScope,
-            session.variableSetId,
-            variableSetAuthority,
-            connectionCredentials?.sandboxSecrets,
-          ),
+          (async () =>
+            loadWorkspaceEnvironmentForRunWithCredentials(
+              db,
+              runSettings,
+              connectionScope,
+              session.variableSetId,
+              variableSetAuthority,
+              connectionCredentials?.sandboxSecrets,
+              session.variableSetId && connectionCredentials?.sandboxSecrets
+                ? { expectedGeneration: await expectedVariableSetGeneration(session.variableSetId) }
+                : {},
+            ))(),
           cancellationSignal,
           undefined,
         );
@@ -6836,14 +6871,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             rigDefaultVariableSetIds,
             async (rigDefaultVariableSetId) =>
               await waitForTurnOperation(
-                loadWorkspaceEnvironmentForRunWithCredentials(
-                  db,
-                  runSettings,
-                  connectionScope,
-                  rigDefaultVariableSetId,
-                  variableSetAuthority,
-                  connectionCredentials?.sandboxSecrets,
-                ),
+                (async () =>
+                  loadWorkspaceEnvironmentForRunWithCredentials(
+                    db,
+                    runSettings,
+                    connectionScope,
+                    rigDefaultVariableSetId,
+                    variableSetAuthority,
+                    connectionCredentials?.sandboxSecrets,
+                    connectionCredentials?.sandboxSecrets
+                      ? {
+                          expectedGeneration:
+                            await expectedVariableSetGeneration(rigDefaultVariableSetId),
+                        }
+                      : {},
+                  ))(),
                 cancellationSignal,
                 undefined,
               ),

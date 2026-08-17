@@ -39,6 +39,7 @@ import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-in
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
+import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
 import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
   EditableArtifactWebSocketTransport,
@@ -424,6 +425,8 @@ export async function startApi() {
   const stopMemorySlackPublicationPump = startMemorySlackPublicationPump(routeDeps);
   const stopTemporalScheduleCleanupPump = startTemporalScheduleCleanupPump({
     db: dbClient.db,
+    cleanupConnectorAuthorization: async (claim) =>
+      await cleanupScheduledTaskConnectorAuthorization(routeDeps, claim),
     deleteSchedule: async (temporalScheduleId) => {
       await workflowClient.client.deleteScheduledTaskSchedule({ temporalScheduleId });
     },

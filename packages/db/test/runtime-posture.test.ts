@@ -338,6 +338,10 @@ describe("runtime database posture evaluator", () => {
         "scheduled_task_run_personal_resource_admissions",
         "scheduled_task_run_personal_resource_once_receipts",
         "scheduled_task_run_personal_resource_snapshots",
+        "scheduled_task_connection_authority_snapshots",
+        "scheduled_task_run_connection_authority_snapshots",
+        "scheduled_task_reusable_connection_materializations",
+        "scheduled_task_revision_authorities",
         "session_attempt_personal_resource_admissions",
         "session_attempt_personal_resource_snapshots",
         "session_attempt_connected_machine_authorizations",
@@ -350,11 +354,11 @@ describe("runtime database posture evaluator", () => {
         ? ([
             [FORCE_RLS_TABLES, 261],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 137],
+            [RUNTIME_FULL_DML_TABLES, 135],
             [RUNTIME_READ_ONLY_TABLES, 18],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
-            [RUNTIME_READ_INSERT_UPDATE_TABLES, 29],
+            [RUNTIME_READ_INSERT_UPDATE_TABLES, 31],
             [PROTECTED_NO_DIRECT_DML_TABLES, 42],
             [RUNTIME_DML_TABLES, 230],
           ] as const)
@@ -547,7 +551,7 @@ describe("runtime database posture evaluator", () => {
         routine.name.includes("personal_document") ||
         routine.name === "resolve_document_original_file(uuid, uuid, text, uuid)" ||
         routine.name.includes("scoped_variable_set") ||
-        routine.name.includes("scoped_rig") ||
+        (routine.name.includes("scoped_rig") && !routine.name.startsWith("scheduled_")) ||
         routine.name.includes("scoped_enrollment") ||
         routine.name.includes("scoped_sandbox") ||
         routine.name.includes("scoped_machine_dependent_sessions") ||

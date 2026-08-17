@@ -37,6 +37,38 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
 }
 ```
 
+## Scheduled connection authority
+
+Agent schedules may carry explicit personal Connection authority. The public
+request contains only the credential-free server, Connection, and common-user
+grant tuple returned by the authority-selection API; the SDK never receives or
+stores provider credentials:
+
+```ts
+const task = await client.createScheduledTask(workspaceId, {
+  name: "Daily triage",
+  schedule: { type: "calendar", hour: 8, minute: 0, timeZone: "Europe/Oslo" },
+  runMode: "reusable_session",
+  agentConfig: { prompt: "Triage the new support issues" },
+  connectionAuthorities: [selection],
+});
+```
+
+PATCH semantics are deliberate: omit `connectionAuthorities` to preserve the
+exact prior immutable selection, pass `[]` to clear it, or pass a non-empty
+array to replace and revalidate it. Execution-changing edits that preserve
+personal authority must be made by the same causal human; use an explicit fresh
+selection when authority should move. `once` grants are consumed by the durable
+scheduled occurrence, not by an activity attempt, so retries reuse the same run
+receipt. `listScheduledTaskRuns` exposes terminal occurrence state while private
+Connection ids, subjects, and authority snapshots stay server-side.
+
+Deleting a task is externally idempotent and immediately removes it from live
+lists and quota, but the server retains a tombstone plus run/session/turn audit
+evidence until workspace/account retention cleanup. A stable `triggerId` is
+still required when a caller wants manual-trigger retries to coalesce; ordinary
+scheduled fires derive their producer identity from the Temporal fire workflow.
+
 ## Realtime browser controller (`@opengeni/sdk/realtime`)
 
 The public realtime subpath owns the provider-neutral browser controller and

@@ -300,7 +300,7 @@ describe("incident telemetry dispatch preflight", () => {
       capabilityServerIds: ["dynamic-capability"],
       apiIntegrationServerIds: ["delegated-integration"],
       session,
-      plannedTools: [],
+      plannedTools: session.tools,
     });
     const runtime = resolveSessionToolPolicy({
       toolPolicy: session.toolPolicy,

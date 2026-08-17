@@ -599,6 +599,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
           name: payload.name ?? "Daily social media analysis",
           status: payload.status,
           action: { kind: "agent_turn" },
+          connectionAuthorities: [],
           schedule: {
             type: "calendar",
             timeZone: payload.timeZone,

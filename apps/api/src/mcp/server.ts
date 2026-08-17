@@ -50,7 +50,6 @@ import {
   beginRigChangeVerificationAttempt,
   createVariableSet,
   decryptVariableSetValue,
-  deleteScheduledTask,
   encryptVariableSetValue,
   getSession,
   getSessionGoal,
@@ -88,7 +87,6 @@ import {
   setSessionGoalStatusWithEvent,
   recordSessionGoalProgressWithEvent,
   setVariableSetVariable,
-  updateScheduledTask,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
   RigChangeTransitionError,
@@ -156,7 +154,6 @@ import {
   socialSearchLive,
   socialThreadLive,
 } from "../integrations/social-api";
-import { revokeKnowledgeSourceScheduleAuthorization } from "../integrations/google-drive";
 import {
   promoteVerifiedDefinitionEditChangeForApi,
   proposeRigChangeForApi,
@@ -174,7 +171,6 @@ import {
   manualScheduledTaskTriggerUsageKey,
   manualScheduledTaskTriggerWorkflowId,
   scheduledTaskForGrant,
-  scheduledTaskAuthorityUpdateForGrant,
   scheduledTaskRunForGrant,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
@@ -182,6 +178,7 @@ import {
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
   validateScheduledTaskTarget,
+  updateScheduledTaskForApi,
   validatedScheduledTaskUpdate,
 } from "@opengeni/core";
 import {
@@ -231,7 +228,6 @@ import { createFikenClient, resolveFikenConnectionForTool } from "../integration
 import {
   browseAtlassianSources,
   getAtlassianLiveItem,
-  revokeAtlassianScheduleAuthorization,
   searchAtlassianLive,
 } from "../integrations/atlassian";
 import { AtlassianConnectionMetadata } from "@opengeni/contracts/atlassian";
@@ -239,6 +235,7 @@ import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyBrainGovernedWriteTools } from "./company-brain-governed-writes";
 import { registerRememberTools } from "./remember";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
+import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -1449,6 +1446,9 @@ export function buildOpenGeniMcpServer(
           overlapPolicy: z4.string().optional(),
           agentConfig: z4.unknown(),
           status: z4.string().optional(),
+          // Explicit credential-free connection authority selections; declared
+          // so MCP validation doesn't strip them before the contract parse.
+          connectionAuthorities: z4.array(z4.unknown()).optional(),
           variableSetId: z4.string().uuid().optional(),
           // Deprecated alias of variableSetId; declared so MCP validation doesn't
           // strip it before the contract parse maps it (rename back-compat).
@@ -1513,6 +1513,9 @@ export function buildOpenGeniMcpServer(
           overlapPolicy: z4.string().optional(),
           agentConfig: z4.unknown().optional(),
           status: z4.string().optional(),
+          // Omitted preserves the frozen selections, [] clears them, and an
+          // array replaces them; declared so MCP validation doesn't strip it.
+          connectionAuthorities: z4.array(z4.unknown()).optional(),
           variableSetId: z4.string().uuid().nullable().optional(),
           // Deprecated alias of variableSetId (rename back-compat); declared so MCP
           // validation doesn't strip it before the contract parse maps it.
@@ -1541,7 +1544,7 @@ export function buildOpenGeniMcpServer(
         if (!scheduledTaskUpdateChangesState(existing, update)) {
           return json(scheduledTaskReceipt("scheduled_tasks_update", existing, "unchanged", false));
         }
-        const task = await updateScheduledTask(deps.db, grant.workspaceId, id, update);
+        const task = await updateScheduledTaskForApi(deps.db, grant.workspaceId, id, update);
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
@@ -1564,7 +1567,7 @@ export function buildOpenGeniMcpServer(
           return json(scheduledTaskReceipt("scheduled_tasks_pause", existing, "unchanged", false));
         }
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
-        const task = await updateScheduledTask(deps.db, grant.workspaceId, id, {
+        const task = await updateScheduledTaskForApi(deps.db, grant.workspaceId, id, {
           status: "paused",
         });
         await syncUpdatedScheduledTask({
@@ -1589,10 +1592,17 @@ export function buildOpenGeniMcpServer(
           return json(scheduledTaskReceipt("scheduled_tasks_resume", existing, "unchanged", false));
         }
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
-        const task = await updateScheduledTask(deps.db, grant.workspaceId, id, {
-          status: "active",
-          ...scheduledTaskAuthorityUpdateForGrant(grant),
+        const update = await validatedScheduledTaskUpdate({
+          settings: deps.settings,
+          db: deps.db,
+          objectStorage: deps.objectStorage,
+          grant,
+          existing,
+          payload: { status: "active" },
+          sessionAuthorization: deps.sessionAuthorization,
+          authorizationSurface: "first_party_mcp",
         });
+        const task = await updateScheduledTaskForApi(deps.db, grant.workspaceId, id, update);
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
@@ -1696,41 +1706,19 @@ export function buildOpenGeniMcpServer(
         inputSchema: { id: z4.string().uuid() },
       },
       async ({ id }) => {
-        const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
-        if (task.metadata.connectorKind === "atlassian") {
-          await revokeAtlassianScheduleAuthorization(deps, {
-            task,
-            subjectId: grant.subjectId,
-          });
-        } else {
-          await revokeKnowledgeSourceScheduleAuthorization(deps, {
-            task,
-            subjectId: grant.subjectId,
-          });
-        }
-        await deps.workflowClient.deleteScheduledTaskSchedule({
-          temporalScheduleId: task.temporalScheduleId,
+        const { task, changed } = await deleteScheduledTaskWithDurableCleanup(deps, {
+          workspaceId: grant.workspaceId,
+          taskId: id,
+          subjectId: grant.subjectId,
         });
-        try {
-          await deleteScheduledTask(deps.db, grant.workspaceId, id);
-        } catch {
-          return json(
-            scheduledTaskReceipt("scheduled_tasks_delete", task, "partial_failure", true, {
-              partialFailure: { stage: "database_delete", retryable: true },
-              warnings: [
-                "The Temporal schedule was deleted, but the task database record remains.",
-              ],
-            }),
-          );
-        }
         return json(
           mcpMutationReceipt({
             operation: "scheduled_tasks_delete",
             committed: true,
             outcome: "deleted",
-            changed: true,
+            changed,
             resource: { type: "scheduled_task", id: task.id, state: "deleted" },
-            idempotency: { status: "not_supported" },
+            idempotency: { status: changed ? "applied" : "replayed" },
           }),
         );
       },

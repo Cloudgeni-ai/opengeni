@@ -25,6 +25,8 @@ import {
   getSessionHistoryItems,
   createScheduledTask,
   createScheduledTaskRun,
+  getNestedAgentDepthDeploymentPolicy,
+  markScheduledTaskRunFailedIfQueued,
   createApiKey,
   createSession,
   createSessionGoal,
@@ -51,7 +53,6 @@ import {
   listSessionEvents,
   listSessionsForSubject,
   updateScheduledTask,
-  updateScheduledTaskRun,
   updateSessionMcpServerCredentials,
   requireScheduledTaskTargetInTransaction,
   ScheduledTaskTargetConflictError,
@@ -60,7 +61,12 @@ import {
   upsertCapabilityCatalogItem,
 } from "@opengeni/db";
 import { submitTestHumanPrompt } from "./helpers/session-control";
-import type { AccessGrant, Permission } from "@opengeni/contracts";
+import {
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  type AccessGrant,
+  type Permission,
+} from "@opengeni/contracts";
 import {
   applyRawSql,
   expectContiguousSequences,
@@ -660,6 +666,57 @@ describe("DB integration", () => {
       },
       metadata: {},
     });
+    // Every agent occurrence is admitted against the task's immutable accepted
+    // execution while the task is still active; pausing afterwards keeps the
+    // retained run history readable.
+    const depthPolicy = await getNestedAgentDepthDeploymentPolicy(dbClient.db);
+    const runId = crypto.randomUUID();
+    const run = await createScheduledTaskRun(dbClient.db, {
+      runId,
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      taskAuthorityRevision: task.authorityRevision,
+      taskExecutionDigest: task.executionDigest,
+      triggerType: "manual",
+      producerKey: `db-integration-run:${runId}`,
+      scheduledAt: null,
+      acceptedExecutionSnapshot: {
+        version: 1,
+        task,
+        resolvedModel: "scripted-model",
+        resolvedReasoningEffort: "medium",
+        resolvedLatencyMode: "standard",
+        resolvedSandboxBackend: "none",
+        resolvedSandboxOs: "linux",
+        resolvedTools: [],
+        resolvedFirstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+        resolvedFirstPartyMcpPermissions: [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+        resolvedVariableSet: null,
+        resolvedRig: null,
+        resolvedSlackBotConnection: null,
+        targetSessionExecution: null,
+        generatedSessionBinding: {
+          createIdempotencyKey: `db-integration-run:${runId}`,
+          effectiveMaxNestedAgentDepth: depthPolicy.maxNestedAgentDepth,
+          nestedAgentDepthPolicySource: depthPolicy.policySource,
+          codexCompactionMode: "portable",
+        },
+        personalConnectionDelegations: [],
+        personalResourceAuthoritySubjectId: null,
+        causalHumanSubjectId: null,
+        causalHumanAuthority: null,
+        xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+        xaiAuthoritySubjectId: null,
+        connectionAuthoritySubjectId: null,
+        triggerInitiator: { kind: "service", subjectId: "scheduler" },
+        agentRunUsageIdempotencyKey: null,
+        incidentPreflightRequired: false,
+        alertOccurrenceLabels: null,
+      },
+    });
+    // Agent run status is lifecycle-only: direct row updates are fenced, and
+    // the terminal transition goes through the run lifecycle capability.
+    await markScheduledTaskRunFailedIfQueued(dbClient.db, grant.workspaceId, run.id, "no worker");
     const updated = await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, {
       status: "paused",
     });
@@ -669,17 +726,6 @@ describe("DB integration", () => {
         (item) => item.id === task.id,
       ),
     ).toBe(true);
-
-    const run = await createScheduledTaskRun(dbClient.db, {
-      workspaceId: grant.workspaceId,
-      taskId: task.id,
-      triggerType: "manual",
-      scheduledAt: null,
-    });
-    await updateScheduledTaskRun(dbClient.db, grant.workspaceId, run.id, {
-      status: "failed",
-      error: "no worker",
-    });
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(runs[0]?.status).toBe("failed");
     expect(runs[0]?.error).toBe("no worker");

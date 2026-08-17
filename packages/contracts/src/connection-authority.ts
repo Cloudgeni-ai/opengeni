@@ -156,6 +156,7 @@ const AcceptedConnectionWork = z.discriminatedUnion("kind", [
       kind: z.literal("scheduled_task"),
       taskId: z.string().uuid(),
       taskAuthorityRevision: z.number().int().positive(),
+      runId: z.string().uuid(),
     })
     .strict(),
 ]);

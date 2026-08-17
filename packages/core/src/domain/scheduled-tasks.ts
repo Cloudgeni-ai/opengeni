@@ -25,14 +25,19 @@ import {
   getNestedAgentDepthDeploymentPolicy,
   getRig,
   getScheduledTask,
+  getScheduledTaskIncludingDeletedForUpdate,
   getScheduledTaskPersonalConnectionDelegations,
+  getScheduledTaskXaiProviderAccountAuthoritySnapshot,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
   getSession,
+  nestedPostgresSqlState,
   requireWorkspace,
   scopedKnowledgeScopeKey,
   updateScheduledTask,
+  withWorkspaceSubjectRls,
   resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   type Database,
+  type TemporalScheduleCleanupClaim,
   type UpdateScheduledTaskInput,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
@@ -50,7 +55,6 @@ import { validateVariableSetAttachment } from "./environments";
 import {
   freezePersonalConnectionDelegations,
   personalConnectionDelegationSourceForGrant,
-  personalConnectionDelegationsEqual,
 } from "./personal-connection-delegations";
 import {
   assertWorkspaceModelPolicyAllows,
@@ -172,7 +176,15 @@ export async function createValidatedScheduledTask(input: {
   // NOT that it has an active version now (that is a fire-time concern). RLS
   // makes a cross-workspace id indistinguishable from missing → both 422.
   if (!knowledgeAction && input.payload.rigId) {
-    await requireScheduledTaskRig(input.db, input.grant.workspaceId, input.payload.rigId);
+    await requireScheduledTaskRig(
+      input.db,
+      {
+        accountId: input.grant.accountId,
+        workspaceId: input.grant.workspaceId,
+        subjectId: input.grant.subjectId,
+      },
+      input.payload.rigId,
+    );
   }
   const runtimeSettings = knowledgeAction
     ? null
@@ -191,6 +203,7 @@ export async function createValidatedScheduledTask(input: {
           settings: runtimeSettings,
           tools: [...agentConfig.tools, { kind: "mcp", id: "opengeni" }],
           source: personalConnectionDelegationSourceForGrant(input.grant),
+          authoritySelections: input.payload.connectionAuthorities,
           rejectUnselectedActivatedConnections: true,
           ...scheduledConnectionSurfaceEligibility(runtimeSettings, target),
         });
@@ -207,28 +220,84 @@ export async function createValidatedScheduledTask(input: {
           workspaceId: input.grant.workspaceId,
           subjectId: input.grant.subjectId,
         });
-  return await createScheduledTask(input.db, {
-    id,
-    accountId: input.grant.accountId,
-    workspaceId: input.grant.workspaceId,
-    name: trimmedScheduledTaskName(input.payload.name),
-    status: input.payload.status,
-    schedule: input.payload.schedule,
-    temporalScheduleId: scheduledTaskTemporalScheduleId(id),
-    runMode: input.payload.runMode,
-    overlapPolicy: input.payload.overlapPolicy,
-    action,
-    agentConfig,
-    ...(creationInitiator.initiator ? { createdBy: creationInitiator.initiator } : {}),
-    ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
-    createdByActor: creationInitiator.actor ?? null,
-    personalConnectionDelegations,
-    xaiProviderAccountAuthoritySnapshot,
-    targetSessionId: target?.id ?? null,
-    variableSetId: input.payload.variableSetId ?? null,
-    rigId: input.payload.rigId ?? null,
-    metadata: input.payload.metadata,
-  });
+  return await withScheduledTaskAuthorityWriteErrors(() =>
+    createScheduledTask(input.db, {
+      id,
+      accountId: input.grant.accountId,
+      workspaceId: input.grant.workspaceId,
+      name: trimmedScheduledTaskName(input.payload.name),
+      status: input.payload.status,
+      schedule: input.payload.schedule,
+      temporalScheduleId: scheduledTaskTemporalScheduleId(id),
+      runMode: input.payload.runMode,
+      overlapPolicy: input.payload.overlapPolicy,
+      action,
+      agentConfig,
+      ...(creationInitiator.initiator ? { createdBy: creationInitiator.initiator } : {}),
+      ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
+      createdByActor: creationInitiator.actor ?? null,
+      personalConnectionDelegations,
+      xaiProviderAccountAuthoritySnapshot,
+      targetSessionId: target?.id ?? null,
+      variableSetId: input.payload.variableSetId ?? null,
+      rigId: input.payload.rigId ?? null,
+      metadata: input.payload.metadata,
+    }),
+  );
+}
+
+function nestedPostgresMessage(error: unknown): string | null {
+  const queue: unknown[] = [error];
+  const seen = new Set<unknown>();
+  while (queue.length > 0 && seen.size < 64) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    const record = current as Record<string, unknown>;
+    if (typeof record.code === "string" && typeof record.message === "string") {
+      return record.message;
+    }
+    for (const key of ["cause", "errors", "error", "originalError"]) {
+      const nested = record[key];
+      if (Array.isArray(nested)) queue.push(...nested);
+      else if (nested !== undefined) queue.push(nested);
+    }
+  }
+  return null;
+}
+
+/**
+ * Scheduled-task authority writes fail closed inside SECURITY DEFINER seams
+ * (42501): a non-human writer delegating resources, an authorizer without
+ * active workspace membership, or a foreign human retaining another subject's
+ * grants. Those are caller-resolvable conflicts, not server faults.
+ */
+export async function withScheduledTaskAuthorityWriteErrors<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (nestedPostgresSqlState(error) === "42501") {
+      const detail = nestedPostgresMessage(error);
+      throw new HTTPException(409, {
+        message: detail
+          ? `scheduled task authority denied: ${detail}`
+          : "scheduled task authority denied",
+      });
+    }
+    throw error;
+  }
+}
+
+/** API/MCP-facing update that maps authority-write denials to 409. */
+export async function updateScheduledTaskForApi(
+  db: Database,
+  workspaceId: string,
+  taskId: string,
+  update: UpdateScheduledTaskInput,
+): Promise<ScheduledTask> {
+  return await withScheduledTaskAuthorityWriteErrors(() =>
+    updateScheduledTask(db, workspaceId, taskId, update),
+  );
 }
 
 export async function validateScheduledTaskTarget(input: {
@@ -303,7 +372,7 @@ export async function validateScheduledTaskTarget(input: {
       message: "target session variableSet attachment does not match the scheduled task",
     });
   }
-  if (input.rigId && input.rigId !== session.rigId) {
+  if ((session.rigId ?? null) !== (input.rigId ?? null)) {
     throw new HTTPException(422, {
       message: "target session rig does not match the scheduled task",
     });
@@ -366,10 +435,10 @@ export function scheduledTaskAuthorityUpdateForGrant(
 // workspace. A missing/cross-workspace id is a 422 (RLS-invisible == missing).
 async function requireScheduledTaskRig(
   db: Database,
-  workspaceId: string,
+  access: { accountId: string; workspaceId: string; subjectId: string },
   rigId: string,
 ): Promise<void> {
-  const rig = await getRig(db, workspaceId, rigId);
+  const rig = await getRig(db, access, rigId);
   if (!rig) {
     throw new HTTPException(422, { message: `unknown rigId: ${rigId}` });
   }
@@ -400,7 +469,8 @@ export async function validatedScheduledTaskUpdate(input: {
       input.payload.runMode !== undefined ||
       input.payload.targetSessionId !== undefined ||
       input.payload.variableSetId !== undefined ||
-      input.payload.rigId !== undefined
+      input.payload.rigId !== undefined ||
+      input.payload.connectionAuthorities !== undefined
     ) {
       throw new HTTPException(422, {
         message: "knowledge source schedules do not accept agent/session configuration",
@@ -499,11 +569,25 @@ export async function validatedScheduledTaskUpdate(input: {
     }
   }
   if (input.payload.rigId !== undefined) {
-    // The rig binds fresh per fire, so changing it on a reusable-session task is
-    // harmless for the LIVE session (which keeps its own frozen version) and
-    // only affects subsequent new-session fires — no live-session guard needed.
+    if (
+      input.existing.runMode === "reusable_session" &&
+      input.existing.reusableSessionId !== null &&
+      input.payload.rigId !== input.existing.rigId
+    ) {
+      throw new HTTPException(409, {
+        message: "A reusable-session task cannot change rigId after materialization; recreate it",
+      });
+    }
     if (input.payload.rigId !== null) {
-      await requireScheduledTaskRig(input.db, input.existing.workspaceId, input.payload.rigId);
+      await requireScheduledTaskRig(
+        input.db,
+        {
+          accountId: input.existing.accountId,
+          workspaceId: input.existing.workspaceId,
+          subjectId: input.grant.subjectId,
+        },
+        input.payload.rigId,
+      );
     }
     update.rigId = input.payload.rigId;
   }
@@ -539,6 +623,78 @@ export async function validatedScheduledTaskUpdate(input: {
       });
     }
     update.agentConfig = nextAgentConfig;
+  }
+  const nextAgentConfig = update.agentConfig ?? input.existing.agentConfig;
+  const authorityTargetChanged =
+    nextRunMode !== input.existing.runMode ||
+    nextTargetSessionId !== input.existing.targetSessionId ||
+    (input.payload.variableSetId !== undefined &&
+      input.payload.variableSetId !== input.existing.variableSetId) ||
+    (input.payload.rigId !== undefined && input.payload.rigId !== input.existing.rigId);
+  const materialExecutionChange =
+    authorityTargetChanged ||
+    input.payload.connectionAuthorities !== undefined ||
+    !isDeepStrictEqual(nextAgentConfig, input.existing.agentConfig) ||
+    (input.payload.action !== undefined &&
+      !isDeepStrictEqual(input.payload.action, input.existing.action)) ||
+    (input.payload.schedule !== undefined &&
+      !isDeepStrictEqual(input.payload.schedule, input.existing.schedule)) ||
+    (input.payload.overlapPolicy !== undefined &&
+      input.payload.overlapPolicy !== input.existing.overlapPolicy) ||
+    (input.payload.metadata !== undefined &&
+      !isDeepStrictEqual(input.payload.metadata, input.existing.metadata)) ||
+    (input.existing.status === "paused" && input.payload.status === "active");
+  const existingXaiAuthority = await getScheduledTaskXaiProviderAccountAuthoritySnapshot(
+    input.db,
+    input.existing.workspaceId,
+    input.existing.id,
+  );
+  if (
+    existingXaiAuthority.scope === "user" &&
+    materialExecutionChange &&
+    (input.existing.createdBy.kind !== "subject" ||
+      input.existing.createdBy.subjectId !== input.grant.subjectId)
+  ) {
+    throw new HTTPException(409, {
+      message: "changing a user-scoped xAI scheduled task requires the same causal human",
+    });
+  }
+  const existingDelegations = await getScheduledTaskPersonalConnectionDelegations(
+    input.db,
+    input.existing.workspaceId,
+    input.existing.id,
+  );
+  if (input.payload.connectionAuthorities === undefined) {
+    if (
+      existingDelegations.length > 0 &&
+      !isDeepStrictEqual(nextAgentConfig.tools, input.existing.agentConfig.tools)
+    ) {
+      throw new HTTPException(409, {
+        message:
+          "changing tools on a connection-authorized task requires explicit connectionAuthorities",
+      });
+    }
+    if (existingDelegations.length > 0) {
+      if (
+        materialExecutionChange &&
+        existingDelegations.some(
+          (delegation) => delegation.ownerSubjectId !== input.grant.subjectId,
+        )
+      ) {
+        throw new HTTPException(409, {
+          message:
+            "preserving connection authority requires the same causal human; provide a new explicit selection",
+        });
+      }
+      if (authorityTargetChanged) {
+        update.cloneConnectionAuthorityFromRevision = input.existing.authorityRevision;
+      } else {
+        update.clonePersonalResourceAuthorityFromRevision = input.existing.authorityRevision;
+      }
+    }
+  } else if (input.payload.connectionAuthorities.length === 0) {
+    update.personalConnectionDelegations = [];
+  } else {
     const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
       input.db,
       input.existing.workspaceId,
@@ -559,29 +715,26 @@ export async function validatedScheduledTaskUpdate(input: {
       rigId: input.payload.rigId !== undefined ? input.payload.rigId : input.existing.rigId,
       agentConfig: nextAgentConfig,
     });
-    const personalConnectionDelegations = await freezePersonalConnectionDelegations({
+    update.personalConnectionDelegations = await freezePersonalConnectionDelegations({
       db: input.db,
       workspaceId: input.existing.workspaceId,
       settings: runtimeSettings,
       tools: [...nextAgentConfig.tools, { kind: "mcp", id: "opengeni" }],
       source: personalConnectionDelegationSourceForGrant(input.grant),
+      authoritySelections: input.payload.connectionAuthorities,
       rejectUnselectedActivatedConnections: true,
       ...scheduledConnectionSurfaceEligibility(runtimeSettings, nextTarget),
     });
-    if (input.existing.reusableSessionId && input.existing.runMode === "reusable_session") {
-      const existingDelegations = await getScheduledTaskPersonalConnectionDelegations(
-        input.db,
-        input.existing.workspaceId,
-        input.existing.id,
-      );
-      if (!personalConnectionDelegationsEqual(existingDelegations, personalConnectionDelegations)) {
-        throw new HTTPException(409, {
-          message:
-            "cannot change personal MCP connections of a task with a live reusable session; recreate the task",
-        });
-      }
-    }
-    update.personalConnectionDelegations = personalConnectionDelegations;
+  }
+  if (
+    !materialExecutionChange &&
+    input.payload.connectionAuthorities === undefined &&
+    update.clonePersonalResourceAuthorityFromRevision === undefined
+  ) {
+    // Administrative lifecycle/name edits preserve the exact revision-bound
+    // causal human. They must not silently re-authorize retained Variable Set,
+    // Rig, Connection, or xAI authority under the manager performing the edit.
+    update.clonePersonalResourceAuthorityFromRevision = input.existing.authorityRevision;
   }
   if (
     existingTarget &&
@@ -616,11 +769,15 @@ export async function validatedScheduledTaskUpdate(input: {
   if (
     input.payload.targetSessionId !== undefined ||
     input.existing.runMode === "existing_session" ||
-    nextRunMode === "existing_session"
+    nextRunMode === "existing_session" ||
+    (input.existing.runMode === "reusable_session" && nextRunMode !== "reusable_session")
   ) {
     update.targetSessionId = nextTargetSessionId;
   }
   Object.assign(update, scheduledTaskAuthorityUpdateForGrant(input.grant));
+  if (update.clonePersonalResourceAuthorityFromRevision !== undefined) {
+    update.refreshPersonalResourceAuthority = false;
+  }
   return update;
 }
 
@@ -746,6 +903,73 @@ export class ScheduledTaskSyncError extends Error {
   }
 }
 
+/**
+ * One deletion lifecycle shared by HTTP and first-party MCP adapters.
+ * Connector authorization is proven before the one-way tombstone. The same
+ * transaction detaches reclaimable task resources and persists both external
+ * cleanup obligations; best-effort processing is only an acceleration of that
+ * durable receipt.
+ */
+export async function deleteScheduledTaskLifecycle(input: {
+  db: Database;
+  workspaceId: string;
+  taskId: string;
+  subjectId: string;
+  preflightConnectorAuthorization: (task: ScheduledTask) => Promise<void>;
+  cleanupConnectorAuthorization: (db: Database, task: ScheduledTask) => Promise<void>;
+  processCleanupClaims?: (claims: readonly TemporalScheduleCleanupClaim[]) => Promise<void>;
+}): Promise<{
+  task: ScheduledTask;
+  changed: boolean;
+  cleanup: TemporalScheduleCleanupClaim | null;
+}> {
+  const result = await withWorkspaceSubjectRls(
+    input.db,
+    input.workspaceId,
+    input.subjectId,
+    async (tx) => {
+      const task = await getScheduledTaskIncludingDeletedForUpdate(
+        tx,
+        input.workspaceId,
+        input.taskId,
+      );
+      if (!task) throw new HTTPException(404, { message: "Scheduled task not found" });
+      const wasLive = task.deletedAt === null;
+      if (
+        task.action.kind === "knowledge_source_sync" &&
+        (task.action.initiatingSubjectId !== input.subjectId ||
+          task.action.connection.ownerSubjectId !== input.subjectId)
+      ) {
+        throw new HTTPException(403, {
+          message: "knowledge source schedule requires the exact initiating subject",
+        });
+      }
+      if (wasLive && task.action.kind === "knowledge_source_sync") {
+        await input.preflightConnectorAuthorization(task);
+      }
+      const deletion =
+        task.action.kind === "knowledge_source_sync"
+          ? await (async () => {
+              await input.cleanupConnectorAuthorization(tx, task);
+              return await deleteScheduledTask(tx, input.workspaceId, task.id, {
+                connectorCleanupSubjectId: input.subjectId,
+                connectorCleanupCompleted: true,
+                expectedAuthorityRevision: task.authorityRevision,
+                expectedExecutionDigest: task.executionDigest,
+              });
+            })()
+          : await deleteScheduledTask(tx, input.workspaceId, task.id);
+      return { task, deletion };
+    },
+  );
+  const { task, deletion } = result;
+  const { cleanup, changed } = deletion;
+  if (cleanup && input.processCleanupClaims) {
+    await input.processCleanupClaims([cleanup]);
+  }
+  return { task, changed, cleanup };
+}
+
 export async function syncCreatedScheduledTask(input: {
   db: Database;
   workflowClient: SessionWorkflowClient;
@@ -756,6 +980,9 @@ export async function syncCreatedScheduledTask(input: {
   } catch (error) {
     let persistenceRestored = true;
     try {
+      // Creation rollback removes only the failed schedule. Connector desired
+      // state remains authoritative so a later connector save can rematerialize
+      // it; this is intentionally not the user-requested deletion lifecycle.
       await deleteScheduledTask(input.db, input.task.workspaceId, input.task.id);
     } catch {
       persistenceRestored = false;

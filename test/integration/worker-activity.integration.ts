@@ -2972,6 +2972,7 @@ describe("worker activities integration", () => {
       workspaceId: grant.workspaceId,
       taskId: task.id,
       triggerType: "scheduled",
+      producerKey: `worker-activity-${crypto.randomUUID()}`,
     });
 
     expect(result.action).toBe("start");
@@ -2992,11 +2993,10 @@ describe("worker activities integration", () => {
     });
     expect(session?.tools).toEqual([{ kind: "mcp", id: "docs" }]);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, result.sessionId, 0, 10);
-    expect(events.map((event) => event.type)).toEqual([
-      "session.created",
-      "session.status.changed",
-      "system.update.pending",
-    ]);
+    // session.created carries the public "queued" status directly, so no
+    // separate session.status.changed event is emitted before the wake.
+    expect(events.map((event) => event.type)).toEqual(["session.created", "system.update.pending"]);
+    expect(events[0]?.payload).toMatchObject({ status: "queued" });
     const pendingUpdates = await listOutstandingSessionSystemUpdates(
       dbClient.db,
       grant.workspaceId,
@@ -3094,12 +3094,12 @@ describe("worker activities integration", () => {
       effectiveControl: { state: "paused" },
     });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, first.sessionId, 0, 10);
+    // session.created carries the public "queued" status directly; there is no
+    // separate session.status.changed event before the (withheld) wake.
     expect(events.find((event) => event.type === "session.created")?.payload).toMatchObject({
       status: "queued",
     });
-    expect(events.find((event) => event.type === "session.status.changed")?.payload).toMatchObject({
-      status: "queued",
-    });
+    expect(events.filter((event) => event.type === "session.status.changed")).toHaveLength(0);
   });
 
   test("blocks scheduled task dispatch when the account monthly model cost cap is reached", async () => {
@@ -3150,6 +3150,7 @@ describe("worker activities integration", () => {
         workspaceId: grant.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
       }),
     ).resolves.toEqual({ action: "blocked", reason: "monthly_model_cost_limit" });
     expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toHaveLength(0);
@@ -3255,6 +3256,7 @@ describe("worker activities integration", () => {
         workspaceId: grant.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
       }),
     ).resolves.toMatchObject({
       action: "start",
@@ -3313,6 +3315,7 @@ describe("worker activities integration", () => {
       workspaceId: grant.workspaceId,
       taskId: task.id,
       triggerType: "scheduled",
+      producerKey: `worker-activity-${crypto.randomUUID()}`,
     });
     const stored = await requireScheduledTask(dbClient.db, grant.workspaceId, task.id);
     const manualUsageKey = `test:scheduled-reusable-manual:${task.id}`;
@@ -3488,13 +3491,17 @@ describe("worker activities integration", () => {
     });
 
     await setSessionStatus(dbClient.db, grant.workspaceId, target.id, "cancelled");
+    // A cancelled target is a deterministic terminal outcome: the run settles
+    // (skipped, session_cancelled) and the dispatch resolves blocked rather than
+    // throwing into a Temporal retry loop.
     await expect(
       activities.dispatchScheduledTaskRun({
         workspaceId: grant.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
       }),
-    ).rejects.toThrow("reusable session is cancelled; refusing to revive on scheduled fire");
+    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
     expect(await getSession(dbClient.db, grant.workspaceId, target.id)).toMatchObject({
       status: "cancelled",
     });
@@ -3504,7 +3511,7 @@ describe("worker activities integration", () => {
     expect(await listSessionTurns(dbClient.db, grant.workspaceId, target.id, 10)).toHaveLength(0);
     const cancelledRuns = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(cancelledRuns).toHaveLength(1);
-    expect(cancelledRuns[0]?.status).toBe("failed");
+    expect(cancelledRuns[0]).toMatchObject({ status: "skipped", error: "session_cancelled" });
     expect(
       await sumUsageQuantity(dbClient.db, {
         accountId: grant.accountId,
@@ -3525,11 +3532,18 @@ describe("worker activities integration", () => {
         workspaceId: grant.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
       }),
-    ).rejects.toThrow("scheduled task target session is unavailable");
+    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
     const deletedRuns = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(deletedRuns).toHaveLength(2);
-    expect(deletedRuns.every((run) => run.status === "failed")).toBe(true);
+    expect(deletedRuns.every((run) => run.status === "skipped" || run.status === "failed")).toBe(
+      true,
+    );
+    expect(deletedRuns.some((run) => run.error === "scheduled_target_session_unavailable")).toBe(
+      true,
+    );
+    expect(deletedRuns.some((run) => run.status === "dispatched")).toBe(false);
     expect(
       await sumUsageQuantity(dbClient.db, {
         accountId: grant.accountId,
@@ -3791,6 +3805,7 @@ describe("worker activities integration", () => {
       workspaceId: grant.workspaceId,
       taskId: task.id,
       triggerType: "scheduled",
+      producerKey: `worker-activity-${crypto.randomUUID()}`,
     });
     expect(dispatched.action).toBe("start");
     const session = await getSession(dbClient.db, grant.workspaceId, dispatched.sessionId);
@@ -3913,15 +3928,26 @@ describe("worker activities integration", () => {
         model: new ScriptedModel([{ outputText: "ok" }]),
       }),
     });
+    // Binding divergence is deterministic: the run settles failed with a stable
+    // error code and the dispatch resolves blocked instead of throwing.
     await expect(
       activities.dispatchScheduledTaskRun({
         workspaceId: grant.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
       }),
-    ).rejects.toThrow("scheduled task variableSet attachment does not match its reusable session");
+    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
-    expect(runs[0]?.status).toBe("failed");
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      status: "failed",
+      error: "scheduled_reusable_binding_changed",
+    });
+    // Nothing was delivered into the diverged session.
+    expect(
+      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, session.id),
+    ).toHaveLength(0);
   });
 
   test("refuses to revive a cancelled reusable session on the next fire", async () => {
@@ -3972,8 +3998,9 @@ describe("worker activities integration", () => {
         workspaceId: grant.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
       }),
-    ).rejects.toThrow(/cancelled/i);
+    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
 
     // Nothing was appended to the cancelled session: no new user.message, no
     // turn queued, and the session stays cancelled (not revived to queued).
@@ -3985,9 +4012,10 @@ describe("worker activities integration", () => {
     expect(revived?.status).toBe("cancelled");
     const queuedTurns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 50);
     expect(queuedTurns.filter((turn) => turn.status === "queued")).toHaveLength(0);
-    // The run is recorded as failed, not dispatched.
+    // The run settles terminally (skipped, session_cancelled), not dispatched.
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
-    expect(runs[0]?.status).toBe("failed");
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: "skipped", error: "session_cancelled" });
   });
 });
 

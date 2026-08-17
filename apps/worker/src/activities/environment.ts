@@ -133,6 +133,14 @@ export async function loadWorkspaceEnvironmentForRunWithCredentials(
   environmentId: string | null,
   authority: VariableSetCredentialAuthority,
   sandboxSecrets?: ConnectionCredentialsPort["sandboxSecrets"],
+  options: {
+    /**
+     * Exact accepted scheduled-occurrence generation for this Variable Set,
+     * resolved by the caller from the immutable run snapshot; null/omitted for
+     * ordinary live turns.
+     */
+    expectedGeneration?: number | null;
+  } = {},
 ): Promise<WorkspaceEnvironmentForRun | null> {
   if (!sandboxSecrets) {
     return loadWorkspaceEnvironmentForRunFromDb(db, settings, {
@@ -148,11 +156,13 @@ export async function loadWorkspaceEnvironmentForRunWithCredentials(
   if (!environmentId) {
     return null;
   }
+  const expectedGeneration = options.expectedGeneration ?? null;
   const secrets: SandboxSecrets = await sandboxSecrets({
     accountId: scope.accountId,
     workspaceId: scope.workspaceId,
     ...authority,
     variableSetId: environmentId,
+    ...(expectedGeneration === null ? {} : { expectedGeneration }),
   });
   // workspace-scope cross-check: the provider must echo THIS run's workspace before we apply its
   // decrypted values into the sandbox.
@@ -163,7 +173,12 @@ export async function loadWorkspaceEnvironmentForRunWithCredentials(
     secrets.turnId !== authority.turnId ||
     secrets.attemptId !== authority.attemptId ||
     secrets.executionGeneration !== authority.executionGeneration ||
-    secrets.variableSetId !== environmentId
+    secrets.variableSetId !== environmentId ||
+    // A scheduled attempt materializes only the exact accepted generation:
+    // the host must echo it and return that generation's values.
+    (expectedGeneration !== null &&
+      (secrets.expectedGeneration !== expectedGeneration ||
+        secrets.generation !== expectedGeneration))
   ) {
     throw new Error("connection-credential provider (sandboxSecrets) returned stale authority");
   }

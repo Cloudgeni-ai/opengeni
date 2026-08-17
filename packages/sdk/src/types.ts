@@ -580,6 +580,27 @@ export type UpdateSessionMcpApprovalPolicyResponse = {
 export type ConnectionKind = "oauth2" | "api_key" | "app_install" | "delegated";
 export type ConnectionStatus = "active" | "needs_reauth" | "revoked" | "error";
 
+export type UserResourceDelegation = {
+  authorityId: string;
+  grantId: string;
+  organizationId: string;
+  workspaceId: string;
+  sessionId: string | null;
+  action: string;
+  mode: "once" | "session" | "always";
+  context: "user_private" | "workspace_shared";
+  authorityEpoch: number | null;
+  authorityGeneration: number;
+  grantGeneration: number;
+  resourceVersionId?: string | null | undefined;
+};
+
+export type McpConnectionAuthoritySelection = {
+  serverId: string;
+  connectionId: string;
+  userDelegation: UserResourceDelegation;
+};
+
 export type McpServerConnectionRef = {
   connectionId?: string | undefined;
   provider?: string | undefined;
@@ -3960,6 +3981,7 @@ export type CreateAgentScheduledTaskRequest = {
   action?: { kind: "agent_turn" } | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
+  connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
@@ -3989,6 +4011,7 @@ export type UpdateScheduledTaskRequest = {
   schedule?: ScheduledTaskScheduleSpec | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
+  connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   action?: ScheduledTaskAction | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;

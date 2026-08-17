@@ -11,6 +11,7 @@ import {
   OPENGENI_PERSONAL_SLACK_MCP_URL,
   OrganizationMember,
   SessionGoalSnapshot,
+  ScheduledTaskRunAcceptedExecution,
   SessionGoalRootConstraintsWrite,
   normalizeSessionGoalRootConstraints,
   sessionGoalUtf8Bytes,
@@ -72,6 +73,7 @@ import type {
   ScheduledTaskAgentConfig,
   ScheduledTaskOverlapPolicy,
   ScheduledTaskRun,
+  ScheduledTaskRunAcceptedExecution as ScheduledTaskRunAcceptedExecutionType,
   ScheduledTaskRunMode,
   ScheduledTaskRunStatus,
   ScheduledTaskScheduleSpec,
@@ -2297,6 +2299,10 @@ export type TemporalScheduleCleanupClaim = {
   accountId: string;
   workspaceId: string;
   temporalScheduleId: string;
+  scheduledTaskId: string | null;
+  connectorCleanupSubjectId: string | null;
+  connectorCleanupSnapshot: unknown | null;
+  connectorCleanupCompletedAt: Date | null;
   claimId: string;
   attemptCount: number;
 };
@@ -2503,6 +2509,16 @@ export async function deleteWorkspaceIfQuiescent(
             .from(schema.scheduledTasks)
             .where(eq(schema.scheduledTasks.workspaceId, input.workspaceId))
             .for("update", { noWait: true });
+          // The workspace cascade itself removes every connector/source row.
+          // Adopt any earlier task-level receipt by completing its DB-only
+          // connector stage before the parent disappears; the surviving row
+          // then owns only the external Temporal deletion.
+          await tx.execute(sql`
+            select opengeni_private.complete_workspace_temporal_connector_cleanups(
+              ${input.accountId}::uuid,
+              ${input.workspaceId}::uuid
+            )
+          `);
           const cleanupClaimId = randomUUID();
           const temporalScheduleCleanups =
             schedules.length === 0
@@ -2519,17 +2535,23 @@ export async function deleteWorkspaceIfQuiescent(
                       attemptCount: 1,
                     })),
                   )
+                  .onConflictDoNothing({
+                    target: schema.temporalScheduleCleanupOutbox.temporalScheduleId,
+                  })
                   .returning({
                     id: schema.temporalScheduleCleanupOutbox.id,
                     accountId: schema.temporalScheduleCleanupOutbox.accountId,
                     workspaceId: schema.temporalScheduleCleanupOutbox.workspaceId,
                     temporalScheduleId: schema.temporalScheduleCleanupOutbox.temporalScheduleId,
+                    scheduledTaskId: schema.temporalScheduleCleanupOutbox.scheduledTaskId,
+                    connectorCleanupSubjectId:
+                      schema.temporalScheduleCleanupOutbox.connectorCleanupSubjectId,
+                    connectorCleanupSnapshot:
+                      schema.temporalScheduleCleanupOutbox.connectorCleanupSnapshot,
+                    connectorCleanupCompletedAt:
+                      schema.temporalScheduleCleanupOutbox.connectorCleanupCompletedAt,
                     attemptCount: schema.temporalScheduleCleanupOutbox.attemptCount,
                   });
-          if (temporalScheduleCleanups.length !== schedules.length) {
-            throw new Error("Failed to persist every Temporal schedule cleanup receipt");
-          }
-
           const deleted = await tx
             .delete(schema.workspaces)
             .where(
@@ -2583,6 +2605,10 @@ export async function claimTemporalScheduleCleanups(
     account_id: string;
     workspace_id: string;
     temporal_schedule_id: string;
+    scheduled_task_id: string | null;
+    connector_cleanup_subject_id: string | null;
+    connector_cleanup_snapshot: unknown | null;
+    connector_cleanup_completed_at: Date | null;
     attempt_count: number;
   }>(
     db,
@@ -2597,6 +2623,10 @@ export async function claimTemporalScheduleCleanups(
     accountId: row.account_id,
     workspaceId: row.workspace_id,
     temporalScheduleId: row.temporal_schedule_id,
+    scheduledTaskId: row.scheduled_task_id,
+    connectorCleanupSubjectId: row.connector_cleanup_subject_id,
+    connectorCleanupSnapshot: row.connector_cleanup_snapshot,
+    connectorCleanupCompletedAt: row.connector_cleanup_completed_at,
     claimId: input.claimId,
     attemptCount: row.attempt_count,
   }));
@@ -2620,6 +2650,22 @@ export async function settleTemporalScheduleCleanup(
     `,
   );
   return row?.settled === true;
+}
+
+/** Persist the connector half of a combined cleanup before attempting Temporal. */
+export async function completeTemporalScheduleConnectorCleanup(
+  db: Database,
+  input: { id: string; claimId: string },
+): Promise<boolean> {
+  const [row] = await rawRows<{ completed: boolean }>(
+    db,
+    sql`
+      select opengeni_private.complete_temporal_schedule_connector_cleanup(
+        ${input.id}, ${input.claimId}
+      ) as completed
+    `,
+  );
+  return row?.completed === true;
 }
 
 export async function createApiKey(
@@ -3926,7 +3972,12 @@ export async function countScheduledTasksForWorkspace(
         count: sql<number>`count(*)::int`,
       })
       .from(schema.scheduledTasks)
-      .where(eq(schema.scheduledTasks.workspaceId, workspaceId));
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, workspaceId),
+          isNull(schema.scheduledTasks.deletedAt),
+        ),
+      );
     return Number(count);
   });
 }
@@ -3990,6 +4041,7 @@ export type UpdateScheduledTaskInput = Partial<{
   rigId: string | null;
   metadata: Record<string, unknown>;
   refreshPersonalResourceAuthority: boolean;
+  cloneConnectionAuthorityFromRevision: number;
   clonePersonalResourceAuthorityFromRevision: number;
   authorityUpdatedBy: TurnInitiator;
   authorityUpdatedByContext: TurnInitiatorContext;
@@ -4628,6 +4680,7 @@ export type SessionTurnForExecution = SessionTurn & {
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
   /** Worker-only causal authority; never inferred from the current worker. */
   initiatingHumanSubjectId: string | null;
+  scheduledTaskRunId: string | null;
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
   goalSnapshot: SessionGoalSnapshot;
 };
@@ -13737,6 +13790,12 @@ export async function createScheduledTask(
         ${row.id}::uuid,
         ${row.authorityRevision}::bigint
       )`);
+      await scopedDb.execute(sql`select record_scheduled_task_revision_authority(
+        ${row.accountId}::uuid,
+        ${row.workspaceId}::uuid,
+        ${row.id}::uuid,
+        ${row.authorityRevision}::bigint
+      )`);
       return mapScheduledTask(row);
     },
   );
@@ -13754,6 +13813,12 @@ export async function updateScheduledTask(
       input.clonePersonalResourceAuthorityFromRevision !== undefined
     ) {
       throw new Error("scheduled task authority refresh and clone are mutually exclusive");
+    }
+    if (
+      input.cloneConnectionAuthorityFromRevision !== undefined &&
+      !input.refreshPersonalResourceAuthority
+    ) {
+      throw new Error("scheduled connection authority clone requires a resource refresh");
     }
     if (input.refreshPersonalResourceAuthority) {
       const frozenUpdater = await frozenSessionCreatorForInsert(scopedDb, {
@@ -13803,6 +13868,7 @@ export async function updateScheduledTask(
         and(
           eq(schema.scheduledTasks.workspaceId, workspaceId),
           eq(schema.scheduledTasks.id, taskId),
+          isNull(schema.scheduledTasks.deletedAt),
         ),
       )
       .returning();
@@ -13810,7 +13876,25 @@ export async function updateScheduledTask(
       throw new Error(`Scheduled task not found: ${taskId}`);
     }
     if (input.refreshPersonalResourceAuthority) {
-      await scopedDb.execute(sql`select freeze_scheduled_task_personal_resources(
+      if (input.cloneConnectionAuthorityFromRevision !== undefined) {
+        await scopedDb.execute(
+          sql`select refresh_scheduled_task_personal_resources_clone_connections(
+            ${row.accountId}::uuid,
+            ${row.workspaceId}::uuid,
+            ${row.id}::uuid,
+            ${input.cloneConnectionAuthorityFromRevision}::bigint,
+            ${row.authorityRevision}::bigint
+          )`,
+        );
+      } else {
+        await scopedDb.execute(sql`select freeze_scheduled_task_personal_resources(
+          ${row.accountId}::uuid,
+          ${row.workspaceId}::uuid,
+          ${row.id}::uuid,
+          ${row.authorityRevision}::bigint
+        )`);
+      }
+      await scopedDb.execute(sql`select record_scheduled_task_revision_authority(
         ${row.accountId}::uuid,
         ${row.workspaceId}::uuid,
         ${row.id}::uuid,
@@ -13818,6 +13902,13 @@ export async function updateScheduledTask(
       )`);
     } else if (input.clonePersonalResourceAuthorityFromRevision !== undefined) {
       await scopedDb.execute(sql`select clone_scheduled_task_personal_resource_authority(
+        ${row.accountId}::uuid,
+        ${row.workspaceId}::uuid,
+        ${row.id}::uuid,
+        ${input.clonePersonalResourceAuthorityFromRevision}::bigint,
+        ${row.authorityRevision}::bigint
+      )`);
+      await scopedDb.execute(sql`select clone_scheduled_task_revision_authority(
         ${row.accountId}::uuid,
         ${row.workspaceId}::uuid,
         ${row.id}::uuid,
@@ -13842,10 +13933,58 @@ export async function getScheduledTask(
         and(
           eq(schema.scheduledTasks.workspaceId, workspaceId),
           eq(schema.scheduledTasks.id, taskId),
+          isNull(schema.scheduledTasks.deletedAt),
         ),
       )
       .limit(1);
     return row ? mapScheduledTask(row) : null;
+  });
+}
+
+/** Internal delete-recovery lookup; public list/get surfaces hide tombstones. */
+export async function getScheduledTaskIncludingDeleted(
+  db: Database,
+  workspaceId: string,
+  taskId: string,
+): Promise<(ScheduledTask & { deletedAt: string | null }) | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, workspaceId),
+          eq(schema.scheduledTasks.id, taskId),
+        ),
+      )
+      .limit(1);
+    return row
+      ? { ...mapScheduledTask(row), deletedAt: row.deletedAt?.toISOString() ?? null }
+      : null;
+  });
+}
+
+/** Task-first deletion lock; call only inside the surrounding lifecycle transaction. */
+export async function getScheduledTaskIncludingDeletedForUpdate(
+  db: Database,
+  workspaceId: string,
+  taskId: string,
+): Promise<(ScheduledTask & { deletedAt: string | null }) | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, workspaceId),
+          eq(schema.scheduledTasks.id, taskId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    return row
+      ? { ...mapScheduledTask(row), deletedAt: row.deletedAt?.toISOString() ?? null }
+      : null;
   });
 }
 
@@ -13896,6 +14035,7 @@ export async function requireScheduledTaskIncidentAuthorityInTransaction(
       and(
         eq(schema.scheduledTasks.workspaceId, input.workspaceId),
         eq(schema.scheduledTasks.id, input.taskId),
+        isNull(schema.scheduledTasks.deletedAt),
       ),
     )
     .for("update")
@@ -13925,6 +14065,7 @@ export async function getScheduledTaskXaiProviderAccountAuthoritySnapshot(
         and(
           eq(schema.scheduledTasks.workspaceId, workspaceId),
           eq(schema.scheduledTasks.id, taskId),
+          isNull(schema.scheduledTasks.deletedAt),
         ),
       )
       .limit(1);
@@ -13977,6 +14118,7 @@ export async function requireScheduledTaskTargetInTransaction(
       and(
         eq(schema.scheduledTasks.workspaceId, input.workspaceId),
         eq(schema.scheduledTasks.id, input.taskId),
+        isNull(schema.scheduledTasks.deletedAt),
       ),
     )
     .for("update")
@@ -14000,7 +14142,12 @@ export async function listScheduledTasks(
     const rows = await scopedDb
       .select()
       .from(schema.scheduledTasks)
-      .where(eq(schema.scheduledTasks.workspaceId, workspaceId))
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, workspaceId),
+          isNull(schema.scheduledTasks.deletedAt),
+        ),
+      )
       .orderBy(desc(schema.scheduledTasks.createdAt))
       .limit(limit)
       .offset(offset);
@@ -14033,6 +14180,7 @@ export async function listKnowledgeSourceSyncTasksForConnection(
           .where(
             and(
               eq(schema.scheduledTasks.workspaceId, workspaceId),
+              isNull(schema.scheduledTasks.deletedAt),
               sql`${schema.scheduledTasks.action}->>'kind' = 'knowledge_source_sync'`,
               sql`${schema.scheduledTasks.action}->'connection'->>'connectionId' = ${connectionId}`,
               cursor
@@ -14080,22 +14228,179 @@ export async function deleteScheduledTask(
   db: Database,
   workspaceId: string,
   taskId: string,
-): Promise<void> {
-  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb
-      .delete(schema.scheduledTasks)
-      .where(
-        and(
-          eq(schema.scheduledTasks.workspaceId, workspaceId),
-          eq(schema.scheduledTasks.id, taskId),
-        ),
-      );
+  options: {
+    connectorCleanupSubjectId?: string;
+    connectorCleanupCompleted?: boolean;
+    expectedAuthorityRevision?: number;
+    expectedExecutionDigest?: string;
+  } = {},
+): Promise<{ cleanup: TemporalScheduleCleanupClaim | null; changed: boolean }> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    return await scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const [task] = await tx
+        .select()
+        .from(schema.scheduledTasks)
+        .where(
+          and(
+            eq(schema.scheduledTasks.workspaceId, workspaceId),
+            eq(schema.scheduledTasks.id, taskId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!task) return { cleanup: null, changed: false };
+      const mappedTask = mapScheduledTask(task);
+      const changed = task.deletedAt === null;
+      const connectorCleanupSubjectId = options.connectorCleanupSubjectId ?? null;
+      if (connectorCleanupSubjectId) {
+        if (
+          task.authorityRevision !== options.expectedAuthorityRevision ||
+          task.executionDigest !== options.expectedExecutionDigest
+        ) {
+          throw new Error("scheduled task changed after connector cleanup preflight");
+        }
+        if (
+          mappedTask.action.kind !== "knowledge_source_sync" ||
+          mappedTask.action.initiatingSubjectId !== connectorCleanupSubjectId ||
+          mappedTask.action.connection.ownerSubjectId !== connectorCleanupSubjectId
+        ) {
+          throw new Error("scheduled task connector cleanup requires the exact causal subject");
+        }
+      }
+      if (!task.deletedAt) {
+        await tx
+          .update(schema.scheduledTasks)
+          .set({
+            status: "paused",
+            deletedAt: new Date(),
+            variableSetId: null,
+            reusableSessionId: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.scheduledTasks.workspaceId, workspaceId),
+              eq(schema.scheduledTasks.id, taskId),
+              isNull(schema.scheduledTasks.deletedAt),
+            ),
+          );
+      }
+      const claimId = randomUUID();
+      let [cleanup] = await tx
+        .insert(schema.temporalScheduleCleanupOutbox)
+        .values({
+          accountId: task.accountId,
+          workspaceId: task.workspaceId,
+          temporalScheduleId: task.temporalScheduleId,
+          scheduledTaskId: connectorCleanupSubjectId ? task.id : null,
+          connectorCleanupSubjectId,
+          connectorCleanupSnapshot:
+            connectorCleanupSubjectId && mappedTask.action.kind === "knowledge_source_sync"
+              ? {
+                  version: 1,
+                  taskId: mappedTask.id,
+                  accountId: mappedTask.accountId,
+                  workspaceId: mappedTask.workspaceId,
+                  connectorKind: mappedTask.metadata.connectorKind,
+                  connectionId: mappedTask.action.connection.connectionId,
+                  connectionVersion: mappedTask.action.connection.connectionVersion,
+                  sourceId: mappedTask.action.sourceId,
+                  sourceLifecycleGeneration: mappedTask.action.sourceLifecycleGeneration,
+                  sourceConfigGeneration: mappedTask.action.sourceConfigGeneration,
+                  externalSourceId: mappedTask.metadata.externalSourceId,
+                  subjectId: connectorCleanupSubjectId,
+                }
+              : null,
+          connectorCleanupCompletedAt:
+            connectorCleanupSubjectId && options.connectorCleanupCompleted ? new Date() : null,
+          claimId,
+          claimUntil: sql<Date>`now() + interval '15 seconds'`,
+          attemptCount: 1,
+        })
+        .onConflictDoNothing({
+          target: schema.temporalScheduleCleanupOutbox.temporalScheduleId,
+        })
+        .returning({
+          id: schema.temporalScheduleCleanupOutbox.id,
+          accountId: schema.temporalScheduleCleanupOutbox.accountId,
+          workspaceId: schema.temporalScheduleCleanupOutbox.workspaceId,
+          temporalScheduleId: schema.temporalScheduleCleanupOutbox.temporalScheduleId,
+          scheduledTaskId: schema.temporalScheduleCleanupOutbox.scheduledTaskId,
+          connectorCleanupSubjectId: schema.temporalScheduleCleanupOutbox.connectorCleanupSubjectId,
+          connectorCleanupSnapshot: schema.temporalScheduleCleanupOutbox.connectorCleanupSnapshot,
+          connectorCleanupCompletedAt:
+            schema.temporalScheduleCleanupOutbox.connectorCleanupCompletedAt,
+          attemptCount: schema.temporalScheduleCleanupOutbox.attemptCount,
+        });
+      if (
+        !cleanup &&
+        connectorCleanupSubjectId &&
+        mappedTask.action.kind === "knowledge_source_sync"
+      ) {
+        const connectorCleanupSnapshot = {
+          version: 1,
+          taskId: mappedTask.id,
+          accountId: mappedTask.accountId,
+          workspaceId: mappedTask.workspaceId,
+          connectorKind: mappedTask.metadata.connectorKind,
+          connectionId: mappedTask.action.connection.connectionId,
+          connectionVersion: mappedTask.action.connection.connectionVersion,
+          sourceId: mappedTask.action.sourceId,
+          sourceLifecycleGeneration: mappedTask.action.sourceLifecycleGeneration,
+          sourceConfigGeneration: mappedTask.action.sourceConfigGeneration,
+          externalSourceId: mappedTask.metadata.externalSourceId,
+          subjectId: connectorCleanupSubjectId,
+        };
+        const [upgraded] = await rawRows<{ upgraded: boolean }>(
+          tx,
+          sql`
+            select opengeni_private.upgrade_temporal_schedule_connector_cleanup(
+              ${task.accountId}::uuid,
+              ${task.workspaceId}::uuid,
+              ${task.temporalScheduleId},
+              ${task.id}::uuid,
+              ${connectorCleanupSubjectId},
+              ${JSON.stringify(connectorCleanupSnapshot)}::jsonb,
+              ${claimId}::uuid
+            ) as upgraded
+          `,
+        );
+        if (upgraded?.upgraded) {
+          [cleanup] = await tx
+            .select({
+              id: schema.temporalScheduleCleanupOutbox.id,
+              accountId: schema.temporalScheduleCleanupOutbox.accountId,
+              workspaceId: schema.temporalScheduleCleanupOutbox.workspaceId,
+              temporalScheduleId: schema.temporalScheduleCleanupOutbox.temporalScheduleId,
+              scheduledTaskId: schema.temporalScheduleCleanupOutbox.scheduledTaskId,
+              connectorCleanupSubjectId:
+                schema.temporalScheduleCleanupOutbox.connectorCleanupSubjectId,
+              connectorCleanupSnapshot:
+                schema.temporalScheduleCleanupOutbox.connectorCleanupSnapshot,
+              connectorCleanupCompletedAt:
+                schema.temporalScheduleCleanupOutbox.connectorCleanupCompletedAt,
+              attemptCount: schema.temporalScheduleCleanupOutbox.attemptCount,
+            })
+            .from(schema.temporalScheduleCleanupOutbox)
+            .where(
+              eq(schema.temporalScheduleCleanupOutbox.temporalScheduleId, task.temporalScheduleId),
+            )
+            .limit(1);
+        }
+      }
+      return {
+        cleanup: cleanup ? { ...cleanup, claimId } : null,
+        changed,
+      };
+    });
   });
 }
 
 export async function createScheduledTaskRun(
   db: Database,
   input: {
+    runId?: string;
     workspaceId: string;
     taskId: string;
     /** Exact task snapshot read by the dispatching worker. */
@@ -14107,6 +14412,7 @@ export async function createScheduledTaskRun(
     producerKey?: string | null;
     scheduledAt?: Date | null;
     firedAt?: Date;
+    acceptedExecutionSnapshot?: ScheduledTaskRunAcceptedExecutionType | null;
   },
 ): Promise<ScheduledTaskRun> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
@@ -14120,13 +14426,31 @@ export async function createScheduledTaskRun(
         and(
           eq(schema.scheduledTasks.workspaceId, input.workspaceId),
           eq(schema.scheduledTasks.id, input.taskId),
+          isNull(schema.scheduledTasks.deletedAt),
         ),
       )
       .limit(1);
     if (!taskRow) {
       throw new Error(`Scheduled task not found: ${input.taskId}`);
     }
+    const actionKind = ((taskRow.action as ScheduledTaskAction | null)?.kind ??
+      "agent_turn") satisfies ScheduledTaskActionKind;
+    const acceptedExecutionSnapshot =
+      actionKind === "agent_turn"
+        ? ScheduledTaskRunAcceptedExecution.parse(input.acceptedExecutionSnapshot)
+        : null;
+    if (
+      acceptedExecutionSnapshot &&
+      (acceptedExecutionSnapshot.task.id !== input.taskId ||
+        acceptedExecutionSnapshot.task.workspaceId !== input.workspaceId ||
+        acceptedExecutionSnapshot.task.accountId !== taskRow.accountId ||
+        acceptedExecutionSnapshot.task.authorityRevision !== input.taskAuthorityRevision ||
+        acceptedExecutionSnapshot.task.executionDigest !== input.taskExecutionDigest)
+    ) {
+      throw new Error("scheduled task accepted execution binding changed");
+    }
     const values = {
+      ...(input.runId ? { id: input.runId } : {}),
       accountId: taskRow.accountId,
       workspaceId: taskRow.workspaceId,
       taskId: input.taskId,
@@ -14137,19 +14461,51 @@ export async function createScheduledTaskRun(
       scheduledAt: input.scheduledAt ?? null,
       firedAt: input.firedAt ?? new Date(),
       status: "queued" as const,
-      actionKind: ((taskRow.action as ScheduledTaskAction | null)?.kind ??
-        "agent_turn") satisfies ScheduledTaskActionKind,
+      actionKind,
+      acceptedExecutionSnapshot,
+      acceptedExecutionDigest: acceptedExecutionSnapshot
+        ? sql<string>`encode(digest(convert_to(${JSON.stringify(
+            acceptedExecutionSnapshot,
+          )}::jsonb::text, 'UTF8'), 'sha256'), 'hex')`
+        : null,
     };
-    const [inserted] = input.producerKey
-      ? await scopedDb
-          .insert(schema.scheduledTaskRuns)
-          .values(values)
-          .onConflictDoNothing({
-            target: [schema.scheduledTaskRuns.workspaceId, schema.scheduledTaskRuns.producerKey],
-            where: sql`${schema.scheduledTaskRuns.producerKey} is not null`,
-          })
-          .returning()
-      : await scopedDb.insert(schema.scheduledTaskRuns).values(values).returning();
+    let inserted: typeof schema.scheduledTaskRuns.$inferSelect | undefined;
+    if (actionKind === "agent_turn" && input.producerKey && acceptedExecutionSnapshot) {
+      const [created] = await rawRows<{ id: string }>(
+        scopedDb,
+        sql`select create_scheduled_agent_run_with_admission(
+          ${input.runId ?? randomUUID()}::uuid,
+          ${taskRow.accountId}::uuid,
+          ${taskRow.workspaceId}::uuid,
+          ${input.taskId}::uuid,
+          ${input.taskAuthorityRevision}::bigint,
+          ${input.taskExecutionDigest}::text,
+          ${input.triggerType}::text,
+          ${input.producerKey}::text,
+          ${input.scheduledAt?.toISOString() ?? null}::timestamptz,
+          ${(input.firedAt ?? new Date()).toISOString()}::timestamptz,
+          ${JSON.stringify(acceptedExecutionSnapshot)}::jsonb
+        ) as id`,
+      );
+      if (created) {
+        [inserted] = await scopedDb
+          .select()
+          .from(schema.scheduledTaskRuns)
+          .where(eq(schema.scheduledTaskRuns.id, created.id))
+          .limit(1);
+      }
+    } else {
+      [inserted] = input.producerKey
+        ? await scopedDb
+            .insert(schema.scheduledTaskRuns)
+            .values(values)
+            .onConflictDoNothing({
+              target: [schema.scheduledTaskRuns.workspaceId, schema.scheduledTaskRuns.producerKey],
+              where: sql`${schema.scheduledTaskRuns.producerKey} is not null`,
+            })
+            .returning()
+        : await scopedDb.insert(schema.scheduledTaskRuns).values(values).returning();
+    }
     const [row] = inserted
       ? [inserted]
       : await scopedDb
@@ -14171,6 +14527,66 @@ export async function createScheduledTaskRun(
         row.taskExecutionDigest !== input.taskExecutionDigest)
     ) {
       throw new Error("scheduled task run execution binding changed");
+    }
+    if (row.taskId !== input.taskId || row.triggerType !== input.triggerType) {
+      throw new Error("scheduled task run producer identity changed");
+    }
+    if (
+      acceptedExecutionSnapshot &&
+      stableJson(row.acceptedExecutionSnapshot) !== stableJson(acceptedExecutionSnapshot)
+    ) {
+      throw new Error("scheduled task run accepted execution changed");
+    }
+    return mapScheduledTaskRun(row);
+  });
+}
+
+export async function getScheduledTaskRunAcceptedExecution(
+  db: Database,
+  input: { workspaceId: string; runId: string },
+): Promise<ScheduledTaskRunAcceptedExecutionType | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        snapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot,
+        digest: schema.scheduledTaskRuns.acceptedExecutionDigest,
+      })
+      .from(schema.scheduledTaskRuns)
+      .where(
+        and(
+          eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+          eq(schema.scheduledTaskRuns.id, input.runId),
+        ),
+      )
+      .limit(1);
+    if (!row?.snapshot || !row.digest) return null;
+    return ScheduledTaskRunAcceptedExecution.parse(row.snapshot);
+  });
+}
+
+export async function getScheduledTaskRunByProducerKey(
+  db: Database,
+  input: {
+    workspaceId: string;
+    taskId: string;
+    triggerType: ScheduledTaskTriggerType;
+    producerKey: string;
+  },
+): Promise<ScheduledTaskRun | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.scheduledTaskRuns)
+      .where(
+        and(
+          eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+          eq(schema.scheduledTaskRuns.producerKey, input.producerKey),
+        ),
+      )
+      .limit(1);
+    if (!row) return null;
+    if (row.taskId !== input.taskId || row.triggerType !== input.triggerType) {
+      throw new Error("scheduled task run producer identity changed");
     }
     return mapScheduledTaskRun(row);
   });
@@ -14297,6 +14713,27 @@ export async function materializeScheduledTaskReusableSessionFromRun(
   );
 }
 
+export async function bindScheduledTaskRunSessionInTransaction(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; runId: string; sessionId: string },
+): Promise<void> {
+  await withRlsContext(
+    tx,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await rawRows(
+        scopedDb,
+        sql`select bind_scheduled_task_run_session(
+          ${input.accountId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.runId}::uuid,
+          ${input.sessionId}::uuid
+        )`,
+      );
+    },
+  );
+}
+
 async function scheduledTaskRunCausalHumanInTransaction(
   tx: Database,
   input: { accountId: string; workspaceId: string; runId: string },
@@ -14311,7 +14748,129 @@ async function scheduledTaskRunCausalHumanInTransaction(
       )
       limit 1`,
   );
-  return row?.initiatingHumanSubjectId ?? null;
+  const [connectionRow] = await rawRows<{ initiatingHumanSubjectId: string }>(
+    tx,
+    sql`select scheduled_task_run_connection_authority_subject(
+      ${input.accountId}::uuid,
+      ${input.workspaceId}::uuid,
+      ${input.runId}::uuid
+    ) as "initiatingHumanSubjectId"`,
+  );
+  if (
+    row?.initiatingHumanSubjectId &&
+    connectionRow?.initiatingHumanSubjectId &&
+    row.initiatingHumanSubjectId !== connectionRow.initiatingHumanSubjectId
+  ) {
+    throw new Error("scheduled authority classes have different causal humans");
+  }
+  const [acceptedRow] = await tx
+    .select({ acceptedExecutionSnapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot })
+    .from(schema.scheduledTaskRuns)
+    .where(
+      and(
+        eq(schema.scheduledTaskRuns.id, input.runId),
+        eq(schema.scheduledTaskRuns.accountId, input.accountId),
+        eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+      ),
+    )
+    .limit(1);
+  const acceptedCausalSubject = acceptedRow?.acceptedExecutionSnapshot
+    ? ScheduledTaskRunAcceptedExecution.parse(acceptedRow.acceptedExecutionSnapshot)
+        .causalHumanSubjectId
+    : null;
+  const authoritySubject =
+    row?.initiatingHumanSubjectId ?? connectionRow?.initiatingHumanSubjectId ?? null;
+  if (authoritySubject && acceptedCausalSubject && authoritySubject !== acceptedCausalSubject) {
+    throw new Error("scheduled accepted causal human differs from authority subject");
+  }
+  return authoritySubject ?? acceptedCausalSubject ?? null;
+}
+
+export async function getScheduledTaskPersonalResourceAuthoritySubject(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    taskId: string;
+    taskAuthorityRevision: number;
+  },
+): Promise<string | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ subjectId: string | null }>(
+        scopedDb,
+        sql`select scheduled_task_personal_resource_authority_subject(
+          ${input.accountId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.taskId}::uuid,
+          ${input.taskAuthorityRevision}::bigint
+        ) as "subjectId"`,
+      );
+      return row?.subjectId ?? null;
+    },
+  );
+}
+
+export async function getScheduledTaskRevisionAuthoritySubject(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    taskId: string;
+    taskAuthorityRevision: number;
+  },
+): Promise<string | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ subjectId: string | null }>(
+        scopedDb,
+        sql`select scheduled_task_revision_authority_subject(
+          ${input.accountId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.taskId}::uuid,
+          ${input.taskAuthorityRevision}::bigint
+        ) as "subjectId"`,
+      );
+      return row?.subjectId ?? null;
+    },
+  );
+}
+
+export async function getScheduledTaskRevisionAuthority(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    taskId: string;
+    taskAuthorityRevision: number;
+  },
+): Promise<{
+  subjectId: string;
+  organizationMembershipId: string;
+  membershipAuthorizationRevision: number;
+} | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ authority: unknown }>(
+        scopedDb,
+        sql`select scheduled_task_revision_authority_snapshot(
+          ${input.accountId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.taskId}::uuid,
+          ${input.taskAuthorityRevision}::bigint
+        ) as authority`,
+      );
+      const authority = row?.authority;
+      if (!authority) return null;
+      return ScheduledTaskRunAcceptedExecution.shape.causalHumanAuthority.parse(authority);
+    },
+  );
 }
 
 /** Failure settlement must not rewrite a source already committed as dispatched. */
@@ -14322,38 +14881,155 @@ export async function markScheduledTaskRunFailedIfQueued(
   error: string,
 ): Promise<void> {
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb
-      .update(schema.scheduledTaskRuns)
-      .set({ status: "failed", error, updatedAt: new Date() })
-      .where(
-        and(
-          eq(schema.scheduledTaskRuns.workspaceId, workspaceId),
-          eq(schema.scheduledTaskRuns.id, runId),
-          eq(schema.scheduledTaskRuns.status, "queued"),
-        ),
-      );
+    await scopedDb.execute(sql`select transition_scheduled_agent_run(
+      current_setting('opengeni.account_id')::uuid,
+      ${workspaceId}::uuid,
+      ${runId}::uuid,
+      null::uuid,
+      null::uuid,
+      'failed'::text,
+      ${error}::text
+    )`);
+  });
+}
+
+export async function markScheduledTaskRunSkippedIfQueued(
+  db: Database,
+  input: { workspaceId: string; runId: string; sessionId: string; error: string },
+): Promise<void> {
+  await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    await scopedDb.execute(sql`select transition_scheduled_agent_run(
+      current_setting('opengeni.account_id')::uuid,
+      ${input.workspaceId}::uuid,
+      ${input.runId}::uuid,
+      ${input.sessionId}::uuid,
+      null::uuid,
+      'skipped'::text,
+      ${input.error}::text
+    )`);
   });
 }
 
 /** Claim-time stale-authority settlement; no model/tool/sandbox work has started. */
 export async function markScheduledTaskRunAuthorityRejectedInTransaction(
   tx: Database,
-  input: { workspaceId: string; runId: string },
+  input: { workspaceId: string; sessionId: string; runId: string; error?: string },
 ): Promise<void> {
-  await tx
-    .update(schema.scheduledTaskRuns)
-    .set({
-      status: "failed",
-      error: "incident_responder_under_capable",
-      updatedAt: new Date(),
-    })
+  await tx.execute(sql`select transition_scheduled_agent_run(
+    current_setting('opengeni.account_id')::uuid,
+    ${input.workspaceId}::uuid,
+    ${input.runId}::uuid,
+    ${input.sessionId}::uuid,
+    null::uuid,
+    'failed'::text,
+    ${input.error ?? "incident_responder_under_capable"}::text
+  )`);
+}
+
+async function validateScheduledTargetExecutionAtClaim(
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    session: typeof schema.sessions.$inferSelect;
+    runId: string;
+  },
+): Promise<string | null> {
+  const [liveAuthority] = await rawRows<{ denial: string | null }>(
+    tx,
+    sql`select validate_scheduled_agent_run_live_authority(
+      ${input.accountId}::uuid,
+      ${input.workspaceId}::uuid,
+      ${input.runId}::uuid
+    ) as denial`,
+  );
+  if (liveAuthority?.denial) return liveAuthority.denial;
+  const [run] = await tx
+    .select({ acceptedExecutionSnapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot })
+    .from(schema.scheduledTaskRuns)
     .where(
       and(
-        eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
         eq(schema.scheduledTaskRuns.id, input.runId),
-        inArray(schema.scheduledTaskRuns.status, ["queued", "dispatched"]),
+        eq(schema.scheduledTaskRuns.accountId, input.accountId),
+        eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+        eq(schema.scheduledTaskRuns.sessionId, input.session.id),
       ),
-    );
+    )
+    .limit(1)
+    .for("update");
+  if (!run?.acceptedExecutionSnapshot) return "scheduled_authority_snapshot_missing";
+  const accepted = ScheduledTaskRunAcceptedExecution.parse(run.acceptedExecutionSnapshot);
+  const target = accepted.targetSessionExecution;
+  if (!target) return null;
+  const mcpServers = await tx
+    .select({ id: schema.sessionMcpServers.serverId })
+    .from(schema.sessionMcpServers)
+    .where(
+      and(
+        eq(schema.sessionMcpServers.workspaceId, input.workspaceId),
+        eq(schema.sessionMcpServers.sessionId, input.session.id),
+      ),
+    )
+    .orderBy(asc(schema.sessionMcpServers.serverId));
+  const variableSet = target.variableSetId
+    ? await getVariableSet(
+        tx,
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: accepted.personalResourceAuthoritySubjectId ?? "scheduled-task",
+        },
+        target.variableSetId,
+      )
+    : null;
+  const [rigVersion] =
+    target.rigId && target.rigVersionId
+      ? await tx
+          .select({ defaultVariableSetIds: schema.rigVersions.defaultVariableSetIds })
+          .from(schema.rigVersions)
+          .where(
+            and(
+              eq(schema.rigVersions.accountId, input.accountId),
+              eq(schema.rigVersions.rigId, target.rigId),
+              eq(schema.rigVersions.id, target.rigVersionId),
+            ),
+          )
+          .for("share")
+          .limit(1)
+      : [];
+  const rigDefaultVariableSets = await Promise.all(
+    (rigVersion?.defaultVariableSetIds ?? []).map(async (variableSetId) => {
+      const defaultSet = await getVariableSet(
+        tx,
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: accepted.personalResourceAuthoritySubjectId ?? "scheduled-task",
+        },
+        variableSetId,
+      );
+      return defaultSet ? { id: defaultSet.id, generation: defaultSet.generation } : null;
+    }),
+  );
+  return target.sessionId !== input.session.id ||
+    target.visibility !== input.session.visibility ||
+    target.authorityEpoch !== input.session.authorityEpoch ||
+    stableJson(target.firstPartyMcpTools) !== stableJson(input.session.firstPartyMcpTools) ||
+    stableJson(target.firstPartyMcpPermissions) !==
+      stableJson(input.session.firstPartyMcpPermissions ?? null) ||
+    stableJson(target.toolPolicy) !== stableJson(input.session.toolPolicy) ||
+    stableJson(target.mcpServerIds) !== stableJson(mcpServers.map((server) => server.id)) ||
+    target.toolPolicyVersion !== input.session.toolPolicyVersion ||
+    target.variableSetId !== (input.session.variableSetId ?? null) ||
+    target.variableSetGeneration !== (variableSet?.generation ?? null) ||
+    target.rigId !== (input.session.rigId ?? null) ||
+    target.rigVersionId !== (input.session.rigVersionId ?? null) ||
+    stableJson(target.rigDefaultVariableSets) !==
+      stableJson(rigDefaultVariableSets.filter((value) => value !== null)) ||
+    target.maxNestedAgentDepthOverride !== (input.session.maxNestedAgentDepthOverride ?? null) ||
+    target.effectiveMaxNestedAgentDepth !== input.session.effectiveMaxNestedAgentDepth
+    ? "scheduled_target_execution_changed"
+    : null;
 }
 
 export async function updateScheduledTaskRun(
@@ -14410,28 +15086,20 @@ export async function settleScheduledTaskRunInTransaction(
     workspaceId: string;
     runId: string;
     sessionId: string;
-    triggerEventId: string;
-    status: "dispatched";
+    triggerEventId: string | null;
+    status: "dispatched" | "skipped";
+    error?: string | null;
   },
 ): Promise<void> {
-  const [row] = await tx
-    .update(schema.scheduledTaskRuns)
-    .set({
-      status: input.status,
-      sessionId: input.sessionId,
-      triggerEventId: input.triggerEventId,
-      error: null,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
-        eq(schema.scheduledTaskRuns.id, input.runId),
-        inArray(schema.scheduledTaskRuns.status, ["queued", "dispatched"]),
-      ),
-    )
-    .returning({ id: schema.scheduledTaskRuns.id });
-  if (!row) throw new Error(`Scheduled task run not dispatchable: ${input.runId}`);
+  await tx.execute(sql`select transition_scheduled_agent_run(
+    current_setting('opengeni.account_id')::uuid,
+    ${input.workspaceId}::uuid,
+    ${input.runId}::uuid,
+    ${input.sessionId}::uuid,
+    ${input.triggerEventId}::uuid,
+    ${input.status}::text,
+    ${input.error ?? null}::text
+  )`);
 }
 
 export async function listScheduledTaskRuns(
@@ -14763,6 +15431,7 @@ export async function countScheduledTasksUsingVariableSet(
         and(
           eq(schema.scheduledTasks.workspaceId, workspaceId),
           eq(schema.scheduledTasks.variableSetId, variableSetId),
+          isNull(schema.scheduledTasks.deletedAt),
         ),
       );
     return Number(count);
@@ -16072,6 +16741,38 @@ export async function getRigVersion(
   });
 }
 
+/** Credential-free exact retained Rig metadata under the target workspace's
+ * scoped organization/user authority. Unlike the physical-workspace helpers,
+ * this remains valid for a personal-origin Rig granted into another workspace. */
+export async function getScheduledScopedRigVersionMetadata(
+  db: Database,
+  access: RigAccessContext,
+  rigId: string,
+  versionId: string,
+): Promise<{
+  name: string;
+  version: RigVersion;
+  health: RigVerificationHealth;
+} | null> {
+  return await withRlsContext(db, access, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, access.subjectId);
+    const [row] = await rawRows<{
+      value: {
+        name: string;
+        version: RigVersion;
+        health: RigVerificationHealth;
+      } | null;
+    }>(
+      scopedDb,
+      sql`select scheduled_scoped_rig_version_metadata(
+        ${access.accountId}::uuid, ${access.workspaceId}::uuid, ${access.subjectId},
+        ${rigId}::uuid, ${versionId}::uuid
+      ) as value`,
+    );
+    return row?.value ?? null;
+  });
+}
+
 export async function materializeRigVersionForAttempt(
   db: Database,
   input: {
@@ -16745,6 +17446,42 @@ export async function beginRigChangeVerificationAttempt(
   });
 }
 
+export async function getScheduledVariableSetExpectedGenerationForAttempt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    /** Actor subject for RLS (a service initiator on pure scheduled turns). */
+    subjectId: string;
+    /** Exact causal human, or null for a pure service attempt (workspace/org sets only). */
+    initiatingHumanSubjectId: string | null;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    variableSetId: string;
+  },
+): Promise<number | null> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, input.subjectId);
+    await scopedDb.execute(sql`select set_config(
+      'opengeni.initiating_human_subject_id', ${input.initiatingHumanSubjectId ?? ""}, true
+    )`);
+    const [row] = await rawRows<{ generation: number | null }>(
+      scopedDb,
+      sql`select scheduled_variable_set_expected_generation_for_attempt(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+        ${input.sessionId}::uuid, ${input.turnId}::uuid,
+        ${input.attemptId}::uuid, ${input.executionGeneration}::integer,
+        ${input.variableSetId}::uuid
+      ) as generation`,
+    );
+    return row?.generation === null || row?.generation === undefined
+      ? null
+      : Number(row.generation);
+  });
+}
+
 /**
  * The ONLY helper that selects value_encrypted. Used exclusively by the worker
  * activity that materializes a sandbox for a run whose session carries an
@@ -16790,6 +17527,20 @@ export async function getVariableSetValuesForRun(
         },
         true
       )`);
+      await getScheduledVariableSetExpectedGenerationForAttempt(scopedDb, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.authority.subjectId,
+        initiatingHumanSubjectId:
+          input.authority.initiatingHumanSubjectId === undefined
+            ? input.authority.subjectId
+            : input.authority.initiatingHumanSubjectId,
+        sessionId: input.authority.sessionId,
+        turnId: input.authority.turnId,
+        attemptId: input.authority.attemptId,
+        executionGeneration: input.authority.executionGeneration,
+        variableSetId: input.variableSetId,
+      });
     }
     const rows = await rawRows<{
       id: string;
@@ -24253,6 +25004,13 @@ export type SessionCreateInput = {
   createIdempotencyKey?: string | null;
   sandboxGroupId?: string | null;
   sandboxOs?: SandboxOs;
+  /** Exact accepted generated-session compaction policy; internal lifecycle callers only. */
+  frozenCodexCompactionMode?: Session["codexCompactionMode"];
+  /** Exact accepted root-session depth policy; internal lifecycle callers only. */
+  frozenNestedAgentDepthPolicy?: {
+    effectiveMaxNestedAgentDepth: number;
+    nestedAgentDepthPolicySource: NestedAgentDepthPolicySource;
+  };
   mcpServers?: CreateSessionMcpServerInput[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   initialXaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
@@ -24394,6 +25152,28 @@ async function resolveSessionDepthDecision(
     "maxNestedAgentDepthOverride",
   );
   const explicitOverride = requestedOverride !== null;
+  if (input.frozenNestedAgentDepthPolicy) {
+    if (parentSessionId !== null) {
+      throw new Error("Frozen root session depth policy cannot create a child session");
+    }
+    const effectiveMaxNestedAgentDepth = requireDepthInput(
+      input.frozenNestedAgentDepthPolicy.effectiveMaxNestedAgentDepth,
+      "frozenNestedAgentDepthPolicy.effectiveMaxNestedAgentDepth",
+    );
+    if (effectiveMaxNestedAgentDepth === null) {
+      throw new Error("Frozen root session depth policy has no effective maximum");
+    }
+    return {
+      denied: false,
+      rootSessionId: id,
+      nestedAgentDepth: 0,
+      maxNestedAgentDepthOverride: requestedOverride,
+      effectiveMaxNestedAgentDepth,
+      nestedAgentDepthPolicySource: input.frozenNestedAgentDepthPolicy.nestedAgentDepthPolicySource,
+      nestedAgentDepthPolicySessionId:
+        input.frozenNestedAgentDepthPolicy.nestedAgentDepthPolicySource === "session" ? id : null,
+    };
+  }
   let parent: typeof schema.sessions.$inferSelect | undefined;
   if (parentSessionId) {
     [parent] = await tx
@@ -24729,9 +25509,11 @@ async function createSessionInTransaction(
             nestedAgentDepthPolicySessionId: decision.nestedAgentDepthPolicySessionId,
             // Freeze once at create from the effective create model + workspace
             // default. Later workspace setting changes never move existing sessions.
-            codexCompactionMode: isCodexBilledModel(input.model)
-              ? resolveWorkspaceCodexCompactionDefault(workspace.settings)
-              : "portable",
+            codexCompactionMode:
+              input.frozenCodexCompactionMode ??
+              (isCodexBilledModel(input.model)
+                ? resolveWorkspaceCodexCompactionDefault(workspace.settings)
+                : "portable"),
             status: "queued",
           },
           "initialMessage",
@@ -46528,6 +47310,149 @@ export async function upsertSessionGoal(
 }
 
 /**
+ * Re-arm one reusable scheduled goal exactly once per admitted run. The receipt,
+ * goal mutation, and timeline fact share the canonical session lock transaction,
+ * so crash recovery cannot reset counters or append goal.set twice.
+ */
+export async function upsertScheduledSessionGoalForRun(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    runId: string;
+    text: string;
+    successCriteria?: string | null;
+    maxAutoContinuations?: number | null;
+    mutationPolicy?: SessionGoalMutationPolicy;
+  },
+): Promise<SessionEvent[]> {
+  return await withSessionActivityRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await withSessionActivitySavepoint(scopedDb, async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!locks.control || !locks.workspace || !session) {
+          throw new Error(`Session not found: ${input.sessionId}`);
+        }
+        const [run] = await tx
+          .select({
+            sessionId: schema.scheduledTaskRuns.sessionId,
+            status: schema.scheduledTaskRuns.status,
+            acceptedExecutionSnapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot,
+          })
+          .from(schema.scheduledTaskRuns)
+          .where(
+            and(
+              eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+              eq(schema.scheduledTaskRuns.id, input.runId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!run || run.sessionId !== input.sessionId || run.status !== "queued") {
+          throw new Error("scheduled reusable goal run binding changed");
+        }
+        const accepted = ScheduledTaskRunAcceptedExecution.parse(run.acceptedExecutionSnapshot);
+        const acceptedGoal = accepted.task.agentConfig.goal ?? null;
+        if (
+          accepted.task.runMode !== "reusable_session" ||
+          !acceptedGoal ||
+          stableJson({
+            text: input.text,
+            successCriteria: input.successCriteria ?? null,
+            maxAutoContinuations: input.maxAutoContinuations ?? null,
+            mutationPolicy: input.mutationPolicy ?? null,
+          }) !==
+            stableJson({
+              text: acceptedGoal.text,
+              successCriteria: acceptedGoal.successCriteria ?? null,
+              maxAutoContinuations: acceptedGoal.maxAutoContinuations ?? null,
+              mutationPolicy: acceptedGoal.mutationPolicy ?? null,
+            })
+        ) {
+          throw new Error("scheduled reusable goal differs from accepted execution");
+        }
+        const requestHash = createHash("sha256")
+          .update(
+            stableJson({
+              runId: input.runId,
+              sessionId: input.sessionId,
+              goal: acceptedGoal,
+            }),
+          )
+          .digest("hex");
+        const inserted = await tx
+          .insert(schema.sessionCommandReceipts)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            actorType: "service",
+            actorSubjectId: "scheduler",
+            action: "scheduled.goal.reset",
+            targetSessionId: input.sessionId,
+            operationKey: input.runId,
+            canonicalRequestHash: requestHash,
+            result: { runId: input.runId },
+          })
+          .onConflictDoNothing()
+          .returning({ id: schema.sessionCommandReceipts.id });
+        if (inserted.length === 0) return [];
+        const result = await upsertSessionGoal(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          text: input.text,
+          successCriteria: input.successCriteria ?? null,
+          maxAutoContinuations: input.maxAutoContinuations ?? null,
+          ...(input.mutationPolicy ? { mutationPolicy: input.mutationPolicy } : {}),
+          createdBy: "scheduled_task",
+        });
+        const now = new Date();
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence: session.lastSequence + 1,
+                type: "goal.set",
+                payload: {
+                  goalId: result.goal.id,
+                  text: result.goal.text,
+                  ...(result.goal.successCriteria
+                    ? { successCriteria: result.goal.successCriteria }
+                    : {}),
+                  version: result.goal.version,
+                  actor: "scheduled_task",
+                  replaced: result.replaced,
+                },
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        if (!event) throw new Error("Failed to append scheduled goal.set event");
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+          .where(eq(schema.sessions.id, input.sessionId));
+        return [mapEvent(event)];
+      }),
+  );
+}
+
+/**
  * Agent/API goal_set: session sequence ownership, the create-or-replace
  * mutation, and goal.set timeline fact commit together. The session-first lock
  * order matches active-turn event writes; goal_set must never hold a goal row
@@ -49841,6 +50766,28 @@ export async function claimSessionWorkForAttempt(
           const cancelledUpdateIds: string[] = [];
           const authorityRejectedUpdateIds: string[] = [];
           for (const update of updates) {
+            const scheduledAuthorityDenial = update.scheduledTaskRunId
+              ? await validateScheduledTargetExecutionAtClaim(tx as unknown as Database, {
+                  accountId,
+                  workspaceId,
+                  session: session!,
+                  runId: update.scheduledTaskRunId,
+                })
+              : null;
+            if (update.scheduledTaskRunId && scheduledAuthorityDenial) {
+              await markScheduledTaskRunAuthorityRejectedInTransaction(tx as unknown as Database, {
+                workspaceId,
+                sessionId,
+                runId: update.scheduledTaskRunId,
+                error: scheduledAuthorityDenial,
+              });
+              await tx
+                .update(schema.sessionSystemUpdates)
+                .set({ state: "failed" })
+                .where(eq(schema.sessionSystemUpdates.id, update.id));
+              authorityRejectedUpdateIds.push(update.id);
+              continue;
+            }
             if (input.validatePendingSystemUpdateAuthority) {
               const validation = await input.validatePendingSystemUpdateAuthority(
                 tx as unknown as Database,
@@ -49849,7 +50796,10 @@ export async function claimSessionWorkForAttempt(
               if (validation.action === "reject") {
                 await tx
                   .update(schema.sessionSystemUpdates)
-                  .set({ state: "failed", classification: "failure" })
+                  // Classification is immutable accepted content. Authority
+                  // rejection is represented by the lifecycle state and its
+                  // cancellation evidence, not by rewriting the occurrence.
+                  .set({ state: "failed" })
                   .where(eq(schema.sessionSystemUpdates.id, update.id));
                 authorityRejectedUpdateIds.push(update.id);
                 continue;
@@ -50311,6 +51261,50 @@ export async function claimSessionWorkForAttempt(
           }
           return attempt;
         };
+        const rejectScheduledTurnBeforeNewAttempt = async (
+          turn: typeof schema.sessionTurns.$inferSelect,
+          denial: string,
+        ): Promise<ClaimSessionWorkForAttemptResult> => {
+          if (!turn.scheduledTaskRunId) {
+            throw new SessionControlInvariantError(
+              `Turn ${turn.id} has no scheduled run for authority rejection`,
+            );
+          }
+          await markScheduledTaskRunAuthorityRejectedInTransaction(tx as unknown as Database, {
+            workspaceId,
+            sessionId,
+            runId: turn.scheduledTaskRunId,
+            error: denial,
+          });
+          await tx
+            .update(schema.sessionSystemUpdates)
+            .set({ state: "failed" })
+            .where(
+              and(
+                eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+                eq(schema.sessionSystemUpdates.sessionId, sessionId),
+                eq(schema.sessionSystemUpdates.scheduledTaskRunId, turn.scheduledTaskRunId),
+                eq(schema.sessionSystemUpdates.state, "pending"),
+              ),
+            );
+          const settled = await failSessionWorkBeforeAttemptClaim(
+            tx as unknown as Database,
+            workspaceId,
+            {
+              accountId: session.accountId,
+              sessionId,
+              workflowId,
+              trigger: input.trigger,
+              error: denial,
+            },
+          );
+          if (settled.action === "stale") {
+            throw new SessionControlInvariantError(
+              `Scheduled authority rejection for turn ${turn.id} lost its pre-attempt settlement`,
+            );
+          }
+          return { action: "unclaimed", reason: "no-work" };
+        };
         if (session.activeTurnId !== null) {
           const [activeTurnPreview] = await tx
             .select()
@@ -50401,6 +51395,18 @@ export async function claimSessionWorkForAttempt(
             if (!advancesApproval) {
               return { action: "unclaimed", reason: "stale-approval" };
             }
+            if (activeTurn.scheduledTaskRunId) {
+              const denial = await validateScheduledTargetExecutionAtClaim(
+                tx as unknown as Database,
+                {
+                  accountId: session.accountId,
+                  workspaceId,
+                  session,
+                  runId: activeTurn.scheduledTaskRunId,
+                },
+              );
+              if (denial) return await rejectScheduledTurnBeforeNewAttempt(activeTurn, denial);
+            }
             if (parsedDispatch.generation >= Number.MAX_SAFE_INTEGER) {
               throw new Error("Turn dispatch generation exhausted; refusing to wrap or reuse it");
             }
@@ -50462,6 +51468,18 @@ export async function claimSessionWorkForAttempt(
               if (codexWaiter || xaiWaiter) {
                 return { action: "unclaimed", reason: "no-work" };
               }
+            }
+            if (activeTurn.scheduledTaskRunId) {
+              const denial = await validateScheduledTargetExecutionAtClaim(
+                tx as unknown as Database,
+                {
+                  accountId: session.accountId,
+                  workspaceId,
+                  session,
+                  runId: activeTurn.scheduledTaskRunId,
+                },
+              );
+              if (denial) return await rejectScheduledTurnBeforeNewAttempt(activeTurn, denial);
             }
             if (parsedDispatch.generation >= Number.MAX_SAFE_INTEGER) {
               throw new Error("Turn dispatch generation exhausted; refusing to wrap or reuse it");
@@ -51017,30 +52035,114 @@ export async function claimSessionWorkForAttempt(
             )
             .orderBy(desc(schema.sessionTurns.startedAt), desc(schema.sessionTurns.createdAt))
             .limit(1);
-          const model =
+          let model =
             typeof goalPolicy?.model === "string"
               ? goalPolicy.model
               : (latestStarted?.model ?? session.model);
-          const reasoningEffort = reasoningEffortForMetadata(
+          let reasoningEffort = reasoningEffortForMetadata(
             {
               reasoningEffort: goalPolicy?.reasoningEffort ?? latestStarted?.reasoningEffort,
             },
             reasoningEffortForMetadata(session.metadata, "medium"),
           );
-          const latencyMode = latencyModeForMetadata(
+          let latencyMode = latencyModeForMetadata(
             {
               latencyMode: goalPolicy?.latencyMode ?? latestStarted?.latencyMode,
             },
             latencyModeForMetadata(session.metadata, "standard"),
           );
-          const tools = Array.isArray(goalPolicy?.tools)
+          let tools = Array.isArray(goalPolicy?.tools)
             ? goalPolicy.tools
             : (latestStarted?.tools ?? session.tools);
-          const sandboxBackend =
+          let sandboxBackend =
             typeof goalPolicy?.sandboxBackend === "string"
               ? goalPolicy.sandboxBackend
               : (latestStarted?.sandboxBackend ?? session.sandboxBackend);
           const scheduledTaskRunId = delivered.updates[0]?.scheduledTaskRunId ?? null;
+          let scheduledEffectiveMcpServerIds: string[] | null = null;
+          let sandboxOs = latestStarted?.sandboxOs ?? session.sandboxOs;
+          if (scheduledTaskRunId) {
+            const [scheduledRun] = await tx
+              .select({
+                acceptedExecutionSnapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot,
+              })
+              .from(schema.scheduledTaskRuns)
+              .where(
+                and(
+                  eq(schema.scheduledTaskRuns.id, scheduledTaskRunId),
+                  eq(schema.scheduledTaskRuns.accountId, session.accountId),
+                  eq(schema.scheduledTaskRuns.workspaceId, workspaceId),
+                  eq(schema.scheduledTaskRuns.sessionId, sessionId),
+                ),
+              )
+              .limit(1);
+            if (!scheduledRun?.acceptedExecutionSnapshot) {
+              throw new Error("scheduled turn is missing accepted execution truth");
+            }
+            const accepted = ScheduledTaskRunAcceptedExecution.parse(
+              scheduledRun.acceptedExecutionSnapshot,
+            );
+            const targetPolicy = accepted.targetSessionExecution;
+            if (targetPolicy) {
+              scheduledEffectiveMcpServerIds = targetPolicy.effectiveMcpServerIds;
+              const targetMcpServers = await tx
+                .select({ id: schema.sessionMcpServers.serverId })
+                .from(schema.sessionMcpServers)
+                .where(
+                  and(
+                    eq(schema.sessionMcpServers.workspaceId, workspaceId),
+                    eq(schema.sessionMcpServers.sessionId, sessionId),
+                  ),
+                )
+                .orderBy(asc(schema.sessionMcpServers.serverId));
+              const targetVariableSet = targetPolicy.variableSetId
+                ? await getVariableSet(
+                    tx as unknown as Database,
+                    {
+                      accountId: session.accountId,
+                      workspaceId,
+                      subjectId: accepted.personalResourceAuthoritySubjectId ?? "scheduled-task",
+                    },
+                    targetPolicy.variableSetId,
+                  )
+                : null;
+              if (
+                targetPolicy.sessionId !== sessionId ||
+                targetPolicy.visibility !== session.visibility ||
+                targetPolicy.authorityEpoch !== session.authorityEpoch ||
+                stableJson(targetPolicy.firstPartyMcpTools) !==
+                  stableJson(session.firstPartyMcpTools) ||
+                stableJson(targetPolicy.firstPartyMcpPermissions) !==
+                  stableJson(session.firstPartyMcpPermissions ?? null) ||
+                stableJson(targetPolicy.toolPolicy) !== stableJson(session.toolPolicy) ||
+                stableJson(targetPolicy.mcpServerIds) !==
+                  stableJson(targetMcpServers.map((server) => server.id)) ||
+                targetPolicy.toolPolicyVersion !== session.toolPolicyVersion ||
+                targetPolicy.variableSetId !== (session.variableSetId ?? null) ||
+                targetPolicy.variableSetGeneration !== (targetVariableSet?.generation ?? null) ||
+                targetPolicy.rigId !== (session.rigId ?? null) ||
+                targetPolicy.rigVersionId !== (session.rigVersionId ?? null) ||
+                targetPolicy.maxNestedAgentDepthOverride !==
+                  (session.maxNestedAgentDepthOverride ?? null) ||
+                targetPolicy.effectiveMaxNestedAgentDepth !== session.effectiveMaxNestedAgentDepth
+              ) {
+                throw new Error("scheduled target execution session authority changed");
+              }
+              model = targetPolicy.model;
+              reasoningEffort = targetPolicy.reasoningEffort;
+              latencyMode = targetPolicy.latencyMode;
+              tools = targetPolicy.tools;
+              sandboxBackend = targetPolicy.sandboxBackend;
+              sandboxOs = targetPolicy.sandboxOs;
+            } else {
+              model = accepted.resolvedModel;
+              reasoningEffort = accepted.resolvedReasoningEffort;
+              latencyMode = accepted.resolvedLatencyMode;
+              tools = accepted.resolvedTools;
+              sandboxBackend = accepted.resolvedSandboxBackend;
+              sandboxOs = accepted.resolvedSandboxOs;
+            }
+          }
           const scheduledTaskCausalHuman = scheduledTaskRunId
             ? await scheduledTaskRunCausalHumanInTransaction(tx as unknown as Database, {
                 accountId: session.accountId,
@@ -51168,17 +52270,19 @@ export async function claimSessionWorkForAttempt(
                   reasoningEffort,
                   latencyMode,
                   sandboxBackend,
-                  sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
+                  sandboxOs,
                   metadata: metadataWithTurnDispatchAttempt(
                     {
                       internalUpdateCount: delivered.count,
                       ...(routingGoalUpdate ? { goalId: routingGoalUpdate.payload.goalId } : {}),
+                      ...(scheduledEffectiveMcpServerIds ? { scheduledEffectiveMcpServerIds } : {}),
                     },
                     { id: input.dispatchId, generation: 1, triggerEventId },
                   ),
                   ...initiatorColumns(internalInitiator),
                   initiatingHumanSubjectId,
                   personalConnectionDelegations: internalPersonalConnectionDelegations,
+                  scheduledTaskRunId,
                   xaiProviderAccountAuthoritySnapshot: internalXaiAuthority.snapshot,
                   startedAt: now,
                   createdAt: now,
@@ -56182,6 +57286,141 @@ export async function getLatestStartedSessionTurn(
   });
 }
 
+/**
+ * Freeze the effective policy an internal scheduled update would inherit from
+ * an existing session at occurrence admission. The later claim consumes this
+ * exact policy instead of re-reading whichever turn happened to start most
+ * recently in the meantime.
+ */
+export async function getScheduledTargetSessionExecution(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  authoritySubjectId?: string | null,
+): Promise<ScheduledTaskRunAcceptedExecutionType["targetSessionExecution"]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    if (authoritySubjectId) await setSubjectRlsContext(scopedDb, authoritySubjectId);
+    const [session] = await scopedDb
+      .select({
+        id: schema.sessions.id,
+        accountId: schema.sessions.accountId,
+        visibility: schema.sessions.visibility,
+        authorityEpoch: schema.sessions.authorityEpoch,
+        model: schema.sessions.model,
+        metadata: schema.sessions.metadata,
+        tools: schema.sessions.tools,
+        sandboxBackend: schema.sessions.sandboxBackend,
+        sandboxOs: schema.sessions.sandboxOs,
+        firstPartyMcpTools: schema.sessions.firstPartyMcpTools,
+        firstPartyMcpPermissions: schema.sessions.firstPartyMcpPermissions,
+        toolPolicy: schema.sessions.toolPolicy,
+        toolPolicyVersion: schema.sessions.toolPolicyVersion,
+        variableSetId: schema.sessions.variableSetId,
+        rigId: schema.sessions.rigId,
+        rigVersionId: schema.sessions.rigVersionId,
+        maxNestedAgentDepthOverride: schema.sessions.maxNestedAgentDepthOverride,
+        effectiveMaxNestedAgentDepth: schema.sessions.effectiveMaxNestedAgentDepth,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .for("share")
+      .limit(1);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    const targetMcpServers = await scopedDb
+      .select({ id: schema.sessionMcpServers.serverId })
+      .from(schema.sessionMcpServers)
+      .where(
+        and(
+          eq(schema.sessionMcpServers.workspaceId, workspaceId),
+          eq(schema.sessionMcpServers.sessionId, sessionId),
+        ),
+      )
+      .orderBy(asc(schema.sessionMcpServers.serverId));
+    const latestStarted = await latestStartedSessionTurnRow(scopedDb, workspaceId, sessionId);
+    const variableSet = session.variableSetId
+      ? await getVariableSet(
+          scopedDb,
+          {
+            accountId: session.accountId,
+            workspaceId,
+            // Common organization/workspace sets need no personal owner;
+            // user-owned sets resolve only for the frozen causal subject.
+            subjectId: authoritySubjectId ?? "scheduled-task",
+          },
+          session.variableSetId,
+        )
+      : null;
+    if (session.variableSetId && !variableSet) {
+      throw new Error("scheduled target session variable set is unavailable");
+    }
+    const rigMetadata =
+      session.rigId && session.rigVersionId
+        ? await getScheduledScopedRigVersionMetadata(
+            scopedDb,
+            {
+              accountId: session.accountId,
+              workspaceId,
+              subjectId: authoritySubjectId ?? "scheduled-task",
+            },
+            session.rigId,
+            session.rigVersionId,
+          )
+        : null;
+    if (session.rigId && session.rigVersionId && !rigMetadata) {
+      throw new Error("scheduled target session Rig version is unavailable");
+    }
+    const rigDefaultVariableSets = await Promise.all(
+      (rigMetadata?.version.defaultVariableSetIds ?? []).map(async (variableSetId) => {
+        const defaultSet = await getVariableSet(
+          scopedDb,
+          {
+            accountId: session.accountId,
+            workspaceId,
+            subjectId: authoritySubjectId ?? "scheduled-task",
+          },
+          variableSetId,
+        );
+        if (!defaultSet) {
+          throw new Error(
+            `scheduled target Rig default Variable Set is unavailable: ${variableSetId}`,
+          );
+        }
+        return { id: defaultSet.id, generation: defaultSet.generation };
+      }),
+    );
+    return {
+      sessionId: session.id,
+      visibility: session.visibility as "user_private" | "workspace_shared",
+      authorityEpoch: session.authorityEpoch,
+      model: latestStarted?.model ?? session.model,
+      reasoningEffort: reasoningEffortForMetadata(
+        { reasoningEffort: latestStarted?.reasoningEffort },
+        reasoningEffortForMetadata(session.metadata, "medium"),
+      ),
+      latencyMode: latencyModeForMetadata(
+        { latencyMode: latestStarted?.latencyMode },
+        latencyModeForMetadata(session.metadata, "standard"),
+      ),
+      tools: (latestStarted?.tools ?? session.tools) as ToolRef[],
+      sandboxBackend: (latestStarted?.sandboxBackend ?? session.sandboxBackend) as SandboxBackend,
+      sandboxOs: (latestStarted?.sandboxOs ?? session.sandboxOs) as SandboxOs,
+      firstPartyMcpTools: session.firstPartyMcpTools as FirstPartyMcpToolName[],
+      firstPartyMcpPermissions: (session.firstPartyMcpPermissions as Permission[] | null) ?? null,
+      toolPolicy: session.toolPolicy,
+      mcpServerIds: targetMcpServers.map((server) => server.id),
+      effectiveMcpServerIds: targetMcpServers.map((server) => server.id),
+      toolPolicyVersion: session.toolPolicyVersion,
+      variableSetId: session.variableSetId ?? null,
+      variableSetGeneration: variableSet?.generation ?? null,
+      rigId: session.rigId ?? null,
+      rigVersionId: session.rigVersionId ?? null,
+      rigDefaultVariableSets,
+      maxNestedAgentDepthOverride: session.maxNestedAgentDepthOverride ?? null,
+      effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
+    };
+  });
+}
+
 export async function listSessionTurns(
   db: Database,
   workspaceId: string,
@@ -58966,6 +60205,7 @@ function mapSessionTurnForExecution(
   return {
     ...mapSessionTurn(row),
     initiatingHumanSubjectId: row.initiatingHumanSubjectId ?? null,
+    scheduledTaskRunId: row.scheduledTaskRunId ?? null,
     personalConnectionDelegations: parsedPersonalConnectionDelegations(
       row.personalConnectionDelegations,
       `session_turns:${row.workspaceId}:${row.sessionId}:${row.id}`,

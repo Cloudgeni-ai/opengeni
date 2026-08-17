@@ -5129,6 +5129,9 @@ export const sessionTurns = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    // Immutable scheduled occurrence that accepted this logical turn. Null for
+    // ordinary human, goal, child, and unrelated internal work.
+    scheduledTaskRunId: uuid("scheduled_task_run_id"),
     xaiProviderAccountAuthoritySnapshot: jsonb("xai_provider_account_authority_snapshot")
       .$type<XaiProviderAccountAuthoritySnapshotV1>()
       .notNull()
@@ -8638,6 +8641,7 @@ export const scheduledTasks = pgTable(
     // in migration 0047 (forward-reference pattern). Consumed in M3.
     rigId: uuid("rig_id"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -8669,6 +8673,12 @@ export const temporalScheduleCleanupOutbox = pgTable(
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     temporalScheduleId: text("temporal_schedule_id").notNull(),
+    scheduledTaskId: uuid("scheduled_task_id"),
+    connectorCleanupSubjectId: text("connector_cleanup_subject_id"),
+    connectorCleanupSnapshot: jsonb("connector_cleanup_snapshot"),
+    connectorCleanupCompletedAt: timestamp("connector_cleanup_completed_at", {
+      withTimezone: true,
+    }),
     claimId: uuid("claim_id"),
     claimUntil: timestamp("claim_until", { withTimezone: true }),
     attemptCount: integer("attempt_count").notNull().default(0),
@@ -8692,6 +8702,58 @@ export const temporalScheduleCleanupOutbox = pgTable(
         and ${table.attemptCount} >= 0
         and ((${table.claimId} is null and ${table.claimUntil} is null)
           or (${table.claimId} is not null and ${table.claimUntil} is not null))
+        and ((${table.scheduledTaskId} is null and ${table.connectorCleanupSubjectId} is null
+              and ${table.connectorCleanupSnapshot} is null)
+          or (${table.scheduledTaskId} is not null and ${table.connectorCleanupSubjectId} is not null
+              and ${table.connectorCleanupSnapshot} is not null))
+        and (${table.connectorCleanupSnapshot} is not null
+          or ${table.connectorCleanupCompletedAt} is null)
+        and (${table.connectorCleanupSubjectId} is null
+          or octet_length(${table.connectorCleanupSubjectId}) between 1 and 4096)
+        and (${table.connectorCleanupSnapshot} is null or (
+          jsonb_typeof(${table.connectorCleanupSnapshot}) = 'object'
+          and ${table.connectorCleanupSnapshot} ?& array[
+            'version','taskId','accountId','workspaceId','connectorKind','connectionId',
+            'connectionVersion','sourceId','sourceLifecycleGeneration',
+            'sourceConfigGeneration','externalSourceId','subjectId'
+          ]
+          and ${table.connectorCleanupSnapshot} - array[
+            'version','taskId','accountId','workspaceId','connectorKind','connectionId',
+            'connectionVersion','sourceId','sourceLifecycleGeneration',
+            'sourceConfigGeneration','externalSourceId','subjectId'
+          ]::text[] = '{}'::jsonb
+          and jsonb_typeof(${table.connectorCleanupSnapshot}->'version') = 'number'
+          and jsonb_typeof(${table.connectorCleanupSnapshot}->'taskId') = 'string'
+          and jsonb_typeof(${table.connectorCleanupSnapshot}->'accountId') = 'string'
+          and jsonb_typeof(${table.connectorCleanupSnapshot}->'workspaceId') = 'string'
+          and jsonb_typeof(${table.connectorCleanupSnapshot}->'connectorKind') = 'string'
+          and jsonb_typeof(${table.connectorCleanupSnapshot}->'connectionId') = 'string'
+          and jsonb_typeof(${table.connectorCleanupSnapshot}->'connectionVersion') = 'number'
+          and jsonb_typeof(${table.connectorCleanupSnapshot}->'sourceId') = 'string'
+          and jsonb_typeof(${table.connectorCleanupSnapshot}->'sourceLifecycleGeneration') = 'number'
+          and jsonb_typeof(${table.connectorCleanupSnapshot}->'sourceConfigGeneration') = 'number'
+          and jsonb_typeof(${table.connectorCleanupSnapshot}->'externalSourceId') = 'string'
+          and jsonb_typeof(${table.connectorCleanupSnapshot}->'subjectId') = 'string'
+          and ${table.connectorCleanupSnapshot}->>'version' = '1'
+          and ${table.connectorCleanupSnapshot}->>'connectorKind' in ('google_drive','atlassian')
+          and ${table.connectorCleanupSnapshot}->>'subjectId' = ${table.connectorCleanupSubjectId}
+          and ${table.connectorCleanupSnapshot}->>'taskId' = ${table.scheduledTaskId}::text
+          and ${table.connectorCleanupSnapshot}->>'accountId' = ${table.accountId}::text
+          and ${table.connectorCleanupSnapshot}->>'workspaceId' = ${table.workspaceId}::text
+          and octet_length(${table.connectorCleanupSnapshot}->>'externalSourceId') between 1 and 2048
+          and octet_length(${table.connectorCleanupSnapshot}->>'subjectId') between 1 and 4096
+          and ${table.connectorCleanupSnapshot}->>'taskId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          and ${table.connectorCleanupSnapshot}->>'accountId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          and ${table.connectorCleanupSnapshot}->>'workspaceId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          and ${table.connectorCleanupSnapshot}->>'connectionId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          and ${table.connectorCleanupSnapshot}->>'sourceId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          and ${table.connectorCleanupSnapshot}->>'connectionVersion' ~ '^[1-9][0-9]*$'
+          and ${table.connectorCleanupSnapshot}->>'sourceLifecycleGeneration' ~ '^[1-9][0-9]*$'
+          and ${table.connectorCleanupSnapshot}->>'sourceConfigGeneration' ~ '^[1-9][0-9]*$'
+          and (${table.connectorCleanupSnapshot}->>'connectionVersion')::numeric <= 9007199254740991
+          and (${table.connectorCleanupSnapshot}->>'sourceLifecycleGeneration')::numeric <= 9007199254740991
+          and (${table.connectorCleanupSnapshot}->>'sourceConfigGeneration')::numeric <= 9007199254740991
+        ))
         and (${table.lastError} is null or length(${table.lastError}) <= 2000)`,
     ),
   }),
@@ -8709,7 +8771,7 @@ export const scheduledTaskRuns = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     taskId: uuid("task_id")
       .notNull()
-      .references(() => scheduledTasks.id, { onDelete: "cascade" }),
+      .references(() => scheduledTasks.id),
     taskAuthorityRevision: bigint("task_authority_revision", {
       mode: "number",
     }),
@@ -8718,9 +8780,7 @@ export const scheduledTaskRuns = pgTable(
     triggerType: text("trigger_type").notNull(),
     scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
     firedAt: timestamp("fired_at", { withTimezone: true }).notNull().defaultNow(),
-    sessionId: uuid("session_id").references(() => sessions.id, {
-      onDelete: "set null",
-    }),
+    sessionId: uuid("session_id").references(() => sessions.id),
     triggerEventId: uuid("trigger_event_id"),
     actionKind: text("action_kind").notNull().default("agent_turn"),
     knowledgeSyncRunId: uuid("knowledge_sync_run_id"),
@@ -8729,6 +8789,10 @@ export const scheduledTaskRuns = pgTable(
     // Stable Temporal producer identity. Activity replay/re-dispatch returns
     // the exact run instead of allocating a second schedule source row.
     producerKey: text("producer_key"),
+    // Complete credential-free accepted execution truth. It is private worker
+    // authority and never appears in public scheduled-run projections.
+    acceptedExecutionSnapshot: jsonb("accepted_execution_snapshot").$type<unknown>(),
+    acceptedExecutionDigest: text("accepted_execution_digest"),
     error: text("error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

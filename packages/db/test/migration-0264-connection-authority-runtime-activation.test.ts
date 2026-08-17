@@ -22,6 +22,10 @@ const migrationUrl = new URL(
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const migrationName = "0264_connection_authority_runtime_activation.sql";
+// 0275 replaces the accepted-authority capture installed by 0264, so the
+// synthetic upgrade must withhold it alongside 0264 and replay both through the
+// real filename ledger in dependency order.
+const scheduledConnectionAuthorityMigrationName = "0275_scheduled_connection_authority.sql";
 
 describe("migration 0264 connection authority runtime activation", () => {
   test("is a drained exact-attempt cutover with canonical snapshots and idempotent audit", async () => {
@@ -64,7 +68,10 @@ describe("migration 0264 connection authority runtime activation", () => {
           applied_at timestamptz not null default now()
         )
       `;
-      await sql`insert into schema_migrations (name) values (${migrationName})`;
+      await sql`
+        insert into schema_migrations (name)
+        values (${migrationName}), (${scheduledConnectionAuthorityMigrationName})
+      `;
       await migrate(blank.databaseUrl);
 
       const [account] = await sql<{ id: string }[]>`
@@ -155,7 +162,10 @@ describe("migration 0264 connection authority runtime activation", () => {
           ${sql.json(explicitDelegation)}::jsonb
         ) returning id
       `;
-      await sql`delete from schema_migrations where name = ${migrationName}`;
+      await sql`
+        delete from schema_migrations
+        where name in (${migrationName}, ${scheduledConnectionAuthorityMigrationName})
+      `;
       await expect(migrate(blank.databaseUrl)).rejects.toMatchObject({ code: "55000" });
 
       await sql`
@@ -191,6 +201,17 @@ describe("migration 0264 connection authority runtime activation", () => {
       } finally {
         await appSql.end({ timeout: 1 });
       }
+
+      await migrate(blank.databaseUrl);
+      const receipts = await sql<Array<{ name: string }>>`
+        select name from schema_migrations
+        where name in (${migrationName}, ${scheduledConnectionAuthorityMigrationName})
+        order by name
+      `;
+      expect(receipts.map((receipt) => receipt.name)).toEqual([
+        migrationName,
+        scheduledConnectionAuthorityMigrationName,
+      ]);
     } finally {
       await sql.end({ timeout: 1 });
       await blank.release();
