@@ -5,11 +5,12 @@ import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
   createDb,
   createImportBatch,
+  encryptEnvironmentValue,
   getGlobalCatalogOAuthProfile,
   upsertRegistryCapabilityCatalogItem,
   type DbClient,
 } from "@opengeni/db";
-import { readSignedState } from "@opengeni/github";
+import { createSignedState, readSignedState } from "@opengeni/github";
 import {
   acquireSharedTestDatabase,
   startTestMcpServer,
@@ -27,6 +28,7 @@ import {
   assertAuthorizationServerPins,
   assertOwnershipAllowed,
   builtInOAuthProfileFor,
+  catalogMcpUrlKey,
   defaultOwnershipFor,
   oauthProfileFromCatalog,
 } from "../src/integrations/oauth-profiles";
@@ -199,24 +201,65 @@ describe("catalog OAuth profiles", () => {
     ).toThrow("did not remain bound to the reviewed provider origins");
   });
 
-  test("an empty profile keeps the default behavior and malformed profiles are ignored", () => {
+  test("an empty profile keeps the default behavior and malformed profiles fail closed", () => {
     const empty = oauthProfileFromCatalog("https://mcp.example/mcp", {});
-    expect(empty).not.toBeNull();
-    expect(empty!.allowedOwnership).toEqual(DEFAULT_OAUTH_PROFILE.allowedOwnership);
-    expect(empty!.exactMcpBinding).toBe(false);
-    expect(empty!.sendResourceParameter).toBe(true);
-    expect(empty!.authorizationServer).toBeUndefined();
+    expect(empty.allowedOwnership).toEqual(DEFAULT_OAUTH_PROFILE.allowedOwnership);
+    expect(empty.exactMcpBinding).toBe(false);
+    expect(empty.sendResourceParameter).toBe(true);
+    expect(empty.authorizationServer).toBeUndefined();
 
-    expect(oauthProfileFromCatalog("https://mcp.example/mcp", null)).toBeNull();
-    expect(oauthProfileFromCatalog("https://mcp.example/mcp", "profile")).toBeNull();
-    expect(oauthProfileFromCatalog("https://mcp.example/mcp", { unknownKey: true })).toBeNull();
-    expect(oauthProfileFromCatalog("https://mcp.example/mcp", { allowedOwnership: [] })).toBeNull();
-    expect(
-      oauthProfileFromCatalog("https://mcp.example/mcp", { allowedOwnership: ["group"] }),
-    ).toBeNull();
-    expect(
-      oauthProfileFromCatalog("https://mcp.example/mcp", { pinnedIssuerOrigins: ["nonsense"] }),
-    ).toBeNull();
+    // A present-but-invalid profile fails closed with a 422: silently
+    // degrading to the default profile would drop a declared fence on a typo.
+    for (const malformed of [
+      null,
+      "profile",
+      { unknownKey: true },
+      { allowedOwnership: [] },
+      { allowedOwnership: ["group"] },
+      { pinnedIssuerOrigins: ["nonsense"] },
+      { requestedScopes: [] },
+      { extraAuthorizeParams: { scope: "everything" } },
+      { extraAuthorizeParams: { redirect_uri: "https://attacker.example/cb" } },
+      { extraAuthorizeParams: { state: "forged" } },
+      { extraAuthorizeParams: { code_challenge: "abc" } },
+    ]) {
+      expect(() => oauthProfileFromCatalog("https://mcp.example/mcp", malformed)).toThrow(
+        HTTPException,
+      );
+    }
+  });
+
+  test("catalogMcpUrlKey normalizes the variants the importer's row key normalizes", () => {
+    expect(catalogMcpUrlKey("https://MCP.Pinned.Example/mcp/")).toBe(
+      "https://mcp.pinned.example/mcp",
+    );
+    expect(catalogMcpUrlKey("https://mcp.pinned.example:443/mcp")).toBe(
+      "https://mcp.pinned.example/mcp",
+    );
+    expect(catalogMcpUrlKey("https://mcp.pinned.example/mcp#frag")).toBe(
+      "https://mcp.pinned.example/mcp",
+    );
+    expect(catalogMcpUrlKey("https://mcp.pinned.example/mcp")).toBe(
+      "https://mcp.pinned.example/mcp",
+    );
+  });
+
+  test("a Slack-identity authorization server is reserved for the hosted-Slack profile", () => {
+    const slackAs = {
+      issuer: "https://slack.com",
+      authorizationServer: "https://slack.com",
+      authorizationEndpoint: "https://slack.com/oauth/v2/authorize",
+      tokenEndpoint: "https://slack.com/api/oauth.v2.access",
+    };
+    expect(() => assertAuthorizationServerNotReserved(slackAs, DEFAULT_OAUTH_PROFILE)).toThrow(
+      `Slack OAuth is allowed only for ${OFFICIAL_SLACK_MCP_URL}`,
+    );
+    expect(() =>
+      assertAuthorizationServerNotReserved(
+        slackAs,
+        builtInOAuthProfileFor({ mcpUrl: OFFICIAL_SLACK_MCP_URL })!,
+      ),
+    ).not.toThrow();
   });
 
   test("a catalog profile cannot loosen a built-in fence because built-ins resolve first", () => {
@@ -247,15 +290,27 @@ describe("catalog OAuth profiles", () => {
         verifier: "test-pkce-verifier",
         scopes: ["files:read"],
         resourceParameterSupported: true,
-        extraParams: { audience: "pinned", tenant: "acme" },
+        extraParams: {
+          audience: "pinned",
+          tenant: "acme",
+          // The schema rejects these upstream; the builder must also refuse to
+          // let an extra param displace a security parameter it already set.
+          state: "forged",
+          scope: "everything",
+          redirect_uri: "https://attacker.example/cb",
+          code_challenge_method: "plain",
+        },
       }),
     );
     expect(url.searchParams.get("audience")).toBe("pinned");
     expect(url.searchParams.get("tenant")).toBe("acme");
     expect(url.searchParams.get("resource")).toBe("https://mcp.pinned.example/mcp");
-    // Extra params never displace the security parameters.
     expect(url.searchParams.get("code_challenge_method")).toBe("S256");
     expect(url.searchParams.get("state")).toBe("signed-state");
+    expect(url.searchParams.get("scope")).toBe("files:read");
+    expect(url.searchParams.get("redirect_uri")).toBe(
+      "https://api.opengeni.test/v1/integrations/oauth/callback",
+    );
   });
 
   test("ownership asserts raise typed HTTP 422s", () => {
@@ -273,9 +328,9 @@ describe("catalog OAuth profiles", () => {
 });
 
 describe("catalog-profile-driven OAuth start", () => {
-  function app() {
+  function app(overrides: Partial<Settings> = {}) {
     return createApp({
-      settings,
+      settings: { ...settings, ...overrides },
       db: client.db,
       bus: {} as never,
       workflowClient: {} as never,
@@ -470,5 +525,149 @@ describe("catalog-profile-driven OAuth start", () => {
         "https://no-such-row.example/mcp",
       ),
     ).toBeNull();
+  });
+
+  test("a workspace-created row's oauthProfile never steers OAuth", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const mcpUrl = "https://workspace-row.example/mcp";
+    await shared!.admin`
+      insert into capability_catalog_items (
+        id, account_id, workspace_id, kind, source, name, category, mcp_url, metadata
+      ) values (
+        'mcp:custom:workspace-row', ${workspace.accountId}, ${workspace.workspaceId}, 'mcp',
+        'manual', 'Workspace Row', 'custom', ${mcpUrl},
+        ${shared!.admin.json({ oauthProfile: { allowedOwnership: ["personal"] } })}
+      )`;
+    expect(await getGlobalCatalogOAuthProfile(client.db, workspace.workspaceId, mcpUrl)).toBeNull();
+  });
+
+  test("a URL variant of a profiled row resolves the same catalog profile", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const as = startFakeAuthorizationServer();
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer pinned-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="files:read"`,
+    });
+    try {
+      // The row is keyed by the importer's canonical URL (no trailing slash);
+      // the start targets a trailing-slash variant of the same server.
+      await insertCatalogProfileRow(mcp.url, { allowedOwnership: ["personal"] });
+      const response = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            mcpUrl: `${mcp.url}/`,
+            ownership: "workspace",
+            returnPath: "/integrations",
+          }),
+        },
+      );
+      expect(response.status).toBe(422);
+      expect(await response.text()).toContain("allows only personal connections");
+    } finally {
+      as.close();
+      mcp.close();
+    }
+  });
+
+  test("a malformed catalog profile fails the start closed instead of defaulting", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const as = startFakeAuthorizationServer();
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer pinned-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="files:read"`,
+    });
+    try {
+      await insertCatalogProfileRow(mcp.url, { allowedOwnership: ["everyone"] });
+      const response = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ mcpUrl: mcp.url, returnPath: "/integrations" }),
+        },
+      );
+      expect(response.status).toBe(422);
+      expect(await response.text()).toContain("catalog OAuth profile is invalid");
+    } finally {
+      as.close();
+      mcp.close();
+    }
+  });
+
+  test("a hostile global row for a built-in URL cannot loosen the built-in fence", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    await insertCatalogProfileRow(OFFICIAL_SLACK_MCP_URL, {
+      allowedOwnership: ["workspace", "personal"],
+    });
+    // Deployment Slack credentials are configured so the flow reaches the
+    // ownership fence rather than the earlier 503; the hostile catalog row
+    // must still never be consulted.
+    const response = await app({
+      slackClientId: "slack-client-id",
+      slackClientSecret: "slack-client-secret",
+    }).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
+      method: "POST",
+      headers: {
+        authorization: await bearer(workspace, ["connections:write"]),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        mcpUrl: OFFICIAL_SLACK_MCP_URL,
+        ownership: "workspace",
+        returnPath: "/integrations",
+      }),
+    });
+    expect(response.status).toBe(422);
+    expect(await response.text()).toContain("Slack's hosted MCP connection is personal only");
+  });
+
+  test("the callback fences a catalog personal-only row against a stale workspace-owned state", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const mcpUrl = "https://callback-fence.example/mcp";
+    await insertCatalogProfileRow(mcpUrl, { allowedOwnership: ["personal"] });
+    // A state minted by an older deployment (before the row declared
+    // personal-only) with workspace ownership must not persist shared
+    // authority at the callback.
+    const state = createSignedState(STATE_SECRET, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: "subject-a",
+      ownership: "workspace",
+      providerDomain: "callback-fence.example",
+      mcpUrl,
+      resource: mcpUrl,
+      requestedScopes: [],
+      authorizeScopes: [],
+      encryptedPkceVerifier: encryptEnvironmentValue(rawKey, "test-pkce-verifier-value-123456789"),
+      clientId: "client",
+      tokenEndpoint: "https://callback-fence.example/token",
+      authorizationServer: "https://callback-fence.example",
+      issuer: "https://callback-fence.example",
+      clientRegistrationMethod: "cimd",
+      tokenEndpointAuthMethod: "none",
+      resourceParameterSupported: true,
+      returnPath: "/integrations",
+    });
+    const callback = await app().request(
+      `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`,
+    );
+    expect(callback.status).toBe(302);
+    const location = callback.headers.get("location")!;
+    expect(location).toContain("integration_oauth=error");
+    expect(location).toContain("stage=state_verify");
   });
 });

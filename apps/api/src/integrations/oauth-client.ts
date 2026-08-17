@@ -50,6 +50,7 @@ import {
   assertAuthorizationServerPins,
   assertOwnershipAllowed,
   builtInOAuthProfileFor,
+  catalogMcpUrlKey,
   defaultOwnershipFor,
   deploymentManagedClientFor,
   oauthProfileFromCatalog,
@@ -322,8 +323,12 @@ async function startMcpOAuthWithinDeadline(
   const profile =
     builtInProfile ??
     (await deadline.run("connection_lookup", async () => {
-      const raw = await getGlobalCatalogOAuthProfile(db, context.workspaceId, mcpUrl);
-      return raw ? oauthProfileFromCatalog(mcpUrl, raw) : null;
+      const raw = await getGlobalCatalogOAuthProfile(
+        db,
+        context.workspaceId,
+        catalogMcpUrlKey(mcpUrl),
+      );
+      return raw === null ? null : oauthProfileFromCatalog(mcpUrl, raw);
     })) ??
     DEFAULT_OAUTH_PROFILE;
   assertOAuthStartProfile(settings, context.payload, mcpUrl, profile);
@@ -596,11 +601,10 @@ async function completeMcpOAuthCallbackWithinDeadline(
           const raw = await getGlobalCatalogOAuthProfile(
             scopedDb,
             state!.workspaceId,
-            state!.mcpUrl,
+            catalogMcpUrlKey(state!.mcpUrl),
           );
-          const catalogProfile = raw ? oauthProfileFromCatalog(state!.mcpUrl, raw) : null;
-          if (catalogProfile) {
-            assertOwnershipAllowed(catalogProfile, state!.ownership);
+          if (raw !== null) {
+            assertOwnershipAllowed(oauthProfileFromCatalog(state!.mcpUrl, raw), state!.ownership);
           }
         }
         return await consumeIntegrationOAuthStateNonce(scopedDb, {
@@ -1339,14 +1343,11 @@ export function buildAuthorizationUrl(input: {
   url.searchParams.set("redirect_uri", input.redirectUri);
   url.searchParams.set("state", input.state);
   if (input.resourceParameterSupported) {
+    // Suppressing RFC 8707 is a profile fact (Google's endpoints reject the
+    // parameter); any provider-specific replacement parameters, such as
+    // Google's offline-consent options, are that profile's
+    // `extraAuthorizeParams` rather than behavior implied by the suppression.
     url.searchParams.set("resource", input.resource);
-  } else {
-    // Google's OAuth endpoints do not implement RFC 8707's `resource`
-    // parameter. Explicit offline consent is required to obtain the refresh
-    // token used by the durable connection broker.
-    url.searchParams.set("access_type", "offline");
-    url.searchParams.set("include_granted_scopes", "true");
-    url.searchParams.set("prompt", "consent");
   }
   url.searchParams.set("code_challenge_method", "S256");
   url.searchParams.set("code_challenge", pkceChallenge(input.verifier));
@@ -1354,7 +1355,12 @@ export function buildAuthorizationUrl(input: {
     url.searchParams.set("scope", input.scopes.join(" "));
   }
   for (const [name, value] of Object.entries(input.extraParams ?? {})) {
-    url.searchParams.set(name, value);
+    // Defense in depth behind the schema/curation validation: an extra
+    // parameter can never displace a security parameter the client already
+    // set (state, PKCE, scope, resource, redirect_uri, ...).
+    if (!url.searchParams.has(name)) {
+      url.searchParams.set(name, value);
+    }
   }
   return url.toString();
 }

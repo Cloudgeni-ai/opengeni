@@ -175,6 +175,14 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   },
   // Google's OAuth endpoints do not implement RFC 8707's `resource` parameter.
   sendResourceParameter: false,
+  // Explicit offline consent is required to obtain the refresh token used by
+  // the durable connection broker. These are Gmail profile data, not behavior
+  // implied by suppressing the resource parameter.
+  extraAuthorizeParams: {
+    access_type: "offline",
+    include_granted_scopes: "true",
+    prompt: "consent",
+  },
   // The Gmail PRM advertises broader grants, including full-mail access. The
   // reviewed connector never lets a caller widen the capability contract.
   requestedScopes: OFFICIAL_GMAIL_MCP_SCOPES,
@@ -207,6 +215,15 @@ const RESERVED_AUTHORIZATION_SERVERS: readonly {
     issuerOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
     allowedProfileKey: OFFICIAL_GMAIL_PROFILE.key,
     message: `Google OAuth is allowed only for ${OFFICIAL_GMAIL_MCP_URL}`,
+  },
+  {
+    // A URL variant that dodges the hosted-Slack profile match (for example a
+    // trailing slash yielding providerDomain mcp.slack.com) must not reach
+    // Slack's authorization server as a default-profile flow: that would mint
+    // a workspace-ownable Slack identity with the deployment client.
+    issuerOrigins: [SLACK_OAUTH_ORIGIN, SLACK_MCP_ORIGIN],
+    allowedProfileKey: HOSTED_SLACK_PROFILE.key,
+    message: `Slack OAuth is allowed only for ${OFFICIAL_SLACK_MCP_URL}`,
   },
 ];
 
@@ -341,6 +358,24 @@ export function assertAuthorizationServerNotReserved(
  * client settings, reserved-server membership) are built-in-only by
  * construction because the schema cannot express them.
  */
+/**
+ * Authorize-URL parameters owned by the OAuth client itself. A profile's
+ * `extraAuthorizeParams` may never name one: overriding `scope` or `resource`
+ * would widen the grant past the recorded contract, and the rest carry the
+ * PKCE/state security machinery. Enforced in this schema, in the curation
+ * parser, and defensively again in `buildAuthorizationUrl`.
+ */
+export const RESERVED_AUTHORIZE_PARAMS: ReadonlySet<string> = new Set([
+  "client_id",
+  "code_challenge",
+  "code_challenge_method",
+  "redirect_uri",
+  "resource",
+  "response_type",
+  "scope",
+  "state",
+]);
+
 export const catalogOAuthProfileSchema = z
   .object({
     clientSource: z.enum(["deployment_managed", "cimd", "dcr"]).optional(),
@@ -352,8 +387,14 @@ export const catalogOAuthProfileSchema = z
       .array(z.enum(["personal", "workspace"]))
       .min(1)
       .optional(),
-    requestedScopes: z.array(z.string().min(1)).optional(),
-    extraAuthorizeParams: z.record(z.string(), z.string()).optional(),
+    requestedScopes: z.array(z.string().min(1)).min(1).optional(),
+    extraAuthorizeParams: z
+      .record(z.string(), z.string())
+      .optional()
+      .refine(
+        (value) => !value || Object.keys(value).every((key) => !RESERVED_AUTHORIZE_PARAMS.has(key)),
+        { message: "extraAuthorizeParams may not name a reserved OAuth parameter" },
+      ),
   })
   .strict();
 
@@ -364,15 +405,43 @@ function originOf(value: string): string {
 }
 
 /**
+ * Canonical catalog lookup key for an MCP URL, mirroring the importer's
+ * `canonicalMcpUrl` (`scripts/catalog-curation.ts`): no fragment, lowercase
+ * host, default ports stripped, trailing slashes collapsed. Without this, a
+ * trailing-slash or uppercase-host variant of a profiled URL would miss the
+ * row and silently fall back to the default profile.
+ */
+export function catalogMcpUrlKey(value: string): string {
+  const url = new URL(value);
+  url.hash = "";
+  url.hostname = url.hostname.toLowerCase();
+  if (
+    (url.protocol === "https:" && url.port === "443") ||
+    (url.protocol === "http:" && url.port === "80")
+  ) {
+    url.port = "";
+  }
+  url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+  return url.toString();
+}
+
+/**
  * Applies a validated catalog profile over the default profile for a row with
  * no built-in. `deployment_managed` from catalog data resolves through the
  * operator clients JSON (issuer-keyed) only; named settings-backed clients
  * remain built-in-only.
+ *
+ * A present-but-invalid profile fails closed with a 422: the row's operator
+ * declared constraints, and silently degrading to the default profile would
+ * drop an ownership fence or origin pin on a JSON typo.
  */
-export function oauthProfileFromCatalog(mcpUrl: string, raw: unknown): OAuthProviderProfile | null {
+export function oauthProfileFromCatalog(mcpUrl: string, raw: unknown): OAuthProviderProfile {
   const parsed = catalogOAuthProfileSchema.safeParse(raw);
   if (!parsed.success) {
-    return null;
+    throw new HTTPException(422, {
+      message:
+        "this integration's catalog OAuth profile is invalid; re-run the catalog import or fix the curated overlay",
+    });
   }
   const data = parsed.data;
   const issuerOrigins = data.pinnedIssuerOrigins?.map(originOf);

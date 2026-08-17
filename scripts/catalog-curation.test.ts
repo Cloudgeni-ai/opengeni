@@ -112,6 +112,11 @@ describe("curated catalog overlay document", () => {
     expect(() => parseCuratedCatalog(entry({ extraAuthorizeParams: { a: 1 } }))).toThrow(
       /string-to-string/,
     );
+    for (const reserved of ["scope", "state", "redirect_uri", "code_challenge", "resource"]) {
+      expect(() =>
+        parseCuratedCatalog(entry({ extraAuthorizeParams: { [reserved]: "x" } })),
+      ).toThrow(/reserved OAuth parameter/);
+    }
   });
 
   test("preserves an explicit null logoSourceUrl and distinguishes it from omission", () => {

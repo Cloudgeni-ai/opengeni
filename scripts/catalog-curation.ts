@@ -183,6 +183,22 @@ const OAUTH_PROFILE_KEYS: ReadonlySet<string> = new Set([
 const OAUTH_CLIENT_SOURCES: ReadonlySet<string> = new Set(["deployment_managed", "cimd", "dcr"]);
 const OAUTH_OWNERSHIPS: ReadonlySet<string> = new Set(["personal", "workspace"]);
 
+/**
+ * Authorize-URL parameters owned by the OAuth client. An overlay's
+ * `extraAuthorizeParams` may never name one; mirrored by the API's zod schema
+ * and enforced defensively again when the authorize URL is built.
+ */
+const RESERVED_AUTHORIZE_PARAMS: ReadonlySet<string> = new Set([
+  "client_id",
+  "code_challenge",
+  "code_challenge_method",
+  "redirect_uri",
+  "resource",
+  "response_type",
+  "scope",
+  "state",
+]);
+
 function parseOAuthProfile(raw: unknown, where: string): CuratedOAuthProfile {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new CuratedCatalogError(`${where}: oauthProfile must be an object`);
@@ -257,6 +273,13 @@ function parseOAuthProfile(raw: unknown, where: string): CuratedOAuthProfile {
       throw new CuratedCatalogError(
         `${where}: oauthProfile.extraAuthorizeParams must be a string-to-string object`,
       );
+    }
+    for (const key of Object.keys(value)) {
+      if (RESERVED_AUTHORIZE_PARAMS.has(key)) {
+        throw new CuratedCatalogError(
+          `${where}: oauthProfile.extraAuthorizeParams may not name the reserved OAuth parameter "${key}"`,
+        );
+      }
     }
     profile.extraAuthorizeParams = value as Record<string, string>;
   }
