@@ -17,10 +17,25 @@ const DOCKER_INSTANCE_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 
 type DockerResumeState = {
   containerId?: unknown;
+  image?: unknown;
   workspaceRootPath?: unknown;
   workspaceRootOwned?: unknown;
   snapshot?: unknown;
 };
+
+/** A cold continuity owner is the only caller allowed to replace a missing
+ * Docker execution wrapper while preserving its host workspace. The durable
+ * provider state carries the image of the missing container; prefer the
+ * currently configured image for the replacement so a deployment upgrade
+ * cannot publish a new lease image while silently restarting the old one. */
+export function dockerContinuityResumeStateForImage<T>(
+  state: T,
+  configuredImage: string | undefined,
+): T {
+  const image = configuredImage?.trim();
+  if (!image || !state || typeof state !== "object" || Array.isArray(state)) return state;
+  return { ...state, image };
+}
 
 function dockerContinuityKey(state: unknown): string | null {
   if (!state || typeof state !== "object" || Array.isArray(state)) return null;
@@ -62,6 +77,18 @@ class OpenGeniDockerSandboxClient extends DockerSandboxClient {
   constructor(options: DockerSandboxClientOptions = {}) {
     super(options);
     this.#openGeniOptions = options;
+  }
+
+  /** Ordinary resume is reserved by OpenGeni for the elected cold continuity
+   * owner. Exact live attachment uses resumeExact() below and never reimages. */
+  override async resume(
+    state: Parameters<DockerSandboxClient["resume"]>[0],
+    options?: Parameters<DockerSandboxClient["resume"]>[1],
+  ) {
+    return await super.resume(
+      dockerContinuityResumeStateForImage(state, this.#openGeniOptions.image),
+      options,
+    );
   }
 
   /** Exact attach must not call the SDK's ordinary resume when the persisted
