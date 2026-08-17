@@ -117,8 +117,16 @@ describe("get.<domain> install routes", () => {
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
-      "https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v0.1.14/opengeni-agent-universal-apple-darwin",
+      "https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v0.1.15/opengeni-agent-universal-apple-darwin",
     );
+  });
+
+  test("GET /agent/latest/OpenGeni-Agent.icns serves the committed macOS bundle icon", async () => {
+    const res = await appFor(testSettings()).request("/agent/latest/OpenGeni-Agent.icns");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/icns");
+    expect(res.headers.get("x-opengeni-agent-source")).toBe("committed");
+    expect(new TextDecoder().decode((await res.arrayBuffer()).slice(0, 4))).toBe("icns");
   });
 
   test("GET /agent/v<ver>/<unbaked-asset> redirects to the immutable agent-v<ver> tag asset", async () => {
@@ -255,7 +263,7 @@ describe("get.<domain> install routes — baked binary serving", () => {
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toContain(
-      "/releases/download/agent-v0.1.14/opengeni-agent-universal-apple-darwin",
+      "/releases/download/agent-v0.1.15/opengeni-agent-universal-apple-darwin",
     );
   });
 });
