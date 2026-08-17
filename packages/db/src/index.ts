@@ -4939,7 +4939,7 @@ export async function resolveDocumentOriginalFileForSubject(
   );
 }
 
-/** Batch form of requireFileForSubject for durable model-history projection. */
+/** Batch form of requireFileForSubject; unauthorized or missing ids are omitted. */
 export async function getFilesForSubject(
   db: Database,
   input: {

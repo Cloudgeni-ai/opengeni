@@ -14,7 +14,6 @@ import {
   getSandboxSessionEnvelope,
   getSessionEvent,
   listSessionSystemUpdatesForTurn,
-  requireFileForSubject,
   type Database,
 } from "@opengeni/db";
 import {
@@ -152,9 +151,7 @@ export type ModelHistoryAttachmentProjector = (
 ) => Promise<Array<Record<string, unknown>>>;
 
 export type ModelHistoryAttachmentProjectionOptions = {
-  /** Exact files attached to the triggering message. Historical refs remain receipts. */
-  inlineFileIds?: ReadonlySet<string>;
-  /** Metadata already authorized while resolving that triggering message. */
+  /** Exact, already-authorized files attached to the triggering message. */
   inlineFiles?: readonly FileAsset[];
 };
 
@@ -300,14 +297,7 @@ function attachmentRefsFromItem(item: Record<string, unknown>): FileResourceRef[
   return refs;
 }
 
-function attachmentReceiptText(
-  ref: FileResourceRef,
-  file: FileAsset | undefined,
-  resolvedForCurrentTurn: boolean,
-): string {
-  if (!file && resolvedForCurrentTurn) {
-    return `[Attachment unavailable or no longer authorized: ${ref.fileId}.]`;
-  }
+function attachmentReceiptText(ref: FileResourceRef, file: FileAsset | undefined): string {
   if (!file) {
     return (
       `[Earlier attachment: fileId=${ref.fileId}; mountDirectory=/workspace/${resourceMountPath(ref)}. ` +
@@ -324,26 +314,19 @@ function attachmentReceiptText(
 }
 
 /**
- * Build one turn-scoped durable-attachment projector. Metadata is batch-loaded
- * and file bytes are memoized, so compaction/retry can reuse the same work and
- * the SDK's repeated tool loop never touches storage or rescans old history.
+ * Build one turn-scoped durable-attachment projector. Current attachment
+ * metadata arrives already authorized; bytes are memoized for same-turn retry.
+ * Historical projection has no database or object-storage path.
  */
 export function createModelHistoryAttachmentProjector(
-  db: Database,
-  authority: { accountId: string; workspaceId: string; subjectId: string | null },
   policy: ModelAttachmentInputPolicy,
   readFileBytes?: (file: FileAsset) => Promise<Uint8Array>,
 ): ModelHistoryAttachmentProjector {
-  const fileById = new Map<string, FileAsset>();
-  const missingFileIds = new Set<string>();
   const contentById = new Map<string, ModelAttachmentContent>();
   const attemptedContentIds = new Set<string>();
 
   return async (items, options = {}) => {
-    const inlineFileIds = options.inlineFileIds ?? new Set<string>();
-    for (const file of options.inlineFiles ?? []) {
-      if (inlineFileIds.has(file.id)) fileById.set(file.id, file);
-    }
+    const currentFileById = new Map((options.inlineFiles ?? []).map((file) => [file.id, file]));
     const refsByIndex = new Map<number, FileResourceRef[]>();
     const orderedFileIds: string[] = [];
     const seenFileIds = new Set<string>();
@@ -359,31 +342,15 @@ export function createModelHistoryAttachmentProjector(
     }
     if (refsByIndex.size === 0) return items;
 
-    const unknownIds = orderedFileIds.filter(
-      (id) => inlineFileIds.has(id) && !fileById.has(id) && !missingFileIds.has(id),
-    );
-    if (unknownIds.length > 0) {
-      const files = await getFilesForSubject(db, {
-        ...authority,
-        fileIds: unknownIds,
-      });
-      for (const file of files) fileById.set(file.id, file);
-      for (const id of unknownIds) {
-        if (!fileById.has(id)) missingFileIds.add(id);
-      }
-    }
-
     if (readFileBytes) {
       // Only the triggering message's attachments cross the provider byte
       // boundary. Historical messages retain compact durable receipts and can
       // recover bytes explicitly through the existing Files MCP + shell path.
       const readable = [...orderedFileIds]
         .reverse()
-        .map((id) => fileById.get(id))
+        .map((id) => currentFileById.get(id))
         .filter((file): file is FileAsset => {
-          if (!file || attemptedContentIds.has(file.id) || !inlineFileIds.has(file.id)) {
-            return false;
-          }
+          if (!file || attemptedContentIds.has(file.id)) return false;
           const descriptor = modelAttachmentDescriptor(file.contentType);
           return Boolean(
             descriptor &&
@@ -403,10 +370,11 @@ export function createModelHistoryAttachmentProjector(
         ? [...original.content]
         : [{ type: "input_text", text: String(original.content ?? "") }];
       const attachmentParts = refs.flatMap((ref) => {
-        const attachment = contentById.get(ref.fileId);
+        const currentFile = currentFileById.get(ref.fileId);
+        const attachment = currentFile ? contentById.get(ref.fileId) : undefined;
         const receipt = {
           type: "input_text",
-          text: attachmentReceiptText(ref, fileById.get(ref.fileId), inlineFileIds.has(ref.fileId)),
+          text: attachmentReceiptText(ref, currentFile),
         };
         if (!attachment) {
           return [receipt];
@@ -679,7 +647,6 @@ async function messageInput(
     async () =>
       projectModelHistory
         ? await projectModelHistory(materializedHistory, {
-            inlineFileIds: new Set(currentAttachmentRefs.map((ref) => ref.fileId)),
             inlineFiles: currentAttachments.map((attachment) => attachment.file),
           })
         : materializedHistory,
@@ -755,18 +722,22 @@ async function resolveUserMessageFileAttachments(
   subjectId: string | null,
   resources: ResourceRef[],
 ): Promise<UserMessageFileAttachment[]> {
-  const attachments: UserMessageFileAttachment[] = [];
-  for (const resource of resources) {
-    if (resource.kind !== "file") continue;
-    const file = await requireFileForSubject(db, {
-      accountId,
-      workspaceId,
-      subjectId,
-      fileId: resource.fileId,
-    });
-    attachments.push({ resource, file });
-  }
-  return attachments;
+  const fileResources = resources.filter(
+    (resource): resource is FileResourceRef => resource.kind === "file",
+  );
+  if (fileResources.length === 0) return [];
+  const files = await getFilesForSubject(db, {
+    accountId,
+    workspaceId,
+    subjectId,
+    fileIds: fileResources.map((resource) => resource.fileId),
+  });
+  const fileById = new Map(files.map((file) => [file.id, file]));
+  return fileResources.map((resource) => {
+    const file = fileById.get(resource.fileId);
+    if (!file) throw new Error(`File not found: ${resource.fileId}`);
+    return { resource, file };
+  });
 }
 
 function userMessageAttachmentsContext(
