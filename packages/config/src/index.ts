@@ -418,12 +418,11 @@ const SettingsSchema = z.object({
   // id ("x", "reddit"): {"x":{"clientId":"...","clientSecret":"..."}}.
   socialOauthClientsJson: z.string().default("{}"),
   // Session goal guard rails. Goals are designed for runs that legitimately
-  // span days, so length is bounded by pathology detection (no-progress
-  // streaks, budget exhaustion), never by count. goalMaxAutoContinuations is
-  // therefore UNSET by default (no cap); deployments may configure one, and
-  // it then acts as a hard ceiling that per-goal overrides can only lower.
+  // span days, so length is bounded by explicit completion/pause and budget
+  // exhaustion, never by count. goalMaxAutoContinuations is therefore UNSET
+  // by default (no cap); deployments may configure one, and it then acts as a
+  // hard ceiling that per-goal overrides can only lower.
   goalMaxAutoContinuations: z.coerce.number().int().positive().optional(),
-  goalNoProgressLimit: z.coerce.number().int().positive().default(3),
   // Per-segment ceiling on agent loop turns (model calls) within a single
   // session turn. Effectively unbounded by default for the same reason as
   // above; the graceful max-turns valve (idle + goal continuation, never a
@@ -2120,7 +2119,6 @@ export function getSettings(): Settings {
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
     socialOauthClientsJson: optional("OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
-    goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
     contextEffectiveWindowTokens: optional("OPENGENI_CONTEXT_EFFECTIVE_WINDOW_TOKENS"),

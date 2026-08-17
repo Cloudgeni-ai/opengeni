@@ -3515,7 +3515,6 @@ describe("clean session control plane", () => {
     const firstDecision = await evaluateGoalContinuation(client.db, {
       workspaceId: grant.workspaceId!,
       sessionId: session.id,
-      noProgressLimit: 3,
     });
     expect(firstDecision).toMatchObject({ decision: "continue", autoContinuation: 1 });
     if (firstDecision.decision !== "continue") throw new Error("goal did not continue");
@@ -3571,7 +3570,6 @@ describe("clean session control plane", () => {
       await evaluateGoalContinuation(client.db, {
         workspaceId: grant.workspaceId!,
         sessionId: session.id,
-        noProgressLimit: 3,
       }),
     ).toEqual({ decision: "none" });
     expect(await getSessionGoal(client.db, grant.workspaceId!, session.id)).toMatchObject({
@@ -3585,7 +3583,6 @@ describe("clean session control plane", () => {
       await evaluateGoalContinuation(client.db, {
         workspaceId: grant.workspaceId!,
         sessionId: session.id,
-        noProgressLimit: 3,
       }),
     ).toEqual({ decision: "queue" });
     const humanAttemptId = crypto.randomUUID();
@@ -3611,7 +3608,6 @@ describe("clean session control plane", () => {
       await evaluateGoalContinuation(client.db, {
         workspaceId: grant.workspaceId!,
         sessionId: session.id,
-        noProgressLimit: 3,
       }),
     ).toMatchObject({ decision: "continue", autoContinuation: 1 });
   });

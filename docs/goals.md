@@ -27,7 +27,8 @@ in `session_turns.goal_snapshot` when the turn is accepted. Ordinary turns,
 goal continuations, recovery, and both compaction modes use only that snapshot,
 never a later mutable goal head. The snapshot is rendered on the turn's newest
 durable model-input item: a leading part of a human/API user message, or the
-internal-update batch for a machine-only turn. It never mutates the persistent
+canonical user-role continuation message for a goal-owned turn. Other machine
+updates coalesced into that turn are attached as ordinary message context. It never mutates the persistent
 agent-instruction prefix or exists only in activity memory, so later requests
 extend the same prompt-cache prefix and recovery replays identical authority.
 
@@ -74,7 +75,7 @@ A goal is `active`, `paused`, or `completed`.
   them with its goal snapshot. A goal-bearing child inherits the calling
   turn's exact frozen set when the field is omitted, while an explicit array
   may only narrow that set. Explicit `[]` delegates no root constraints.
-- `goal_progress` records a concrete, attempt-fenced progress fact without
+- `goal_progress` optionally records a concrete, attempt-fenced audit fact without
   changing text, criteria, policy, objective revision, or lifecycle version.
   Legacy `goal_update.progressNote` calls route through this separate operation.
   Agent calls require a stable UUID `idempotencyKey`. That operation identity
@@ -116,8 +117,8 @@ The continuation is a revisioned obligation, not a workflow polling loop:
 3. At an idle boundary `maybeContinueGoal` materializes the revision in one
    Postgres transaction. It locks and re-checks admission, session, goal,
    non-terminal turns, authoritative Steer work, existing continuation updates,
-   and provider-capacity waiters before evaluating progress and limits.
-4. A successful decision atomically commits the progress mutation, one
+   and provider-capacity waiters before evaluating limits.
+4. A successful decision atomically commits the continuation counter, one
    `goal_continuation` system update, `system.update.pending` and
    `goal.continuation` events, one `agent_run.created` usage fact, the observed
    revision, session state/sequence, and another workflow-wake outbox revision.
@@ -135,23 +136,21 @@ The locked decision applies these rules:
    continuation.
    A pending human/API prompt and an authoritative Steer instruction also win
    even if they race materialization.
-3. Otherwise progress since the previous continuation is scored: a continuation
-   turn that produced no non-goal execution tool call and no committed
-   `goal.progress` fact increments a
-   no-progress streak (a user/scheduled turn in between resets the streak and
-   the budget — human re-engagement re-arms the loop). A semantic rewrite or
-   proposal alone never resets the streak.
-4. Guards: `noProgressStreak >= OPENGENI_GOAL_NO_PROGRESS_LIMIT` (default 3)
-   auto-pauses the goal with a visible `goal.paused` event
-   (`reason: "no_progress"`). Goals are NOT capped by continuation count by
-   default — runs legitimately span days, so length is governed by progress
-   and budget guards, never by count. If a deployment sets
+3. Budget/admission policy can pause the goal visibly with reason `limits`.
+   OpenGeni does not infer progress or blockage from tool/event shape; the
+   model explicitly completes or pauses the goal under the continuation
+   instructions, and a user can control it directly.
+4. Goals are NOT capped by continuation count by default — runs legitimately
+   span days. If a deployment sets
    `OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS` it becomes a hard ceiling
    (`min(goal.maxAutoContinuations, setting)`, pause reason
    `"max_auto_continuations"`); a per-goal `maxAutoContinuations` applies on
    its own even without the deployment setting.
-5. Otherwise one deterministic goal-continuation internal update is recorded,
-   referencing the goal text and success criteria, the session's tool surface
+5. Otherwise one deterministic goal-continuation internal update is recorded.
+   At claim, its exact prompt becomes one canonical user-role model-memory item
+   with the frozen goal snapshot; it is not duplicated into the generic
+   internal-update envelope. Any unrelated machine updates coalesced with it
+   are attached as ordinary message context. The turn uses the session's tool surface
    plus the first-party `opengeni` MCP server (so the goal tools are always
    reachable), and the session's stored conversation — the agent keeps its full
    context. It may start one internal-update inference only after queued human
@@ -253,8 +252,8 @@ re-establishes its objective each time.
 
 The goal tools are session-scoped first-party MCP tools. Agent `goal_update`
 requires an explicit `changeKind`, non-empty `rationale`, and
-`expectedObjectiveRevision`; execution progress uses the separate
-`goal_progress` tool. The worker signs the
+`expectedObjectiveRevision`; optional execution-progress audit facts use the
+separate `goal_progress` tool but do not gate continuation. The worker signs the
 session id into the delegated access token it uses for first-party MCP calls
 (HMAC, worker-asserted — not agent-controlled), and the API registers
 `goal_set`/`goal_update`/`goal_progress`/`goal_complete`/`goal_pause` only for grants carrying
@@ -278,5 +277,4 @@ arguments is rejected as `IDEMPOTENCY_KEY_REUSED`.
 
 | Variable                               | Default            | Meaning                                                                                                                                                                                                                                                                             |
 | -------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS` | _(unset — no cap)_ | Optional hard ceiling on synthesized continuation turns per goal arming. Unset by default: goals are bounded by the progress and budget guards, not by count, so a run can legitimately span days. When set, it is a ceiling that a per-goal `maxAutoContinuations` can only lower. |
-| `OPENGENI_GOAL_NO_PROGRESS_LIMIT`      | `3`                | Consecutive zero-progress continuations tolerated before auto-pause.                                                                                                                                                                                                                |
+| `OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS` | _(unset — no cap)_ | Optional hard ceiling on synthesized continuation turns per goal arming. Unset by default, so a run can legitimately span days. When set, it is a ceiling that a per-goal `maxAutoContinuations` can only lower. |

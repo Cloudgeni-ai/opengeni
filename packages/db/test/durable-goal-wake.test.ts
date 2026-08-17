@@ -6,6 +6,7 @@ import {
 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
+  addSessionSystemUpdate,
   armCodexCapacityWait,
   appendSessionEventsForTurnAttempt,
   applySessionTurnSettlement,
@@ -196,7 +197,6 @@ function materialize(ctx: GoalFixture) {
     sessionId: ctx.session.id,
     workflowId: `session-${ctx.session.id}`,
     defaultMaxAutoContinuations: null,
-    noProgressLimit: 3,
     budgetBlocked: null,
     policy: {
       model: "scripted-model",
@@ -1297,6 +1297,18 @@ describe("durable active-goal wake", () => {
     const ctx = await runningGoalFixture();
     await settleIdle(ctx);
     expect((await materialize(ctx)).action).toBe("continue");
+    const [pendingContinuation] = await shared.admin<
+      Array<{ summary: string; payload: { prompt?: string } }>
+    >`
+      select summary, payload from session_system_updates
+      where workspace_id = ${ctx.grant.workspaceId!}
+        and session_id = ${ctx.session.id}
+        and kind = 'goal_continuation'
+        and state = 'pending'`;
+    expect(pendingContinuation).toMatchObject({
+      summary: "Continue active session goal",
+      payload: { prompt: "continue Finish the durable wake proof (1)" },
+    });
 
     const attemptId = crypto.randomUUID();
     const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
@@ -1321,8 +1333,14 @@ describe("durable active-goal wake", () => {
         and session_id = ${ctx.session.id}
         and turn_id = ${claimed.turn.id}
       order by position`;
-    expect(JSON.stringify(continuationHistory[0]?.item)).toContain(SESSION_GOAL_CONTEXT_LABEL);
-    expect(JSON.stringify(continuationHistory[0]?.item)).toContain("[OpenGeni internal updates]");
+    expect(continuationHistory[0]?.item).toMatchObject({ type: "message", role: "user" });
+    const continuationModelInput = JSON.stringify(continuationHistory[0]?.item);
+    expect(continuationModelInput).toContain(SESSION_GOAL_CONTEXT_LABEL);
+    expect(continuationModelInput).toContain("continue Finish the durable wake proof (1)");
+    expect(continuationModelInput).not.toContain("[OpenGeni internal updates]");
+    expect(
+      continuationModelInput.match(/continue Finish the durable wake proof \(1\)/g) ?? [],
+    ).toHaveLength(1);
     expect(
       (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
         ?.continuation,
@@ -1410,6 +1428,52 @@ describe("durable active-goal wake", () => {
       (await getSessionGoalWithContinuation(client.db, goal.grant.workspaceId!, goal.session.id))
         ?.continuation,
     ).toMatchObject({ state: "running", reason: "goal_turn_running" });
+  });
+
+  test("keeps coalesced machine context inside the canonical user-role continuation", async () => {
+    const ctx = await runningGoalFixture();
+    await settleIdle(ctx);
+    expect((await materialize(ctx)).action).toBe("continue");
+    const contextUpdate = await addSessionSystemUpdate(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `goal-context-${crypto.randomUUID()}`,
+      summary: "New execution evidence",
+      payload: {
+        type: "agent_message",
+        text: "New execution evidence",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    if (!contextUpdate.added) throw new Error("context update was not inserted");
+
+    const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    if (claimed.action !== "claimed") throw new Error("goal continuation was not claimed");
+    expect(claimed.turn.source).toBe("goal");
+
+    const [history] = await shared.admin<Array<{ item: Record<string, unknown> }>>`
+      select item from session_history_items
+      where workspace_id = ${ctx.grant.workspaceId!}
+        and session_id = ${ctx.session.id}
+        and turn_id = ${claimed.turn.id}`;
+    expect(history?.item).toMatchObject({ type: "message", role: "user" });
+    const input = JSON.stringify(history?.item);
+    expect(input).toContain("[Application context attached to this user message]");
+    expect(input).toContain("New execution evidence");
+    expect(input).toContain("continue Finish the durable wake proof (1)");
+    expect(input).not.toContain("goal_continuation");
   });
 
   test("recursive Pause suppresses synthesis and Resume re-arms the same pending revision", async () => {
@@ -1665,10 +1729,18 @@ describe("durable active-goal wake", () => {
     });
   }
 
-  test("a racing human Send stays the next inference and consumes no separate goal turn", async () => {
+  test("a human Send supersedes a materialized continuation before claim", async () => {
     const ctx = await runningGoalFixture();
     await settleIdle(ctx);
-    const send = withWorkspaceSubjectRls(
+    expect((await materialize(ctx)).action).toBe("continue");
+    const [pending] = await shared.admin<Array<{ id: string }>>`
+      select id from session_system_updates
+      where workspace_id = ${ctx.grant.workspaceId!}
+        and session_id = ${ctx.session.id}
+        and kind = 'goal_continuation'
+        and state = 'pending'`;
+    if (!pending) throw new Error("materialized continuation missing");
+    const submitted = await withWorkspaceSubjectRls(
       client.db,
       ctx.grant.workspaceId!,
       ctx.grant.subjectId,
@@ -1689,7 +1761,6 @@ describe("durable active-goal wake", () => {
           }),
         ),
     );
-    await Promise.all([send, materialize(ctx)]);
     const nextAttemptId = crypto.randomUUID();
     const next = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
       sessionId: ctx.session.id,
@@ -1702,14 +1773,130 @@ describe("durable active-goal wake", () => {
     expect(next.action).toBe("claimed");
     if (next.action !== "claimed") return;
     expect(next.turn.source).toBe("user");
+    expect(next.turn.id).toBe(submitted.turn.id);
     const [goalTurns] = await shared.admin`
       select count(*)::int as count from session_turns
       where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}
         and source = 'goal'`;
     expect(Number(goalTurns!.count)).toBe(0);
+    const [superseded] = await shared.admin<
+      Array<{ state: string; delivered_turn_id: string | null }>
+    >`
+      select state, delivered_turn_id
+      from session_system_updates
+      where id = ${pending.id}`;
+    expect(superseded).toEqual({ state: "superseded", delivered_turn_id: null });
+    const [cancelled] = await shared.admin<
+      Array<{ turn_id: string | null; turn_attempt_id: string | null }>
+    >`
+      select turn_id, turn_attempt_id
+      from session_events
+      where workspace_id = ${ctx.grant.workspaceId!}
+        and session_id = ${ctx.session.id}
+        and type = 'system.update.cancelled'
+        and payload ->> 'reason' = 'superseded_by_authoritative_input'
+      order by sequence desc
+      limit 1`;
+    expect(cancelled).toEqual({ turn_id: next.turn.id, turn_attempt_id: nextAttemptId });
+    expect(await counts(ctx)).toMatchObject({ autoContinuations: 0 });
+    expect(
+      await listSessionSystemUpdatesForTurn(
+        client.db,
+        ctx.grant.workspaceId!,
+        ctx.session.id,
+        next.turn.id,
+      ),
+    ).toEqual([]);
   });
 
-  test("a racing Steer remains the causal system direction while coalescing the goal update", async () => {
+  test("a realtime-delegated human turn supersedes only the pending continuation", async () => {
+    const ctx = await runningGoalFixture();
+    await settleIdle(ctx);
+    expect((await materialize(ctx)).action).toBe("continue");
+    const [pendingGoal] = await shared.admin<Array<{ id: string }>>`
+      select id from session_system_updates
+      where workspace_id = ${ctx.grant.workspaceId!}
+        and session_id = ${ctx.session.id}
+        and kind = 'goal_continuation'
+        and state = 'pending'`;
+    if (!pendingGoal) throw new Error("materialized continuation missing");
+    const other = await addSessionSystemUpdate(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `realtime-context-${crypto.randomUUID()}`,
+      summary: "Already projected to realtime",
+      payload: {
+        type: "agent_message",
+        text: "Already projected to realtime",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    if (!other.added) throw new Error("context update was not inserted");
+    const submitted = await withWorkspaceSubjectRls(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            accountId: ctx.grant.accountId,
+            workspaceId: ctx.grant.workspaceId!,
+            sessionId: ctx.session.id,
+            subjectId: ctx.grant.subjectId,
+            actor: { type: "human", subjectId: ctx.grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "provider-delegated human direction",
+            resources: [],
+            reasoningEffortFallback: "low",
+            source: "user",
+          }),
+        ),
+    );
+    await shared.admin`
+      update session_turns
+      set metadata = jsonb_build_object(
+        'realtimeDelegation', jsonb_build_object(
+          'realtimeId', ${crypto.randomUUID()}::text,
+          'connectionEpoch', 1,
+          'delegationItemId', ${crypto.randomUUID()}::text,
+          'ledgerEntryId', ${crypto.randomUUID()}::text
+        )
+      )
+      where id = ${submitted.turn.id}`;
+
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claimed).toMatchObject({ action: "claimed", turn: { id: submitted.turn.id } });
+    const updates = await shared.admin<Array<{ id: string; state: string }>>`
+      select id, state from session_system_updates
+      where id in (${pendingGoal.id}, ${other.update.id})
+      order by id`;
+    expect(updates.find((update) => update.id === pendingGoal.id)?.state).toBe("superseded");
+    expect(updates.find((update) => update.id === other.update.id)?.state).toBe("pending");
+    expect(await counts(ctx)).toMatchObject({ autoContinuations: 0 });
+    expect(
+      await listSessionSystemUpdatesForTurn(
+        client.db,
+        ctx.grant.workspaceId!,
+        ctx.session.id,
+        submitted.turn.id,
+      ),
+    ).toEqual([]);
+  });
+
+  test("a racing Steer supersedes the materialized continuation", async () => {
     const ctx = await runningGoalFixture();
     await settleIdle(ctx);
     expect((await materialize(ctx)).action).toBe("continue");
@@ -1752,12 +1939,15 @@ describe("durable active-goal wake", () => {
       ctx.session.id,
       claimed.turn.id,
     );
-    expect(delivered.map((update) => update.kind)).toEqual([
-      "goal_continuation",
-      "agent_steer_instruction",
-    ]);
+    expect(delivered.map((update) => update.kind)).toEqual(["agent_steer_instruction"]);
+    const [superseded] = await shared.admin<Array<{ state: string }>>`
+      select state from session_system_updates
+      where workspace_id = ${ctx.grant.workspaceId!}
+        and session_id = ${ctx.session.id}
+        and kind = 'goal_continuation'`;
+    expect(superseded?.state).toBe("superseded");
     expect(await counts(ctx)).toMatchObject({
-      autoContinuations: 1,
+      autoContinuations: 0,
       updates: 1,
       usage: 1,
     });

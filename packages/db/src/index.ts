@@ -199,6 +199,7 @@ import {
   RigProviderImage as RigProviderImageContract,
   SessionGoal as SessionGoalContract,
   SessionSystemUpdatePayload,
+  renderSessionSystemUpdateBatch,
   sessionSystemUpdateBatchHistoryItem,
   HostEventExport as HostEventExportContract,
   HostEventExportBatch as HostEventExportBatchContract,
@@ -47869,8 +47870,8 @@ export async function rejectSessionGoalRevisionWithEvent(
 /**
  * Low-level semantic goal revision. The established lifecycle version still
  * advances so stale continuation updates are cancelled, while the migration
- * trigger advances the separate objective revision. A semantic rewrite is not
- * execution progress and therefore never resets the no-progress streak.
+ * trigger advances the separate objective revision. A semantic rewrite does
+ * not synthesize or consume another continuation.
  */
 export async function updateSessionGoal(
   db: Database,
@@ -48593,7 +48594,7 @@ export async function setSessionGoalStatus(
               autoContinuations: 0,
               noProgressStreak: 0,
               // A re-armed goal starts a fresh continuation epoch; stale pointers to
-              // a pre-pause continuation turn must not feed the progress detector.
+              // a pre-pause continuation turn must not affect later lineage.
               lastContinuationTurnId: null,
               versionAtLastContinuation: null,
               continuationWakeRevision: existing.continuationWakeRevision + 1,
@@ -48760,7 +48761,7 @@ export type GoalContinuationDecision =
   | { decision: "queue" }
   | {
       decision: "paused";
-      reason: "no_progress" | "max_auto_continuations" | "limits";
+      reason: "max_auto_continuations" | "limits";
       goal: SessionGoal;
     }
   | {
@@ -48820,9 +48821,8 @@ async function latestFinishedTurnHasFailureCodeTx(
  * Core continuation decision, taken in one transaction with the goal row
  * locked. Queued work always wins; any non-terminal turn (queued, running, or
  * requires_action awaiting a human approval) blocks auto-continuation. The
- * no-progress and max-continuation guards mutate counters here only, so a
- * replaying workflow re-reads recorded activity results and never recomputes
- * them.
+ * optional max-continuation guard mutates its counter here only, so a replaying
+ * workflow re-reads recorded activity results and never recomputes it.
  */
 export async function evaluateGoalContinuation(
   db: Database,
@@ -48830,9 +48830,8 @@ export async function evaluateGoalContinuation(
     workspaceId: string;
     sessionId: string;
     // Optional: when absent (the default posture) goals are uncapped and length
-    // is governed by the no-progress and budget guards only.
+    // is governed by explicit completion/pause and budget guards.
     defaultMaxAutoContinuations?: number | null;
-    noProgressLimit: number;
     // Caller-computed billing/limits block reason. Applied inside the locked
     // decision (before the counter bump) so a budget pause never consumes
     // continuation budget.
@@ -48933,11 +48932,9 @@ export async function evaluateGoalContinuation(
           return { decision: "none" } as const;
         }
         let autoContinuations = row.autoContinuations;
-        let noProgressStreak = row.noProgressStreak;
-        // P3: a 429-failover continuation (the last continuation turn carried the `rotated`
-        // marker) is a multi-account rotate, not goal progress OR a goal stall — it must not
-        // burn the auto-continuation budget while walking accounts. Freezes the increment below,
-        // mirroring the budget-pause precedent that a limits pause never consumes budget.
+        // A 429-failover continuation (the last continuation turn carried the `rotated`
+        // marker) is a multi-account rotate, not another unit of goal work. It must not burn
+        // the auto-continuation budget while walking accounts, matching the budget-pause rule.
         let rotatedFailover = false;
         if (row.lastContinuationTurnId) {
           const lastFinished = latestFinished;
@@ -48945,7 +48942,6 @@ export async function evaluateGoalContinuation(
             // A user/scheduled turn ran since the last continuation: human
             // re-engagement re-arms the auto-continuation budget.
             autoContinuations = 0;
-            noProgressStreak = 0;
           } else if (lastFinished) {
             const [{ rotatedFailures } = { rotatedFailures: 0 }] = await tx
               .select({
@@ -48961,82 +48957,10 @@ export async function evaluateGoalContinuation(
                 ),
               );
             rotatedFailover = Number(rotatedFailures) > 0;
-            const [{ executionToolCalls } = { executionToolCalls: 0 }] = await tx
-              .select({
-                executionToolCalls: sql<number>`count(*)::int`,
-              })
-              .from(schema.sessionEvents)
-              .where(
-                and(
-                  eq(schema.sessionEvents.workspaceId, input.workspaceId),
-                  eq(schema.sessionEvents.turnId, row.lastContinuationTurnId),
-                  eq(schema.sessionEvents.type, "agent.toolCall.created"),
-                  // Goal administration is not execution progress. A semantic
-                  // rewrite/proposal must never reset the detector merely by
-                  // calling its own control tool; goal_progress is counted
-                  // only from its committed, attempt-fenced event below.
-                  sql`coalesce(${schema.sessionEvents.payload} ->> 'name', '')
-                    !~ '(^|__)goal_(set|update|progress)$'`,
-                ),
-              );
-            const [{ progressEvents } = { progressEvents: 0 }] = await tx
-              .select({ progressEvents: sql<number>`count(*)::int` })
-              .from(schema.sessionEvents)
-              .where(
-                and(
-                  eq(schema.sessionEvents.workspaceId, input.workspaceId),
-                  eq(schema.sessionEvents.turnId, row.lastContinuationTurnId),
-                  eq(schema.sessionEvents.type, "goal.progress"),
-                ),
-              );
-            if (Number(executionToolCalls) > 0 || Number(progressEvents) > 0) {
-              noProgressStreak = 0;
-            } else {
-              // A turn that died on retryable provider backpressure says nothing
-              // about whether the goal can progress; freezing the streak keeps a
-              // sustained rate-limit window from masquerading as a stuck goal.
-              // The auto-continuation cap remains the backstop for a real outage.
-              const [{ backpressureFailures } = { backpressureFailures: 0 }] = await tx
-                .select({
-                  backpressureFailures: sql<number>`count(*)::int`,
-                })
-                .from(schema.sessionEvents)
-                .where(
-                  and(
-                    eq(schema.sessionEvents.workspaceId, input.workspaceId),
-                    eq(schema.sessionEvents.turnId, row.lastContinuationTurnId),
-                    eq(schema.sessionEvents.type, "turn.failed"),
-                    sql`${schema.sessionEvents.payload} ->> 'recovery' = 'goal_continuation'`,
-                  ),
-                );
-              if (Number(backpressureFailures) === 0) {
-                noProgressStreak = noProgressStreak + 1;
-              }
-            }
           }
         }
-        if (noProgressStreak >= input.noProgressLimit) {
-          const [paused] = await tx
-            .update(schema.sessionGoals)
-            .set({
-              status: "paused",
-              pausedReason: "no_progress",
-              autoContinuations,
-              noProgressStreak,
-              version: row.version + 1,
-              updatedAt: new Date(),
-            })
-            .where(eq(schema.sessionGoals.id, row.id))
-            .returning();
-          return {
-            decision: "paused",
-            reason: "no_progress",
-            goal: mapSessionGoal(paused!),
-          } as const;
-        }
-        // No configured default means uncapped: goal length is bounded by the
-        // no-progress and budget guards above, never by count. When a default is
-        // configured it is a hard ceiling; per-goal overrides can only lower it.
+        // No configured default means uncapped. When a default is configured it
+        // is a hard ceiling; per-goal overrides can only lower it.
         const capCandidates = [row.maxAutoContinuations, input.defaultMaxAutoContinuations].filter(
           (value): value is number => typeof value === "number",
         );
@@ -49048,7 +48972,7 @@ export async function evaluateGoalContinuation(
               status: "paused",
               pausedReason: "max_auto_continuations",
               autoContinuations,
-              noProgressStreak,
+              noProgressStreak: 0,
               version: row.version + 1,
               updatedAt: new Date(),
             })
@@ -49070,7 +48994,7 @@ export async function evaluateGoalContinuation(
               pausedReason: "limits",
               rationale: input.budgetBlocked,
               autoContinuations,
-              noProgressStreak,
+              noProgressStreak: 0,
               version: row.version + 1,
               updatedAt: new Date(),
             })
@@ -49089,7 +49013,7 @@ export async function evaluateGoalContinuation(
           .update(schema.sessionGoals)
           .set({
             autoContinuations: nextAutoContinuations,
-            noProgressStreak,
+            noProgressStreak: 0,
             versionAtLastContinuation: row.version,
             updatedAt: new Date(),
           })
@@ -49120,7 +49044,7 @@ export type MaterializeGoalContinuationResult =
  * Consume one durable goal-wake revision into one continuation obligation.
  *
  * This is deliberately one outer PostgreSQL transaction. The existing locked
- * evaluator runs as a nested savepoint, so its no-progress/counter mutation is
+ * evaluator runs as a nested savepoint, so its counter mutation is
  * rolled back if prompt construction, update/event insertion, metering, or the
  * workflow-wake outbox write fails. Retrying after a lost COMMIT response sees
  * the same stable goal revision and the already-pending update; it never spends
@@ -49134,7 +49058,6 @@ export async function materializeGoalContinuation(
     sessionId: string;
     workflowId: string;
     defaultMaxAutoContinuations?: number | null;
-    noProgressLimit: number;
     budgetBlocked?: string | null;
     policy: {
       model: string;
@@ -49377,7 +49300,6 @@ export async function materializeGoalContinuation(
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           defaultMaxAutoContinuations: input.defaultMaxAutoContinuations ?? null,
-          noProgressLimit: input.noProgressLimit,
           budgetBlocked: input.budgetBlocked ?? null,
         });
         if (decision.decision === "none" || decision.decision === "queue") {
@@ -49488,7 +49410,7 @@ export async function materializeGoalContinuation(
           throw new Error(`Internal update payload exceeds ${MAX_INTERNAL_UPDATE_BYTES} bytes`);
         }
         if (Buffer.byteLength(prompt) > MAX_INTERNAL_UPDATE_BYTES) {
-          throw new Error(`Internal update summary exceeds ${MAX_INTERNAL_UPDATE_BYTES} bytes`);
+          throw new Error(`Goal continuation prompt exceeds ${MAX_INTERNAL_UPDATE_BYTES} bytes`);
         }
         const [update] = await tx
           .insert(schema.sessionSystemUpdates)
@@ -49503,7 +49425,7 @@ export async function materializeGoalContinuation(
                   classification: "info",
                   sourceId: decision.goal.id,
                   dedupeKey: `goal-continuation:${decision.goal.id}:wake:${goalWakeRevision}`,
-                  summary: prompt,
+                  summary: "Continue active session goal",
                   payload,
                   lineage: {
                     goalId: decision.goal.id,
@@ -50705,6 +50627,10 @@ export async function claimSessionWorkForAttempt(
           occurredAt: Date,
           triggerEventId?: string,
           expectedXaiAuthority?: FrozenXaiExecutionAuthority,
+          options: {
+            supersedeGoalContinuations?: boolean;
+            deliverUpdates?: boolean;
+          } = {},
         ): Promise<{
           count: number;
           lastSequence: number;
@@ -50715,42 +50641,87 @@ export async function claimSessionWorkForAttempt(
           events: SessionEventInsertWithPayload[];
           event: SessionEventInsertWithPayload | null;
         }> => {
-          const [agentSteer] = await tx
-            .select()
-            .from(schema.sessionSystemUpdates)
-            .where(
-              and(
-                eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
-                eq(schema.sessionSystemUpdates.sessionId, sessionId),
-                eq(schema.sessionSystemUpdates.state, "pending"),
-                eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
-              ),
-            )
-            .orderBy(
-              desc(schema.sessionSystemUpdates.createdAt),
-              desc(schema.sessionSystemUpdates.id),
-            )
-            .limit(1)
-            .for("update");
-          const ordinary = await tx
-            .select()
-            .from(schema.sessionSystemUpdates)
-            .where(
-              and(
-                eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
-                eq(schema.sessionSystemUpdates.sessionId, sessionId),
-                eq(schema.sessionSystemUpdates.state, "pending"),
-                ne(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
-              ),
-            )
-            .orderBy(
-              asc(schema.sessionSystemUpdates.createdAt),
-              asc(schema.sessionSystemUpdates.id),
-            )
-            .limit(MAX_INTERNAL_UPDATE_BATCH_MEMBERS + (agentSteer ? 0 : 1))
-            .for("update");
+          const [agentSteer] =
+            options.deliverUpdates === false
+              ? []
+              : await tx
+                  .select()
+                  .from(schema.sessionSystemUpdates)
+                  .where(
+                    and(
+                      eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+                      eq(schema.sessionSystemUpdates.sessionId, sessionId),
+                      eq(schema.sessionSystemUpdates.state, "pending"),
+                      eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
+                    ),
+                  )
+                  .orderBy(
+                    desc(schema.sessionSystemUpdates.createdAt),
+                    desc(schema.sessionSystemUpdates.id),
+                  )
+                  .limit(1)
+                  .for("update");
+          const supersededGoalUpdates =
+            agentSteer || options.supersedeGoalContinuations
+              ? await tx
+                  .update(schema.sessionSystemUpdates)
+                  .set({ state: "superseded" })
+                  .where(
+                    and(
+                      eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+                      eq(schema.sessionSystemUpdates.sessionId, sessionId),
+                      eq(schema.sessionSystemUpdates.kind, "goal_continuation"),
+                      eq(schema.sessionSystemUpdates.state, "pending"),
+                    ),
+                  )
+                  .returning({
+                    id: schema.sessionSystemUpdates.id,
+                    payload: schema.sessionSystemUpdates.payload,
+                  })
+              : [];
+          for (const update of supersededGoalUpdates) {
+            const payload = SessionSystemUpdatePayload.parse(update.payload);
+            if (payload.type !== "goal_continuation") continue;
+            await tx
+              .update(schema.sessionGoals)
+              .set({
+                autoContinuations: 0,
+                noProgressStreak: 0,
+                updatedAt: occurredAt,
+              })
+              .where(
+                and(
+                  eq(schema.sessionGoals.workspaceId, workspaceId),
+                  eq(schema.sessionGoals.sessionId, sessionId),
+                  eq(schema.sessionGoals.id, payload.goalId),
+                  eq(schema.sessionGoals.version, payload.goalVersion),
+                  eq(schema.sessionGoals.status, "active"),
+                ),
+              );
+          }
+          const supersededGoalUpdateIds = supersededGoalUpdates.map((update) => update.id);
+          const ordinary =
+            options.deliverUpdates === false
+              ? []
+              : await tx
+                  .select()
+                  .from(schema.sessionSystemUpdates)
+                  .where(
+                    and(
+                      eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+                      eq(schema.sessionSystemUpdates.sessionId, sessionId),
+                      eq(schema.sessionSystemUpdates.state, "pending"),
+                      ne(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
+                    ),
+                  )
+                  .orderBy(
+                    asc(schema.sessionSystemUpdates.createdAt),
+                    asc(schema.sessionSystemUpdates.id),
+                  )
+                  .limit(MAX_INTERNAL_UPDATE_BATCH_MEMBERS + (agentSteer ? 0 : 1))
+                  .for("update");
           const updates = agentSteer ? [agentSteer, ...ordinary] : ordinary;
-          if (updates.length === 0) {
+          if (updates.length === 0 && supersededGoalUpdateIds.length === 0) {
             return {
               count: 0,
               lastSequence: nextSequence - 1,
@@ -50855,6 +50826,25 @@ export async function claimSessionWorkForAttempt(
           if (deliverable.length === 0) {
             let sequence = nextSequence - 1;
             const cancellationEvents: SessionEventInsertWithPayload[] = [];
+            if (supersededGoalUpdateIds.length > 0) {
+              cancellationEvents.push({
+                accountId,
+                workspaceId,
+                sessionId,
+                turnId: options.supersedeGoalContinuations ? turnId : null,
+                turnGeneration: options.supersedeGoalContinuations ? turnGeneration : null,
+                turnAttemptId: options.supersedeGoalContinuations ? input.attemptId : null,
+                turnAssociation: options.supersedeGoalContinuations ? "current" : null,
+                sequence: ++sequence,
+                type: "system.update.cancelled" as const,
+                payload: {
+                  updateIds: supersededGoalUpdateIds,
+                  count: supersededGoalUpdateIds.length,
+                  reason: "superseded_by_authoritative_input",
+                },
+                occurredAt,
+              });
+            }
             if (cancelledUpdateIds.length > 0) {
               cancellationEvents.push({
                 accountId,
@@ -50956,6 +50946,25 @@ export async function claimSessionWorkForAttempt(
           const eventId = triggerEventId ?? crypto.randomUUID();
           let sequence = nextSequence - 1;
           const events: SessionEventInsertWithPayload[] = [];
+          if (supersededGoalUpdateIds.length > 0) {
+            events.push({
+              accountId,
+              workspaceId,
+              sessionId,
+              turnId,
+              turnGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
+              sequence: ++sequence,
+              type: "system.update.cancelled",
+              payload: {
+                updateIds: supersededGoalUpdateIds,
+                count: supersededGoalUpdateIds.length,
+                reason: "superseded_by_authoritative_input",
+              },
+              occurredAt,
+            });
+          }
           if (cancelledUpdateIds.length > 0) {
             events.push({
               accountId,
@@ -51032,6 +51041,7 @@ export async function claimSessionWorkForAttempt(
           accountId: string,
           turnId: string,
           goalSnapshot?: SessionGoalSnapshot,
+          historyItemOverride?: Record<string, unknown>,
         ): Promise<void> => {
           if (!delivered.historyItemId || !delivered.historyItem) {
             if (delivered.count !== 0) {
@@ -51059,12 +51069,14 @@ export async function claimSessionWorkForAttempt(
                 sessionId,
                 turnId,
                 position: Number(position),
-                item: goalSnapshot
-                  ? sessionSystemUpdateBatchHistoryItem(
-                      delivered.updates.map((update) => mapSessionSystemUpdate(update)),
-                      goalSnapshot,
-                    )
-                  : delivered.historyItem,
+                item:
+                  historyItemOverride ??
+                  (goalSnapshot
+                    ? sessionSystemUpdateBatchHistoryItem(
+                        delivered.updates.map((update) => mapSessionSystemUpdate(update)),
+                        goalSnapshot,
+                      )
+                    : delivered.historyItem),
               },
               "item",
               "itemCodecVersion",
@@ -52294,11 +52306,32 @@ export async function claimSessionWorkForAttempt(
             )
             .returning();
           if (!internalTurn) throw new Error("Failed to create internal update inference");
+          const frozenGoalSnapshot = SessionGoalSnapshot.parse(internalTurn.goalSnapshot);
+          let goalContinuationHistoryItem: Record<string, unknown> | undefined;
+          if (routingGoalUpdate) {
+            const continuation = SessionSystemUpdatePayload.parse(routingGoalUpdate.payload);
+            if (continuation.type !== "goal_continuation") {
+              throw new Error("Goal-owned turn has no goal continuation payload");
+            }
+            const contextualUpdates = delivered.updates
+              .filter((update) => update.payload.type !== "goal_continuation")
+              .map((update) => mapSessionSystemUpdate(update));
+            goalContinuationHistoryItem = durableUserHistoryItem(
+              continuation.prompt,
+              [],
+              [],
+              contextualUpdates.length > 0
+                ? renderSessionSystemUpdateBatch(contextualUpdates)
+                : undefined,
+              frozenGoalSnapshot,
+            );
+          }
           await persistDeliveredUpdateBatch(
             delivered,
             session.accountId,
             internalTurn.id,
-            SessionGoalSnapshot.parse(internalTurn.goalSnapshot),
+            frozenGoalSnapshot,
+            goalContinuationHistoryItem,
           );
           await registerAttempt(internalTurn);
           if (!delivered.event) throw new Error("Delivered update batch has no durable event");
@@ -52407,18 +52440,20 @@ export async function claimSessionWorkForAttempt(
         const providerDelegatedTurn = isSessionRealtimeDelegationTurnMetadata(row.metadata);
         // Cross-session updates are already projected through
         // delegation.context.append. Keep them pending instead of consuming
-        // them as hidden context on the provider-delegated ordinary turn.
+        // them as hidden context on the provider-delegated ordinary turn. The
+        // exact human delegation still supersedes a pending goal continuation,
+        // just like any other accepted human turn.
         const delivered = providerDelegatedTurn
-          ? {
-              count: 0,
-              lastSequence: session.lastSequence,
-              triggerEventId: null,
-              historyItemId: null,
-              historyItem: null,
-              updates: [] as Array<typeof schema.sessionSystemUpdates.$inferSelect>,
-              events: [] as SessionEventInsertWithPayload[],
-              event: null,
-            }
+          ? await deliverPendingUpdates(
+              session.accountId,
+              row.id,
+              row.executionGeneration,
+              session.lastSequence + 1,
+              now,
+              undefined,
+              undefined,
+              { supersedeGoalContinuations: true, deliverUpdates: false },
+            )
           : await deliverPendingUpdates(
               session.accountId,
               row.id,
@@ -52438,6 +52473,7 @@ export async function claimSessionWorkForAttempt(
                       (row.initiatorKind === "subject" ? row.initiatorSubjectId : null))
                     : null,
               },
+              { supersedeGoalContinuations: true },
             );
         await persistDeliveredUpdateBatch(delivered, session.accountId, row.id);
         if (delivered.events.length > 0) {

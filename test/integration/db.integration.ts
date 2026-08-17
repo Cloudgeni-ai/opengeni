@@ -872,7 +872,7 @@ describe("DB integration", () => {
     expect(replaced.goal.version).toBeGreaterThan(completed.goal.version);
   });
 
-  test("evaluateGoalContinuation honors queue, approvals, progress, and caps", async () => {
+  test("evaluateGoalContinuation honors queue, approvals, and caps", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createSession(dbClient.db, {
       accountId: grant.accountId,
@@ -883,7 +883,7 @@ describe("DB integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const guards = { defaultMaxAutoContinuations: 5, noProgressLimit: 2 };
+    const guards = { defaultMaxAutoContinuations: 5 };
 
     // No goal yet.
     expect(
@@ -962,37 +962,14 @@ describe("DB integration", () => {
       cap: 5,
     });
 
-    // A continuation turn that finishes without tool calls or a goal revision
-    // increments the no-progress streak; noProgressLimit 2 pauses the goal.
-    for (let round = 1; round <= 2; round += 1) {
-      const continuationTurn = await claimGoalContinuationExecution(dbClient.db, grant, session.id);
-      await settleRegisteredExecution(dbClient.db, grant, continuationTurn, "completed");
-      const next = await evaluateGoalContinuation(dbClient.db, {
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        ...guards,
-      });
-      if (round < 2) {
-        expect(next.decision).toBe("continue");
-      } else {
-        expect(next).toMatchObject({
-          decision: "paused",
-          reason: "no_progress",
-        });
-      }
-    }
-    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.pausedReason).toBe(
-      "no_progress",
-    );
-
-    // Replacing the goal re-arms it; the per-goal cap is enforced.
+    // A user-authoritative redirect re-arms it; the per-goal cap is enforced.
     await upsertSessionGoal(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
       text: "one more push",
       maxAutoContinuations: 1,
-      createdBy: "agent",
+      createdBy: "api",
     });
     const capped = await evaluateGoalContinuation(dbClient.db, {
       workspaceId: grant.workspaceId,
@@ -1004,11 +981,8 @@ describe("DB integration", () => {
       autoContinuation: 1,
       cap: 1,
     });
-    // Mark progress in that continuation so the cap (not no-progress) triggers.
     const capTurn = await claimGoalContinuationExecution(dbClient.db, grant, session.id);
-    await settleRegisteredExecution(dbClient.db, grant, capTurn, "completed", [
-      { type: "agent.toolCall.created", payload: {} },
-    ]);
+    await settleRegisteredExecution(dbClient.db, grant, capTurn, "completed");
     const atCap = await evaluateGoalContinuation(dbClient.db, {
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -1020,7 +994,7 @@ describe("DB integration", () => {
     });
   });
 
-  test("provider backpressure turns freeze the no-progress streak", async () => {
+  test("continuations are not paused by inferred progress", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createSession(dbClient.db, {
       accountId: grant.accountId,
@@ -1031,7 +1005,7 @@ describe("DB integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const guards = { defaultMaxAutoContinuations: 10, noProgressLimit: 2 };
+    const guards = { defaultMaxAutoContinuations: null };
     await createSessionGoal(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -1046,22 +1020,12 @@ describe("DB integration", () => {
     });
     expect(first).toMatchObject({ decision: "continue", autoContinuation: 1 });
 
-    // Three consecutive rate-limited continuations (no tool calls) exceed
-    // noProgressLimit 2, but backpressure failures must not advance the
-    // streak: the goal keeps continuing instead of pausing as no_progress.
+    // Tool-call shape and provider outcome are not reliable progress signals.
+    // Repeated continuations without either remain active until the model,
+    // user, budget, or an explicit configured cap ends the goal.
     for (let round = 1; round <= 3; round += 1) {
       const turn = await claimGoalContinuationExecution(dbClient.db, grant, session.id);
-      await settleRegisteredExecution(dbClient.db, grant, turn, "failed", [
-        {
-          type: "turn.failed",
-          payload: {
-            code: "provider_rate_limited",
-            retryable: true,
-            recovery: "goal_continuation",
-            runStateSaved: false,
-          },
-        },
-      ]);
+      await settleRegisteredExecution(dbClient.db, grant, turn, "completed");
       const next = await evaluateGoalContinuation(dbClient.db, {
         workspaceId: grant.workspaceId,
         sessionId: session.id,
@@ -1072,25 +1036,10 @@ describe("DB integration", () => {
         autoContinuation: 1 + round,
       });
     }
-
-    // Ordinary empty continuations still count: two of them pause the goal.
-    for (let round = 1; round <= 2; round += 1) {
-      const turn = await claimGoalContinuationExecution(dbClient.db, grant, session.id);
-      await settleRegisteredExecution(dbClient.db, grant, turn, "completed");
-      const next = await evaluateGoalContinuation(dbClient.db, {
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        ...guards,
-      });
-      if (round < 2) {
-        expect(next.decision).toBe("continue");
-      } else {
-        expect(next).toMatchObject({
-          decision: "paused",
-          reason: "no_progress",
-        });
-      }
-    }
+    expect(await getSessionGoal(dbClient.db, grant.workspaceId, session.id)).toMatchObject({
+      status: "active",
+      noProgressStreak: 0,
+    });
   });
 
   test("goals are uncapped by count when no default cap is configured", async () => {
@@ -1104,8 +1053,9 @@ describe("DB integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    // No deployment default: length is governed by progress/budget guards only.
-    const guards = { defaultMaxAutoContinuations: null, noProgressLimit: 2 };
+    // No deployment default: length is governed by explicit lifecycle and
+    // budget guards only.
+    const guards = { defaultMaxAutoContinuations: null };
     await createSessionGoal(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -1113,8 +1063,8 @@ describe("DB integration", () => {
       text: "keep going for days",
       createdBy: "api",
     });
-    // Run well past the old default cap of 20; with progress every round the
-    // loop must keep continuing, with a null cap throughout.
+    // Run well past the old default cap of 20; the loop keeps continuing with
+    // a null cap throughout.
     let decision = await evaluateGoalContinuation(dbClient.db, {
       workspaceId: grant.workspaceId,
       sessionId: session.id,

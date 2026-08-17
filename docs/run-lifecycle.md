@@ -327,14 +327,14 @@ persists through recovery without accidentally becoming a permanent session
 default, while later policy or preference changes affect only later accepted
 turns.
 
-**Runs have no length limits, by design.** What the SDK calls "turns" are model
+**Runs have no default length limits, by design.** What the SDK calls "turns" are model
 calls; `OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN` exists but defaults to
 effectively unbounded. There is no continuation cap and the agent activity's
 Temporal timeout is measured in days, not hours. OpenGeni is built for agents
-that legitimately run for a very long time, so **run length is bounded by
-symptoms, never by counts**: the no-progress detector and budget exhaustion are
-the real guards. Do not reintroduce count- or duration-based caps on legitimate
-run length; if a run is misbehaving, detect the pathology, do not cap the clock.
+that legitimately run for a very long time. Budget/admission policy and
+explicit goal completion or pause bound execution; OpenGeni does not infer
+"no progress" from tool/event shape. Do not reintroduce default count- or
+duration-based caps on legitimate run length; fix the pathology instead.
 
 Recoverable conditions preserve context instead of failing the session, so a
 long run survives them. Retryable provider connectivity, 5xx failures, and typed
@@ -1094,8 +1094,8 @@ original attempt for audit. Receipt/result, goal version, session-sequenced
 event, and mutation commit atomically. A lost response can therefore be
 reconciled from a recovered attempt without double-applying the update, and an
 old replay returns its stored result rather than overwriting newer goal truth.
-Full detail in `docs/goals.md`; goals are bounded by progress/budget guards, not
-counts.
+Full detail in `docs/goals.md`; goals are bounded by budget/admission policy and
+explicit lifecycle control, not an inferred progress score.
 
 ## Memory — three stores, three jobs
 
