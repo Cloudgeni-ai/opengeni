@@ -3,7 +3,7 @@ import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { RunRawModelStreamEvent, Usage } from "@openai/agents-core";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
-import { TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import { TurnExecutionPolicyV1, type ResourceRef } from "@opengeni/contracts";
 import { createObservability } from "@opengeni/observability";
 import * as opengeniDb from "@opengeni/db";
 import {
@@ -95,6 +95,7 @@ import {
   providerRecoveryResult,
   requiresSignedFileResourceDownloads,
   resolveActiveSandboxBackend,
+  runtimeResourcesForTurn,
   runMandatoryHistoryPersistenceStep,
   sandboxEstablishPolicyDecision,
   sandboxFileMaterializationOutcome,
@@ -3738,6 +3739,30 @@ describe("Codex credential lease deadline fence", () => {
 });
 
 describe("sandbox file materialization note", () => {
+  test("keeps repositories durable but admits only current-turn file attachments", () => {
+    const repository: ResourceRef = {
+      kind: "repository",
+      provider: "github",
+      repositoryId: "123",
+      uri: "https://github.com/cloudgeni-ai/opengeni",
+      ref: "main",
+      mountPath: "opengeni",
+    };
+    const historicalFile: ResourceRef = {
+      kind: "file",
+      fileId: "00000000-0000-4000-8000-000000000071",
+    };
+    const currentFile: ResourceRef = {
+      kind: "file",
+      fileId: "00000000-0000-4000-8000-000000000072",
+    };
+
+    expect(runtimeResourcesForTurn([repository, historicalFile], [currentFile])).toEqual([
+      repository,
+      currentFile,
+    ]);
+  });
+
   test("uses the active backend when deciding whether attachments need signed delivery", () => {
     const modalHome = testSettings({
       sandboxBackend: "modal",

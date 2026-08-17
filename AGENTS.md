@@ -247,6 +247,8 @@ Do not expect model provider credentials to automatically appear in the sandbox 
 
 The API and sandbox file-resource object-storage boundary supports `s3-compatible`, `azure-blob`, `aws-s3`, and `gcs`. Azure Blob-backed Docker/local sandboxes use native Azure Blob manifest mounts. Modal Azure Blob, AWS S3, and GCS file resources use short-lived signed download materialization.
 
+User-message file attachments enter the runtime manifest and eager materialization path only on the exact turn that attached them. Historical attachments remain compact durable `fileId` receipts and must not cause later metadata/object reads, filesystem validation, remounting, or download; retrieve old bytes explicitly through the existing Files MCP plus shell. Historical generated-image receipts likewise never trigger eager sandbox restoration.
+
 ## Verification
 
 Unit tests and typechecks do not require Temporal, NATS, Postgres, a sandbox backend, or live model credentials:

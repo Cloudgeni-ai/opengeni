@@ -148,7 +148,15 @@ export type ModelAttachmentContent = {
 
 export type ModelHistoryAttachmentProjector = (
   items: Array<Record<string, unknown>>,
+  options?: ModelHistoryAttachmentProjectionOptions,
 ) => Promise<Array<Record<string, unknown>>>;
+
+export type ModelHistoryAttachmentProjectionOptions = {
+  /** Exact files attached to the triggering message. Historical refs remain receipts. */
+  inlineFileIds?: ReadonlySet<string>;
+  /** Metadata already authorized while resolving that triggering message. */
+  inlineFiles?: readonly FileAsset[];
+};
 
 export type ModelAttachmentInputPolicy = {
   supportsImageInput: boolean;
@@ -292,17 +300,26 @@ function attachmentRefsFromItem(item: Record<string, unknown>): FileResourceRef[
   return refs;
 }
 
-function attachmentUnavailableText(ref: FileResourceRef, file: FileAsset | undefined): string {
-  if (!file) {
+function attachmentReceiptText(
+  ref: FileResourceRef,
+  file: FileAsset | undefined,
+  resolvedForCurrentTurn: boolean,
+): string {
+  if (!file && resolvedForCurrentTurn) {
     return `[Attachment unavailable or no longer authorized: ${ref.fileId}.]`;
   }
-  const filename = file?.safeFilename ?? ref.fileId;
-  const mediaType = file?.contentType ?? "unknown type";
-  const path = file ? sandboxFilePath(ref, file) : `/workspace/${resourceMountPath(ref)}`;
+  if (!file) {
+    return (
+      `[Earlier attachment: fileId=${ref.fileId}; mountDirectory=/workspace/${resourceMountPath(ref)}. ` +
+      `Use the existing file there, or call files__files_get_download_url with this fileId and ` +
+      `download it with the shell.]`
+    );
+  }
+  const path = sandboxFilePath(ref, file);
   return (
-    `[Attachment not included directly because the selected model does not accept this input ` +
-    `or it exceeded the safe inline limit: ${filename} (${mediaType}). ` +
-    `It remains available to tools in the sandbox at ${path}.]`
+    `[Attachment: ${file.safeFilename}; fileId=${file.id}; type=${file.contentType}; ` +
+    `bytes=${file.sizeBytes}; path=${path}. If the local path is absent, call ` +
+    `files__files_get_download_url with this fileId and download it with the shell.]`
   );
 }
 
@@ -322,7 +339,11 @@ export function createModelHistoryAttachmentProjector(
   const contentById = new Map<string, ModelAttachmentContent>();
   const attemptedContentIds = new Set<string>();
 
-  return async (items) => {
+  return async (items, options = {}) => {
+    const inlineFileIds = options.inlineFileIds ?? new Set<string>();
+    for (const file of options.inlineFiles ?? []) {
+      if (inlineFileIds.has(file.id)) fileById.set(file.id, file);
+    }
     const refsByIndex = new Map<number, FileResourceRef[]>();
     const orderedFileIds: string[] = [];
     const seenFileIds = new Set<string>();
@@ -338,7 +359,9 @@ export function createModelHistoryAttachmentProjector(
     }
     if (refsByIndex.size === 0) return items;
 
-    const unknownIds = orderedFileIds.filter((id) => !fileById.has(id) && !missingFileIds.has(id));
+    const unknownIds = orderedFileIds.filter(
+      (id) => inlineFileIds.has(id) && !fileById.has(id) && !missingFileIds.has(id),
+    );
     if (unknownIds.length > 0) {
       const files = await getFilesForSubject(db, {
         ...authority,
@@ -351,13 +374,16 @@ export function createModelHistoryAttachmentProjector(
     }
 
     if (readFileBytes) {
-      // Prefer the newest attachments if the aggregate request safety limit is
-      // reached; an old image becomes a marker instead of hiding the new prompt.
+      // Only the triggering message's attachments cross the provider byte
+      // boundary. Historical messages retain compact durable receipts and can
+      // recover bytes explicitly through the existing Files MCP + shell path.
       const readable = [...orderedFileIds]
         .reverse()
         .map((id) => fileById.get(id))
         .filter((file): file is FileAsset => {
-          if (!file || attemptedContentIds.has(file.id)) return false;
+          if (!file || attemptedContentIds.has(file.id) || !inlineFileIds.has(file.id)) {
+            return false;
+          }
           const descriptor = modelAttachmentDescriptor(file.contentType);
           return Boolean(
             descriptor &&
@@ -376,21 +402,25 @@ export function createModelHistoryAttachmentProjector(
       const existingContent = Array.isArray(original.content)
         ? [...original.content]
         : [{ type: "input_text", text: String(original.content ?? "") }];
-      const attachmentParts = refs.map((ref) => {
+      const attachmentParts = refs.flatMap((ref) => {
         const attachment = contentById.get(ref.fileId);
+        const receipt = {
+          type: "input_text",
+          text: attachmentReceiptText(ref, fileById.get(ref.fileId), inlineFileIds.has(ref.fileId)),
+        };
         if (!attachment) {
-          return {
-            type: "input_text",
-            text: attachmentUnavailableText(ref, fileById.get(ref.fileId)),
-          };
+          return [receipt];
         }
-        return attachment.kind === "image"
-          ? { type: "input_image", image: attachment.dataUrl }
-          : {
-              type: "input_file",
-              file: attachment.dataUrl,
-              filename: attachment.filename,
-            };
+        return [
+          receipt,
+          attachment.kind === "image"
+            ? { type: "input_image", image: attachment.dataUrl }
+            : {
+                type: "input_file",
+                file: attachment.dataUrl,
+                filename: attachment.filename,
+              },
+        ];
       });
       const clone: Record<string, unknown> = {
         ...original,
@@ -494,7 +524,7 @@ export async function turnInput(
       trigger,
       undefined,
       joinInternalContext(internalContext, attachmentContext),
-      fileAttachments.map((attachment) => attachment.resource),
+      fileAttachments,
       options.providerApi,
       options.projectCanonicalHistory,
       options.materializeModelHistory,
@@ -600,7 +630,7 @@ async function messageInput(
   trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>,
   text: string | undefined,
   internalContext: string | undefined,
-  currentAttachmentRefs: FileResourceRef[] = [],
+  currentAttachments: UserMessageFileAttachment[] = [],
   providerApi: HistoryProviderApi = "responses",
   projectCanonicalHistory?: ModelHistoryAttachmentProjector,
   materializeModelHistory?: ModelHistoryAttachmentProjector,
@@ -608,6 +638,7 @@ async function messageInput(
   loadActiveHistory: typeof getActiveSessionHistoryItemsPaged = getActiveSessionHistoryItemsPaged,
   preparationOptions: Pick<TurnInputOptions, "onPreparationPhase"> = {},
 ): Promise<PreparedTurnInput> {
+  const currentAttachmentRefs = currentAttachments.map((attachment) => attachment.resource);
   const [stored, envelope] = await Promise.all([
     measureHistoryPreparationPhase(preparationOptions, "durable_history_load", async () =>
       loadActiveHistory(db, trigger.workspaceId, trigger.sessionId),
@@ -646,7 +677,12 @@ async function messageInput(
     preparationOptions,
     "model_attachment_projection",
     async () =>
-      projectModelHistory ? await projectModelHistory(materializedHistory) : materializedHistory,
+      projectModelHistory
+        ? await projectModelHistory(materializedHistory, {
+            inlineFileIds: new Set(currentAttachmentRefs.map((ref) => ref.fileId)),
+            inlineFiles: currentAttachments.map((attachment) => attachment.file),
+          })
+        : materializedHistory,
   );
   const prepared = await measureHistoryPreparationPhase(
     preparationOptions,

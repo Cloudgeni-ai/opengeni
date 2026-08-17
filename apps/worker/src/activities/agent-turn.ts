@@ -827,6 +827,16 @@ export function filterUnmaterializedSandboxFileDownloads(
   return downloads.filter((download) => !materializedFileIds.has(download.fileId));
 }
 
+export function runtimeResourcesForTurn(
+  sessionResources: readonly ResourceRef[],
+  currentTurnResources: readonly ResourceRef[],
+): ResourceRef[] {
+  return mergeResourceRefs(
+    sessionResources.filter((resource) => resource.kind !== "file"),
+    [...currentTurnResources],
+  );
+}
+
 export function sandboxFileMaterializationOutcome(
   failures: readonly SandboxFileDownloadFailure[],
 ): "completed" | "failed" {
@@ -4197,6 +4207,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let modelCanReceiveRetainedSessionImages = true;
     const generatedImageReceiptsByProviderItemId = new Map<string, GeneratedImageReceipt>();
     const generatedImageReceiptsByArtifactId = new Map<string, GeneratedImageReceipt>();
+    const generatedImageArtifactIdsCreatedThisTurn = new Set<string>();
     const videoGenerationAcceptancesByCallId = new Map<
       string,
       { operationId: string; requestDigest: string }
@@ -4265,7 +4276,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     const warnGeneratedImageMaterializationDeferred = (error: unknown): void => {
       // Generation and permanent retention are already durable. Never turn a
       // transient sandbox copy failure into a replay of paid provider work;
-      // an unmaterialized resource is retried on the next real sandbox.
+      // the receipt remains explicitly retrievable through workspace Files.
       observability.warn("Generated image sandbox materialization deferred", {
         errorClass: error instanceof Error ? error.name : "UnknownError",
         errorCode: "generated_image_materialization_deferred",
@@ -4279,18 +4290,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     ): Promise<boolean> => {
       try {
         const { file, download } = await prepareGeneratedImageDownload(receipt);
-        const cacheable = sandbox.established.backendId !== "selfhosted";
         if (generatedImageMaterializationCache?.instanceId !== sandbox.established.instanceId) {
-          const fileIds =
-            cacheable && sandboxGroupId
-              ? await getMaterializedSandboxFileResources(db, {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sandboxGroupId,
-                  expectedEpoch: sandbox.leaseEpoch,
-                  instanceId: sandbox.established.instanceId,
-                })
-              : new Set<string>();
+          const fileIds = sandboxGroupId
+            ? await getMaterializedSandboxFileResources(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sandboxGroupId,
+                expectedEpoch: sandbox.leaseEpoch,
+                instanceId: sandbox.established.instanceId,
+              })
+            : new Set<string>();
           generatedImageMaterializationCache = {
             instanceId: sandbox.established.instanceId,
             fileIds,
@@ -4307,7 +4316,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ),
         );
         generatedImageMaterializationCache.fileIds.add(file.id);
-        if (cacheable && sandboxGroupId) {
+        if (sandboxGroupId) {
           await markSandboxFileResourcesMaterialized(db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -4388,6 +4397,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         retained.receipt.artifact.artifactId,
         retained.receipt,
       );
+      generatedImageArtifactIdsCreatedThisTurn.add(retained.receipt.artifact.artifactId);
       await materializeGeneratedImage(retained.receipt);
       return retained.receipt;
     };
@@ -6054,8 +6064,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
           : undefined,
       );
-      const modelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
-        projectModelInputForCapabilities(await attachmentProjector(items), modelInputPolicy);
+      const modelHistoryProjector = async (
+        items: Array<Record<string, unknown>>,
+        projectionOptions?: Parameters<typeof attachmentProjector>[1],
+      ) =>
+        projectModelInputForCapabilities(
+          await attachmentProjector(items, projectionOptions),
+          modelInputPolicy,
+        );
       const generatedImageHistoryProjector = async (
         items: Array<Record<string, unknown>>,
       ): Promise<Array<Record<string, unknown>>> => {
@@ -6759,6 +6775,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
 
       const turnResources = mergeResourceRefs(session.resources, turn.resources);
+      // Repositories remain durable workspace inputs. File attachments do not:
+      // only files attached to this exact turn enter the sandbox manifest and
+      // eager materialization path. Historical file ids remain in canonical
+      // history/session metadata and are recoverable through the Files MCP.
+      const runtimeResources = runtimeResourcesForTurn(session.resources, turn.resources);
       // Attach the first-party MCP server to EVERY turn, regardless of how/when
       // the session was created (API, scheduled task, or a pre-existing session
       // whose stored tools predate this). The server registration is then
@@ -6977,7 +6998,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           requiresSignedFileResourceDownloads(
             runSettings,
             activeSandboxBackend ?? groupBoxBackend,
-          ) && turnResources.some((resource) => resource.kind === "file"),
+          ) && turn.resources.some((resource) => resource.kind === "file"),
       });
       const establishPolicy = establishDecision.policy;
       recordTurnSandboxEstablishPolicy(observability, {
@@ -7042,7 +7063,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         input.accountId,
         input.workspaceId,
         fileAuthoritySubjectId,
-        turnResources,
+        turn.resources,
       );
       const authorizeGitHubTokenMint: GitHubTokenMintAuthorization = async (selection) => {
         await assertGitHubTokenMintSelectionAuthorized(
@@ -7875,7 +7896,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               input.accountId,
               input.workspaceId,
               fileAuthoritySubjectId,
-              turnResources,
+              turn.resources,
               activeSandboxBackend ?? groupBoxBackend,
             ),
             cancellationSignal,
@@ -7891,7 +7912,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             backend: activeSandboxBackend ?? groupBoxBackend,
             outcome: fileResolutionOutcome,
             durationSeconds: (performance.now() - fileResolutionStartedAt) / 1_000,
-            count: turnResources.length,
+            count: turn.resources.length,
           });
         }
       })();
@@ -8405,6 +8426,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
                 });
                 generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
+                generatedImageArtifactIdsCreatedThisTurn.add(receipt.artifact.artifactId);
                 await materializeGeneratedImage(receipt);
                 return receipt;
               },
@@ -8439,6 +8461,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
                 });
                 generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
+                generatedImageArtifactIdsCreatedThisTurn.add(receipt.artifact.artifactId);
                 await materializeGeneratedImage(receipt);
                 return receipt;
               },
@@ -8474,6 +8497,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
               });
               generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
+              generatedImageArtifactIdsCreatedThisTurn.add(receipt.artifact.artifactId);
               await materializeGeneratedImage(receipt);
               return receipt;
             },
@@ -8701,7 +8725,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const agentConstructionStartedAt = performance.now();
         let agentConstructionOutcome: "completed" | "failed" = "completed";
         try {
-          return runtime.buildAgent(modelRunSettings, turnResources, {
+          return runtime.buildAgent(modelRunSettings, runtimeResources, {
             reasoningEffort: turn.reasoningEffort,
             latencyMode: turnExecutionPolicy.latencyMode,
             ...(serviceTier ? { serviceTier } : {}),
@@ -9089,10 +9113,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 provisioned,
               );
               // `get()` does not release the first routed sandbox operation
-              // until this hook returns. Materialize durable generated images
-              // here so that operation can use their advertised paths without
-              // racing a best-effort background copy.
-              for (const receipt of generatedImageReceiptsByArtifactId.values()) {
+              // until this hook returns. Only images created during this exact
+              // turn can require deferred delivery here; historical images stay
+              // as durable receipts and are restored explicitly when requested.
+              for (const artifactId of generatedImageArtifactIdsCreatedThisTurn) {
+                const receipt = generatedImageReceiptsByArtifactId.get(artifactId);
+                if (!receipt) continue;
                 await materializeGeneratedImageInSandbox(
                   receipt,
                   provisioned,
@@ -9556,30 +9582,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (resolvedSandbox && setupBoxSession && fileResourceDownloads.length > 0) {
         const fileMaterializationStartedAt = performance.now();
         let fileMaterializationOutcome: "completed" | "failed" = "completed";
-        const cacheMaterialization = resolvedSandbox.established.backendId !== "selfhosted";
-        let fileMaterializationCache: "hit" | "miss" | "disabled" = cacheMaterialization
-          ? "miss"
-          : "disabled";
+        let fileMaterializationCache: "hit" | "miss" = "miss";
         try {
           const boxInstanceId = resolvedSandbox.established.instanceId;
-          // Managed boxes are immutable platform state, so their durable lease can
-          // memoize successful downloads. A connected machine is user-owned: files
-          // can be changed or removed between turns, so verify/materialize every
-          // attached file each turn instead of trusting the managed-box cache.
-          const alreadyMaterialized = cacheMaterialization
-            ? await getMaterializedSandboxFileResources(db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sandboxGroupId: session.sandboxGroupId,
-                expectedEpoch: resolvedSandbox.leaseEpoch,
-                instanceId: boxInstanceId,
-              })
-            : new Set<string>();
+          // A successful transfer is durable for this exact filesystem instance.
+          // Do not turn later model startup into an integrity scan. If an owner or
+          // agent removes the file, it can be restored explicitly through the
+          // existing Files MCP using the durable file id carried in model history.
+          const alreadyMaterialized = await getMaterializedSandboxFileResources(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sandboxGroupId: session.sandboxGroupId,
+            expectedEpoch: resolvedSandbox.leaseEpoch,
+            instanceId: boxInstanceId,
+          });
           const downloadsToMaterialize = filterUnmaterializedSandboxFileDownloads(
             fileResourceDownloads,
             alreadyMaterialized,
           );
-          if (cacheMaterialization && downloadsToMaterialize.length === 0) {
+          if (downloadsToMaterialize.length === 0) {
             fileMaterializationCache = "hit";
           }
           const runAs = sandboxRunAs(runSettings);
@@ -9612,7 +9633,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             const succeededFileIds = downloadsToMaterialize
               .map((download) => download.fileId)
               .filter((fileId) => !failedFileIds.has(fileId));
-            if (cacheMaterialization && succeededFileIds.length > 0) {
+            if (succeededFileIds.length > 0) {
               await markSandboxFileResourcesMaterialized(db, {
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
