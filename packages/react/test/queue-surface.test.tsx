@@ -9,6 +9,7 @@ import {
 import { queueComposerCheckoutEnabled } from "../src/components/queue-surface-implementation";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
+import type { SessionQueueSnapshot } from "@opengeni/sdk";
 import { fakeTurn } from "./fake-client";
 import { flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 import {
@@ -139,6 +140,14 @@ async function click(target: Element | null): Promise<void> {
   expect(target).not.toBeNull();
   await act(async () => {
     (target as HTMLElement).click();
+    await Promise.resolve();
+  });
+}
+
+async function press(target: Element | null, key: string): Promise<void> {
+  expect(target).not.toBeNull();
+  await act(async () => {
+    target?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
     await Promise.resolve();
   });
 }
@@ -365,6 +374,100 @@ describe("QueueSurface", () => {
       "delete:11111111-1111-4111-8111-111111111111",
     ]);
     expect(mounted.container.textContent).toContain("Queued prompt deleted.");
+  });
+
+  test("shows a visible truthful status for every pending queue mutation", async () => {
+    for (const [kind, label] of [
+      ["move", "Saving new position…"],
+      ["edit", "Moving to composer…"],
+      ["steer", "Changing direction…"],
+      ["delete", "Deleting…"],
+    ] as const) {
+      mounted = await renderLoadedQueueSurface(
+        <QueueSurface
+          queue={queue({
+            pendingByTurn: { "11111111-1111-4111-8111-111111111111": kind },
+            mutationFor: (turnId) =>
+              turnId === "11111111-1111-4111-8111-111111111111" ? kind : null,
+            mutating: true,
+          })}
+          composer={composer()}
+        />,
+      );
+      await click(mounted.container.querySelector('button[aria-expanded="false"]'));
+      const status = mounted.container.querySelector(`[data-testid="queue-mutation-${kind}"]`);
+      expect(status?.textContent).toContain(label);
+      expect(status?.getAttribute("role")).toBe("status");
+
+      const current = mounted;
+      mounted = null;
+      await current.unmount();
+      document.body.replaceChildren();
+    }
+  });
+
+  test("keeps a complete projected order visible while a slow move is uncommitted", async () => {
+    let releaseMove!: () => void;
+    const moveGate = new Promise<void>((resolve) => {
+      releaseMove = resolve;
+    });
+    const first = fakeTurn({
+      id: "11111111-1111-4111-8111-111111111111",
+      prompt: "first queued prompt",
+    });
+    const second = fakeTurn({
+      id: "22222222-2222-4222-8222-222222222222",
+      prompt: "second queued prompt",
+    });
+
+    function Harness() {
+      const [items, setItems] = useState([first, second]);
+      const [pendingTurnId, setPendingTurnId] = useState<string | null>(null);
+      const state = queue({
+        snapshot: { version: 1 } as SessionQueueSnapshot,
+        queue: items,
+        pendingByTurn: pendingTurnId ? { [pendingTurnId]: "move" } : {},
+        mutationFor: (turnId) => (turnId === pendingTurnId ? "move" : null),
+        mutating: pendingTurnId !== null,
+        moveTurn: async (turnId) => {
+          setPendingTurnId(turnId);
+          await moveGate;
+          setItems([second, first]);
+          setPendingTurnId(null);
+          return true;
+        },
+      });
+      return <QueueSurface queue={state} composer={composer()} />;
+    }
+
+    mounted = await renderLoadedQueueSurface(<Harness />);
+    await click(mounted.container.querySelector('button[aria-expanded="false"]'));
+    const firstHandle = mounted.container.querySelectorAll("[data-queue-handle]")[0] ?? null;
+    await press(firstHandle, " ");
+    await press(firstHandle, "ArrowDown");
+    await press(firstHandle, " ");
+
+    expect(
+      [...mounted.container.querySelectorAll("[data-queue-turn-id]")].map((row) =>
+        row.getAttribute("data-queue-turn-id"),
+      ),
+    ).toEqual([second.id, first.id]);
+    expect(
+      mounted.container.querySelector('[data-testid="queue-mutation-move"]')?.textContent,
+    ).toContain("Saving new position…");
+    expect(mounted.container.textContent).toContain("Saving queued prompt at position 2.");
+
+    await act(async () => {
+      releaseMove();
+      await moveGate;
+    });
+    await flush();
+    expect(
+      [...mounted.container.querySelectorAll("[data-queue-turn-id]")].map((row) =>
+        row.getAttribute("data-queue-turn-id"),
+      ),
+    ).toEqual([second.id, first.id]);
+    expect(mounted.container.querySelector('[data-testid="queue-mutation-move"]')).toBeNull();
   });
 
   test("renders canonical pending machine inputs in the sole queue surface", async () => {

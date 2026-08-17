@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { Profiler } from "react";
 import {
   Markdown,
   MessageTimeline,
@@ -77,6 +78,87 @@ function elementRect(top: number, bottom: number, left = 0, right = 240): DOMRec
 }
 
 describe("UserMessageBody", () => {
+  test("uses the element observer instead of one redundant window listener per message", async () => {
+    let observerCount = 0;
+    globalThis.ResizeObserver = class {
+      constructor() {
+        observerCount += 1;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    const originalAddEventListener = window.addEventListener;
+    const resizeListeners: EventListenerOrEventListenerObject[] = [];
+    window.addEventListener = ((type: string, listener: EventListenerOrEventListenerObject) => {
+      if (type === "resize") {
+        resizeListeners.push(listener);
+      }
+      return originalAddEventListener.call(window, type, listener);
+    }) as typeof window.addEventListener;
+
+    try {
+      const r = await renderComponent(
+        <>
+          <UserMessageBody messageId="observed-a" text="Observed prompt A">
+            <p>Observed prompt A</p>
+          </UserMessageBody>
+          <UserMessageBody messageId="observed-b" text="Observed prompt B">
+            <p>Observed prompt B</p>
+          </UserMessageBody>
+        </>,
+      );
+      expect(resizeListeners).toHaveLength(0);
+      expect(observerCount).toBe(1);
+      await r.unmount();
+    } finally {
+      window.addEventListener = originalAddEventListener;
+    }
+  });
+
+  test("measures a short source with tall rendered content without a second React commit", async () => {
+    const originalRect = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      if (this.hasAttribute("data-og-user-message-content")) return elementRect(0, 480);
+      if (this.hasAttribute("data-og-user-message-clip")) return elementRect(0, 224);
+      if (this.getAttribute("aria-hidden") === "true") return elementRect(0, 224);
+      return originalRect.call(this);
+    };
+    globalThis.ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    let commits = 0;
+
+    try {
+      const r = await renderComponent(
+        <Profiler
+          id="measured-user-message"
+          onRender={() => {
+            commits += 1;
+          }}
+        >
+          <UserMessageBody messageId="measured-on-mount" text="Short source">
+            <div>Tall rendered content</div>
+          </UserMessageBody>
+        </Profiler>,
+      );
+      expect(commits).toBe(1);
+      expect(
+        r.container
+          .querySelector("[data-og-user-message-body]")
+          ?.getAttribute("data-og-collapsible"),
+      ).toBe("true");
+      expect(
+        r.container.querySelector<HTMLButtonElement>("[data-og-user-message-disclosure]")?.hidden,
+      ).toBe(false);
+      await r.unmount();
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = originalRect;
+    }
+  });
+
   test("keeps the complete Markdown subtree mounted behind an accessible disclosure", async () => {
     const text = longMarkdown();
     const r = await renderComponent(
@@ -92,7 +174,9 @@ describe("UserMessageBody", () => {
     expect(button?.textContent).toBe("Show more");
     expect(button?.getAttribute("aria-expanded")).toBe("false");
     expect(button?.getAttribute("aria-controls")).toBe(clip?.id);
-    expect(r.container.querySelector("[data-og-user-message-fade]")).not.toBeNull();
+    expect(r.container.querySelector<HTMLElement>("[data-og-user-message-fade]")?.hidden).toBe(
+      false,
+    );
     expect(r.container.textContent).toContain("こんにちは · مرحبا · 👩🏽‍💻");
     expect(r.container.textContent).toContain("Final paragraph after the long URL.");
     expect(r.container.querySelector("pre code")?.textContent).toContain("console.log(unicode)");
@@ -100,7 +184,9 @@ describe("UserMessageBody", () => {
     await actRun(() => button?.click());
     expect(button?.textContent).toBe("Show less");
     expect(button?.getAttribute("aria-expanded")).toBe("true");
-    expect(r.container.querySelector("[data-og-user-message-fade]")).toBeNull();
+    expect(r.container.querySelector<HTMLElement>("[data-og-user-message-fade]")?.hidden).toBe(
+      true,
+    );
     expect(r.container.textContent).toContain("Final paragraph after the long URL.");
 
     await actRun(() => button?.click());
@@ -130,11 +216,15 @@ describe("UserMessageBody", () => {
     Object.defineProperty(threshold, "offsetHeight", { configurable: true, value: 224 });
 
     await actRun(() => callbacks.forEach((callback) => callback([], {} as ResizeObserver)));
-    expect(r.container.querySelector("[data-og-user-message-disclosure]")).not.toBeNull();
+    expect(
+      r.container.querySelector<HTMLButtonElement>("[data-og-user-message-disclosure]")?.hidden,
+    ).toBe(false);
 
     Object.defineProperty(content, "scrollHeight", { configurable: true, value: 180 });
     await actRun(() => callbacks.forEach((callback) => callback([], {} as ResizeObserver)));
-    expect(r.container.querySelector("[data-og-user-message-disclosure]")).toBeNull();
+    expect(
+      r.container.querySelector<HTMLButtonElement>("[data-og-user-message-disclosure]")?.hidden,
+    ).toBe(true);
     await r.unmount();
   });
 
@@ -278,8 +368,12 @@ describe("UserMessageBody", () => {
         <p>Ordinary prompt</p>
       </UserMessageBody>,
     );
-    expect(r.container.querySelector("[data-og-user-message-disclosure]")).toBeNull();
-    expect(r.container.textContent).toBe("Ordinary prompt");
+    expect(
+      r.container.querySelector<HTMLButtonElement>("[data-og-user-message-disclosure]")?.hidden,
+    ).toBe(true);
+    expect(r.container.querySelector("[data-og-user-message-content]")?.textContent).toBe(
+      "Ordinary prompt",
+    );
     await r.unmount();
   });
 });
