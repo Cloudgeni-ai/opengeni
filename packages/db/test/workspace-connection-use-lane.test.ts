@@ -5,7 +5,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
+import { testSettings } from "@opengeni/testing";
 import {
+  buildConnectionTokenResolver,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
@@ -14,6 +16,7 @@ import {
   type Database,
   type DbClient,
 } from "../src";
+import type { ConnectionBrokerDeps } from "../src/connection-token-resolver";
 
 const migrationUrl = new URL("../drizzle/0279_workspace_connection_use_lane.sql", import.meta.url);
 
@@ -234,6 +237,110 @@ describe("workspace connection use lane (migration 0279)", () => {
       where id = ${fixture.attemptId}`;
     const resolution = await resolveAcceptedConnectionUse(db, useInput(fixture, connection.id));
     expect(resolution).toEqual({ status: "denied", reason: "session_identity_changed" });
+  });
+
+  test("the standalone resolver never forwards an owner binding for a workspace ref", async () => {
+    // Interactive turns stamp the initiating human's subjectId on every
+    // credential request regardless of ref scope. The non-host resolver must
+    // not turn that into a personal owner binding, or the 0279 workspace lane
+    // denies the ambient shared row for every interactive turn.
+    const captured: Array<Record<string, unknown>> = [];
+    const never = () => {
+      throw new Error("must not be reached after a denied authorization");
+    };
+    const deps = {
+      loadCredential: never,
+      recordRefresh: never,
+      setStatus: never,
+      recordUsed: never,
+      refresh: never,
+      encrypt: never,
+      keyBytes: never,
+      now: () => new Date(),
+      authorizeAcceptedUse: async (_db: unknown, input: Record<string, unknown>) => {
+        captured.push(input);
+        return { status: "denied" as const, reason: "connection_status_inactive" as const };
+      },
+    } as unknown as ConnectionBrokerDeps;
+    const resolver = buildConnectionTokenResolver({} as Database, testSettings(), deps);
+    const result = await resolver({
+      workspaceId: "workspace-1",
+      subjectId: "user:human-initiator",
+      serverId: "linear",
+      destinationUrl: "https://mcp.linear.app/mcp",
+      connectionRef: {
+        providerDomain: "linear.app",
+        connectionId: crypto.randomUUID(),
+        kind: "oauth2",
+        subjectScope: "workspace",
+      },
+      connectionUseContext: {
+        accountId: crypto.randomUUID(),
+        workspaceId: "workspace-1",
+        sessionId: crypto.randomUUID(),
+        turnId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        executionGeneration: 1,
+        physicalRequestId: crypto.randomUUID(),
+        usePhase: "credential_resolution",
+      },
+    });
+    expect(result.status).toBe("auth_needed");
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toMatchObject({ subjectScope: "workspace" });
+    expect("ownerSubjectId" in captured[0]!).toBe(false);
+    // The subject lane keeps its owner binding.
+    await resolver({
+      workspaceId: "workspace-1",
+      subjectId: "user:human-initiator",
+      serverId: "linear",
+      destinationUrl: "https://mcp.linear.app/mcp",
+      connectionRef: {
+        providerDomain: "linear.app",
+        connectionId: crypto.randomUUID(),
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+      connectionUseContext: {
+        accountId: crypto.randomUUID(),
+        workspaceId: "workspace-1",
+        sessionId: crypto.randomUUID(),
+        turnId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        executionGeneration: 1,
+        physicalRequestId: crypto.randomUUID(),
+        usePhase: "credential_resolution",
+      },
+    });
+    expect(captured[1]).toMatchObject({
+      subjectScope: "subject",
+      ownerSubjectId: "user:human-initiator",
+    });
+  });
+
+  test("a frozen snapshot for the turn+server denies a workspace-scope request live", async () => {
+    if (!available) return;
+    const fixture = await claimedTurnFixture();
+    const connection = await insertWorkspaceConnection(fixture);
+    // Freeze an explicit-workspace snapshot for this exact turn + server. The
+    // snapshot lane runs first and honors only personal ('user') snapshots,
+    // so any frozen row for the pair refuses the ambient workspace borrow.
+    await admin`
+      insert into turn_connection_authority_snapshots (
+        account_id, workspace_id, session_id, turn_id, server_id, connection_id,
+        connection_generation, origin_workspace_id, provider_domain,
+        connection_kind, authority_scope, authority_source,
+        session_visibility, session_authority_epoch, canonical_snapshot,
+        snapshot_digest
+      )
+      select ${fixture.accountId}, ${fixture.workspaceId}, ${fixture.sessionId},
+        ${fixture.turnId}, 'linear', ${connection.id}, ${connection.generation},
+        ${fixture.workspaceId}, 'linear.app', 'oauth2', 'workspace',
+        'explicit_workspace', 'workspace_shared', 1, snapshot.value,
+        digest(convert_to(snapshot.value::text, 'UTF8'), 'sha256')
+      from (select '{"kind":"frozen-workspace"}'::jsonb as value) snapshot`;
+    const resolution = await resolveAcceptedConnectionUse(db, useInput(fixture, connection.id));
+    expect(resolution).toEqual({ status: "denied", reason: "connection_identity_changed" });
   });
 
   test("the snapshot lane keeps precedence over the workspace lane in the function source", async () => {
