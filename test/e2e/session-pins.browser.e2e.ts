@@ -973,6 +973,16 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(await composer.inputValue()).toBe("Unsent local draft that must not be overwritten");
       await chrome.getByRole("button", { name: "Keep current draft" }).click();
       expect(await queuedRows.count()).toBe(2);
+      // The confirmation above is intentionally exercised while the local
+      // draft may still be unsaved. Settle that accepted draft before clearing
+      // it so cleanup cannot race two opposite autosaves under a loaded runner.
+      await waitForComposerDraftText(
+        desktopPage,
+        apiBaseUrl,
+        workspaceId,
+        manager.id,
+        "Unsent local draft that must not be overwritten",
+      );
       await composer.fill("");
       await waitForComposerDraftText(desktopPage, apiBaseUrl, workspaceId, manager.id, "");
       await chrome.getByRole("button", { name: "Edit queued prompt 2" }).click();
