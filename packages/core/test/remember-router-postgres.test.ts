@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  activateWorkspaceInstructionPolicyRevision,
   activateWorkspaceLearningPolicyRevision,
+  createWorkspaceInstructionPolicyDraft,
   createDb,
   createSession,
   createWorkspaceLearningPolicyRevision,
@@ -415,5 +417,47 @@ describe("remember router (real PostgreSQL)", () => {
         request: { ...confirmRequest, operationId: crypto.randomUUID() },
       }),
     ).rejects.toThrow();
+  }, 180_000);
+
+  test("a user-directed rule binds to the workspace's current active policy head", async () => {
+    if (!shared || !client) return;
+    const f = await fixture("suggest");
+    // Most real workspaces already have an active global policy.
+    const existing = await createWorkspaceInstructionPolicyDraft(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      kind: "policy",
+      scope: "global",
+      roleKey: null,
+      content: "Existing human policy.",
+      provenanceSource: "human",
+      provenanceSourceId: null,
+      supersedesRevisionId: null,
+      createdBySubjectId: f.ownerSubjectId,
+    });
+    await activateWorkspaceInstructionPolicyRevision(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      revisionId: existing.id,
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      actorSubjectId: f.ownerSubjectId,
+      reason: "Seed an active head.",
+    });
+    const router = createRememberRouter({ db: client.db });
+    const rule = await router.remember({
+      attempt: f.attempt,
+      request: {
+        operationId: crypto.randomUUID(),
+        lane: "instruction_policy",
+        scope: "workspace",
+        content: "Never push directly to main.",
+        reason: "Hard rule stated by the user.",
+      },
+    });
+    expect(rule.status).toBe("confirmation_required");
+    if (rule.status !== "confirmation_required") return;
+    expect(rule.proposalId).not.toBeNull();
+    expect(rule.humanInput.questions[0]!.prompt).toContain("mandatory workspace rule");
   }, 180_000);
 });
