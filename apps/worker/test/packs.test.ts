@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import { CapabilityPack } from "@opengeni/contracts";
+import { mergeRigDefaultVariableSetEnvironment } from "@opengeni/core";
 import {
-  mergeRigDefaultVariableSetEnvironment,
   packInstallationUsesLegacyRuntime,
   settingsWithPackSandboxImage,
   settingsWithRigImage,

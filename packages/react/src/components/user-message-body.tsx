@@ -117,16 +117,11 @@ type SharedResizeObserverState = {
 type DisclosureMeasurementJob = {
   read: () => boolean;
   write: (collapsible: boolean) => void;
-  afterWrite: () => void;
-};
-
-type SharedDisclosureMeasurementState = {
-  jobs: Map<object, DisclosureMeasurementJob>;
-  queued: boolean;
 };
 
 const sharedResizeObservers = new WeakMap<Window, SharedResizeObserverState>();
-const sharedDisclosureMeasurements = new WeakMap<Window, SharedDisclosureMeasurementState>();
+const disclosureMeasurementJobs = new Map<object, DisclosureMeasurementJob>();
+let disclosureMeasurementQueued = false;
 
 /**
  * Coalesce a commit's disclosure reads before applying any presentation writes.
@@ -138,41 +133,20 @@ function scheduleDisclosureMeasurement(
   key: object,
   job: DisclosureMeasurementJob,
 ): () => void {
-  let state = sharedDisclosureMeasurements.get(view);
-  if (!state) {
-    state = { jobs: new Map(), queued: false };
-    sharedDisclosureMeasurements.set(view, state);
-  }
-  state.jobs.set(key, job);
-  if (!state.queued) {
-    state.queued = true;
+  disclosureMeasurementJobs.set(key, job);
+  if (!disclosureMeasurementQueued) {
+    disclosureMeasurementQueued = true;
     view.queueMicrotask(() => {
-      const current = sharedDisclosureMeasurements.get(view);
-      if (!current) {
-        return;
-      }
-      current.queued = false;
-      const pending = [...current.jobs.values()];
-      current.jobs.clear();
+      disclosureMeasurementQueued = false;
+      const pending = [...disclosureMeasurementJobs.values()];
+      disclosureMeasurementJobs.clear();
       const decisions = pending.map(({ read }) => read());
       for (let index = 0; index < pending.length; index += 1) {
         pending[index]!.write(decisions[index]!);
       }
-      for (const { afterWrite } of pending) {
-        afterWrite();
-      }
-      if (current.jobs.size === 0 && !current.queued) {
-        sharedDisclosureMeasurements.delete(view);
-      }
     });
   }
-  return () => {
-    const current = sharedDisclosureMeasurements.get(view);
-    current?.jobs.delete(key);
-    if (current && current.jobs.size === 0 && !current.queued) {
-      sharedDisclosureMeasurements.delete(view);
-    }
-  };
+  return () => disclosureMeasurementJobs.delete(key);
 }
 
 function observeSharedResize(element: Element, callback: () => void): (() => void) | null {
@@ -184,16 +158,13 @@ function observeSharedResize(element: Element, callback: () => void): (() => voi
   if (!state) {
     const callbacks = new Map<Element, () => void>();
     const observer = new ResizeObserver((entries) => {
-      const notified = new Set<() => void>();
       if (entries.length === 0) {
-        for (const registered of callbacks.values()) notified.add(registered);
+        for (const registered of new Set(callbacks.values())) registered();
       } else {
         for (const entry of entries) {
-          const registered = callbacks.get(entry.target);
-          if (registered) notified.add(registered);
+          callbacks.get(entry.target)?.();
         }
       }
-      for (const registered of notified) registered();
     });
     state = { callbacks, observer };
     sharedResizeObservers.set(view, state);
@@ -294,9 +265,7 @@ export function UserMessageBody({ messageId, text, children, className }: UserMe
   const syncDisclosurePresentation = useCallback((nextCollapsible: boolean) => {
     collapsibleRef.current = nextCollapsible;
     const nextCollapsed = nextCollapsible && !expandedRef.current;
-    const root = rootRef.current;
     const clip = clipRef.current;
-    if (root) root.dataset.ogCollapsible = nextCollapsible ? "true" : "false";
     clip?.classList.toggle("max-h-56", nextCollapsed);
     clip?.classList.toggle("overflow-hidden", nextCollapsed);
     clip?.classList.toggle("sm:max-h-72", nextCollapsed);
@@ -370,8 +339,10 @@ export function UserMessageBody({ messageId, text, children, className }: UserMe
     }
     return scheduleDisclosureMeasurement(view, measurementKeyRef.current, {
       read: readCollapsible,
-      write: syncDisclosurePresentation,
-      afterWrite: syncCollapsedInteractivity,
+      write: (nextCollapsible) => {
+        syncDisclosurePresentation(nextCollapsible);
+        syncCollapsedInteractivity();
+      },
     });
   }, [readCollapsible, syncCollapsedInteractivity, syncDisclosurePresentation]);
 
@@ -438,7 +409,6 @@ export function UserMessageBody({ messageId, text, children, className }: UserMe
       ref={rootRef}
       data-og-user-message-body=""
       data-og-message-id={messageId}
-      data-og-collapsible={collapsible ? "true" : "false"}
       data-og-expanded={expanded ? "true" : "false"}
       className={cn("relative min-w-0", className)}
     >

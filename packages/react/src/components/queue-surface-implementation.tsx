@@ -85,7 +85,6 @@ export function QueueSurface({
   const [announcement, setAnnouncement] = useState("");
   const [draggedTurnId, setDraggedTurnId] = useState<string | null>(null);
   const [pendingMove, setPendingMove] = useState<{
-    turnId: string;
     baseVersion: number | null;
     turnIds: string[];
   } | null>(null);
@@ -150,7 +149,6 @@ export function QueueSurface({
       const ordered = arrayMove(queue.queue, oldIndex, boundedIndex);
       const beforeTurnId = ordered[boundedIndex + 1]?.id ?? null;
       setPendingMove({
-        turnId,
         baseVersion: queue.snapshot?.version ?? null,
         turnIds: ordered.map((turn) => turn.id),
       });
@@ -164,7 +162,7 @@ export function QueueSurface({
         );
         if (moved) focusQueueTurn(surfaceRef.current, turnId);
       } finally {
-        setPendingMove((current) => (current?.turnId === turnId ? null : current));
+        setPendingMove(null);
       }
     },
     [pendingMove, queue, surfaceRef],
@@ -932,10 +930,7 @@ function ReadOnlyQueueRow({
   onDisclosureChange: (expanded: boolean) => void;
 }) {
   return (
-    <li
-      className="flex min-w-0 items-start gap-2 bg-surface px-3 py-2"
-      data-queue-turn-id={turn.id}
-    >
+    <li className="flex min-w-0 items-start gap-2 bg-surface px-3 py-2">
       <span className="mt-1 shrink-0 font-mono text-og-xs text-fg-subtle">{index + 1}</span>
       <div className="min-w-0 flex-1">
         <QueuePrompt
