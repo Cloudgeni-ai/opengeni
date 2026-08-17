@@ -115,12 +115,13 @@ async function fixture(mode: "off" | "suggest" | "automatic") {
 
 async function answeredRememberInput(
   f: Awaited<ReturnType<typeof fixture>>,
-  proposalId: string,
+  targetId: string,
   content: string,
   answer: string[] = ["save"],
+  prompt = "Save this as a workspace preference for everyone in this workspace?",
 ): Promise<string> {
   const id = crypto.randomUUID();
-  const questionId = `remember:${proposalId}`;
+  const questionId = `remember:${targetId}`;
   await shared!.admin`
     insert into session_human_input_requests (
       id, account_id, workspace_id, session_id, turn_id, turn_generation,
@@ -133,7 +134,7 @@ async function answeredRememberInput(
         {
           id: questionId,
           kind: "single_select",
-          prompt: "Save this as a workspace preference for everyone in this workspace?",
+          prompt,
           label: "Remember",
           helpText: content,
           options: [
@@ -190,7 +191,7 @@ describe("remember router (real PostgreSQL)", () => {
     expect(receipt.status).toBe("confirmation_required");
     if (receipt.status !== "confirmation_required") return;
     expect(receipt.humanInput.questions[0]).toMatchObject({
-      id: `remember:${receipt.proposalId}`,
+      id: `remember:${receipt.proposalId!}`,
       kind: "single_select",
       options: [
         { id: "save", label: "Save" },
@@ -205,24 +206,26 @@ describe("remember router (real PostgreSQL)", () => {
 
     const decisionReceiptId = receipt.learning!.receiptId;
     // A "don't save" answer cannot activate.
-    const skipped = await answeredRememberInput(f, receipt.proposalId, request.content, ["skip"]);
+    const skipped = await answeredRememberInput(f, receipt.proposalId!, request.content, ["skip"]);
     await expect(
       router.confirm({
         attempt: f.attempt,
         request: {
+          target: "proposal",
           operationId: crypto.randomUUID(),
-          proposalId: receipt.proposalId,
+          proposalId: receipt.proposalId!,
           decisionReceiptId,
           humanInputRequestId: skipped,
         },
       }),
     ).rejects.toThrow();
     // A different proposal id cannot be confirmed with this answer.
-    const answered = await answeredRememberInput(f, receipt.proposalId, request.content);
+    const answered = await answeredRememberInput(f, receipt.proposalId!, request.content);
     await expect(
       router.confirm({
         attempt: f.attempt,
         request: {
+          target: "proposal",
           operationId: crypto.randomUUID(),
           proposalId: crypto.randomUUID(),
           decisionReceiptId,
@@ -235,8 +238,9 @@ describe("remember router (real PostgreSQL)", () => {
       router.confirm({
         attempt: f.attempt,
         request: {
+          target: "proposal",
           operationId: crypto.randomUUID(),
-          proposalId: receipt.proposalId,
+          proposalId: receipt.proposalId!,
           decisionReceiptId: crypto.randomUUID(),
           humanInputRequestId: answered,
         },
@@ -244,8 +248,9 @@ describe("remember router (real PostgreSQL)", () => {
     ).rejects.toThrow();
 
     const confirmRequest = {
+      target: "proposal" as const,
       operationId: crypto.randomUUID(),
-      proposalId: receipt.proposalId,
+      proposalId: receipt.proposalId!,
       decisionReceiptId,
       humanInputRequestId: answered,
     };
@@ -284,7 +289,7 @@ describe("remember router (real PostgreSQL)", () => {
     ).rejects.toThrow();
   }, 180_000);
 
-  test("mandatory rules always need the human even under automatic; knowledge is proposal-only; off blocks", async () => {
+  test("mandatory rules always need the human even under automatic; knowledge needs it too; off blocks", async () => {
     if (!shared || !client) return;
     const automatic = await fixture("automatic");
     const router = createRememberRouter({ db: client.db });
@@ -314,10 +319,101 @@ describe("remember router (real PostgreSQL)", () => {
         subject: "Acme",
       },
     });
-    expect(fact.status).toBe("proposed_for_review");
+    expect(fact.status).toBe("confirmation_required");
+    if (fact.status === "confirmation_required") {
+      expect(fact.proposalId).toBeNull();
+      expect(fact.humanInput.questions[0]).toMatchObject({
+        id: `remember:${fact.claimId}`,
+        prompt: "Save this as workspace knowledge for everyone in this workspace?",
+      });
+    }
 
     const off = await fixture("off");
     const blocked = await router.remember({ attempt: off.attempt, request: preferenceRequest() });
     expect(blocked).toMatchObject({ status: "blocked", reason: "learning_policy_off" });
+  }, 180_000);
+
+  test("knowledge facts approve through the review lifecycle only after the bound human answer", async () => {
+    if (!shared || !client) return;
+    const f = await fixture("suggest");
+    const router = createRememberRouter({ db: client.db });
+    const content = "Acme's largest customer is Globex.";
+    const receipt = await router.remember({
+      attempt: f.attempt,
+      request: {
+        operationId: crypto.randomUUID(),
+        lane: "knowledge",
+        scope: "workspace",
+        content,
+        reason: "The user stated a company fact.",
+        subject: "Acme",
+      },
+    });
+    expect(receipt.status).toBe("confirmation_required");
+    if (receipt.status !== "confirmation_required") return;
+    const knowledgePrompt = "Save this as workspace knowledge for everyone in this workspace?";
+    // Misleading prompt or a preference-shaped question cannot confirm a fact.
+    const misleading = await answeredRememberInput(
+      f,
+      receipt.claimId,
+      content,
+      ["save"],
+      "Continue?",
+    );
+    const wrongLane = await answeredRememberInput(f, receipt.claimId, content);
+    for (const humanInputRequestId of [misleading, wrongLane, crypto.randomUUID()]) {
+      await expect(
+        router.confirm({
+          attempt: f.attempt,
+          request: {
+            target: "knowledge_claim",
+            operationId: crypto.randomUUID(),
+            claimId: receipt.claimId,
+            humanInputRequestId,
+          },
+        }),
+      ).rejects.toThrow();
+    }
+    const answered = await answeredRememberInput(
+      f,
+      receipt.claimId,
+      content,
+      ["save"],
+      knowledgePrompt,
+    );
+    const confirmRequest = {
+      target: "knowledge_claim" as const,
+      operationId: crypto.randomUUID(),
+      claimId: receipt.claimId,
+      humanInputRequestId: answered,
+    };
+    const confirmed = await router.confirm({ attempt: f.attempt, request: confirmRequest });
+    expect(confirmed).toMatchObject({
+      status: "activated",
+      proposalId: null,
+      claimId: receipt.claimId,
+      activation: {
+        destination: "knowledge",
+        claimId: receipt.claimId,
+        authorityKind: "human_confirmed",
+        undo: "knowledge_review",
+      },
+    });
+    const replay = await router.confirm({ attempt: f.attempt, request: confirmRequest });
+    expect(replay).toEqual(confirmed);
+    const [latestReview] = await shared.admin<
+      Array<{ state: string; actor_kind: string; reason: string }>
+    >`
+      select state, actor_kind, reason from knowledge_claim_reviews
+      where claim_id = ${receipt.claimId} order by review_revision desc limit 1
+    `;
+    expect(latestReview).toMatchObject({ state: "approved", actor_kind: "service" });
+    // A second confirmation of an approved claim conflicts.
+    await expect(
+      router.confirm({
+        attempt: f.attempt,
+        request: { ...confirmRequest, operationId: crypto.randomUUID() },
+      }),
+    ).rejects.toThrow();
   }, 180_000);
 });

@@ -144,3 +144,48 @@ export const GovernedLearningActivationUndoReceipt = z
 export type GovernedLearningActivationUndoReceipt = z.infer<
   typeof GovernedLearningActivationUndoReceipt
 >;
+
+/**
+ * Immutable content-free proof that the exact initiating human confirmed a
+ * user-directed Knowledge claim (`remember` with lane `knowledge`) through the
+ * bound structured human-input question, after which the claim's latest
+ * `proposed` review was superseded by an `approved` service review.
+ */
+export const RememberKnowledgeConfirmationReceipt = z
+  .object({
+    id: z.string().uuid(),
+    operationId: z.string().uuid(),
+    inputHash: sha256,
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    turnId: z.string().uuid(),
+    executionGeneration: z.number().int().positive(),
+    initiatingHumanSubjectId: boundedActor,
+    serviceActorSubjectId: boundedActor,
+    claimId: z.string().uuid(),
+    evidenceId: z.string().uuid(),
+    taskNoteId: z.string().uuid(),
+    taskNoteTextHash: sha256,
+    humanInputRequestId: z.string().uuid(),
+    previousReviewId: z.string().uuid(),
+    previousReviewRevision: z.number().int().positive(),
+    approvalReviewId: z.string().uuid(),
+    approvalReviewRevision: z.number().int().positive(),
+    createdAt: z.string().datetime(),
+  })
+  .strict();
+export type RememberKnowledgeConfirmationReceipt = z.infer<
+  typeof RememberKnowledgeConfirmationReceipt
+>;
+
+export const ConfirmRememberKnowledgeClaimRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    claimId: z.string().uuid(),
+    humanInputRequestId: z.string().uuid(),
+  })
+  .strict();
+export type ConfirmRememberKnowledgeClaimRequest = z.infer<
+  typeof ConfirmRememberKnowledgeClaimRequest
+>;

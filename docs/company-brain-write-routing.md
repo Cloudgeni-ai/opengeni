@@ -139,8 +139,9 @@ confidence, and the receipt is one of:
 
 - `blocked` - the frozen learning policy is `off` for this source; nothing durable
   was written;
-- `proposed_for_review` - Knowledge facts are proposals for the human Knowledge
-  review lifecycle;
+- (Knowledge facts also return `confirmation_required`, bound to the claim id
+  rather than a change proposal; the same one-click answer approves the claim
+  through the Knowledge review lifecycle, see below);
 - `activated` - a preference under `automatic` was activated by the governed
   controller and is undoable from Learning & autonomy;
 - `confirmation_required` - the proposal is durable but the policy will not
@@ -173,6 +174,20 @@ pause and the turn resumes on a new attempt of the same execution generation,
 the capability requires the turn's current live attempt rather than the minting
 attempt. Agents cannot fabricate that answer: the human-input row is written only
 by the authenticated human's response route.
+
+For the Knowledge lane, `remember_confirm` invokes migration 0273's
+`confirm_remember_knowledge_claim`. It performs the same live-turn,
+responder, canonical-prompt (`Save this as workspace knowledge for everyone in
+this workspace?`), exact-note-text, fixed-options, and `save` checks bound to
+`remember:<claimId>`, requires the claim's latest review to still be
+`proposed` and its Task-note evidence to be active and uncontradicted, then
+appends an `approved` service review through the guarded
+`governed_learning_apply_knowledge_review` path (service actor, causal human
+retained) and records an immutable content-free
+`remember_knowledge_confirmation_receipts` row. Undo is the Knowledge review
+lifecycle itself (`knowledge_correct` or a human revocation), not Learning &
+autonomy history. Knowledge is never approved automatically, even under the
+`automatic` learning mode.
 
 `task_note_promote_knowledge` accepts an active, unexpired version-one note from
 the exact caller's root tree plus normalized entity/predicate metadata. The note
