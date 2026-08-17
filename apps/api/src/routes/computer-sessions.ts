@@ -37,6 +37,7 @@ import {
   getAttachedBrowserDevice,
   getComputerSessionControlRecord,
   getLiveEnrollmentConnection,
+  getSandbox,
   getSession,
   listComputerSessions,
   prepareComputerSessionCreate,
@@ -82,9 +83,10 @@ import {
   deriveComputerSessionControllerTokens,
   deriveComputerViewGrantToken,
 } from "../browser-controller-authority";
+import { connectedMachineComputerAccessError } from "../connected-machine-computer-access";
 import { withCachedController } from "../controller-data-plane";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
-import { allowedCorsOrigin } from "../http/cors";
+import { validateInteractionRequestOrigin } from "../http/cors";
 import { interactionControlApiError } from "../http/interaction-control-error";
 import { observeComputerActionResult, observeLifecycleResult } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
@@ -143,7 +145,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     const request = await parseJsonBody(context, CreateComputerSessionRequest);
     const startedAtMs = performance.now();
     await authorizeSourceSession(deps, grant, request.sessionId, "session.control");
-    const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
+    const origin = requestOrigin(context, deps.settings);
     const authority = controllerAuthorityRoot(deps);
 
     try {
@@ -266,26 +268,27 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
               () => placement,
             );
           } catch (error) {
-            if (
+            const retryableRequestFailure =
+              error instanceof BrowserControlRequestError &&
+              error.retryable &&
+              error.error.code !== "machine_locked";
+            const outcomeUnknown =
+              error instanceof BrowserControlProtocolError ||
               error instanceof BrowserControlTransportError ||
-              (error instanceof BrowserControlRequestError &&
-                error.retryable &&
-                error.error.code !== "machine_locked") ||
-              isAbort(error)
-            ) {
-              throw error;
-            }
+              isAbort(error);
+            const rethrowAfterFailure =
+              error instanceof BrowserControlTransportError ||
+              retryableRequestFailure ||
+              isAbort(error);
             const failed = await failComputerSessionOperation(deps.db, {
               accountId: grant.accountId,
               workspaceId,
               operationId: request.operationId,
               computerSessionId: preparedSession.id,
-              ...(error instanceof BrowserControlProtocolError
-                ? { state: "outcome_unknown" as const }
-                : {}),
+              ...(outcomeUnknown ? { state: "outcome_unknown" as const } : {}),
               error: interactionFailure(error),
             });
-            if (interactionHeld && !(error instanceof BrowserControlProtocolError)) {
+            if (interactionHeld && !outcomeUnknown) {
               await releaseInteractionHolder(
                 grant,
                 workspaceId,
@@ -293,6 +296,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
                 placement.placement,
               ).catch(() => undefined);
             }
+            if (rethrowAfterFailure) throw error;
             return failed;
           }
           // These facts come from the physical adapter after its native helper
@@ -454,7 +458,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/attachments",
     async (context) => {
       const { workspaceId, grant, computerSessionId } = await routePreamble(context, "stream:view");
-      const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
+      const origin = requestOrigin(context, deps.settings);
       const request = await parseJsonBody(context, ComputerSessionAttachmentRequest);
       const result = await withActiveComputerController(
         context,
@@ -501,7 +505,11 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             grantId,
             expiresAt,
           });
-          await client.createComputerViewGrant(reference, { grantId, token, expiresAt });
+          await client.createComputerViewGrant(reference, {
+            grantId,
+            token,
+            expiresAt,
+          });
           const relaySecret = placement.session.openComputerFrames
             ? resolveStreamTokenSecret(deps.settings)
             : null;
@@ -628,7 +636,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       const computerSessionId = requireUuidParam(context, "computerSessionId");
       const request = await parseJsonBody(context, ComputerSessionLifecycleRequest);
       const startedAtMs = performance.now();
-      const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
+      const origin = requestOrigin(context, deps.settings);
       try {
         const before = await getComputerSessionControlRecord(deps.db, {
           accountId: grant.accountId,
@@ -787,6 +795,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
         throw new ComputerSessionStateError("Attached browser machine is unavailable");
       }
+      if (operation !== "computer.end") {
+        assertConnectedMachineComputerAccess(enrollment, operation);
+      }
       assertPlacementInstance(expectedPlacementInstanceId, device.connectionGeneration);
       const built = await buildSelfhostedBackendSession({
         workspaceId: sourceSession.workspaceId,
@@ -857,6 +868,21 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         }
 
         const resolved = await handle.routingSession.prime();
+        if (operation !== "computer.end" && resolved.kind === "selfhosted" && resolved.sandboxId) {
+          const sandbox = await getSandbox(deps.db, grant, resolved.sandboxId);
+          if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) {
+            throw new ComputerSessionStateError("Connected Machine placement is unavailable");
+          }
+          const enrollment = await getLiveEnrollmentConnection(
+            deps.db,
+            grant,
+            sandbox.enrollmentId,
+          );
+          if (!enrollment?.connectionInstanceId) {
+            throw new ComputerSessionStateError("Connected Machine is unavailable");
+          }
+          assertConnectedMachineComputerAccess(enrollment, operation);
+        }
         if (expectedPlacement?.kind === "connected_machine") {
           if (
             resolved.kind !== "selfhosted" ||
@@ -897,7 +923,10 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         }
         if (resolved.kind === "selfhosted") {
           return await callback({
-            placement: { kind: "connected_machine", sandboxId: resolved.sandboxId },
+            placement: {
+              kind: "connected_machine",
+              sandboxId: resolved.sandboxId,
+            },
             placementInstanceId: resolved.providerInstanceId ?? resolved.sandboxId,
             session: resolved.session as unknown as BrowserControlPlacementSession,
             lease: null,
@@ -1297,7 +1326,11 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
   async function routePreamble(
     context: Context,
     permission: "sessions:read" | "sessions:control" | "stream:view",
-  ): Promise<{ workspaceId: string; grant: AccessGrant; computerSessionId: string }> {
+  ): Promise<{
+    workspaceId: string;
+    grant: AccessGrant;
+    computerSessionId: string;
+  }> {
     const workspaceId = context.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(context, deps, workspaceId, permission);
     return {
@@ -1424,7 +1457,10 @@ async function authorizeSourceSession(
     });
   } catch (error) {
     if (error instanceof SessionAuthorizationDeniedError) {
-      throw new HTTPException(404, { message: "session not found", cause: error });
+      throw new HTTPException(404, {
+        message: "session not found",
+        cause: error,
+      });
     }
     if (error instanceof SessionAuthorizationUnavailableError) {
       throw new HTTPException(503, {
@@ -1480,26 +1516,8 @@ function requireOpaqueParam(context: Context, name: string): string {
   return value;
 }
 
-function requestOrigin(context: Context, allowedPattern: string): string | null {
-  const value = context.req.header("origin");
-  if (!value) return null;
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new HTTPException(400, { message: "invalid request origin" });
-  }
-  if (
-    url.origin === "null" ||
-    (url.protocol !== "http:" && url.protocol !== "https:") ||
-    url.origin !== value
-  ) {
-    throw new HTTPException(400, { message: "invalid request origin" });
-  }
-  if (!allowedCorsOrigin(allowedPattern, url.origin)) {
-    throw new HTTPException(403, { message: "request origin is not allowed" });
-  }
-  return url.origin;
+function requestOrigin(context: Context, settings: ApiRouteDeps["settings"]): string | null {
+  return validateInteractionRequestOrigin(context.req.header("origin"), settings);
 }
 
 function interactionActorForGrant(grant: AccessGrant): ReturnType<typeof InteractionActor.parse> {
@@ -1525,6 +1543,25 @@ function assertPlacementInstance(expected: string | null, actual: string): void 
   }
 }
 
+function assertConnectedMachineComputerAccess(
+  enrollment: {
+    hasDisplay: boolean;
+    desktopUnavailableReason: string | null;
+    allowScreenControl: boolean;
+  },
+  operation: ChannelAOperation,
+): void {
+  const error = connectedMachineComputerAccessError(
+    enrollment,
+    operation === "computer.action" || operation === "computer.control",
+  );
+  if (!error) return;
+  if (error.status === 403) {
+    throw new HTTPException(403, { message: error.message });
+  }
+  throw new ComputerSessionStateError(error.message);
+}
+
 function isTerminalOperation(state: string): boolean {
   return state === "completed" || state === "failed" || state === "outcome_unknown";
 }
@@ -1545,7 +1582,11 @@ function interactionFailure(error: unknown) {
     error instanceof BrowserControlUnsupportedError ||
     error instanceof BrowserControlServerUnsupportedError
   ) {
-    return { code: "unsupported" as const, message: error.message, retryable: false };
+    return {
+      code: "unsupported" as const,
+      message: error.message,
+      retryable: false,
+    };
   }
   if (error instanceof BrowserControlServerError) {
     return {
