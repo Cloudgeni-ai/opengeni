@@ -8,15 +8,18 @@ import {
   VENDORED_LOGO_DIRECTORY,
   VENDORED_LOGO_MANIFEST,
   catalogLogoObjectKey,
+  extensionForContentType,
   parseVendoredLogoManifest,
   readVendoredLogoAsset,
   serializeVendoredLogoManifest,
+  svgActiveContentReason,
   validateLogoAsset,
   vendoredLogoManifestFingerprintInput,
   vendoredLogosByCapabilityId,
   type VendoredLogoEntry,
   type VendoredLogoManifest,
 } from "./catalog-vendored-logos";
+import { createObjectStorage } from "../packages/storage/src/index";
 import {
   catalogCapabilityId,
   catalogImportFingerprint,
@@ -24,6 +27,7 @@ import {
   normalizeCatalogSnapshot,
   readSnapshotFile,
   resolveCatalogRowLogo,
+  resolveLogoObjectStorage,
   type CatalogIntegrationRow,
   type LogoStorage,
 } from "./import-integrations-catalog";
@@ -266,6 +270,65 @@ describe("vendored logo resolution", () => {
     expect(stored).toHaveLength(0);
   });
 
+  test("a rejected object-storage write degrades to the monogram instead of aborting the import", async () => {
+    const counter = { fetches: 0 };
+    const rejectingStorage: LogoStorage = {
+      async putObject() {
+        throw new Error("503 slow down");
+      },
+    };
+
+    // Vendored path: reached even with skipLogos, so a transient storage fault
+    // must not fail the deployment hook that runs the importer.
+    const vendored = await resolveCatalogRowLogo(curatedRow, {
+      storage: rejectingStorage,
+      fetchImpl: refusingFetch(counter),
+      storeLogos: false,
+      vendoredLogos: vendoredLogosByCapabilityId(manifest),
+      vendoredLogoDirectory: directory,
+    });
+    expect(vendored).toEqual({
+      logoAssetPath: null,
+      logoSource: "generic_monogram",
+      failure: {
+        reason: "logo_store_failed:503 slow down",
+        sourceUrl: "https://integrations.sh/logo/curated.example",
+      },
+    });
+
+    // Fetched long-tail path: same contract.
+    const fetchedTail = await resolveCatalogRowLogo(uncuratedRow, {
+      storage: rejectingStorage,
+      fetchImpl: async () =>
+        new Response(new Uint8Array([9, 9, 9]), {
+          status: 200,
+          headers: { "content-type": "image/png" },
+        }),
+      storeLogos: true,
+      vendoredLogos: vendoredLogosByCapabilityId(manifest),
+      vendoredLogoDirectory: directory,
+    });
+    expect(fetchedTail).toEqual({
+      logoAssetPath: null,
+      logoSource: "generic_monogram",
+      failure: {
+        reason: "logo_store_failed:503 slow down",
+        sourceUrl: "https://integrations.sh/logo/tail.example",
+      },
+    });
+    expect(counter.fetches).toBe(0);
+  });
+
+  test("object storage that throws on construction degrades to no storage rather than crashing", () => {
+    const settings = {
+      objectStorageBackend: "azure-blob",
+      objectStorageBucket: "catalog",
+      objectStorageAzureConnectionString: "this-is-not-a-connection-string",
+    } as unknown as Parameters<typeof resolveLogoObjectStorage>[0];
+    expect(() => createObjectStorage(settings)).toThrow();
+    expect(resolveLogoObjectStorage(settings)).toBeNull();
+  });
+
   test("the vendored manifest participates in the import fingerprint", async () => {
     const base = { snapshotPath: fixtureUrl.pathname, snapshotRef: "reviewed", skipLogos: true };
     const empty: VendoredLogoManifest = { version: 1, entries: [] };
@@ -345,6 +408,85 @@ describe("vendored logo manifest document", () => {
     expect(ok.ok && ok.contentType).toBe("image/png");
   });
 
+  test("rejects image types the catalog-asset route cannot serve back", () => {
+    // These would previously be stored under an `.img` extension the serving
+    // route does not map, producing an asset that exists and still 404s.
+    for (const contentType of ["image/avif", "image/tiff", "image/heic"]) {
+      expect(validateLogoAsset({ contentType, bytes: PNG_BYTES })).toEqual({
+        ok: false,
+        reason: `unservable_content_type:${contentType}`,
+      });
+      expect(extensionForContentType(contentType)).toBeNull();
+    }
+    for (const [contentType, extension] of [
+      ["image/svg+xml", "svg"],
+      ["image/jpeg", "jpg"],
+      ["image/png", "png"],
+      ["image/gif", "gif"],
+      ["image/webp", "webp"],
+      ["image/x-icon", "ico"],
+      ["image/vnd.microsoft.icon", "ico"],
+    ] as const) {
+      expect(extensionForContentType(contentType)).toBe(extension);
+    }
+    expect(() =>
+      parseVendoredLogoManifest({
+        version: 1,
+        entries: [
+          {
+            ...entryFor(row({ domain: "a.example", mcpUrl: "https://a.example/mcp" }), PNG_BYTES),
+            contentType: "image/avif",
+          },
+        ],
+      }),
+    ).toThrow(/unservable_content_type/);
+  });
+
+  test("rejects SVG marks that carry active content", () => {
+    const svg = (body: string) => ({
+      contentType: "image/svg+xml",
+      bytes: new TextEncoder().encode(
+        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">${body}</svg>`,
+      ),
+    });
+    const rejected: Array<[string, string]> = [
+      ["<script>alert(1)</script>", "script_element"],
+      ["<foreignObject><body/></foreignObject>", "foreign_object"],
+      [`<rect onload="alert(1)" />`, "event_handler_attribute"],
+      [`<a href="javascript:alert(1)"><rect/></a>`, "javascript_url"],
+      [`<use href="https://evil.example/x.svg#a" />`, "external_use_href"],
+      [`<image xlink:href="https://evil.example/x.png" />`, "external_image_href"],
+    ];
+    for (const [body, name] of rejected) {
+      expect(validateLogoAsset(svg(body))).toEqual({
+        ok: false,
+        reason: `svg_active_content:${name}`,
+      });
+    }
+
+    // An ordinary mark, including a same-document `<use>` reference, passes.
+    const clean = validateLogoAsset(
+      svg(`<defs><path id="p" d="M0 0h24v24H0z"/></defs><use href="#p" fill="#111"/>`),
+    );
+    expect(clean.ok).toBe(true);
+    // Non-SVG bytes are never text-scanned: PNG bytes that happen to spell a
+    // pattern must still pass.
+    expect(
+      validateLogoAsset({
+        contentType: "image/png",
+        bytes: new TextEncoder().encode("<script>"),
+      }).ok,
+    ).toBe(true);
+  });
+
+  test("every committed SVG asset is free of active content", async () => {
+    for (const entry of VENDORED_LOGO_MANIFEST.entries) {
+      if (entry.contentType !== "image/svg+xml") continue;
+      const bytes = new Uint8Array(await readFile(join(VENDORED_LOGO_DIRECTORY, entry.file)));
+      expect(svgActiveContentReason(entry.contentType, bytes), entry.file).toBeNull();
+    }
+  });
+
   test("the committed manifest covers exactly the curated rows that permit a logo, byte for byte", async () => {
     const normalized = normalizeCatalogSnapshot(await readSnapshotFile(snapshotPath));
     const { fetchable, suppressed } = curatedLogoCandidates(normalized.rows);
@@ -375,7 +517,7 @@ describe("vendored logo manifest document", () => {
     }
     // No orphaned files next to the manifest.
     const files = (await readdir(VENDORED_LOGO_DIRECTORY)).filter(
-      (name) => name !== "manifest.json",
+      (name) => name !== "manifest.json" && name !== "README.md",
     );
     expect(files.sort()).toEqual(VENDORED_LOGO_MANIFEST.entries.map((entry) => entry.file).sort());
     expect(CURATED_CATALOG.entries.filter((entry) => entry.logoSourceUrl === null).length).toBe(
@@ -461,6 +603,8 @@ describe("vendor-catalog-logos script", () => {
     });
     expect(first.failed).toEqual([]);
     await writeFile(join(directory, "orphan.png"), good);
+    // Directory bookkeeping is not an asset and must survive a regeneration.
+    await writeFile(join(directory, "README.md"), "# not an asset\n");
 
     const second = await vendorCatalogLogos({
       snapshot: await snapshot(),
@@ -487,5 +631,6 @@ describe("vendor-catalog-logos script", () => {
       true,
     );
     expect((await readdir(directory)).includes("orphan.png")).toBe(false);
+    expect((await readdir(directory)).includes("README.md")).toBe(true);
   });
 });

@@ -31,6 +31,8 @@ import {
 
 const DEFAULT_SNAPSHOT_PATH = "data/catalog/integrations-snapshot.json";
 const MANIFEST_FILE = "manifest.json";
+/** Directory bookkeeping that is not a vendored asset and must survive a regeneration. */
+const NON_ASSET_FILES: ReadonlySet<string> = new Set([MANIFEST_FILE, "README.md"]);
 const CAPABILITY_ID_PREFIX = "mcp:integrations-sh:";
 
 export type VendorLogosResult = {
@@ -58,7 +60,13 @@ export function vendoredLogoFileName(capabilityId: string, contentType: string):
     .toLowerCase()
     .replace(/[^a-z0-9.-]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return `${safe || "logo"}.${extensionForContentType(contentType)}`;
+  const extension = extensionForContentType(contentType);
+  if (!extension) {
+    // Unreachable through the vendoring flow: only a validated asset reaches
+    // here, and validation rejects every content type the route cannot serve.
+    throw new Error(`unsupported logo content type: ${contentType}`);
+  }
+  return `${safe || "logo"}.${extension}`;
 }
 
 /** Curated rows in import order, split by whether the overlay permits a logo. */
@@ -168,7 +176,7 @@ export async function vendorCatalogLogos(input: {
   const referenced = new Set(entries.map((entry) => entry.file));
   const removed: string[] = [];
   for (const name of await readdir(directory)) {
-    if (name === MANIFEST_FILE || referenced.has(name)) continue;
+    if (NON_ASSET_FILES.has(name) || referenced.has(name)) continue;
     removed.push(name);
   }
 

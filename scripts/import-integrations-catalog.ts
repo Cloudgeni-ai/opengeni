@@ -199,6 +199,30 @@ export type CatalogLogoResolution = {
   failure: { reason: string; sourceUrl: string | null } | null;
 };
 
+/**
+ * Constructs object storage for the importer, or null when it cannot be built.
+ *
+ * `createObjectStorage` returns null only for an unconfigured s3-compatible
+ * backend; azure-blob, aws-s3, and gcs throw on missing or malformed settings.
+ * Both outcomes mean the same thing here: no self-hosted logo bytes, so every
+ * row falls back to a monogram and the catalog still imports.
+ */
+export function resolveLogoObjectStorage(
+  settings: Parameters<typeof createObjectStorage>[0],
+): ObjectStorage | null {
+  try {
+    return createObjectStorage(settings);
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        warning: "object_storage_unavailable",
+        detail: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    return null;
+  }
+}
+
 export async function readSnapshotFile(path: string): Promise<unknown> {
   return JSON.parse(await readFile(path, "utf8"));
 }
@@ -705,14 +729,15 @@ export async function resolveCatalogRowLogo(
         failure: { reason: asset.reason, sourceUrl },
       };
     }
-    const key = catalogLogoObjectKey(row.domain, asset.sha256, asset.contentType);
-    await input.storage.putObject({
-      key,
-      contentType: asset.contentType,
-      body: asset.bytes,
-      sha256: asset.sha256,
-    });
-    return { logoAssetPath: key, logoSource: "vendored", failure: null };
+    const put = await putLogoObject(input.storage, row.domain, asset);
+    if (!put.ok) {
+      return {
+        logoAssetPath: null,
+        logoSource: "generic_monogram",
+        failure: { reason: put.reason, sourceUrl },
+      };
+    }
+    return { logoAssetPath: put.key, logoSource: "vendored", failure: null };
   }
   if (!input.storeLogos) {
     return { logoAssetPath: null, logoSource: "generic_monogram", failure: null };
@@ -749,20 +774,50 @@ export async function storeLogoForRow(
   if (!asset.ok) {
     return { ok: false, sourceUrl, reason: asset.reason };
   }
-  const key = catalogLogoObjectKey(row.domain, asset.sha256, asset.contentType);
-  await input.storage.putObject({
-    key,
-    contentType: asset.contentType,
-    body: asset.bytes,
-    sha256: asset.sha256,
-  });
+  const put = await putLogoObject(input.storage, row.domain, asset);
+  if (!put.ok) {
+    return { ok: false, sourceUrl, reason: put.reason };
+  }
   return {
     ok: true,
-    path: key,
+    path: put.key,
     sourceUrl,
     contentType: asset.contentType,
     sizeBytes: asset.bytes.byteLength,
   };
+}
+
+/**
+ * Stores one validated logo asset.
+ *
+ * A logo is cosmetic: the catalog row is correct with a monogram. Object
+ * storage is a third-party service that can be transiently unavailable,
+ * misconfigured, or read-only, and the importer runs as the Helm
+ * `catalog-import` hook Job, so letting a rejected `putObject` escape would
+ * fail the whole deployment hook over an icon. Every storage outcome is
+ * therefore reported as a recorded logo failure, exactly like a rejected fetch
+ * or an invalid asset.
+ */
+async function putLogoObject(
+  storage: LogoStorage,
+  domain: string,
+  asset: { contentType: string; sha256: string; bytes: Uint8Array },
+): Promise<{ ok: true; key: string } | { ok: false; reason: string }> {
+  try {
+    const key = catalogLogoObjectKey(domain, asset.sha256, asset.contentType);
+    await storage.putObject({
+      key,
+      contentType: asset.contentType,
+      body: asset.bytes,
+      sha256: asset.sha256,
+    });
+    return { ok: true, key };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `logo_store_failed:${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }
 
 export function catalogCapabilityId(domain: string, mcpUrl: string): string {
@@ -1366,8 +1421,12 @@ if (import.meta.main) {
       process.exit(0);
     }
     // Vendored curated logos are stored even with --skip-logos; the flag only
-    // suppresses network fetches for the uncurated long tail.
-    const storage = createObjectStorage(settings);
+    // suppresses network fetches for the uncurated long tail. Only the
+    // s3-compatible backend returns null when unconfigured; azure-blob, aws-s3,
+    // and gcs throw. A deployment without usable object storage must still
+    // import the catalog and fall back to monograms, so construction failure is
+    // reported and degraded rather than fatal.
+    const storage = resolveLogoObjectStorage(settings);
     const result = await importIntegrationsCatalog({
       db: dbClient.db,
       snapshot,
