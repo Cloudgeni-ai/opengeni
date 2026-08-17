@@ -1,7 +1,8 @@
 import type { LensAppRegistration, LensProvider, LensRepositoryBinding } from "@opengeni/sdk";
 import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import { OpenGeniLensClient } from "@opengeni/sdk/lens";
 import { BotIcon, CheckCircle2Icon, CopyIcon, Loader2Icon, PlusIcon } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,6 +16,7 @@ export function LensSetupCard(props: {
   workspaceId: string;
   canManage: boolean;
 }) {
+  const client = useMemo(() => new OpenGeniLensClient(props.client), [props.client]);
   const [registrations, setRegistrations] = useState<LensAppRegistration[]>([]);
   const [repositories, setRepositories] = useState<LensRepositoryBinding[]>([]);
   const [loading, setLoading] = useState(true);
@@ -36,11 +38,11 @@ export function LensSetupCard(props: {
   const [projectId, setProjectId] = useState("");
 
   const refresh = useCallback(async () => {
-    const result = await props.client.listLensConfiguration(props.workspaceId);
+    const result = await client.listConfiguration(props.workspaceId);
     setRegistrations(result.registrations);
     setRepositories(result.repositories);
     setSelectedRegistration((current) => current || result.registrations[0]?.id || "");
-  }, [props.client, props.workspaceId]);
+  }, [client, props.workspaceId]);
 
   useEffect(() => {
     let live = true;
@@ -57,7 +59,7 @@ export function LensSetupCard(props: {
     setBusy(true);
     setError(null);
     try {
-      const registration = await props.client.createLensAppRegistration(props.workspaceId, {
+      const registration = await client.createAppRegistration(props.workspaceId, {
         name,
         provider,
         ...(providerBaseUrl ? { providerBaseUrl } : {}),
@@ -82,7 +84,7 @@ export function LensSetupCard(props: {
     setBusy(true);
     setError(null);
     try {
-      await props.client.createLensRepositoryBinding(props.workspaceId, {
+      await client.createRepositoryBinding(props.workspaceId, {
         registrationId: selectedRegistration,
         repositoryUri,
         repositoryFullName,

@@ -8201,182 +8201,189 @@ export const OPENGENI_LENS_SESSION_ROLE = "pull_request_review" as const;
 export const LensProvider = GitCredentialProvider;
 export type LensProvider = z.infer<typeof LensProvider>;
 
-export const LensCredentialKind = z.enum(["github_app", "provider_token"]);
+export const LensCredentialKind = /* @__PURE__ */ z.enum(["github_app", "provider_token"]);
 export type LensCredentialKind = z.infer<typeof LensCredentialKind>;
 
-export const LensWebhookAuthKind = z.enum(["hmac_sha256", "shared_token", "basic"]);
+export const LensWebhookAuthKind = /* @__PURE__ */ z.enum(["hmac_sha256", "shared_token", "basic"]);
 export type LensWebhookAuthKind = z.infer<typeof LensWebhookAuthKind>;
 
-const LensSecretInput = z.string().min(8).max(65_536);
+const LensSecretInput = /* @__PURE__ */ (() => z.string().min(8).max(65_536))();
 
-export const CreateLensAppRegistrationRequest = z
-  .object({
-    name: z.string().trim().min(1).max(200),
-    provider: LensProvider,
-    providerBaseUrl: z.string().url().max(2048).optional(),
-    appId: z.string().trim().min(1).max(512).optional(),
-    credentialKind: LensCredentialKind,
-    privateKey: LensSecretInput.optional(),
-    accessToken: LensSecretInput.optional(),
-    accessTokenExpiresAt: z.string().datetime().nullable().optional(),
-    webhookSecret: LensSecretInput,
-    webhookUsername: z.string().min(1).max(512).optional(),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (value.provider === "github" && value.credentialKind !== "github_app") {
-      context.addIssue({
-        code: "custom",
-        path: ["credentialKind"],
-        message: "GitHub Lens registrations require a dedicated GitHub App",
-      });
-    }
-    if (value.provider === "github" && (!value.appId || !value.privateKey)) {
-      context.addIssue({
-        code: "custom",
-        path: [!value.appId ? "appId" : "privateKey"],
-        message: "GitHub Lens registrations require the dedicated App ID and private key",
-      });
-    }
-    if (value.provider !== "github" && value.credentialKind !== "provider_token") {
-      context.addIssue({
-        code: "custom",
-        path: ["credentialKind"],
-        message: "GitLab and Azure DevOps Lens registrations require a provider token",
-      });
-    }
-    if (value.credentialKind === "provider_token" && !value.accessToken) {
-      context.addIssue({
-        code: "custom",
-        path: ["accessToken"],
-        message: "provider_token credentials require accessToken",
-      });
-    }
-    if (
-      value.credentialKind === "github_app" &&
-      (value.accessToken !== undefined || value.privateKey === undefined)
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: [value.accessToken !== undefined ? "accessToken" : "privateKey"],
-        message: "GitHub App credentials require privateKey and cannot include accessToken",
-      });
-    }
-    if (value.credentialKind === "provider_token" && value.privateKey !== undefined) {
-      context.addIssue({
-        code: "custom",
-        path: ["privateKey"],
-        message: "provider_token credentials cannot include a GitHub privateKey",
-      });
-    }
-    if (value.provider === "github" && value.accessTokenExpiresAt !== undefined) {
-      context.addIssue({
-        code: "custom",
-        path: ["accessTokenExpiresAt"],
-        message: "GitHub App registrations do not use accessTokenExpiresAt",
-      });
-    }
-    if (value.provider === "azure_devops" && !value.webhookUsername) {
-      context.addIssue({
-        code: "custom",
-        path: ["webhookUsername"],
-        message: "Azure DevOps service hooks require a Basic authentication username",
-      });
-    }
-  });
+export const CreateLensAppRegistrationRequest = /* @__PURE__ */ (() =>
+  z
+    .object({
+      name: z.string().trim().min(1).max(200),
+      provider: LensProvider,
+      providerBaseUrl: z.string().url().max(2048).optional(),
+      appId: z.string().trim().min(1).max(512).optional(),
+      credentialKind: LensCredentialKind,
+      privateKey: LensSecretInput.optional(),
+      accessToken: LensSecretInput.optional(),
+      accessTokenExpiresAt: z.string().datetime().nullable().optional(),
+      webhookSecret: LensSecretInput,
+      webhookUsername: z.string().min(1).max(512).optional(),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (value.provider === "github" && value.credentialKind !== "github_app") {
+        context.addIssue({
+          code: "custom",
+          path: ["credentialKind"],
+          message: "GitHub Lens registrations require a dedicated GitHub App",
+        });
+      }
+      if (value.provider === "github" && (!value.appId || !value.privateKey)) {
+        context.addIssue({
+          code: "custom",
+          path: [!value.appId ? "appId" : "privateKey"],
+          message: "GitHub Lens registrations require the dedicated App ID and private key",
+        });
+      }
+      if (value.provider !== "github" && value.credentialKind !== "provider_token") {
+        context.addIssue({
+          code: "custom",
+          path: ["credentialKind"],
+          message: "GitLab and Azure DevOps Lens registrations require a provider token",
+        });
+      }
+      if (value.credentialKind === "provider_token" && !value.accessToken) {
+        context.addIssue({
+          code: "custom",
+          path: ["accessToken"],
+          message: "provider_token credentials require accessToken",
+        });
+      }
+      if (
+        value.credentialKind === "github_app" &&
+        (value.accessToken !== undefined || value.privateKey === undefined)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: [value.accessToken !== undefined ? "accessToken" : "privateKey"],
+          message: "GitHub App credentials require privateKey and cannot include accessToken",
+        });
+      }
+      if (value.credentialKind === "provider_token" && value.privateKey !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["privateKey"],
+          message: "provider_token credentials cannot include a GitHub privateKey",
+        });
+      }
+      if (value.provider === "github" && value.accessTokenExpiresAt !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["accessTokenExpiresAt"],
+          message: "GitHub App registrations do not use accessTokenExpiresAt",
+        });
+      }
+      if (value.provider === "azure_devops" && !value.webhookUsername) {
+        context.addIssue({
+          code: "custom",
+          path: ["webhookUsername"],
+          message: "Azure DevOps service hooks require a Basic authentication username",
+        });
+      }
+    }))();
 export type CreateLensAppRegistrationRequest = z.infer<typeof CreateLensAppRegistrationRequest>;
 
-export const UpdateLensAppRegistrationRequest = z
-  .object({
-    name: z.string().trim().min(1).max(200).optional(),
-    accessToken: LensSecretInput.optional(),
-    privateKey: LensSecretInput.optional(),
-    accessTokenExpiresAt: z.string().datetime().nullable().optional(),
-    webhookSecret: LensSecretInput.optional(),
-    webhookUsername: z.string().min(1).max(512).optional(),
-    status: z.enum(["active", "disabled"]).optional(),
-  })
-  .strict()
-  .refine((value) => Object.keys(value).length > 0, {
-    message: "Lens registration update must change at least one field",
-  });
+export const UpdateLensAppRegistrationRequest = /* @__PURE__ */ (() =>
+  z
+    .object({
+      name: z.string().trim().min(1).max(200).optional(),
+      accessToken: LensSecretInput.optional(),
+      privateKey: LensSecretInput.optional(),
+      accessTokenExpiresAt: z.string().datetime().nullable().optional(),
+      webhookSecret: LensSecretInput.optional(),
+      webhookUsername: z.string().min(1).max(512).optional(),
+      status: z.enum(["active", "disabled"]).optional(),
+    })
+    .strict()
+    .refine((value) => Object.keys(value).length > 0, {
+      message: "Lens registration update must change at least one field",
+    }))();
 export type UpdateLensAppRegistrationRequest = z.infer<typeof UpdateLensAppRegistrationRequest>;
 
-export const LensAppRegistration = z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  name: z.string(),
-  provider: LensProvider,
-  providerBaseUrl: z.string().url(),
-  appId: z.string().nullable(),
-  credentialKind: LensCredentialKind,
-  hasCredential: z.boolean(),
-  accessTokenExpiresAt: z.string().nullable(),
-  webhookAuthKind: LensWebhookAuthKind,
-  hasWebhookSecret: z.boolean(),
-  webhookUsername: z.string().nullable(),
-  webhookPath: z.string(),
-  status: z.enum(["active", "disabled"]),
-  createdBySubjectId: z.string(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const LensAppRegistration = /* @__PURE__ */ (() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    name: z.string(),
+    provider: LensProvider,
+    providerBaseUrl: z.string().url(),
+    appId: z.string().nullable(),
+    credentialKind: LensCredentialKind,
+    hasCredential: z.boolean(),
+    accessTokenExpiresAt: z.string().nullable(),
+    webhookAuthKind: LensWebhookAuthKind,
+    hasWebhookSecret: z.boolean(),
+    webhookUsername: z.string().nullable(),
+    webhookPath: z.string(),
+    status: z.enum(["active", "disabled"]),
+    createdBySubjectId: z.string(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }))();
 export type LensAppRegistration = z.infer<typeof LensAppRegistration>;
 
-export const CreateLensRepositoryBindingRequest = z
-  .object({
-    registrationId: z.string().uuid(),
-    repositoryUri: z.string().url().max(2048),
-    repositoryFullName: z.string().trim().min(1).max(1024),
-    providerRepositoryId: z.union([z.string().min(1).max(512), z.number().int().positive()]),
-    installationId: z.union([z.string().min(1).max(512), z.number().int().positive()]).optional(),
-    projectId: z.union([z.string().min(1).max(512), z.number().int().positive()]).optional(),
-    model: z.string().min(1).max(512).nullable().optional(),
-    additionalInstructions: z.string().max(16_384).nullable().optional(),
-    status: z.enum(["active", "disabled"]).default("active"),
-  })
-  .strict();
+export const CreateLensRepositoryBindingRequest = /* @__PURE__ */ (() =>
+  z
+    .object({
+      registrationId: z.string().uuid(),
+      repositoryUri: z.string().url().max(2048),
+      repositoryFullName: z.string().trim().min(1).max(1024),
+      providerRepositoryId: z.union([z.string().min(1).max(512), z.number().int().positive()]),
+      installationId: z.union([z.string().min(1).max(512), z.number().int().positive()]).optional(),
+      projectId: z.union([z.string().min(1).max(512), z.number().int().positive()]).optional(),
+      model: z.string().min(1).max(512).nullable().optional(),
+      additionalInstructions: z.string().max(16_384).nullable().optional(),
+      status: z.enum(["active", "disabled"]).default("active"),
+    })
+    .strict())();
 export type CreateLensRepositoryBindingRequest = z.infer<typeof CreateLensRepositoryBindingRequest>;
 
-export const UpdateLensRepositoryBindingRequest = z
-  .object({
-    model: z.string().min(1).max(512).nullable().optional(),
-    additionalInstructions: z.string().max(16_384).nullable().optional(),
-    status: z.enum(["active", "disabled"]).optional(),
-  })
-  .strict()
-  .refine((value) => Object.keys(value).length > 0, {
-    message: "Lens repository update must change at least one field",
-  });
+export const UpdateLensRepositoryBindingRequest = /* @__PURE__ */ (() =>
+  z
+    .object({
+      model: z.string().min(1).max(512).nullable().optional(),
+      additionalInstructions: z.string().max(16_384).nullable().optional(),
+      status: z.enum(["active", "disabled"]).optional(),
+    })
+    .strict()
+    .refine((value) => Object.keys(value).length > 0, {
+      message: "Lens repository update must change at least one field",
+    }))();
 export type UpdateLensRepositoryBindingRequest = z.infer<typeof UpdateLensRepositoryBindingRequest>;
 
-export const LensRepositoryBinding = z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  registrationId: z.string().uuid(),
-  provider: LensProvider,
-  repositoryUri: z.string(),
-  repositoryFullName: z.string(),
-  providerRepositoryId: z.string(),
-  installationId: z.string().nullable(),
-  projectId: z.string().nullable(),
-  model: z.string().nullable(),
-  additionalInstructions: z.string().nullable(),
-  status: z.enum(["active", "disabled"]),
-  createdBySubjectId: z.string(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const LensRepositoryBinding = /* @__PURE__ */ (() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    registrationId: z.string().uuid(),
+    provider: LensProvider,
+    repositoryUri: z.string(),
+    repositoryFullName: z.string(),
+    providerRepositoryId: z.string(),
+    installationId: z.string().nullable(),
+    projectId: z.string().nullable(),
+    model: z.string().nullable(),
+    additionalInstructions: z.string().nullable(),
+    status: z.enum(["active", "disabled"]),
+    createdBySubjectId: z.string(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }))();
 export type LensRepositoryBinding = z.infer<typeof LensRepositoryBinding>;
 
-export const LensWebhookResult = z.object({
-  accepted: z.boolean(),
-  duplicate: z.boolean(),
-  ignoredReason: z.string().nullable(),
-  sessionId: z.string().uuid().nullable(),
-});
+export const LensWebhookResult = /* @__PURE__ */ (() =>
+  z.object({
+    accepted: z.boolean(),
+    duplicate: z.boolean(),
+    ignoredReason: z.string().nullable(),
+    sessionId: z.string().uuid().nullable(),
+  }))();
 export type LensWebhookResult = z.infer<typeof LensWebhookResult>;
 
 export const EnablePackRequest = withVariableSetIdAlias({

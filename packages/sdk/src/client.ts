@@ -194,8 +194,6 @@ import type {
   CreateGitHubAppManifestRequest,
   CreateGitHubAppManifestResponse,
   CreateKnowledgeMemoryRequest,
-  CreateLensAppRegistrationRequest,
-  CreateLensRepositoryBindingRequest,
   CreateScheduledTaskRequest,
   CreateSessionRequest,
   CreateSessionResponse,
@@ -230,7 +228,6 @@ import type {
   KnowledgeMemorySearchRequest,
   ListApiKeysResponse,
   ListManagedOrganizationMembershipsResponse,
-  ListLensConfigurationResponse,
   ListOrganizationInvitationsPageResponse,
   ListOrganizationMembersResponse,
   AcceptOrganizationInvitationRequest,
@@ -265,8 +262,6 @@ import type {
   ApproveSlackUserLinkAccessRequest,
   PackInstallation,
   PackUninstallPreview,
-  LensAppRegistration,
-  LensRepositoryBinding,
   LatencyMode,
   ReasoningEffort,
   RetainedScreenshotDownload,
@@ -278,8 +273,6 @@ import type {
   RetainedArtifactContentOptions,
   RetainedArtifactMetadata,
   UpdateVideoGenerationPolicyRequest,
-  UpdateLensAppRegistrationRequest,
-  UpdateLensRepositoryBindingRequest,
   VideoArtifactPlaybackSource,
   VideoGenerationOperationSummary,
   VideoGenerationPolicy,
@@ -5365,75 +5358,6 @@ export class OpenGeniClient {
     );
   }
 
-  // --- OpenGeni Lens ----------------------------------------------------------------------
-
-  async listLensConfiguration(workspaceId: string): Promise<ListLensConfigurationResponse> {
-    return await this.requestJson<ListLensConfigurationResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/lens/registrations`,
-    );
-  }
-
-  async createLensAppRegistration(
-    workspaceId: string,
-    request: CreateLensAppRegistrationRequest,
-  ): Promise<LensAppRegistration> {
-    return await this.requestJson<LensAppRegistration>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/lens/registrations`,
-      request,
-    );
-  }
-
-  async updateLensAppRegistration(
-    workspaceId: string,
-    registrationId: string,
-    request: UpdateLensAppRegistrationRequest,
-  ): Promise<LensAppRegistration> {
-    return await this.requestJson<LensAppRegistration>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/lens/registrations/${encodeURIComponent(registrationId)}`,
-      request,
-    );
-  }
-
-  async deleteLensAppRegistration(workspaceId: string, registrationId: string): Promise<void> {
-    await this.requestVoid(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/lens/registrations/${encodeURIComponent(registrationId)}`,
-    );
-  }
-
-  async createLensRepositoryBinding(
-    workspaceId: string,
-    request: CreateLensRepositoryBindingRequest,
-  ): Promise<LensRepositoryBinding> {
-    return await this.requestJson<LensRepositoryBinding>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/lens/repositories`,
-      request,
-    );
-  }
-
-  async updateLensRepositoryBinding(
-    workspaceId: string,
-    bindingId: string,
-    request: UpdateLensRepositoryBindingRequest,
-  ): Promise<LensRepositoryBinding> {
-    return await this.requestJson<LensRepositoryBinding>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/lens/repositories/${encodeURIComponent(bindingId)}`,
-      request,
-    );
-  }
-
-  async deleteLensRepositoryBinding(workspaceId: string, bindingId: string): Promise<void> {
-    await this.requestVoid(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/lens/repositories/${encodeURIComponent(bindingId)}`,
-    );
-  }
-
   // --- Capabilities -------------------------------------------------------------------------
 
   async listCapabilities(workspaceId: string): Promise<CapabilityCatalogResponse> {
@@ -6491,8 +6415,8 @@ export class OpenGeniClient {
     return response;
   }
 
-  /** Like `requestJson` for endpoints that respond with no body (204). */
-  private async requestVoid(method: string, path: string, body?: unknown): Promise<void> {
+  /** Contract-checked transport shared by opt-in typed SDK clients for 204 responses. */
+  async requestVoid(method: string, path: string, body?: unknown): Promise<void> {
     const correlationId = crypto.randomUUID();
     let response: Response;
     try {

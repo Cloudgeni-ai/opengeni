@@ -161,7 +161,9 @@ POST   /v1/webhooks/lens/:accountId/:workspaceId/:registrationId
 ```
 
 `DELETE` is an audit-preserving disable operation. The SDK exposes matching
-`listLensConfiguration`, registration, and repository-binding methods.
+registration and repository-binding methods through the opt-in
+`@opengeni/sdk/lens` client so Lens setup code does not enter ordinary session
+bundles.
 
 - contracts and Pack constants: `packages/contracts/src/index.ts`
 - Skill, webhook verification, and normalization: `packages/core/src/domain/lens.ts`
@@ -170,4 +172,5 @@ POST   /v1/webhooks/lens/:accountId/:workspaceId/:registrationId
 - HTTP adapter and session dispatch: `apps/api/src/routes/lens.ts`
 - standalone credential broker: `apps/worker/src/lens-credentials.ts`
 - exact-head repository materialization: `packages/runtime/src/index.ts`
+- optional typed SDK client: `packages/sdk/src/lens-client.ts`
 - setup UI: `apps/web/src/components/capabilities/lens-setup-card.tsx`
