@@ -745,8 +745,11 @@ migrations:
 catalogImport:
   enabled: true
   snapshotPath: /app/data/catalog/integrations-snapshot.json
-  # Keep deployment success independent of hundreds of third-party logo hosts.
-  # Set false to fetch, validate, and self-host logos during the import.
+  # Skip network logo fetches for the uncurated long tail so deployment success
+  # stays independent of hundreds of third-party logo hosts. Curated connectors
+  # still get their logos: the importer copies the vendored assets committed
+  # under data/catalog/logos/ into object storage regardless of this flag. Set
+  # false to also fetch, validate, and self-host the long tail during import.
   skipLogos: true
   backoffLimit: 3
   annotations:

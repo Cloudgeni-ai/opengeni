@@ -21,11 +21,22 @@ import {
   curatedCatalogFingerprintInput,
   type CuratedCatalog,
 } from "./catalog-curation";
+import {
+  VENDORED_LOGO_DIRECTORY,
+  VENDORED_LOGO_MANIFEST,
+  catalogLogoObjectKey,
+  fetchLogoAsset,
+  readVendoredLogoAsset,
+  vendoredLogoManifestFingerprintInput,
+  vendoredLogosByCapabilityId,
+  type LogoFetch,
+  type VendoredLogoEntry,
+  type VendoredLogoManifest,
+} from "./catalog-vendored-logos";
 
 const SOURCE = "integrations.sh";
 const MIT_ATTRIBUTION =
   "Seed catalog metadata imported from integrations.sh / UsefulSoftwareCo integrationsdotsh (MIT License, Copyright (c) 2026 Rhys Sullivan).";
-const MAX_LOGO_BYTES = 512 * 1024;
 
 // Bump deliberately whenever normalization or import semantics can change
 // persisted output without changing the reviewed snapshot bytes.
@@ -173,7 +184,20 @@ export type ImportCatalogResult = {
 export type LogoStorage = Pick<ObjectStorage, "putObject"> & {
   bucket?: string;
 };
-export type LogoFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
+export type { LogoFetch } from "./catalog-vendored-logos";
+
+/**
+ * Where a row's rendered logo came from. `vendored` bytes are committed under
+ * `data/catalog/logos/`; `integrations.sh` bytes were fetched during this
+ * import; `generic_monogram` means no self-hosted asset exists for the row.
+ */
+export type CatalogLogoSource = "vendored" | "integrations.sh" | "generic_monogram";
+
+export type CatalogLogoResolution = {
+  logoAssetPath: string | null;
+  logoSource: CatalogLogoSource;
+  failure: { reason: string; sourceUrl: string | null } | null;
+};
 
 export async function readSnapshotFile(path: string): Promise<unknown> {
   return JSON.parse(await readFile(path, "utf8"));
@@ -457,7 +481,11 @@ export async function importIntegrationsCatalog(input: {
   snapshotRef?: string | null;
   storage?: LogoStorage | null;
   fetchImpl?: LogoFetch;
+  /** `false` skips network logo fetches; vendored assets are still stored. */
   storeLogos?: boolean;
+  /** Test seam. Production always uses the committed manifest and directory. */
+  vendoredLogos?: VendoredLogoManifest | null;
+  vendoredLogoDirectory?: string;
 }): Promise<ImportCatalogResult> {
   const normalized = normalizeCatalogSnapshot(input.snapshot);
   if (normalized.rows.length === 0) {
@@ -482,30 +510,36 @@ export async function importIntegrationsCatalog(input: {
     },
   });
   const logoFailures: ImportCatalogResult["logoFailures"] = [];
+  const vendoredLogos = vendoredLogosByCapabilityId(
+    input.vendoredLogos === undefined
+      ? VENDORED_LOGO_MANIFEST
+      : (input.vendoredLogos ?? { version: 1, entries: [] }),
+  );
 
   for (const row of normalized.rows) {
-    let logoAssetPath: string | null = null;
-    if (input.storeLogos !== false && row.logoSourceUrl) {
-      const logo = await storeLogoForRow(row, {
-        storage: input.storage ?? null,
-        fetchImpl: input.fetchImpl ?? fetch,
+    const logo = await resolveCatalogRowLogo(row, {
+      storage: input.storage ?? null,
+      fetchImpl: input.fetchImpl ?? fetch,
+      storeLogos: input.storeLogos !== false,
+      vendoredLogos,
+      ...(input.vendoredLogoDirectory
+        ? { vendoredLogoDirectory: input.vendoredLogoDirectory }
+        : {}),
+    });
+    if (logo.failure) {
+      logoFailures.push({
+        domain: row.domain,
+        mcpUrl: row.mcpUrl,
+        reason: logo.failure.reason,
+        sourceUrl: logo.failure.sourceUrl,
       });
-      if (logo.ok) {
-        logoAssetPath = logo.path;
-      } else {
-        logoFailures.push({
-          domain: row.domain,
-          mcpUrl: row.mcpUrl,
-          reason: logo.reason,
-          sourceUrl: logo.sourceUrl,
-        });
-      }
     }
     await upsertRegistryCapabilityCatalogItem(
       input.db,
       catalogRowToDbInput(row, {
         importBatchId: batch.id,
-        logoAssetPath,
+        logoAssetPath: logo.logoAssetPath,
+        logoSource: logo.logoSource,
       }),
     );
   }
@@ -555,6 +589,8 @@ export function catalogRowToDbInput(
   input: {
     importBatchId: string;
     logoAssetPath?: string | null;
+    /** Defaults to the legacy derivation from `logoSourceUrl` when omitted. */
+    logoSource?: CatalogLogoSource;
   },
 ): RegistryCapabilityCatalogItemInput {
   return {
@@ -576,7 +612,7 @@ export function catalogRowToDbInput(
     ...(row.category ? { category: row.category } : {}),
     tags: ["mcp", "integration", row.tier, row.authKind],
     metadata: {
-      logoSource: row.logoSourceUrl ? "integrations.sh" : "generic_monogram",
+      logoSource: input.logoSource ?? (row.logoSourceUrl ? "integrations.sh" : "generic_monogram"),
       originalLogoUrl: row.logoSourceUrl,
       ...(row.featured || row.official
         ? {
@@ -616,6 +652,85 @@ export function catalogRowToDbInput(
   };
 }
 
+/**
+ * Resolves the self-hosted logo for one row.
+ *
+ * Order of authority: a curated `logoSourceUrl: null` always wins and yields the
+ * monogram with no fetch and no vendored copy, even if a vendored file exists.
+ * Otherwise a vendored asset whose recorded source matches the row's effective
+ * source is copied into object storage regardless of `storeLogos`, because it
+ * adds no third-party dependency. Only the uncurated remainder is fetched from
+ * the network, and only when `storeLogos` is true.
+ */
+export async function resolveCatalogRowLogo(
+  row: CatalogIntegrationRow,
+  input: {
+    storage: LogoStorage | null;
+    fetchImpl: LogoFetch;
+    storeLogos: boolean;
+    vendoredLogos: ReadonlyMap<string, VendoredLogoEntry>;
+    vendoredLogoDirectory?: string;
+  },
+): Promise<CatalogLogoResolution> {
+  const sourceUrl = row.logoSourceUrl;
+  if (!sourceUrl) {
+    return { logoAssetPath: null, logoSource: "generic_monogram", failure: null };
+  }
+  const vendored = input.vendoredLogos.get(catalogCapabilityId(row.domain, row.mcpUrl));
+  if (vendored) {
+    if (vendored.sourceUrl !== sourceUrl) {
+      // The overlay or snapshot moved the row's logo source after vendoring.
+      // Serving the stale bytes would misattribute them; regenerate instead.
+      return {
+        logoAssetPath: null,
+        logoSource: "generic_monogram",
+        failure: { reason: "vendored_logo_source_mismatch", sourceUrl },
+      };
+    }
+    if (!input.storage) {
+      return {
+        logoAssetPath: null,
+        logoSource: "generic_monogram",
+        failure: { reason: "object_storage_unavailable", sourceUrl },
+      };
+    }
+    const asset = await readVendoredLogoAsset(
+      vendored,
+      input.vendoredLogoDirectory ?? VENDORED_LOGO_DIRECTORY,
+    );
+    if (!asset.ok) {
+      return {
+        logoAssetPath: null,
+        logoSource: "generic_monogram",
+        failure: { reason: asset.reason, sourceUrl },
+      };
+    }
+    const key = catalogLogoObjectKey(row.domain, asset.sha256, asset.contentType);
+    await input.storage.putObject({
+      key,
+      contentType: asset.contentType,
+      body: asset.bytes,
+      sha256: asset.sha256,
+    });
+    return { logoAssetPath: key, logoSource: "vendored", failure: null };
+  }
+  if (!input.storeLogos) {
+    return { logoAssetPath: null, logoSource: "generic_monogram", failure: null };
+  }
+  const stored = await storeLogoForRow(row, {
+    storage: input.storage,
+    fetchImpl: input.fetchImpl,
+  });
+  if (stored.ok) {
+    return { logoAssetPath: stored.path, logoSource: "integrations.sh", failure: null };
+  }
+  return {
+    logoAssetPath: null,
+    logoSource: "generic_monogram",
+    failure: { reason: stored.reason, sourceUrl: stored.sourceUrl },
+  };
+}
+
 export async function storeLogoForRow(
   row: CatalogIntegrationRow,
   input: {
@@ -630,49 +745,23 @@ export async function storeLogoForRow(
   if (!input.storage) {
     return { ok: false, sourceUrl, reason: "object_storage_unavailable" };
   }
-  let response: Response;
-  try {
-    response = await input.fetchImpl(sourceUrl);
-  } catch (error) {
-    return {
-      ok: false,
-      sourceUrl,
-      reason: `fetch_failed:${error instanceof Error ? error.message : String(error)}`,
-    };
+  const asset = await fetchLogoAsset(sourceUrl, input.fetchImpl);
+  if (!asset.ok) {
+    return { ok: false, sourceUrl, reason: asset.reason };
   }
-  if (!response.ok) {
-    return { ok: false, sourceUrl, reason: `http_status:${response.status}` };
-  }
-  const contentType = normalizedContentType(response.headers.get("content-type"));
-  if (!contentType?.startsWith("image/")) {
-    return {
-      ok: false,
-      sourceUrl,
-      reason: `invalid_content_type:${contentType ?? "missing"}`,
-    };
-  }
-  const contentLength = response.headers.get("content-length");
-  if (contentLength && Number(contentLength) > MAX_LOGO_BYTES) {
-    return { ok: false, sourceUrl, reason: "image_too_large" };
-  }
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > MAX_LOGO_BYTES) {
-    return { ok: false, sourceUrl, reason: "image_too_large" };
-  }
-  const digest = createHash("sha256").update(bytes).digest("hex");
-  const key = `catalog-assets/integrations-sh/logos/${safePathSegment(row.domain)}/${digest.slice(0, 24)}.${extensionForContentType(contentType)}`;
+  const key = catalogLogoObjectKey(row.domain, asset.sha256, asset.contentType);
   await input.storage.putObject({
     key,
-    contentType,
-    body: bytes,
-    sha256: digest,
+    contentType: asset.contentType,
+    body: asset.bytes,
+    sha256: asset.sha256,
   });
   return {
     ok: true,
     path: key,
     sourceUrl,
-    contentType,
-    sizeBytes: bytes.byteLength,
+    contentType: asset.contentType,
+    sizeBytes: asset.bytes.byteLength,
   };
 }
 
@@ -990,41 +1079,6 @@ function stableRowSortKey(row: CatalogIntegrationRow): string {
   return `${row.domain}\n${row.name}\n${row.provenance}\n${row.logoSourceUrl ?? ""}\n${row.mcpUrl}`;
 }
 
-function normalizedContentType(value: string | null): string | null {
-  return value?.split(";")[0]?.trim().toLowerCase() || null;
-}
-
-function extensionForContentType(contentType: string): string {
-  if (contentType === "image/svg+xml") {
-    return "svg";
-  }
-  if (contentType === "image/jpeg") {
-    return "jpg";
-  }
-  if (contentType === "image/png") {
-    return "png";
-  }
-  if (contentType === "image/gif") {
-    return "gif";
-  }
-  if (contentType === "image/webp") {
-    return "webp";
-  }
-  if (contentType === "image/x-icon" || contentType === "image/vnd.microsoft.icon") {
-    return "ico";
-  }
-  return "img";
-}
-
-function safePathSegment(value: string): string {
-  return (
-    value
-      .toLowerCase()
-      .replace(/[^a-z0-9.-]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "unknown"
-  );
-}
-
 function slugify(value: string): string {
   return (
     value
@@ -1174,6 +1228,8 @@ export async function catalogImportFingerprint(input: {
   semanticVersion?: number;
   /** Test seam. Production always fingerprints the committed overlay. */
   curatedCatalog?: CuratedCatalog;
+  /** Test seam. Production always fingerprints the committed vendored manifest. */
+  vendoredLogos?: VendoredLogoManifest;
 }): Promise<string> {
   const semanticVersion = input.semanticVersion ?? CATALOG_IMPORT_SEMANTIC_VERSION;
   if (!Number.isSafeInteger(semanticVersion) || semanticVersion < 1 || semanticVersion > 9999) {
@@ -1188,6 +1244,11 @@ export async function catalogImportFingerprint(input: {
   const curatedSha256 = createHash("sha256")
     .update(curatedCatalogFingerprintInput(input.curatedCatalog ?? CURATED_CATALOG))
     .digest("hex");
+  // Vendored logos are copied into object storage by every import, so a new or
+  // replaced asset must invalidate `--if-changed` exactly like the overlay.
+  const vendoredLogosSha256 = createHash("sha256")
+    .update(vendoredLogoManifestFingerprintInput(input.vendoredLogos ?? VENDORED_LOGO_MANIFEST))
+    .digest("hex");
   const digest = createHash("sha256")
     .update(
       JSON.stringify({
@@ -1196,6 +1257,7 @@ export async function catalogImportFingerprint(input: {
         snapshotRef: input.snapshotRef ?? null,
         snapshotSha256,
         curatedSha256,
+        vendoredLogosSha256,
       }),
     )
     .digest("hex");
@@ -1303,7 +1365,9 @@ if (import.meta.main) {
       await dbClient.close();
       process.exit(0);
     }
-    const storage = args.skipLogos ? null : createObjectStorage(settings);
+    // Vendored curated logos are stored even with --skip-logos; the flag only
+    // suppresses network fetches for the uncurated long tail.
+    const storage = createObjectStorage(settings);
     const result = await importIntegrationsCatalog({
       db: dbClient.db,
       snapshot,
