@@ -59,6 +59,15 @@ contract:
   cadence defaults, and interactive read policy without starting ingestion.
 - OpenGeni cannot create, edit, or delete files in Drive. Outbound publishing is
   a separate capability and is not implied by this connector.
+- Publication destination authority is frozen at turn acceptance: the exact
+  output folder is copied into the accepted delegation, and a later
+  connection-settings change fails the already-accepted turn's publication
+  closed instead of silently redirecting it (pre-freeze turns keep the bounded
+  legacy live resolution). Every publication - model or Codemode caller -
+  registers a durable execute-once fence before any provider request; a
+  failure before the first request settles `not_executed` (safe to retry),
+  while a failure after it settles `uncertain` and the tool surfaces the
+  unknown outcome so nobody blindly retries a POST that may have landed.
 - OAuth tokens remain encrypted and server-side. They do not enter browser
   persistence, model context, agent sandboxes, source metadata, logs, or webhook
   payloads.

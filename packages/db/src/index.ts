@@ -24034,7 +24034,13 @@ export type BeginConnectorActionExecutionResult =
   | {
       allowed: false;
       managed: true;
-      reason: "approval_required" | "blocked" | "rejected" | "already_executed" | "uncertain_retry";
+      reason:
+        | "approval_required"
+        | "blocked"
+        | "rejected"
+        | "already_executed"
+        | "uncertain_retry"
+        | "not_executed";
       requestId: string;
       actionFingerprint: string;
     };
@@ -24922,7 +24928,9 @@ export async function beginConnectorActionExecution(
               ? "rejected"
               : row.status === "blocked"
                 ? "blocked"
-                : "already_executed";
+                : row.status === "failed"
+                  ? "not_executed"
+                  : "already_executed";
         return {
           allowed: false,
           managed: true,
@@ -24941,7 +24949,7 @@ export async function completeConnectorActionExecution(
     workspaceId: string;
     requestId: string;
     attemptId: string;
-    outcome: "completed" | "uncertain";
+    outcome: "completed" | "uncertain" | "not_executed";
   },
 ): Promise<void> {
   await withRlsContext(
@@ -24962,14 +24970,17 @@ export async function completeConnectorActionExecution(
           .for("update")
           .limit(1);
         if (!existing) throw new Error("Connector action request not found for completion");
-        if (existing.status === input.outcome) return;
+        // A not-executed completion is a terminal failure whose provider
+        // request never happened; it keeps the existing status vocabulary.
+        const terminalStatus = input.outcome === "not_executed" ? "failed" : input.outcome;
+        if (existing.status === terminalStatus && existing.outcome === input.outcome) return;
         if (existing.status !== "executing") {
           throw new Error(`Connector action request cannot complete from ${existing.status}`);
         }
         const [row] = await tx
           .update(schema.connectorActionRequests)
           .set({
-            status: input.outcome,
+            status: terminalStatus,
             outcome: input.outcome,
             executionFinishedAt: new Date(),
             updatedAt: new Date(),
@@ -24982,7 +24993,9 @@ export async function completeConnectorActionExecution(
           action:
             input.outcome === "completed"
               ? "connector.action.execution_completed"
-              : "connector.action.execution_uncertain",
+              : input.outcome === "not_executed"
+                ? "connector.action.execution_not_executed"
+                : "connector.action.execution_uncertain",
           subjectId: row.initiatorSubjectId,
           extra: { outcome: input.outcome },
         });

@@ -712,6 +712,16 @@ describe("personal MCP connection delegation", () => {
       ownerSubjectId: "user:owner",
       providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
       kind: "oauth2",
+      // The exact destination frozen at acceptance: a later
+      // connection-settings change can never redirect an already-accepted
+      // turn's publication.
+      outputDestination: {
+        folderId: "folder-1",
+        folderName: "Published",
+        driveId: null,
+        location: "my_drive",
+        selectedAt: "2026-08-14T00:00:00.000Z",
+      },
     });
     const inherited = personalConnectionDelegationsFromParent({
       servers: [],

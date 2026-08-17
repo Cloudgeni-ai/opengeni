@@ -693,4 +693,150 @@ describe("Google Drive editable artifact publication", () => {
     ).rejects.toThrow("was not executed: blocked");
     expect(completions).toEqual([]);
   });
+
+  test("a frozen delegation destination overrides live metadata and fail-closes on drift", async () => {
+    const frozenDelegation = { ...publicationDelegation, outputDestination: destination };
+    // Frozen matches live: resolves to the frozen destination.
+    expect(
+      await resolveGoogleDrivePublicationTarget({} as Database, workspaceId, [frozenDelegation], {
+        getMembership: async () => ({}) as never,
+        getConnection: async () => connection() as never,
+      }),
+    ).toEqual(target);
+    // The owner re-pointed the connection at a different folder after
+    // acceptance: the already-accepted turn must not publish anywhere.
+    const moved = connection();
+    (moved.metadata as { outputDestination: typeof destination }).outputDestination = {
+      ...destination,
+      folderId: "folder-moved",
+      folderName: "Elsewhere",
+      selectedAt: "2026-08-16T00:00:00.000Z",
+    };
+    expect(
+      await resolveGoogleDrivePublicationTarget({} as Database, workspaceId, [frozenDelegation], {
+        getMembership: async () => ({}) as never,
+        getConnection: async () => moved as never,
+      }),
+    ).toBeNull();
+    // A pre-freeze delegation keeps the bounded legacy live resolution.
+    expect(
+      await resolveGoogleDrivePublicationTarget(
+        {} as Database,
+        workspaceId,
+        [publicationDelegation],
+        {
+          getMembership: async () => ({}) as never,
+          getConnection: async () => moved as never,
+        },
+      ),
+    ).toEqual({
+      ...target,
+      destination: (moved.metadata as { outputDestination: typeof destination }).outputDestination,
+    });
+  });
+
+  test("model callers hit the same durable fence and an uncertain retry surfaces an unknown outcome", async () => {
+    let begins = 0;
+    const tool = createGoogleDrivePublicationAttemptTool({
+      db: {} as Database,
+      objectStorage: objectStorage(),
+      identity,
+      subjectId: "subject-a",
+      target,
+      resolveCredential: async () => ({ status: "ok" }) as never,
+      ports: {
+        getConnection: async () => connection() as never,
+        getMembership: async () => ({}) as never,
+        readMaterialization: async () => materialization() as never,
+        requireFile: async () => sourceFile,
+        prepare: async () => ({ managed: true, decision: "allow" }),
+        begin: async () => {
+          begins += 1;
+          return { allowed: false, managed: true, requestId: "r", reason: "uncertain_retry" };
+        },
+        complete: async () => {
+          throw new Error("a denied admission must not complete");
+        },
+        fetch: async () => new Response("must not call provider", { status: 500 }),
+      },
+    });
+    await expect(
+      tool.execute(request, {
+        operationId: "99999999-9999-4999-8999-999999999999",
+        caller: { kind: "model", subjectId: "agent:test" },
+      }),
+    ).rejects.toThrow("outcome is unknown");
+    expect(begins).toBe(1);
+  });
+
+  test("a failure before any provider request completes not_executed with a retry-safe message", async () => {
+    const completions: string[] = [];
+    const tool = createGoogleDrivePublicationAttemptTool({
+      db: {} as Database,
+      objectStorage: objectStorage(),
+      identity,
+      subjectId: "subject-a",
+      target,
+      resolveCredential: async () => ({ status: "auth_needed" }) as never,
+      ports: {
+        getConnection: async () => connection() as never,
+        getMembership: async () => ({}) as never,
+        readMaterialization: async () => materialization() as never,
+        requireFile: async () => sourceFile,
+        prepare: async () => ({ managed: true, decision: "allow" }),
+        begin: async () => ({ allowed: true, managed: true, requestId: "req-1" }),
+        complete: async (_db, completion) => {
+          completions.push(completion.outcome);
+        },
+        fetch: async () => new Response("must not call provider", { status: 500 }),
+      },
+    });
+    await expect(
+      tool.execute(request, {
+        operationId: "99999999-9999-4999-8999-999999999999",
+        caller: { kind: "model", subjectId: "agent:test" },
+      }),
+    ).rejects.toThrow("was not executed: no request reached Google Drive");
+    expect(completions).toEqual(["not_executed"]);
+  });
+
+  test("a failure after the provider request started completes uncertain with an unknown-outcome message", async () => {
+    const completions: string[] = [];
+    const tool = createGoogleDrivePublicationAttemptTool({
+      db: {} as Database,
+      objectStorage: objectStorage(),
+      identity,
+      subjectId: "subject-a",
+      target,
+      resolveCredential: async () =>
+        ({
+          status: "ok",
+          headers: { authorization: "Bearer token" },
+          connectionId,
+          connectionVersion: 3,
+          expiresAt: null,
+        }) as never,
+      ports: {
+        getConnection: async () => connection() as never,
+        getMembership: async () => ({}) as never,
+        readMaterialization: async () => materialization() as never,
+        requireFile: async () => sourceFile,
+        prepare: async () => ({ managed: true, decision: "allow" }),
+        begin: async () => ({ allowed: true, managed: true, requestId: "req-2" }),
+        complete: async (_db, completion) => {
+          completions.push(completion.outcome);
+        },
+        fetch: async () => {
+          throw new Error("socket reset mid-upload");
+        },
+      },
+    });
+    await expect(
+      tool.execute(request, {
+        operationId: "99999999-9999-4999-8999-999999999999",
+        caller: { kind: "model", subjectId: "agent:test" },
+      }),
+    ).rejects.toThrow("outcome is unknown");
+    expect(completions).toEqual(["uncertain"]);
+  });
 });
