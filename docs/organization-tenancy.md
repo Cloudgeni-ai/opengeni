@@ -229,7 +229,17 @@ retained process's next mutation (`authority_unattributed`) - in both cases the
 running provider process is never terminated or re-owned, and the fence
 consumes no workspace generation. The lifecycle still never infers ownership
 for a historical row whose authority was never recorded; stream-token
-invalidation remains in the separate live-access hardening program. `retain`
+invalidation remains in the separate live-access hardening program.
+Connection-use audit facts and variable-set audit events carry the same
+attribution since migration 0280: every `connection_use_audit_facts` row
+records the frozen causal initiator and the session authority
+epoch/visibility/owner observed by the exact locked rows of that use (NULL
+attribution on a fence that never loaded them is itself the honest fact), and
+variable-set materialization/secret-read audits carry the causal human,
+attempt authority triple, and owner authority identity. Variable-set denials
+raise and roll their transaction back by design; the application records the
+metadata-only denial fact in a fresh transaction instead of weakening the
+fail-closed seam. `retain`
 has no deletion deadline;
 `delete_after` accepts the initial 30–90 day policy window and stamps a bounded
 future deadline. Destructive expiry is an explicit operator lifecycle, not an

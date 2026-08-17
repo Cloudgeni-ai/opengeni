@@ -15244,7 +15244,7 @@ export async function readVariableSetSecretAtomically(
   if ((input.variableSetId === undefined) === (input.variableSetName === undefined)) {
     throw new Error("exactly one variableSetId or variableSetName is required");
   }
-  return await withRlsContext(
+  const outcome = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
@@ -15288,7 +15288,35 @@ export async function readVariableSetSecretAtomically(
           });
         } catch (error) {
           if (input.actor.kind === "agent_attempt") {
-            throw new VariableSetSecretReadAuthorityError();
+            // Only an actual authority denial (42501) is durable denial
+            // evidence. A transient failure (deadlock, timeout, missing row)
+            // keeps the typed rejection but must not fabricate a denial fact.
+            if (nestedPostgresSqlState(error) !== "42501") {
+              return DENIED_VARIABLE_SET_SECRET_READ_UNRECORDED;
+            }
+            // The denied read was a savepoint; this outer transaction is
+            // alive, so the metadata-only denial fact commits with it while
+            // the typed rejection still reaches the caller (thrown outside
+            // the transaction callback so the audit row survives).
+            await tx.insert(schema.auditEvents).values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.subjectId,
+              action: "variable_set.secret.read.denied",
+              targetType: "workspace_variable_set",
+              targetId: input.variableSetId ?? input.variableSetName ?? "unresolved",
+              metadata: {
+                outcome: "denied",
+                name: input.name,
+                actorKind: input.actor.kind,
+                sessionId: input.actor.sessionId,
+                turnId: input.actor.turnId,
+                attemptId: input.actor.attemptId,
+                executionGeneration: input.actor.executionGeneration,
+              },
+              metadataCodecVersion: 1,
+            });
+            return DENIED_VARIABLE_SET_SECRET_READ;
           }
           if (nestedPostgresSqlState(error) === "P0002") {
             return null;
@@ -15307,7 +15335,19 @@ export async function readVariableSetSecretAtomically(
         };
       }),
   );
+  if (
+    outcome === DENIED_VARIABLE_SET_SECRET_READ ||
+    outcome === DENIED_VARIABLE_SET_SECRET_READ_UNRECORDED
+  ) {
+    throw new VariableSetSecretReadAuthorityError();
+  }
+  return outcome;
 }
+
+const DENIED_VARIABLE_SET_SECRET_READ = Symbol("denied-variable-set-secret-read");
+const DENIED_VARIABLE_SET_SECRET_READ_UNRECORDED = Symbol(
+  "denied-variable-set-secret-read-unrecorded",
+);
 
 export async function updateVariableSet(
   db: Database,
@@ -17488,6 +17528,82 @@ export async function getVariableSetValuesForRun(
   };
   values: Record<string, string>;
 } | null> {
+  try {
+    return await getVariableSetValuesForRunInTransaction(db, input);
+  } catch (error) {
+    // Denials RAISE inside the SECURITY DEFINER seam, so their transaction -
+    // including any audit row it could have written - rolls back by design.
+    // Record the denial fact from out here in a fresh transaction instead:
+    // metadata-only, content-free, never weakening the fail-closed contract.
+    if (nestedPostgresSqlState(error) === "42501") {
+      await recordVariableSetDenialAudit(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        action: "variable_set.materialize.denied",
+        variableSetId: input.variableSetId,
+        subjectId:
+          input.authority.kind === "agent_attempt" ? input.authority.subjectId : "service:session",
+        ...(input.authority.kind === "agent_attempt"
+          ? {
+              sessionId: input.authority.sessionId,
+              turnId: input.authority.turnId,
+              attemptId: input.authority.attemptId,
+              executionGeneration: input.authority.executionGeneration,
+            }
+          : { sessionId: input.authority.sessionId }),
+      }).catch(() => undefined);
+    }
+    throw error;
+  }
+}
+
+async function recordVariableSetDenialAudit(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    action: string;
+    variableSetId?: string;
+    subjectId: string;
+    sessionId?: string;
+    turnId?: string;
+    attemptId?: string;
+    executionGeneration?: number;
+    name?: string;
+  },
+): Promise<void> {
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        action: input.action,
+        targetType: "workspace_variable_set",
+        targetId: input.variableSetId ?? "unresolved",
+        metadata: {
+          outcome: "denied",
+          ...(input.variableSetId ? { variableSetId: input.variableSetId } : {}),
+          ...(input.name ? { name: input.name } : {}),
+          ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+          ...(input.turnId ? { turnId: input.turnId } : {}),
+          ...(input.attemptId ? { attemptId: input.attemptId } : {}),
+          ...(input.executionGeneration !== undefined
+            ? { executionGeneration: input.executionGeneration }
+            : {}),
+        },
+        metadataCodecVersion: 1,
+      });
+    },
+  );
+}
+
+async function getVariableSetValuesForRunInTransaction(
+  db: Database,
+  input: Parameters<typeof getVariableSetValuesForRun>[1],
+): ReturnType<typeof getVariableSetValuesForRun> {
   return await withRlsContext(db, input, async (scopedDb) => {
     if (input.authority.kind === "agent_attempt") {
       await setSubjectRlsContext(scopedDb, input.authority.subjectId);
