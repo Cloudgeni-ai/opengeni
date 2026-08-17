@@ -88,6 +88,7 @@ import { withCachedController } from "../controller-data-plane";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { interactionControlApiError } from "../http/interaction-control-error";
+import { createInteractionFrameProxyAttachment } from "../interaction-frame-proxy";
 import { observeComputerActionResult, observeLifecycleResult } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 
@@ -562,30 +563,43 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
                   },
                 };
               })()
-            : record.session.placement.kind === "sandbox_group" &&
-                record.session.platform === "linux" &&
-                target.kind === "screen"
-              ? {
-                  kind: "direct_rfb" as const,
-                  url: await client.computerRfbStreamUrl(reference, request.targetId),
-                  protocols: [
-                    "binary",
-                    COMPUTER_RFB_WEBSOCKET_PROTOCOL,
-                    `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
-                  ],
-                }
-              : {
-                  kind: "direct_websocket" as const,
-                  url: await client.computerFrameStreamUrl(
-                    reference,
-                    request.targetId,
-                    request.stream,
-                  ),
-                  protocols: [
-                    COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
-                    `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
-                  ],
-                };
+            : await (async () => {
+                const rfb =
+                  record.session.placement.kind === "sandbox_group" &&
+                  record.session.platform === "linux" &&
+                  target.kind === "screen";
+                const protocols = rfb
+                  ? [
+                      "binary",
+                      COMPUTER_RFB_WEBSOCKET_PROTOCOL,
+                      `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
+                    ]
+                  : [
+                      COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
+                      `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
+                    ];
+                const upstreamUrl = rfb
+                  ? await client.computerRfbStreamUrl(reference, request.targetId)
+                  : await client.computerFrameStreamUrl(
+                      reference,
+                      request.targetId,
+                      request.stream,
+                    );
+                const attachment =
+                  placement.lease?.backend === "docker"
+                    ? createInteractionFrameProxyAttachment({
+                        requestUrl: context.req.url,
+                        rootSecret: controllerAuthorityRoot(deps),
+                        upstreamUrl,
+                        upstreamProtocols: protocols,
+                        origin,
+                        expiresAt,
+                      })
+                    : { url: upstreamUrl, protocols };
+                return rfb
+                  ? { kind: "direct_rfb" as const, ...attachment }
+                  : { kind: "direct_websocket" as const, ...attachment };
+              })();
           return ComputerSessionAttachment.parse({
             computerSessionId,
             controllerGeneration: binding.controllerGeneration,

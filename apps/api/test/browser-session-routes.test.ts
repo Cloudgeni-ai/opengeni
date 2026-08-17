@@ -101,6 +101,8 @@ describe("BrowserSession route discipline", () => {
     );
     expect(attachment).toContain("requestOrigin(context, deps.settings)");
     expect(attachment).toContain("client.addAllowedOrigins([origin])");
+    expect(attachment).toContain('placement.lease?.backend === "docker"');
+    expect(attachment).toContain("createInteractionFrameProxyAttachment");
   });
 
   test("rejects archived identities before acquiring a browser placement", async () => {

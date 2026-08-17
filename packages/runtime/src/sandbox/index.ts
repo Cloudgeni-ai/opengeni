@@ -61,6 +61,7 @@ import { normalizeProtocolJsonValue } from "../protocol-json";
 import { sandboxCommandExitCode, sandboxCommandStillRunning } from "./command-result";
 import { parseExecBannerSessionId } from "./exec-banner";
 import { runStateCompatibilityProvider, runStateExposedPortsRecord } from "./run-state-compat";
+import type { ExposedPortEndpoint } from "./stream-port";
 
 // Re-export the config-owned environment/port helpers from the leaf so the
 // API-direct control plane can pull its full sandbox-construction surface from
@@ -685,6 +686,24 @@ function withDockerNetwork(client: SandboxClient, network: string | undefined): 
     const containerId = (session as { state?: { containerId?: unknown } }).state?.containerId;
     if (typeof containerId === "string" && containerId.length > 0) {
       await connectDockerNetwork(trimmed, containerId);
+      const portResolver = (
+        session as T & {
+          resolveExposedPort?: (port: number) => Promise<ExposedPortEndpoint>;
+        }
+      ).resolveExposedPort;
+      if (typeof portResolver === "function") {
+        Object.defineProperty(session, "resolveExposedPort", {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: async (port: number) =>
+            dockerNetworkExposedPortEndpoint(
+              containerId,
+              port,
+              await portResolver.call(session, port),
+            ),
+        });
+      }
     }
     return session;
   };
@@ -744,6 +763,26 @@ function withDockerNetwork(client: SandboxClient, network: string | undefined): 
             await client.deserializeSessionState!(state),
         }
       : {}),
+  };
+}
+
+/**
+ * Once a Docker sandbox joins the API's network, server-side traffic must use
+ * the container's network identity and original port. The SDK's published
+ * 127.0.0.1 host port is meaningful only to the Docker host, not to an API
+ * process running in another container. Calling the provider resolver first
+ * preserves its exposed-port validation.
+ */
+export function dockerNetworkExposedPortEndpoint(
+  containerId: string,
+  containerPort: number,
+  endpoint: ExposedPortEndpoint,
+): ExposedPortEndpoint {
+  const host = /^[a-f0-9]{64}$/i.test(containerId) ? containerId.slice(0, 12) : containerId;
+  return {
+    ...endpoint,
+    host,
+    port: containerPort,
   };
 }
 
