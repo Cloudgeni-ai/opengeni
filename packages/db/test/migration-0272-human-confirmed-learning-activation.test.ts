@@ -24,6 +24,13 @@ describe("migration 0272 human-confirmed learning activation", () => {
     expect(sql).toContain("AND request.status = 'answered'");
     expect(sql).toContain("AND request.responded_by = caller_subject_id");
     expect(sql).toContain("AND answer.value->'values' = to_jsonb(ARRAY['save'])");
+    // The question the human saw is reconstructed from the exact Task-note text
+    // and proposal lane; prompt, help text, and options must all match.
+    expect(sql).toContain("human_question_help := left(task_note_row.text, 2000);");
+    expect(sql).toContain("AND question.value->>'prompt' = human_question_prompt");
+    expect(sql).toContain("AND question.value->>'helpText' = human_question_help");
+    expect(sql).toContain("AND question.value->'options' = human_question_options");
+    expect(sql).toContain("human confirmation requires exact Task-note evidence");
     // Confirmable receipts only; policy off still fails closed.
     expect(sql).toContain("AND receipt.outcome IN ('suggest', 'automatic', 'confidence')");
     expect(sql).toContain("IF current_mode = 'off' THEN");

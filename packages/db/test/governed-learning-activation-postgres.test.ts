@@ -162,11 +162,12 @@ async function decision(
   } = { kind: "policy", scope: "global", roleKey: null },
   expectedInstructionActivationVersion = 0,
 ) {
+  const noteText = `Activation source ${crypto.randomUUID()}`;
   const note = await createTaskNote(client!.db, {
     ...f.writerAttempt,
     operationId: crypto.randomUUID(),
     kind: "decision",
-    text: `Activation source ${crypto.randomUUID()}`,
+    text: noteText,
     expiresInDays: 7,
   });
   const common = {
@@ -222,28 +223,39 @@ async function decision(
     },
   });
   expect(receipt.automaticEligible).toBe(f.mode === "automatic");
-  return { write, receipt };
+  return { write, receipt, noteText };
 }
 
 async function answeredRememberInput(
   f: Awaited<ReturnType<typeof fixture>>,
   proposalId: string,
+  content: string,
   overrides: {
     respondedBy?: string;
     answer?: string[];
     questionId?: string;
     status?: string;
     turnGeneration?: number;
+    prompt?: string;
+    helpText?: string;
+    options?: Array<{ id: string; label: string }>;
+    lane?: "preference" | "instruction_policy";
   } = {},
 ): Promise<string> {
   const id = crypto.randomUUID();
   const questionId = overrides.questionId ?? `remember:${proposalId}`;
+  const what =
+    (overrides.lane ?? "preference") === "preference"
+      ? "workspace preference"
+      : "mandatory workspace rule";
   const questions = [
     {
       id: questionId,
       kind: "single_select",
-      prompt: "Save this as a workspace preference?",
-      options: [
+      prompt: overrides.prompt ?? `Save this as a ${what} for everyone in this workspace?`,
+      label: "Remember",
+      helpText: overrides.helpText ?? content,
+      options: overrides.options ?? [
         { id: "save", label: "Save" },
         { id: "skip", label: "Don't save" },
       ],
@@ -971,7 +983,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
     if (!shared || !client) return;
     const f = await fixture("suggest");
     const d = await decision(f, "preference");
-    const answered = await answeredRememberInput(f, d.write.knowledgeChangeProposalId!);
+    const answered = await answeredRememberInput(f, d.write.knowledgeChangeProposalId!, d.noteText);
     // Simulate the worker closing the minting attempt for human input and
     // claiming a new attempt on the same turn and execution generation.
     const resumedAttemptId = crypto.randomUUID();
@@ -1029,21 +1041,44 @@ describe("governed-learning activation PostgreSQL authority", () => {
       }),
     ).rejects.toThrow();
 
-    const wrongSubject = await answeredRememberInput(f, proposalId, {
+    const wrongSubject = await answeredRememberInput(f, proposalId, d.noteText, {
       respondedBy: "user:someone-else",
     });
-    const skipped = await answeredRememberInput(f, proposalId, { answer: ["skip"] });
-    const otherProposal = await answeredRememberInput(f, proposalId, {
+    const skipped = await answeredRememberInput(f, proposalId, d.noteText, { answer: ["skip"] });
+    const otherProposal = await answeredRememberInput(f, proposalId, d.noteText, {
       questionId: `remember:${crypto.randomUUID()}`,
     });
-    const pending = await answeredRememberInput(f, proposalId, { status: "pending" });
-    const staleGeneration = await answeredRememberInput(f, proposalId, { turnGeneration: 2 });
+    const pending = await answeredRememberInput(f, proposalId, d.noteText, { status: "pending" });
+    const staleGeneration = await answeredRememberInput(f, proposalId, d.noteText, {
+      turnGeneration: 2,
+    });
+    // The human must have seen the canonical prompt, the exact content, and
+    // the fixed options; a misleading agent-authored question cannot confirm.
+    const misleadingPrompt = await answeredRememberInput(f, proposalId, d.noteText, {
+      prompt: "Continue setup?",
+    });
+    const hiddenContent = await answeredRememberInput(f, proposalId, d.noteText, {
+      helpText: "Nothing important.",
+    });
+    const relabeledOptions = await answeredRememberInput(f, proposalId, d.noteText, {
+      options: [
+        { id: "save", label: "Yes" },
+        { id: "skip", label: "No" },
+      ],
+    });
+    const wrongLane = await answeredRememberInput(f, proposalId, d.noteText, {
+      lane: "instruction_policy",
+    });
     for (const humanInputRequestId of [
       wrongSubject,
       skipped,
       otherProposal,
       pending,
       staleGeneration,
+      misleadingPrompt,
+      hiddenContent,
+      relabeledOptions,
+      wrongLane,
       crypto.randomUUID(),
     ]) {
       await expect(
@@ -1058,7 +1093,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
       ).rejects.toBeInstanceOf(GovernedLearningActivationAuthorityError);
     }
     // Another human's session context cannot consume the owner's answer.
-    const answered = await answeredRememberInput(f, proposalId);
+    const answered = await answeredRememberInput(f, proposalId, d.noteText);
     await expect(
       activateHumanConfirmedLearningDecision(client!.db, {
         caller: { workspaceId: f.grant.workspaceId, subjectId: "user:someone-else" },

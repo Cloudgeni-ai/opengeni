@@ -156,7 +156,13 @@ confidence, and the receipt is one of:
 requires the exact initiating human's `session_human_input_requests` row: same
 session and turn, same execution generation as the decision receipt, status
 `answered`, `responded_by` equal to the turn's initiating human, and the bound
-question answered with exactly `save`. It accepts `suggest`, `automatic`, and
+question answered with exactly `save`. The question the human saw is not
+trusted from the agent: the capability reconstructs the canonical prompt from
+the proposal lane, the help text from the exact Task-note text, and the fixed
+`Save` / `Don't save` options, and refuses any human-input row whose question
+differs, so a misleading agent-authored prompt cannot obtain confirmation (only
+Task-note-backed proposals, i.e. those created by `remember`, are confirmable).
+It accepts `suggest`, `automatic`, and
 `confidence` decision receipts (never `off`, `revoked`, `stale`, or `conflict`),
 revalidates the current learning policy (not `off`), evidence, review, and
 destination CAS, and writes only through the destination-native lifecycle. The

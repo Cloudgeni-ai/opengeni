@@ -68,6 +68,13 @@ DECLARE
   destination_operation_id uuid;
   human_input_row session_human_input_requests%ROWTYPE;
   human_question_id text;
+  human_question_lane text;
+  human_question_prompt text;
+  human_question_help text;
+  human_question_options jsonb := jsonb_build_array(
+    jsonb_build_object('id', 'save', 'label', 'Save'),
+    jsonb_build_object('id', 'skip', 'label', 'Don''t save')
+  );
 BEGIN
   IF p_account_id IS NULL OR p_workspace_id IS NULL OR p_operation_id IS NULL
     OR p_decision_receipt_id IS NULL OR p_human_input_request_id IS NULL
@@ -134,33 +141,6 @@ BEGIN
     decision_row.account_id, decision_row.workspace_id, decision_row.session_id
   ) THEN
     RAISE EXCEPTION 'confirmable evaluator receipt is unavailable'
-      USING ERRCODE = '42501';
-  END IF;
-  -- The exact human must have answered the bound question for this proposal
-  -- on the same session/turn, in the same execution generation, with `save`.
-  human_question_id := 'remember:' || decision_row.proposal_id::text;
-  SELECT * INTO human_input_row FROM session_human_input_requests request
-  WHERE request.id = p_human_input_request_id
-    AND request.account_id = p_account_id AND request.workspace_id = p_workspace_id
-    AND request.session_id = decision_row.session_id
-    AND request.turn_id = decision_row.turn_id
-    AND request.turn_generation = decision_row.execution_generation
-    AND request.status = 'answered'
-    AND request.responded_by = caller_subject_id
-    AND request.response->>'outcome' = 'answered'
-    AND EXISTS (
-      SELECT 1 FROM jsonb_array_elements(request.questions) question(value)
-      WHERE question.value->>'id' = human_question_id
-        AND question.value->>'kind' = 'single_select'
-    )
-    AND EXISTS (
-      SELECT 1 FROM jsonb_array_elements(request.response->'answers') answer(value)
-      WHERE answer.value->>'questionId' = human_question_id
-        AND answer.value->'values' = to_jsonb(ARRAY['save'])
-    )
-  FOR SHARE;
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'human confirmation for this proposal is unavailable'
       USING ERRCODE = '42501';
   END IF;
   IF EXISTS (
@@ -393,6 +373,54 @@ BEGIN
       document_authority.current_acl_id, document_authority.current_acl_hash,
       evidence_row.document_chunk_id, false
     )::text, 'UTF8')), 'hex');
+  END IF;
+
+  -- The exact human must have answered the bound question for this proposal
+  -- on the same session/turn, in the same execution generation, with `save`.
+  -- The question the human saw is reconstructed here from the proposal itself
+  -- (canonical prompt, exact proposal content as help text, fixed options), so
+  -- an agent cannot obtain confirmation through a misleading prompt.
+  human_question_id := 'remember:' || decision_row.proposal_id::text;
+  -- Only Task-note evidence (the exact user-directed text) is confirmable; the
+  -- proposal content of a preference is a normalized envelope, not the words
+  -- the human was shown.
+  IF task_note_row.id IS NULL THEN
+    RAISE EXCEPTION 'human confirmation requires exact Task-note evidence' USING ERRCODE = '42501';
+  END IF;
+  human_question_lane := proposal_row.target_kind;
+  human_question_help := left(task_note_row.text, 2000);
+  human_question_prompt := 'Save this as a ' || CASE human_question_lane
+      WHEN 'instruction_policy' THEN 'mandatory workspace rule'
+      WHEN 'preference' THEN 'workspace preference'
+      ELSE 'workspace knowledge' END
+    || ' for everyone in this workspace?';
+  SELECT * INTO human_input_row FROM session_human_input_requests request
+  WHERE request.id = p_human_input_request_id
+    AND request.account_id = p_account_id AND request.workspace_id = p_workspace_id
+    AND request.session_id = decision_row.session_id
+    AND request.turn_id = decision_row.turn_id
+    AND request.turn_generation = decision_row.execution_generation
+    AND request.status = 'answered'
+    AND request.responded_by = caller_subject_id
+    AND request.response->>'outcome' = 'answered'
+    AND EXISTS (
+      SELECT 1 FROM jsonb_array_elements(request.questions) question(value)
+      WHERE question.value->>'id' = human_question_id
+        AND question.value->>'kind' = 'single_select'
+        AND question.value->>'prompt' = human_question_prompt
+        AND question.value->>'helpText' = human_question_help
+        AND question.value->'options' = human_question_options
+        AND coalesce((question.value->>'allowOther')::boolean, false) = false
+    )
+    AND EXISTS (
+      SELECT 1 FROM jsonb_array_elements(request.response->'answers') answer(value)
+      WHERE answer.value->>'questionId' = human_question_id
+        AND answer.value->'values' = to_jsonb(ARRAY['save'])
+    )
+  FOR SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'human confirmation for this proposal is unavailable'
+      USING ERRCODE = '42501';
   END IF;
   IF current_authority_hash IS DISTINCT FROM decision_row.evidence_authority_hash THEN
     RAISE EXCEPTION 'governed-learning evidence authority changed after evaluation'

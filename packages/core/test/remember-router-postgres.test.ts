@@ -116,6 +116,7 @@ async function fixture(mode: "off" | "suggest" | "automatic") {
 async function answeredRememberInput(
   f: Awaited<ReturnType<typeof fixture>>,
   proposalId: string,
+  content: string,
   answer: string[] = ["save"],
 ): Promise<string> {
   const id = crypto.randomUUID();
@@ -132,7 +133,9 @@ async function answeredRememberInput(
         {
           id: questionId,
           kind: "single_select",
-          prompt: "Save?",
+          prompt: "Save this as a workspace preference for everyone in this workspace?",
+          label: "Remember",
+          helpText: content,
           options: [
             { id: "save", label: "Save" },
             { id: "skip", label: "Don't save" },
@@ -202,7 +205,7 @@ describe("remember router (real PostgreSQL)", () => {
 
     const decisionReceiptId = receipt.learning!.receiptId;
     // A "don't save" answer cannot activate.
-    const skipped = await answeredRememberInput(f, receipt.proposalId, ["skip"]);
+    const skipped = await answeredRememberInput(f, receipt.proposalId, request.content, ["skip"]);
     await expect(
       router.confirm({
         attempt: f.attempt,
@@ -215,7 +218,7 @@ describe("remember router (real PostgreSQL)", () => {
       }),
     ).rejects.toThrow();
     // A different proposal id cannot be confirmed with this answer.
-    const answered = await answeredRememberInput(f, receipt.proposalId);
+    const answered = await answeredRememberInput(f, receipt.proposalId, request.content);
     await expect(
       router.confirm({
         attempt: f.attempt,

@@ -129,6 +129,12 @@ function promotionRequest(
   }
 }
 
+/**
+ * Canonical confirmation question. Migration 0272 reconstructs exactly this
+ * prompt/help/options from the proposal and refuses any human-input row that
+ * differs, so a misleading agent-authored prompt can never authorize a save.
+ * `helpText` truncation is by code point to match PostgreSQL `left()`.
+ */
 function humanInputPrompt(request: RememberRequest, proposalId: string) {
   const what =
     request.lane === "preference"
@@ -143,7 +149,7 @@ function humanInputPrompt(request: RememberRequest, proposalId: string) {
         kind: "single_select" as const,
         prompt: `Save this as a ${what} for everyone in this workspace?`,
         label: "Remember",
-        helpText: request.content.slice(0, 2_000),
+        helpText: Array.from(request.content).slice(0, 2_000).join(""),
         options: [
           { id: REMEMBER_HUMAN_INPUT_SAVE_OPTION, label: "Save" },
           { id: REMEMBER_HUMAN_INPUT_SKIP_OPTION, label: "Don't save" },
