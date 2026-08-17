@@ -23,7 +23,10 @@ import {
   sdkBackendIdForSandboxBackend,
   selectBackend,
 } from "../src/sandbox";
-import { dockerInspectProvesMissing } from "../src/sandbox/providers/docker";
+import {
+  dockerContinuityResumeStateForImage,
+  dockerInspectProvesMissing,
+} from "../src/sandbox/providers/docker";
 
 // Per-provider credential stubs so build() can run without real creds. Only the
 // fields validateCredentials requires per backend are present.
@@ -141,6 +144,25 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
     const tarSession = { state: { workspacePersistence: "tar", sandboxId: "box" } };
     prepareProviderForTeardownAfterCapture("vercel", tarSession);
     expect(tarSession.state).toEqual({ workspacePersistence: "tar", sandboxId: "box" });
+  });
+});
+
+describe("Docker continuity image selection", () => {
+  test("a cold replacement uses the configured image without mutating persisted state", () => {
+    const persisted = { containerId: "old-box", image: "sandbox:old", workspaceRootOwned: true };
+    const resumed = dockerContinuityResumeStateForImage(persisted, " sandbox:new ");
+    expect(resumed).toEqual({
+      containerId: "old-box",
+      image: "sandbox:new",
+      workspaceRootOwned: true,
+    });
+    expect(persisted.image).toBe("sandbox:old");
+  });
+
+  test("an unset configured image preserves the provider state", () => {
+    const persisted = { image: "sandbox:old" };
+    expect(dockerContinuityResumeStateForImage(persisted, undefined)).toBe(persisted);
+    expect(dockerContinuityResumeStateForImage(persisted, "   ")).toBe(persisted);
   });
 });
 
