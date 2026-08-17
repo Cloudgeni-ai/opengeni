@@ -2326,6 +2326,16 @@ describe("DB integration", () => {
       },
       memoryEmbedder,
     );
+    // Enabled with an absent memoryPromptMode → the retrieval_only default
+    // (OPE-249): no standing block even though records exist.
+    expect(await resolveWorkspaceMemoryBlock(dbClient.db, grant.workspaceId)).toBeNull();
+
+    // Explicit legacy_standing is the rollback opt-out and restores the block.
+    await dbClient.db.execute(dbSql`
+      update workspaces
+      set settings = settings || '{"memoryPromptMode":"legacy_standing"}'::jsonb
+      where id = ${grant.workspaceId}::uuid
+    `);
     const block = await resolveWorkspaceMemoryBlock(dbClient.db, grant.workspaceId);
     expect(block).toContain("## Workspace memory");
     expect(block).toContain("### Preferences");
@@ -2365,9 +2375,15 @@ describe("DB integration", () => {
       "Prefer Terraform for infra.",
     );
 
-    // Enabled but empty → the empty-state bootstrap block, not null.
+    // Enabled but empty under legacy_standing → the empty-state bootstrap
+    // block, not null.
     const empty = await testGrant(dbClient.db);
     await enableWorkspaceMemory(empty.workspaceId);
+    await dbClient.db.execute(dbSql`
+      update workspaces
+      set settings = settings || '{"memoryPromptMode":"legacy_standing"}'::jsonb
+      where id = ${empty.workspaceId}::uuid
+    `);
     const emptyBlock = await resolveWorkspaceMemoryBlock(dbClient.db, empty.workspaceId);
     expect(emptyBlock).toContain("currently empty");
   });
