@@ -789,6 +789,11 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       { type: "message", role: "user", content: initialMessage },
       historyItem,
     ]);
+    expect(
+      (await getActiveSessionHistoryItemsPaged(app.db, workspaceId, session.id)).map(
+        (entry) => entry.item,
+      ),
+    ).toEqual(pagedHistory.map((entry) => entry.item));
 
     const callId = "pending-synthetic-call";
     const callItem = {

@@ -11,6 +11,7 @@ import {
   SUMMARY_BUFFER_TOKENS,
   buildCompactionReplacementHistory,
   buildRemoteV2ReplacementHistory,
+  compactionThresholdTokens,
   compactionReplacementFingerprint,
   decideCompaction,
   estimateTokens,
@@ -112,6 +113,23 @@ export async function maybeCompactContext(
     );
   }
   const useRemoteV2 = options.codexCompactionMode === "remote_v2";
+
+  // An automatic check below the provider-accounted threshold cannot compact.
+  // Avoid loading and projecting the same complete history that the ordinary
+  // model-input path will load immediately afterward. Operator requests still
+  // load history so their durable requested/skipped semantics stay unchanged.
+  if (!options.force && !options.clearRequestedCompaction) {
+    const providerInputTokens =
+      typeof lastInputTokens === "number" && lastInputTokens > 0 ? lastInputTokens : 0;
+    if (providerInputTokens < compactionThresholdTokens(settings)) {
+      return {
+        compacted: false,
+        reason: "below_threshold",
+        events: [],
+        requestConsumed: false,
+      };
+    }
+  }
 
   // Preserve the complete ordered transcript while bounding each Postgres
   // driver result frame beside the decoded history already held by this turn.

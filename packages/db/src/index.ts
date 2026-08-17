@@ -22545,7 +22545,13 @@ export async function recordSessionActiveCodexCredential(
     await scopedDb
       .update(schema.sessions)
       .set({ codexLastCredentialId: credentialId, updatedAt: new Date() })
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, workspaceId),
+          eq(schema.sessions.id, sessionId),
+          sql`${schema.sessions.codexLastCredentialId} is distinct from ${credentialId}`,
+        ),
+      );
   });
 }
 
@@ -29463,7 +29469,7 @@ export async function getActiveSessionHistoryItemsPaged(
   db: Database,
   workspaceId: string,
   sessionId: string,
-  pageSize = 16,
+  pageSize = ACTIVE_SESSION_HISTORY_MAX_ROWS,
   maximumJsonBytes = ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES,
   maximumRows = ACTIVE_SESSION_HISTORY_MAX_ROWS,
   maximumJsonNodes = ACTIVE_SESSION_HISTORY_MAX_JSON_NODES,
@@ -29476,8 +29482,14 @@ export async function getActiveSessionHistoryItemsPaged(
     providerArtifactInvalidatedAt: Date | null;
   }>
 > {
-  if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) {
-    throw new Error("active session history page size must be an integer between 1 and 100");
+  if (
+    !Number.isSafeInteger(pageSize) ||
+    pageSize < 1 ||
+    pageSize > ACTIVE_SESSION_HISTORY_MAX_ROWS
+  ) {
+    throw new Error(
+      `active session history page size must be an integer between 1 and ${ACTIVE_SESSION_HISTORY_MAX_ROWS}`,
+    );
   }
   if (!Number.isSafeInteger(maximumJsonBytes) || maximumJsonBytes < 1) {
     throw new Error("active session history JSON limit must be a positive safe integer");
@@ -29648,7 +29660,7 @@ export async function getActiveSessionHistoryItemsPaged(
             item: fromPostgresLosslessJson(row.item, itemCodecVersion),
           })),
         );
-        if (page.length < pageSize) return rows;
+        if (rows.length === actualRows || page.length < pageSize) return rows;
         const nextPosition = page.at(-1)!.position;
         if (afterPosition !== null && nextPosition <= afterPosition) {
           throw new Error("active session history keyset did not advance");

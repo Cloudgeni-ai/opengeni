@@ -299,6 +299,8 @@ import {
   assertSessionAllowsProductModel,
   defaultSessionMcpServerIds,
   directPersonalConnectionSubjectId,
+  loadRigDefaultVariableSetEnvironment,
+  mergeRigDefaultVariableSetEnvironment,
   rigProviderImageContentHash,
   resolveRigProviderImageForRun,
   resolveCodexAppsCredentialIdForRun,
@@ -348,7 +350,6 @@ import {
 } from "./run-credentials";
 import { withFirstPartyTools } from "./goals";
 import {
-  mergeRigDefaultVariableSetEnvironment,
   rigProviderImageSourceImage,
   resolveWorkspacePackRuntime,
   resolveWorkspaceInstalledSkillRuntime,
@@ -5481,13 +5482,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
           if (effectiveCodexCredentialId) {
             const priorAccountId = sessionCodex?.lastCredentialId ?? null;
-            await recordSessionActiveCodexCredential(
-              db,
-              input.workspaceId,
-              input.sessionId,
-              effectiveCodexCredentialId,
-            );
             if (priorAccountId !== effectiveCodexCredentialId) {
+              await recordSessionActiveCodexCredential(
+                db,
+                input.workspaceId,
+                input.sessionId,
+                effectiveCodexCredentialId,
+              );
               const rotated = rotationDecision.kind === "active" && rotationDecision.moved;
               await publish([
                 {
@@ -6732,21 +6733,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // fixed for the session's life — the merged manifest env is therefore stable
         // across the session's turns (the same guarantee the session's own variable
         // set already relies on), keeping validateNoEnvironmentDelta empty.
-        for (const rigDefaultVariableSetId of rigDefaultVariableSetIds) {
-          const rigDefaultSet = await waitForTurnOperation(
-            loadWorkspaceEnvironmentForRunWithCredentials(
-              db,
-              runSettings,
-              connectionScope,
-              rigDefaultVariableSetId,
-              variableSetAuthority,
-              connectionCredentials?.sandboxSecrets,
-            ),
-            cancellationSignal,
-            undefined,
-          );
-          Object.assign(rigDefaultEnvironmentValues, rigDefaultSet?.values ?? {});
-        }
+        Object.assign(
+          rigDefaultEnvironmentValues,
+          await loadRigDefaultVariableSetEnvironment(
+            rigDefaultVariableSetIds,
+            async (rigDefaultVariableSetId) =>
+              await waitForTurnOperation(
+                loadWorkspaceEnvironmentForRunWithCredentials(
+                  db,
+                  runSettings,
+                  connectionScope,
+                  rigDefaultVariableSetId,
+                  variableSetAuthority,
+                  connectionCredentials?.sandboxSecrets,
+                ),
+                cancellationSignal,
+                undefined,
+              ),
+          ),
+        );
       }
       variableSetId = workspaceVariableSet?.id ?? "";
       // Session set wins collisions with the rig defaults (explicit precedence).

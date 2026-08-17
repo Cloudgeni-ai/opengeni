@@ -110,6 +110,7 @@ import {
   sandboxCommandExitCode,
   sandboxArtifactRuntimeDoctorHooks,
   sandboxFileDownloadsForAgent,
+  sandboxLifecycleHooksForIds,
   sandboxRunAs,
   codemodeTokenSeedCommand,
   withSandboxFileDownloads,
@@ -8840,6 +8841,106 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("does not reuse an SDK-global tools-list across attempt-scoped allowedTools", async () => {
+    const registryId = `scoped_${crypto.randomUUID().replaceAll("-", "_")}`;
+    let remoteLists = 0;
+    const localServer = (): MCPServer => ({
+      name: `inner-${crypto.randomUUID()}`,
+      cacheToolsList: true,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        remoteLists += 1;
+        return [
+          {
+            name: "read_records",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+          {
+            name: "delete_records",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+      async invalidateToolsCache() {},
+    });
+    const toolNamesFor = async (allowedTools: string[]): Promise<string[]> => {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: registryId,
+              name: "Attempt-scoped server",
+              url: "https://attempt-scoped.example.test/mcp",
+              cacheToolsList: true,
+              allowedTools,
+            },
+          ],
+        }),
+        [{ kind: "mcp", id: registryId }],
+        {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: crypto.randomUUID(),
+          executionGeneration: 1,
+          localMcpServers: [{ id: registryId, server: localServer() }],
+        },
+      );
+      try {
+        return (await getAllMcpTools({ mcpServers: prepared.mcpServers }))
+          .map((tool) => tool.name)
+          .sort();
+      } finally {
+        await prepared.close();
+      }
+    };
+
+    expect(await toolNamesFor(["read_records", "delete_records"])).toEqual([
+      prefixedMcpToolName(registryId, "delete_records"),
+      prefixedMcpToolName(registryId, "read_records"),
+    ]);
+    expect(await toolNamesFor(["read_records"])).toEqual([
+      prefixedMcpToolName(registryId, "read_records"),
+    ]);
+    expect(remoteLists).toBe(2);
+  });
+
+  test("does not reuse an SDK-global list across in-process attempt definitions", async () => {
+    const toolNamesFor = async (modelName: string): Promise<string[]> => {
+      const prepared = await prepareAgentTools(testSettings(), [], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: crypto.randomUUID(),
+        executionGeneration: 1,
+        attemptToolDefinitions: [
+          {
+            identity: { serverId: "attempt", toolName: modelName },
+            modelName,
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+            source: "mcp",
+            approval: "none",
+            execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+          },
+        ],
+      });
+      try {
+        return (await getAllMcpTools({ mcpServers: prepared.mcpServers })).map((tool) => tool.name);
+      } finally {
+        await prepared.close();
+      }
+    };
+
+    expect(await toolNamesFor("attempt_alpha")).toEqual(["attempt_alpha"]);
+    expect(await toolNamesFor("attempt_beta")).toEqual(["attempt_beta"]);
+  });
+
   test("routes selected local MCP adapters through prefixing, bounds, connection identity, and cancellation", async () => {
     const connectionId = "11111111-2222-4333-8444-555555555555";
     let connected = 0;
@@ -9141,6 +9242,30 @@ describe("runtime Skill activation", () => {
         { environment: {} },
       ),
     ).rejects.toThrow("Artifact runtime doctor failed");
+  });
+
+  test("credential hook resolution validates every id and deduplicates first-seen hooks", async () => {
+    const hooks = sandboxLifecycleHooksForIds([
+      "azure-cli-login",
+      "azure-cli-login",
+      "azure-cli-login",
+    ]);
+    const commands: string[] = [];
+    await runBeforeAgentStartHooks({} as any, hooks, {
+      environment: {
+        AZURE_CLIENT_ID: "client",
+        AZURE_CLIENT_SECRET: "secret",
+        AZURE_TENANT_ID: "tenant",
+      },
+      commandRunner: async (_session, { cmd }) => {
+        commands.push(cmd);
+        return { exitCode: 0, output: "" };
+      },
+    });
+    expect(commands).toEqual([azureCliLoginCommand()]);
+    expect(() =>
+      sandboxLifecycleHooksForIds(["azure-cli-login", "unknown", "azure-cli-login"]),
+    ).toThrow("Unknown sandbox lifecycle hook unknown");
   });
 
   test("an explicit curated library selection is materialized and indexed", () => {

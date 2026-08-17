@@ -5154,7 +5154,11 @@ function logPublicMcpLifecycleFailure(error: Error): void {
  * owns no authority and cannot execute until bound to that exact environment.
  */
 class AttemptDefinitionMcpServer implements MCPServer {
-  readonly cacheToolsList = true;
+  // The SDK cache is process-global and keyed by this stable server name, but
+  // definitions are immutable only within one attempt. This server already
+  // owns the exact in-memory list, so cross-attempt SDK caching is both
+  // unnecessary and capable of exposing a predecessor attempt's catalog.
+  readonly cacheToolsList = false;
   private readonly resultCustomDataBridge = new McpResultCustomDataBridge();
   readonly customDataExtractor = this.resultCustomDataBridge.customDataExtractor;
   readonly toolMetaResolver = this.resultCustomDataBridge.toolMetaResolver;
@@ -5282,7 +5286,12 @@ export class PrefixedMcpServer implements MCPServer {
     // headers, provider bodies, or other credential-bearing data.
     this.name = `${MCP_SDK_LIFECYCLE_NAME}:${safeMcpServerIdentity(registryId)}`;
     this.prefix = prefixedMcpToolName(registryId, "");
-    this.cacheToolsList = inner.cacheToolsList;
+    // This wrapper already freezes one exact tools/list promise per prepared
+    // attempt. The Agents SDK process-global cache is keyed by this stable
+    // registry name and therefore cannot represent attempt-scoped allowlists.
+    // Keep the inner transport's own connection cache; repeated reads on this
+    // wrapper still reuse frozenTools without another remote list request.
+    this.cacheToolsList = false;
     this.resultCustomDataBridge = new McpResultCustomDataBridge({
       innerServer: inner,
       unprefixToolName: (toolName) => this.unprefixToolName(toolName),
@@ -7417,12 +7426,18 @@ const builtInSandboxLifecycleHooks: Record<string, SandboxLifecycleHook> = {
 };
 
 export function sandboxLifecycleHooksForIds(ids: string[]): SandboxLifecycleHook[] {
-  return ids.map((id) => {
+  const resolved = ids.map((id) => {
     const hook = builtInSandboxLifecycleHooks[id];
     if (!hook) {
       throw new Error(`Unknown sandbox lifecycle hook ${id}`);
     }
     return hook;
+  });
+  const seen = new Set<string>();
+  return resolved.filter((hook) => {
+    if (seen.has(hook.id)) return false;
+    seen.add(hook.id);
+    return true;
   });
 }
 
@@ -8743,7 +8758,10 @@ const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
 const RIG_SETUP_RUNTIME_MARKER_ROOT = "/tmp/opengeni/rig-setup";
 const RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT = "/var/opengeni";
 const RIG_SETUP_INLINE_COMMAND_MAX_BYTES = 32 * 1024;
-const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 24 * 1024;
+// The cancellation fence embeds a lifecycle command twice, then the current
+// runAs wrapper repeats it across several execution branches. Keep each base64
+// chunk below Modal's 64-KiB aggregate argument ceiling after both wrappers.
+const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 7 * 1024;
 const RIG_SETUP_PAYLOAD_ROOT = "/tmp/opengeni/rig-setup-payloads";
 
 export type RigSetupScriptCommandOptions = {
