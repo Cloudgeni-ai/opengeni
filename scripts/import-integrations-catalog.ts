@@ -108,6 +108,7 @@ export type CatalogIntegrationRow = {
   allowedTools?: string[];
   requireApproval?: boolean | string[];
   connectionOwnership?: "personal_only";
+  oauthProfile?: Record<string, unknown>;
   credentialFacts: Array<Record<string, unknown>>;
   tier: CatalogTier;
   provenance: string;
@@ -363,6 +364,9 @@ export function normalizeCatalogSnapshot(
         : {}),
       ...(official?.connectionOwnership
         ? { connectionOwnership: official.connectionOwnership }
+        : {}),
+      ...(official?.oauthProfile
+        ? { oauthProfile: official.oauthProfile as Record<string, unknown> }
         : {}),
       credentialFacts: recordArray(candidate.credentialFacts),
       tier: official?.tier ?? (provenance === "detected" ? "verified" : "community"),
@@ -649,6 +653,7 @@ export function catalogRowToDbInput(
       ...(row.allowedTools ? { allowedTools: row.allowedTools } : {}),
       ...(row.requireApproval !== undefined ? { requireApproval: row.requireApproval } : {}),
       ...(row.connectionOwnership ? { connectionOwnership: row.connectionOwnership } : {}),
+      ...(row.oauthProfile ? { oauthProfile: row.oauthProfile } : {}),
       ...(row.documentationUrl ? { documentationUrl: row.documentationUrl } : {}),
       ...(row.registryName
         ? {

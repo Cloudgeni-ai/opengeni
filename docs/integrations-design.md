@@ -153,7 +153,37 @@ The callback route must NOT call `requireAccessGrant` — a browser redirect car
 
 DCR-minted OAuth clients are deployment-wide authorization-server identity, not per-workspace user credentials. They live in `integration_oauth_clients`, keyed by AS issuer, with `client_secret` encrypted under the variable-sets key when present. This keeps one DCR client reusable across many workspace connections to the same AS, while the actual access/refresh tokens remain in workspace-scoped `connections.credential_encrypted`. Operator pre-registered clients are read from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` and are not copied into Postgres.
 
-Some authorization servers advertise both CIMD and DCR but only issue MCP-accepted tokens to DCR clients. Linear's MCP server (`https://mcp.linear.app`) is in this compatibility set: operator credentials still win when configured, otherwise OpenGeni dynamically registers and reuses a confidential DCR client with Linear's resolved `read write` MCP scope even though Linear's metadata also says `client_id_metadata_document_supported=true`. Stale Linear DCR clients registered before that policy are replaced on the next connect attempt.
+Some authorization servers advertise both CIMD and DCR but only issue MCP-accepted tokens to DCR clients. Linear's MCP server (`https://mcp.linear.app`) is in this compatibility set: operator credentials still win when configured, otherwise OpenGeni dynamically registers and reuses a confidential DCR client with Linear's resolved `read write` MCP scope even though Linear's metadata also says `client_id_metadata_document_supported=true`. Stale Linear DCR clients registered before that policy are replaced on the next connect attempt. The override is data twice over: Linear's curated catalog row carries `oauthProfile.clientSource: "dcr"`, and the OAuth client keeps the issuer on its prefer-DCR list for deployments with a stale catalog (§5.2.2).
+
+### 5.2.2 Provider OAuth quirks as data (profiles)
+
+Providers that need a pre-registered client with pinned metadata, personal-only
+ownership, an exact resource URL, a fixed scope set, or non-standard authorize
+parameters are expressed as an `OAuthProviderProfile`
+(`apps/api/src/integrations/oauth-profiles.ts`), never as a provider branch in
+the flow. `oauth-client.ts` resolves exactly one profile per start and reads
+every quirk from it: start-time payload fences (caller-client rejection,
+provider identity, exact MCP URL, required deployment client), allowed
+ownership plus its default, exact-URL reconnect binding and connection
+selection, post-discovery authorization-server origin pins, `resource`
+parameter suppression, extra authorize parameters, and an exact scope override.
+
+Profiles come from two layers with a fixed resolution order — built-in, then
+catalog, then default:
+
+- **Built-in profiles** (hosted Slack MCP, official Gmail) live in code as data
+  because their fences are security invariants that must not depend on catalog
+  import state. Reserved authorization servers (Google's) and the DCR
+  compatibility issuer list are adjacent data tables. Deployment-managed client
+  credentials (Slack's `OPENGENI_SLACK_CLIENT_ID`/`SECRET`) resolve through a
+  keyed table that only built-in profiles can reference.
+- **Catalog profiles** ride a global catalog row as `metadata.oauthProfile`
+  (curated overlay `oauthProfile` -> importer -> `capability_catalog_items`),
+  zod-validated at use time. A catalog profile applies only when no built-in
+  matched and can only narrow the default flow: its schema cannot express
+  deployment-client keys or reserved-server membership, so catalog data can
+  never loosen a built-in fence or borrow Slack's credentials. This is how a
+  new pinned-client provider is added with no API change.
 
 ### 5.3 Our client identity (CIMD)
 

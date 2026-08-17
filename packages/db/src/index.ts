@@ -6674,6 +6674,45 @@ export async function listCapabilityCatalogItems(
   });
 }
 
+/**
+ * Declarative OAuth profile carried by a global (registry-imported) catalog
+ * row for an exact MCP URL, or null when no row declares one. Only global
+ * rows are consulted: a workspace-created row must not steer another
+ * workspace's OAuth flow, and the OAuth client applies the profile as a
+ * narrowing constraint over its defaults.
+ *
+ * A stale row's profile still applies deliberately: staleness hides the row
+ * from the browse surface, but dropping its declared fences on staleness
+ * would loosen an ownership or origin constraint. Non-stale rows win when a
+ * duplicate `mcp_url` exists under two provider domains; the remaining id
+ * tie-break is only for determinism. The value is returned raw (whatever the
+ * row carries) so the caller's validation decides how a malformed profile
+ * fails; absence of the key is the only null.
+ */
+export async function getGlobalCatalogOAuthProfile(
+  db: Database,
+  workspaceId: string,
+  mcpUrl: string,
+): Promise<unknown | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        metadata: schema.capabilityCatalogItems.metadata,
+        stale: schema.capabilityCatalogItems.stale,
+      })
+      .from(schema.capabilityCatalogItems)
+      .where(
+        and(
+          isNull(schema.capabilityCatalogItems.workspaceId),
+          eq(schema.capabilityCatalogItems.mcpUrl, mcpUrl),
+        ),
+      )
+      .orderBy(asc(schema.capabilityCatalogItems.stale), asc(schema.capabilityCatalogItems.id));
+    const row = rows.find((candidate) => candidate.metadata.oauthProfile !== undefined);
+    return row === undefined ? null : (row.metadata.oauthProfile ?? null);
+  });
+}
+
 export async function getCapabilityCatalogItem(
   db: Database,
   workspaceId: string,
