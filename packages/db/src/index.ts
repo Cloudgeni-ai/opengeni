@@ -38165,9 +38165,12 @@ async function lockWorkspaceMutationAuthorityTx(
         "Workspace mutation rejected because its active route moved before admission",
       );
     }
-    // The accepted turn already froze its causal initiator and tenancy tuple.
-    // Copy them verbatim - recovery, retry and continuation must all record the
-    // same authority, so nothing is re-derived from live state here.
+    // The accepted turn already froze its causal initiator and tenancy tuple;
+    // copy them verbatim so recovery, retry and continuation all record the
+    // same authority. The grant identity below is the one live resolution: it
+    // can fence a frozen human whose membership was since revoked or
+    // suspended, matching the 0263 teardown that cancels work initiated by a
+    // suspended subject.
     const turnInitiator = frozenTurnInitiator(fence.turn);
     const turnGrant = await resolveWorkspaceMutationGrantIdentityTx(tx, {
       accountId: authority.accountId,
@@ -38243,10 +38246,13 @@ async function lockWorkspaceMutationAuthorityTx(
         "Direct workspace mutation rejected because it carries no causal initiator",
       );
     }
-    // A direct writer has no frozen snapshot, so its grant is re-proved here, in
-    // the same transaction that advances the generation. That closes the window
-    // between HTTP authorization and the provider write: a revocation committed
-    // in between fences this operation instead of racing it.
+    // A direct writer has no frozen snapshot, so its grant is re-proved here,
+    // in the same transaction that advances the generation: a revocation
+    // committed before this statement fences the operation instead of relying
+    // on stale HTTP authorization. A revocation committing after this
+    // lock-free read still races the admission commit; the recorded grant
+    // identity and observed revision exist so the offboarding teardown and a
+    // later revocation sweep can find and settle exactly those writers.
     const directGrant = await resolveWorkspaceMutationGrantIdentityTx(tx, {
       accountId: authority.accountId,
       humanSubjectId: initiatorSubjectId,
@@ -38348,8 +38354,11 @@ async function lockWorkspaceMutationAuthorityTx(
     routeEpoch: process.routeEpoch,
     authority: {
       ...processAuthority,
-      // The frozen grant identity stays authoritative; only the observed
-      // revision is refreshed, because it is evidence and not a fence.
+      // A frozen grant identity is never replaced. A process admitted before
+      // its human's membership row existed may backfill it from the live
+      // unique (account, subject) row - memberships are never deleted or
+      // recreated, so the id cannot diverge from the frozen human - and the
+      // observed revision refreshes because it is evidence, not a fence.
       initiatorOrganizationMembershipId:
         processAuthority.initiatorOrganizationMembershipId ?? processGrant.membershipId,
       initiatorAuthorizationRevision:
