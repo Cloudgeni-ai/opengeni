@@ -130,8 +130,10 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         machineName: body.machineName ?? null,
         canOfferDisplay: body.canOfferDisplay,
         requestsScreenControl: body.requestsScreenControl,
-        // The approve page is served at the SAME origin as this request.
-        verificationOrigin: new URL(c.req.url).origin,
+        // Prefer the externally configured deployment origin. Behind a TLS-
+        // terminating proxy c.req.url can carry the internal http scheme, which
+        // must never leak into the device-flow command shown to the operator.
+        verificationOrigin: settings.publicBaseUrl ?? new URL(c.req.url).origin,
       },
     );
     return c.json(result, 201);

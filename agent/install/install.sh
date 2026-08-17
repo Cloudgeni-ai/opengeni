@@ -45,9 +45,10 @@
 #                              background service (use `opengeni-agent run`).
 #   OPENGENI_API_URL           Control-plane API base URL for connection. Carried
 #                              into both non-interactive and device-flow `connect`
-#                              calls (the agent also reads it via clap). Set it
-#                              to target a specific deployment instead of the
-#                              api.opengeni.ai default.
+#                              calls (the agent also reads it via clap). A script
+#                              served by a deployment defaults this to that same
+#                              origin; the committed managed-cloud default is
+#                              https://app.opengeni.ai.
 #   OPENGENI_WORKSPACE_ID      The workspace (UUID) an INTERACTIVE device-flow
 #                              connection binds to (the approver must hold a grant
 #                              in it). Honored by the agent's `connect`/`run`
@@ -104,6 +105,12 @@ OPENGENI_MINISIGN_PUBKEY='RWSaqgF1EVFuci7hXvDJO7cBh2xf2k0XKhCpvl23aWKG+nMAGfZ6D2
 OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"
 BASE_URL="${OPENGENI_INSTALL_BASE_URL:-$OPENGENI_INSTALL_DEFAULT_BASE_URL}"
 VERSION="${OPENGENI_AGENT_VERSION:-latest}"
+# Default connection origin. A deployed control plane rewrites this marker next
+# to the asset marker above, so fetching its installer also pins enrollment to
+# that exact deployment without requiring a caller-supplied environment variable.
+# Keep the line shape stable for apps/api/src/routes/install.ts.
+OPENGENI_API_DEFAULT_URL="https://app.opengeni.ai"
+OPENGENI_API_URL="${OPENGENI_API_URL:-$OPENGENI_API_DEFAULT_URL}"
 
 # --- macOS app-bundle identity (constants) -----------------------------------
 # The bundle id is the STABLE anchor for macOS TCC (Screen Recording /
@@ -913,7 +920,7 @@ finish() {
   if [ -n "${OPENGENI_ENROLL_TOKEN:-}" ]; then
     log "non-interactive connection (OPENGENI_ENROLL_TOKEN set)"
     # Forward OPENGENI_API_URL explicitly so the exchange targets THIS deployment
-    # (not the api.opengeni.ai default) even when the agent's env-inherit path is
+    # even when the agent's env-inherit path is
     # ever bypassed. The agent also reads $OPENGENI_API_URL via clap, so the env
     # alone would suffice — this is belt-and-suspenders. The workspace is encoded
     # in the token, so no --workspace-id is needed on this path. A supplied token

@@ -348,7 +348,10 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
         and resource_id = ${machine.enrollmentId}
     `;
     const [sessionAuthority] = await admin<
-      Array<{ authorityEpoch: number; visibility: "user_private" | "workspace_shared" }>
+      Array<{
+        authorityEpoch: number;
+        visibility: "user_private" | "workspace_shared";
+      }>
     >`
       select authority_epoch as "authorityEpoch", visibility
       from sessions where id = ${session.id}
@@ -790,8 +793,34 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     const self = await provisionSandbox(services, ctx, { kind: "selfhosted" });
     expect(self.kind).toBe("selfhosted");
     if (self.kind === "selfhosted") {
-      expect(self.installCommandUnix).toContain("install.sh");
-      expect(self.verificationUri).toContain("/device");
+      expect(self.installCommandUnix).toBe(
+        `curl -fsSL ${settings.publicBaseUrl}/install.sh | ` +
+          `OPENGENI_API_URL=${settings.publicBaseUrl} ` +
+          `OPENGENI_WORKSPACE_ID=${ctx.workspaceId} sh`,
+      );
+      expect(self.installCommandWindows).toBe(
+        `$env:OPENGENI_API_URL='${settings.publicBaseUrl}'; ` +
+          `$env:OPENGENI_WORKSPACE_ID='${ctx.workspaceId}'; ` +
+          `irm ${settings.publicBaseUrl}/install.ps1 | iex`,
+      );
+      expect(self.instructions).toContain("do not run a second bare `connect`");
+      expect(self.verificationUri).toBe(`${settings.publicBaseUrl}/device`);
+    }
+
+    const managedDefault = await provisionSandbox(
+      {
+        ...services,
+        settings: { ...services.settings, publicBaseUrl: undefined },
+      },
+      ctx,
+      { kind: "selfhosted" },
+    );
+    expect(managedDefault.kind).toBe("selfhosted");
+    if (managedDefault.kind === "selfhosted") {
+      expect(managedDefault.installCommandUnix).toContain(
+        "OPENGENI_API_URL=https://app.opengeni.ai",
+      );
+      expect(managedDefault.verificationUri).toBe("https://app.opengeni.ai/device");
     }
 
     const modal = await provisionSandbox(services, ctx, {

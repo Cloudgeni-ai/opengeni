@@ -23,6 +23,7 @@ use tracing::{info, warn};
 use crate::cli::UpdateArgs;
 use crate::config::{self, StoredConnection};
 use crate::enrollment::InstallIdentity;
+use crate::DEFAULT_API_URL;
 
 /// Public fallback used only before the machine has any enrolled deployment.
 const DEFAULT_BASE_URL: &str = "https://get.opengeni.ai";
@@ -137,7 +138,7 @@ fn persist_completed_update_receipt_at(
 /// Returns a human-facing error string on any fetch/verify/apply failure.
 pub fn run(args: &UpdateArgs) -> Result<(), String> {
     let legacy_api_url =
-        std::env::var("OPENGENI_API_URL").unwrap_or_else(|_| "https://api.opengeni.ai".to_string());
+        std::env::var("OPENGENI_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
     let connections = config::load_connections(&legacy_api_url)
         .map_err(|e| format!("could not load connections: {e}"))?;
 

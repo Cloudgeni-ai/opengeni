@@ -107,13 +107,13 @@ hard per-process maximum with resource-based admission and HPA.
 The ordinary dependency services remain private `ClusterIP` services. Five
 one-port NodePort services are the complete private-edge surface:
 
-| NodePort | Destination | Purpose |
+| NodePort | Destination    | Purpose                                      |
 | --- | --- | --- |
-| `30080` | web | browser application |
-| `30081` | API | API, SSE, enrollment, and agent distribution |
-| `30222` | NATS websocket | enrolled-machine command/event transport |
-| `30443` | relay | live terminal/desktop byte streams |
-| `30900` | MinIO API | signed browser file transfer only |
+| `30080`  | web            | browser application                          |
+| `30081`  | API            | API, SSE, enrollment, and agent distribution |
+| `30222`  | NATS websocket | enrolled-machine command/event transport     |
+| `30443`  | relay          | live terminal/desktop byte streams           |
+| `30900`  | MinIO API      | signed browser file transfer only            |
 
 The NATS client/monitor ports and MinIO admin console are not exposed. On K3s,
 bind NodePorts to loopback with
@@ -126,8 +126,8 @@ websocket, relay, and MinIO API their own private TLS ports. Set
 `selfhosted.natsUrl`, `selfhosted.relayUrl`, and `minio.publicEndpoint` to those
 private URLs. Also set `OPENGENI_PUBLIC_BASE_URL` to the browser/API origin. The
 API uses it when serving the installer, so an enrolled machine downloads the
-agent version baked into this deployment rather than falling back to the public
-archive.
+agent version baked into this deployment and connects back to that same external
+HTTPS origin rather than falling back to either public default.
 
 For a tailnet-only deployment, `OPENGENI_AUTH_REQUIRED=false` and
 `OPENGENI_PRODUCT_ACCESS_MODE=local` mean there is no shared deployment access
@@ -1332,14 +1332,14 @@ poll task queues until that Temporal namespace exists.
 
 Use this boundary when building a production cluster:
 
-| Capability | Production source | OpenGeni wiring |
+| Capability    | Production source                                                                                                                 | OpenGeni wiring                                                                                            |
 | --- | --- | --- |
-| NATS | Existing endpoint or official NATS chart from `https://nats-io.github.io/k8s/helm/charts/` | `nats.enabled=false` plus `nats.url` or `OPENGENI_NATS_URL` |
-| Temporal | Temporal Cloud, existing endpoint, or official Temporal chart from `https://go.temporal.io/helm-charts` with external persistence | `temporal.enabled=false` plus `OPENGENI_TEMPORAL_HOST`; add `OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud |
-| Postgres | Managed cloud Postgres, existing database, or CloudNativePG from `https://cloudnative-pg.github.io/charts` | `postgres.enabled=false` plus `OPENGENI_DATABASE_URL` |
-| Secrets | External Secrets Operator from `https://charts.external-secrets.io`, Vault, or cloud-native secret delivery | `externalSecret.enabled=true` or `secret.existingSecret` |
-| TLS | cert-manager, cloud load balancer certificates, or an existing ingress/TLS stack | `ingress.tls` and SSE-safe ingress annotations |
-| Observability | `deploy/observability` pinned Prometheus/Grafana wrapper, an existing compatible platform, or a managed OTLP/Prometheus backend | `/metrics`, OTLP env, `ServiceMonitor`, `PrometheusRule`, canonical dashboard labels |
+| NATS          | Existing endpoint or official NATS chart from `https://nats-io.github.io/k8s/helm/charts/`                                        | `nats.enabled=false` plus `nats.url` or `OPENGENI_NATS_URL`                                                |
+| Temporal      | Temporal Cloud, existing endpoint, or official Temporal chart from `https://go.temporal.io/helm-charts` with external persistence | `temporal.enabled=false` plus `OPENGENI_TEMPORAL_HOST`; add `OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud |
+| Postgres      | Managed cloud Postgres, existing database, or CloudNativePG from `https://cloudnative-pg.github.io/charts`                        | `postgres.enabled=false` plus `OPENGENI_DATABASE_URL`                                                      |
+| Secrets       | External Secrets Operator from `https://charts.external-secrets.io`, Vault, or cloud-native secret delivery                       | `externalSecret.enabled=true` or `secret.existingSecret`                                                   |
+| TLS           | cert-manager, cloud load balancer certificates, or an existing ingress/TLS stack                                                  | `ingress.tls` and SSE-safe ingress annotations                                                             |
+| Observability | `deploy/observability` pinned Prometheus/Grafana wrapper, an existing compatible platform, or a managed OTLP/Prometheus backend   | `/metrics`, OTLP env, `ServiceMonitor`, `PrometheusRule`, canonical dashboard labels                       |
 
 The runtime secret must provide values such as:
 
@@ -1374,10 +1374,10 @@ OpenGeni's storage package intentionally exposes a small provider-neutral bounda
 
 Sandbox file mount support is also backend-specific:
 
-| Sandbox backend | S3-compatible | Azure Blob | AWS S3 | GCS |
+| Sandbox backend                     | S3-compatible          | Azure Blob                      | AWS S3                          | GCS                             |
 | --- | --- | --- | --- | --- |
-| Docker/local in-container sandboxes | rclone mount | rclone mount | signed download materialization | signed download materialization |
-| Modal | SDK cloud bucket mount | signed download materialization | signed download materialization | signed download materialization |
+| Docker/local in-container sandboxes | rclone mount           | rclone mount                    | signed download materialization | signed download materialization |
+| Modal                               | SDK cloud bucket mount | signed download materialization | signed download materialization | signed download materialization |
 
 ## Terraform Registry MCP Docs
 
@@ -1500,9 +1500,11 @@ install script and the per-deploy agent binary at auth-exempt paths
 (`/install.sh`, `/install.ps1`, `/uninstall.sh`, and `/agent/*`), so
 `curl -fsSL https://<host>/install.sh | sh` installs the exact agent build that
 matches the running control plane (the per-SHA binary baked into the API image),
-with no dependency on an external CDN. A public release archive is the fallback
-for other OS/arch assets and the self-update channel. Route these paths (and an
-optional `get.<domain>` host) to the `api` service in the ingress.
+and the served script defaults enrollment to that same public origin. A configured
+`OPENGENI_API_URL` still overrides it, so this works with no dependency on an
+external CDN. A public release archive is the fallback for other OS/arch assets
+and the self-update channel. Route these paths (and an optional `get.<domain>`
+host) to the `api` service in the ingress.
 
 `/agent/latest/<asset>` is a compatibility route backed by the immutable
 versioned release selected by `OPENGENI_AGENT_STABLE_VERSION` (default `0.1.14`).
@@ -1640,12 +1642,12 @@ bun run deployment:health-audit -- \
 The command always prints one bounded
 `opengeni.deployment-health-audit.v1` JSON document and uses stable exit codes:
 
-| Exit | Status | Meaning |
+| Exit | Status        | Meaning                                                                                                                     |
 | ---: | --- | --- |
-| `0` | `healthy` | Every requested read-only check passed. |
-| `1` | `degraded` | The deployment is serving, but recent restarts or warning events need observation. |
-| `2` | `incident` | A workload, endpoint, Helm release, PVC, or deployment-revision invariant failed. |
-| `3` | `audit_error` | The audit itself could not establish trustworthy evidence, for example because inventory JSON was unavailable or malformed. |
+|  `0` | `healthy`     | Every requested read-only check passed.                                                                                     |
+|  `1` | `degraded`    | The deployment is serving, but recent restarts or warning events need observation.                                          |
+|  `2` | `incident`    | A workload, endpoint, Helm release, PVC, or deployment-revision invariant failed.                                           |
+|  `3` | `audit_error` | The audit itself could not establish trustworthy evidence, for example because inventory JSON was unavailable or malformed. |
 
 `--upstream-revision` is context only. A coherent, intentionally pinned
 deployment behind upstream is healthy. `--expected-revision` is declarative
@@ -1883,18 +1885,18 @@ the exact literal `null` for supplied nullable values; omission means “not
 supplied” and blocks. Hashes are 64 lowercase hexadecimal characters and times
 are canonical ISO-8601 UTC strings.
 
-| Fence | Environment variables |
+| Fence                | Environment variables                                                                                                                                                                                                                                |
 | --- | --- |
-| Locator | `OPENGENI_RECOVERY_ACCOUNT_ID`, `OPENGENI_RECOVERY_WORKSPACE_ID`, `OPENGENI_RECOVERY_SESSION_ID`, `OPENGENI_RECOVERY_SANDBOX_GROUP_ID` |
-| Lease/loss | `OPENGENI_RECOVERY_LEASE_ID`, `OPENGENI_RECOVERY_BACKEND`, `OPENGENI_RECOVERY_CURRENT_EPOCH`, `OPENGENI_RECOVERY_LOST_EPOCH`, `OPENGENI_RECOVERY_LOST_INSTANCE_ID`, `OPENGENI_RECOVERY_REFCOUNT`, `OPENGENI_RECOVERY_PROVIDER_BACKEND` |
-| Route | `OPENGENI_RECOVERY_ROUTE_KIND`, `OPENGENI_RECOVERY_ROUTE_TARGET_ID`, `OPENGENI_RECOVERY_ROUTE_EPOCH` |
-| Workspace/restore | `OPENGENI_RECOVERY_WORKSPACE_GENERATION`, `OPENGENI_RECOVERY_WORKSPACE_STATUS`, `OPENGENI_RECOVERY_RESTORE_STATUS`, `OPENGENI_RECOVERY_RESTORE_FAILURE_CODE` |
-| Archive generation | `OPENGENI_RECOVERY_ARCHIVE_GENERATION`, `OPENGENI_RECOVERY_ARCHIVE_COMPLETE` |
-| Descriptor/object | `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_VERSION`, `OPENGENI_RECOVERY_ARCHIVE_REVISION`, `OPENGENI_RECOVERY_ARCHIVE_OBJECT_KIND`, `OPENGENI_RECOVERY_ARCHIVE_OBJECT_ID` |
-| Reference integrity | `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_BYTES`, `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_SHA256`, `OPENGENI_RECOVERY_ARCHIVE_REFERENCE_BYTES`, `OPENGENI_RECOVERY_ARCHIVE_REFERENCE_SHA256` |
-| Workspace tree | `OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_ALGORITHM`, `OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_SHA256`, `OPENGENI_RECOVERY_ARCHIVE_TREE_ENTRY_COUNT`, `OPENGENI_RECOVERY_ARCHIVE_TREE_FILE_COUNT`, `OPENGENI_RECOVERY_ARCHIVE_TOTAL_FILE_BYTES` |
-| Capture/verification | `OPENGENI_RECOVERY_ARCHIVE_CAPTURED_AT`, `OPENGENI_RECOVERY_ARCHIVE_VERIFICATION_STATE`, `OPENGENI_RECOVERY_ARCHIVE_VERIFIED_REVISION`, `OPENGENI_RECOVERY_ARCHIVE_VERIFIED_AT` |
-| External observation | `OPENGENI_RECOVERY_PROVIDER_OBJECT_KIND`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_ID`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_STATUS`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_OBSERVED_AT` |
+| Locator              | `OPENGENI_RECOVERY_ACCOUNT_ID`, `OPENGENI_RECOVERY_WORKSPACE_ID`, `OPENGENI_RECOVERY_SESSION_ID`, `OPENGENI_RECOVERY_SANDBOX_GROUP_ID`                                                                                                               |
+| Lease/loss           | `OPENGENI_RECOVERY_LEASE_ID`, `OPENGENI_RECOVERY_BACKEND`, `OPENGENI_RECOVERY_CURRENT_EPOCH`, `OPENGENI_RECOVERY_LOST_EPOCH`, `OPENGENI_RECOVERY_LOST_INSTANCE_ID`, `OPENGENI_RECOVERY_REFCOUNT`, `OPENGENI_RECOVERY_PROVIDER_BACKEND`               |
+| Route                | `OPENGENI_RECOVERY_ROUTE_KIND`, `OPENGENI_RECOVERY_ROUTE_TARGET_ID`, `OPENGENI_RECOVERY_ROUTE_EPOCH`                                                                                                                                                 |
+| Workspace/restore    | `OPENGENI_RECOVERY_WORKSPACE_GENERATION`, `OPENGENI_RECOVERY_WORKSPACE_STATUS`, `OPENGENI_RECOVERY_RESTORE_STATUS`, `OPENGENI_RECOVERY_RESTORE_FAILURE_CODE`                                                                                         |
+| Archive generation   | `OPENGENI_RECOVERY_ARCHIVE_GENERATION`, `OPENGENI_RECOVERY_ARCHIVE_COMPLETE`                                                                                                                                                                         |
+| Descriptor/object    | `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_VERSION`, `OPENGENI_RECOVERY_ARCHIVE_REVISION`, `OPENGENI_RECOVERY_ARCHIVE_OBJECT_KIND`, `OPENGENI_RECOVERY_ARCHIVE_OBJECT_ID`                                                                                 |
+| Reference integrity  | `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_BYTES`, `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_SHA256`, `OPENGENI_RECOVERY_ARCHIVE_REFERENCE_BYTES`, `OPENGENI_RECOVERY_ARCHIVE_REFERENCE_SHA256`                                           |
+| Workspace tree       | `OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_ALGORITHM`, `OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_SHA256`, `OPENGENI_RECOVERY_ARCHIVE_TREE_ENTRY_COUNT`, `OPENGENI_RECOVERY_ARCHIVE_TREE_FILE_COUNT`, `OPENGENI_RECOVERY_ARCHIVE_TOTAL_FILE_BYTES` |
+| Capture/verification | `OPENGENI_RECOVERY_ARCHIVE_CAPTURED_AT`, `OPENGENI_RECOVERY_ARCHIVE_VERIFICATION_STATE`, `OPENGENI_RECOVERY_ARCHIVE_VERIFIED_REVISION`, `OPENGENI_RECOVERY_ARCHIVE_VERIFIED_AT`                                                                      |
+| External observation | `OPENGENI_RECOVERY_PROVIDER_OBJECT_KIND`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_ID`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_STATUS`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_OBSERVED_AT`                                                                        |
 
 The descriptor's `archiveBytes`/`archiveSha256` describe the opaque provider
 reference payload. Preview independently decodes `workspaceArchive` and
