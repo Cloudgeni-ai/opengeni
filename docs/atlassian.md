@@ -55,4 +55,4 @@ This developer-app registration is deployment-wide operator setup. OpenGeni cust
 - Agent tools: `apps/api/src/mcp/server.ts`
 - Frozen personal authority: `packages/core/src/domain/personal-connection-delegations.ts`
 - Scheduled inventory/content driver: `apps/worker/src/activities/knowledge-source-sync.ts`
-- Capabilities UX: `apps/web/src/components/capabilities/atlassian-connector-card.tsx`
+- Capabilities UX: `apps/web/src/components/capabilities/use-atlassian-integration.tsx` (sheet adapter) and `apps/web/src/components/capabilities/atlassian-source-dialog.tsx`

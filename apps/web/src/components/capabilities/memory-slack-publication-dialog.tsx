@@ -17,6 +17,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
 import { openGeniSlackBotConnectionLabel } from "@/lib/slack-bot";
@@ -24,16 +31,70 @@ import type { ConnectionMetadata } from "@/types";
 
 const IMPORTANCES: MemorySlackImportance[] = ["major", "normal", "minor"];
 
+/** The memory-slack SDK client, created here so the SDK stays behind this lazy boundary. */
+export function createMemorySlackClient(
+  coreClient: ConstructorParameters<typeof OpenGeniMemorySlackClient>[0],
+): OpenGeniMemorySlackClient {
+  return new OpenGeniMemorySlackClient(coreClient);
+}
+
 type DraftPolicy = Record<MemorySlackImportance, "auto" | "review" | "never">;
 
-export function MemorySlackPublicationCard({
+/**
+ * Publish important Memory decisions to one verified, bot-member Slack channel.
+ * Opened from the Slack integration sheet; the sheet's option switch reflects the
+ * saved configuration and this dialog edits it and shows delivery history.
+ */
+export function MemorySlackPublicationDialog({
   workspaceId,
   connections,
   canManage,
+  open,
+  onOpenChange,
+  onSaved,
 }: {
   workspaceId: string;
   connections: ConnectionMetadata[];
   canManage: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSaved?: (configuration: MemorySlackPublicationConfiguration) => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Publish important decisions to Slack</DialogTitle>
+          <DialogDescription>
+            Route bounded summaries of workspace Memory changes and completed governed-learning
+            outcomes to one verified, bot-member channel. Major items can publish automatically;
+            lower-signal items can wait for review or stay quiet. Slack is a notification surface,
+            never the authoritative record.
+          </DialogDescription>
+        </DialogHeader>
+        {open ? (
+          <MemorySlackPublicationSettings
+            workspaceId={workspaceId}
+            connections={connections}
+            canManage={canManage}
+            onSaved={onSaved}
+          />
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function MemorySlackPublicationSettings({
+  workspaceId,
+  connections,
+  canManage,
+  onSaved,
+}: {
+  workspaceId: string;
+  connections: ConnectionMetadata[];
+  canManage: boolean;
+  onSaved?: (configuration: MemorySlackPublicationConfiguration) => void;
 }) {
   const { client: coreClient } = useAppContext();
   const client = useMemo(() => new OpenGeniMemorySlackClient(coreClient), [coreClient]);
@@ -155,6 +216,7 @@ export function MemorySlackPublicationCard({
         reviewImportances: IMPORTANCES.filter((importance) => policy[importance] === "review"),
       });
       applyConfiguration(next);
+      onSaved?.(next);
       toast.success("Slack decision publication settings saved");
       await refresh();
     } catch (saveError) {
@@ -192,17 +254,8 @@ export function MemorySlackPublicationCard({
   }
 
   return (
-    <div className="mt-4 rounded-lg border border-border bg-bg/40 p-3">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <p className="text-xs font-semibold text-fg">Publish important decisions to Slack</p>
-          <p className="mt-1 max-w-2xl text-2xs leading-5 text-fg-muted">
-            Route bounded summaries of workspace Memory changes and completed governed-learning
-            outcomes to one verified, bot-member channel. Major items can publish automatically;
-            lower-signal items can wait for review or stay quiet. Slack is a notification surface,
-            never the authoritative record.
-          </p>
-        </div>
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <Button
             type="button"

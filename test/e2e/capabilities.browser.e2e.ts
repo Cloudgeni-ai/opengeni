@@ -352,18 +352,11 @@ describe("capabilities browser e2e", () => {
         waitUntil: "networkidle",
       });
 
-      await page
-        .getByRole("button", {
-          name: "Google Drive Browse selected folders and Shared Drives for read-only knowledge sync. Not connected",
-          exact: true,
-        })
-        .click();
-      const advancedAccounts = page.getByText("Agent file access and additional accounts", {
-        exact: true,
-      });
-      await expectVisible(advancedAccounts);
-      await advancedAccounts.click();
-
+      // The Google Drive integration row is the knowledge connection; named
+      // Drive accounts (per-account tool namespaces) live in Connected services.
+      await expectVisible(
+        page.getByRole("button", { name: "Google Drive. Not connected", exact: true }),
+      );
       const instance = page.locator('[data-integration-instance="finance"]');
       await expectVisible(instance);
       await expectText(instance, "Google Drive — Finance");
@@ -1313,5 +1306,7 @@ function driveBinding(request: Record<string, unknown>) {
     lastErrorCode: null,
     createdAt: new Date(0).toISOString(),
     updatedAt: new Date(0).toISOString(),
+    directlyOwned: true,
+    owners: [{ kind: "direct", id: "finance", removable: true }],
   };
 }

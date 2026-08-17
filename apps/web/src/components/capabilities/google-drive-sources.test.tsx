@@ -11,7 +11,7 @@ import {
   configuredGoogleDriveSources,
   googleDriveDestinationOptionDisabled,
   googleDriveReadPolicyLabel,
-} from "./google-drive-connector-card";
+} from "./google-drive-sources";
 
 describe("Google Drive connector truthfulness copy", () => {
   test("describes the shipped read-only browser without claiming Drive writes", () => {
