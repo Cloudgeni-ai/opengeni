@@ -3269,7 +3269,11 @@ export type SandboxSecretsRequest = {
   turnId: string;
   attemptId: string;
   executionGeneration: number;
-  initiatingHumanSubjectId: string;
+  // Organization/workspace Variable Sets may be materialized by a pure
+  // service turn (for example, the scheduler). Personal Variable Sets still
+  // require this causal human and an exact personal-resource grant.
+  initiator: TurnInitiator;
+  initiatingHumanSubjectId: string | null;
   variableSetId: string;
 };
 
