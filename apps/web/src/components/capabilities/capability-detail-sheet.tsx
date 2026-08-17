@@ -434,7 +434,7 @@ export function DetailBody({
           ) : plan.mode === "api_key" ? (
             <div className="space-y-3">
               {personalOnly ? (
-                <PersonalOnlyConnectionNotice />
+                <PersonalOnlyConnectionNotice itemName={item.name} />
               ) : (
                 <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
               )}
@@ -462,7 +462,7 @@ export function DetailBody({
           ) : plan.mode === "oauth" ? (
             <div className="space-y-3">
               {personalOnly ? (
-                <PersonalOnlyConnectionNotice />
+                <PersonalOnlyConnectionNotice itemName={item.name} />
               ) : (
                 <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
               )}
@@ -571,12 +571,12 @@ function SkillControls({
   );
 }
 
-function PersonalOnlyConnectionNotice() {
+function PersonalOnlyConnectionNotice({ itemName }: { itemName: string }) {
   return (
     <Notice tone="info">
       <span className="font-medium">Personal connection.</span> Other workspace members cannot
-      discover or use this account. Each member connects their own. Gmail content added to a session
-      follows that session's visibility.
+      discover or use this account. Each member connects their own. {itemName} content added to a
+      session follows that session's visibility.
     </Notice>
   );
 }

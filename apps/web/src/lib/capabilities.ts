@@ -269,12 +269,16 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
 }
 
 const OFFICIAL_GMAIL_MCP_URL = "https://gmailmcp.googleapis.com/mcp/v1";
+// Slack's hosted MCP issues user tokens only; shared Slack access is the
+// OpenGeni workspace bot, never one member's grant.
+const OFFICIAL_SLACK_MCP_URL = "https://mcp.slack.com/mcp";
+const PERSONAL_ONLY_MCP_URLS = new Set([OFFICIAL_GMAIL_MCP_URL, OFFICIAL_SLACK_MCP_URL]);
 
 export function capabilityRequiresPersonalConnection(item: CapabilityCatalogItem): boolean {
   return (
     item.metadata.connectionOwnership === "personal_only" ||
-    item.mcpUrl?.replace(/\/+$/, "") === OFFICIAL_GMAIL_MCP_URL ||
-    item.endpointUrl?.replace(/\/+$/, "") === OFFICIAL_GMAIL_MCP_URL
+    PERSONAL_ONLY_MCP_URLS.has(item.mcpUrl?.replace(/\/+$/, "") ?? "") ||
+    PERSONAL_ONLY_MCP_URLS.has(item.endpointUrl?.replace(/\/+$/, "") ?? "")
   );
 }
 

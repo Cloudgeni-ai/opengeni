@@ -342,6 +342,32 @@ describe("capabilityConnectPlan", () => {
     ).toBe(true);
   });
 
+  test("Slack's hosted MCP is personal-only; shared Slack access is the workspace bot", () => {
+    expect(
+      capabilityRequiresPersonalConnection(
+        item({
+          providerDomain: "slack.com",
+          mcpUrl: "https://mcp.slack.com/mcp",
+          metadata: {},
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      capabilityRequiresPersonalConnection(
+        item({
+          providerDomain: "slack.com",
+          endpointUrl: "https://mcp.slack.com/mcp/",
+          metadata: {},
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      capabilityRequiresPersonalConnection(
+        item({ providerDomain: "slack.com", mcpUrl: "https://slack.example.test/mcp" }),
+      ),
+    ).toBe(false);
+  });
+
   test("MCP with required headers collects an api_key with humanized labels", () => {
     const plan = capabilityConnectPlan(
       item({

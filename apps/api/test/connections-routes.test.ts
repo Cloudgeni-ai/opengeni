@@ -13,6 +13,7 @@ import {
   decryptEnvironmentValue,
   encryptEnvironmentValue,
   getConnectionMetadata,
+  listConnectionsMetadata,
   loadIntegrationOAuthClient,
   loadConnectionCredentialForBroker,
   type DbClient,
@@ -30,6 +31,7 @@ import {
   OFFICIAL_GMAIL_MCP_URL,
   assertOfficialGmailPersonalOwnership,
   assertGoogleAuthorizationServer,
+  assertHostedSlackMcpPersonalOwnership,
   assertSlackAuthorizationServer,
   buildAuthorizationUrl,
   chooseMcpAuthorizeScopes,
@@ -410,6 +412,14 @@ describe("official Gmail MCP OAuth compatibility", () => {
     ).not.toThrow();
     expect(() => assertOfficialGmailPersonalOwnership(OFFICIAL_GMAIL_MCP_URL, "workspace")).toThrow(
       "Gmail connections are personal only",
+    );
+  });
+
+  test("requires every hosted Slack MCP OAuth connection to be personal", () => {
+    expect(() => assertHostedSlackMcpPersonalOwnership(true, "personal")).not.toThrow();
+    expect(() => assertHostedSlackMcpPersonalOwnership(false, "workspace")).not.toThrow();
+    expect(() => assertHostedSlackMcpPersonalOwnership(true, "workspace")).toThrow(
+      "Slack's hosted MCP connection is personal only",
     );
   });
 });
@@ -1682,88 +1692,92 @@ describe("connections routes", () => {
     }
   });
 
-  test("workspace Slack MCP uses configured operator credentials and persists workspace ownership", async () => {
+  test("rejects workspace-owned hosted Slack MCP at start, on legacy reconnect, and at callback", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const as = startFakeAuthorizationServer({
-      issuer: "https://slack.com/mcp",
-      clientIdMetadataDocumentSupported: false,
-      tokenEndpointAuthMethodsSupported: ["client_secret_post"],
-      scopesSupported: ["search:read.public", "chat:write"],
-    });
-    const mcp = startTestMcpServer({
-      requiredAuthorization: "Bearer mcp-access-token",
-      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="search:read.public chat:write"`,
-    });
-    try {
-      const response = await app({
-        environment: "test",
-        slackClientId: "slack-client-id",
-        slackClientSecret: "slack-client-secret",
-      }).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
-        method: "POST",
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-          "content-type": "application/json",
+    const slackSettings = {
+      environment: "test" as const,
+      slackClientId: "slack-client-id",
+      slackClientSecret: "slack-client-secret",
+    };
+    const start = async (body: Record<string, unknown>) =>
+      app(slackSettings).request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "slack.com",
+            mcpUrl: "https://mcp.slack.com/mcp",
+            returnPath: "/capabilities?connect_item=slack",
+            ...body,
+          }),
         },
-        body: JSON.stringify({
-          providerDomain: "slack.com",
-          mcpUrl: mcp.url,
-          ownership: "workspace",
-          returnPath: "/capabilities?connect_item=slack",
-        }),
-      });
-
-      const responseText = await response.clone().text();
-      expect(response.status, responseText).toBe(200);
-      const body = (await response.json()) as {
-        state: string;
-        authorizationUrl: string;
-      };
-      const authUrl = new URL(body.authorizationUrl);
-      expect(authUrl.searchParams.get("client_id")).toBe("slack-client-id");
-      expect(authUrl.searchParams.get("scope")).toBe("search:read.public chat:write");
-
-      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
-      expect(state?.providerDomain).toBe("slack.com");
-      expect(state?.ownership).toBe("workspace");
-      expect(state?.clientRegistrationMethod).toBe("operator");
-      expect(state?.clientId).toBe("slack-client-id");
-      expect(JSON.stringify(state)).not.toContain("slack-client-secret");
-
-      const callback = await publicApp(client.db, {
-        slackClientId: "slack-client-id",
-        slackClientSecret: "slack-client-secret",
-      }).request(
-        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
       );
-      expect(callback.status).toBe(302);
-      const callbackLocation = new URL(
-        callback.headers.get("location")!,
-        "https://api.opengeni.test",
-      );
-      expect(callbackLocation.searchParams.get("integration_oauth")).toBe("success");
-      expect(callbackLocation.searchParams.get("ownership")).toBe("workspace");
-      const connectionId = callbackLocation.searchParams.get("connectionId");
-      expect(connectionId).not.toBeNull();
-      expect(
-        await getConnectionMetadata(client.db, workspace.workspaceId, connectionId!, "subject-a"),
-      ).toMatchObject({
-        subjectId: null,
-        providerDomain: "slack.com",
-        kind: "oauth2",
-      });
-      expect(as.tokenRequests).toHaveLength(1);
-      expect(as.tokenRequests[0]!.get("client_id")).toBe("slack-client-id");
-      expect(as.tokenRequests[0]!.get("client_secret")).toBe("slack-client-secret");
-      expect(as.tokenRequestAuthHeaders[0]).toBeNull();
-    } finally {
-      mcp.close();
-      as.close();
+
+    // Explicit workspace ownership and the generic "omitted means workspace"
+    // default both fail closed before discovery contacts Slack.
+    for (const body of [{ ownership: "workspace" }, {}]) {
+      const response = await start(body);
+      expect(response.status).toBe(422);
+      expect(await response.text()).toContain("Slack's hosted MCP connection is personal only");
     }
+
+    // A legacy workspace-owned row cannot be renewed through reconnect either.
+    const legacy = await createConnection(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: null,
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(rawKey, JSON.stringify({ fixture: true })),
+      metadata: { mcpUrl: "https://mcp.slack.com/mcp" },
+      createdBySubjectId: "subject-a",
+    });
+    const reconnect = await start({ connectionId: legacy.id });
+    expect(reconnect.status).toBe(422);
+    expect(await reconnect.text()).toContain("Slack's hosted MCP connection is personal only");
+
+    // State minted by an older deployment with workspace ownership must not
+    // persist shared authority during a rolling update.
+    const state = createSignedState(STATE_SECRET, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: "subject-a",
+      ownership: "workspace",
+      providerDomain: "slack.com",
+      mcpUrl: "https://mcp.slack.com/mcp",
+      resource: "https://mcp.slack.com/mcp",
+      requestedScopes: [],
+      authorizeScopes: ["search:read.public"],
+      encryptedPkceVerifier: encryptEnvironmentValue(rawKey, "slack-verifier"),
+      clientId: "slack-client-id",
+      tokenEndpoint: "https://slack.com/api/oauth.v2.access",
+      authorizationServer: "https://slack.com",
+      issuer: "https://slack.com",
+      clientRegistrationMethod: "operator",
+      tokenEndpointAuthMethod: "client_secret_post",
+      returnPath: "/capabilities?connect_item=slack",
+    });
+    const callback = await publicApp(client.db, slackSettings).request(
+      `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`,
+    );
+    expect(callback.status).toBe(302);
+    const callbackLocation = new URL(
+      callback.headers.get("location")!,
+      "https://api.opengeni.test",
+    );
+    expect(callbackLocation.searchParams.get("integration_oauth")).toBe("error");
+    expect(callbackLocation.searchParams.get("stage")).toBe("state_verify");
+    expect(
+      await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a"),
+    ).toHaveLength(1);
   });
 
-  test("explicit personal Slack MCP ownership remains bound to the authenticating subject", async () => {
+  test("personal Slack MCP uses configured operator credentials and remains bound to the authenticating subject", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const as = startFakeAuthorizationServer({
@@ -1797,9 +1811,16 @@ describe("connections routes", () => {
 
       const responseText = await response.clone().text();
       expect(response.status, responseText).toBe(200);
-      const body = (await response.json()) as { state: string };
+      const body = (await response.json()) as { state: string; authorizationUrl: string };
+      const authUrl = new URL(body.authorizationUrl);
+      expect(authUrl.searchParams.get("client_id")).toBe("slack-client-id");
+      expect(authUrl.searchParams.get("scope")).toBe("search:read.public chat:write");
       const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
+      expect(state?.providerDomain).toBe("slack.com");
       expect(state?.ownership).toBe("personal");
+      expect(state?.clientRegistrationMethod).toBe("operator");
+      expect(state?.clientId).toBe("slack-client-id");
+      expect(JSON.stringify(state)).not.toContain("slack-client-secret");
 
       const callback = await publicApp(client.db, {
         slackClientId: "slack-client-id",
@@ -1812,6 +1833,7 @@ describe("connections routes", () => {
         callback.headers.get("location")!,
         "https://api.opengeni.test",
       );
+      expect(callbackLocation.searchParams.get("integration_oauth")).toBe("success");
       expect(callbackLocation.searchParams.get("ownership")).toBe("personal");
       const connectionId = callbackLocation.searchParams.get("connectionId");
       expect(connectionId).not.toBeNull();
@@ -1822,6 +1844,10 @@ describe("connections routes", () => {
         providerDomain: "slack.com",
         kind: "oauth2",
       });
+      expect(as.tokenRequests).toHaveLength(1);
+      expect(as.tokenRequests[0]!.get("client_id")).toBe("slack-client-id");
+      expect(as.tokenRequests[0]!.get("client_secret")).toBe("slack-client-secret");
+      expect(as.tokenRequestAuthHeaders[0]).toBeNull();
     } finally {
       mcp.close();
       as.close();

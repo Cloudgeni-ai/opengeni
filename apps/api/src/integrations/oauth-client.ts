@@ -314,6 +314,7 @@ async function startMcpOAuthWithinDeadline(
   assertHostedSlackMcpOAuthStart(settings, context.payload, mcpUrl, hostedSlackMcp);
   const requestedOwnership: ConnectionOwnership = context.payload.ownership ?? "workspace";
   assertOfficialGmailPersonalOwnership(mcpUrl, requestedOwnership);
+  assertHostedSlackMcpPersonalOwnership(hostedSlackMcp, requestedOwnership);
   const returnPath = safeReturnPath(context.payload.returnPath ?? "/integrations");
   const baseUrl = integrationBaseUrl(settings.publicBaseUrl, context.requestUrl);
   const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
@@ -337,6 +338,9 @@ async function startMcpOAuthWithinDeadline(
   const ownership = existing
     ? ownershipForConnection(existing.subjectId, context.subjectId)
     : requestedOwnership;
+  // A reconnect of a legacy workspace-owned hosted Slack row must not renew
+  // shared authority over one human's grant.
+  assertHostedSlackMcpPersonalOwnership(hostedSlackMcp, ownership);
 
   const discovery = await discoverMcpOAuth(mcpUrl, settings, deadline);
   if (hostedSlackMcp && !isLocalTestEnvironment(settings.environment)) {
@@ -433,6 +437,30 @@ export function assertOfficialGmailPersonalOwnership(
   }
 }
 
+/**
+ * Slack's hosted MCP issues user tokens only. Sharing one human's grant as
+ * workspace authority made every shared agent act as a named employee; the
+ * OpenGeni workspace bot owns shared Slack access instead (bot-token search
+ * covers public channels, files, and users).
+ */
+export function assertHostedSlackMcpPersonalOwnership(
+  hostedSlackMcp: boolean,
+  ownership: ConnectionOwnership,
+): void {
+  if (hostedSlackMcp && ownership !== "personal") {
+    throw new HTTPException(422, {
+      message:
+        "Slack's hosted MCP connection is personal only; install the OpenGeni Slack bot for workspace access",
+    });
+  }
+}
+
+export function isHostedSlackMcpTarget(providerDomain: string, mcpUrl: string): boolean {
+  return (
+    mcpUrl === OFFICIAL_SLACK_MCP_URL || canonicalProviderDomain(providerDomain) === "slack.com"
+  );
+}
+
 export async function completeMcpOAuthCallback(
   deps: OAuthClientDeps,
   input: {
@@ -479,8 +507,13 @@ async function completeMcpOAuthCallbackWithinDeadline(
   try {
     state = readOAuthState(input.state, settings);
     // Fence state minted by an older deployment too: a rolling update must not
-    // let a still-valid workspace-owned Gmail callback persist shared authority.
+    // let a still-valid workspace-owned Gmail or hosted Slack callback persist
+    // shared authority.
     assertOfficialGmailPersonalOwnership(state.mcpUrl, state.ownership);
+    assertHostedSlackMcpPersonalOwnership(
+      isHostedSlackMcpTarget(state.providerDomain, state.mcpUrl),
+      state.ownership,
+    );
     if (!input.code) {
       return {
         redirectTo: callbackReturnPath(state.returnPath, "error", {
@@ -1247,7 +1280,7 @@ async function existingOAuthConnectionForStart(
       connection.providerDomain === input.providerDomain &&
       (!input.exactMcpBinding || connection.metadata.mcpUrl === input.mcpUrl),
   );
-  if (input.hostedSlackMcp && input.newConnectionOwnership === "personal") {
+  if (input.hostedSlackMcp) {
     return selectCanonicalPersonalSlackConnection(matching);
   }
   return matching.find((connection) => connection.status === "active") ?? null;

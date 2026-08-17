@@ -20,16 +20,30 @@ export const OPENGENI_SLACK_BOT_REQUIRED_SCOPES = [
 export const OPENGENI_SLACK_REACTION_REQUIRED_SCOPE = "reactions:read" as const;
 
 /**
+ * Bot-token search scopes for Slack's Real-time Search API
+ * (`assistant.search.context`). Slack accepts these as BOT scopes, so
+ * workspace-wide public search runs under the bot identity and never needs a
+ * human proxy token. Private-channel, DM, and MPIM search remain user-token
+ * only and belong exclusively to the personal hosted-MCP grant.
+ */
+export const OPENGENI_SLACK_BOT_SEARCH_SCOPES = [
+  "search:read.public",
+  "search:read.files",
+  "search:read.users",
+] as const;
+
+/**
  * Scopes requested by the managed and generated self-hosted manifests.
  *
- * `reactions:read` is deliberately not part of the base eligibility contract:
- * legacy installations may continue using existing Slack interactions and
- * tools while the reaction setting stays disabled and the UI asks an admin to
- * reinstall.
+ * `reactions:read` and the bot search scopes are deliberately not part of the
+ * base eligibility contract: legacy installations may continue using existing
+ * Slack interactions and tools while the reaction setting stays disabled, bot
+ * search stays unavailable, and the UI asks an admin to reinstall.
  */
 export const OPENGENI_SLACK_BOT_REQUESTED_SCOPES = [
   ...OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_REACTION_REQUIRED_SCOPE,
+  ...OPENGENI_SLACK_BOT_SEARCH_SCOPES,
 ] as const;
 
 export const OPENGENI_SLACK_BOT_EVENTS = [
@@ -148,7 +162,12 @@ export function buildOpenGeniSlackBotManifest(publicBaseUrl: string) {
 export const OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES = [
   "team:read",
   OPENGENI_SLACK_REACTION_REQUIRED_SCOPE,
+  ...OPENGENI_SLACK_BOT_SEARCH_SCOPES,
 ] as const;
+
+export function hasOpenGeniSlackBotSearchScopes(grantedScopes: readonly string[]): boolean {
+  return OPENGENI_SLACK_BOT_SEARCH_SCOPES.every((scope) => grantedScopes.includes(scope));
+}
 
 /** @deprecated Use evaluateOpenGeniSlackBotScopes; an allowlist is the policy. */
 export const OPENGENI_SLACK_BOT_FORBIDDEN_SCOPES = ["channels:join", "chat:write.public"] as const;
