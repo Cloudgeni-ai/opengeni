@@ -8,6 +8,7 @@ import {
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
   ModelContextContributionSummaries,
+  OPENGENI_PERSONAL_SLACK_MCP_URL,
   OrganizationMember,
   SessionGoalSnapshot,
   SessionGoalRootConstraintsWrite,
@@ -7718,6 +7719,17 @@ export async function listEnabledMcpCapabilityServers(
       // Credential-gated MCPs are runnable only when either legacy static
       // credential headers or the connections broker ref were stored at enable
       // time.
+      return [];
+    }
+    if (
+      connectionRef &&
+      item.endpointUrl.replace(/\/+$/, "") === OPENGENI_PERSONAL_SLACK_MCP_URL &&
+      connectionRef.subjectScope !== "subject"
+    ) {
+      // The hosted Slack MCP is personal-only. A workspace-scoped ref could
+      // only have been stored before that rule; enable-time fences stop new
+      // ones, and this stops an already-enabled one from executing a shared
+      // human token at runtime. It is not runnable until reconnected personally.
       return [];
     }
     const metadata = item.metadata;

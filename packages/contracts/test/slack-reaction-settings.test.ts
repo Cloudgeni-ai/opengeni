@@ -6,11 +6,16 @@ import {
   workspaceSlackReactionChannelAllowed,
 } from "../src";
 import {
+  areOpenGeniSlackBotScopesAccepted,
   buildOpenGeniSlackBotManifest,
+  evaluateOpenGeniSlackBotScopes,
+  hasOpenGeniSlackBotSearchScopes,
   hasOpenGeniSlackReactionScope,
   OPENGENI_MANAGED_PUBLIC_BASE_URL,
   OPENGENI_SLACK_BOT_EVENTS,
   OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
+  OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+  OPENGENI_SLACK_BOT_SEARCH_SCOPES,
   OPENGENI_SLACK_MCP_USER_SCOPES,
   OPENGENI_SLACK_REACTION_REQUIRED_SCOPE,
 } from "../src/slack-bot-scopes";
@@ -60,6 +65,38 @@ describe("Slack reaction summon workspace settings", () => {
     expect(OPENGENI_SLACK_BOT_REQUESTED_SCOPES).toContain(OPENGENI_SLACK_REACTION_REQUIRED_SCOPE);
     expect(hasOpenGeniSlackReactionScope(OPENGENI_SLACK_BOT_REQUESTED_SCOPES)).toBe(true);
     expect(hasOpenGeniSlackReactionScope([])).toBe(false);
+  });
+
+  test("requests bot-token public search scopes without widening beyond Slack's bot-scope surface", () => {
+    expect(OPENGENI_SLACK_BOT_SEARCH_SCOPES).toEqual([
+      "search:read.public",
+      "search:read.files",
+      "search:read.users",
+    ]);
+    for (const scope of OPENGENI_SLACK_BOT_SEARCH_SCOPES) {
+      expect(OPENGENI_SLACK_BOT_REQUESTED_SCOPES).toContain(scope);
+      // Existing installations without the search grant remain eligible.
+      expect(OPENGENI_SLACK_BOT_REQUIRED_SCOPES).not.toContain(scope);
+    }
+    expect(hasOpenGeniSlackBotSearchScopes(OPENGENI_SLACK_BOT_REQUESTED_SCOPES)).toBe(true);
+    expect(hasOpenGeniSlackBotSearchScopes(OPENGENI_SLACK_BOT_REQUIRED_SCOPES)).toBe(false);
+    expect(areOpenGeniSlackBotScopesAccepted(OPENGENI_SLACK_BOT_REQUIRED_SCOPES)).toBe(true);
+    expect(areOpenGeniSlackBotScopesAccepted(OPENGENI_SLACK_BOT_REQUESTED_SCOPES)).toBe(true);
+    // Private-conversation search stays a user-token-only personal grant; join
+    // and public-post scopes stay off the bot allowlist.
+    for (const scope of [
+      "search:read.private",
+      "search:read.im",
+      "search:read.mpim",
+      "search:read.enterprise",
+      "channels:join",
+      "chat:write.public",
+    ]) {
+      expect(OPENGENI_SLACK_BOT_REQUESTED_SCOPES).not.toContain(scope);
+      expect(
+        evaluateOpenGeniSlackBotScopes([...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, scope]),
+      ).toMatchObject({ accepted: false, unsupported: [scope] });
+    }
   });
 
   test("generates one managed or self-hosted manifest with the exact read scope and reaction event", () => {
