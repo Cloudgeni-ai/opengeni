@@ -31,6 +31,14 @@ export type ProbeCatalogOptions = {
   timeoutMs?: number;
   overallBudgetMs?: number;
   now?: () => number;
+  /**
+   * Extra attempts for a transient outcome (connection error, timeout, 5xx).
+   * A live endpoint that flakes once under probe concurrency must not be
+   * evicted from the snapshot on that single observation.
+   */
+  transientRetries?: number;
+  transientRetryDelayMs?: number;
+  sleep?: (ms: number) => Promise<void>;
 };
 
 export type ProbedCatalogSnapshot = NormalizedCatalogSnapshot & {
@@ -48,6 +56,18 @@ export type ProbedCatalogSnapshot = NormalizedCatalogSnapshot & {
 const DEFAULT_CONCURRENCY = 24;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const DEFAULT_OVERALL_BUDGET_MS = 10 * 60_000;
+const DEFAULT_TRANSIENT_RETRIES = 2;
+const DEFAULT_TRANSIENT_RETRY_DELAY_MS = 2_000;
+
+export function isTransientProbeOutcome(outcome: CatalogProbeOutcome): boolean {
+  if (outcome.status === "real") {
+    return false;
+  }
+  if (outcome.reason === "connection_error" || outcome.reason === "timeout") {
+    return true;
+  }
+  return outcome.reason === "http_status" && (outcome.httpStatus ?? 0) >= 500;
+}
 
 export async function probeCatalogSnapshot(
   normalized: NormalizedCatalogSnapshot,
@@ -57,6 +77,13 @@ export async function probeCatalogSnapshot(
   const concurrency = Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY);
   const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const now = options.now ?? Date.now;
+  const transientRetries = Math.max(0, options.transientRetries ?? DEFAULT_TRANSIENT_RETRIES);
+  const transientRetryDelayMs = Math.max(
+    0,
+    options.transientRetryDelayMs ?? DEFAULT_TRANSIENT_RETRY_DELAY_MS,
+  );
+  const sleep =
+    options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const deadline =
     now() + Math.max(timeoutMs, options.overallBudgetMs ?? DEFAULT_OVERALL_BUDGET_MS);
   const outcomes: ProbedCatalogSnapshot["probe"]["outcomes"] = [];
@@ -71,17 +98,31 @@ export async function probeCatalogSnapshot(
       if (!row) {
         return;
       }
-      const outcome =
-        now() >= deadline
-          ? {
-              status: "unverified" as const,
-              reason: "timeout" as const,
-              detail: "overall_budget_exhausted",
-            }
-          : await probeMcpEndpoint(row.mcpUrl, {
-              fetchImpl,
-              timeoutMs: Math.min(timeoutMs, Math.max(1, deadline - now())),
-            });
+      const budgetExhausted: CatalogProbeOutcome = {
+        status: "unverified",
+        reason: "timeout",
+        detail: "overall_budget_exhausted",
+      };
+      let outcome: CatalogProbeOutcome = budgetExhausted;
+      for (let attempt = 0; attempt <= transientRetries && now() < deadline; attempt += 1) {
+        if (attempt > 0 && transientRetryDelayMs > 0) {
+          await sleep(transientRetryDelayMs * attempt);
+          // The retry sleep may have consumed the remaining budget. A probe
+          // started now would run with a 1 ms timeout and report `timeout`
+          // as if the endpoint were slow; report the exhausted budget instead.
+          if (now() >= deadline) {
+            outcome = budgetExhausted;
+            break;
+          }
+        }
+        outcome = await probeMcpEndpoint(row.mcpUrl, {
+          fetchImpl,
+          timeoutMs: Math.min(timeoutMs, Math.max(1, deadline - now())),
+        });
+        if (!isTransientProbeOutcome(outcome)) {
+          break;
+        }
+      }
       outcomes[index] = { domain: row.domain, mcpUrl: row.mcpUrl, outcome };
       if (outcome.status === "real") {
         keptRows[index] = withProbeMetadata(row, outcome);
