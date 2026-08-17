@@ -38,6 +38,7 @@ import {
   SESSION_GOAL_RATIONALE_MAX_BYTES,
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
+  SESSION_INSTRUCTIONS_MAX_CHARACTERS,
   sessionGoalUtf8Bytes,
   TASK_NOTE_LIST_DEFAULT_LIMIT,
   TASK_NOTE_LIST_MAX_LIMIT,
@@ -4297,7 +4298,7 @@ function registerWorkspaceOrchestrationTools(
     const sessionCreateInput = z4
       .object({
         initialMessage: z4.string().min(1),
-        instructions: z4.string().min(1).max(32768).optional(),
+        instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
         goal: z4.unknown().optional(),
         resources: z4.array(z4.unknown()).optional(),
         tools: z4.array(z4.unknown()).optional(),

@@ -69,7 +69,7 @@ non-bypassable CORE (goal-loop ownership + variable set block) always
 substituted in. Exact-message application context does not enter this prefix.
 
 - **Workspace `agentInstructions`** (`Workspace.agentInstructions`, set at workspace create/update) — the white-label persona for _every_ session in a workspace. Use it for stable, tenant-wide branding/behavior. It may embed the `{{core}}` marker to place the non-bypassable CORE; if it omits the marker, CORE is appended.
-- **Per-session `instructions`** (`CreateSessionRequest.instructions`) — an optional, per-_session_ refinement layered after the workspace persona. Use it to deliver a **per-agent-type prompt** (reviewer vs. planner vs. fixer) when many personas share one workspace, without minting a workspace per persona. It is org-visible metadata (returned on the session record, exposed like `title`/`goal`), never a timeline event, and carries system-level authority.
+- **Per-session `instructions`** (`CreateSessionRequest.instructions`) — an optional, per-_session_ refinement layered after the workspace persona. Use it to deliver a **per-agent-type prompt** (reviewer vs. planner vs. fixer) when many personas share one workspace, without minting a workspace per persona. It is org-visible metadata (returned on the session record, exposed like `title`/`goal`), never a timeline event, carries system-level authority, and is capped at 65536 characters.
 - **Per-message `modelContext`** (`CreateSessionRequest.modelContext`,
   `SendMessageInput.modelContext`, and supported realtime inbound entries) —
   optional application context for one exact accepted message. OpenGeni stores
