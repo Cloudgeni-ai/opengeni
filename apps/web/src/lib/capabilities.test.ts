@@ -3,7 +3,9 @@ import { describe, expect, test } from "bun:test";
 import {
   apiKeyConnectionRef,
   capabilityAuthHint,
+  capabilityCategoryLabel,
   capabilityConnectPlan,
+  capabilityCuration,
   capabilityFilterLabel,
   capabilityFormError,
   capabilityItemKindLabel,
@@ -28,6 +30,7 @@ import {
   registryResultsForQuery,
   resolveSheetItem,
   socialConnectionsForOwnership,
+  sortFeaturedFirst,
   subjectOAuthConnectionRef,
   workspaceConnectionForDomain,
 } from "./capabilities";
@@ -337,6 +340,32 @@ describe("capabilityConnectPlan", () => {
         item({ metadata: { connectionOwnership: "personal_only" } }),
       ),
     ).toBe(true);
+  });
+
+  test("Slack's hosted MCP is personal-only; shared Slack access is the workspace bot", () => {
+    expect(
+      capabilityRequiresPersonalConnection(
+        item({
+          providerDomain: "slack.com",
+          mcpUrl: "https://mcp.slack.com/mcp",
+          metadata: {},
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      capabilityRequiresPersonalConnection(
+        item({
+          providerDomain: "slack.com",
+          endpointUrl: "https://mcp.slack.com/mcp/",
+          metadata: {},
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      capabilityRequiresPersonalConnection(
+        item({ providerDomain: "slack.com", mcpUrl: "https://slack.example.test/mcp" }),
+      ),
+    ).toBe(false);
   });
 
   test("MCP with required headers collects an api_key with humanized labels", () => {
@@ -1098,5 +1127,77 @@ describe("helpers", () => {
     expect(capabilityMonogram("Linear")).toBe("LI");
     expect(capabilityMonogram("Google Drive")).toBe("GD");
     expect(capabilityMonogram("")).toBe("?");
+  });
+});
+
+describe("capabilityCuration", () => {
+  test("reads featured and official from import curation metadata", () => {
+    expect(
+      capabilityCuration(item({ metadata: { curation: { featured: true, official: true } } })),
+    ).toEqual({ featured: true, official: true });
+  });
+
+  test("defaults both flags to false when curation is absent or malformed", () => {
+    expect(capabilityCuration(item({ metadata: {} }))).toEqual({
+      featured: false,
+      official: false,
+    });
+    expect(capabilityCuration(item({ metadata: { curation: "yes" } }))).toEqual({
+      featured: false,
+      official: false,
+    });
+    expect(capabilityCuration(item({ metadata: { curation: { featured: "true" } } }))).toEqual({
+      featured: false,
+      official: false,
+    });
+  });
+});
+
+describe("sortFeaturedFirst", () => {
+  test("moves featured rows to the front and preserves relative order otherwise", () => {
+    const a = item({ id: "a" });
+    const b = item({ id: "b", metadata: { curation: { featured: true } } });
+    const c = item({ id: "c" });
+    const d = item({ id: "d", metadata: { curation: { featured: true } } });
+    expect(sortFeaturedFirst([a, b, c, d]).map((entry) => entry.id)).toEqual(["b", "d", "a", "c"]);
+  });
+
+  test("returns a new array and leaves the input untouched", () => {
+    const input = [
+      item({ id: "x" }),
+      item({ id: "y", metadata: { curation: { featured: true } } }),
+    ];
+    const sorted = sortFeaturedFirst(input);
+    expect(sorted).not.toBe(input);
+    expect(input.map((entry) => entry.id)).toEqual(["x", "y"]);
+  });
+});
+
+describe("capabilityCategoryLabel", () => {
+  test("maps known slugs to human labels and hides custom", () => {
+    expect(capabilityCategoryLabel("project-management")).toBe("Project management");
+    expect(capabilityCategoryLabel("developer-tools")).toBe("Developer tools");
+    expect(capabilityCategoryLabel("integrations")).toBe("Integrations");
+    expect(capabilityCategoryLabel("custom")).toBeNull();
+    expect(capabilityCategoryLabel(null)).toBeNull();
+  });
+
+  test("title-cases an unknown slug instead of leaking it raw", () => {
+    expect(capabilityCategoryLabel("knowledge-graphs")).toBe("Knowledge graphs");
+    expect(capabilityCategoryLabel("weird_thing")).toBe("Weird thing");
+  });
+});
+
+describe("filterCapabilityCatalogItems ignores curation flags", () => {
+  test("typing official does not match every curated connector", () => {
+    const curated = item({
+      id: "cur",
+      name: "Linear",
+      description: "Issues",
+      metadata: { curation: { featured: true, official: true } },
+    });
+    const plain = item({ id: "plain", name: "Official Widgets", description: "Widgets" });
+    const hits = filterCapabilityCatalogItems([curated, plain], "all", "official");
+    expect(hits.map((entry) => entry.id)).toEqual(["plain"]);
   });
 });

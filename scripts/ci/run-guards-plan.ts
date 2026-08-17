@@ -10,6 +10,7 @@ const COMMANDS: Readonly<Record<string, readonly string[]>> = {
   "docs-refs": ["bun", "scripts/check-docs-refs.ts"],
   "generated-fonts": ["bun", "run", "check:generated-fonts"],
   "public-hygiene": ["bun", "run", "check:public-hygiene"],
+  "migration-ordinals": ["bun", "scripts/check-migration-ordinals.ts"],
   "publish-closure": ["bun", "scripts/publish-closure-guard.ts"],
 };
 

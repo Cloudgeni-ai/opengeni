@@ -84,6 +84,10 @@ export function QueueSurface({
   const [replaceDraftFor, setReplaceDraftFor] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const [draggedTurnId, setDraggedTurnId] = useState<string | null>(null);
+  const [pendingMove, setPendingMove] = useState<{
+    baseVersion: number | null;
+    turnIds: string[];
+  } | null>(null);
   const surface = usePortalTokenSource<HTMLDivElement>();
   const surfaceRef = surface.currentRef;
   const portalTokenStyle = usePortalTokenStyle(surface.source);
@@ -112,30 +116,56 @@ export function QueueSurface({
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
   const displayedQueue = useMemo(() => {
-    if (!keyboardDrag) return queue.queue;
-    const oldIndex = queue.queue.findIndex((turn) => turn.id === keyboardDrag.turnId);
-    if (oldIndex < 0) return queue.queue;
-    return arrayMove(queue.queue, oldIndex, keyboardDrag.projectedIndex);
-  }, [keyboardDrag, queue.queue]);
+    if (keyboardDrag) {
+      const oldIndex = queue.queue.findIndex((turn) => turn.id === keyboardDrag.turnId);
+      if (oldIndex < 0) return queue.queue;
+      return arrayMove(queue.queue, oldIndex, keyboardDrag.projectedIndex);
+    }
+    if (
+      !pendingMove ||
+      pendingMove.baseVersion === null ||
+      queue.snapshot?.version !== pendingMove.baseVersion
+    ) {
+      return queue.queue;
+    }
+    const byId = new Map(queue.queue.map((turn) => [turn.id, turn]));
+    const projected = pendingMove.turnIds.map((turnId) => byId.get(turnId));
+    // Never let an optimistic ordering projection omit or invent a row. Any
+    // concurrent authoritative membership change wins immediately.
+    if (projected.some((turn) => !turn) || projected.length !== queue.queue.length) {
+      return queue.queue;
+    }
+    return projected as SessionTurn[];
+  }, [keyboardDrag, pendingMove, queue.queue, queue.snapshot?.version]);
 
   const ids = useMemo(() => displayedQueue.map((turn) => turn.id), [displayedQueue]);
   const moveToIndex = useCallback(
     async (turnId: string, nextIndex: number): Promise<void> => {
+      if (queue.mutating || pendingMove) return;
       const oldIndex = queue.queue.findIndex((turn) => turn.id === turnId);
       if (oldIndex < 0) return;
       const boundedIndex = Math.max(0, Math.min(nextIndex, queue.queue.length - 1));
       if (oldIndex === boundedIndex) return;
       const ordered = arrayMove(queue.queue, oldIndex, boundedIndex);
       const beforeTurnId = ordered[boundedIndex + 1]?.id ?? null;
-      const moved = await queue.moveTurn(turnId, beforeTurnId);
-      setAnnouncement(
-        moved
-          ? `Queued prompt moved to position ${boundedIndex + 1}.`
-          : "The queue changed before that prompt could be moved. Refreshed server order.",
-      );
-      if (moved) focusQueueTurn(surfaceRef.current, turnId);
+      setPendingMove({
+        baseVersion: queue.snapshot?.version ?? null,
+        turnIds: ordered.map((turn) => turn.id),
+      });
+      setAnnouncement(`Saving queued prompt at position ${boundedIndex + 1}.`);
+      try {
+        const moved = await queue.moveTurn(turnId, beforeTurnId);
+        setAnnouncement(
+          moved
+            ? `Queued prompt moved to position ${boundedIndex + 1}.`
+            : "The queue changed before that prompt could be moved. Refreshed server order.",
+        );
+        if (moved) focusQueueTurn(surfaceRef.current, turnId);
+      } finally {
+        setPendingMove(null);
+      }
     },
-    [queue, surfaceRef],
+    [pendingMove, queue, surfaceRef],
   );
 
   const onDragEnd = useCallback(
@@ -211,11 +241,15 @@ export function QueueSurface({
   const edit = useCallback(
     async (turn: SessionTurn, replaceDraft: boolean) => {
       if (!composer || !canEditInComposer) return;
+      setAnnouncement("Moving queued prompt to the composer…");
       const restored = await queue.editTurn(turn.id, {
         expectedDraftRevision: composer.draftRevision,
         replaceDraft,
       });
-      if (!restored) return;
+      if (!restored) {
+        setAnnouncement("That prompt changed before it could be moved to the composer.");
+        return;
+      }
       composer.applyDraft(restored);
       setReplaceDraftFor(null);
       setAnnouncement("Queued prompt moved back to the composer for editing.");
@@ -358,6 +392,7 @@ export function QueueSurface({
                       turn.id === queue.pendingInputAttachment?.turnId ? attachedInputs : []
                     }
                     pending={queue.mutationFor(turn.id)}
+                    reorderDisabled={queue.mutating || pendingMove !== null}
                     confirmingReplace={replaceDraftFor === turn.id}
                     keyboardDragging={keyboardDrag?.turnId === turn.id}
                     portalTokenStyle={portalTokenStyle}
@@ -367,6 +402,7 @@ export function QueueSurface({
                     onConfirmReplace={() => void edit(turn, true)}
                     onCancelReplace={() => setReplaceDraftFor(null)}
                     onSteer={() => {
+                      setAnnouncement("Requesting this queued prompt as the next direction…");
                       void queue.steerTurn(turn.id).then((steered) => {
                         setAnnouncement(
                           steered
@@ -379,6 +415,7 @@ export function QueueSurface({
                       });
                     }}
                     onDelete={() => {
+                      setAnnouncement("Deleting queued prompt…");
                       void queue.removeTurn(turn.id).then((removed) => {
                         setAnnouncement(
                           removed
@@ -930,6 +967,7 @@ function SortableQueueRow({
   count,
   attachedInputs,
   pending,
+  reorderDisabled,
   confirmingReplace,
   keyboardDragging,
   portalTokenStyle,
@@ -947,6 +985,7 @@ function SortableQueueRow({
   count: number;
   attachedInputs: SessionPendingInputPreview[];
   pending: QueueMutationKind | null;
+  reorderDisabled: boolean;
   confirmingReplace: boolean;
   keyboardDragging: boolean;
   portalTokenStyle: PortalTokenStyle;
@@ -961,7 +1000,7 @@ function SortableQueueRow({
 }) {
   const sortable = useSortable({
     id: turn.id,
-    disabled: pending !== null || keyboardDragging,
+    disabled: reorderDisabled || keyboardDragging,
   });
   return (
     <li
@@ -981,7 +1020,7 @@ function SortableQueueRow({
           {...sortable.attributes}
           {...sortable.listeners}
           onKeyDown={onHandleKeyDown}
-          disabled={pending !== null}
+          disabled={reorderDisabled}
           className="col-start-1 row-start-1 mt-0.5 inline-flex size-7 shrink-0 touch-none items-center justify-center rounded-md text-fg-subtle hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:size-[44px]"
           aria-label={`Reorder queued prompt ${index + 1}`}
           title="Drag to reorder. Press Space, arrows, then Space to drop."
@@ -1015,6 +1054,20 @@ function SortableQueueRow({
             <span className="min-w-0 truncate">{turn.model}</span>
             <span className="shrink-0">{turn.reasoningEffort}</span>
           </div>
+          {pending ? (
+            <div
+              role="status"
+              aria-live="polite"
+              className="mt-1 flex items-center gap-1.5 text-og-xs font-medium text-status-waiting"
+              data-testid={`queue-mutation-${pending}`}
+            >
+              <Loader2Icon
+                aria-hidden="true"
+                className="size-3 shrink-0 animate-spin motion-reduce:animate-none"
+              />
+              {queueMutationPendingLabel(pending)}
+            </div>
+          ) : null}
         </div>
         <div className="col-span-full row-start-3 flex min-w-0 items-start justify-end gap-1.5 sm:col-span-1 sm:col-start-4 sm:row-start-1 sm:gap-2">
           <button
@@ -1140,6 +1193,19 @@ function SortableQueueRow({
       ) : null}
     </li>
   );
+}
+
+function queueMutationPendingLabel(kind: QueueMutationKind): string {
+  switch (kind) {
+    case "move":
+      return "Saving new position…";
+    case "edit":
+      return "Moving to composer…";
+    case "steer":
+      return "Changing direction…";
+    case "delete":
+      return "Deleting…";
+  }
 }
 
 const verticalOnly: Modifier = ({ transform }) => ({ ...transform, x: 0 });

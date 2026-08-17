@@ -58,7 +58,9 @@ import {
   type RoutableSandbox,
   type ResolvedActiveBackend,
   type RoutingMutationSettlementResult,
+  type RoutingSandboxFirstOperationObserver,
   type RoutingSandboxOperationObserver,
+  type RoutingSandboxWaitObservation,
   type RoutingRetainedProcess,
   type RoutingRetainedProcessTerminalProof,
   type SelfhostedOpObserver,
@@ -418,11 +420,12 @@ function beforePersistableHomeMutation(
   | ((input: {
       op: string;
       backend: ResolvedActiveBackend;
+      onCaptureWait?: (observation: RoutingSandboxWaitObservation) => void;
     }) => Promise<PersistableMutationAdmission | null>)
   | undefined {
   const fence = ids.workspaceMutationFence;
   if (!home || !fence) return undefined;
-  return async ({ op, backend }) => {
+  return async ({ op, backend, onCaptureWait }) => {
     // A connected-machine target is intentionally non-persistable: its writes
     // do not dirty the session home's archive. Exact home identity metadata is
     // present only on a verified durable home route.
@@ -451,6 +454,7 @@ function beforePersistableHomeMutation(
       operation: op,
       captureWaitMs: sandboxLifecycleTransitionWaitMs(services.settings),
       ...(services.waitSignal ? { waitSignal: services.waitSignal } : {}),
+      ...(onCaptureWait ? { onCaptureWait } : {}),
     });
     return { admission, providerBinding };
   };
@@ -894,6 +898,7 @@ export function wrapLazyTurnBoxWithRouting(
       sandboxGroupId: string;
       backend: string;
     };
+    onFirstOperation?: RoutingSandboxFirstOperationObserver;
   },
 ): EstablishedSandboxSession {
   const { db, settings, bus, onOp } = services;
@@ -995,6 +1000,7 @@ export function wrapLazyTurnBoxWithRouting(
       return routedResolver(pointer);
     },
     ...(services.onSandboxOperation ? { onOperation: services.onSandboxOperation } : {}),
+    ...(args.onFirstOperation ? { onFirstOperation: args.onFirstOperation } : {}),
     ...(beforeMutation ? { beforeMutation } : {}),
     ...(afterMutation ? { afterMutation } : {}),
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),

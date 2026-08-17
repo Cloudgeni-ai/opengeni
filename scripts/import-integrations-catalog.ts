@@ -14,6 +14,13 @@ import {
   type RegistryCapabilityCatalogItemInput,
 } from "@opengeni/db";
 import { createObjectStorage, type ObjectStorage } from "../packages/storage/src/index";
+import {
+  CURATED_CATALOG,
+  canonicalMcpUrl,
+  curatedCatalogEntriesByMcpUrl,
+  curatedCatalogFingerprintInput,
+  type CuratedCatalog,
+} from "./catalog-curation";
 
 const SOURCE = "integrations.sh";
 const MIT_ATTRIBUTION =
@@ -22,7 +29,7 @@ const MAX_LOGO_BYTES = 512 * 1024;
 
 // Bump deliberately whenever normalization or import semantics can change
 // persisted output without changing the reviewed snapshot bytes.
-export const CATALOG_IMPORT_SEMANTIC_VERSION = 1;
+export const CATALOG_IMPORT_SEMANTIC_VERSION = 2;
 
 export const deadDemoDomains = new Set([
   "auto-calculator.onrender.com",
@@ -77,6 +84,12 @@ export type CatalogIntegrationRow = {
   domain: string;
   name: string;
   description?: string;
+  /** Curated grouping; absent means the registry-wide default. */
+  category?: string;
+  /** Curated: promoted to the featured strip. Not a security review. */
+  featured?: boolean;
+  /** Curated: the provider publishes this server on its own domain. */
+  official?: boolean;
   mcpUrl: string;
   transport: "streamable-http";
   authKind: CatalogAuthKind;
@@ -112,6 +125,12 @@ export type NormalizedCatalogSnapshot = {
     reason: string;
   }>;
   quarantined: Array<{ row: CatalogIntegrationRow; reason: string }>;
+  /**
+   * Curated overlay entries whose MCP URL matched no surviving snapshot row.
+   * A dead entry means a reviewed contract silently applies to nothing, so it
+   * is reported like a skip rather than dropped.
+   */
+  unmatchedCurated: string[];
   cleaning: {
     inputRows: number;
     outputRows: number;
@@ -123,154 +142,6 @@ export type NormalizedCatalogSnapshot = {
     controlCharacterFields: number;
   };
 };
-
-const brandedNamesByMcpUrl = new Map([["https://mcp.linear.app/mcp", "Linear"]]);
-
-/**
- * Reviewed first-party contracts override weaker registry metadata. Keep this
- * list deliberately small: each entry must be backed by the provider's own
- * current MCP documentation, not inferred from an aggregator.
- */
-const officialCatalogContractsByMcpUrl = new Map<
-  string,
-  Pick<CatalogIntegrationRow, "name" | "tier" | "provenance" | "authKind" | "scopesHint"> &
-    Partial<
-      Pick<
-        CatalogIntegrationRow,
-        | "description"
-        | "allowedTools"
-        | "requireApproval"
-        | "connectionOwnership"
-        | "logoSourceUrl"
-        | "homepageUrl"
-        | "installUrl"
-        | "documentationUrl"
-        | "registryName"
-        | "registryVersion"
-        | "registryStatus"
-        | "registryIsLatest"
-        | "registryPublishedAt"
-        | "repositorySource"
-        | "repositoryUrl"
-        | "sourceCommit"
-      >
-    >
->([
-  [
-    "https://gmailmcp.googleapis.com/mcp/v1",
-    {
-      name: "Gmail",
-      description:
-        "Search and read Gmail, create drafts, and organize messages through Google's official hosted MCP server.",
-      tier: "verified",
-      provenance: "official:developers.google.com/workspace/gmail/api/reference/mcp",
-      authKind: "oauth2",
-      // Keep the consent surface to the union required by the reviewed tools
-      // instead of requesting every scope advertised by PRM.
-      scopesHint: [
-        "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/gmail.compose",
-        "https://www.googleapis.com/auth/gmail.modify",
-      ],
-      // Freeze the reviewed Developer Preview surface. Newly introduced
-      // remote tools remain unavailable until the catalog contract is reviewed.
-      allowedTools: [
-        "create_draft",
-        "get_message",
-        "get_thread",
-        "label_message",
-        "label_thread",
-        "list_drafts",
-        "list_labels",
-        "search_threads",
-        "unlabel_message",
-        "unlabel_thread",
-      ],
-      requireApproval: [
-        "create_draft",
-        "label_message",
-        "label_thread",
-        "unlabel_message",
-        "unlabel_thread",
-      ],
-      // A consumer Gmail account is never a workspace credential. Each member
-      // authorizes their own mailbox and receives only their own delegation.
-      connectionOwnership: "personal_only",
-      // Google has not published a reusable Gmail MCP logo asset. Keep the
-      // catalog's self-hosted monogram instead of hotlinking a brand asset.
-      logoSourceUrl: null,
-      homepageUrl: "https://developers.google.com/workspace/gmail/api/reference/mcp",
-      installUrl: "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
-      documentationUrl: "https://developers.google.com/workspace/gmail/api/reference/mcp",
-    },
-  ],
-  [
-    "https://mcp.slack.com/mcp",
-    {
-      name: "Slack",
-      tier: "verified",
-      provenance: "official:docs.slack.dev/ai/slack-mcp-server",
-      authKind: "oauth2",
-      // Slack's tools/list is grant-dependent. These are the complete scopes
-      // advertised by its official OAuth protected-resource metadata.
-      scopesHint: [
-        "search:read.public",
-        "search:read.private",
-        "search:read.mpim",
-        "search:read.im",
-        "search:read.files",
-        "search:read.users",
-        "chat:write",
-        "channels:history",
-        "groups:history",
-        "mpim:history",
-        "im:history",
-        "canvases:read",
-        "canvases:write",
-        "users:read",
-        "users:read.email",
-        "reactions:write",
-        "reactions:read",
-        "emoji:read",
-        "files:read",
-        "channels:write",
-        "groups:write",
-        "im:write",
-        "mpim:write",
-        "channels:read",
-        "groups:read",
-        "mpim:read",
-      ],
-    },
-  ],
-  [
-    "https://api.mobbin.com/mcp",
-    {
-      name: "Mobbin",
-      description:
-        "Search Mobbin’s library for real-world product screens, flows, and UI/UX references. Requires a paid Mobbin plan (Pro, Team, or Enterprise). Provider-managed usage credits apply.",
-      tier: "verified",
-      provenance: "official:mcp-registry:com.mobbin/mobbin@1.0.1",
-      authKind: "oauth2",
-      scopesHint: ["openid"],
-      // Mobbin has not published a reusable logo license with its MCP
-      // listing. Keep the catalog's calm monogram rather than copying an
-      // unlicensed vendor asset.
-      logoSourceUrl: null,
-      homepageUrl: "https://mobbin.com/mcp",
-      installUrl: "https://docs.mobbin.com/mcp/clients/overview",
-      documentationUrl: "https://docs.mobbin.com/mcp/introduction",
-      registryName: "com.mobbin/mobbin",
-      registryVersion: "1.0.1",
-      registryStatus: "active",
-      registryIsLatest: true,
-      registryPublishedAt: "2026-06-03T10:01:47.928592Z",
-      repositorySource: "github",
-      repositoryUrl: "https://github.com/mobbin/mobbin-mcp-server",
-      sourceCommit: "bbee2a6be34d251c580ba80bb8b407c87587aba7",
-    },
-  ],
-]);
 
 export type LogoStorageResult =
   | {
@@ -343,7 +214,7 @@ export function normalizeCatalogSnapshot(
   const cleanedSnapshot = stripControlCharacters(snapshot, controlCharacters);
   const root = asRecord(cleanedSnapshot);
   const generatedAt = stringValue(root?.generatedAt) ?? stringValue(root?.snapshotDate) ?? null;
-  const candidates = precomputedRows(root ?? cleanedSnapshot) ?? rawSurfaceRows(root);
+  const candidates = catalogCandidateRows(cleanedSnapshot);
   const skipped: NormalizedCatalogSnapshot["skipped"] = [];
   const quarantined: NormalizedCatalogSnapshot["quarantined"] = [];
   const candidatesByDomainName = new Map<string, CatalogIntegrationRow>();
@@ -402,7 +273,7 @@ export function normalizeCatalogSnapshot(
         continue;
       }
     }
-    const official = officialCatalogContractsByMcpUrl.get(mcpUrl);
+    const official = curatedCatalogEntriesByMcpUrl.get(mcpUrl);
     const authKind = official?.authKind ?? normalizeAuthKind(candidate.authKind);
     if (authKind === "unknown") {
       skipped.push({ domain, mcpUrl: null, reason: "auth_unknown" });
@@ -422,16 +293,25 @@ export function normalizeCatalogSnapshot(
     const registryIsLatest = official?.registryIsLatest ?? candidate.registryIsLatest;
     const row: CatalogIntegrationRow = {
       domain,
-      name:
-        official?.name ?? brandedNamesByMcpUrl.get(mcpUrl) ?? stringValue(candidate.name) ?? domain,
+      name: official?.name ?? stringValue(candidate.name) ?? domain,
       ...optionalString("description", official?.description ?? stringValue(candidate.description)),
+      ...optionalString("category", official?.category),
+      ...(official?.featured ? { featured: true } : {}),
+      ...(official?.official ? { official: true } : {}),
       mcpUrl,
       transport: "streamable-http",
       authKind,
-      scopesHint: official?.scopesHint ?? stringArray(candidate.scopesHint),
-      ...(official?.allowedTools ? { allowedTools: official.allowedTools } : {}),
+      scopesHint: official?.scopesHint
+        ? [...official.scopesHint]
+        : stringArray(candidate.scopesHint),
+      ...(official?.allowedTools ? { allowedTools: [...official.allowedTools] } : {}),
       ...(official?.requireApproval !== undefined
-        ? { requireApproval: official.requireApproval }
+        ? {
+            requireApproval:
+              typeof official.requireApproval === "boolean"
+                ? official.requireApproval
+                : [...official.requireApproval],
+          }
         : {}),
       ...(official?.connectionOwnership
         ? { connectionOwnership: official.connectionOwnership }
@@ -547,9 +427,15 @@ export function normalizeCatalogSnapshot(
       left.mcpUrl.localeCompare(right.mcpUrl),
   );
 
+  const matchedCurated = new Set(rows.map((row) => row.mcpUrl));
+  const unmatchedCurated = [...curatedCatalogEntriesByMcpUrl.keys()]
+    .filter((mcpUrl) => !matchedCurated.has(mcpUrl))
+    .sort();
+
   return {
     generatedAt,
     rows,
+    unmatchedCurated,
     skipped,
     quarantined,
     cleaning: {
@@ -687,10 +573,19 @@ export function catalogRowToDbInput(
     scopesHint: row.scopesHint,
     homepageUrl: row.homepageUrl ?? `https://${row.domain}`,
     installUrl: row.installUrl ?? row.homepageUrl ?? `https://${row.domain}`,
+    ...(row.category ? { category: row.category } : {}),
     tags: ["mcp", "integration", row.tier, row.authKind],
     metadata: {
       logoSource: row.logoSourceUrl ? "integrations.sh" : "generic_monogram",
       originalLogoUrl: row.logoSourceUrl,
+      ...(row.featured || row.official
+        ? {
+            curation: {
+              ...(row.featured ? { featured: true } : {}),
+              ...(row.official ? { official: true } : {}),
+            },
+          }
+        : {}),
       ...(row.allowedTools ? { allowedTools: row.allowedTools } : {}),
       ...(row.requireApproval !== undefined ? { requireApproval: row.requireApproval } : {}),
       ...(row.connectionOwnership ? { connectionOwnership: row.connectionOwnership } : {}),
@@ -783,6 +678,15 @@ export async function storeLogoForRow(
 
 export function catalogCapabilityId(domain: string, mcpUrl: string): string {
   return `mcp:integrations-sh:${slugify(domain)}-${shortHash(`${domain}:${mcpUrl}`)}`;
+}
+
+/**
+ * The pre-normalization candidate rows of any accepted snapshot shape: a
+ * precomputed `importRows`/`rows` list (or bare array), else the raw
+ * integrations.sh index plus per-domain surface documents.
+ */
+export function catalogCandidateRows(snapshot: unknown): UnknownRecord[] {
+  return precomputedRows(snapshot) ?? rawSurfaceRows(asRecord(snapshot));
 }
 
 function precomputedRows(snapshot: unknown): UnknownRecord[] | null {
@@ -1005,19 +909,7 @@ function normalizeDomain(value: unknown): string | null {
   return raw || null;
 }
 
-export function canonicalMcpUrl(value: string): string {
-  const url = new URL(value);
-  url.hash = "";
-  url.hostname = url.hostname.toLowerCase();
-  if (
-    (url.protocol === "https:" && url.port === "443") ||
-    (url.protocol === "http:" && url.port === "80")
-  ) {
-    url.port = "";
-  }
-  url.pathname = url.pathname.replace(/\/+$/, "") || "/";
-  return url.toString();
-}
+export { canonicalMcpUrl };
 
 function normalizeAuthContract(value: unknown): Record<string, unknown> | null {
   const record = asRecord(value);
@@ -1280,6 +1172,8 @@ export async function catalogImportFingerprint(input: {
   snapshotRef?: string;
   skipLogos?: boolean;
   semanticVersion?: number;
+  /** Test seam. Production always fingerprints the committed overlay. */
+  curatedCatalog?: CuratedCatalog;
 }): Promise<string> {
   const semanticVersion = input.semanticVersion ?? CATALOG_IMPORT_SEMANTIC_VERSION;
   if (!Number.isSafeInteger(semanticVersion) || semanticVersion < 1 || semanticVersion > 9999) {
@@ -1288,6 +1182,12 @@ export async function catalogImportFingerprint(input: {
   const snapshotSha256 = createHash("sha256")
     .update(await readFile(input.snapshotPath))
     .digest("hex");
+  // The curated overlay is bundled into the importer, so it is part of the
+  // effective input. Hash its canonical parsed form: an overlay-only PR must
+  // invalidate `--if-changed`, while whitespace-only reformatting must not.
+  const curatedSha256 = createHash("sha256")
+    .update(curatedCatalogFingerprintInput(input.curatedCatalog ?? CURATED_CATALOG))
+    .digest("hex");
   const digest = createHash("sha256")
     .update(
       JSON.stringify({
@@ -1295,6 +1195,7 @@ export async function catalogImportFingerprint(input: {
         skipLogos: input.skipLogos === true,
         snapshotRef: input.snapshotRef ?? null,
         snapshotSha256,
+        curatedSha256,
       }),
     )
     .digest("hex");
@@ -1328,6 +1229,24 @@ if (import.meta.main) {
   const args = parseArgs(process.argv.slice(2));
   const snapshot = await readSnapshotFile(args.snapshotPath);
   const normalized = normalizeCatalogSnapshot(snapshot);
+  if (normalized.unmatchedCurated.length > 0) {
+    // A reviewed contract that matches no row would silently apply to nothing.
+    // Fail the import so the mismatch is fixed at review time, not discovered
+    // when a user sees the raw aggregator name.
+    console.error(
+      JSON.stringify(
+        {
+          error: "curated_entries_unmatched",
+          detail:
+            "data/catalog/curated.json has entries whose mcpUrl matches no importable snapshot row",
+          unmatchedCurated: normalized.unmatchedCurated,
+        },
+        null,
+        2,
+      ),
+    );
+    process.exit(1);
+  }
   if (args.dryRun) {
     console.log(
       JSON.stringify(

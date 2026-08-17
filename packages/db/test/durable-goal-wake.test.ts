@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  SESSION_GOAL_CONTEXT_LABEL,
   SESSION_GOAL_TEXT_MAX_BYTES,
   type McpPersonalConnectionDelegation,
 } from "@opengeni/contracts";
@@ -284,6 +285,14 @@ describe("durable active-goal wake", () => {
       objectiveRevision: 1,
       mutationPolicy: "preserve_intent",
     });
+    const initialHistory = await shared.admin<Array<{ item: Record<string, unknown> }>>`
+      select item from session_history_items
+      where workspace_id = ${ctx.grant.workspaceId!}
+        and session_id = ${ctx.session.id}
+        and turn_id = ${ctx.turn.id}
+      order by position`;
+    expect(JSON.stringify(initialHistory[0]?.item)).toContain(SESSION_GOAL_CONTEXT_LABEL);
+    expect(JSON.stringify(initialHistory[0]?.item)).toContain("Finish the durable wake proof");
 
     await withWorkspaceSubjectRls(client.db, ctx.grant.workspaceId!, ctx.grant.subjectId, (db) =>
       db.transaction((tx) =>
@@ -351,6 +360,13 @@ describe("durable active-goal wake", () => {
       text: "Finish the durable wake proof",
       objectiveRevision: 1,
     });
+    const recoveredHistory = await shared.admin<Array<{ item: Record<string, unknown> }>>`
+      select item from session_history_items
+      where workspace_id = ${ctx.grant.workspaceId!}
+        and session_id = ${ctx.session.id}
+        and turn_id = ${ctx.turn.id}
+      order by position`;
+    expect(recoveredHistory).toEqual(initialHistory);
   });
 
   test("a goal created after a no-goal turn is queued cannot leak into that turn", async () => {
@@ -1299,6 +1315,14 @@ describe("durable active-goal wake", () => {
       subjectId: "goal-continuation",
     });
     expect(claimed.turn.initiatingHumanSubjectId).toBe(ctx.grant.subjectId);
+    const continuationHistory = await shared.admin<Array<{ item: Record<string, unknown> }>>`
+      select item from session_history_items
+      where workspace_id = ${ctx.grant.workspaceId!}
+        and session_id = ${ctx.session.id}
+        and turn_id = ${claimed.turn.id}
+      order by position`;
+    expect(JSON.stringify(continuationHistory[0]?.item)).toContain(SESSION_GOAL_CONTEXT_LABEL);
+    expect(JSON.stringify(continuationHistory[0]?.item)).toContain("[OpenGeni internal updates]");
     expect(
       (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
         ?.continuation,

@@ -243,6 +243,71 @@ function fakeSession(result: unknown) {
 }
 
 describe("runRigSetupHook (M3)", () => {
+  test("exact verified provider image skips without a marker command", async () => {
+    const events: Array<{ type: string; payload: any }> = [];
+    const calls: Array<Record<string, unknown>> = [];
+    const session = {
+      state: { imageId: "im-exact-verified" },
+      exec: async (args: Record<string, unknown>) => {
+        calls.push(args);
+        throw new Error("exact verified image must not need a marker probe");
+      },
+    };
+
+    await runRigSetupHook(session as any, {
+      environment: {},
+      rigSetup: rigSetup({
+        contentHash: `sha256:${"a".repeat(64)}`,
+        verifiedProviderImageId: "im-exact-verified",
+      }),
+      onRuntimeEvent: (event) => {
+        events.push(event as any);
+      },
+    });
+
+    expect(calls).toHaveLength(0);
+    expect(events.map((event) => event.type)).toEqual(["rig.setup.started", "rig.setup.skipped"]);
+  });
+
+  test("provider image mismatch retains the existing marker fallback", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const session = {
+      state: { imageId: "im-other" },
+      exec: async (args: Record<string, unknown>) => {
+        calls.push(args);
+        return { status: 0, output: "__OPENGENI_RIG_SETUP_SKIPPED__\n" };
+      },
+    };
+
+    await runRigSetupHook(session as any, {
+      environment: {},
+      rigSetup: rigSetup({
+        contentHash: `sha256:${"a".repeat(64)}`,
+        verifiedProviderImageId: "im-exact-verified",
+      }),
+    });
+
+    expect(calls).toHaveLength(1);
+  });
+
+  test("provider image identity without a content hash cannot bypass the marker", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const session = {
+      state: { imageId: "im-exact-verified" },
+      exec: async (args: Record<string, unknown>) => {
+        calls.push(args);
+        return { status: 0, output: "__OPENGENI_RIG_SETUP_SKIPPED__\n" };
+      },
+    };
+
+    await runRigSetupHook(session as any, {
+      environment: {},
+      rigSetup: rigSetup({ verifiedProviderImageId: "im-exact-verified" }),
+    });
+
+    expect(calls).toHaveLength(1);
+  });
+
   test("marker present → completed{skipped:true}, no throw", async () => {
     const events: Array<{ type: string; payload: any }> = [];
     const { session } = fakeSession({ status: 0, output: "__OPENGENI_RIG_SETUP_SKIPPED__\n" });
@@ -353,6 +418,11 @@ describe("runRigSetupHook (M3)", () => {
     expect(calls.every((call) => Buffer.byteLength(String(call.cmd), "utf8") < 32 * 1024)).toBe(
       true,
     );
+    expect(
+      calls
+        .filter((call) => String(call.cmd).startsWith("printf '%s'"))
+        .every((call) => Buffer.byteLength(String(call.cmd), "utf8") < 8 * 1024),
+    ).toBe(true);
     expect(calls.some((call) => String(call.cmd).includes("base64 -d"))).toBe(true);
     expect(calls.some((call) => String(call.cmd).includes("exec bash '/tmp/opengeni/"))).toBe(true);
     expect(calls.every((call) => !String(call.cmd).includes(script))).toBe(true);

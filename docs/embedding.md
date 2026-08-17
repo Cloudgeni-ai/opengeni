@@ -366,9 +366,13 @@ or replace a healthy sibling token. Renewal may rotate a broker bearer but may
 not change its exact routes during the admitted attempt; any route change fails
 closed and waits for a newer turn. Renewal requires no model/MCP call and never
 mutates the manifest.
-`sandboxSecrets` receives `{ accountId, workspaceId, variableSetId }` and returns
-plaintext variable set values plus the scoped `workspaceId`, with the same echo
-check before values are applied.
+`sandboxSecrets` receives the account/workspace/resource ids plus the exact
+session/turn/attempt/execution generation, frozen turn initiator, and nullable
+causal-human subject. Organization/workspace Variable Sets may be resolved for
+a pure service initiator; user-scoped sets must reject a null causal human and
+revalidate the exact admitted personal-resource grant. The provider returns
+plaintext values plus exact scope/resource/attempt echoes, which the worker
+checks before applying any value.
 
 `runCredentials` is the session-aware seam for credentials that programs inside
 the sandbox need: cloud CLI variables, kubeconfigs, provider configuration files,

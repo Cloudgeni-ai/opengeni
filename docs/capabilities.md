@@ -614,7 +614,32 @@ The integrations catalog import pipeline is offline and reviewable. It never
 live-consumes integrations.sh at request time. The reviewed source of truth is
 the committed snapshot at `data/catalog/integrations-snapshot.json`. Updating it
 is a PR workflow: run `bun run catalog:refresh`, review the snapshot diff, then
-merge. Standard Helm installs and upgrades import that committed snapshot by
+merge. The refresh reads the integrations.sh index (`api.json`), hydrates one
+per-domain discovery document (`/api/{domain}/discovery`) for every distinct MCP
+domain it lists because the index no longer embeds MCP endpoints itself, and
+then probes every candidate endpoint with an MCP `initialize` request. Only
+endpoints that answer as MCP (a JSON-RPC or SSE reply, or a `WWW-Authenticate`
+challenge) survive; a transient connection error, timeout, or 5xx is retried a
+bounded number of times before it evicts a row, while a definitive 404 or
+non-MCP body is never retried. Committed rows whose endpoint upstream no longer
+lists stay candidates and are re-probed like every other row (`--no-retain`
+disables this), so a reviewed first-party endpoint that integrations.sh never
+indexed survives exactly as long as it still answers. Because a retained row is
+re-emitted byte-identical, the snapshot header records every retention decision
+under `retention` (`candidateRows`, the kept `retainedRows` keyed by domain plus
+canonical `mcpUrl`, and `droppedRows` with the evicting reason) so an upstream
+delisting is visible in the PR diff rather than a zero-diff no-op. A refresh
+that yields zero upstream candidates fails instead of rewriting the committed
+file, and one that would keep fewer than half of the committed rows also fails
+because that is a probe outage (DNS, proxy, rate limiting, budget exhaustion)
+rather than upstream evidence; importing such a file would mark every missing
+registry row stale. `--allow-shrink` overrides that floor for a genuine mass
+delisting. Upstream fetches never follow redirects and are byte-bounded, and a
+malformed committed snapshot or committed row fails the refresh loudly instead
+of silently disabling retention. `--input <raw.json>` accepts either an
+already-hydrated upstream document or a precomputed `importRows` snapshot for
+offline reruns.
+Standard Helm installs and upgrades import that committed snapshot by
 default through the `catalogImport` hook Job; set `catalogImport.enabled=false`
 to opt out. The default `catalogImport.skipLogos=true` keeps deployment success
 independent of third-party logo hosts and uses generic monograms; set it to
@@ -629,7 +654,44 @@ writes when that exact snapshot already completed successfully. The importer
 writes global capability rows, records an `import_batches` provenance row with
 MIT attribution, and upserts registry entries by `(provider_domain, mcp_url)`.
 Rows removed from a later snapshot are marked `stale`, not deleted, and are
-excluded from default workspace catalog listings.
+excluded from default workspace catalog listings. An upstream domain rekey
+(for example the Atlassian row moving from `atlassian.net` to `jira.com`)
+produces a new capability id and marks the old row stale, so a workspace that
+enabled the old row must re-enable the rekeyed one.
+
+### Curated overlay
+
+The snapshot is raw aggregator output: names are unnormalized and its `tier`
+says nothing about trust. `data/catalog/curated.json` is the committed overlay
+that fixes that, applied during the same normalization pass and keyed by exact
+canonical MCP URL. Every field is optional; a supplied value wins over the
+snapshot and an omitted one falls through unchanged, so a name-only entry is a
+pure branding fix while a full entry can pin the reviewed first-party contract
+(scopes, allowed tools, approval, ownership, docs, logo policy). It replaces the
+in-code maps that previously carried the Gmail, Slack, and Mobbin contracts, and
+its parser fails the import loudly on any malformed entry rather than silently
+shipping the raw aggregator row.
+
+Two curated flags surface in the product. `featured` promotes a connector to
+the front of the Browse grid. `official` renders an "Official" marker meaning
+the provider publishes the MCP server on its own domain. Both are checkable
+claims recorded in the row's `metadata.curation`; neither is a security review,
+and the UI must never label a connector as reviewed or verified. Every entry
+must be backed by the provider's own current documentation, and its `notes`
+field records the reasoning for reviewers. Editing the overlay is the same PR
+workflow as the snapshot: change the file, re-run the import, review the diff.
+The overlay's canonical parsed form is part of the `--if-changed` import
+fingerprint, so an overlay-only change lands on the next deploy while a
+whitespace-only reformat does not trigger a re-import. Every entry must be
+written in canonical MCP URL form and must match an importable snapshot row;
+the import fails loudly on an unknown key, a non-canonical URL, or a curated
+entry that matches nothing, because each of those would otherwise silently
+ship the raw aggregator row.
+
+Curated `category` values are grouping slugs rendered through a display-label
+map in the web app; the catalog sort key is `kind`, then `category`, then
+`name`, so assigning a category moves a row into that group in the merged
+listing.
 
 Imported logos are fetched during import, validated as images below 512KB, and
 stored through OpenGeni object storage under `catalog-assets/...`; catalog rows

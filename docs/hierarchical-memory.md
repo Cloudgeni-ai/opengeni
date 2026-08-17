@@ -150,8 +150,11 @@ model:
 
 - absent or `retrieval_only` (the default since migration 0271)
   removes the broad standing pinned/recency block from every agent prompt;
-- an explicit `legacy_standing` opt-out preserves the old working-set block and
-  agent search behavior for rollback;
+- an explicit `legacy_standing` opt-out preserves the old working-set block,
+  agent search behavior, and the legacy `memory_save` agent tool for rollback;
+  under the default mode `memory_save` is not registered and durable agent
+  writes go through `remember` and task-note promotion (`memory_search` and
+  `memory_correct` remain);
 - in `retrieval_only`, first-party agent `memory_search` excludes legacy
   `kind = preference` rows, while authorized human search, audit, correction,
   export, and the canonical rows remain unchanged;

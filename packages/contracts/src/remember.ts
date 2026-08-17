@@ -81,11 +81,16 @@ export const RememberRequest = z.discriminatedUnion("lane", [
 ]);
 export type RememberRequest = z.infer<typeof RememberRequest>;
 
-/** Bound structured human-input question that authorizes a confirmed remember. */
+/**
+ * Bound structured human-input question that authorizes a confirmed remember.
+ * The question id binds the exact confirmation target: the
+ * `knowledge_change_proposals` id for Ways-of-working lanes, or the
+ * `knowledge_claims` id for the Knowledge lane.
+ */
 export const REMEMBER_HUMAN_INPUT_SAVE_OPTION = "save" as const;
 export const REMEMBER_HUMAN_INPUT_SKIP_OPTION = "skip" as const;
-export function rememberHumanInputQuestionId(proposalId: string): string {
-  return `remember:${proposalId}`;
+export function rememberHumanInputQuestionId(targetId: string): string {
+  return `remember:${targetId}`;
 }
 
 // z.lazy: this module is re-exported from ./index, so resolve the question
@@ -96,15 +101,27 @@ export const RememberHumanInputPrompt = z.object({
 });
 export type RememberHumanInputPrompt = z.infer<typeof RememberHumanInputPrompt>;
 
-export const RememberActivationSummary = z.object({
-  receiptId: z.string().uuid(),
-  destination: GovernedLearningActivationDestination,
-  destinationRevisionId: z.string().uuid().nullable(),
-  effectiveAt: z.string().datetime().nullable(),
-  authorityKind: z.enum(["automatic", "human_confirmed"]),
-  /** Learning & autonomy history exposes exact undo for this receipt. */
-  undo: z.literal("learning_history"),
-});
+export const RememberActivationSummary = z.discriminatedUnion("destination", [
+  z.object({
+    destination: GovernedLearningActivationDestination,
+    receiptId: z.string().uuid(),
+    destinationRevisionId: z.string().uuid().nullable(),
+    effectiveAt: z.string().datetime().nullable(),
+    authorityKind: z.enum(["automatic", "human_confirmed"]),
+    /** Learning & autonomy history exposes exact undo for this receipt. */
+    undo: z.literal("learning_history"),
+  }),
+  z.object({
+    destination: z.literal("knowledge"),
+    receiptId: z.string().uuid(),
+    claimId: z.string().uuid(),
+    approvalReviewId: z.string().uuid(),
+    effectiveAt: z.string().datetime().nullable(),
+    authorityKind: z.literal("human_confirmed"),
+    /** Knowledge approvals are undone through the Knowledge review lifecycle (`knowledge_correct` or a human revocation). */
+    undo: z.literal("knowledge_review"),
+  }),
+]);
 export type RememberActivationSummary = z.infer<typeof RememberActivationSummary>;
 
 export const RememberReceipt = z.discriminatedUnion("status", [
@@ -116,7 +133,7 @@ export const RememberReceipt = z.discriminatedUnion("status", [
     scope: RememberScope,
     reason: z.literal("learning_policy_off"),
   }),
-  /** Knowledge facts are proposals for the human Knowledge review lifecycle. */
+  /** Kept for callers that still expect review-only Knowledge; not returned by `remember` today. */
   z.object({
     status: z.literal("proposed_for_review"),
     operationId: z.string().uuid(),
@@ -150,7 +167,9 @@ export const RememberReceipt = z.discriminatedUnion("status", [
     lane: RememberLane,
     scope: RememberScope,
     noteId: z.string().uuid(),
-    proposalId: z.string().uuid(),
+    /** Ways-of-working lanes confirm a change proposal; Knowledge confirms the claim. */
+    proposalId: z.string().uuid().nullable(),
+    claimId: z.string().uuid(),
     learning: CompanyBrainLearningDecisionSummary.nullable(),
     learningFailure: CompanyBrainLearningStepFailure.nullable(),
     humanInput: RememberHumanInputPrompt,
@@ -159,23 +178,35 @@ export const RememberReceipt = z.discriminatedUnion("status", [
 ]);
 export type RememberReceipt = z.infer<typeof RememberReceipt>;
 
-export const RememberConfirmRequest = z
-  .object({
-    operationId: z.string().uuid(),
-    proposalId: z.string().uuid(),
-    /** `learning.receiptId` from the `confirmation_required` remember receipt. */
-    decisionReceiptId: z.string().uuid(),
-    /** The `requestId` returned by `request_human_input`. */
-    humanInputRequestId: z.string().uuid(),
-  })
-  .strict();
+export const RememberConfirmRequest = z.discriminatedUnion("target", [
+  z
+    .object({
+      target: z.literal("proposal"),
+      operationId: z.string().uuid(),
+      proposalId: z.string().uuid(),
+      /** `learning.receiptId` from the `confirmation_required` remember receipt. */
+      decisionReceiptId: z.string().uuid(),
+      /** The `requestId` returned by `request_human_input`. */
+      humanInputRequestId: z.string().uuid(),
+    })
+    .strict(),
+  z
+    .object({
+      target: z.literal("knowledge_claim"),
+      operationId: z.string().uuid(),
+      claimId: z.string().uuid(),
+      humanInputRequestId: z.string().uuid(),
+    })
+    .strict(),
+]);
 export type RememberConfirmRequest = z.infer<typeof RememberConfirmRequest>;
 
 export const RememberConfirmReceipt = z.object({
   status: z.literal("activated"),
   operationId: z.string().uuid(),
-  proposalId: z.string().uuid(),
-  decisionReceiptId: z.string().uuid(),
+  proposalId: z.string().uuid().nullable(),
+  claimId: z.string().uuid(),
+  decisionReceiptId: z.string().uuid().nullable(),
   activation: RememberActivationSummary,
 });
 export type RememberConfirmReceipt = z.infer<typeof RememberConfirmReceipt>;

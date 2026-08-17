@@ -348,14 +348,14 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 260],
+            [FORCE_RLS_TABLES, 261],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 137],
             [RUNTIME_READ_ONLY_TABLES, 18],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 29],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 41],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 42],
             [RUNTIME_DML_TABLES, 230],
           ] as const)
         : ([
@@ -380,7 +380,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 271 : 203;
+      const tableCount = hasCurrentMainActivityLedger ? 272 : 203;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
@@ -682,6 +682,7 @@ describe("runtime database posture evaluator", () => {
       "governed_learning_decision_receipts",
       "governed_learning_activation_receipts",
       "governed_learning_activation_undo_receipts",
+      "remember_knowledge_confirmation_receipts",
     ] as const) {
       expect(FORCE_RLS_TABLES).toContain(table);
       expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
@@ -695,6 +696,9 @@ describe("runtime database posture evaluator", () => {
     );
     expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
       "activate_human_confirmed_learning_decision(uuid, uuid, uuid, uuid, uuid)",
+    );
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
+      "confirm_remember_knowledge_claim(uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid)",
     );
     expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
       "undo_governed_learning_activation(uuid, uuid, uuid, uuid)",

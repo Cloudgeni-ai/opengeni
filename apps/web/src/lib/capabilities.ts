@@ -145,7 +145,9 @@ export function filterCapabilityCatalogItems(
       item.homepageUrl,
       item.installUrl,
       ...item.tags,
-      JSON.stringify(item.metadata),
+      // Curation flags are presentation facts, not search terms; typing
+      // "official" must not match every curated connector.
+      JSON.stringify(metadataForSearch(item.metadata)),
     ]
       .filter(Boolean)
       .join(" ")
@@ -267,13 +269,90 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
 }
 
 const OFFICIAL_GMAIL_MCP_URL = "https://gmailmcp.googleapis.com/mcp/v1";
+// Slack's hosted MCP issues user tokens only; shared Slack access is the
+// OpenGeni workspace bot, never one member's grant.
+const OFFICIAL_SLACK_MCP_URL = "https://mcp.slack.com/mcp";
+const PERSONAL_ONLY_MCP_URLS = new Set([OFFICIAL_GMAIL_MCP_URL, OFFICIAL_SLACK_MCP_URL]);
 
 export function capabilityRequiresPersonalConnection(item: CapabilityCatalogItem): boolean {
   return (
     item.metadata.connectionOwnership === "personal_only" ||
-    item.mcpUrl?.replace(/\/+$/, "") === OFFICIAL_GMAIL_MCP_URL ||
-    item.endpointUrl?.replace(/\/+$/, "") === OFFICIAL_GMAIL_MCP_URL
+    PERSONAL_ONLY_MCP_URLS.has(item.mcpUrl?.replace(/\/+$/, "") ?? "") ||
+    PERSONAL_ONLY_MCP_URLS.has(item.endpointUrl?.replace(/\/+$/, "") ?? "")
   );
+}
+
+/**
+ * Curation facts written by the catalog import from `data/catalog/curated.json`.
+ * Both are checkable claims, not a security review: `official` means the
+ * provider publishes the server on its own domain; `featured` means we chose
+ * to promote it. Neither must ever be rendered as "reviewed" or "verified".
+ */
+export function capabilityCuration(item: Pick<CapabilityCatalogItem, "metadata">): {
+  featured: boolean;
+  official: boolean;
+} {
+  const raw = item.metadata.curation;
+  const record =
+    raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+  return {
+    featured: record?.featured === true,
+    official: record?.official === true,
+  };
+}
+
+/** Stable order: featured first, everything else in its existing order. */
+export function sortFeaturedFirst<T extends Pick<CapabilityCatalogItem, "metadata">>(
+  items: readonly T[],
+): T[] {
+  const featured: T[] = [];
+  const rest: T[] = [];
+  for (const item of items) {
+    (capabilityCuration(item).featured ? featured : rest).push(item);
+  }
+  return [...featured, ...rest];
+}
+
+function metadataForSearch(metadata: Record<string, unknown>): Record<string, unknown> {
+  if (!("curation" in metadata)) return metadata;
+  const { curation: _curation, ...rest } = metadata;
+  return rest;
+}
+
+const CATEGORY_LABELS: Readonly<Record<string, string>> = {
+  analytics: "Analytics",
+  automation: "Automation",
+  communication: "Communication",
+  configured: "Configured",
+  data: "Data",
+  design: "Design",
+  "developer-tools": "Developer tools",
+  files: "Files",
+  finance: "Finance",
+  integrations: "Integrations",
+  marketing: "Marketing",
+  productivity: "Productivity",
+  "project-management": "Project management",
+  "public-mcp": "Public MCP",
+  sales: "Sales",
+  scheduling: "Scheduling",
+  "social-media": "Social media",
+  "source-control": "Source control",
+  web: "Web",
+};
+
+/** Human label for a catalog category slug; unknown slugs are title-cased. */
+export function capabilityCategoryLabel(category: string | null | undefined): string | null {
+  if (!category || category === "custom") return null;
+  const known = CATEGORY_LABELS[category];
+  if (known) return known;
+  return category
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((word, index) =>
+      index === 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word.toLowerCase(),
+    )
+    .join(" ");
 }
 
 /** Short auth hint for a tile ("OAuth" / "API key"), or null when none applies. */

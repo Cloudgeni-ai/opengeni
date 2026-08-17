@@ -33,6 +33,7 @@ import {
   type RoutableBackendSession,
   type ResolvedActiveBackend,
   type RoutableSandbox,
+  type RoutingSandboxSessionDeps,
 } from "../src/sandbox";
 // The REAL computer-use discriminator — the proxy's native-surface presence must
 // satisfy (and, for Modal, fail) this exact duck-type, not a local reimplementation.
@@ -254,6 +255,64 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       stdout: "authoritative",
       exitCode: 0,
     });
+  });
+
+  test("observes the first route once with exclusive phases and an actual snapshot wait", async () => {
+    const backend = new FakeBackend("timed");
+    const observations: Parameters<
+      NonNullable<RoutingSandboxSessionDeps["onFirstOperation"]>
+    >[0][] = [];
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async ({ onCaptureWait }) => {
+        await Bun.sleep(8);
+        onCaptureWait?.({ durationMs: 7, outcome: "completed" });
+        return { admission: "exact" };
+      },
+      afterMutation: async () => undefined,
+      onFirstOperation: (observation) => observations.push(observation),
+    });
+
+    await proxy.exec({ cmd: "first" });
+    await proxy.exec({ cmd: "second" });
+
+    expect(observations).toHaveLength(1);
+    expect(observations[0]).toMatchObject({
+      op: "exec",
+      outcome: "completed",
+      phases: {
+        resolution: { outcome: "completed" },
+        mutationAdmission: { outcome: "completed" },
+        providerOperation: { outcome: "completed" },
+        mutationSettlement: { outcome: "completed" },
+        snapshotWait: { durationMs: 7, outcome: "completed" },
+      },
+    });
+    const phases = observations[0]!.phases;
+    expect(phases.mutationAdmission!.durationMs).toBeLessThan(observations[0]!.durationMs);
+    expect(
+      Object.values(phases).reduce((total, phase) => total + phase.durationMs, 0),
+    ).toBeLessThanOrEqual(observations[0]!.durationMs + 2);
+  });
+
+  test("omits first-operation phases that never ran after route resolution fails", async () => {
+    const observations: Parameters<
+      NonNullable<RoutingSandboxSessionDeps["onFirstOperation"]>
+    >[0][] = [];
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => {
+        throw new Error("resolution failed");
+      },
+      onFirstOperation: (observation) => observations.push(observation),
+    });
+
+    await expect(proxy.exec({ cmd: "never-ran" })).rejects.toThrow("resolution failed");
+    expect(observations).toHaveLength(1);
+    expect(observations[0]).toMatchObject({ outcome: "failed" });
+    expect(Object.keys(observations[0]!.phases)).toEqual(["resolution"]);
+    expect(observations[0]!.phases.resolution?.outcome).toBe("failed");
   });
 
   test("exec preserves structured output and PTY authority on an execCommand-only backend", async () => {
