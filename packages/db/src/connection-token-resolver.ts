@@ -849,7 +849,11 @@ export function buildConnectionTokenResolver(
         providerDomain: ref.providerDomain,
         ...(ref.kind ? { connectionKind: ref.kind } : {}),
         subjectScope: ref.subjectScope === "subject" ? "subject" : "workspace",
-        ...(subjectId ? { ownerSubjectId: subjectId } : {}),
+        // An owner binding belongs only to the personal lanes. Interactive
+        // turns stamp the initiating human's subjectId on every credential
+        // request regardless of ref scope; forwarding it for a workspace ref
+        // would make the 0279 workspace lane deny the ambient shared row.
+        ...(ref.subjectScope === "subject" && subjectId ? { ownerSubjectId: subjectId } : {}),
       });
       if (authorization.status === "denied") {
         return authNeeded(
