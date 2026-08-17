@@ -907,6 +907,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "scheduled_tasks_delete",
   "scheduled_task_runs_list",
   "slack_bot_list_channels",
+  "slack_bot_search",
   "slack_bot_channel_history",
   "slack_bot_thread_replies",
   "slack_bot_list_users",

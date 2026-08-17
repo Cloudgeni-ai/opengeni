@@ -2591,6 +2591,7 @@ export type FirstPartyMcpToolName =
   | "scheduled_tasks_delete"
   | "scheduled_task_runs_list"
   | "slack_bot_list_channels"
+  | "slack_bot_search"
   | "slack_bot_channel_history"
   | "slack_bot_thread_replies"
   | "slack_bot_list_users"
