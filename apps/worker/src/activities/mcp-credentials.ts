@@ -45,18 +45,31 @@ export function connectionTokenResolverForTurn(input: {
         delegation.serverId === request.serverId &&
         delegation.connectionId === request.connectionRef.connectionId,
     );
+    const subjectScope: "subject" | "workspace" =
+      request.connectionRef.subjectScope === "subject" ? "subject" : "workspace";
     // Every subject-scoped request must match an exact connection frozen on the
     // accepted turn. This also hard-fences pre-cutover common-user turns that
     // lack a userDelegation: the DB resolver denies those rows because only a
     // true legacy_user connection is eligible for bounded compatibility.
-    if (request.connectionRef.subjectScope !== "subject") return await baseResolver(request);
-    if (!acceptedDelegation || !request.connectionRef.connectionId) {
+    if (
+      subjectScope === "subject" &&
+      (!acceptedDelegation || !request.connectionRef.connectionId)
+    ) {
       return {
         status: "auth_needed",
         reason: "personal_authority_unavailable",
         providerDomain: request.connectionRef.providerDomain,
         ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
       };
+    }
+    // Workspace-scope requests now run through the same accepted-use authority
+    // (migration 0279): the exact workspace-owned connection is revalidated
+    // inside the canonical lifecycle fences and every use leaves an idempotent
+    // audit fact. A ref with no connection id is the bounded pre-snapshot
+    // legacy path - it cannot be authorized by exact identity, so it keeps the
+    // unprivileged resolution the old short-circuit used.
+    if (subjectScope === "workspace" && !request.connectionRef.connectionId) {
+      return await baseResolver(request);
     }
     const credentialUseContext = {
       accountId: input.accountId,
@@ -70,11 +83,16 @@ export function connectionTokenResolverForTurn(input: {
     };
     const authorityBinding = {
       serverId: request.serverId,
-      connectionId: request.connectionRef.connectionId,
+      // Both lane guards above require an exact connection id at this point.
+      ...(request.connectionRef.connectionId
+        ? { connectionId: request.connectionRef.connectionId }
+        : {}),
       providerDomain: request.connectionRef.providerDomain,
       ...(request.connectionRef.kind ? { connectionKind: request.connectionRef.kind } : {}),
-      subjectScope: "subject" as const,
-      ...(request.subjectId ? { ownerSubjectId: request.subjectId } : {}),
+      subjectScope,
+      ...(subjectScope === "subject" && request.subjectId
+        ? { ownerSubjectId: request.subjectId }
+        : {}),
     };
     const authorize = async (
       context: Omit<typeof credentialUseContext, "usePhase"> & {
