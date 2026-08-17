@@ -1245,7 +1245,7 @@ function SessionChatPane(props: {
   const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
     props.session.status,
-    props.queue.effectiveControl?.state === "paused",
+    (props.queue.effectiveControl ?? props.session.effectiveControl).state === "paused",
   );
 
   // Slash-command palette context: the operator controls (/goal, /clear,
