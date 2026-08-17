@@ -3181,6 +3181,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       sessionId,
       requestId,
       holderId,
+      initiatorSubjectId: "subject-direct-release",
       sandboxGroupId: groupId,
       expectedEpoch: epoch,
       expectedInstanceId: "box-direct-release",

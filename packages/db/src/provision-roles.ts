@@ -492,6 +492,7 @@ async function grantAppRoleIfSchemaExists(
     "organization_membership_command(jsonb)",
     "prepare_organization_membership_protocol_settlements(jsonb)",
     "assert_active_managed_human_organization_membership(uuid,text)",
+    "resolve_workspace_writer_grant_identity(uuid,text)",
     "get_organization_retention_policy(uuid,text)",
     "preview_organization_retention_deletions(uuid,integer)",
     "claim_organization_retention_deletion(uuid,uuid,uuid[])",
