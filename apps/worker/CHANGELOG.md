@@ -1,5 +1,71 @@
 # @opengeni/worker-bundle
 
+## 0.20.7
+
+### Patch Changes
+
+- 91d5caf: Add a provider-neutral operational instruction contract for consistent agent collaboration, execution safety, file editing, and skill usage across every OpenGeni persona. Keep persistent system instructions prompt-cache stable, project goal continuations once as canonical user messages, let authoritative human input supersede a pending continuation, and remove the unreliable inferred-progress pause.
+- 987742d: Skip the redundant in-box rig marker probe when a live Modal session reports
+  the exact immutable image that already passed the rig's content, source,
+  provider-binding, and independent cold-boot verification. Missing or mismatched
+  image identity retains the existing fail-closed marker and setup path.
+- 987742d: Reduce turn-start overhead without reducing admitted history, rig variables, or
+  user-visible content. Active history loads in one admitted query, automatic
+  compaction skips duplicate history work below threshold, unchanged Codex
+  credential pointers avoid redundant session-activity writes, rig defaults
+  load at bounded concurrency for admitted worker attempts, and the attempt-scoped
+  MCP wrapper no longer reuses a broader process-global tool list.
+
+  Improve large-session interaction by measuring rich-message disclosure without
+  a second React commit, showing truthful pending queue actions immediately, and
+  replacing the false zero-step placeholder with the session's real lifecycle.
+
+- d168b8f: Allow exact scheduled service turns to materialize organization- and workspace-scoped Variable Sets while preserving causal-human and personal-grant checks for user-scoped sets.
+- 6860c5f: Add organization, workspace, and owner-private scopes for Rigs and Connected Machines. Personal machine use and Rig materialization now revalidate exact-attempt grants, membership, workspace access, authority epochs, and generations before runtime access.
+- c297fc0: Freeze Company Brain mode and bounded legacy instructions when a turn is
+  accepted, then bind them to a content-free first-attempt selection receipt whose
+  candidate and rendered-budget subsets make replacement recovery shrink-only.
+- Updated dependencies [1aa02d4]
+- Updated dependencies [ca75ed9]
+- Updated dependencies [c297fc0]
+- Updated dependencies [91d5caf]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [02e21fa]
+- Updated dependencies [c297fc0]
+- Updated dependencies [987742d]
+- Updated dependencies [987742d]
+- Updated dependencies [db758f3]
+- Updated dependencies [e9aabaa]
+- Updated dependencies [1f860f0]
+- Updated dependencies [6a8954f]
+- Updated dependencies [c297fc0]
+- Updated dependencies [22c0c21]
+- Updated dependencies [5cd7b46]
+- Updated dependencies [4eb7abd]
+- Updated dependencies [89d4ab3]
+- Updated dependencies [7454580]
+- Updated dependencies [16cbd7b]
+- Updated dependencies [30ba620]
+- Updated dependencies [d168b8f]
+- Updated dependencies [6860c5f]
+- Updated dependencies [f72563d]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [cac85bc]
+  - @opengeni/config@0.16.6
+  - @opengeni/contracts@1.2.0
+  - @opengeni/core@1.2.0
+  - @opengeni/db@1.1.0
+  - @opengeni/documents@0.6.0
+  - @opengeni/runtime@1.0.3
+  - @opengeni/github@0.4.61
+  - @opengeni/storage@0.2.98
+  - @opengeni/codemode@0.4.6
+  - @opengeni/events@0.3.114
+  - @opengeni/observability@0.7.9
+
 ## 0.20.6
 
 ### Patch Changes
