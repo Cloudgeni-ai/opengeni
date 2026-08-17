@@ -49,7 +49,8 @@ export type VariableSetCredentialAuthority = {
   turnId: string;
   attemptId: string;
   executionGeneration: number;
-  initiatingHumanSubjectId: string;
+  initiator: TurnInitiator;
+  initiatingHumanSubjectId: string | null;
 };
 
 export type GitTokenSeeds = Partial<Record<GitCredentialProvider, string>>;
@@ -139,7 +140,7 @@ export async function loadWorkspaceEnvironmentForRunWithCredentials(
       variableSetId: environmentId,
       authority: {
         kind: "agent_attempt",
-        subjectId: authority.initiatingHumanSubjectId,
+        subjectId: authority.initiatingHumanSubjectId ?? authority.initiator.subjectId,
         ...authority,
       },
     });

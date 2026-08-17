@@ -6697,8 +6697,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
       // §7.6 connection-credential provider — load (and decrypt) selected Variable Sets via the
       // host `sandboxSecrets` provider when bound; unset → today's local decrypt. Preserve the
-      // legacy null-attachment fast path: service/legacy turns with neither a session set nor rig
-      // defaults require no initiating-human authority and perform no Variable Set work.
+      // legacy null-attachment fast path: turns with neither a session set nor rig defaults perform
+      // no Variable Set work. Organization/workspace sets use the exact turn actor; personal sets
+      // additionally require the causal human frozen into the admitted turn.
       const connectionScope = {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -6709,14 +6710,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       > = null;
       const rigDefaultEnvironmentValues: Record<string, string> = {};
       if (session.variableSetId !== null || rigDefaultVariableSetIds.length > 0) {
-        if (!fileAuthoritySubjectId) {
-          throw new Error("variable-set materialization requires an initiating human subject");
-        }
         const variableSetAuthority = {
           sessionId: input.sessionId,
           turnId: turn.id,
           attemptId: input.attemptId,
           executionGeneration: turn.executionGeneration,
+          initiator: turn.initiator,
           initiatingHumanSubjectId: fileAuthoritySubjectId,
         };
         workspaceVariableSet = await waitForTurnOperation(

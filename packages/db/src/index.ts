@@ -16749,6 +16749,7 @@ export async function getVariableSetValuesForRun(
           turnId: string;
           attemptId: string;
           executionGeneration: number;
+          initiatingHumanSubjectId?: string | null;
         }
       | { kind: "session_attach"; sessionId: string };
   },
@@ -16766,7 +16767,13 @@ export async function getVariableSetValuesForRun(
     if (input.authority.kind === "agent_attempt") {
       await setSubjectRlsContext(scopedDb, input.authority.subjectId);
       await scopedDb.execute(sql`select set_config(
-        'opengeni.initiating_human_subject_id', ${input.authority.subjectId}, true
+        'opengeni.initiating_human_subject_id',
+        ${
+          input.authority.initiatingHumanSubjectId === undefined
+            ? input.authority.subjectId
+            : (input.authority.initiatingHumanSubjectId ?? "")
+        },
+        true
       )`);
     }
     const rows = await rawRows<{
@@ -16892,6 +16899,7 @@ export async function loadVariableSetForRun(
           turnId: string;
           attemptId: string;
           executionGeneration: number;
+          initiatingHumanSubjectId?: string | null;
         }
       | { kind: "session_attach"; sessionId: string };
   },

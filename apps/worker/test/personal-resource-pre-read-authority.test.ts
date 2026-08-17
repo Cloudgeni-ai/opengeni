@@ -20,15 +20,14 @@ describe("personal-resource direct-read authority", () => {
     expect(source).toContain("const variableSetAuthority = {");
     expect(source).toContain("attemptId: input.attemptId");
     expect(source).toContain("executionGeneration: turn.executionGeneration");
+    expect(source).toContain("initiator: turn.initiator");
     expect(source).toContain("initiatingHumanSubjectId: fileAuthoritySubjectId");
     expect(source.match(/variableSetAuthority,/gu)?.length).toBe(2);
-    const selectionGuard = source.indexOf(
-      "if (session.variableSetId !== null || rigDefaultVariableSetIds.length > 0)",
-      authorize,
-    );
-    const subjectGuard = source.indexOf("if (!fileAuthoritySubjectId)", selectionGuard);
+    const selectionGuard = source.indexOf("session.variableSetId !== null ||", authorize);
     expect(selectionGuard).toBeGreaterThan(authorize);
     expect(selectionGuard).toBeLessThan(variableRead);
-    expect(subjectGuard).toBeGreaterThan(selectionGuard);
+    expect(source).not.toContain(
+      'throw new Error("variable-set materialization requires an initiating human subject")',
+    );
   });
 });

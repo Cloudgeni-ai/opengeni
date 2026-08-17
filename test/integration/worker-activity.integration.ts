@@ -3759,7 +3759,7 @@ describe("worker activities integration", () => {
     expect(JSON.stringify(failed?.payload)).not.toContain("required-secret-123456");
   });
 
-  test("propagates scheduled task environment attachments into dispatched sessions", async () => {
+  test("materializes scheduled task workspace Variable Sets for pure service turns", async () => {
     const grant = await testGrant(dbClient.db);
     const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
       TASK_TOKEN: "task-secret-123456",
@@ -3808,6 +3808,71 @@ describe("worker activities integration", () => {
       variableSetName: environment.name,
     });
     expect(JSON.stringify(events)).not.toContain("task-secret-123456");
+
+    const attemptId = crypto.randomUUID();
+    const result = await activities.runAgentTurn({
+      attemptId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: dispatched.sessionId,
+      trigger: { kind: "next" },
+      workflowId: `session-${dispatched.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+    });
+    expect(result.status).toBe("idle");
+    const [scheduledTurn] = await listSessionTurns(
+      dbClient.db,
+      grant.workspaceId,
+      dispatched.sessionId,
+      10,
+    );
+    expect(scheduledTurn?.initiator).toEqual({
+      kind: "service",
+      subjectId: "scheduler",
+      label: "OpenGeni scheduler",
+    });
+    const [storedAuthority] = await withWorkspaceRls(
+      dbClient.db,
+      grant.workspaceId,
+      async (scopedDb) =>
+        await scopedDb.execute<{
+          initiatorKind: string;
+          initiatorSubjectId: string;
+          initiatingHumanSubjectId: string | null;
+        }>(dbSql`
+          select initiator_kind as "initiatorKind",
+            initiator_subject_id as "initiatorSubjectId",
+            initiating_human_subject_id as "initiatingHumanSubjectId"
+          from session_turns where id = ${scheduledTurn!.id}
+        `),
+    );
+    expect(storedAuthority).toEqual({
+      initiatorKind: "service",
+      initiatorSubjectId: "scheduler",
+      initiatingHumanSubjectId: null,
+    });
+    const [materializationAudit] = await withWorkspaceRls(
+      dbClient.db,
+      grant.workspaceId,
+      async (scopedDb) =>
+        await scopedDb.execute<{ subjectId: string; actorKind: string }>(dbSql`
+          select subject_id as "subjectId", metadata->>'actorKind' as "actorKind"
+          from audit_events
+          where workspace_id = ${grant.workspaceId}
+            and action = 'variable_set.materialized'
+            and metadata->>'attemptId' = ${attemptId}
+        `),
+    );
+    expect(materializationAudit).toEqual({ subjectId: "scheduler", actorKind: "service" });
+    const completedEvents = await listSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      dispatched.sessionId,
+      0,
+      100,
+    );
+    expect(completedEvents.some((event) => event.type === "turn.completed")).toBe(true);
+    expect(completedEvents.some((event) => event.type === "turn.failed")).toBe(false);
   });
 
   test("fails reusable dispatch when the task attachment diverges from its session", async () => {
