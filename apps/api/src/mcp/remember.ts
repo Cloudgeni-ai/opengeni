@@ -91,18 +91,46 @@ export function registerRememberTools(input: RegisterRememberToolsInput): void {
     "remember_confirm",
     {
       description:
-        "Complete a `remember` that returned status=confirmation_required after the human answered the bound `request_human_input` question. Pass the proposalId and learning.receiptId from that receipt and the requestId returned by request_human_input. Activation only succeeds when the exact initiating human answered Save on this turn; otherwise the proposal stays for review.",
+        "Complete a `remember` that returned status=confirmation_required after the human answered the bound `request_human_input` question. For preference/instruction_policy pass proposalId and learning.receiptId (as decisionReceiptId) from that receipt; for knowledge pass claimId. Always pass the requestId returned by request_human_input. Activation only succeeds when the exact initiating human answered Save on this turn; otherwise the proposal stays for review.",
       inputSchema: {
         operationId: z.string().uuid(),
-        proposalId: z.string().uuid(),
-        decisionReceiptId: z.string().uuid(),
+        proposalId: z.string().uuid().optional(),
+        decisionReceiptId: z.string().uuid().optional(),
+        claimId: z.string().uuid().optional(),
         humanInputRequestId: z.string().uuid(),
       },
     },
     async (request) => {
       await input.authorize();
+      const confirmRequest =
+        request.proposalId && request.decisionReceiptId
+          ? {
+              target: "proposal" as const,
+              operationId: request.operationId,
+              proposalId: request.proposalId,
+              decisionReceiptId: request.decisionReceiptId,
+              humanInputRequestId: request.humanInputRequestId,
+            }
+          : request.claimId
+            ? {
+                target: "knowledge_claim" as const,
+                operationId: request.operationId,
+                claimId: request.claimId,
+                humanInputRequestId: request.humanInputRequestId,
+              }
+            : null;
+      if (!confirmRequest) {
+        return input.json({
+          status: "not_confirmed",
+          code: "invalid_target",
+          message:
+            "Pass proposalId + decisionReceiptId (preference/instruction_policy) or claimId (knowledge).",
+        });
+      }
       try {
-        return input.json(await router.confirm({ attempt: input.attempt, request }));
+        return input.json(
+          await router.confirm({ attempt: input.attempt, request: confirmRequest }),
+        );
       } catch (error) {
         if (error instanceof RememberError) {
           return input.json({ status: "not_confirmed", code: error.code, message: error.message });

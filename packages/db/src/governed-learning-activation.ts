@@ -1,12 +1,16 @@
 import {
   ActivateGovernedLearningDecisionRequest,
   ActivateHumanConfirmedLearningDecisionRequest,
+  ConfirmRememberKnowledgeClaimRequest,
   GovernedLearningActivationCaller,
+  RememberKnowledgeConfirmationReceipt,
   GovernedLearningActivationReceipt,
   GovernedLearningActivationUndoReceipt,
   UndoGovernedLearningActivationRequest,
   type ActivateGovernedLearningDecisionRequest as ActivateRequest,
   type ActivateHumanConfirmedLearningDecisionRequest as ActivateHumanConfirmedRequest,
+  type ConfirmRememberKnowledgeClaimRequest as ConfirmRememberKnowledgeClaimRequestType,
+  type RememberKnowledgeConfirmationReceipt as RememberKnowledgeConfirmationReceiptType,
   type GovernedLearningActivationCaller as ActivationCaller,
   type GovernedLearningActivationReceipt as ActivationReceipt,
   type GovernedLearningActivationUndoReceipt as UndoReceipt,
@@ -437,5 +441,140 @@ export async function getWorkspaceKnowledgeChangeProposalSummary(
       targetKind: row.target_kind,
       initiatingHumanSubjectId: row.initiating_human_subject_id,
     };
+  });
+}
+
+type KnowledgeConfirmationRow = {
+  id: string;
+  operation_id: string;
+  input_hash: string;
+  account_id: string;
+  workspace_id: string;
+  session_id: string;
+  turn_id: string;
+  execution_generation: number;
+  initiating_human_subject_id: string;
+  service_actor_subject_id: string;
+  claim_id: string;
+  evidence_id: string;
+  task_note_id: string;
+  task_note_text_hash: string;
+  human_input_request_id: string;
+  previous_review_id: string;
+  previous_review_revision: number | string;
+  approval_review_id: string;
+  approval_review_revision: number | string;
+  created_at: Date | string;
+};
+
+/**
+ * Approve one user-directed Knowledge claim after the exact initiating human
+ * answered the bound `remember:<claimId>` structured human-input question with
+ * `save` on the live turn. The database capability revalidates the claim,
+ * Task-note evidence, latest `proposed` review, and the canonical question
+ * before writing the approval through the guarded service-review path.
+ */
+export async function confirmRememberKnowledgeClaim(
+  db: Database,
+  raw: {
+    caller: ActivationCaller & {
+      sessionId: string;
+      turnId: string;
+      executionGeneration: number;
+    };
+    request: ConfirmRememberKnowledgeClaimRequestType;
+  },
+): Promise<RememberKnowledgeConfirmationReceiptType> {
+  const caller = GovernedLearningActivationCaller.parse({
+    workspaceId: raw.caller.workspaceId,
+    subjectId: raw.caller.subjectId,
+  });
+  const request = ConfirmRememberKnowledgeClaimRequest.parse(raw.request);
+  const { sessionId, turnId, executionGeneration } = raw.caller;
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+  if (
+    !uuidPattern.test(sessionId) ||
+    !uuidPattern.test(turnId) ||
+    !Number.isSafeInteger(executionGeneration) ||
+    executionGeneration <= 0
+  ) {
+    throw new GovernedLearningActivationAuthorityError(
+      "remember Knowledge confirmation requires exact turn authority",
+    );
+  }
+  try {
+    return await withWorkspaceSubjectRls(
+      db,
+      caller.workspaceId,
+      caller.subjectId,
+      async (scoped) => {
+        const rows = await rawRows<KnowledgeConfirmationRow>(
+          scoped,
+          sql`SELECT * FROM confirm_remember_knowledge_claim(
+          current_setting('opengeni.account_id')::uuid,
+          ${caller.workspaceId}::uuid,
+          ${sessionId}::uuid,
+          ${turnId}::uuid,
+          ${executionGeneration}::integer,
+          ${request.operationId}::uuid,
+          ${request.claimId}::uuid,
+          ${request.humanInputRequestId}::uuid
+        )`,
+        );
+        const row = rows[0];
+        if (rows.length !== 1 || !row) {
+          throw new Error("remember Knowledge confirmation returned no unique receipt");
+        }
+        return RememberKnowledgeConfirmationReceipt.parse({
+          id: row.id,
+          operationId: row.operation_id,
+          inputHash: row.input_hash,
+          accountId: row.account_id,
+          workspaceId: row.workspace_id,
+          sessionId: row.session_id,
+          turnId: row.turn_id,
+          executionGeneration: Number(row.execution_generation),
+          initiatingHumanSubjectId: row.initiating_human_subject_id,
+          serviceActorSubjectId: row.service_actor_subject_id,
+          claimId: row.claim_id,
+          evidenceId: row.evidence_id,
+          taskNoteId: row.task_note_id,
+          taskNoteTextHash: row.task_note_text_hash,
+          humanInputRequestId: row.human_input_request_id,
+          previousReviewId: row.previous_review_id,
+          previousReviewRevision: Number(row.previous_review_revision),
+          approvalReviewId: row.approval_review_id,
+          approvalReviewRevision: Number(row.approval_review_revision),
+          createdAt: iso(row.created_at),
+        });
+      },
+    );
+  } catch (error) {
+    translate(error);
+  }
+}
+
+/**
+ * Read the initiating human bound to one workspace-scoped Knowledge claim under
+ * workspace RLS. Used by `remember_confirm` for the Knowledge lane; exposes no
+ * content.
+ */
+export async function getWorkspaceKnowledgeClaimInitiatingHuman(
+  db: Database,
+  input: { workspaceId: string; claimId: string },
+): Promise<string | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scoped) => {
+    const rows = await rawRows<{ initiating_human_subject_id: string | null }>(
+      scoped,
+      sql`SELECT claim.initiating_human_subject_id
+          FROM knowledge_claims claim
+          WHERE claim.account_id = current_setting('opengeni.account_id')::uuid
+            AND claim.scope_kind = 'workspace'
+            AND claim.scope_workspace_id = ${input.workspaceId}::uuid
+            AND claim.scope_subject_id IS NULL
+            AND claim.id = ${input.claimId}::uuid
+          LIMIT 1`,
+    );
+    return rows[0]?.initiating_human_subject_id ?? null;
   });
 }

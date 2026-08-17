@@ -17,8 +17,10 @@ import {
 import {
   type Database,
   activateHumanConfirmedLearningDecision,
+  confirmRememberKnowledgeClaim,
   createTaskNote,
   getWorkspaceKnowledgeChangeProposalSummary,
+  getWorkspaceKnowledgeClaimInitiatingHuman,
 } from "@opengeni/db";
 import { createHash } from "node:crypto";
 import {
@@ -45,7 +47,9 @@ export type RememberRouterOptions = {
   learningRouter?: Pick<ReturnType<typeof createCompanyBrainLearningPolicyRouter>, "write">;
   createNote?: typeof createTaskNote;
   activateHumanConfirmed?: typeof activateHumanConfirmedLearningDecision;
+  confirmKnowledgeClaim?: typeof confirmRememberKnowledgeClaim;
   proposalSummary?: typeof getWorkspaceKnowledgeChangeProposalSummary;
+  claimInitiatingHuman?: typeof getWorkspaceKnowledgeClaimInitiatingHuman;
   notifyActivation?: (input: {
     db: Database;
     receipt: GovernedLearningActivationReceipt;
@@ -135,19 +139,19 @@ function promotionRequest(
  * differs, so a misleading agent-authored prompt can never authorize a save.
  * `helpText` truncation is by code point to match PostgreSQL `left()`.
  */
-function humanInputPrompt(request: RememberRequest, proposalId: string) {
-  const what =
+function humanInputPrompt(request: RememberRequest, targetId: string) {
+  const prompt =
     request.lane === "preference"
-      ? "workspace preference"
+      ? "Save this as a workspace preference for everyone in this workspace?"
       : request.lane === "instruction_policy"
-        ? "mandatory workspace rule"
-        : "workspace knowledge";
+        ? "Save this as a mandatory workspace rule for everyone in this workspace?"
+        : "Save this as workspace knowledge for everyone in this workspace?";
   return {
     questions: [
       {
-        id: rememberHumanInputQuestionId(proposalId),
+        id: rememberHumanInputQuestionId(targetId),
         kind: "single_select" as const,
-        prompt: `Save this as a ${what} for everyone in this workspace?`,
+        prompt,
         label: "Remember",
         helpText: Array.from(request.content).slice(0, 2_000).join(""),
         options: [
@@ -189,7 +193,10 @@ export function createRememberRouter(options: RememberRouterOptions): {
   const createNote = options.createNote ?? createTaskNote;
   const activateHumanConfirmed =
     options.activateHumanConfirmed ?? activateHumanConfirmedLearningDecision;
+  const confirmKnowledgeClaim = options.confirmKnowledgeClaim ?? confirmRememberKnowledgeClaim;
   const proposalSummary = options.proposalSummary ?? getWorkspaceKnowledgeChangeProposalSummary;
+  const claimInitiatingHuman =
+    options.claimInitiatingHuman ?? getWorkspaceKnowledgeClaimInitiatingHuman;
   const notifyActivation =
     options.notifyActivation ??
     (async ({ db, receipt, sessionId, attemptId }) =>
@@ -228,13 +235,18 @@ export function createRememberRouter(options: RememberRouterOptions): {
         return RememberReceipt.parse({ ...base, status: "blocked", reason: "learning_policy_off" });
       }
       if (route.write.knowledgeChangeProposalId === null) {
+        // Knowledge is owned by the human review lifecycle: the same one-click
+        // confirmation approves the claim, bound to the claim id.
         return RememberReceipt.parse({
           ...base,
-          status: "proposed_for_review",
+          status: "confirmation_required",
           noteId: note.note.id,
+          proposalId: null,
           claimId: route.write.claimId,
-          evidenceId: route.write.evidenceId,
-          reviewId: route.write.reviewId,
+          learning: null,
+          learningFailure: null,
+          humanInput: humanInputPrompt(request, route.write.claimId),
+          confirmWith: "remember_confirm",
         });
       }
       const proposalId = route.write.knowledgeChangeProposalId;
@@ -260,6 +272,7 @@ export function createRememberRouter(options: RememberRouterOptions): {
         status: "confirmation_required",
         noteId: note.note.id,
         proposalId,
+        claimId: route.write.claimId,
         learning: route.learning,
         learningFailure: route.learningFailure,
         humanInput: humanInputPrompt(request, proposalId),
@@ -270,6 +283,48 @@ export function createRememberRouter(options: RememberRouterOptions): {
     async confirm(input) {
       const attempt = await attemptOf(input.attempt);
       const request = RememberConfirmRequest.parse(input.request);
+      if (request.target === "knowledge_claim") {
+        // The database capability proves the exact human answered the bound
+        // question with `save` on this live turn and that the claim is still
+        // awaiting review before writing the approval.
+        const initiatingHuman = await claimInitiatingHuman(options.db, {
+          workspaceId: attempt.workspaceId,
+          claimId: request.claimId,
+        });
+        if (!initiatingHuman) {
+          throw new RememberError("proposal_unavailable", "The remember claim is not available");
+        }
+        const receipt = await confirmKnowledgeClaim(options.db, {
+          caller: {
+            workspaceId: attempt.workspaceId,
+            subjectId: initiatingHuman,
+            sessionId: attempt.sessionId,
+            turnId: attempt.turnId,
+            executionGeneration: attempt.executionGeneration,
+          },
+          request: {
+            operationId: request.operationId,
+            claimId: request.claimId,
+            humanInputRequestId: request.humanInputRequestId,
+          },
+        });
+        return RememberConfirmReceipt.parse({
+          status: "activated",
+          operationId: request.operationId,
+          proposalId: null,
+          claimId: receipt.claimId,
+          decisionReceiptId: null,
+          activation: {
+            destination: "knowledge",
+            receiptId: receipt.id,
+            claimId: receipt.claimId,
+            approvalReviewId: receipt.approvalReviewId,
+            effectiveAt: receipt.createdAt,
+            authorityKind: "human_confirmed",
+            undo: "knowledge_review",
+          },
+        });
+      }
       const proposal = await proposalSummary(options.db, {
         workspaceId: attempt.workspaceId,
         proposalId: request.proposalId,
@@ -307,6 +362,7 @@ export function createRememberRouter(options: RememberRouterOptions): {
         status: "activated",
         operationId: request.operationId,
         proposalId: proposal.id,
+        claimId: proposal.claimId,
         decisionReceiptId: request.decisionReceiptId,
         activation: activationSummary(activation),
       });

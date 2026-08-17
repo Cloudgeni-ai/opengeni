@@ -52,7 +52,25 @@ function harness() {
       },
       async confirm(input) {
         confirms.push(input);
-        const request = input.request as { proposalId: string };
+        const request = input.request as { target: string; proposalId?: string; claimId?: string };
+        if (request.target === "knowledge_claim") {
+          return {
+            status: "activated",
+            operationId: OPERATION_ID,
+            proposalId: null,
+            claimId: request.claimId!,
+            decisionReceiptId: null,
+            activation: {
+              destination: "knowledge",
+              receiptId: "00000000-0000-4000-8000-000000000114",
+              claimId: request.claimId!,
+              approvalReviewId: "00000000-0000-4000-8000-000000000115",
+              effectiveAt: null,
+              authorityKind: "human_confirmed",
+              undo: "knowledge_review",
+            },
+          };
+        }
         if (request.proposalId !== PROPOSAL_ID) {
           throw new RememberError("proposal_unavailable", "The remember proposal is not available");
         }
@@ -60,6 +78,7 @@ function harness() {
           status: "activated",
           operationId: OPERATION_ID,
           proposalId: PROPOSAL_ID,
+          claimId: "00000000-0000-4000-8000-000000000116",
           decisionReceiptId: DECISION_ID,
           activation: {
             receiptId: "00000000-0000-4000-8000-000000000113",
@@ -145,6 +164,24 @@ describe("remember MCP tools", () => {
       code: "proposal_unavailable",
       message: "The remember proposal is not available",
     });
-    expect(h.authorizations()).toBe(2);
+    const knowledge = await h.handlers.get("remember_confirm")!({
+      operationId: OPERATION_ID,
+      claimId: "00000000-0000-4000-8000-000000000116",
+      humanInputRequestId: HUMAN_INPUT_ID,
+    });
+    expect(JSON.parse(knowledge.content[0]!.text)).toMatchObject({
+      status: "activated",
+      activation: { destination: "knowledge", undo: "knowledge_review" },
+    });
+    expect(h.confirms[2]).toMatchObject({ request: { target: "knowledge_claim" } });
+    const invalid = await h.handlers.get("remember_confirm")!({
+      operationId: OPERATION_ID,
+      humanInputRequestId: HUMAN_INPUT_ID,
+    });
+    expect(JSON.parse(invalid.content[0]!.text)).toMatchObject({
+      status: "not_confirmed",
+      code: "invalid_target",
+    });
+    expect(h.authorizations()).toBe(4);
   });
 });
