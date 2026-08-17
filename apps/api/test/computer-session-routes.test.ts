@@ -94,8 +94,8 @@ describe("ComputerSession route discipline", () => {
     expect(placement).toContain("enrollment.connectionInstanceId");
     expect(placement).toContain("buildSelfhostedBackendSession({");
     expect(placement).toContain("new NatsControlRpc(");
-    expect(placement).toContain(
-      "assertPlacementInstance(expectedPlacementInstanceId, device.connectionGeneration)",
+    expect(placement).toMatch(
+      /assertPlacementInstance\(\s*expectedPlacementInstanceId,\s*device\.connectionGeneration,?\s*\)/u,
     );
     expect(placement).toContain("placementInstanceId: device.connectionGeneration");
   });

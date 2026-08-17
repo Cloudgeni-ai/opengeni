@@ -37,6 +37,7 @@ import {
   getAttachedBrowserDevice,
   getComputerSessionControlRecord,
   getLiveEnrollmentConnection,
+  getSandbox,
   getSession,
   listComputerSessions,
   prepareComputerSessionCreate,
@@ -82,6 +83,7 @@ import {
   deriveComputerSessionControllerTokens,
   deriveComputerViewGrantToken,
 } from "../browser-controller-authority";
+import { connectedMachineComputerAccessError } from "../connected-machine-computer-access";
 import { withCachedController } from "../controller-data-plane";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { validateInteractionRequestOrigin } from "../http/cors";
@@ -501,7 +503,11 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             grantId,
             expiresAt,
           });
-          await client.createComputerViewGrant(reference, { grantId, token, expiresAt });
+          await client.createComputerViewGrant(reference, {
+            grantId,
+            token,
+            expiresAt,
+          });
           const relaySecret = placement.session.openComputerFrames
             ? resolveStreamTokenSecret(deps.settings)
             : null;
@@ -787,6 +793,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
         throw new ComputerSessionStateError("Attached browser machine is unavailable");
       }
+      if (operation !== "computer.end") {
+        assertConnectedMachineComputerAccess(enrollment, operation);
+      }
       assertPlacementInstance(expectedPlacementInstanceId, device.connectionGeneration);
       const built = await buildSelfhostedBackendSession({
         workspaceId: sourceSession.workspaceId,
@@ -857,6 +866,21 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         }
 
         const resolved = await handle.routingSession.prime();
+        if (operation !== "computer.end" && resolved.kind === "selfhosted" && resolved.sandboxId) {
+          const sandbox = await getSandbox(deps.db, grant, resolved.sandboxId);
+          if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) {
+            throw new ComputerSessionStateError("Connected Machine placement is unavailable");
+          }
+          const enrollment = await getLiveEnrollmentConnection(
+            deps.db,
+            grant,
+            sandbox.enrollmentId,
+          );
+          if (!enrollment?.connectionInstanceId) {
+            throw new ComputerSessionStateError("Connected Machine is unavailable");
+          }
+          assertConnectedMachineComputerAccess(enrollment, operation);
+        }
         if (expectedPlacement?.kind === "connected_machine") {
           if (
             resolved.kind !== "selfhosted" ||
@@ -897,7 +921,10 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         }
         if (resolved.kind === "selfhosted") {
           return await callback({
-            placement: { kind: "connected_machine", sandboxId: resolved.sandboxId },
+            placement: {
+              kind: "connected_machine",
+              sandboxId: resolved.sandboxId,
+            },
             placementInstanceId: resolved.providerInstanceId ?? resolved.sandboxId,
             session: resolved.session as unknown as BrowserControlPlacementSession,
             lease: null,
@@ -1297,7 +1324,11 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
   async function routePreamble(
     context: Context,
     permission: "sessions:read" | "sessions:control" | "stream:view",
-  ): Promise<{ workspaceId: string; grant: AccessGrant; computerSessionId: string }> {
+  ): Promise<{
+    workspaceId: string;
+    grant: AccessGrant;
+    computerSessionId: string;
+  }> {
     const workspaceId = context.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(context, deps, workspaceId, permission);
     return {
@@ -1424,7 +1455,10 @@ async function authorizeSourceSession(
     });
   } catch (error) {
     if (error instanceof SessionAuthorizationDeniedError) {
-      throw new HTTPException(404, { message: "session not found", cause: error });
+      throw new HTTPException(404, {
+        message: "session not found",
+        cause: error,
+      });
     }
     if (error instanceof SessionAuthorizationUnavailableError) {
       throw new HTTPException(503, {
@@ -1507,6 +1541,25 @@ function assertPlacementInstance(expected: string | null, actual: string): void 
   }
 }
 
+function assertConnectedMachineComputerAccess(
+  enrollment: {
+    hasDisplay: boolean;
+    desktopUnavailableReason: string | null;
+    allowScreenControl: boolean;
+  },
+  operation: ChannelAOperation,
+): void {
+  const error = connectedMachineComputerAccessError(
+    enrollment,
+    operation === "computer.action" || operation === "computer.control",
+  );
+  if (!error) return;
+  if (error.status === 403) {
+    throw new HTTPException(403, { message: error.message });
+  }
+  throw new ComputerSessionStateError(error.message);
+}
+
 function isTerminalOperation(state: string): boolean {
   return state === "completed" || state === "failed" || state === "outcome_unknown";
 }
@@ -1527,7 +1580,11 @@ function interactionFailure(error: unknown) {
     error instanceof BrowserControlUnsupportedError ||
     error instanceof BrowserControlServerUnsupportedError
   ) {
-    return { code: "unsupported" as const, message: error.message, retryable: false };
+    return {
+      code: "unsupported" as const,
+      message: error.message,
+      retryable: false,
+    };
   }
   if (error instanceof BrowserControlServerError) {
     return {
