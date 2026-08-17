@@ -348,11 +348,16 @@ BEGIN
       || 'SET search_path = pg_catalog, %I, pg_temp',
     data_schema, data_schema
   );
-  EXECUTE format(
-    'GRANT EXECUTE ON FUNCTION %I.resolve_workspace_writer_grant_identity(uuid,text) '
-      || 'TO opengeni_app',
-    data_schema
-  );
+  -- Same conditional grant as migration 0263: dedicated-schema/embedded
+  -- deployments replay this ledger without the opengeni_app role because the
+  -- host runs OpenGeni's queries over its own role and never uses it.
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION %I.resolve_workspace_writer_grant_identity(uuid,text) '
+        || 'TO opengeni_app',
+      data_schema
+    );
+  END IF;
 END
 $workspace_writer_grant_seam$;
 

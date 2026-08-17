@@ -37804,7 +37804,7 @@ type DirectWorkspaceMutationAuthority = {
 type AdmittedWorkspaceMutationAuthority = {
   /** `legacy_unattributed` is honest, not broken: a turn frozen before
    * migration 0096 has no causal initiator to copy, and inventing one would be
-   * exactly the ownership inference OPE-203 forbids. */
+   * exactly the ownership inference this authority model forbids. */
   initiatorKind: "subject" | "service" | "legacy_unattributed";
   initiatorSubjectId: string;
   initiatingHumanSubjectId: string | null;
@@ -38024,7 +38024,7 @@ async function lockWorkspaceMutationSessionTx(
  * exact lookup and never a guess. A principal with no membership row at all is
  * not an organization human (deployment/API-key/local principals): it keeps its
  * subject attribution and carries no membership, because inventing one would be
- * exactly the ownership inference OPE-203 forbids. A `provisioning` membership
+ * exactly the ownership inference this authority model forbids. A `provisioning` membership
  * is not yet a grant and is likewise not recorded, but it is not a revocation
  * either and must not fence.
  */
