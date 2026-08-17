@@ -65,6 +65,55 @@ describe("curated catalog overlay document", () => {
     expect(parsed.entries[0]).toEqual({ mcpUrl: "https://mcp.example.com/mcp", name: "Example" });
   });
 
+  test("parses a declarative oauthProfile and rejects malformed ones loudly", () => {
+    const parsed = parseCuratedCatalog({
+      version: 1,
+      entries: [
+        {
+          mcpUrl: "https://mcp.pinned.example/mcp",
+          oauthProfile: {
+            clientSource: "dcr",
+            exactMcpUrl: "https://mcp.pinned.example/mcp",
+            pinnedIssuerOrigins: ["https://auth.pinned.example"],
+            sendResourceParameter: false,
+            allowedOwnership: ["personal"],
+            requestedScopes: ["files:read"],
+            extraAuthorizeParams: { audience: "pinned" },
+          },
+        },
+      ],
+    });
+    expect(parsed.entries[0]!.oauthProfile).toEqual({
+      clientSource: "dcr",
+      exactMcpUrl: "https://mcp.pinned.example/mcp",
+      pinnedIssuerOrigins: ["https://auth.pinned.example"],
+      sendResourceParameter: false,
+      allowedOwnership: ["personal"],
+      requestedScopes: ["files:read"],
+      extraAuthorizeParams: { audience: "pinned" },
+    });
+
+    const entry = (oauthProfile: unknown) => ({
+      version: 1,
+      entries: [{ mcpUrl: "https://a.example/mcp", oauthProfile }],
+    });
+    expect(() => parseCuratedCatalog(entry("dcr"))).toThrow(/must be an object/);
+    expect(() => parseCuratedCatalog(entry({ surprise: true }))).toThrow(/unknown key "surprise"/);
+    expect(() => parseCuratedCatalog(entry({ clientSource: "magic" }))).toThrow(
+      /clientSource must be one of/,
+    );
+    expect(() => parseCuratedCatalog(entry({ allowedOwnership: [] }))).toThrow(/allowedOwnership/);
+    expect(() => parseCuratedCatalog(entry({ allowedOwnership: ["group"] }))).toThrow(
+      /allowedOwnership/,
+    );
+    expect(() => parseCuratedCatalog(entry({ pinnedIssuerOrigins: ["nonsense"] }))).toThrow(
+      /entries must be URLs/,
+    );
+    expect(() => parseCuratedCatalog(entry({ extraAuthorizeParams: { a: 1 } }))).toThrow(
+      /string-to-string/,
+    );
+  });
+
   test("preserves an explicit null logoSourceUrl and distinguishes it from omission", () => {
     const parsed = parseCuratedCatalog({
       version: 1,
@@ -186,6 +235,11 @@ describe("curated fields flow through import normalization", () => {
     const dbInput = catalogRowToDbInput(linear, { importBatchId: "batch-1" });
     expect(dbInput.category).toBe("project-management");
     expect(dbInput.metadata).toMatchObject({ curation: { featured: true, official: true } });
+    // The committed overlay expresses Linear's DCR-compatibility override as
+    // profile data, and the importer carries it into the row metadata the
+    // OAuth client resolves at start time.
+    expect(linear.oauthProfile).toEqual({ clientSource: "dcr" });
+    expect(dbInput.metadata).toMatchObject({ oauthProfile: { clientSource: "dcr" } });
   });
 
   test("an uncurated row carries no category, no curation, and no metadata curation key", () => {

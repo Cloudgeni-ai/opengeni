@@ -6741,6 +6741,37 @@ export async function listCapabilityCatalogItems(
   });
 }
 
+/**
+ * Declarative OAuth profile carried by a global (registry-imported) catalog
+ * row for an exact MCP URL, or null when no row declares one. Only global
+ * rows are consulted: a workspace-created row must not steer another
+ * workspace's OAuth flow, and the OAuth client applies the profile as a
+ * narrowing constraint over its defaults.
+ */
+export async function getGlobalCatalogOAuthProfile(
+  db: Database,
+  workspaceId: string,
+  mcpUrl: string,
+): Promise<Record<string, unknown> | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ metadata: schema.capabilityCatalogItems.metadata })
+      .from(schema.capabilityCatalogItems)
+      .where(
+        and(
+          isNull(schema.capabilityCatalogItems.workspaceId),
+          eq(schema.capabilityCatalogItems.mcpUrl, mcpUrl),
+        ),
+      )
+      .orderBy(asc(schema.capabilityCatalogItems.id))
+      .limit(1);
+    const profile = row?.metadata?.oauthProfile;
+    return typeof profile === "object" && profile !== null && !Array.isArray(profile)
+      ? (profile as Record<string, unknown>)
+      : null;
+  });
+}
+
 export async function getCapabilityCatalogItem(
   db: Database,
   workspaceId: string,

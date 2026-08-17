@@ -34,6 +34,12 @@ export type CuratedCatalogEntry = {
   readonly allowedTools?: readonly string[];
   readonly requireApproval?: boolean | readonly string[];
   readonly connectionOwnership?: "personal_only";
+  /**
+   * Declarative OAuth quirks for the row, applied by the API's OAuth client as
+   * a narrowing constraint over its defaults (never a loosening one). Shape is
+   * validated here structurally and again by the API's zod schema at use time.
+   */
+  readonly oauthProfile?: CuratedOAuthProfile;
   /** `null` deliberately suppresses a logo fetch and keeps the monogram. */
   readonly logoSourceUrl?: string | null;
   readonly homepageUrl?: string;
@@ -49,6 +55,17 @@ export type CuratedCatalogEntry = {
   readonly sourceCommit?: string;
   /** Reviewer-facing rationale. Never rendered to end users. */
   readonly notes?: readonly string[];
+};
+
+export type CuratedOAuthProfile = {
+  readonly clientSource?: "deployment_managed" | "cimd" | "dcr";
+  readonly exactMcpUrl?: string;
+  readonly pinnedIssuerOrigins?: readonly string[];
+  readonly pinnedEndpointOrigins?: readonly string[];
+  readonly sendResourceParameter?: boolean;
+  readonly allowedOwnership?: readonly ("personal" | "workspace")[];
+  readonly requestedScopes?: readonly string[];
+  readonly extraAuthorizeParams?: Readonly<Record<string, string>>;
 };
 
 export type CuratedCatalog = {
@@ -147,9 +164,104 @@ const KNOWN_KEYS: ReadonlySet<string> = new Set<string>([
   "authKind",
   "tier",
   "connectionOwnership",
+  "oauthProfile",
   "logoSourceUrl",
   "requireApproval",
 ]);
+
+const OAUTH_PROFILE_KEYS: ReadonlySet<string> = new Set([
+  "clientSource",
+  "exactMcpUrl",
+  "pinnedIssuerOrigins",
+  "pinnedEndpointOrigins",
+  "sendResourceParameter",
+  "allowedOwnership",
+  "requestedScopes",
+  "extraAuthorizeParams",
+]);
+
+const OAUTH_CLIENT_SOURCES: ReadonlySet<string> = new Set(["deployment_managed", "cimd", "dcr"]);
+const OAUTH_OWNERSHIPS: ReadonlySet<string> = new Set(["personal", "workspace"]);
+
+function parseOAuthProfile(raw: unknown, where: string): CuratedOAuthProfile {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new CuratedCatalogError(`${where}: oauthProfile must be an object`);
+  }
+  const record = raw as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!OAUTH_PROFILE_KEYS.has(key)) {
+      throw new CuratedCatalogError(`${where}: oauthProfile has unknown key "${key}"`);
+    }
+  }
+  const profile: {
+    -readonly [K in keyof CuratedOAuthProfile]: CuratedOAuthProfile[K];
+  } = {};
+  if (record.clientSource !== undefined) {
+    if (typeof record.clientSource !== "string" || !OAUTH_CLIENT_SOURCES.has(record.clientSource)) {
+      throw new CuratedCatalogError(
+        `${where}: oauthProfile.clientSource must be one of ${[...OAUTH_CLIENT_SOURCES].join(", ")}`,
+      );
+    }
+    profile.clientSource = record.clientSource as NonNullable<CuratedOAuthProfile["clientSource"]>;
+  }
+  if (record.exactMcpUrl !== undefined) {
+    if (typeof record.exactMcpUrl !== "string" || !URL.canParse(record.exactMcpUrl)) {
+      throw new CuratedCatalogError(`${where}: oauthProfile.exactMcpUrl must be a URL`);
+    }
+    profile.exactMcpUrl = record.exactMcpUrl;
+  }
+  for (const key of ["pinnedIssuerOrigins", "pinnedEndpointOrigins", "requestedScopes"] as const) {
+    const value = record[key];
+    if (value === undefined) continue;
+    if (
+      !Array.isArray(value) ||
+      value.length === 0 ||
+      value.some((item) => typeof item !== "string" || item.trim().length === 0)
+    ) {
+      throw new CuratedCatalogError(
+        `${where}: oauthProfile.${key} must be a non-empty string array`,
+      );
+    }
+    if (key !== "requestedScopes" && value.some((item) => !URL.canParse(item))) {
+      throw new CuratedCatalogError(`${where}: oauthProfile.${key} entries must be URLs`);
+    }
+    profile[key] = value as string[];
+  }
+  if (record.sendResourceParameter !== undefined) {
+    if (typeof record.sendResourceParameter !== "boolean") {
+      throw new CuratedCatalogError(`${where}: oauthProfile.sendResourceParameter must be boolean`);
+    }
+    profile.sendResourceParameter = record.sendResourceParameter;
+  }
+  if (record.allowedOwnership !== undefined) {
+    const value = record.allowedOwnership;
+    if (
+      !Array.isArray(value) ||
+      value.length === 0 ||
+      value.some((item) => typeof item !== "string" || !OAUTH_OWNERSHIPS.has(item))
+    ) {
+      throw new CuratedCatalogError(
+        `${where}: oauthProfile.allowedOwnership must be a non-empty array of "personal" | "workspace"`,
+      );
+    }
+    profile.allowedOwnership = value as ("personal" | "workspace")[];
+  }
+  if (record.extraAuthorizeParams !== undefined) {
+    const value = record.extraAuthorizeParams;
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      Array.isArray(value) ||
+      Object.values(value).some((item) => typeof item !== "string")
+    ) {
+      throw new CuratedCatalogError(
+        `${where}: oauthProfile.extraAuthorizeParams must be a string-to-string object`,
+      );
+    }
+    profile.extraAuthorizeParams = value as Record<string, string>;
+  }
+  return profile;
+}
 
 /**
  * Mirrors the importer's canonicalization exactly. Kept local so this module
@@ -242,6 +354,10 @@ function parseEntry(value: unknown, index: number): CuratedCatalogEntry {
       throw new CuratedCatalogError(`${where}: connectionOwnership must be "personal_only"`);
     }
     entry.connectionOwnership = connectionOwnership;
+  }
+
+  if ("oauthProfile" in record) {
+    entry.oauthProfile = parseOAuthProfile(record.oauthProfile, where);
   }
 
   // `logoSourceUrl: null` is meaningful: it suppresses the logo fetch and
