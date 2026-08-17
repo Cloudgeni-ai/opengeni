@@ -1112,7 +1112,7 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
     return new HTTPException(409, { message: error.message });
   const authorityFence = workspaceMutationAuthorityFenceCode(error);
   // A revoked grant is an authorization outcome, not a server fault; an
-  // unattributed pre-0276 writer is a conflict the caller resolves by starting
+  // unattributed pre-0277 writer is a conflict the caller resolves by starting
   // fresh work. Both must be visible instead of surfacing as a 500.
   if (authorityFence === "authority_revoked")
     return new HTTPException(403, { message: (error as Error).message });

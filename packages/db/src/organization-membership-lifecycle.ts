@@ -211,6 +211,77 @@ async function settleOrganizationMembershipProtocols(
   }
 }
 
+/**
+ * Remove one workspace membership through the fenced SECURITY DEFINER
+ * teardown (migration 0278): the same prepare/settle/command protocol as
+ * organization offboarding, scoped to exactly one workspace and one subject.
+ * Cancels the removed member's queued/live turns in the workspace, interrupts
+ * live attempts, ends their realtime modes, advances their private sessions'
+ * authority epochs, registers workflow wakes, deletes their per-workspace
+ * personal rows, and deletes the membership - in one transaction. Returns
+ * false when no membership row exists (idempotent retry).
+ */
+export async function removeWorkspaceMember(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+    targetSubjectId: string;
+  },
+): Promise<boolean> {
+  const command = {
+    action: "remove",
+    organizationId: input.accountId,
+    workspaceId: input.workspaceId,
+    actorSubjectId: input.actorSubjectId,
+    targetSubjectId: input.targetSubjectId,
+    operationId: crypto.randomUUID(),
+  };
+  return await db.transaction(async (tx) => {
+    const txDb = tx as unknown as Database;
+    // The personal-state fence first, exactly as the pre-0278 delete path took
+    // it: session listing takes the shared counterpart and pin mutation the
+    // same exclusive one. The removal command re-acquires it (reentrant within
+    // this transaction), but taking it here keeps the wait observable and the
+    // fence ordered before every other lock this transaction takes.
+    await txDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(
+        ${`session-personal-state:${input.workspaceId}:${input.targetSubjectId}`}, 0))`,
+    );
+    const settlements = await withRlsContext(
+      txDb,
+      { accountId: input.accountId, workspaceId: null },
+      async (scopedDb) => {
+        await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+        const [row] = await rawRows<{ result: unknown }>(
+          scopedDb,
+          sql`select prepare_workspace_membership_removal_settlements(
+            ${JSON.stringify(command)}::jsonb
+          ) as result`,
+        );
+        return parseOrganizationMembershipProtocolSettlements(row?.result ?? []);
+      },
+    );
+    await settleOrganizationMembershipProtocols(txDb, settlements);
+    return await withRlsContext(
+      txDb,
+      { accountId: input.accountId, workspaceId: null },
+      async (scopedDb) => {
+        await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+        const [row] = await rawRows<{ result: unknown }>(
+          scopedDb,
+          sql`select workspace_membership_removal_command(
+            ${JSON.stringify(command)}::jsonb
+          ) as result`,
+        );
+        if (!row) throw new Error("Workspace membership removal returned no result");
+        return (row.result as { removed?: unknown } | null)?.removed === true;
+      },
+    );
+  });
+}
+
 export async function assertActiveManagedHumanOrganizationMembership(
   db: Database,
   input: { accountId: string; subjectId: string },

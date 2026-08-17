@@ -198,7 +198,19 @@ also on the bounded idle timer. A buffered or replayed event therefore fails
 closed after suspension or offboarding instead of retaining the grant captured
 when the HTTP request began.
 Reactivation restores only active organization and personal-workspace access,
-never old grants. Offboarding applies the same canonical
+never old grants.
+Removing one workspace membership (migration 0278) is the same canonical
+teardown scoped to exactly that workspace and subject: the
+`workspace_membership_removal_command` SECURITY DEFINER seam cancels the
+removed member's queued/live turns there, interrupts live attempts, ends their
+active realtime modes, pauses their created scheduled tasks and owned-session
+goals, revokes their workspace-scoped resource grants, advances their private
+sessions' authority epochs with `session.authority.revoked` events, registers
+workflow wakes, deletes their per-workspace personal rows, and deletes the
+membership - in one transaction, behind the same prepare/settle protocol for
+pending tool calls. Self-removal, removing the last administering member, and
+a non-administering actor fail closed in the seam itself. Other workspaces,
+organization membership status, and retention are untouched. Offboarding applies the same canonical
 workspace/session/turn/attempt teardown, then terminally revokes membership and
 retains resource authority and physical data. Owned-session authority epochs
 advance with content-free audit events; unrelated users' shared-session state
