@@ -25,6 +25,10 @@ import {
   writeCompanyBrainGovernedProposal,
 } from "@opengeni/db";
 import { createHash } from "node:crypto";
+import {
+  publishGovernedLearningEventToSlack,
+  type GovernedLearningSlackPublicationResult,
+} from "./governed-learning-slack-publication";
 
 export type CompanyBrainGovernedWriteInput = {
   attempt: unknown;
@@ -46,6 +50,17 @@ export type CompanyBrainGovernedWriteRouterOptions = {
    * decision receipt is recorded but the inactive draft stays for review.
    */
   automaticDestinations?: ReadonlyArray<GovernedLearningActivationDestination>;
+  /**
+   * Optional post-activation notification sink (Slack publication outbox).
+   * Notification is never authority: failures are swallowed after the
+   * activation receipt is durable and never change the route receipt.
+   */
+  notifyActivation?: (input: {
+    db: Database;
+    receipt: GovernedLearningActivationReceipt;
+    sessionId: string;
+    attemptId: string;
+  }) => Promise<GovernedLearningSlackPublicationResult>;
 };
 
 export const DEFAULT_AUTOMATIC_LEARNING_DESTINATIONS: ReadonlyArray<GovernedLearningActivationDestination> =
@@ -144,6 +159,15 @@ export function createCompanyBrainLearningPolicyRouter(
   const authority = options.authority ?? writeCompanyBrainGovernedProposal;
   const evaluate = options.evaluate ?? evaluateGovernedLearningProposal;
   const activate = options.activate ?? activateGovernedLearningDecision;
+  const notifyActivation =
+    options.notifyActivation ??
+    (async ({ db, receipt, sessionId, attemptId }) =>
+      publishGovernedLearningEventToSlack(db, {
+        kind: "activated",
+        receipt,
+        sessionId,
+        attemptId,
+      }));
   const automaticDestinations = new Set(
     options.automaticDestinations ?? DEFAULT_AUTOMATIC_LEARNING_DESTINATIONS,
   );
@@ -272,6 +296,16 @@ export function createCompanyBrainLearningPolicyRouter(
           learning,
           learningFailure: classifyLearningFailure("activation", error),
         });
+      }
+      try {
+        await notifyActivation({
+          db: options.db,
+          receipt: activation,
+          sessionId: attempt.sessionId,
+          attemptId: attempt.attemptId,
+        });
+      } catch {
+        // Notification is best-effort; the durable receipts already exist.
       }
       return CompanyBrainLearningPolicyRouteReceipt.parse({
         operationId: request.operationId,

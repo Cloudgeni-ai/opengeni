@@ -17,14 +17,21 @@ Documents, scoped-knowledge claims, collection content, prompts, logs, or
 connector payloads.
 
 The governed-learning adapter in
-`packages/core/src/domain/durable-learning-slack-publication.ts` is a narrow
-post-persistence consumer. The canonical router still owns learning policy,
-scope resolution, authority, routing, rollback, and its immutable attempt and
-receipt. The adapter verifies matching attempt id/input hash, accepts only an
-exact workspace scope, requires a bounded subject summary for writes, and fails
-closed for connector evidence because the v1 contract cannot prove that the
-connector was not Slack. It never publishes from an authority-adapter callback
-or router claim table.
+`packages/core/src/domain/governed-learning-slack-publication.ts` is a narrow
+post-persistence consumer of the immutable migration 0269 activation and undo
+receipts. The Company Brain learning-policy router calls it after an automatic
+activation commits, and the `/learning/activations/:id/undo` route calls it
+after an undo commits; both calls are best-effort and can never change the
+durable receipts or the route receipt. The adapter reads no proposal content,
+evidence bytes, or destination bodies: its projection is a fixed content-free
+sentence plus destination, source kind, revision, receipt ids, and timestamps.
+Preference activations are `normal` importance; instruction-policy activations
+and every undo are `major`. For an activation it first resolves the evidence
+origin (task note, or the knowledge provider key behind the document version)
+and fails closed when the origin is unresolvable or Slack-derived, so
+Slack-sourced knowledge can never republish itself. The idempotency key is
+`governed-learning:<activated|undone>:<receiptId>` and the actor is the
+receipt's service actor with the causal human retained as provenance.
 
 Both source paths pass only their allowlisted summary/owner/destination text
 through the deterministic sink-local credential-shape boundary in
@@ -32,7 +39,7 @@ through the deterministic sink-local credential-shape boundary in
 projection is hashed or persisted. The final Slack formatter applies the same
 boundary again before escaping and truncation as defense in depth. Recognized
 credential forms are replaced with a fixed omission marker; canonical Memory,
-durable-learning attempts/receipts, model history, events, and other internal
+governed-learning receipts, model history, events, and other internal
 OpenGeni content remain exact and are never rewritten by this boundary.
 
 ## Immutable configuration
@@ -109,7 +116,7 @@ and forced workspace row-level security.
 Slack copy contains only the allowlisted summary, importance, optional owner,
 occurrence time, governed destination/outcome where applicable, and a link back
 to the authoritative OpenGeni Memory or Workspace State view. It excludes raw
-Memory content, non-projected durable-learning subject content, evidence,
+Memory content, governed-learning proposal content, evidence,
 prompts, credential-shaped values, and actor identifiers. The same sanitized
 summary is used by the persisted publication row and bounded delivery-history
 projection, so review and history surfaces cannot reveal a value removed at the
