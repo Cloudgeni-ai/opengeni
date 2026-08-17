@@ -7786,6 +7786,87 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("defers only optional MCP preparation while required tools remain eager", async () => {
+    let releaseOptional!: () => void;
+    const optionalConnect = new Promise<void>((resolve) => {
+      releaseOptional = resolve;
+    });
+    const makeServer = (name: string, connect: () => Promise<void>): MCPServer => ({
+      name,
+      cacheToolsList: false,
+      connect,
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "lookup",
+            description: `Lookup through ${name}`,
+            inputSchema: {
+              type: "object" as const,
+              properties: {},
+              additionalProperties: false,
+            },
+          },
+        ];
+      },
+      async callTool() {
+        return [{ type: "text", text: name }];
+      },
+      async invalidateToolsCache() {},
+    });
+    const required = makeServer("required-inner", async () => {});
+    const optional = makeServer("optional-inner", async () => await optionalConnect);
+    const configs = [
+      {
+        id: "required",
+        name: "Required",
+        url: "https://required.invalid/mcp",
+        cacheToolsList: false,
+      },
+      {
+        id: "optional",
+        name: "Optional",
+        url: "https://optional.invalid/mcp",
+        cacheToolsList: false,
+      },
+    ];
+    const settings = testSettings({ sandboxBackend: "none", mcpServers: configs });
+    const prepared = await prepareAgentTools(
+      settings,
+      [
+        { kind: "mcp", id: "required" },
+        { kind: "mcp", id: "optional", optional: true },
+      ],
+      {
+        deferBestEffortUntilModelResponse: true,
+        localMcpServers: [
+          { id: "required", server: required },
+          { id: "optional", server: optional },
+        ],
+      },
+    );
+    try {
+      expect(prepared.ready).toBeDefined();
+      const agent = buildOpenGeniAgent(settings, [], {
+        mcpServers: prepared.mcpServers,
+      });
+      expect((await agent.getMcpTools(new RunContext())).map((tool) => tool.name)).toEqual([
+        "required__lookup",
+      ]);
+
+      releaseOptional();
+      const complete = await prepared.ready!;
+      expect((await agent.getMcpTools(new RunContext())).map((tool) => tool.name).sort()).toEqual([
+        "optional__lookup",
+        "required__lookup",
+      ]);
+      expect(complete.attemptToolEnvironment).toBeNull();
+    } finally {
+      releaseOptional();
+      await prepared.close();
+    }
+  });
+
   test("SDK MCP lifecycle logs are structural while callers receive exact errors", async () => {
     const sentinel = "synthetic-mcp-lifecycle-boundary-123456";
     const registryId = "registry-mcp-lifecycle-boundary";

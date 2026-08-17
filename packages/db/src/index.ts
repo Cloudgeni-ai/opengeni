@@ -37507,29 +37507,42 @@ async function advanceWorkspaceGenerationForAuthority(
   operationInput: string,
   captureWaitMs = 0,
   waitSignal?: AbortSignal,
+  onCaptureWait?: (durationMs: number) => void,
 ): Promise<SandboxWorkspaceMutationAdmission> {
   if (!Number.isSafeInteger(captureWaitMs) || captureWaitMs < 0 || captureWaitMs > 60 * 60_000) {
     throw new Error("Workspace archive capture wait is invalid");
   }
   const deadline = performance.now() + captureWaitMs;
   let delayMs = 25;
-  for (;;) {
-    try {
-      return await advanceWorkspaceGenerationForAuthorityOnce(db, authority, operationInput);
-    } catch (error) {
-      if (
-        !(error instanceof SandboxWorkspaceMutationFencedError) ||
-        error.code !== "capture_in_progress" ||
-        performance.now() >= deadline
-      ) {
-        throw error;
+  let captureWaitStartedAt: number | undefined;
+  try {
+    for (;;) {
+      try {
+        return await advanceWorkspaceGenerationForAuthorityOnce(db, authority, operationInput);
+      } catch (error) {
+        if (
+          !(error instanceof SandboxWorkspaceMutationFencedError) ||
+          error.code !== "capture_in_progress" ||
+          performance.now() >= deadline
+        ) {
+          throw error;
+        }
+        captureWaitStartedAt ??= performance.now();
+        await waitForSandboxTransition(
+          Math.min(delayMs, Math.max(1, deadline - performance.now())),
+          waitSignal,
+          "Sandbox workspace mutation wait cancelled",
+        );
+        delayMs = Math.min(500, delayMs * 2);
       }
-      await waitForSandboxTransition(
-        Math.min(delayMs, Math.max(1, deadline - performance.now())),
-        waitSignal,
-        "Sandbox workspace mutation wait cancelled",
-      );
-      delayMs = Math.min(500, delayMs * 2);
+    }
+  } finally {
+    if (captureWaitStartedAt !== undefined && onCaptureWait) {
+      try {
+        onCaptureWait(Math.max(0, performance.now() - captureWaitStartedAt));
+      } catch {
+        // Diagnostics must never alter mutation admission authority.
+      }
     }
   }
 }
@@ -37560,6 +37573,9 @@ export async function advanceWorkspaceGeneration(
     captureWaitMs?: number;
     /** Cancel the bounded transition wait without creating an admission. */
     waitSignal?: AbortSignal;
+    /** Observe only time spent retrying while a provider archive capture owns
+     * the lease. Diagnostics are fail-open and never affect admission. */
+    onCaptureWait?: (durationMs: number) => void;
     /** Active-routed mutations bind to the exact session pointer. Omitted means
      * an intentional home-provider write outside the routing surface. */
     routeKind?: "home" | "active";
@@ -37589,6 +37605,7 @@ export async function advanceWorkspaceGeneration(
     input.operation,
     input.captureWaitMs,
     input.waitSignal,
+    input.onCaptureWait,
   );
 }
 

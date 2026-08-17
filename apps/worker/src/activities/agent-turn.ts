@@ -158,6 +158,7 @@ import {
   isMcpRequestTimeoutError,
   isMcpTransportConnectivityError,
   runOwnedSandboxSetup,
+  recordModelPreparationMeasurement,
   RoutingMutationOutcomeUnknownError,
   SandboxConfigError,
   SandboxExactResumeInstanceUnavailableError,
@@ -2478,6 +2479,23 @@ export function lazyToolTransportForTurn(
   return "generic_dispatch";
 }
 
+/** Only brand-new lazy-capable turns may overlap optional tool preparation. */
+export function shouldDeferBestEffortToolPreparation(args: {
+  lazyToolTransport: LazyToolTransport | null;
+  progressiveDisclosureEnabled: boolean;
+  artifactRuntimeAvailable: boolean;
+  triggerKind: "next" | "approval";
+  triggerType: string;
+}): boolean {
+  return Boolean(
+    args.lazyToolTransport &&
+    args.progressiveDisclosureEnabled &&
+    !args.artifactRuntimeAvailable &&
+    args.triggerKind === "next" &&
+    (args.triggerType === "user.message" || args.triggerType === "system.update.delivered"),
+  );
+}
+
 /**
  * Native web search is a runtime capability, not part of the session's MCP
  * allow-list. Attach it whenever the resolved provider advertises runnable
@@ -3613,6 +3631,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       sandbox: ResumedTurnSandbox,
       operation: string,
       mutation: () => Promise<T>,
+      observePhase?: (measurement: {
+        phase: "admission" | "settlement";
+        outcome: "completed" | "failed";
+        durationSeconds: number;
+      }) => void,
     ): Promise<T> => {
       // Connected machines are the user's own persistence and never dirty the
       // cloud home archive. Every persistable raw-session write batch is fenced
@@ -3649,18 +3672,51 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
         ...(cancellationSignal ? { waitSignal: cancellationSignal } : {}),
       };
-      const admission = await advanceWorkspaceGeneration(db, identity);
+      const observeMutationPhase = (
+        phase: "admission" | "settlement",
+        outcome: "completed" | "failed",
+        startedAt: number,
+      ): void => {
+        try {
+          observePhase?.({
+            phase,
+            outcome,
+            durationSeconds: Math.max(0, performance.now() - startedAt) / 1_000,
+          });
+        } catch {
+          // Diagnostics must never alter workspace mutation authority.
+        }
+      };
+      const admissionStartedAt = performance.now();
+      let admissionOutcome: "completed" | "failed" = "failed";
+      let admission: Awaited<ReturnType<typeof advanceWorkspaceGeneration>>;
+      try {
+        admission = await advanceWorkspaceGeneration(db, identity);
+        admissionOutcome = "completed";
+      } finally {
+        observeMutationPhase("admission", admissionOutcome, admissionStartedAt);
+      }
+      const settleMutation = async (outcome: "resolved" | "rejected"): Promise<void> => {
+        const settlementStartedAt = performance.now();
+        let settlementOutcome: "completed" | "failed" = "failed";
+        try {
+          await verifyWorkspaceMutationSettlement(db, {
+            ...identity,
+            admission,
+            outcome,
+          });
+          settlementOutcome = "completed";
+        } finally {
+          observeMutationPhase("settlement", settlementOutcome, settlementStartedAt);
+        }
+      };
       let result: T;
       try {
         result = await mutation();
       } catch (providerError) {
         const partialMutation = providerError instanceof ChannelAPartialMutationError;
         try {
-          await verifyWorkspaceMutationSettlement(db, {
-            ...identity,
-            admission,
-            outcome: partialMutation ? "resolved" : "rejected",
-          });
+          await settleMutation(partialMutation ? "resolved" : "rejected");
         } catch (settlementError) {
           throw new RoutingMutationOutcomeUnknownError(
             operation,
@@ -3680,11 +3736,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         throw providerError;
       }
       try {
-        await verifyWorkspaceMutationSettlement(db, {
-          ...identity,
-          admission,
-          outcome: "resolved",
-        });
+        await settleMutation("resolved");
       } catch (settlementError) {
         throw new RoutingMutationOutcomeUnknownError(
           operation,
@@ -3772,6 +3824,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       await current?.flush().catch(() => undefined);
     };
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
+    let toolPreparationReady: Promise<void> | null = null;
+    let toolPreparationClosing = false;
     let codemodeDispatcher: CodemodeAttemptDispatcher | null = null;
     const toolCancellationFenceRef: {
       current: TurnToolCancellationFence | null;
@@ -8023,6 +8077,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       ]);
       const toolPreparationStartedAt = performance.now();
       let toolPreparationOutcome: "completed" | "failed" = "completed";
+      const progressiveDisclosureEnabled =
+        lazyToolTransport === "codex_native"
+          ? runSettings.codexToolSearchEnabled
+          : runSettings.lazyToolSearchEnabled;
+      const deferBestEffortToolPreparation = shouldDeferBestEffortToolPreparation({
+        lazyToolTransport,
+        progressiveDisclosureEnabled,
+        artifactRuntimeAvailable: sandboxArtifactRuntime.available,
+        triggerKind: input.trigger.kind,
+        triggerType,
+      });
       const materializeConnectorAttachments = async (
         request: ConnectorAttachmentMaterializationRequest,
       ) => {
@@ -8081,6 +8146,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             onAuthNeeded: publishToolAuthNeeded,
             materializeConnectorAttachments,
             localMcpServers,
+            ...(deferBestEffortToolPreparation ? { deferBestEffortUntilModelResponse: true } : {}),
             onPreparationPhase: (measurement) => {
               recordTurnStartupPhase(observability, {
                 phase: `tool_${measurement.phase}`,
@@ -8154,11 +8220,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ]);
       }
       const postToolPreparationStartedAt = performance.now();
-      if (turnId && preparedTools.attemptToolEnvironment) {
+      const activatePreparedToolEnvironment = (
+        tools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>>,
+      ): void => {
+        if (
+          toolPreparationClosing ||
+          !turnId ||
+          !tools.attemptToolEnvironment ||
+          codemodeDispatcher
+        ) {
+          return;
+        }
         codemodeDispatcher = new CodemodeAttemptDispatcher(
           db,
           bus,
-          preparedTools.attemptToolEnvironment,
+          tools.attemptToolEnvironment,
           {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -8170,6 +8246,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           cancellationSignal,
         );
         codemodeDispatcher.start();
+      };
+      if (preparedTools.ready) {
+        toolPreparationReady = preparedTools.ready.then((tools) => {
+          activatePreparedToolEnvironment(tools);
+        });
+      } else {
+        activatePreparedToolEnvironment(preparedTools);
       }
       // Genesis turn = the first user turn (no assistant history reconciled
       // yet). Durable Postgres state (countSessionHistoryItems includes
@@ -8649,6 +8732,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...imageGenerationOption,
             ...videoGenerationOption,
             lazyToolTransport,
+            ...(toolPreparationReady ? { toolPreparationReady } : {}),
             supportsImageInput,
             inputFileMediaTypes: modelInputPolicy.inputFileMediaTypes,
             ...(resolvedModel
@@ -8950,6 +9034,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         : {}),
                     },
                   ),
+                (measurement) => {
+                  if (firstModelRequestPreparationRecorded) return;
+                  recordModelPreparationMeasurement({
+                    phase:
+                      measurement.phase === "admission"
+                        ? "sandbox_workspace_mutation_admission"
+                        : "sandbox_workspace_mutation_settlement",
+                    outcome: measurement.outcome,
+                    durationSeconds: measurement.durationSeconds,
+                  });
+                },
               );
               await attachCodemodeTokenRenewal(
                 provisioned.established.session as CodemodeTokenWriterSession,
@@ -9059,6 +9154,40 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               accountId: input.accountId,
               sandboxGroupId: session.sandboxGroupId,
               backend: groupBoxBackend,
+            },
+            onFirstOperation: (measurement) => {
+              if (firstModelRequestPreparationRecorded) return;
+              const outcome = measurement.outcome;
+              recordModelPreparationMeasurement({
+                phase: "sandbox_first_routed_operation",
+                outcome,
+                durationSeconds: measurement.durationMs / 1_000,
+              });
+              recordModelPreparationMeasurement({
+                phase: "sandbox_first_routed_resolution",
+                outcome,
+                durationSeconds: measurement.resolutionMs / 1_000,
+              });
+              recordModelPreparationMeasurement({
+                phase: "sandbox_first_routed_mutation_admission",
+                outcome,
+                durationSeconds: measurement.mutationAdmissionMs / 1_000,
+              });
+              recordModelPreparationMeasurement({
+                phase: "sandbox_first_routed_provider_operation",
+                outcome,
+                durationSeconds: measurement.providerOperationMs / 1_000,
+              });
+              recordModelPreparationMeasurement({
+                phase: "sandbox_first_routed_mutation_settlement",
+                outcome,
+                durationSeconds: measurement.mutationSettlementMs / 1_000,
+              });
+              recordModelPreparationMeasurement({
+                phase: "sandbox_snapshot_wait",
+                outcome,
+                durationSeconds: measurement.snapshotWaitMs / 1_000,
+              });
             },
           },
         );
@@ -12440,6 +12569,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             observability,
             ...(finalizerSignal ? { signal: finalizerSignal } : {}),
           });
+        }
+        toolPreparationClosing = true;
+        if (toolPreparationReady) {
+          await waitForTurnFinalizerStep(
+            toolPreparationReady.catch(() => undefined),
+            finalizerSignal,
+          );
         }
         if (codemodeDispatcher) {
           await waitForTurnFinalizerStep(

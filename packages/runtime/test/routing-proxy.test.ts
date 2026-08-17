@@ -256,6 +256,46 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     });
   });
 
+  test("observes the complete first route once with mutation and snapshot-wait splits", async () => {
+    const backend = new FakeBackend("timed");
+    const observations: Array<{
+      op: string;
+      outcome: string;
+      durationMs: number;
+      resolutionMs: number;
+      mutationAdmissionMs: number;
+      providerOperationMs: number;
+      mutationSettlementMs: number;
+      snapshotWaitMs: number;
+    }> = [];
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async ({ onCaptureWait }) => {
+        onCaptureWait?.(7);
+        return { admission: "exact" };
+      },
+      afterMutation: async () => undefined,
+      onFirstOperation: (observation) => observations.push(observation),
+    });
+
+    await proxy.exec({ cmd: "first" });
+    await proxy.exec({ cmd: "second" });
+
+    expect(observations).toHaveLength(1);
+    expect(observations[0]).toMatchObject({
+      op: "exec",
+      outcome: "completed",
+      snapshotWaitMs: 7,
+      mutationAdmissionMs: 0,
+    });
+    expect(observations[0]!.durationMs).toBeGreaterThanOrEqual(0);
+    expect(observations[0]!.resolutionMs).toBeGreaterThanOrEqual(0);
+    expect(observations[0]!.mutationAdmissionMs).toBeGreaterThanOrEqual(0);
+    expect(observations[0]!.providerOperationMs).toBeGreaterThanOrEqual(0);
+    expect(observations[0]!.mutationSettlementMs).toBeGreaterThanOrEqual(0);
+  });
+
   test("exec preserves structured output and PTY authority on an execCommand-only backend", async () => {
     const promotions: Array<number | null> = [];
     const backend: RoutableBackendSession = {

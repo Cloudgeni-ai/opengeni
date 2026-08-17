@@ -201,11 +201,19 @@ export interface RoutingSandboxSessionDeps {
    * diagnostic only: callback failures are isolated and can never change the
    * provider result or durable mutation-settlement ordering. */
   onOperation?: RoutingSandboxOperationObserver;
+  /** Observe the complete first routed operation, including lazy resolution,
+   * mutation fences, provider capture waits, and provider work. The callback is
+   * diagnostic only and fires at most once per proxy. */
+  onFirstOperation?: RoutingSandboxFirstOperationObserver;
   /** Admit a filesystem-writing operation after resolving its exact route but
    * before invoking the provider. A rejection fails closed and is deliberately
    * outside provider fence-retry/error handling, so it can never replay the op
    * against a rival backend. */
-  beforeMutation?: (input: { op: string; backend: ResolvedActiveBackend }) => Promise<unknown>;
+  beforeMutation?: (input: {
+    op: string;
+    backend: ResolvedActiveBackend;
+    onCaptureWait?: (durationMs: number) => void;
+  }) => Promise<unknown>;
   /** Mark a mutation physically settled after its provider promise resolves OR
    * rejects. A resolved result is also revalidated against the same durable
    * route and attempt fence before its output is accepted. Settlement rejection
@@ -267,6 +275,26 @@ export type RoutingSandboxOperationObservation = {
 export type RoutingSandboxOperationObserver = (
   observation: RoutingSandboxOperationObservation,
 ) => void;
+
+export type RoutingSandboxFirstOperationObservation = {
+  op: string;
+  outcome: "completed" | "failed";
+  durationMs: number;
+  resolutionMs: number;
+  mutationAdmissionMs: number;
+  providerOperationMs: number;
+  mutationSettlementMs: number;
+  snapshotWaitMs: number;
+};
+
+export type RoutingSandboxFirstOperationObserver = (
+  observation: RoutingSandboxFirstOperationObservation,
+) => void;
+
+type RoutingSandboxFirstOperationTiming = Omit<
+  RoutingSandboxFirstOperationObservation,
+  "op" | "outcome" | "durationMs"
+>;
 
 export type DefaultBackendLossResult = {
   leaseEpoch: number;
@@ -525,6 +553,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   // The last-resolved backend, exposed via the `state` getter (a method-free read
   // of the active backend's `state`). Updated on every resolve.
   private lastResolved: ResolvedActiveBackend | undefined;
+  /** Claimed synchronously before the first dispatch awaits, so concurrent
+   * callers cannot produce duplicate first-operation observations. */
+  private firstOperationClaimed = false;
   /** Provider session ids are scoped to one backend instance. Each entry copies
    * that exact resolved route so pointer movement can never redirect stdin,
    * polling, or process-group helpers to another box. */
@@ -994,24 +1025,116 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     mutatesWorkspace: boolean,
     fn: (session: RoutableBackendSession, backend: ResolvedActiveBackend) => Promise<T>,
   ): Promise<T> {
+    if (this.firstOperationClaimed) {
+      return await this.dispatchWithRetries(op, mutatesWorkspace, fn);
+    }
+    this.firstOperationClaimed = true;
+    const startedAt = performance.now();
+    const timing: RoutingSandboxFirstOperationTiming = {
+      resolutionMs: 0,
+      mutationAdmissionMs: 0,
+      providerOperationMs: 0,
+      mutationSettlementMs: 0,
+      snapshotWaitMs: 0,
+    };
+    let outcome: RoutingSandboxFirstOperationObservation["outcome"] = "failed";
+    try {
+      const result = await this.dispatchWithRetries(op, mutatesWorkspace, fn, timing);
+      outcome = "completed";
+      return result;
+    } finally {
+      try {
+        this.deps.onFirstOperation?.({
+          op,
+          outcome,
+          durationMs: Math.max(0, performance.now() - startedAt),
+          ...timing,
+        });
+      } catch {
+        // Telemetry is never part of routing or mutation-settlement authority.
+      }
+    }
+  }
+
+  private async dispatchWithRetries<T>(
+    op: string,
+    mutatesWorkspace: boolean,
+    fn: (session: RoutableBackendSession, backend: ResolvedActiveBackend) => Promise<T>,
+    firstOperationTiming?: RoutingSandboxFirstOperationTiming,
+  ): Promise<T> {
     let attempt = 0;
     let lastError: unknown;
     while (attempt <= this.maxFenceRetries) {
-      const backend = await this.resolve();
+      const resolveStartedAt = performance.now();
+      let backend: ResolvedActiveBackend;
+      try {
+        backend = await this.resolve();
+      } finally {
+        if (firstOperationTiming) {
+          firstOperationTiming.resolutionMs += Math.max(0, performance.now() - resolveStartedAt);
+        }
+      }
       // Admission failures are NOT provider fence errors and must never enter
       // the retry/rebind loop. If this exact route cannot advance its durable
       // mutation generation, fail before the provider sees the operation.
-      const admission = mutatesWorkspace
-        ? await this.deps.beforeMutation?.({ op, backend })
-        : undefined;
+      let admission: unknown;
+      if (mutatesWorkspace) {
+        const admissionStartedAt = performance.now();
+        let admissionCaptureWaitMs = 0;
+        try {
+          admission = await this.deps.beforeMutation?.({
+            op,
+            backend,
+            ...(firstOperationTiming
+              ? {
+                  onCaptureWait: (durationMs: number) => {
+                    const boundedDurationMs = Math.max(0, durationMs);
+                    admissionCaptureWaitMs += boundedDurationMs;
+                    firstOperationTiming.snapshotWaitMs += boundedDurationMs;
+                  },
+                }
+              : {}),
+          });
+        } finally {
+          if (firstOperationTiming) {
+            firstOperationTiming.mutationAdmissionMs += Math.max(
+              0,
+              performance.now() - admissionStartedAt - admissionCaptureWaitMs,
+            );
+          }
+        }
+      }
       let result: T;
-      try {
-        result = await this.invokeProviderOperation(op, backend, () =>
-          fn(backend.session, backend),
+      const providerOperationStartedAt = performance.now();
+      let providerCaptureWaitMs = 0;
+      let providerOperationRecorded = false;
+      const recordProviderOperation = (): void => {
+        if (!firstOperationTiming || providerOperationRecorded) return;
+        providerOperationRecorded = true;
+        firstOperationTiming.providerOperationMs += Math.max(
+          0,
+          performance.now() - providerOperationStartedAt - providerCaptureWaitMs,
         );
+      };
+      try {
+        result = await this.invokeProviderOperation(
+          op,
+          backend,
+          () => fn(backend.session, backend),
+          firstOperationTiming
+            ? (durationMs) => {
+                const boundedDurationMs = Math.max(0, durationMs);
+                providerCaptureWaitMs += boundedDurationMs;
+                firstOperationTiming.snapshotWaitMs += boundedDurationMs;
+              }
+            : undefined,
+        );
+        recordProviderOperation();
       } catch (error) {
+        recordProviderOperation();
         const partialMutation = error instanceof ChannelAPartialMutationError;
         if (mutatesWorkspace && this.deps.afterMutation) {
+          const settlementStartedAt = performance.now();
           try {
             await this.deps.afterMutation({
               op,
@@ -1028,6 +1151,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
                 : `Mutating sandbox operation "${op}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
               { cause: settlementError },
             );
+          } finally {
+            if (firstOperationTiming) {
+              firstOperationTiming.mutationSettlementMs += Math.max(
+                0,
+                performance.now() - settlementStartedAt,
+              );
+            }
           }
         }
         if (partialMutation) {
@@ -1093,6 +1223,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           result,
           ...(retainedProcess ? { retainedProcess } : {}),
         };
+        const settlementStartedAt = performance.now();
         try {
           const settlementResult = await this.deps.afterMutation(settlement);
           if (retainedRecord && settlementResult) {
@@ -1130,6 +1261,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
               ...(retainedRecord ? { retainedProcess: retainedRecord.process } : {}),
             },
           );
+        } finally {
+          if (firstOperationTiming) {
+            firstOperationTiming.mutationSettlementMs += Math.max(
+              0,
+              performance.now() - settlementStartedAt,
+            );
+          }
         }
       }
 
@@ -1182,11 +1320,12 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     op: string,
     backend: ResolvedActiveBackend,
     fn: () => Promise<T>,
+    onCaptureWait?: (durationMs: number) => void,
   ): Promise<T> {
     const startedAt = performance.now();
     let outcome: RoutingSandboxOperationObservation["outcome"] = "failed";
     try {
-      const result = await withSandboxProviderOperation(backend.session, fn);
+      const result = await withSandboxProviderOperation(backend.session, fn, onCaptureWait);
       outcome = "ok";
       return result;
     } catch (error) {
