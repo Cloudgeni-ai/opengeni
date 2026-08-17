@@ -3234,7 +3234,7 @@ function registerMemoryTools(
     {
       description:
         promptMode === "retrieval_only"
-          ? `${MEMORY_SEARCH_TOOL_DESCRIPTION} Legacy preference-kind records are excluded here because structured preferences are the only behavioral authority. To save something the user explicitly asked to keep, use \`remember\`; for your own findings use task notes and their promotion tools.`
+          ? `${MEMORY_SEARCH_TOOL_DESCRIPTION} Legacy preference-kind records are excluded from this tool because structured preferences are the only behavioral authority. To save something the user explicitly asked to keep, use \`remember\`; for your own findings use task notes and their promotion tools.`
           : MEMORY_SEARCH_TOOL_DESCRIPTION,
       inputSchema: {
         query: z4.string().min(1),
