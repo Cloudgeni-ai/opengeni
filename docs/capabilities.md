@@ -490,12 +490,20 @@ The row and the sheet contain no provider-specific branch.
   and spaces) with exactly one edit affordance; **Options** are switches (and,
   where a setting is a choice, a compact select); **Action** is a footer from a
   closed set: `Reconnect` + `Disconnect` when connected, the same pair with
-  `Reconnect` primary when broken, `Set up` when not connected, or the sentence
-  "A workspace admin looks after this integration. You do not need to connect
-  anything." when the integration is admin-managed and the viewer is a member.
-- Role changes content, never layout. A workspace admin sees the Slack bot
-  (installation facts, what OpenGeni can see, reaction shortcut, knowledge
-  destination, decision publication); everyone else sees their own personal
+  `Reconnect` primary when broken, `Set up` when not connected, or a locked
+  sentence when the viewer cannot change anything. The locked sentence defaults
+  to "A workspace admin looks after this integration. You do not need to
+  connect anything."; an adapter may supply a truthful variant instead (e.g.
+  personal-only Slack tells a member that connection management permission is
+  required, because no admin can connect it for them). Provider limited-use
+  disclosures (Google's OAuth disclosures) render in a fixed place above the
+  footer, and the connect/publish affordances reference them via
+  `aria-describedby`.
+- Role changes content, never layout. Anyone with connection management
+  permission (`connections:write` or workspace admin) sees the Slack bot
+  (installation facts, what OpenGeni can see, and install/reconnect/disconnect);
+  the reaction shortcut, knowledge destination, and decision publication options
+  stay admin-gated inside that sheet. Everyone else sees their own personal
   Slack account. Nobody is offered both. Deep provider dialogs (the Drive
   folder picker, the Jira/Confluence source picker, the reaction conversation
   picker, the Slack decision-publication settings) open from the Access block's
@@ -504,7 +512,7 @@ The row and the sheet contain no provider-specific branch.
   additional Google Drive accounts) and custom OpenAPI/GraphQL APIs remain in
   the separate **Connected services** control center below the integrations.
 
-**Connectors** are MCP servers from the catalog, personal ownership by default.
+**Connectors** are MCP servers from the catalog. Connection setup defaults to workspace-owned; a personal connection requires the explicit **Connect only for me** choice (official Gmail and Slack's hosted MCP are the personal-only exceptions).
 A **Featured** strip of tiles driven by curated `metadata.curation.featured`
 leads, followed by the searchable long tail. Tile badges are only `Official`
 (curated `metadata.curation.official`) and `Built by OpenGeni` (first-party
