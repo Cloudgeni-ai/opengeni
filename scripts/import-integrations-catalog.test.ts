@@ -1045,15 +1045,24 @@ describe("integrations.sh MCP endpoint probe", () => {
             mcpUrl: "https://gmail.googleapis.com/mcp",
           }),
           row({ domain: "maybe.example", mcpUrl: "https://maybe.example/mcp" }),
+          row({ domain: "method.example", mcpUrl: "https://method.example/mcp" }),
+          row({ domain: "limited.example", mcpUrl: "https://limited.example/mcp" }),
         ],
       },
       { allowUnprobedCandidates: true },
     );
+    const attempts = new Map<string, number>();
+    const sleeps: number[] = [];
     const probed = await probeCatalogSnapshot(normalized, {
       concurrency: 2,
-      transientRetries: 0,
+      transientRetries: 2,
+      transientRetryDelayMs: 10,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
       fetchImpl: async (input) => {
         const url = String(input);
+        attempts.set(url, (attempts.get(url) ?? 0) + 1);
         if (url.includes("real.example")) {
           return new Response(
             JSON.stringify({
@@ -1070,6 +1079,12 @@ describe("integrations.sh MCP endpoint probe", () => {
         if (url.includes("googleapis.com")) {
           return new Response("not found", { status: 404 });
         }
+        if (url.includes("method.example")) {
+          return new Response("nope", { status: 405 });
+        }
+        if (url.includes("limited.example")) {
+          return new Response("slow down", { status: 429 });
+        }
         return new Response("busy", { status: 503 });
       },
     });
@@ -1077,11 +1092,21 @@ describe("integrations.sh MCP endpoint probe", () => {
     expect(probed.rows.map((candidate) => candidate.domain)).toEqual(["real.example"]);
     expect(probed.probe).toMatchObject({
       kept: 1,
-      dropped: 2,
+      dropped: 4,
       real: 1,
-      unverified: 1,
+      unverified: 3,
       googleapisDropped: 1,
     });
+    // A 5xx is transient: it is retried through every bounded attempt before
+    // the row is evicted, and every retry sleeps through the injected clock.
+    expect(attempts.get("https://maybe.example/mcp")).toBe(3);
+    expect(sleeps).toEqual([10, 20]);
+    // Non-5xx failures are definitive and never retried: 404, 405, and 429
+    // each get exactly one attempt.
+    expect(attempts.get("https://real.example/mcp")).toBe(1);
+    expect(attempts.get("https://gmail.googleapis.com/mcp")).toBe(1);
+    expect(attempts.get("https://method.example/mcp")).toBe(1);
+    expect(attempts.get("https://limited.example/mcp")).toBe(1);
     expect(probed.skipped.find((skip) => skip.domain === "gmail.googleapis.com")).toMatchObject({
       mcpUrl: null,
       reason: "probe_http_not_found",
@@ -1144,6 +1169,44 @@ describe("integrations.sh MCP endpoint probe", () => {
     expect(probed.skipped).toEqual([
       { domain: "dead.example", mcpUrl: null, reason: "probe_connection_error" },
       { domain: "gone.example", mcpUrl: null, reason: "probe_http_not_found" },
+    ]);
+  });
+
+  test("reports budget exhaustion when the retry sleep consumes the remaining budget", async () => {
+    // Without the post-sleep deadline check the second attempt would start
+    // with a 1 ms timeout and misreport a slow endpoint as `timeout`.
+    const normalized = normalizeCatalogSnapshot(
+      {
+        generatedAt: "2026-07-03T00:00:00.000Z",
+        importRows: [row({ domain: "flaky.example", mcpUrl: "https://flaky.example/mcp" })],
+      },
+      { allowUnprobedCandidates: true },
+    );
+    let clock = 0;
+    let fetches = 0;
+    const probed = await probeCatalogSnapshot(normalized, {
+      concurrency: 1,
+      timeoutMs: 100,
+      overallBudgetMs: 1_000,
+      transientRetries: 2,
+      transientRetryDelayMs: 10,
+      now: () => clock,
+      sleep: async () => {
+        clock += 5_000;
+      },
+      fetchImpl: async () => {
+        fetches += 1;
+        return new Response("busy", { status: 503 });
+      },
+    });
+
+    expect(fetches).toBe(1);
+    expect(probed.probe.outcomes).toEqual([
+      {
+        domain: "flaky.example",
+        mcpUrl: "https://flaky.example/mcp",
+        outcome: { status: "unverified", reason: "timeout", detail: "overall_budget_exhausted" },
+      },
     ]);
   });
 });

@@ -19,6 +19,42 @@
     "unverified": 111,
     "googleapisDropped": 2
   },
+  "retention": {
+    "candidateRows": 7,
+    "retainedRows": [
+      {
+        "domain": "autovit.ro",
+        "mcpUrl": "https://www.autovit.ro/mcp"
+      },
+      {
+        "domain": "excalidraw.com",
+        "mcpUrl": "https://mcp.excalidraw.com/mcp"
+      },
+      {
+        "domain": "figma.com",
+        "mcpUrl": "https://mcp.figma.com/mcp"
+      },
+      {
+        "domain": "gmailmcp.googleapis.com",
+        "mcpUrl": "https://gmailmcp.googleapis.com/mcp/v1"
+      },
+      {
+        "domain": "mobbin.com",
+        "mcpUrl": "https://api.mobbin.com/mcp"
+      },
+      {
+        "domain": "resend.com",
+        "mcpUrl": "https://mcp.resend.com/"
+      }
+    ],
+    "droppedRows": [
+      {
+        "domain": "betterstack.com",
+        "mcpUrl": "https://betterstack.com/mcp",
+        "reason": "duplicate_domain_name"
+      }
+    ]
+  },
   "importRows": [
     {
       "domain": "2u.com",

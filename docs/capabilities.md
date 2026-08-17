@@ -624,10 +624,21 @@ bounded number of times before it evicts a row, while a definitive 404 or
 non-MCP body is never retried. Committed rows whose endpoint upstream no longer
 lists stay candidates and are re-probed like every other row (`--no-retain`
 disables this), so a reviewed first-party endpoint that integrations.sh never
-indexed survives exactly as long as it still answers. A refresh that yields
-zero upstream candidates fails instead of rewriting the committed file, and
-`--input <raw.json>` accepts either an already-hydrated upstream document or a
-precomputed `importRows` snapshot for offline reruns.
+indexed survives exactly as long as it still answers. Because a retained row is
+re-emitted byte-identical, the snapshot header records every retention decision
+under `retention` (`candidateRows`, the kept `retainedRows` keyed by domain plus
+canonical `mcpUrl`, and `droppedRows` with the evicting reason) so an upstream
+delisting is visible in the PR diff rather than a zero-diff no-op. A refresh
+that yields zero upstream candidates fails instead of rewriting the committed
+file, and one that would keep fewer than half of the committed rows also fails
+because that is a probe outage (DNS, proxy, rate limiting, budget exhaustion)
+rather than upstream evidence; importing such a file would mark every missing
+registry row stale. `--allow-shrink` overrides that floor for a genuine mass
+delisting. Upstream fetches never follow redirects and are byte-bounded, and a
+malformed committed snapshot or committed row fails the refresh loudly instead
+of silently disabling retention. `--input <raw.json>` accepts either an
+already-hydrated upstream document or a precomputed `importRows` snapshot for
+offline reruns.
 Standard Helm installs and upgrades import that committed snapshot by
 default through the `catalogImport` hook Job; set `catalogImport.enabled=false`
 to opt out. The default `catalogImport.skipLogos=true` keeps deployment success
@@ -643,7 +654,10 @@ writes when that exact snapshot already completed successfully. The importer
 writes global capability rows, records an `import_batches` provenance row with
 MIT attribution, and upserts registry entries by `(provider_domain, mcp_url)`.
 Rows removed from a later snapshot are marked `stale`, not deleted, and are
-excluded from default workspace catalog listings.
+excluded from default workspace catalog listings. An upstream domain rekey
+(for example the Atlassian row moving from `atlassian.net` to `jira.com`)
+produces a new capability id and marks the old row stale, so a workspace that
+enabled the old row must re-enable the rekeyed one.
 
 ### Curated overlay
 

@@ -98,14 +98,22 @@ export async function probeCatalogSnapshot(
       if (!row) {
         return;
       }
-      let outcome: CatalogProbeOutcome = {
+      const budgetExhausted: CatalogProbeOutcome = {
         status: "unverified",
         reason: "timeout",
         detail: "overall_budget_exhausted",
       };
+      let outcome: CatalogProbeOutcome = budgetExhausted;
       for (let attempt = 0; attempt <= transientRetries && now() < deadline; attempt += 1) {
         if (attempt > 0 && transientRetryDelayMs > 0) {
           await sleep(transientRetryDelayMs * attempt);
+          // The retry sleep may have consumed the remaining budget. A probe
+          // started now would run with a 1 ms timeout and report `timeout`
+          // as if the endpoint were slow; report the exhausted budget instead.
+          if (now() >= deadline) {
+            outcome = budgetExhausted;
+            break;
+          }
         }
         outcome = await probeMcpEndpoint(row.mcpUrl, {
           fetchImpl,
