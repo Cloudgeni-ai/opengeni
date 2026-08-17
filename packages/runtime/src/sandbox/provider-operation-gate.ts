@@ -82,14 +82,17 @@ function leaveCapture(gate: ProviderOperationGate): void {
 export async function withSandboxProviderOperation<T>(
   session: unknown,
   operation: () => Promise<T>,
-  onCaptureWait?: (durationMs: number) => void,
+  onCaptureWait?: (observation: { durationMs: number; outcome: "completed" }) => void,
 ): Promise<T> {
   const gate = gateFor(sessionIdentity(session));
   const waitStartedAt = performance.now();
   const waitedForCapture = await enterOperation(gate);
   if (waitedForCapture && onCaptureWait) {
     try {
-      onCaptureWait(Math.max(0, performance.now() - waitStartedAt));
+      onCaptureWait({
+        durationMs: Math.max(0, performance.now() - waitStartedAt),
+        outcome: "completed",
+      });
     } catch {
       // Diagnostics must never alter provider-operation ordering.
     }
