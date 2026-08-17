@@ -18,6 +18,8 @@ import { sanitizeFilename } from "./routes/files";
 
 const FILE_READ_SENTINEL_BYTES = 1;
 const UPLOAD_INTENT_TTL_MS = 60 * 60_000;
+const SANDBOX_ARTIFACT_ABSOLUTE_PATH_MAX_CHARS = 4_096;
+const SANDBOX_ARTIFACT_SAFE_FILENAME_MAX_CHARS = 200;
 
 export async function publishSandboxFileArtifact(
   deps: ApiRouteDeps,
@@ -36,6 +38,11 @@ export async function publishSandboxFileArtifact(
   const storage = deps.objectStorage;
   if (!storage) {
     throw new HTTPException(503, { message: "object storage is not configured" });
+  }
+  if (!storage.headObject) {
+    throw new HTTPException(503, {
+      message: "object storage cannot verify immutable artifact files",
+    });
   }
 
   const path = sandboxArtifactRelativePath(input.path);
@@ -81,7 +88,7 @@ export async function publishSandboxFileArtifact(
   if (filename.length > 1_024) {
     throw new HTTPException(422, { message: "sandbox artifact filename is too long" });
   }
-  const safeFilename = sanitizeFilename(filename);
+  const safeFilename = sandboxArtifactSafeFilename(filename);
   const contentType = sandboxFileContentType(filename);
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   const identity = sandboxArtifactIdentity({
@@ -124,24 +131,30 @@ export async function publishSandboxFileArtifact(
     contentType,
     sizeBytes: bytes.byteLength,
     sha256,
+    bucket: storage.bucket,
     objectKey,
   });
   if (file.status !== "ready") {
-    const exists = await storage.fileExists(file);
-    if (exists) {
-      assertStoredSandboxArtifact(await storage.headFile(file), file);
+    const existingObject = await storage.headObject(file.objectKey);
+    if (existingObject) {
+      assertStoredSandboxArtifact(existingObject, file);
     } else {
-      await storage.putObject({
+      const put = {
         key: file.objectKey,
         contentType: file.contentType,
         body: bytes,
         sha256,
-      });
-      assertStoredSandboxArtifact(await storage.headFile(file), file);
+      };
+      if (storage.putObjectIfAbsent) {
+        await storage.putObjectIfAbsent(put);
+      } else {
+        await storage.putObject(put);
+      }
+      assertStoredSandboxArtifact(await storage.headObject(file.objectKey), file);
     }
     file = await completeFileUpload(deps.db, input.grant.workspaceId, identity.uploadId);
   } else {
-    assertStoredSandboxArtifact(await storage.headFile(file), file);
+    assertStoredSandboxArtifact(await storage.headObject(file.objectKey), file);
   }
 
   await recordWorkspaceUsage(deps, {
@@ -190,12 +203,24 @@ export function sandboxArtifactRelativePath(value: string): string {
     throw new HTTPException(400, { message: "sandbox artifact path is invalid" });
   }
   const normalized = posix.normalize(path);
-  if (normalized === "." || normalized === ".." || normalized.startsWith("../")) {
+  if (
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith("../") ||
+    normalized.endsWith("/")
+  ) {
     throw new HTTPException(400, {
-      message: "sandbox artifact path must be inside /workspace",
+      message: "sandbox artifact path must canonically name a file inside /workspace",
     });
   }
+  if (`/workspace/${normalized}`.length > SANDBOX_ARTIFACT_ABSOLUTE_PATH_MAX_CHARS) {
+    throw new HTTPException(400, { message: "sandbox artifact path is too long" });
+  }
   return normalized;
+}
+
+export function sandboxArtifactSafeFilename(filename: string): string {
+  return sanitizeFilename(filename).slice(0, SANDBOX_ARTIFACT_SAFE_FILENAME_MAX_CHARS);
 }
 
 export function sandboxFileContentType(filename: string): string {
@@ -261,6 +286,7 @@ function assertSandboxArtifactFile(
     contentType: string;
     sizeBytes: number;
     sha256: string;
+    bucket: string;
     objectKey: string;
   },
 ): void {
@@ -271,6 +297,7 @@ function assertSandboxArtifactFile(
     file.contentType !== expected.contentType ||
     file.sizeBytes !== expected.sizeBytes ||
     file.sha256 !== expected.sha256 ||
+    file.bucket !== expected.bucket ||
     file.objectKey !== expected.objectKey
   ) {
     throw new HTTPException(409, { message: "sandbox artifact identity is unavailable" });
@@ -278,13 +305,16 @@ function assertSandboxArtifactFile(
 }
 
 function assertStoredSandboxArtifact(
-  head: ObjectHead,
+  head: ObjectHead | null,
   file: NonNullable<Awaited<ReturnType<typeof getFile>>>,
 ): void {
   if (
-    Number(head.ContentLength ?? -1) !== file.sizeBytes ||
-    (head.ContentType !== undefined && head.ContentType !== file.contentType) ||
-    (file.sha256 !== null && head.Metadata?.sha256 !== file.sha256)
+    !head ||
+    head.ContentLength !== file.sizeBytes ||
+    head.ContentType !== file.contentType ||
+    (file.sha256 !== null && head.Metadata?.sha256 !== file.sha256) ||
+    typeof head.VersionToken !== "string" ||
+    head.VersionToken.length < 1
   ) {
     throw new HTTPException(502, { message: "sandbox artifact failed storage verification" });
   }
