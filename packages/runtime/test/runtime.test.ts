@@ -96,6 +96,7 @@ import {
   prepareAgentTools,
   runAzureCliLoginHook,
   runBeforeAgentStartHooks,
+  sandboxLifecycleHooksForIds,
   runRepositoryCloneHook,
   runCodemodeTokenSeedHook,
   mcpTransportErrorWithRetryMetadata,
@@ -3670,6 +3671,248 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("materializes a bounded connected-machine batch with exact files and batched events", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-attachment-batch-"));
+    const workspace = join(root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const downloads = Array.from({ length: 6 }, (_, index) => {
+      const content = `payload-${index}`;
+      const source = join(root, `source-${index}.txt`);
+      writeFileSync(source, content);
+      return {
+        // Deliberately repeat an id: the terminal result must bind to the unique
+        // target path, not accidentally mark both rows with one file-id result.
+        fileId: index === 4 ? "file-1" : `file-${index}`,
+        mountPath: `.opengeni/files/target-${index}`,
+        filename: `input-${index}.txt`,
+        url: pathToFileURL(source).href,
+        sizeBytes: Buffer.byteLength(content),
+        sha256: index === 4 ? "0".repeat(64) : createHash("sha256").update(content).digest("hex"),
+      };
+    });
+    const commands: string[] = [];
+    const eventBatches: Array<Array<{ type: string; payload: any }>> = [];
+    let individualEvents = 0;
+    const session = {
+      state: { manifest: new Manifest({ root: "/workspace" }) },
+      exec: async ({ cmd }: { cmd: string }) => {
+        commands.push(cmd);
+        const process = Bun.spawn(["/bin/sh", "-c", cmd], {
+          cwd: workspace,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(process.stdout).text(),
+          new Response(process.stderr).text(),
+          process.exited,
+        ]);
+        return { stdout, stderr, output: `${stdout}${stderr}`, exitCode };
+      },
+    };
+
+    try {
+      const result = await materializeSandboxFileDownloads(session as any, downloads, {
+        batchCommands: true,
+        maxConcurrency: 4,
+        onRuntimeEvent: () => {
+          individualEvents += 1;
+        },
+        onRuntimeEvents: (events) => {
+          eventBatches.push(events as Array<{ type: string; payload: any }>);
+        },
+      });
+
+      expect(commands).toHaveLength(1);
+      expect(Buffer.byteLength(commands[0]!, "utf8")).toBeLessThanOrEqual(48 * 1024);
+      expect(commands[0]).toContain("tail -c 2048");
+      expect(commands[0]).toContain("tr '\\r\\n' '  '");
+      expect(commands[0]).not.toContain("sed 's/^/__OG_FILE_LOG__");
+      expect(result.failures.map((failure) => failure.path)).toEqual([
+        "/workspace/.opengeni/files/target-4/input-4.txt",
+      ]);
+      expect(result.failures[0]?.exitCode).toBe(74);
+      expect(result.failures[0]?.reason).toContain("failed size or SHA-256 verification");
+      for (const [index, download] of downloads.entries()) {
+        const target = join(workspace, download.mountPath, download.filename);
+        if (index === 4) {
+          expect(() => statSync(target)).toThrow();
+        } else {
+          expect(readFileSync(target, "utf8")).toBe(`payload-${index}`);
+          expect(statSync(target).mode & 0o222).toBe(0);
+        }
+      }
+      expect(individualEvents).toBe(0);
+      expect(eventBatches.map((events) => events.length)).toEqual([6, 6]);
+      expect(eventBatches[0]?.every((event) => event.type === "sandbox.operation.started")).toBe(
+        true,
+      );
+      expect(
+        eventBatches[1]?.filter((event) => event.type === "sandbox.operation.completed"),
+      ).toHaveLength(5);
+      expect(
+        eventBatches[1]
+          ?.filter((event) => event.type === "sandbox.operation.failed")
+          .map((event) => event.payload.path),
+      ).toEqual(["/workspace/.opengeni/files/target-4/input-4.txt"]);
+      expect(JSON.stringify(eventBatches)).not.toContain("source-4.txt");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("chunks large connected-machine file sets without omitting any terminal events", async () => {
+    const commands: string[] = [];
+    const eventBatchSizes: number[] = [];
+    const downloads = Array.from({ length: 45 }, (_, index) => ({
+      fileId: `file-${index}`,
+      mountPath: `.opengeni/files/file-${index}`,
+      filename: `input-${index}.txt`,
+      url: `https://storage.example/input-${index}.txt?sig=secret-${index}`,
+    }));
+    const result = await materializeSandboxFileDownloads(
+      {
+        state: { manifest: new Manifest({ root: "/workspace" }) },
+        exec: async ({ cmd }: { cmd: string }) => {
+          commands.push(cmd);
+          const indexes = [...cmd.matchAll(/^og_log_(\d+)=/gmu)].map((match) =>
+            Number.parseInt(match[1]!, 10),
+          );
+          return {
+            output: indexes.map((index) => `__OG_FILE_OK__:${index}`).join("\n"),
+            exitCode: 0,
+          };
+        },
+      } as any,
+      downloads,
+      {
+        batchCommands: true,
+        maxConcurrency: 4,
+        onRuntimeEvents: (events) => eventBatchSizes.push(events.length),
+      },
+    );
+
+    expect(result.failures).toEqual([]);
+    expect(commands).toHaveLength(3);
+    expect(commands.every((command) => Buffer.byteLength(command, "utf8") <= 48 * 1024)).toBe(true);
+    expect(eventBatchSizes).toEqual([20, 20, 20, 20, 5, 5]);
+  });
+
+  test("keeps a symlinked batch target isolated while materializing safe siblings", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-attachment-batch-symlink-"));
+    const workspace = join(root, "workspace");
+    const outside = join(root, "outside");
+    mkdirSync(join(workspace, ".opengeni", "files"), { recursive: true });
+    mkdirSync(outside);
+    symlinkSync(outside, join(workspace, ".opengeni", "files", "hostile"), "dir");
+    const downloads = ["hostile", "safe"].map((target, index) => {
+      const content = `payload-${index}`;
+      const source = join(root, `source-${index}.txt`);
+      writeFileSync(source, content);
+      return {
+        fileId: `file-${index}`,
+        mountPath: `.opengeni/files/${target}`,
+        filename: `input-${index}.txt`,
+        url: pathToFileURL(source).href,
+        sizeBytes: Buffer.byteLength(content),
+        sha256: createHash("sha256").update(content).digest("hex"),
+      };
+    });
+    const eventBatches: Array<Array<{ type: string; payload: any }>> = [];
+    const session = {
+      state: { manifest: new Manifest({ root: "/workspace" }) },
+      exec: async ({ cmd }: { cmd: string }) => {
+        const process = Bun.spawn(["/bin/sh", "-c", cmd], {
+          cwd: workspace,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(process.stdout).text(),
+          new Response(process.stderr).text(),
+          process.exited,
+        ]);
+        return { stdout, stderr, output: `${stdout}${stderr}`, exitCode };
+      },
+    };
+
+    try {
+      const result = await materializeSandboxFileDownloads(session as any, downloads, {
+        batchCommands: true,
+        maxConcurrency: 2,
+        onRuntimeEvents: (events) =>
+          eventBatches.push(events as Array<{ type: string; payload: any }>),
+      });
+
+      expect(result.failures.map((failure) => failure.path)).toEqual([
+        "/workspace/.opengeni/files/hostile/input-0.txt",
+      ]);
+      expect(result.failures[0]?.reason).toContain("Refusing symlinked attachment directory");
+      expect(() => statSync(join(outside, "input-0.txt"))).toThrow();
+      expect(
+        readFileSync(join(workspace, ".opengeni", "files", "safe", "input-1.txt"), "utf8"),
+      ).toBe("payload-1");
+      expect(
+        eventBatches[1]
+          ?.filter((event) => event.type === "sandbox.operation.failed")
+          .map((event) => event.payload.path),
+      ).toEqual(["/workspace/.opengeni/files/hostile/input-0.txt"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps batch cancellation terminal-free and redacts command failures", async () => {
+    const downloads = Array.from({ length: 4 }, (_, index) => ({
+      fileId: `file-${index}`,
+      mountPath: `.opengeni/files/file-${index}`,
+      filename: `input-${index}.txt`,
+      url: `https://storage.example/input-${index}.txt?sig=secret-${index}`,
+    }));
+    const cancellationEventBatches: string[][] = [];
+    await expect(
+      materializeSandboxFileDownloads(
+        {
+          state: { manifest: new Manifest({ root: "/workspace" }) },
+          exec: async () => ({ output: "", exitCode: 0 }),
+        } as any,
+        downloads,
+        {
+          batchCommands: true,
+          maxConcurrency: 4,
+          commandRunner: async () => {
+            throw new TurnSandboxCommandCancelledError(new Error("steered during batch"));
+          },
+          onRuntimeEvents: (events) =>
+            cancellationEventBatches.push(events.map((event) => event.type)),
+        },
+      ),
+    ).rejects.toThrow("steered during batch");
+    expect(cancellationEventBatches).toEqual([
+      Array.from({ length: 4 }, () => "sandbox.operation.started"),
+    ]);
+
+    const failureEventBatches: string[] = [];
+    const failed = await materializeSandboxFileDownloads(
+      {
+        state: { manifest: new Manifest({ root: "/workspace" }) },
+        exec: async () => ({ output: "", exitCode: 0 }),
+      } as any,
+      downloads,
+      {
+        batchCommands: true,
+        maxConcurrency: 4,
+        commandRunner: async () => {
+          throw new Error(`provider failed ${downloads[2]!.url}`);
+        },
+        onRuntimeEvents: (events) => failureEventBatches.push(JSON.stringify(events)),
+      },
+    );
+    expect(failed.failures).toHaveLength(4);
+    expect(JSON.stringify(failed)).not.toContain("sig=secret");
+    expect(failureEventBatches.join("\n")).not.toContain("sig=secret");
+  });
+
   test("reports signed file download failures without throwing", async () => {
     const events: Array<{ type: string; payload: any }> = [];
     const result = await materializeSandboxFileDownloads(
@@ -3712,6 +3955,127 @@ describe("runtime event normalization", () => {
     expect(events[1]?.payload.exitCode).toBe(2);
     expect(events[1]?.payload.error).toContain("Illegal option");
     expect(JSON.stringify(events)).not.toContain("sig=secret");
+  });
+
+  test("materializes distinct connected-machine files with bounded concurrency and stable failures", async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const started: number[] = [];
+    const downloads = Array.from({ length: 6 }, (_, index) => ({
+      fileId: `file-${index}`,
+      mountPath: `.opengeni/files/file-${index}`,
+      filename: `input-${index}.txt`,
+      url: `https://storage.example/input-${index}.txt?sig=secret`,
+    }));
+    const events: string[] = [];
+    const result = await materializeSandboxFileDownloads(
+      {
+        state: { manifest: new Manifest({ root: "/workspace" }) },
+        exec: async ({ cmd }: { cmd: string }) => {
+          const index = Number(cmd.match(/input-(\d+)\.txt/u)?.[1]);
+          started.push(index);
+          active += 1;
+          maximumActive = Math.max(maximumActive, active);
+          try {
+            await Bun.sleep(index % 2 === 0 ? 20 : 5);
+            const exitCode = index === 1 || index === 4 ? 2 : 0;
+            return { output: exitCode ? `failed-${index}` : "", exitCode };
+          } finally {
+            active -= 1;
+          }
+        },
+      } as any,
+      downloads,
+      {
+        maxConcurrency: 3,
+        onRuntimeEvent: (event) => events.push(JSON.stringify(event)),
+      },
+    );
+
+    expect(maximumActive).toBe(3);
+    expect(started.toSorted((left, right) => left - right)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(result.failures.map((failure) => failure.fileId)).toEqual(["file-1", "file-4"]);
+    expect(events.filter((event) => event.includes("sandbox.operation.started"))).toHaveLength(6);
+    expect(events.filter((event) => event.includes("sandbox.operation.completed"))).toHaveLength(4);
+    expect(events.filter((event) => event.includes("sandbox.operation.failed"))).toHaveLength(2);
+    expect(events.join("\n")).not.toContain("sig=secret");
+  });
+
+  test("falls back to serial materialization when normalized targets collide", async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const result = await materializeSandboxFileDownloads(
+      {
+        state: { manifest: new Manifest({ root: "/workspace" }) },
+        exec: async () => {
+          active += 1;
+          maximumActive = Math.max(maximumActive, active);
+          await Bun.sleep(10);
+          active -= 1;
+          return { output: "", exitCode: 0 };
+        },
+      } as any,
+      [
+        {
+          fileId: "file-a",
+          mountPath: ".opengeni/files/shared",
+          filename: "input.txt",
+          url: "https://storage.example/a?sig=secret",
+        },
+        {
+          fileId: "file-b",
+          mountPath: ".opengeni/files/shared",
+          filename: "input.txt",
+          url: "https://storage.example/b?sig=secret",
+        },
+      ],
+      { batchCommands: true, maxConcurrency: 4 },
+    );
+
+    expect(result.failures).toEqual([]);
+    expect(maximumActive).toBe(1);
+  });
+
+  test("stops scheduling and drains in-flight materialization before propagating cancellation", async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const started: number[] = [];
+    const downloads = Array.from({ length: 8 }, (_, index) => ({
+      fileId: `file-${index}`,
+      mountPath: `.opengeni/files/file-${index}`,
+      filename: `input-${index}.txt`,
+      url: `https://storage.example/input-${index}.txt`,
+    }));
+    const promise = materializeSandboxFileDownloads(
+      {
+        state: { manifest: new Manifest({ root: "/workspace" }) },
+        exec: async () => ({ output: "", exitCode: 0 }),
+      } as any,
+      downloads,
+      {
+        maxConcurrency: 4,
+        commandRunner: async (_session, args) => {
+          const index = Number(args.cmd.match(/input-(\d+)\.txt/u)?.[1]);
+          started.push(index);
+          active += 1;
+          maximumActive = Math.max(maximumActive, active);
+          try {
+            await Bun.sleep(index === 0 ? 5 : 25);
+            if (index === 0) {
+              throw new TurnSandboxCommandCancelledError(new Error("steered during files"));
+            }
+            return { output: "", exitCode: 0 };
+          } finally {
+            active -= 1;
+          }
+        },
+      },
+    );
+
+    await expect(promise).rejects.toThrow("steered during files");
+    expect(maximumActive).toBe(4);
+    expect(started).toHaveLength(4);
+    expect(active).toBe(0);
   });
 
   test("propagates turn cancellation instead of downgrading it to a file-download failure", async () => {
@@ -8470,6 +8834,75 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("does not reuse an SDK-global tools-list across attempt-scoped allowedTools", async () => {
+    const registryId = `scoped_${crypto.randomUUID().replaceAll("-", "_")}`;
+    const localServer = (): MCPServer => ({
+      name: `inner-${crypto.randomUUID()}`,
+      cacheToolsList: true,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "read_records",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+          {
+            name: "delete_records",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+      async invalidateToolsCache() {},
+    });
+    const toolNamesFor = async (allowedTools: string[]): Promise<string[]> => {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: registryId,
+              name: "Attempt-scoped server",
+              url: "https://attempt-scoped.example.test/mcp",
+              cacheToolsList: true,
+              allowedTools,
+            },
+          ],
+        }),
+        [{ kind: "mcp", id: registryId }],
+        {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: crypto.randomUUID(),
+          executionGeneration: 1,
+          localMcpServers: [{ id: registryId, server: localServer() }],
+        },
+      );
+      try {
+        expect(
+          prepared.attemptToolCatalog?.entries.map((entry) => entry.identity.toolName),
+        ).toEqual(allowedTools);
+        return (await getAllMcpTools({ mcpServers: prepared.mcpServers }))
+          .map((tool) => tool.name)
+          .sort();
+      } finally {
+        await prepared.close();
+      }
+    };
+
+    expect(await toolNamesFor(["read_records", "delete_records"])).toEqual([
+      prefixedMcpToolName(registryId, "delete_records"),
+      prefixedMcpToolName(registryId, "read_records"),
+    ]);
+    expect(await toolNamesFor(["read_records"])).toEqual([
+      prefixedMcpToolName(registryId, "read_records"),
+    ]);
+  });
+
   test("routes selected local MCP adapters through prefixing, bounds, connection identity, and cancellation", async () => {
     const connectionId = "11111111-2222-4333-8444-555555555555";
     let connected = 0;
@@ -8771,6 +9204,30 @@ describe("runtime Skill activation", () => {
         { environment: {} },
       ),
     ).rejects.toThrow("Artifact runtime doctor failed");
+  });
+
+  test("credential hook resolution preserves first-seen order and removes duplicate runs", async () => {
+    const hooks = sandboxLifecycleHooksForIds([
+      "azure-cli-login",
+      "azure-cli-login",
+      "azure-cli-login",
+    ]);
+    const commands: string[] = [];
+    await runBeforeAgentStartHooks({} as any, hooks, {
+      environment: {
+        AZURE_CLIENT_ID: "client",
+        AZURE_CLIENT_SECRET: "secret",
+        AZURE_TENANT_ID: "tenant",
+      },
+      commandRunner: async (_session, { cmd }) => {
+        commands.push(cmd);
+        return { exitCode: 0, output: "" };
+      },
+    });
+    expect(commands).toEqual([azureCliLoginCommand()]);
+    expect(() =>
+      sandboxLifecycleHooksForIds(["azure-cli-login", "unknown", "azure-cli-login"]),
+    ).toThrow("Unknown sandbox lifecycle hook unknown");
   });
 
   test("an explicit curated library selection is materialized and indexed", () => {

@@ -14,7 +14,9 @@ import { createContext, useContext, useRef } from "react";
    is ever toggled on existing DOM, so nothing can replay.
    -------------------------------------------------------------------------- */
 
-const EntranceAnimationContext = createContext(true);
+type EntranceAnimationValue = boolean | { current: boolean };
+
+const EntranceAnimationContext = createContext<EntranceAnimationValue>(true);
 
 export const EntranceAnimationProvider = EntranceAnimationContext.Provider;
 
@@ -25,7 +27,8 @@ export const EntranceAnimationProvider = EntranceAnimationContext.Provider;
  * later appends after a bulk window clears.
  */
 export function useEntranceAnimationLive(): boolean {
-  return useContext(EntranceAnimationContext);
+  const value = useContext(EntranceAnimationContext);
+  return typeof value === "boolean" ? value : value.current;
 }
 
 /**
@@ -34,7 +37,8 @@ export function useEntranceAnimationLive(): boolean {
  * element's lifetime — see the module doctrine above.
  */
 export function useEntranceAnimation(): boolean {
-  const enabled = useContext(EntranceAnimationContext);
+  const value = useContext(EntranceAnimationContext);
+  const enabled = typeof value === "boolean" ? value : value.current;
   const captured = useRef(enabled);
   return captured.current;
 }

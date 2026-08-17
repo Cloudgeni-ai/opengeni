@@ -11,6 +11,7 @@ describe("useComposer embedding policy", () => {
   test("ordinary Send clears immediately and preserves rapid distinct messages in order", async () => {
     const sessionId = crypto.randomUUID();
     const attempts: SendMessageInput[] = [];
+    const acceptedByServer: SessionEvent[] = [];
     let releaseFirst!: () => void;
     const firstPending = new Promise<void>((resolve) => {
       releaseFirst = resolve;
@@ -20,7 +21,7 @@ describe("useComposer embedding policy", () => {
         const submitted = typeof input === "string" ? { text: input } : input;
         attempts.push(submitted);
         if (attempts.length === 1) await firstPending;
-        return {
+        const accepted = {
           id: crypto.randomUUID(),
           workspaceId: WORKSPACE_ID,
           sessionId,
@@ -30,6 +31,8 @@ describe("useComposer embedding policy", () => {
           payload: submitted,
           occurredAt: new Date().toISOString(),
         };
+        acceptedByServer.push(accepted);
+        return accepted;
       },
     });
     const hook = await renderHook(
@@ -58,9 +61,16 @@ describe("useComposer embedding policy", () => {
     expect(new Set(optimistic.map((message) => message.clientEventId)).size).toBe(2);
     expect(attempts.map((attempt) => attempt.text)).toEqual(["first"]);
 
+    await actRun(() => hook.result.current.setValue("third unsent draft"));
+    expect(hook.result.current.optimisticMessages).toBe(optimistic);
+
     releaseFirst();
     await flush();
     expect(attempts.map((attempt) => attempt.text)).toEqual(["first", "second"]);
+    expect(hook.result.current.optimisticMessages).toMatchObject([
+      { text: "first", state: "queued", triggerEventId: acceptedByServer[0]?.id },
+      { text: "second", state: "queued", triggerEventId: acceptedByServer[1]?.id },
+    ]);
 
     const accepted = attempts.map((attempt, index) => ({
       id: crypto.randomUUID(),

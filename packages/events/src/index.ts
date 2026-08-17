@@ -15,6 +15,7 @@ import {
   sessionSubject,
   type AppendEventInput,
   type Database,
+  type SessionEventAppendPhaseObserver,
 } from "@opengeni/db";
 import {
   connect,
@@ -514,6 +515,7 @@ export async function createResponderConnection(
  */
 export type AppendPublishObserver = {
   onAppend?: (info: { durationSeconds: number; count: number }) => void;
+  onAppendPhase?: SessionEventAppendPhaseObserver;
   onPublish?: (info: { durationSeconds: number; count: number }) => void;
 };
 
@@ -643,6 +645,7 @@ export async function appendAndPublishTurnEventsFenced(
     executionGeneration,
     attemptId,
     events,
+    observe?.onAppendPhase,
   );
   observeSince(observe?.onAppend, appendStartedAt, result.events.length);
   if (result.events.length === 0) return result;

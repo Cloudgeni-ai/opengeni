@@ -5027,7 +5027,14 @@ export class PrefixedMcpServer implements MCPServer {
     // headers, provider bodies, or other credential-bearing data.
     this.name = `${MCP_SDK_LIFECYCLE_NAME}:${safeMcpServerIdentity(registryId)}`;
     this.prefix = prefixedMcpToolName(registryId, "");
-    this.cacheToolsList = inner.cacheToolsList;
+    // PrefixedMcpServer already freezes one exact tools/list per prepared
+    // attempt. Do not also opt into the Agents SDK's process-global cache: its
+    // key is this stable registry name, so a later attempt with a narrower
+    // allowedTools or subject-scoped catalog could receive an earlier attempt's
+    // model-visible schemas. The inner transport may retain its own
+    // connection-local cache; repeated SDK reads resolve this instance's
+    // frozenTools promise without another remote tools/list request.
+    this.cacheToolsList = false;
     this.resultCustomDataBridge = new McpResultCustomDataBridge({
       innerServer: inner,
       unprefixToolName: (toolName) => this.unprefixToolName(toolName),
@@ -6563,14 +6570,58 @@ export function withSandboxSessionReady(
 export async function materializeSandboxFileDownloads(
   session: SandboxSessionLike,
   downloads: SandboxFileDownload[],
-  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs" | "commandRunner"> = {},
+  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs" | "commandRunner"> & {
+    /** Connected Machine-only experiment: remove per-file remote exec RTT in bounded chunks. */
+    batchCommands?: boolean;
+    maxConcurrency?: number;
+    onRuntimeEvents?: (events: NormalizedRuntimeEvent[]) => Promise<void> | void;
+  } = {},
 ): Promise<SandboxFileDownloadMaterializationResult> {
+  const requestedConcurrency = context.maxConcurrency ?? 1;
+  if (
+    !Number.isSafeInteger(requestedConcurrency) ||
+    requestedConcurrency < 1 ||
+    requestedConcurrency > 8
+  ) {
+    throw new Error("Sandbox file download concurrency must be an integer between 1 and 8");
+  }
   const normalizedDownloads = normalizeSandboxFileDownloads(downloads);
   if (normalizedDownloads.length === 0) {
     return { failures: [] };
   }
-  const failures: SandboxFileDownloadFailure[] = [];
-  for (const download of normalizedDownloads) {
+  const targetPaths = normalizedDownloads.map(sandboxDownloadLogicalPath);
+  const maximumConcurrency =
+    new Set(targetPaths).size === targetPaths.length
+      ? Math.min(requestedConcurrency, normalizedDownloads.length)
+      : 1;
+
+  if (context.batchCommands && maximumConcurrency > 1) {
+    const failures: SandboxFileDownloadFailure[] = [];
+    for (const batch of sandboxFileDownloadCommandBatches(
+      normalizedDownloads,
+      maximumConcurrency,
+    )) {
+      if (batch.length === 1) {
+        const result = await materializeSandboxFileDownloads(session, batch, {
+          ...context,
+          batchCommands: false,
+          maxConcurrency: 1,
+        });
+        failures.push(...result.failures);
+        continue;
+      }
+      const result = await materializeSandboxFileDownloadBatch(session, batch, {
+        ...context,
+        maxConcurrency: maximumConcurrency,
+      });
+      failures.push(...result.failures);
+    }
+    return { failures };
+  }
+
+  const materializeOne = async (
+    download: SandboxFileDownload,
+  ): Promise<SandboxFileDownloadFailure | null> => {
     const targetRelativePath = sandboxDownloadRelativePath(download);
     const targetPath = sandboxDownloadLogicalPath(download);
     const payload = {
@@ -6589,7 +6640,6 @@ export async function materializeSandboxFileDownloads(
         targetPath,
         "Sandbox file download materialization requires command execution support",
       );
-      failures.push(failure);
       await context.onRuntimeEvent?.({
         type: "sandbox.operation.failed",
         payload: {
@@ -6598,7 +6648,7 @@ export async function materializeSandboxFileDownloads(
           error: failure.reason,
         },
       });
-      continue;
+      return failure;
     }
     let result: unknown;
     try {
@@ -6621,7 +6671,6 @@ export async function materializeSandboxFileDownloads(
     } catch (error) {
       if (error instanceof TurnSandboxCommandCancelledError) throw error;
       const failure = sandboxFileDownloadFailure(download, targetPath, error, result);
-      failures.push(failure);
       await context.onRuntimeEvent?.({
         type: "sandbox.operation.failed",
         payload: {
@@ -6632,9 +6681,270 @@ export async function materializeSandboxFileDownloads(
           ...(failure.output ? { output: failure.output } : {}),
         },
       });
+      return failure;
+    }
+    return null;
+  };
+
+  if (maximumConcurrency === 1) {
+    const failures: SandboxFileDownloadFailure[] = [];
+    for (const download of normalizedDownloads) {
+      const failure = await materializeOne(download);
+      if (failure) failures.push(failure);
+    }
+    return { failures };
+  }
+
+  const results = new Array<SandboxFileDownloadFailure | null>(normalizedDownloads.length);
+  let nextIndex = 0;
+  const fatalErrors: unknown[] = [];
+  const worker = async () => {
+    while (fatalErrors.length === 0) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= normalizedDownloads.length) return;
+      try {
+        results[index] = await materializeOne(normalizedDownloads[index]!);
+      } catch (error) {
+        if (fatalErrors.length === 0) fatalErrors.push(error);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: maximumConcurrency }, worker));
+  if (fatalErrors.length > 0) throw fatalErrors[0];
+  return { failures: results.filter((failure) => failure !== null) };
+}
+
+const SANDBOX_FILE_DOWNLOAD_BATCH_MAX_ITEMS = 20;
+const SANDBOX_FILE_DOWNLOAD_BATCH_MAX_COMMAND_BYTES = 48 * 1024;
+const SANDBOX_FILE_DOWNLOAD_BATCH_LOG_BYTES = 2_048;
+
+type SandboxFileDownloadBatchContext = Pick<
+  SandboxLifecycleHookContext,
+  "onRuntimeEvent" | "runAs" | "commandRunner"
+> & {
+  maxConcurrency: number;
+  onRuntimeEvents?: (events: NormalizedRuntimeEvent[]) => Promise<void> | void;
+};
+
+function sandboxFileDownloadCommandBatches(
+  downloads: SandboxFileDownload[],
+  maximumConcurrency: number,
+): SandboxFileDownload[][] {
+  const batches: SandboxFileDownload[][] = [];
+  let current: SandboxFileDownload[] = [];
+  for (const download of downloads) {
+    const candidate = [...current, download];
+    const candidateFits =
+      candidate.length <= SANDBOX_FILE_DOWNLOAD_BATCH_MAX_ITEMS &&
+      Buffer.byteLength(sandboxFileDownloadBatchCommand(candidate, maximumConcurrency), "utf8") <=
+        SANDBOX_FILE_DOWNLOAD_BATCH_MAX_COMMAND_BYTES;
+    if (candidateFits) {
+      current = candidate;
+      continue;
+    }
+    if (current.length > 0) batches.push(current);
+    current = [download];
+    if (
+      Buffer.byteLength(sandboxFileDownloadBatchCommand(current, maximumConcurrency), "utf8") >
+      SANDBOX_FILE_DOWNLOAD_BATCH_MAX_COMMAND_BYTES
+    ) {
+      // An unusually long signed URL still uses the existing one-file command;
+      // never create an oversized batch merely to preserve batching.
+      batches.push(current);
+      current = [];
     }
   }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
+async function materializeSandboxFileDownloadBatch(
+  session: SandboxSessionLike,
+  downloads: SandboxFileDownload[],
+  context: SandboxFileDownloadBatchContext,
+): Promise<SandboxFileDownloadMaterializationResult> {
+  const payloads = downloads.map((download) => ({
+    fileId: download.fileId,
+    path: sandboxDownloadLogicalPath(download),
+    sizeBytes: download.sizeBytes ?? null,
+    expiresAt: download.expiresAt ? new Date(download.expiresAt).toISOString() : null,
+  }));
+  await emitSandboxFileDownloadEvents(
+    context,
+    payloads.map((payload) => ({
+      type: "sandbox.operation.started" as const,
+      payload: { name: "file-resource-download", ...payload },
+    })),
+  );
+
+  if (!session.exec && !session.execCommand) {
+    const failures = downloads.map((download, index) =>
+      sandboxFileDownloadFailure(
+        download,
+        payloads[index]!.path,
+        "Sandbox file download materialization requires command execution support",
+      ),
+    );
+    await emitSandboxFileDownloadEvents(
+      context,
+      failures.map((failure, index) => ({
+        type: "sandbox.operation.failed" as const,
+        payload: {
+          name: "file-resource-download",
+          ...payloads[index]!,
+          error: failure.reason,
+        },
+      })),
+    );
+    return { failures };
+  }
+
+  let result: unknown;
+  try {
+    result = await runSandboxLifecycleCommand(
+      session,
+      {
+        cmd: sandboxFileDownloadBatchCommand(downloads, context.maxConcurrency),
+        workdir: "/workspace",
+        ...(context.runAs ? { runAs: context.runAs } : {}),
+        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+        maxOutputTokens: 20_000,
+      },
+      context.commandRunner,
+    );
+  } catch (error) {
+    if (error instanceof TurnSandboxCommandCancelledError) throw error;
+    const failures = downloads.map((download, index) =>
+      redactSandboxFileDownloadFailure(
+        sandboxFileDownloadFailure(download, payloads[index]!.path, error, result),
+        downloads,
+      ),
+    );
+    await emitSandboxFileDownloadEvents(
+      context,
+      sandboxFileDownloadTerminalEvents(payloads, failures),
+    );
+    return { failures };
+  }
+
+  const parsed = parseSandboxFileDownloadBatchResult(downloads, payloads, result);
+  await emitSandboxFileDownloadEvents(
+    context,
+    sandboxFileDownloadTerminalEvents(payloads, parsed.failures),
+  );
+  return parsed;
+}
+
+async function emitSandboxFileDownloadEvents(
+  context: Pick<SandboxFileDownloadBatchContext, "onRuntimeEvent" | "onRuntimeEvents">,
+  events: NormalizedRuntimeEvent[],
+): Promise<void> {
+  if (events.length === 0) return;
+  if (context.onRuntimeEvents) {
+    await context.onRuntimeEvents(events);
+    return;
+  }
+  for (const event of events) await context.onRuntimeEvent?.(event);
+}
+
+function sandboxFileDownloadTerminalEvents(
+  payloads: Array<{
+    fileId: string;
+    path: string;
+    sizeBytes: number | null;
+    expiresAt: string | null;
+  }>,
+  failures: SandboxFileDownloadFailure[],
+): NormalizedRuntimeEvent[] {
+  // Normalized target paths are unique on the batch path; file ids are not a
+  // filesystem identity and may legitimately repeat.
+  const failureByPath = new Map(failures.map((failure) => [failure.path, failure]));
+  return payloads.map((payload) => {
+    const failure = failureByPath.get(payload.path);
+    return failure
+      ? {
+          type: "sandbox.operation.failed" as const,
+          payload: {
+            name: "file-resource-download",
+            ...payload,
+            error: failure.reason,
+            ...(failure.exitCode !== undefined ? { exitCode: failure.exitCode } : {}),
+            ...(failure.output ? { output: failure.output } : {}),
+          },
+        }
+      : {
+          type: "sandbox.operation.completed" as const,
+          payload: { name: "file-resource-download", ...payload },
+        };
+  });
+}
+
+function parseSandboxFileDownloadBatchResult(
+  downloads: SandboxFileDownload[],
+  payloads: Array<{ path: string }>,
+  result: unknown,
+): SandboxFileDownloadMaterializationResult {
+  const rawOutput = sandboxCommandOutput(result);
+  const output = redactSandboxFileDownloadUrls(rawOutput, downloads);
+  const statuses = new Map<number, { outcome: "completed" | "failed"; exitCode?: number }>();
+  const logs = new Map<number, string[]>();
+  for (const line of output.split("\n")) {
+    const marker = /^__OG_FILE_(OK|FAILED)__:(\d+)(?::(\d+))?$/u.exec(line);
+    if (marker) {
+      const index = Number.parseInt(marker[2]!, 10);
+      statuses.set(index, {
+        outcome: marker[1] === "OK" ? "completed" : "failed",
+        ...(marker[3] ? { exitCode: Number.parseInt(marker[3], 10) } : {}),
+      });
+      continue;
+    }
+    const log = /^__OG_FILE_LOG__:(\d+):(.*)$/u.exec(line);
+    if (log) {
+      const index = Number.parseInt(log[1]!, 10);
+      logs.set(index, [...(logs.get(index) ?? []), log[2]!]);
+    }
+  }
+
+  const commandExitCode = sandboxCommandExitCode(result);
+  const failures: SandboxFileDownloadFailure[] = [];
+  for (let index = 0; index < downloads.length; index += 1) {
+    const status = statuses.get(index);
+    if (status?.outcome === "completed") continue;
+    const itemOutput = logs.get(index)?.join("\n").trim();
+    const exitCode = status?.exitCode ?? commandExitCode ?? undefined;
+    const reason = status
+      ? `Sandbox file resource download ${downloads[index]!.fileId} failed${exitCode !== undefined ? ` with exit code ${exitCode}` : ""}${itemOutput ? `:\n${itemOutput}` : ""}`
+      : `Sandbox file resource download ${downloads[index]!.fileId} did not report a terminal status${commandExitCode !== null ? ` (batch exit code ${commandExitCode})` : ""}`;
+    failures.push({
+      fileId: downloads[index]!.fileId,
+      filename: downloads[index]!.filename,
+      path: payloads[index]!.path,
+      reason,
+      ...(exitCode !== undefined ? { exitCode } : {}),
+      ...(itemOutput ? { output: itemOutput } : {}),
+    });
+  }
   return { failures };
+}
+
+function redactSandboxFileDownloadUrls(output: string, downloads: SandboxFileDownload[]): string {
+  let redacted = output;
+  for (const download of downloads) {
+    if (download.url) redacted = redacted.replaceAll(download.url, "[redacted signed URL]");
+  }
+  return redacted;
+}
+
+function redactSandboxFileDownloadFailure(
+  failure: SandboxFileDownloadFailure,
+  downloads: SandboxFileDownload[],
+): SandboxFileDownloadFailure {
+  return {
+    ...failure,
+    reason: redactSandboxFileDownloadUrls(failure.reason, downloads),
+    ...(failure.output ? { output: redactSandboxFileDownloadUrls(failure.output, downloads) } : {}),
+  };
 }
 
 function sandboxFileDownloadFailure(
@@ -6962,6 +7272,108 @@ function sandboxDownloadLogicalPath(download: SandboxFileDownload): string {
   return posixPath.join("/workspace", sandboxDownloadRelativePath(download));
 }
 
+function sandboxFileDownloadBatchCommand(
+  downloads: SandboxFileDownload[],
+  maximumConcurrency: number,
+): string {
+  const lines = [
+    "set +x",
+    "set -u",
+    "verify_attachment() {",
+    '  candidate="$1"; expected_size="$2"; expected_sha="$3"',
+    '  [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1',
+    '  if [ "$expected_size" != "-" ]; then',
+    "    actual_size=$(wc -c < \"$candidate\" | tr -d '[:space:]')",
+    '    [ "$actual_size" = "$expected_size" ] || return 1',
+    "  fi",
+    '  if [ "$expected_sha" != "-" ]; then',
+    "    if command -v sha256sum >/dev/null 2>&1; then",
+    "      actual_sha=$(sha256sum \"$candidate\" | awk '{print $1}')",
+    "    elif command -v shasum >/dev/null 2>&1; then",
+    "      actual_sha=$(shasum -a 256 \"$candidate\" | awk '{print $1}')",
+    "    else",
+    '      echo "No SHA-256 verifier is available for attachment delivery" >&2',
+    "      return 2",
+    "    fi",
+    '    [ "$actual_sha" = "$expected_sha" ] || return 1',
+    "  fi",
+    "  return 0",
+    "}",
+    "materialize_one() {",
+    '  target="$1"; url="$2"; expected_size="$3"; expected_sha="$4"; verify_existing="$5"',
+    '  if [ -L "$target" ]; then echo "Refusing symlinked attachment target" >&2; return 73; fi',
+    '  if [ -e "$target" ] && [ ! -f "$target" ]; then echo "Refusing non-file attachment target" >&2; return 73; fi',
+    '  if [ "$verify_existing" = "1" ] && verify_attachment "$target" "$expected_size" "$expected_sha"; then',
+    "    :",
+    "  else",
+    '    tmp=$(mktemp "${target}.opengeni-download.XXXXXX") || return $?',
+    "    trap 'rm -f -- \"$tmp\"' EXIT HUP INT TERM",
+    '    curl --fail --location --silent --show-error --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 1 --retry-max-time 180 --output "$tmp" "$url" || return $?',
+    '    if ! verify_attachment "$tmp" "$expected_size" "$expected_sha"; then echo "Downloaded attachment failed size or SHA-256 verification" >&2; return 74; fi',
+    '    mv -f -- "$tmp" "$target" || return $?',
+    "    trap - EXIT HUP INT TERM",
+    "  fi",
+    '  chmod a-w -- "$target" 2>/dev/null || true',
+    "}",
+    "batch_failed=0",
+  ];
+
+  for (let start = 0; start < downloads.length; start += maximumConcurrency) {
+    const chunk = downloads.slice(start, start + maximumConcurrency);
+    for (let offset = 0; offset < chunk.length; offset += 1) {
+      const index = start + offset;
+      const download = chunk[offset]!;
+      if (!download.url) {
+        throw new Error(`File download materialization URL is empty for ${download.fileId}`);
+      }
+      const targetPath = sandboxDownloadRelativePath(download);
+      const targetDir = posixPath.dirname(targetPath);
+      const directoryCommands: string[] = [];
+      let directory = "";
+      for (const segment of targetDir.split("/")) {
+        directory = directory ? `${directory}/${segment}` : segment;
+        directoryCommands.push(
+          `if [ -L ${shellQuote(directory)} ]; then echo ${shellQuote(`Refusing symlinked attachment directory: ${directory}`)} >&2; exit 73; fi`,
+          `mkdir -p -- ${shellQuote(directory)}`,
+        );
+      }
+      const expectedSize = download.sizeBytes === undefined ? "-" : String(download.sizeBytes);
+      const expectedSha = download.sha256 ?? "-";
+      const verifyExisting =
+        download.sizeBytes !== undefined || download.sha256 !== undefined ? "1" : "0";
+      lines.push(
+        `og_log_${index}=$(mktemp "\${TMPDIR:-/tmp}/opengeni-file-${index}.XXXXXX")`,
+        "(",
+        ...directoryCommands.map((command) => `  ${command}`),
+        `  materialize_one ${shellQuote(targetPath)} ${shellQuote(download.url)} ${shellQuote(expectedSize)} ${shellQuote(expectedSha)} ${shellQuote(verifyExisting)}`,
+        `) 2>"$og_log_${index}" &`,
+        `og_pid_${offset}=$!`,
+      );
+    }
+    for (let offset = 0; offset < chunk.length; offset += 1) {
+      const index = start + offset;
+      lines.push(
+        `if wait "$og_pid_${offset}"; then`,
+        `  printf '%s\\n' ${shellQuote(`__OG_FILE_OK__:${index}`)}`,
+        "else",
+        "  og_rc=$?",
+        `  printf '%s\\n' "__OG_FILE_FAILED__:${index}:$og_rc"`,
+        `  printf '%s' ${shellQuote(`__OG_FILE_LOG__:${index}:`)}`,
+        // Collapse line breaks before prefixing so an adversarial many-line
+        // stderr cannot multiply a bounded excerpt beyond the command output
+        // envelope and hide later files' terminal markers.
+        `  tail -c ${SANDBOX_FILE_DOWNLOAD_BATCH_LOG_BYTES} "$og_log_${index}" | tr '\\r\\n' '  '`,
+        "  printf '\\n'",
+        "  batch_failed=1",
+        "fi",
+        `rm -f -- "$og_log_${index}"`,
+      );
+    }
+  }
+  lines.push('exit "$batch_failed"');
+  return lines.join("\n");
+}
+
 function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: string): string {
   if (!download.url) {
     throw new Error(`File download materialization URL is empty for ${download.fileId}`);
@@ -7081,6 +7493,11 @@ export type RigSetupDescriptor = {
   script: string;
   timeoutMs: number;
   contentHash?: string;
+  /** Exact immutable provider image selected only after content, source-image,
+   * provider-binding, and independent cold-boot verification. The setup hook
+   * may trust this proof only when the live session reports the same image id;
+   * every absent or mismatched identity keeps the in-box marker fallback. */
+  verifiedProviderImageId?: string;
 };
 
 export type SandboxLifecycleHook = {
@@ -7100,12 +7517,18 @@ const builtInSandboxLifecycleHooks: Record<string, SandboxLifecycleHook> = {
 };
 
 export function sandboxLifecycleHooksForIds(ids: string[]): SandboxLifecycleHook[] {
-  return ids.map((id) => {
+  const resolved = ids.map((id) => {
     const hook = builtInSandboxLifecycleHooks[id];
     if (!hook) {
       throw new Error(`Unknown sandbox lifecycle hook ${id}`);
     }
     return hook;
+  });
+  const seen = new Set<string>();
+  return resolved.filter((hook) => {
+    if (seen.has(hook.id)) return false;
+    seen.add(hook.id);
+    return true;
   });
 }
 
@@ -8426,7 +8849,13 @@ const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
 const RIG_SETUP_RUNTIME_MARKER_ROOT = "/tmp/opengeni/rig-setup";
 const RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT = "/var/opengeni";
 const RIG_SETUP_INLINE_COMMAND_MAX_BYTES = 32 * 1024;
-const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 24 * 1024;
+// The cancellation fence embeds a lifecycle command twice, then Agents
+// Extensions repeats that wrapped command in its current-user, root/su, and
+// sudo runAs branches. Modal applies its 64-KiB aggregate argument ceiling only
+// after both wrappers. Seven KiB leaves more than 3 KiB for both wrappers.
+// Modal normally bypasses these chunks through its native filesystem writer;
+// this remains the correctness-safe fallback if that optional capability moves.
+const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 7 * 1024;
 const RIG_SETUP_PAYLOAD_ROOT = "/tmp/opengeni/rig-setup-payloads";
 
 export type RigSetupScriptCommandOptions = {
@@ -8567,32 +8996,56 @@ async function stageRigSetupScript(
 ): Promise<string> {
   const payloadPath = `${RIG_SETUP_PAYLOAD_ROOT}/${randomUUID()}.sh`;
   const encodedPath = `${payloadPath}.b64`;
-  const encoded = Buffer.from(script, "utf8").toString("base64");
-  const commands = [
-    `set -eu\numask 077\nmkdir -p ${shellQuote(RIG_SETUP_PAYLOAD_ROOT)}\n: > ${shellQuote(encodedPath)}`,
-  ];
-  for (let offset = 0; offset < encoded.length; offset += RIG_SETUP_PAYLOAD_CHUNK_CHARS) {
-    commands.push(
-      `printf '%s' ${shellQuote(encoded.slice(offset, offset + RIG_SETUP_PAYLOAD_CHUNK_CHARS))} >> ${shellQuote(encodedPath)}`,
+  const nativeWrite = (
+    session as SandboxSessionLike & {
+      writeSandboxFile?: (path: string, content: string | Uint8Array) => Promise<void>;
+    }
+  ).writeSandboxFile;
+  const runStageCommand = async (command: string, description: string): Promise<void> => {
+    const result = await runSandboxLifecycleCommand(
+      session,
+      {
+        cmd: command,
+        workdir: "/workspace",
+        ...(context.runAs ? { runAs: context.runAs } : {}),
+        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+        maxOutputTokens: 4_000,
+      },
+      context.commandRunner,
     );
-  }
-  commands.push(
-    `set -eu\nbase64 -d ${shellQuote(encodedPath)} > ${shellQuote(payloadPath)}\nchmod 0700 ${shellQuote(payloadPath)}\nrm -f ${shellQuote(encodedPath)}`,
-  );
+    assertSandboxCommandSucceeded(result, description);
+  };
   try {
-    for (const command of commands) {
-      const result = await runSandboxLifecycleCommand(
-        session,
-        {
-          cmd: command,
-          workdir: "/workspace",
-          ...(context.runAs ? { runAs: context.runAs } : {}),
-          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-          maxOutputTokens: 4_000,
-        },
-        context.commandRunner,
+    await runStageCommand(
+      `set -eu\numask 077\nmkdir -p ${shellQuote(RIG_SETUP_PAYLOAD_ROOT)}`,
+      "Rig setup payload directory creation",
+    );
+    if (typeof nativeWrite === "function") {
+      // Modal exposes a byte-exact filesystem RPC. It avoids dozens of
+      // high-latency shell round trips and, unlike a command argument, is not
+      // multiplied by the cancellation + runAs wrappers. Execution, timeout,
+      // marker ownership, and cleanup still use the fenced command path.
+      await nativeWrite.call(session, payloadPath, script);
+      await runStageCommand(
+        `set -eu\numask 077\nchmod 0600 ${shellQuote(payloadPath)}`,
+        "Rig setup native payload finalization",
       );
-      assertSandboxCommandSucceeded(result, "Rig setup payload staging");
+    } else {
+      await runStageCommand(
+        `set -eu\numask 077\n: > ${shellQuote(encodedPath)}`,
+        "Rig setup payload initialization",
+      );
+      const encoded = Buffer.from(script, "utf8").toString("base64");
+      for (let offset = 0; offset < encoded.length; offset += RIG_SETUP_PAYLOAD_CHUNK_CHARS) {
+        await runStageCommand(
+          `printf '%s' ${shellQuote(encoded.slice(offset, offset + RIG_SETUP_PAYLOAD_CHUNK_CHARS))} >> ${shellQuote(encodedPath)}`,
+          "Rig setup payload staging",
+        );
+      }
+      await runStageCommand(
+        `set -eu\nbase64 -d ${shellQuote(encodedPath)} > ${shellQuote(payloadPath)}\nchmod 0600 ${shellQuote(payloadPath)}\nrm -f ${shellQuote(encodedPath)}`,
+        "Rig setup payload decoding",
+      );
     }
     return payloadPath;
   } catch (error) {
@@ -8636,6 +9089,24 @@ export async function runRigSetupHook(
     rigName: rigSetup.rigName,
   };
   await context.onRuntimeEvent?.({ type: "rig.setup.started", payload });
+  const sessionImageId =
+    session.state &&
+    typeof session.state === "object" &&
+    "imageId" in session.state &&
+    typeof session.state.imageId === "string"
+      ? session.state.imageId
+      : null;
+  if (
+    rigSetup.contentHash &&
+    rigSetup.verifiedProviderImageId &&
+    sessionImageId === rigSetup.verifiedProviderImageId
+  ) {
+    await context.onRuntimeEvent?.({
+      type: "rig.setup.skipped",
+      payload: { ...payload, proof: "verified_provider_image" },
+    });
+    return;
+  }
   const commandOptions = {
     timeoutMs: rigSetup.timeoutMs,
     markerRoot: RIG_SETUP_RUNTIME_MARKER_ROOT,

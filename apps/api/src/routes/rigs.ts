@@ -6,6 +6,7 @@ import {
 } from "@opengeni/contracts";
 import {
   beginRigChangeVerificationAttempt,
+  listRigSummaries,
   listRigs,
   RigChangeTransitionError,
 } from "@opengeni/db";
@@ -27,6 +28,7 @@ import {
   updateRigForApi,
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
+import { providerSupportsImmutableImageBuild } from "@opengeni/runtime/sandbox";
 
 export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, workflowClient } = deps;
@@ -115,6 +117,16 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/rigs", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "rigs:use");
+    if (c.req.query("view") === "summary") {
+      return c.json(
+        await listRigSummaries(db, workspaceId, {
+          backend: deps.settings.sandboxBackend,
+          supportsImmutableImages: providerSupportsImmutableImageBuild(
+            deps.settings.sandboxBackend,
+          ),
+        }),
+      );
+    }
     return c.json(await listRigs(db, workspaceId));
   });
 

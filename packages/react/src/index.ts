@@ -177,10 +177,11 @@ export type {
 } from "./hooks/use-environments";
 export { useChannels } from "./hooks/use-channels";
 export type { UseChannelsOptions, UseChannelsResult } from "./hooks/use-channels";
-export { useRigs, useRig, useRigVersions, useRigChanges } from "./hooks/use-rigs";
+export { useRigs, useRigSummaries, useRig, useRigVersions, useRigChanges } from "./hooks/use-rigs";
 export type {
   UseRigsOptions,
   UseRigsResult,
+  UseRigSummariesResult,
   UseRigOptions,
   UseRigResult,
   UseRigVersionsOptions,
@@ -478,10 +479,10 @@ export type { GeneratedVideoPlayerProps } from "./components/generated-video-pla
 export type { MessageTimelineProps } from "./components/message-timeline";
 export { UserMessageBody, userMessageLikelyNeedsDisclosure } from "./components/user-message-body";
 export type { UserMessageBodyProps } from "./components/user-message-body";
-export { Markdown } from "./components/markdown";
+export { Markdown, SettledMarkdown } from "./components/markdown";
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
-export type { MarkdownProps } from "./components/markdown";
+export type { MarkdownProps, SettledMarkdownProps } from "./components/markdown";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
 export type {
   SessionStatusProps,

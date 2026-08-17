@@ -7,7 +7,11 @@ import {
   filterCapabilityCatalogItems,
   summarizePackContents,
 } from "./lib/capabilities";
-import { projectSessionTimeline, summarizeSessionFailure } from "./lib/events";
+import {
+  projectSessionTimeline,
+  retainEqualTimelineItems,
+  summarizeSessionFailure,
+} from "./lib/events";
 import {
   buildApiKeyPermissionGroups,
   buildSessionMcpPermissionGroups,
@@ -24,6 +28,7 @@ import {
   workspaceSettingsPath,
 } from "./lib/routes";
 import { sameSessionForContext } from "./lib/session-context";
+import { sessionTimelineEmptyStateCopy } from "./lib/session-empty-state";
 import {
   defaultExpandedAncestors,
   sessionAncestorPath,
@@ -109,6 +114,25 @@ describe("workspace route helpers", () => {
   test("builds the new workspace-settings and organization-settings paths", () => {
     expect(workspaceSettingsPath("workspace-1")).toBe("/workspaces/workspace-1/settings");
     expect(orgSettingsPath("workspace-1")).toBe("/workspaces/workspace-1/organization");
+  });
+});
+
+describe("zero-step session status", () => {
+  test("uses lifecycle truth instead of presenting every active session as inert", () => {
+    expect(sessionTimelineEmptyStateCopy("running", false).title).toBe("Starting the agent");
+    expect(sessionTimelineEmptyStateCopy("queued", false).title).toBe("Queued to start");
+    expect(sessionTimelineEmptyStateCopy("recovering", false).title).toBe("Restoring this session");
+    expect(sessionTimelineEmptyStateCopy("waiting_capacity", false).title).toBe(
+      "Waiting for capacity",
+    );
+    expect(sessionTimelineEmptyStateCopy("idle", false).title).toBe("Waiting for the first step");
+  });
+
+  test("pause truth wins over a stale running lifecycle", () => {
+    expect(sessionTimelineEmptyStateCopy("running", true)).toEqual({
+      title: "Workstream paused",
+      description: "Queued work stays saved. Resume the workstream when you want it to continue.",
+    });
   });
 });
 
@@ -1091,6 +1115,46 @@ describe("projectSessionTimeline", () => {
     expect(json).toContain("RESOURCE_EXHAUSTED");
     expect(json).toContain("ModalClient");
     expect(json).toContain("Bandwidth exhausted or memory limit exceeded");
+  });
+});
+
+describe("retainEqualTimelineItems", () => {
+  test("reuses unchanged durable rows across a prepend and invalidates changed content", () => {
+    const previous = projectSessionTimeline(session(), [
+      event(2, "user.message", { text: "second" }),
+      event(3, "user.message", { text: "third" }),
+    ]);
+    const prepended = projectSessionTimeline(session(), [
+      event(1, "user.message", { text: "first" }),
+      event(2, "user.message", { text: "second" }),
+      event(3, "user.message", { text: "third" }),
+    ]);
+
+    const retained = retainEqualTimelineItems(previous, prepended);
+    expect(retained).toHaveLength(3);
+    expect(retained[1]).toBe(previous[0]);
+    expect(retained[2]).toBe(previous[1]);
+
+    const changed = projectSessionTimeline(session(), [
+      event(1, "user.message", { text: "first" }),
+      event(2, "user.message", { text: "second, edited" }),
+      event(3, "user.message", { text: "third" }),
+    ]);
+    const changedRetained = retainEqualTimelineItems(retained, changed);
+    expect(changedRetained[1]).not.toBe(retained[1]);
+    expect(changedRetained[1]).toMatchObject({ text: "second, edited" });
+    expect(changedRetained[2]).toBe(retained[2]);
+  });
+
+  test("fails closed instead of reusing duplicate keys", () => {
+    const previous = projectSessionTimeline(session(), [event(1, "user.message", { text: "one" })]);
+    const rebuilt = projectSessionTimeline(session(), [event(1, "user.message", { text: "one" })]);
+    const duplicate = { ...rebuilt[0]! };
+    const retained = retainEqualTimelineItems(previous, [rebuilt[0]!, duplicate]);
+
+    expect(retained[0]).toBe(rebuilt[0]);
+    expect(retained[1]).toBe(duplicate);
+    expect(retained[0]).not.toBe(previous[0]);
   });
 });
 

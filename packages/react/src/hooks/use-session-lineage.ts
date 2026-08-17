@@ -4,7 +4,12 @@ import {
   useEmbeddedSessionLineage,
   type EmbeddedSessionLineageClientOverride,
 } from "../session-context";
-import { useDebouncedCallback, usePolledValue, useSessionEventTrigger } from "./internal";
+import {
+  equalJsonValue,
+  useDebouncedCallback,
+  usePolledValue,
+  useSessionEventTrigger,
+} from "./internal";
 
 export type UseSessionLineageOptions = EmbeddedSessionLineageClientOverride & {
   events?: SessionEvent[] | undefined;
@@ -70,7 +75,13 @@ export function useSessionLineage(
         : { ancestors: [], children: [], truncated: false },
     [client, workspaceId, sessionId],
   );
-  const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled });
+  const state = usePolledValue(load, {
+    pollIntervalMs: options.pollIntervalMs,
+    enabled,
+    // Child status changes still update immediately; identical safety polls do
+    // not invalidate the full parent session route.
+    isEqual: equalJsonValue,
+  });
   const refresh = state.refresh;
   useEffect(() => {
     if (enabled && workspaceControlEvent) void refresh();

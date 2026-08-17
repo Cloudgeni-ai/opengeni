@@ -3,7 +3,13 @@
 // single boundary that translates them into sentence-case labels and maps them
 // onto the shared StatusDot tone language. No rig surface renders a raw slug.
 import type { StatusTone } from "@/components/ui/status-dot";
-import type { RigChange, RigChangeKind, RigVersion } from "@/types";
+import type {
+  RigChange,
+  RigChangeKind,
+  RigProviderImage,
+  RigVersion,
+  RigVersionSummary,
+} from "@/types";
 
 /** Did this change's verification run pass? (The `passed` flag rides the
  *  open-ended verification record written by rig CI.) */
@@ -114,6 +120,82 @@ export function rigCheckHealthView(health: RigCheckHealth): RigStatusView {
   }
 }
 
+export function rigProviderImageStatusView(status: RigProviderImage["status"]): RigStatusView {
+  switch (status) {
+    case "building":
+      return {
+        tone: "running",
+        label: "Preparing image",
+        pulse: true,
+        description: "Building and cold-boot checking this exact rig version.",
+      };
+    case "ready":
+      return {
+        tone: "idle",
+        label: "Image ready",
+        pulse: false,
+        description: "Fresh sandboxes can start from the verified provider image.",
+      };
+    case "failed":
+      return {
+        tone: "failed",
+        label: "Image build failed",
+        pulse: false,
+        description: "Fresh sandboxes use the safe setup fallback until this succeeds.",
+      };
+    case "unsupported":
+      return {
+        tone: "queued",
+        label: "Uses setup fallback",
+        pulse: false,
+        description: "This provider does not support a prebuilt rig image.",
+      };
+  }
+}
+
+export function rigManagedSandboxReadinessView(
+  readiness: RigVersionSummary["managedSandboxImage"],
+): RigStatusView | null {
+  if (!readiness) return null;
+  switch (readiness.status) {
+    case "unprepared":
+      return {
+        tone: "queued",
+        label: "Fast startup not prepared yet",
+        pulse: false,
+        description: "You can start now; the first sandbox may run the complete rig setup.",
+      };
+    case "building":
+      return {
+        tone: "running",
+        label: "Preparing fast startup",
+        pulse: true,
+        description: "You can start now; an immediate first sandbox may take longer.",
+      };
+    case "ready":
+      return {
+        tone: "idle",
+        label: "Fast startup ready",
+        pulse: false,
+        description: "A fresh sandbox can use the verified image for this exact rig version.",
+      };
+    case "failed":
+      return {
+        tone: "failed",
+        label: "Fast image unavailable",
+        pulse: false,
+        description: "The sandbox will run the complete setup instead of skipping rig content.",
+      };
+    case "unsupported":
+      return {
+        tone: "queued",
+        label: "Setup runs at sandbox start",
+        pulse: false,
+        description: "This managed sandbox provider does not support a prebuilt rig image.",
+      };
+  }
+}
+
 /** Attribution string → a short human label. Domain stores `user:<subject>`,
  *  `session:<id>`, or `system`; render the actor, not the raw prefix. */
 export function rigActorLabel(createdBy: string | null | undefined): string {
@@ -136,6 +218,11 @@ export function rigActorLabel(createdBy: string | null | undefined): string {
 
 /** True when a version declares no checks — the overview should say so rather
  *  than imply an empty "passing". */
-export function versionHasChecks(version: RigVersion | null | undefined): boolean {
-  return (version?.checks.length ?? 0) > 0;
+export function versionHasChecks(
+  version: RigVersion | RigVersionSummary | null | undefined,
+): boolean {
+  if (!version) {
+    return false;
+  }
+  return "checkCount" in version ? version.checkCount > 0 : version.checks.length > 0;
 }

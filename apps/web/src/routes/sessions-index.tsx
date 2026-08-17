@@ -17,7 +17,7 @@
 // lightweight local opt-in.
 import {
   FILE_ONLY_MESSAGE_TEXT,
-  useRigs,
+  useRigSummaries,
   useVariableSets,
   useWorkspaceSessions,
   type ComposerState,
@@ -60,6 +60,7 @@ import { FOCUS_CREATE_COMPOSER_EVENT } from "@/lib/create-composer-focus";
 import type { RepoDraft } from "@/lib/session-tools";
 import { displayModel } from "@/lib/format";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
+import { rigManagedSandboxReadinessView } from "@/lib/rig-status";
 import {
   coerceReasoningEffortForModel,
   findPickerRow,
@@ -1109,9 +1110,25 @@ function ManagedSandboxFields(props: {
 }) {
   const { draft, onChange } = props;
   const variableSets = useVariableSets();
-  const rigs = useRigs();
+  const [pollRigReadiness, setPollRigReadiness] = useState(false);
+  const rigs = useRigSummaries({ pollIntervalMs: pollRigReadiness ? 2_500 : undefined });
+  useEffect(() => {
+    if (rigs.loading) return;
+    // Poll only what the person selected. Other rigs can remain unprepared for
+    // months without turning one open composer into a permanent polling loop.
+    const selected = draft.rigId ? rigs.rigs.find((rig) => rig.id === draft.rigId) : undefined;
+    const status = selected?.activeVersion?.managedSandboxImage?.status;
+    const hasPendingImage = status === "unprepared" || status === "building";
+    setPollRigReadiness(hasPendingImage);
+  }, [draft.rigId, rigs.loading, rigs.rigs]);
   const showRigs = rigs.rigs.length > 0;
   const showVariableSets = variableSets.variableSets.length > 0;
+  const selectedRig = draft.rigId
+    ? (rigs.rigs.find((rig) => rig.id === draft.rigId) ?? null)
+    : null;
+  const selectedRigReadiness = rigManagedSandboxReadinessView(
+    selectedRig?.activeVersion?.managedSandboxImage ?? null,
+  );
   if (!showRigs && !showVariableSets) {
     return null;
   }
@@ -1125,36 +1142,54 @@ function ManagedSandboxFields(props: {
           below (still user-overridable). Empty ⇒ the workspace default rig,
           resolved server-side. */}
       {showRigs ? (
-        <div className="flex items-center justify-between gap-3 px-3 py-2">
-          <Label className="flex shrink-0 items-center gap-1.5 text-xs">
-            <ServerCogIcon className="size-3 shrink-0 text-fg-subtle" />
-            Rig
-          </Label>
-          <Select
-            value={draft.rigId}
-            disabled={props.disabled}
-            onChange={(event) => {
-              const rigId = event.target.value;
-              const picked = rigs.rigs.find((rig) => rig.id === rigId);
-              const defaultVariableSetId = picked?.activeVersion?.defaultVariableSetIds[0];
-              onChange({
-                ...draft,
-                rigId,
-                // Preselect the rig's first default variable set into the single
-                // session-level control; the rest still apply server-side.
-                ...(defaultVariableSetId ? { variableSetId: defaultVariableSetId } : {}),
-              });
-            }}
-            className="h-8 w-auto max-w-56 text-xs"
-          >
-            <option value="">Workspace default</option>
-            {rigs.rigs.map((rig) => (
-              <option key={rig.id} value={rig.id}>
-                {rig.name}
-                {rig.activeVersion ? ` (v${rig.activeVersion.version})` : ""}
-              </option>
-            ))}
-          </Select>
+        <div>
+          <div className="flex items-center justify-between gap-3 px-3 py-2">
+            <Label className="flex shrink-0 items-center gap-1.5 text-xs">
+              <ServerCogIcon className="size-3 shrink-0 text-fg-subtle" />
+              Rig
+            </Label>
+            <Select
+              value={draft.rigId}
+              disabled={props.disabled}
+              onChange={(event) => {
+                const rigId = event.target.value;
+                const picked = rigs.rigs.find((rig) => rig.id === rigId);
+                const defaultVariableSetId = picked?.activeVersion?.defaultVariableSetIds[0];
+                onChange({
+                  ...draft,
+                  rigId,
+                  // Preselect the rig's first default variable set into the single
+                  // session-level control; the rest still apply server-side.
+                  ...(defaultVariableSetId ? { variableSetId: defaultVariableSetId } : {}),
+                });
+              }}
+              className="h-8 w-auto max-w-56 text-xs"
+            >
+              <option value="">Workspace default</option>
+              {rigs.rigs.map((rig) => (
+                <option key={rig.id} value={rig.id}>
+                  {rig.name}
+                  {rig.activeVersion ? ` (v${rig.activeVersion.version})` : ""}
+                </option>
+              ))}
+            </Select>
+          </div>
+          {selectedRigReadiness ? (
+            <p
+              aria-live="polite"
+              className="flex items-start gap-1.5 px-3 pb-2 text-2xs text-fg-subtle"
+            >
+              <StatusDot
+                tone={selectedRigReadiness.tone}
+                pulse={selectedRigReadiness.pulse}
+                className="mt-0.5"
+              />
+              <span>
+                <span className="font-medium text-fg-muted">{selectedRigReadiness.label}.</span>{" "}
+                {selectedRigReadiness.description}
+              </span>
+            </p>
+          ) : null}
         </div>
       ) : null}
 

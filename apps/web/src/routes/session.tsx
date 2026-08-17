@@ -29,7 +29,17 @@ import {
   PanelsTopLeftIcon,
   XIcon,
 } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
@@ -71,6 +81,7 @@ import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import {
   isTerminalSessionStatus,
+  projectRetainedSessionTimeline,
   projectSessionTimeline,
   summarizeSessionFailure,
 } from "@/lib/events";
@@ -83,6 +94,7 @@ import {
 import { coerceReasoningEffortForModel, findPickerRow } from "@/lib/model-policy";
 import { resolveSessionComposerModel } from "@/lib/session-model";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
+import { sessionTimelineEmptyStateCopy } from "@/lib/session-empty-state";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
 import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
 import { createWorkspaceRetainedVideoLoader } from "@/lib/retained-video-loader";
@@ -140,6 +152,25 @@ export function SessionRoute({
       replace: true,
     });
   }, [navigate, sessionId, workspaceId]);
+  const openSession = useCallback(
+    (nextSessionId: string) => {
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions/$sessionId",
+        params: { workspaceId, sessionId: nextSessionId },
+      });
+    },
+    [navigate, workspaceId],
+  );
+  const openMemory = useCallback(
+    (memoryId: string) => {
+      void navigate({
+        to: "/workspaces/$workspaceId/memory",
+        params: { workspaceId },
+        search: { memory: memoryId },
+      });
+    },
+    [navigate, workspaceId],
+  );
 
   // Session record + live event log via @opengeni/react. Fresh opens load a
   // bounded tail, then stream live events with resume-by-sequence.
@@ -197,8 +228,39 @@ export function SessionRoute({
         : events,
     [events, viewClearedAfter],
   );
+  const timelineFallbackSession = useMemo(
+    () =>
+      session
+        ? {
+            id: session.id,
+            initialMessage: session.initialMessage,
+            resources: session.resources,
+            tools: session.tools,
+            createdAt: session.createdAt,
+          }
+        : null,
+    [session],
+  );
+  const previousEventTimelineRef = useRef<{
+    sessionId: string;
+    items: TimelineItem[];
+  }>({ sessionId, items: [] });
+  const visibleEventTimeline = useMemo(() => {
+    const previous = previousEventTimelineRef.current;
+    return projectRetainedSessionTimeline(
+      previous.sessionId === sessionId ? previous.items : [],
+      visibleEvents,
+    );
+  }, [sessionId, visibleEvents]);
+  // Publish retention state only after React commits this projection. Writing
+  // the ref during render lets an interrupted concurrent render become the
+  // baseline for a different commit; content remained fail-closed, but render
+  // work must not mutate the committed timeline cache.
+  useLayoutEffect(() => {
+    previousEventTimelineRef.current = { sessionId, items: visibleEventTimeline };
+  }, [sessionId, visibleEventTimeline]);
   const timeline = useMemo(() => {
-    if (!session) {
+    if (!timelineFallbackSession) {
       return [];
     }
     // While the tail window is still being fetched, render nothing rather than
@@ -209,12 +271,21 @@ export function SessionRoute({
     if (initialLoading && visibleEvents.length === 0) {
       return [];
     }
-    const projected = projectSessionTimeline(session, visibleEvents);
+    const projected =
+      visibleEvents.length > 0
+        ? visibleEventTimeline
+        : projectSessionTimeline(timelineFallbackSession, visibleEvents);
     // projectSessionTimeline falls back to the session's initial message when
     // the projection is empty; after a clear-view that fallback would resurrect
     // the very first message, so suppress it once the view has been cleared.
     return viewClearedAfter !== null && visibleEvents.length === 0 ? [] : projected;
-  }, [session, visibleEvents, viewClearedAfter, initialLoading]);
+  }, [
+    initialLoading,
+    timelineFallbackSession,
+    viewClearedAfter,
+    visibleEventTimeline,
+    visibleEvents,
+  ]);
   // Only approvals still awaiting a decision: the durable log replays every
   // historical `session.requiresAction`, so subtract decisions and finished
   // turns instead of rendering decided approvals as live buttons forever.
@@ -542,19 +613,8 @@ export function SessionRoute({
       onJumpToStart={loadOldest}
       onJumpToLatest={jumpToLatest}
       onClearView={clearView}
-      onOpenSession={(nextSessionId) =>
-        void navigate({
-          to: "/workspaces/$workspaceId/sessions/$sessionId",
-          params: { workspaceId, sessionId: nextSessionId },
-        })
-      }
-      onMemoryClick={(memoryId) =>
-        void navigate({
-          to: "/workspaces/$workspaceId/memory",
-          params: { workspaceId },
-          search: { memory: memoryId },
-        })
-      }
+      onOpenSession={openSession}
+      onMemoryClick={openMemory}
       onNewSession={() =>
         void navigate({
           to: "/workspaces/$workspaceId/sessions",
@@ -778,6 +838,21 @@ function useSessionEditableArtifactSummaries(input: {
   return loaded?.key === authorityKey
     ? { artifacts: loaded.artifacts, status: loaded.status, retry }
     : { artifacts: [], status: "loading", retry };
+}
+
+function TimelineAgentMarkdown({ text, item }: { text: string; item: AgentMessageItem }) {
+  const hasStreamed = useRef(item.streaming);
+  if (item.streaming) {
+    // Monotonic presentation memory: once this mounted row has streamed, keep
+    // its existing reveal/settle lifecycle through completion. Rows first seen
+    // as settled history take the stateless but byte-identical render path.
+    hasStreamed.current = true;
+  }
+  return (
+    <div data-testid="assistant-markdown">
+      <MarkdownText text={text} streaming={item.streaming} settled={!hasStreamed.current} />
+    </div>
+  );
 }
 
 function SessionChatPane(props: {
@@ -1187,13 +1262,23 @@ function SessionChatPane(props: {
       repositories.commitSent(input.resources ?? []);
     },
   });
-  const timelineWithOptimisticSends = useMemo<TimelineItem[]>(() => {
+  const optimisticMessages = composer.optimisticMessages;
+  // Give the compact queue receipt the urgent frame; append the complete local
+  // message immediately afterward, without waiting for network acceptance.
+  const timelineOptimisticMessages = useDeferredValue(optimisticMessages);
+  const retryOptimisticMessage = composer.retryOptimisticMessage;
+  const removeOptimisticMessage = composer.removeOptimisticMessage;
+  const timelineOptimisticItems = useMemo<UserMessageItem[]>(() => {
+    const messages = timelineOptimisticMessages ?? [];
+    if (messages.length === 0) {
+      return [];
+    }
     const acceptedClientEventIds = new Set(
       props.events
         .filter((event) => event.type === "user.message" && event.clientEventId)
         .map((event) => event.clientEventId as string),
     );
-    const optimisticItems: UserMessageItem[] = (composer.optimisticMessages ?? [])
+    const optimisticItems: UserMessageItem[] = messages
       .filter((message) => !acceptedClientEventIds.has(message.clientEventId))
       .map((message) => ({
         kind: "user-message",
@@ -1211,14 +1296,14 @@ function SessionChatPane(props: {
           ...(message.error ? { error: message.error } : {}),
           ...(message.state === "failed"
             ? {
-                onRetry: () => composer.retryOptimisticMessage?.(message.clientEventId),
-                onRemove: () => composer.removeOptimisticMessage?.(message.clientEventId),
+                onRetry: () => retryOptimisticMessage?.(message.clientEventId),
+                onRemove: () => removeOptimisticMessage?.(message.clientEventId),
               }
             : {}),
         },
       }));
-    return [...props.timeline, ...optimisticItems];
-  }, [composer, props.events, props.timeline]);
+    return optimisticItems;
+  }, [timelineOptimisticMessages, props.events, removeOptimisticMessage, retryOptimisticMessage]);
   const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
 
   // Slash-command palette context: the operator controls (/goal, /clear,
@@ -1251,16 +1336,137 @@ function SessionChatPane(props: {
   const renderMessageText = useCallback(
     (text: string, item: AgentMessageItem | UserMessageItem) => {
       if (item.kind === "user-message") {
-        return <UserMessageBody workspaceId={props.session.workspaceId} item={item} />;
+        return (
+          <UserMessageBody
+            client={context.client}
+            workspaceId={props.session.workspaceId}
+            item={item}
+          />
+        );
       }
-      return (
-        <div data-testid="assistant-markdown">
-          <MarkdownText text={text} streaming={item.streaming} />
-        </div>
-      );
+      return <TimelineAgentMarkdown text={text} item={item} />;
     },
-    [props.session.workspaceId],
+    [context.client, props.session.workspaceId],
   );
+  const sessionStatus = props.session.status;
+  const {
+    hasOlder,
+    loadingOlder,
+    onLoadOlder,
+    hasNewer,
+    loadingNewer,
+    onLoadNewer,
+    loadingOldest,
+    onJumpToStart,
+    onJumpToLatest,
+    initialLoading,
+    onOpenSession,
+    onMemoryClick,
+    onReconnect,
+    resolveProviderLogo,
+  } = props;
+  const queueStoppingPreviousAttempt = props.queue.stoppingPreviousAttempt;
+  const queueControlState = props.queue.effectiveControl?.state;
+  const timelineEmptyStateCopy = useMemo(
+    () => sessionTimelineEmptyStateCopy(sessionStatus, queueControlState === "paused"),
+    [queueControlState, sessionStatus],
+  );
+  // Composer edits, picker state, voice state, and Steer submission chrome do
+  // not change a settled transcript. Reuse the exact timeline element across
+  // those parent renders so a large, fully mounted history is not reconciled
+  // for every keystroke. An optimistic Send updates its complete tail row while
+  // the durable transcript remains mounted.
+  const sessionTimeline = useMemo(() => {
+    return (
+      <MessageTimeline
+        className="h-full"
+        items={props.timeline}
+        optimisticItems={timelineOptimisticItems}
+        status={sessionStatus}
+        computeLabel={computeLabel}
+        renderMessageText={renderMessageText}
+        onAnnotate={composer.addAnnotation}
+        onOpenSession={onOpenSession}
+        onMemoryClick={onMemoryClick}
+        onReconnect={onReconnect}
+        resolveProviderLogo={resolveProviderLogo}
+        loadRetainedScreenshot={loadRetainedScreenshot}
+        loadRetainedArtifact={loadRetainedArtifact}
+        loadVideoArtifactPlayback={loadVideoArtifactPlayback}
+        hasOlder={hasOlder}
+        loadingOlder={loadingOlder}
+        onLoadOlder={() => void onLoadOlder()}
+        hasNewer={hasNewer}
+        loadingNewer={loadingNewer}
+        onLoadNewer={() => void onLoadNewer()}
+        loadingOldest={loadingOldest}
+        onJumpToStart={() => void onJumpToStart()}
+        onJumpToLatest={() => void onJumpToLatest()}
+        emptyState={
+          queueStoppingPreviousAttempt ? (
+            <EmptyState
+              className="min-h-[24rem]"
+              icon={<Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />}
+              title={
+                queueControlState === "paused" ? "Stopping current work" : "Stopping previous work"
+              }
+              description={
+                queueControlState === "paused"
+                  ? "Waiting for the current command to stop safely. Queued work stays saved."
+                  : "Your direction is saved. It starts after the previous command stops safely."
+              }
+            />
+          ) : initialLoading ? (
+            // History is still fetching — a quiet shimmer, not the
+            // "waiting for the first step" copy (that's for NEW sessions).
+            <div className="grid min-h-[24rem] place-items-center text-sm">
+              <span className="og-shimmer-text font-medium">Loading conversation…</span>
+            </div>
+          ) : (
+            <EmptyState
+              className="min-h-[24rem]"
+              icon={
+                sessionStatus === "running" || sessionStatus === "recovering" ? (
+                  <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+                ) : (
+                  <MessagesSquareIcon className="size-4" />
+                )
+              }
+              title={timelineEmptyStateCopy.title}
+              description={timelineEmptyStateCopy.description}
+            />
+          )
+        }
+      />
+    );
+  }, [
+    composer.addAnnotation,
+    computeLabel,
+    hasNewer,
+    hasOlder,
+    initialLoading,
+    loadRetainedArtifact,
+    loadRetainedScreenshot,
+    loadVideoArtifactPlayback,
+    loadingNewer,
+    loadingOldest,
+    loadingOlder,
+    onJumpToLatest,
+    onJumpToStart,
+    onLoadNewer,
+    onLoadOlder,
+    onMemoryClick,
+    onOpenSession,
+    onReconnect,
+    queueControlState,
+    queueStoppingPreviousAttempt,
+    renderMessageText,
+    resolveProviderLogo,
+    sessionStatus,
+    props.timeline,
+    timelineOptimisticItems,
+    timelineEmptyStateCopy,
+  ]);
 
   return (
     <section
@@ -1289,63 +1495,7 @@ function SessionChatPane(props: {
             />
           ) : null}
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
-            <MessageTimeline
-              className="h-full"
-              items={timelineWithOptimisticSends}
-              status={props.session.status}
-              computeLabel={computeLabel}
-              renderMessageText={renderMessageText}
-              onAnnotate={composer.addAnnotation}
-              onOpenSession={props.onOpenSession}
-              onMemoryClick={props.onMemoryClick}
-              onReconnect={props.onReconnect}
-              resolveProviderLogo={props.resolveProviderLogo}
-              loadRetainedScreenshot={loadRetainedScreenshot}
-              loadRetainedArtifact={loadRetainedArtifact}
-              loadVideoArtifactPlayback={loadVideoArtifactPlayback}
-              hasOlder={props.hasOlder}
-              loadingOlder={props.loadingOlder}
-              onLoadOlder={() => void props.onLoadOlder()}
-              hasNewer={props.hasNewer}
-              loadingNewer={props.loadingNewer}
-              onLoadNewer={() => void props.onLoadNewer()}
-              loadingOldest={props.loadingOldest}
-              onJumpToStart={() => void props.onJumpToStart()}
-              onJumpToLatest={() => void props.onJumpToLatest()}
-              emptyState={
-                props.queue.stoppingPreviousAttempt ? (
-                  <EmptyState
-                    className="min-h-[24rem]"
-                    icon={
-                      <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
-                    }
-                    title={
-                      props.queue.effectiveControl?.state === "paused"
-                        ? "Stopping current work"
-                        : "Stopping previous work"
-                    }
-                    description={
-                      props.queue.effectiveControl?.state === "paused"
-                        ? "Waiting for the current command to stop safely. Queued work stays saved."
-                        : "Your direction is saved. It starts after the previous command stops safely."
-                    }
-                  />
-                ) : props.initialLoading ? (
-                  // History is still fetching — a quiet shimmer, not the
-                  // "waiting for the first step" copy (that's for NEW sessions).
-                  <div className="grid min-h-[24rem] place-items-center text-sm">
-                    <span className="og-shimmer-text font-medium">Loading conversation…</span>
-                  </div>
-                ) : (
-                  <EmptyState
-                    className="min-h-[24rem]"
-                    icon={<MessagesSquareIcon className="size-4" />}
-                    title="Waiting for the first step"
-                    description="The agent's steps will appear here as it works."
-                  />
-                )
-              }
-            />
+            {sessionTimeline}
           </div>
         </>
       )}
@@ -1425,6 +1575,7 @@ function SessionChatPane(props: {
             queue={props.queue}
             composer={terminal ? undefined : composer}
             goal={props.goal}
+            sessionStatus={props.session.status}
             readOnly={terminal}
             agentsSignal={agentsSignal}
             agentsPanel={

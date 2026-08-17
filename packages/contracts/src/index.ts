@@ -6462,6 +6462,44 @@ export const RigVerificationHealth = z.object({
 });
 export type RigVerificationHealth = z.infer<typeof RigVerificationHealth>;
 
+export const RigManagedSandboxImageReadiness = z.object({
+  backend: SandboxBackend,
+  status: z.union([RigProviderImageBuildStatus, z.literal("unprepared")]),
+});
+export type RigManagedSandboxImageReadiness = z.infer<typeof RigManagedSandboxImageReadiness>;
+
+// Lossless list projection for pickers and overview cards. Definition bodies
+// remain available through Rig/getRig; list consumers only need this bounded
+// metadata to render every rig and select its active version.
+export const RigVersionSummary = z.object({
+  id: z.string().uuid(),
+  rigId: z.string().uuid(),
+  version: z.number().int().positive(),
+  image: z.string().nullable(),
+  checkCount: z.number().int().nonnegative(),
+  defaultVariableSetIds: z.array(z.string().uuid()),
+  // Deployment-specific coarse readiness for the managed-sandbox picker. No
+  // provider object identity, definition content, or failure detail crosses
+  // the compact list surface.
+  managedSandboxImage: RigManagedSandboxImageReadiness.nullable().default(null),
+});
+export type RigVersionSummary = z.infer<typeof RigVersionSummary>;
+
+export const RigSummary = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  name: z.string(),
+  description: z.string().nullable(),
+  createdBy: z.string().nullable(),
+  activeVersion: RigVersionSummary.nullable(),
+  activeVersionHealth: RigVerificationHealth.nullable(),
+  versionCount: z.number().int().nonnegative(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type RigSummary = z.infer<typeof RigSummary>;
+
 export const Rig = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),

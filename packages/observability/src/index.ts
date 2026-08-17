@@ -934,15 +934,19 @@ export function logStartupDependencyRetry(
   observability: Observability,
   event: StartupDependencyRetryEvent,
 ): void {
-  observability.warn("Startup dependency connection failed; retrying", {
-    dependency: event.label,
-    attempt: event.attempt,
-    attempts: event.attempts,
-    delayMs: event.delayMs,
-    errorClass: "StartupDependencyError",
-    errorCode: "startup_dependency_retry",
-    origin: "observability",
-  });
+  observability.warn(
+    `Startup dependency failed; retrying: ${event.label} ` +
+      `(attempt ${event.attempt}/${event.attempts}, delay ${event.delayMs} ms)`,
+    {
+      dependency: event.label,
+      attempt: event.attempt,
+      attempts: event.attempts,
+      delayMs: event.delayMs,
+      errorClass: "StartupDependencyError",
+      errorCode: "startup_dependency_retry",
+      origin: "observability",
+    },
+  );
 }
 
 function normalizeLabels(labels: MetricLabels = {}): Record<string, string> {

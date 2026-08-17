@@ -186,15 +186,15 @@ export function resolveRigProviderImageSelection(
   };
 }
 
-export async function settingsWithRigProviderImage(
+export async function resolveRigProviderImageForRun(
   settings: Settings,
   version: RigVersion | null,
   backend: SandboxBackend,
   resolveBinding: typeof resolveModalCheckpointProviderBinding = resolveModalCheckpointProviderBinding,
-): Promise<Settings> {
+): Promise<ReturnType<typeof resolveRigProviderImageSelection>> {
   const image = backend === "modal" ? version?.providerImages.modal : null;
   if (image?.status !== "ready" || !image.providerBindingKeyHash) {
-    return resolveRigProviderImageSelection(settings, version, backend, null).settings;
+    return resolveRigProviderImageSelection(settings, version, backend, null);
   }
   const structural = resolveRigProviderImageSelection(
     settings,
@@ -202,7 +202,7 @@ export async function settingsWithRigProviderImage(
     backend,
     image.providerBindingKeyHash,
   );
-  if (structural.reason !== "selected") return structural.settings;
+  if (structural.reason !== "selected") return structural;
   let currentProviderBindingKeyHash: string | null = null;
   try {
     const binding = await resolveBinding(settings);
@@ -211,8 +211,21 @@ export async function settingsWithRigProviderImage(
     // A provider-native image is an optimization. The exact logical image is
     // still the correct cold-create fallback when provider identity is absent.
   }
-  return resolveRigProviderImageSelection(settings, version, backend, currentProviderBindingKeyHash)
-    .settings;
+  return resolveRigProviderImageSelection(
+    settings,
+    version,
+    backend,
+    currentProviderBindingKeyHash,
+  );
+}
+
+export async function settingsWithRigProviderImage(
+  settings: Settings,
+  version: RigVersion | null,
+  backend: SandboxBackend,
+  resolveBinding: typeof resolveModalCheckpointProviderBinding = resolveModalCheckpointProviderBinding,
+): Promise<Settings> {
+  return (await resolveRigProviderImageForRun(settings, version, backend, resolveBinding)).settings;
 }
 
 export type SessionSandboxRuntime = {

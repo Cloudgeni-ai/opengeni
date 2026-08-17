@@ -465,8 +465,12 @@ export function RootRouteComponent() {
   });
   // Public surfaces render ahead of auth/config gates. `/reset-password` is
   // always public; DEV visual harnesses are public and need no session.
+  // The optimized local performance build deliberately exposes the same
+  // self-contained mock harness without weakening an ordinary production
+  // build's config/auth gate. `vite build --mode performance` is used only by
+  // deterministic browser benchmarks in this repository.
   const isPublicDevHarness =
-    import.meta.env.DEV &&
+    (import.meta.env.DEV || import.meta.env.MODE === "performance") &&
     (pathname === "/dev/composer-chrome" || pathname === "/dev/agent-topology");
   const isPublicAuthRoute = pathname === "/reset-password" || isPublicDevHarness;
   // The @opengeni/sdk client behind every console API call and hook. Auth

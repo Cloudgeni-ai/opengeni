@@ -57,6 +57,8 @@ export interface AuthCalloutDeps {
   settings: Settings;
   callout: NatsCalloutConfig;
   observability?: Observability;
+  /** Integration-only seam. It can shorten, never extend, the production TTL. */
+  testUserJwtTtlSeconds?: number;
 }
 
 /**
@@ -167,6 +169,10 @@ export async function handleAuthorizationRequest(
     connectionInstanceId,
   );
   const nowSeconds = Math.floor(Date.now() / 1000);
+  const userJwtTtlSeconds = Math.min(
+    NATS_USER_JWT_TTL_SECONDS,
+    deps.testUserJwtTtlSeconds ?? NATS_USER_JWT_TTL_SECONDS,
+  );
   const userJwt = mintUserJwt({
     userPublicKey: decoded.userNkey,
     accountSeed: deps.callout.accountSeed,
@@ -179,7 +185,7 @@ export async function handleAuthorizationRequest(
     audienceAccount: deps.callout.accountName,
     // Tie the credential's life to the bearer's remaining life: a revoked/expired
     // enrollment cannot outlive its bearer at the NATS layer either.
-    expiresAtSeconds: Math.min(claims.exp, nowSeconds + NATS_USER_JWT_TTL_SECONDS),
+    expiresAtSeconds: Math.min(claims.exp, nowSeconds + userJwtTtlSeconds),
   });
   const response = mintAuthResponse({
     userPublicKey: decoded.userNkey,

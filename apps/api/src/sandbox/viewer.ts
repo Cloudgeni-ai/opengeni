@@ -20,16 +20,8 @@
 // lease's recorded data_plane_url (null until P4 mints it).
 
 import { createHash } from "node:crypto";
-import {
-  applyGitAuthPointerEnvironment,
-  hasGitCredentialRepositorySelection,
-  hasGitHubRepositorySelection,
-  resolveStreamTokenSecret,
-  sandboxLifecycleTransitionWaitMs,
-  stableSandboxEnvironmentForRun,
-} from "@opengeni/config";
+import { resolveStreamTokenSecret, sandboxLifecycleTransitionWaitMs } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
-import { githubAppBotIdentity } from "@opengeni/github";
 import { type Session, type StreamUrlRotatedPayload } from "@opengeni/contracts";
 import {
   acquireLease,
@@ -37,7 +29,6 @@ import {
   getSandbox,
   getSandboxSessionEnvelope,
   heartbeatLeaseHolder,
-  loadWorkspaceEnvironmentForRun,
   markSandboxProviderReady,
   markWarmLeaseInstanceLost,
   readLease,
@@ -83,6 +74,9 @@ import {
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
 import { establishCachedChannelAHandle } from "./channel-a";
+import { sessionAttachEnvironment } from "./session-environment";
+
+export { sessionAttachEnvironment } from "./session-environment";
 
 /** The minimal services a viewer op needs: the DB + settings (lease cadence +
  *  the sandbox client construction the leaf reads from settings). The bus is
@@ -116,66 +110,6 @@ export type ViewerAttachResult = {
   // (the mint is P4); surfaced here so the shape is stable.
   dataPlaneUrl: string | null;
 };
-
-/**
- * The STABLE run-scoped sandbox environment a COLD box must be created with so
- * that — whether the box is first warmed by an API-direct ATTACH (here) or by the
- * worker TURN — its manifest environment matches the environment the agent later
- * declares for a turn. Without this, an attach-warmed box was created with the
- * BASE allowlist env only (establishSandboxSessionFromEnvelope's
- * collectSandboxEnvironment default), so the next turn's fuller env (git identity
- * + workspace environment + HOME) introduced a delta and the SDK's
- * `validateNoEnvironmentDelta` threw "Live sandbox sessions cannot change manifest
- * environment variables" — the BLOCKING error this fixes.
- *
- * Mirrors the worker turn's STABLE env (config.stableSandboxEnvironmentForRun +
- * the session's attached, decrypted workspace environment + — for a repo-attached
- * session — the stable git-auth POINTERS the turn declares since the token-broker:
- * GIT_ASKPASS / GIT_TERMINAL_PROMPT / bot identity). The pointers carry NO rotating
- * value (the token lives in the box FILE the clone hook seeds), so they are
- * attach-reproducible; omitting them cold-created a box whose env lacked keys the
- * next repo turn's manifest declares → the SDK guard threw "Live sandbox sessions
- * cannot change manifest environment variables" whenever a viewer attach (an open
- * session page) won the cold-create race against the first turn.
- */
-export async function sessionAttachEnvironment(
-  services: ViewerServices,
-  workspaceId: string,
-  session: Session,
-): Promise<Record<string, string>> {
-  const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
-    services.db,
-    services.settings,
-    workspaceId,
-    session.environmentId,
-  );
-  // Build the env with the SESSION's backend, not the deployment default: the
-  // stable base is backend-aware (HOME = the descriptor workspaceRoot, and the
-  // git token-file/askpass pointers derive from HOME), the box is established
-  // with `backendOverride: session.sandboxBackend`, and the worker turn builds
-  // the same env from runSettings.sandboxBackend = the session's backend. An
-  // attach env keyed off the deployment default would cold-create e.g. an e2b
-  // session's box with /workspace-rooted values while its turn declares
-  // /home/user ones — the same guard-killed first turn all over again.
-  const settingsForSession =
-    session.sandboxBackend !== services.settings.sandboxBackend
-      ? { ...services.settings, sandboxBackend: session.sandboxBackend }
-      : services.settings;
-  const environment = stableSandboxEnvironmentForRun(
-    settingsForSession,
-    workspaceEnvironment?.values ?? {},
-    { workspaceId },
-  );
-  if (hasGitCredentialRepositorySelection(session.resources)) {
-    applyGitAuthPointerEnvironment(
-      environment,
-      hasGitHubRepositorySelection(session.resources)
-        ? githubAppBotIdentity(services.settings)
-        : null,
-    );
-  }
-  return environment;
-}
 
 /**
  * Acquire a `viewer` holder on the group lease, spinning up the box IN-PROCESS

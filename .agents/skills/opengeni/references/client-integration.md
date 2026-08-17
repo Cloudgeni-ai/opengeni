@@ -98,6 +98,12 @@ Client UX should distinguish:
 - **Tool providers**: select configured MCP server ids, such as document search or custom enterprise search.
 - **Compute target**: expose only if the product wants users to choose where a session runs; otherwise use deployment defaults. Two distinct axes: a managed **sandbox backend** (a platform-owned ephemeral box; the `sandboxBackend` enum) versus an enrolled **Connected Machine** (user-owned compute addressed by `targetSandboxId` + an optional `workingDir`, run as first-class primary compute — no cloud box behind it, its own git auth, repos not cloned onto it). Do not conflate a **self-hosted deployment** (an operator running the whole OpenGeni service themselves — the `configured` product access mode) with a **Connected Machine** (an end user attaching their own machine as a session's compute, possible inside any deployment, managed or self-hosted). `selfhosted` is only the internal `sandboxBackend` enum value for a Connected Machine; prefer the product term in UI copy.
 
+For rig pickers and list cards, prefer `OpenGeniClient.listRigSummaries()` (the
+`GET /v1/workspaces/:workspaceId/rigs?view=summary` projection). It returns every
+rig in the same order with the active-version metadata needed for selection,
+without transferring setup scripts or check command bodies. `listRigs()` and
+`getRig()` retain the full definition contract.
+
 ## Approvals And Interrupts
 
 Approvals are part of the session event/control loop:

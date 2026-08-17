@@ -5,6 +5,7 @@ import {
   createDb,
   createSession,
   getSessionCodexState,
+  recordSessionActiveCodexCredential,
   setSessionCodexPin,
   type Database,
   type DbClient,
@@ -86,6 +87,43 @@ describe("codex_pin_source (AM-2)", () => {
     const sessionId = await seedSession(ws);
     const state = await getSessionCodexState(db, ws.workspaceId, sessionId);
     expect(state).toEqual({ pinnedCredentialId: null, lastCredentialId: null, pinSource: null });
+  });
+
+  test("recording the unchanged active credential is a true activity no-op", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const sessionId = await seedSession(ws);
+    const accountId = await seedCodexAccount(ws);
+    await recordSessionActiveCodexCredential(db, ws.workspaceId, sessionId, accountId);
+    const [before] = await admin<
+      Array<{ activityRevision: string; updatedAt: Date; workspaceRevision: string }>
+    >`
+      select
+        session.activity_revision::text as "activityRevision",
+        session.updated_at as "updatedAt",
+        revision.revision::text as "workspaceRevision"
+      from sessions as session
+      join workspace_session_activity_revisions as revision
+        on revision.workspace_id = session.workspace_id
+      where session.workspace_id = ${ws.workspaceId} and session.id = ${sessionId}
+    `;
+    await recordSessionActiveCodexCredential(db, ws.workspaceId, sessionId, accountId);
+    const [after] = await admin<
+      Array<{ activityRevision: string; updatedAt: Date; workspaceRevision: string }>
+    >`
+      select
+        session.activity_revision::text as "activityRevision",
+        session.updated_at as "updatedAt",
+        revision.revision::text as "workspaceRevision"
+      from sessions as session
+      join workspace_session_activity_revisions as revision
+        on revision.workspace_id = session.workspace_id
+      where session.workspace_id = ${ws.workspaceId} and session.id = ${sessionId}
+    `;
+    expect(await getSessionCodexState(db, ws.workspaceId, sessionId)).toMatchObject({
+      lastCredentialId: accountId,
+    });
+    expect(after).toEqual(before);
   });
 
   test("default source is 'manual' — the user's in-session switcher", async () => {

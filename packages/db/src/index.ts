@@ -117,6 +117,7 @@ import type {
   WorkspaceRegisteredPack,
   Channel,
   Rig,
+  RigSummary,
   RigProviderImage,
   RigProviderImages,
   RigVersion,
@@ -14192,7 +14193,7 @@ function verificationTimestamp(
 async function loadRigHealthByActiveVersion(
   scopedDb: Database,
   workspaceId: string,
-  activeVersions: RigVersion[],
+  activeVersions: ReadonlyArray<{ id: string }>,
 ): Promise<Map<string, RigVerificationHealth>> {
   const versionIds = activeVersions.map((version) => version.id);
   const healthByVersion: Map<string, RigVerificationHealth> = new Map(
@@ -14384,6 +14385,92 @@ export async function listRigs(db: Database, workspaceId: string): Promise<Rig[]
           ? (healthByVersion.get(activeVersion.id) ?? unknownRigHealth(activeVersion))
           : null,
       );
+    });
+  });
+}
+
+export async function listRigSummaries(
+  db: Database,
+  workspaceId: string,
+  managedSandbox?: {
+    backend: SandboxBackend;
+    supportsImmutableImages: boolean;
+  },
+): Promise<RigSummary[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.rigs)
+      .where(eq(schema.rigs.workspaceId, workspaceId))
+      .orderBy(asc(schema.rigs.createdAt));
+    if (rows.length === 0) {
+      return [];
+    }
+    const activeRows = await scopedDb
+      .select({
+        id: schema.rigVersions.id,
+        rigId: schema.rigVersions.rigId,
+        version: schema.rigVersions.version,
+        image: schema.rigVersions.image,
+        checkCount: sql<number>`jsonb_array_length(${schema.rigVersions.checks})::int`,
+        defaultVariableSetIds: schema.rigVersions.defaultVariableSetIds,
+        providerImages: schema.rigVersions.providerImages,
+      })
+      .from(schema.rigVersions)
+      .where(
+        and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.active, true)),
+      );
+    const activeByRig = new Map(activeRows.map((row) => [row.rigId, row]));
+    const healthByVersion = await loadRigHealthByActiveVersion(scopedDb, workspaceId, activeRows);
+    const countRows = await scopedDb
+      .select({
+        rigId: schema.rigVersions.rigId,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(schema.rigVersions)
+      .where(eq(schema.rigVersions.workspaceId, workspaceId))
+      .groupBy(schema.rigVersions.rigId);
+    const countByRig = new Map(countRows.map((row) => [row.rigId, Number(row.count)]));
+    return rows.map((row) => {
+      const activeRow = activeByRig.get(row.id) ?? null;
+      const activeVersion = activeRow
+        ? {
+            id: activeRow.id,
+            rigId: activeRow.rigId,
+            version: activeRow.version,
+            image: activeRow.image,
+            checkCount: Number(activeRow.checkCount),
+            defaultVariableSetIds: activeRow.defaultVariableSetIds,
+            managedSandboxImage: managedSandbox
+              ? {
+                  backend: managedSandbox.backend,
+                  status:
+                    activeRow.providerImages[managedSandbox.backend]?.status ??
+                    (managedSandbox.supportsImmutableImages
+                      ? ("unprepared" as const)
+                      : ("unsupported" as const)),
+                }
+              : null,
+          }
+        : null;
+      return {
+        id: row.id,
+        accountId: row.accountId,
+        workspaceId: row.workspaceId,
+        name: row.name,
+        description: row.description,
+        createdBy: row.createdBy,
+        activeVersion,
+        activeVersionHealth: activeVersion
+          ? (healthByVersion.get(activeVersion.id) ?? {
+              checkHealth: "unknown" as const,
+              lastVerifiedAt: null,
+            })
+          : null,
+        versionCount: countByRig.get(row.id) ?? 0,
+        createdAt: row.createdAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
+      };
     });
   });
 }
@@ -14767,6 +14854,24 @@ export async function countRigs(db: Database, workspaceId: string): Promise<numb
       .from(schema.rigs)
       .where(eq(schema.rigs.workspaceId, workspaceId));
     return Number(count);
+  });
+}
+
+/**
+ * Serialize workspace rig admission checks with the create they authorize.
+ * The transaction-scoped lock prevents concurrent API requests from all
+ * observing the same pre-create count and exceeding the workspace limit.
+ */
+export async function withRigCreationLock<T>(
+  db: Database,
+  workspaceId: string,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`rig-create:${workspaceId}`}, 0))`,
+    );
+    return await fn(scopedDb);
   });
 }
 
@@ -21445,7 +21550,13 @@ export async function recordSessionActiveCodexCredential(
     await scopedDb
       .update(schema.sessions)
       .set({ codexLastCredentialId: credentialId, updatedAt: new Date() })
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, workspaceId),
+          eq(schema.sessions.id, sessionId),
+          sql`${schema.sessions.codexLastCredentialId} is distinct from ${credentialId}`,
+        ),
+      );
   });
 }
 
@@ -28387,7 +28498,7 @@ export async function getActiveSessionHistoryItemsPaged(
   db: Database,
   workspaceId: string,
   sessionId: string,
-  pageSize = 16,
+  pageSize = 100,
   maximumJsonBytes = ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES,
   maximumRows = ACTIVE_SESSION_HISTORY_MAX_ROWS,
   maximumJsonNodes = ACTIVE_SESSION_HISTORY_MAX_JSON_NODES,
@@ -55687,6 +55798,37 @@ export async function expireSessionInteractionIntervention(
  * events remain associated with their producer in logs but are not admitted to
  * the current durable timeline once the turn row moved generation or terminal.
  */
+export type SessionEventAppendPhase =
+  | "transaction_ready"
+  | "mutation"
+  | "attempt_fence"
+  | "event_write"
+  | "commit";
+
+export type SessionEventAppendPhaseObserver = (input: {
+  phase: SessionEventAppendPhase;
+  durationSeconds: number;
+  persistenceAttempt: number;
+}) => void;
+
+function observeSessionEventAppendPhase(
+  observer: SessionEventAppendPhaseObserver | undefined,
+  phase: SessionEventAppendPhase,
+  startedAt: number,
+  persistenceAttempt: number,
+): void {
+  if (!observer) return;
+  try {
+    observer({
+      phase,
+      durationSeconds: Math.max(0, (performance.now() - startedAt) / 1_000),
+      persistenceAttempt,
+    });
+  } catch {
+    // A diagnostic sink must never affect durable event persistence.
+  }
+}
+
 export async function appendSessionEventsForTurnAttempt(
   db: Database,
   workspaceId: string,
@@ -55695,6 +55837,7 @@ export async function appendSessionEventsForTurnAttempt(
   executionGeneration: number,
   attemptId: string,
   inputs: AppendEventInput[],
+  observePhase?: SessionEventAppendPhaseObserver,
 ): Promise<{ events: SessionEvent[]; accepted: boolean }> {
   if (inputs.length === 0) return { events: [], accepted: true };
   const result = await mutateAndAppendSessionEventsForTurnAttempt(
@@ -55706,6 +55849,7 @@ export async function appendSessionEventsForTurnAttempt(
     attemptId,
     inputs,
     async () => true,
+    observePhase,
   );
   return { events: result.events, accepted: result.accepted };
 }
@@ -55724,6 +55868,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
   attemptId: string,
   inputs: AppendEventInput[],
   mutate: (tx: Database) => Promise<boolean>,
+  observePhase?: SessionEventAppendPhaseObserver,
 ): Promise<{
   events: SessionEvent[];
   accepted: boolean;
@@ -55741,182 +55886,212 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
     correlationId: crypto.randomUUID(),
   };
   const persist = async (activityGateOpen: boolean) =>
-    await runIdempotentPersistenceTransaction(
-      persistence,
-      async () =>
-        await withWorkspaceSessionEventActivityRls(
-          db,
-          workspaceId,
-          activityGateOpen,
-          async (tx) => {
-            const mutationApplied = await mutate(tx);
-            if (!mutationApplied) {
-              return { events: [], accepted: false, mutationApplied: false };
+    await runIdempotentPersistenceTransaction(persistence, async (persistenceAttempt) => {
+      const transactionStartedAt = performance.now();
+      let transactionBodyFinishedAt = transactionStartedAt;
+      const result = await withWorkspaceSessionEventActivityRls(
+        db,
+        workspaceId,
+        activityGateOpen,
+        async (tx) => {
+          observeSessionEventAppendPhase(
+            observePhase,
+            "transaction_ready",
+            transactionStartedAt,
+            persistenceAttempt,
+          );
+          const mutationStartedAt = performance.now();
+          const mutationApplied = await mutate(tx);
+          observeSessionEventAppendPhase(
+            observePhase,
+            "mutation",
+            mutationStartedAt,
+            persistenceAttempt,
+          );
+          if (!mutationApplied) {
+            transactionBodyFinishedAt = performance.now();
+            return { events: [], accepted: false, mutationApplied: false };
+          }
+          const fenceStartedAt = performance.now();
+          const fence = await lockTurnAttemptWriteFenceTx(tx, {
+            workspaceId,
+            sessionId,
+            turnId,
+            executionGeneration,
+            attemptId,
+          });
+          observeSessionEventAppendPhase(
+            observePhase,
+            "attempt_fence",
+            fenceStartedAt,
+            persistenceAttempt,
+          );
+          const session = fence.session;
+          if (!session) throw new Error(`Session not found: ${sessionId}`);
+          if (!activityGateOpen && !fence.allowed) {
+            throw new SessionActivityGateEscalation();
+          }
+          const eventWriteStartedAt = performance.now();
+          let sequence = session.lastSequence;
+          const now = new Date();
+          const usageSourceKey = (input: AppendEventInput): string | null => {
+            if (
+              input.type !== "agent.model.usage" ||
+              !input.payload ||
+              typeof input.payload !== "object"
+            ) {
+              return null;
             }
-            const fence = await lockTurnAttemptWriteFenceTx(tx, {
-              workspaceId,
-              sessionId,
-              turnId,
-              executionGeneration,
-              attemptId,
-            });
-            const session = fence.session;
-            if (!session) throw new Error(`Session not found: ${sessionId}`);
-            if (!activityGateOpen && !fence.allowed) {
-              throw new SessionActivityGateEscalation();
-            }
-            let sequence = session.lastSequence;
-            const now = new Date();
-            const usageSourceKey = (input: AppendEventInput): string | null => {
-              if (
-                input.type !== "agent.model.usage" ||
-                !input.payload ||
-                typeof input.payload !== "object"
-              ) {
-                return null;
-              }
-              const value = (input.payload as Record<string, unknown>).sourceKey;
-              return typeof value === "string" && value.length > 0 ? value : null;
-            };
-            const incomingUsageKeys = [
-              ...new Set(
-                inputs.map(usageSourceKey).filter((value): value is string => value !== null),
-              ),
-            ];
-            const existingUsageRows =
-              fence.allowed && incomingUsageKeys.length > 0
-                ? await tx
-                    .select({
-                      id: schema.sessionEvents.id,
-                      payload: schema.sessionEvents.payload,
-                    })
-                    .from(schema.sessionEvents)
-                    .where(
-                      and(
-                        eq(schema.sessionEvents.workspaceId, workspaceId),
-                        eq(schema.sessionEvents.sessionId, sessionId),
-                        eq(schema.sessionEvents.turnId, turnId),
-                        eq(schema.sessionEvents.type, "agent.model.usage"),
-                        eq(schema.sessionEvents.turnAssociation, "current"),
-                        inArray(
-                          sql<string>`${schema.sessionEvents.payload} ->> 'sourceKey'`,
-                          incomingUsageKeys,
-                        ),
+            const value = (input.payload as Record<string, unknown>).sourceKey;
+            return typeof value === "string" && value.length > 0 ? value : null;
+          };
+          const incomingUsageKeys = [
+            ...new Set(
+              inputs.map(usageSourceKey).filter((value): value is string => value !== null),
+            ),
+          ];
+          const existingUsageRows =
+            fence.allowed && incomingUsageKeys.length > 0
+              ? await tx
+                  .select({
+                    id: schema.sessionEvents.id,
+                    payload: schema.sessionEvents.payload,
+                  })
+                  .from(schema.sessionEvents)
+                  .where(
+                    and(
+                      eq(schema.sessionEvents.workspaceId, workspaceId),
+                      eq(schema.sessionEvents.sessionId, sessionId),
+                      eq(schema.sessionEvents.turnId, turnId),
+                      eq(schema.sessionEvents.type, "agent.model.usage"),
+                      eq(schema.sessionEvents.turnAssociation, "current"),
+                      inArray(
+                        sql<string>`${schema.sessionEvents.payload} ->> 'sourceKey'`,
+                        incomingUsageKeys,
                       ),
-                    )
-                : [];
-            const canonicalUsageIds = new Map<string, string>();
-            for (const row of existingUsageRows) {
-              const value =
-                row.payload && typeof row.payload === "object"
-                  ? (row.payload as Record<string, unknown>).sourceKey
-                  : null;
-              if (typeof value === "string" && value.length > 0) {
-                canonicalUsageIds.set(value, row.id);
-              }
-            }
-            const values = inputs.map((input) => {
-              const id = crypto.randomUUID();
-              if (!fence.allowed) {
-                return {
-                  id,
-                  accountId: session.accountId,
-                  workspaceId,
-                  sessionId,
-                  sequence: ++sequence,
-                  type: "turn.event.rejected_late",
-                  payload: {
-                    rejectedType: input.type,
-                    rejectedPayload: input.payload ?? {},
-                    reason: fence.reason,
-                    expectedExecutionGeneration: executionGeneration,
-                    rejectedAttemptId: attemptId,
-                    currentExecutionGeneration: fence.turn?.executionGeneration ?? null,
-                    currentAttemptId: fence.turn?.activeAttemptId ?? null,
-                    currentTurnStatus: fence.turn?.status ?? null,
-                    currentActiveTurnId: session.activeTurnId,
-                  },
-                  clientEventId: input.clientEventId ?? null,
-                  turnId,
-                  turnGeneration: executionGeneration,
-                  turnAttemptId: attemptId,
-                  turnAssociation: "late_rejected" as const,
-                  duplicateOfEventId: null,
-                  duplicateReason: null,
-                  producerId: input.producerId ?? null,
-                  producerSeq: input.producerSeq ?? null,
-                  occurredAt: input.occurredAt ?? now,
-                };
-              }
-              const sourceKey = usageSourceKey(input);
-              const duplicateOfEventId = sourceKey
-                ? (canonicalUsageIds.get(sourceKey) ?? null)
+                    ),
+                  )
+              : [];
+          const canonicalUsageIds = new Map<string, string>();
+          for (const row of existingUsageRows) {
+            const value =
+              row.payload && typeof row.payload === "object"
+                ? (row.payload as Record<string, unknown>).sourceKey
                 : null;
-              if (sourceKey && !duplicateOfEventId) {
-                canonicalUsageIds.set(sourceKey, id);
-              }
+            if (typeof value === "string" && value.length > 0) {
+              canonicalUsageIds.set(value, row.id);
+            }
+          }
+          const values = inputs.map((input) => {
+            const id = crypto.randomUUID();
+            if (!fence.allowed) {
               return {
                 id,
                 accountId: session.accountId,
                 workspaceId,
                 sessionId,
                 sequence: ++sequence,
-                type: input.type,
-                payload: input.payload ?? {},
+                type: "turn.event.rejected_late",
+                payload: {
+                  rejectedType: input.type,
+                  rejectedPayload: input.payload ?? {},
+                  reason: fence.reason,
+                  expectedExecutionGeneration: executionGeneration,
+                  rejectedAttemptId: attemptId,
+                  currentExecutionGeneration: fence.turn?.executionGeneration ?? null,
+                  currentAttemptId: fence.turn?.activeAttemptId ?? null,
+                  currentTurnStatus: fence.turn?.status ?? null,
+                  currentActiveTurnId: session.activeTurnId,
+                },
                 clientEventId: input.clientEventId ?? null,
                 turnId,
                 turnGeneration: executionGeneration,
                 turnAttemptId: attemptId,
-                turnAssociation: duplicateOfEventId ? ("duplicate" as const) : ("current" as const),
-                duplicateOfEventId,
-                duplicateReason: duplicateOfEventId ? "duplicate_provider_response_usage" : null,
+                turnAssociation: "late_rejected" as const,
+                duplicateOfEventId: null,
+                duplicateReason: null,
                 producerId: input.producerId ?? null,
                 producerSeq: input.producerSeq ?? null,
                 occurredAt: input.occurredAt ?? now,
               };
-            });
-            const inserted = await tx
-              .insert(schema.sessionEvents)
-              .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
-              .returning();
-            if (fence.allowed) {
-              await projectSessionRealtimeDelegationProgressInTransaction(
-                tx as unknown as Database,
-                {
-                  accountId: session.accountId,
-                  workspaceId,
-                  sessionId,
-                  turnId,
-                  events: inserted.map((event) => ({
-                    id: event.id,
-                    sequence: event.sequence,
-                    type: event.type,
-                    payload: event.payload,
-                  })),
-                  now,
-                },
-              );
             }
-            await tx
-              .update(schema.sessions)
-              .set({
-                lastSequence: sequence,
-                ...(sessionEventTypesAdvanceActivity(values) ? { updatedAt: now } : {}),
-              })
-              .where(
-                and(
-                  eq(schema.sessions.workspaceId, workspaceId),
-                  eq(schema.sessions.id, sessionId),
-                ),
-              );
+            const sourceKey = usageSourceKey(input);
+            const duplicateOfEventId = sourceKey
+              ? (canonicalUsageIds.get(sourceKey) ?? null)
+              : null;
+            if (sourceKey && !duplicateOfEventId) {
+              canonicalUsageIds.set(sourceKey, id);
+            }
             return {
-              events: inserted.map(mapEvent),
-              accepted: fence.allowed,
-              mutationApplied: true,
+              id,
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              sequence: ++sequence,
+              type: input.type,
+              payload: input.payload ?? {},
+              clientEventId: input.clientEventId ?? null,
+              turnId,
+              turnGeneration: executionGeneration,
+              turnAttemptId: attemptId,
+              turnAssociation: duplicateOfEventId ? ("duplicate" as const) : ("current" as const),
+              duplicateOfEventId,
+              duplicateReason: duplicateOfEventId ? "duplicate_provider_response_usage" : null,
+              producerId: input.producerId ?? null,
+              producerSeq: input.producerSeq ?? null,
+              occurredAt: input.occurredAt ?? now,
             };
-          },
-        ),
-    );
+          });
+          const inserted = await tx
+            .insert(schema.sessionEvents)
+            .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
+            .returning();
+          if (fence.allowed) {
+            await projectSessionRealtimeDelegationProgressInTransaction(tx as unknown as Database, {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              turnId,
+              events: inserted.map((event) => ({
+                id: event.id,
+                sequence: event.sequence,
+                type: event.type,
+                payload: event.payload,
+              })),
+              now,
+            });
+          }
+          await tx
+            .update(schema.sessions)
+            .set({
+              lastSequence: sequence,
+              ...(sessionEventTypesAdvanceActivity(values) ? { updatedAt: now } : {}),
+            })
+            .where(
+              and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
+            );
+          observeSessionEventAppendPhase(
+            observePhase,
+            "event_write",
+            eventWriteStartedAt,
+            persistenceAttempt,
+          );
+          transactionBodyFinishedAt = performance.now();
+          return {
+            events: inserted.map(mapEvent),
+            accepted: fence.allowed,
+            mutationApplied: true,
+          };
+        },
+      );
+      observeSessionEventAppendPhase(
+        observePhase,
+        "commit",
+        transactionBodyFinishedAt,
+        persistenceAttempt,
+      );
+      return result;
+    });
   try {
     return await persist(initiallyAdvancesActivity);
   } catch (error) {

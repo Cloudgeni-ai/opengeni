@@ -60,10 +60,15 @@ export type AsyncListState<T> = {
  */
 export function usePolledValue<T>(
   load: (signal?: AbortSignal) => Promise<T>,
-  options: { pollIntervalMs?: number | undefined; enabled?: boolean | undefined } = {},
+  options: {
+    pollIntervalMs?: number | undefined;
+    enabled?: boolean | undefined;
+    isEqual?: ((previous: T, next: T) => boolean) | undefined;
+  } = {},
 ): AsyncListState<T> {
   const enabled = options.enabled ?? true;
   const pollIntervalMs = options.pollIntervalMs;
+  const isEqual = options.isEqual;
   const pageLive = usePageLiveActivity();
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(enabled);
@@ -106,7 +111,9 @@ export function usePolledValue<T>(
           activeLoadRef.current === load &&
           !requestAbort.signal.aborted
         ) {
-          setData(result);
+          setData((previous) =>
+            previous !== null && isEqual?.(previous, result) ? previous : result,
+          );
           setError(null);
           setLoading(false);
         }
@@ -126,7 +133,7 @@ export function usePolledValue<T>(
     })();
     inFlightRef.current = { load, promise };
     return promise;
-  }, [load]);
+  }, [isEqual, load]);
 
   const refresh = useCallback((): Promise<void> => {
     const existing = inFlightRef.current;
@@ -190,6 +197,11 @@ export function usePolledValue<T>(
     error: identityMatches ? error : null,
     refresh,
   };
+}
+
+/** Equality for values that crossed an API JSON boundary. */
+export function equalJsonValue<T>(previous: T, next: T): boolean {
+  return JSON.stringify(previous) === JSON.stringify(next);
 }
 
 export type MutationState = {

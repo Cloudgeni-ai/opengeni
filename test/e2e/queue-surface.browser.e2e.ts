@@ -546,6 +546,133 @@ describe("queue surface browser acceptance", () => {
     await readOnlyContext.close();
   }, 30_000);
 
+  test("slow queue mutations acknowledge immediately without hiding or inventing prompts", async () => {
+    const cases = [
+      {
+        kind: "move",
+        status: "Saving new position…",
+        trigger: async (page: Page) => {
+          const handle = page.getByRole("button", {
+            name: "Reorder queued prompt 1",
+            exact: true,
+          });
+          await handle.focus();
+          await page.keyboard.press("Space");
+          await page.keyboard.press("ArrowDown");
+          await page.keyboard.press("Space");
+        },
+      },
+      {
+        kind: "edit",
+        status: "Moving to composer…",
+        trigger: async (page: Page) => {
+          await page
+            .getByRole("button", { name: "More actions for queued prompt 1", exact: true })
+            .click();
+          await page.getByRole("menuitem", { name: "Edit in composer", exact: true }).click();
+        },
+      },
+      {
+        kind: "steer",
+        status: "Changing direction…",
+        trigger: async (page: Page) => {
+          await page.getByRole("button", { name: "Steer queued prompt 2", exact: true }).click();
+        },
+      },
+      {
+        kind: "delete",
+        status: "Deleting…",
+        trigger: async (page: Page) => {
+          await page.getByRole("button", { name: "Delete queued prompt 1", exact: true }).click();
+        },
+      },
+    ] as const;
+
+    for (const mutation of cases) {
+      const context = await browser.newContext({
+        viewport: { width: 375, height: 812 },
+        hasTouch: true,
+        isMobile: true,
+        reducedMotion: "reduce",
+      });
+      try {
+        const page = await context.newPage();
+        const diagnostics = observePageFailures(page);
+        await page.goto(`${baseUrl}/queue.html?count=3&theme=dark&delayMs=1200`, {
+          waitUntil: "networkidle",
+        });
+        await page.getByRole("button", { name: "3 queued prompts", exact: true }).click();
+        const startedAt = performance.now();
+        await mutation.trigger(page);
+        const pending = page.getByTestId(`queue-mutation-${mutation.kind}`);
+        await pending.waitFor();
+        const feedbackMs = performance.now() - startedAt;
+        expect(await pending.textContent()).toContain(mutation.status);
+        expect(feedbackMs).toBeLessThan(250);
+        // The client may project order, but it never removes a prompt before
+        // the server accepts edit/delete/steer, and a move retains all members.
+        expect(await page.locator("[data-queue-turn-id]").count()).toBe(3);
+        expect(
+          await page.locator("[data-queue-harness]").getAttribute("data-pending-mutation-count"),
+        ).toBe("1");
+        await pending.waitFor({ state: "detached", timeout: 5_000 });
+        expect(
+          await page.locator("[data-queue-harness]").getAttribute("data-pending-mutation-count"),
+        ).toBe("0");
+        expect(await page.locator("[data-queue-turn-id]").count()).toBe(
+          mutation.kind === "edit" || mutation.kind === "delete" ? 2 : 3,
+        );
+        expect(diagnostics).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    }
+
+    const rejectedContext = await browser.newContext({
+      viewport: { width: 375, height: 812 },
+      hasTouch: true,
+      isMobile: true,
+      reducedMotion: "reduce",
+    });
+    try {
+      const page = await rejectedContext.newPage();
+      await page.goto(`${baseUrl}/queue.html?count=3&theme=dark&delayMs=800&failMutation=move`, {
+        waitUntil: "networkidle",
+      });
+      await page.getByRole("button", { name: "3 queued prompts", exact: true }).click();
+      const rows = page.locator("[data-queue-turn-id]");
+      const canonical = await rows.evaluateAll((elements) =>
+        elements.map((element) => element.getAttribute("data-queue-turn-id")),
+      );
+      const handle = page.getByRole("button", {
+        name: "Reorder queued prompt 1",
+        exact: true,
+      });
+      await handle.focus();
+      await page.keyboard.press("Space");
+      await page.keyboard.press("ArrowDown");
+      await page.keyboard.press("Space");
+      await page.getByTestId("queue-mutation-move").waitFor();
+      expect(await rows.count()).toBe(3);
+      expect(
+        await rows.evaluateAll((elements) =>
+          elements.map((element) => element.getAttribute("data-queue-turn-id")),
+        ),
+      ).toEqual([canonical[1], canonical[0], canonical[2]]);
+      await page.getByRole("alert").waitFor({ timeout: 5_000 });
+      expect(
+        await rows.evaluateAll((elements) =>
+          elements.map((element) => element.getAttribute("data-queue-turn-id")),
+        ),
+      ).toEqual(canonical);
+      expect(await page.getByRole("alert").textContent()).toContain(
+        "Server rejected delayed move mutation",
+      );
+    } finally {
+      await rejectedContext.close();
+    }
+  }, 30_000);
+
   test("portaled actions retain a 44px coarse-pointer target at every acceptance width", async () => {
     for (const viewport of viewports) {
       const context = await browser.newContext({ viewport, hasTouch: true });

@@ -51,6 +51,7 @@ export default defineConfig({
         browser: resolve(__dirname, "browser.html"),
         computer: resolve(__dirname, "computer.html"),
         composerResponsive: resolve(__dirname, "composer-responsive.html"),
+        composerLatency: resolve(__dirname, "composer-latency.html"),
       },
     },
   },

@@ -2,6 +2,7 @@ import { CapabilityPack } from "@opengeni/contracts";
 import { getWorkspace, listInstalledPortableSkills, type Database } from "@opengeni/db";
 import {
   legacySandboxRuntimeFromPacks,
+  mergeRigDefaultVariableSetEnvironment,
   packInstallationUsesLegacyRuntime,
   resolveWorkspaceLegacyRuntimePacks,
 } from "@opengeni/core";
@@ -12,13 +13,14 @@ import {
   type RuntimeSkillArtifact,
 } from "@opengeni/runtime";
 export {
+  resolveRigProviderImageForRun,
   resolveRigProviderImageSelection,
   rigProviderImageSourceImage,
   settingsWithPackSandboxImage,
   settingsWithRigImage,
   settingsWithRigProviderImage,
 } from "./sandbox-images";
-export { packInstallationUsesLegacyRuntime };
+export { mergeRigDefaultVariableSetEnvironment, packInstallationUsesLegacyRuntime };
 
 /**
  * Legacy pack-scoped runtime compatibility. V2 Pack installations own ordinary
@@ -164,17 +166,3 @@ export async function resolveWorkspaceAgentInstructions(
  * the settings pass through untouched, so deployments without packs keep the
  * global OPENGENI_DOCKER_IMAGE / OPENGENI_MODAL_IMAGE_REF behavior exactly.
  */
-/**
- * Layers the rig version's default variable sets BELOW the session's own set:
- * the session's values WIN on any key collision (explicit precedence). Both maps
- * are already the decrypted-and-merged values (rig defaults merged in listed
- * order upstream). Pure and deterministic — given the same inputs it returns the
- * same env, which is what keeps a session's box-manifest env stable across turns
- * (the rig version is frozen per session, so its default-set list is fixed).
- */
-export function mergeRigDefaultVariableSetEnvironment(
-  rigDefaultValues: Record<string, string>,
-  sessionValues: Record<string, string>,
-): Record<string, string> {
-  return { ...rigDefaultValues, ...sessionValues };
-}

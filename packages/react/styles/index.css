@@ -448,6 +448,50 @@
   scrollbar-color: var(--og-color-border-strong) transparent;
 }
 
+/* Compact single-action chrome paints its Lucide-equivalent glyph without an
+   extra SVG/path subtree. Queue rows use visible text actions instead. */
+.og-queue-icon-action::before {
+  content: "";
+  display: block;
+  width: 0.75rem;
+  height: 0.75rem;
+  flex: none;
+  background-color: currentColor;
+  -webkit-mask: var(--_og-queue-action-icon) center / contain no-repeat;
+  mask: var(--_og-queue-action-icon) center / contain no-repeat;
+}
+
+.og-queue-icon-action[data-queue-action-icon="up"] {
+  --_og-queue-action-icon: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCcgZmlsbD0nbm9uZScgc3Ryb2tlPSdibGFjaycgc3Ryb2tlLXdpZHRoPScyJyBzdHJva2UtbGluZWNhcD0ncm91bmQnIHN0cm9rZS1saW5lam9pbj0ncm91bmQnPjxwYXRoIGQ9Im01IDEyIDctNyA3IDciLz48cGF0aCBkPSJNMTIgMTlWNSIvPjwvc3ZnPg==");
+}
+
+.og-queue-icon-action[data-queue-action-icon="down"] {
+  --_og-queue-action-icon: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCcgZmlsbD0nbm9uZScgc3Ryb2tlPSdibGFjaycgc3Ryb2tlLXdpZHRoPScyJyBzdHJva2UtbGluZWNhcD0ncm91bmQnIHN0cm9rZS1saW5lam9pbj0ncm91bmQnPjxwYXRoIGQ9Ik0xMiA1djE0Ii8+PHBhdGggZD0ibTE5IDEyLTcgNy03LTciLz48L3N2Zz4=");
+}
+
+.og-queue-icon-action[data-queue-action-icon="steer"] {
+  --_og-queue-action-icon: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCcgZmlsbD0nbm9uZScgc3Ryb2tlPSdibGFjaycgc3Ryb2tlLXdpZHRoPScyJyBzdHJva2UtbGluZWNhcD0ncm91bmQnIHN0cm9rZS1saW5lam9pbj0ncm91bmQnPjxwYXRoIGQ9Ik0xNS45MTQgNGExLjUgMS41IDAgMDAtMi40NzQtMS41NjFsLTkgOUExLjUgMS41IDAgMDA1LjUgMTRoNC4wMDJhLjUuNSAwIDAxLjQ3MS42NjZMOC4wODYgMjBhMS41IDEuNSAwIDAwMi40NzUgMS41Nmw5LTlBMS41IDEuNSAwIDAwMTguNSAxMGgtMy45OTdhLjUuNSAwIDAxLS40NzItLjY2N3oiLz48L3N2Zz4=");
+}
+
+.og-queue-icon-action[data-queue-action-icon="edit"] {
+  --_og-queue-action-icon: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCcgZmlsbD0nbm9uZScgc3Ryb2tlPSdibGFjaycgc3Ryb2tlLXdpZHRoPScyJyBzdHJva2UtbGluZWNhcD0ncm91bmQnIHN0cm9rZS1saW5lam9pbj0ncm91bmQnPjxwYXRoIGQ9Ik0yMS4xNzQgNi44MTJhMSAxIDAgMCAwLTMuOTg2LTMuOTg3TDMuODQyIDE2LjE3NGEyIDIgMCAwIDAtLjUuODNsLTEuMzIxIDQuMzUyYS41LjUgMCAwIDAgLjYyMy42MjJsNC4zNTMtMS4zMmEyIDIgMCAwIDAgLjgzLS40OTd6Ii8+PHBhdGggZD0ibTE1IDUgNCA0Ii8+PC9zdmc+");
+}
+
+.og-queue-icon-action[data-queue-action-icon="delete"] {
+  --_og-queue-action-icon: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAyNCAyNCcgZmlsbD0nbm9uZScgc3Ryb2tlPSdibGFjaycgc3Ryb2tlLXdpZHRoPScyJyBzdHJva2UtbGluZWNhcD0ncm91bmQnIHN0cm9rZS1saW5lam9pbj0ncm91bmQnPjxwYXRoIGQ9Ik0xMCAxMXY2Ii8+PHBhdGggZD0iTTE0IDExdjYiLz48cGF0aCBkPSJNMTkgNnYxNGEyIDIgMCAwIDEtMiAySDdhMiAyIDAgMCAxLTItMlY2Ii8+PHBhdGggZD0iTTMgNmgxOCIvPjxwYXRoIGQ9Ik04IDZWNGEyIDIgMCAwIDEgMi0yaDRhMiAyIDAgMCAxIDIgMnYyIi8+PC9zdmc+");
+}
+
+.og-queue-icon-action[data-queue-action-pending="true"]::before {
+  box-sizing: border-box;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 9999px;
+  background: transparent;
+  -webkit-mask: none;
+  mask: none;
+  animation: og-spin 0.9s linear infinite;
+}
+
 /* The machine popover stays mounted so its trigger's `aria-controls` always
    resolves. Keep Radix's positioning wrapper measurable while closed, but
    remove the entire fixed layer from painting, hit testing, and the a11y tree.

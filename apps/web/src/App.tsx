@@ -349,7 +349,9 @@ const routeTree = rootRoute.addChildren([
   billingReturnRoute,
   deviceRoute,
   resetPasswordRoute,
-  ...(import.meta.env.DEV ? [composerChromeGalleryRoute, agentTopologyPreviewRoute] : []),
+  ...(import.meta.env.DEV || import.meta.env.MODE === "performance"
+    ? [composerChromeGalleryRoute, agentTopologyPreviewRoute]
+    : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,

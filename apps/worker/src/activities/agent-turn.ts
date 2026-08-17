@@ -283,6 +283,7 @@ import {
   assertSessionAllowsProductModel,
   defaultSessionMcpServerIds,
   directPersonalConnectionSubjectId,
+  loadRigDefaultVariableSetEnvironment,
   rigProviderImageContentHash,
   resolveCodexAppsCredentialIdForRun,
   withFrozenPersonalConnectionDelegations,
@@ -333,11 +334,11 @@ import { withFirstPartyTools } from "./goals";
 import {
   mergeRigDefaultVariableSetEnvironment,
   rigProviderImageSourceImage,
+  resolveRigProviderImageForRun,
   resolveWorkspacePackRuntime,
   resolveWorkspaceInstalledSkillRuntime,
   settingsWithPackSandboxImage,
   settingsWithRigImage,
-  settingsWithRigProviderImage,
 } from "./packs";
 import { deliverFailedChildTurnToParent } from "./parent-wake";
 import {
@@ -393,6 +394,7 @@ import {
   recordModelRequestPhase,
   recordCompanyBrainContributions,
   recordSessionEventAppendLatency,
+  recordSessionEventAppendPhaseLatency,
   recordSessionEventPublishLatency,
   recordTurnSandboxEstablishPolicy,
   recordTurnStartupPhase,
@@ -464,6 +466,7 @@ import {
   type LatencyMode,
   type ResourceRef,
   type RetainedArtifactMetadata,
+  type SandboxOs,
   type MediaGenerationResult,
   type SessionEvent,
   type SessionEventType,
@@ -3226,6 +3229,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // routing proxy). Kept as a fallback finalizer; the routing proxy normally
     // aggregates it together with every machine reached after a mid-turn swap.
     let machinePrimarySession: import("@opengeni/runtime").SelfhostedSession | null = null;
+    let machinePrimaryOs: SandboxOs | null = null;
     let lazyOwnedSandbox: EstablishedSandboxSession | null = null;
     let turnSandboxProvisioner: TurnSandboxProvisioner<ResumedTurnSandbox> | null = null;
     // The UN-PROXIED established box session, captured BEFORE wrapTurnBoxWithRouting.
@@ -4374,6 +4378,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               recordSessionEventAppendLatency(observability, {
                 durationSeconds,
               }),
+            onAppendPhase: ({ phase, durationSeconds }) =>
+              recordSessionEventAppendPhaseLatency(observability, {
+                phase,
+                durationSeconds,
+              }),
             onPublish: ({ durationSeconds }) =>
               recordSessionEventPublishLatency(observability, {
                 durationSeconds,
@@ -5101,13 +5110,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
           if (effectiveCodexCredentialId) {
             const priorAccountId = sessionCodex?.lastCredentialId ?? null;
-            await recordSessionActiveCodexCredential(
-              db,
-              input.workspaceId,
-              input.sessionId,
-              effectiveCodexCredentialId,
-            );
             if (priorAccountId !== effectiveCodexCredentialId) {
+              await recordSessionActiveCodexCredential(
+                db,
+                input.workspaceId,
+                input.sessionId,
+                effectiveCodexCredentialId,
+              );
               const rotated = rotationDecision.kind === "active" && rotationDecision.moved;
               await publish([
                 {
@@ -5453,11 +5462,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ),
         rigVersion?.image ?? null,
       );
-      const providerImageSettings = await settingsWithRigProviderImage(
+      const providerImageSelection = await resolveRigProviderImageForRun(
         logicalSandboxSettings,
         rigVersion,
         turn.sandboxBackend,
       );
+      const providerImageSettings = providerImageSelection.settings;
+      const verifiedRigProviderImage =
+        providerImageSelection.reason === "selected"
+          ? (providerImageSelection.imageId ?? undefined)
+          : undefined;
       const baseRunSettings = {
         // IMAGE PRECEDENCE: rig > pre-V2 Pack compatibility > deployment.
         // resolveWorkspacePackRuntime returns no image for V2 Pack rows, so
@@ -6161,21 +6175,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // fixed for the session's life — the merged manifest env is therefore stable
       // across the session's turns (the same guarantee the session's own variable
       // set already relies on), keeping validateNoEnvironmentDelta empty.
-      const rigDefaultEnvironmentValues: Record<string, string> = {};
-      for (const rigDefaultVariableSetId of rigVersion?.defaultVariableSetIds ?? []) {
-        const rigDefaultSet = await waitForTurnOperation(
-          loadWorkspaceEnvironmentForRunWithCredentials(
-            db,
-            runSettings,
-            connectionScope,
-            rigDefaultVariableSetId,
-            connectionCredentials?.sandboxSecrets,
+      const rigDefaultEnvironmentValues = await loadRigDefaultVariableSetEnvironment(
+        rigVersion?.defaultVariableSetIds ?? [],
+        async (rigDefaultVariableSetId) =>
+          await waitForTurnOperation(
+            loadWorkspaceEnvironmentForRunWithCredentials(
+              db,
+              runSettings,
+              connectionScope,
+              rigDefaultVariableSetId,
+              connectionCredentials?.sandboxSecrets,
+            ),
+            cancellationSignal,
+            undefined,
           ),
-          cancellationSignal,
-          undefined,
-        );
-        Object.assign(rigDefaultEnvironmentValues, rigDefaultSet?.values ?? {});
-      }
+      );
       // Session set wins collisions with the rig defaults (explicit precedence).
       const sandboxWorkspaceEnvironmentValues = mergeRigDefaultVariableSetEnvironment(
         rigDefaultEnvironmentValues,
@@ -6858,6 +6872,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               input.workspaceId,
               activeSandboxRecord!.enrollmentId!,
             );
+            machinePrimaryOs = machineEnrollment?.os ?? null;
             const machineOpStream =
               settings.agentOpStreamEnabled === true && machineEnrollment?.opStream === true;
             const established = await establishSelfhostedTurnSession(
@@ -7962,6 +7977,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                             ),
                             definition: rigVersion,
                           }),
+                          ...(verifiedRigProviderImage
+                            ? { verifiedProviderImageId: verifiedRigProviderImage }
+                            : {}),
                         },
                       }
                     : {}),
@@ -8515,6 +8533,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : "disabled";
         try {
           const boxInstanceId = resolvedSandbox.established.instanceId;
+          const fileMaterializationBackend = resolvedSandbox.established.backendId;
           // Managed boxes are immutable platform state, so their durable lease can
           // memoize successful downloads. A connected machine is user-owned: files
           // can be changed or removed between turns, so verify/materialize every
@@ -8548,7 +8567,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     onRuntimeEvent: async (event) => {
                       await publish!([{ type: event.type, payload: event.payload }], true);
                     },
+                    onRuntimeEvents: async (events) => {
+                      await publish!(
+                        events.map((event) => ({ type: event.type, payload: event.payload })),
+                        true,
+                      );
+                    },
                     ...(runAs ? { runAs } : {}),
+                    ...(fileMaterializationBackend === "selfhosted" &&
+                    (machinePrimaryOs === "linux" || machinePrimaryOs === "macos")
+                      ? { batchCommands: true, maxConcurrency: 4 }
+                      : {}),
                     ...(toolCancellationFenceRef.current
                       ? {
                           commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(

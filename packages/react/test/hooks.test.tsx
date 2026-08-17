@@ -20,6 +20,8 @@ import type {
   SessionMcpApprovalPolicy,
   SessionMcpServerMetadata,
   SessionTurn,
+  Rig,
+  RigSummary,
   WorkspaceEnvironment,
 } from "@opengeni/sdk";
 import { registerDom, renderHook, flush } from "./render-hook";
@@ -36,10 +38,102 @@ import { useWorkspaceSessions } from "../src/hooks/use-workspace-sessions";
 import { useSessionControl } from "../src/hooks/use-session-control";
 import { useSessionLineage } from "../src/hooks/use-session-lineage";
 import { useSessionMcpApprovalPolicy } from "../src/hooks/use-session-mcp-approval-policy";
+import { useRigs, useRigSummaries } from "../src/hooks/use-rigs";
 import { useTurnQueue } from "../src/hooks/use-turn-queue";
 import { useWorkspaces } from "../src/hooks/use-workspaces";
 
 registerDom();
+
+describe("rig list hooks", () => {
+  const fullRig: Rig = {
+    id: "rig-full",
+    accountId: "account-1",
+    workspaceId: WORKSPACE_ID,
+    name: "Complete rig",
+    description: "Full definition",
+    createdBy: "user-1",
+    activeVersion: {
+      id: "version-full",
+      rigId: "rig-full",
+      version: 3,
+      image: "debian:stable",
+      setupScript: "echo complete",
+      checks: [{ name: "ready", command: "test -f /tmp/ready" }],
+      credentialHooks: ["git"],
+      defaultVariableSetIds: ["variables-1"],
+      changelog: "Complete definition",
+      providerImages: {},
+      createdBy: "user-1",
+      active: true,
+      createdAt: "2026-08-15T00:00:00.000Z",
+    },
+    activeVersionHealth: { checkHealth: "passing", lastVerifiedAt: null },
+    versionCount: 3,
+    createdAt: "2026-08-15T00:00:00.000Z",
+    updatedAt: "2026-08-15T00:00:00.000Z",
+  };
+  const summaryRig: RigSummary = {
+    ...fullRig,
+    activeVersionHealth: fullRig.activeVersionHealth ?? null,
+    activeVersion: {
+      id: "version-full",
+      rigId: "rig-full",
+      version: 3,
+      image: "debian:stable",
+      checkCount: 1,
+      defaultVariableSetIds: ["variables-1"],
+      managedSandboxImage: null,
+    },
+  };
+
+  test("keeps useRigs on the complete compatibility response", async () => {
+    let fullCalls = 0;
+    let summaryCalls = 0;
+    const client = fakeClient({
+      listRigs: async () => {
+        fullCalls += 1;
+        return [fullRig];
+      },
+      listRigSummaries: async () => {
+        summaryCalls += 1;
+        return [summaryRig];
+      },
+    });
+    const hook = await renderHook(() => useRigs({ client, workspaceId: WORKSPACE_ID }), undefined);
+    await flush();
+
+    expect(fullCalls).toBe(1);
+    expect(summaryCalls).toBe(0);
+    expect(hook.result.current.rigs[0]?.activeVersion?.setupScript).toBe("echo complete");
+    await hook.unmount();
+  });
+
+  test("uses the compact response only through useRigSummaries", async () => {
+    let fullCalls = 0;
+    let summaryCalls = 0;
+    const client = fakeClient({
+      listRigs: async () => {
+        fullCalls += 1;
+        return [fullRig];
+      },
+      listRigSummaries: async () => {
+        summaryCalls += 1;
+        return [summaryRig];
+      },
+    });
+    const hook = await renderHook(
+      () => useRigSummaries({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+
+    expect(fullCalls).toBe(0);
+    expect(summaryCalls).toBe(1);
+    expect(hook.result.current.rigs[0]?.activeVersion?.checkCount).toBe(1);
+    expect("setupScript" in (hook.result.current.rigs[0]?.activeVersion ?? {})).toBe(false);
+    await hook.unmount();
+  });
+});
 
 function makeEvent(
   sequence: number,
@@ -310,6 +404,59 @@ describe("useTurnQueue", () => {
     expect(listCalls).toBe(2);
     expect(hook.result.current.queue.map((turn) => turn.id)).toEqual(["victim"]);
     expect(hook.result.current.mutationError?.message).toContain("409");
+    await hook.unmount();
+  });
+
+  test("a delayed queue mutation exposes truthful pending state without changing server order", async () => {
+    const first = fakeTurn({ id: "11111111-1111-4111-8111-111111111111", prompt: "first" });
+    const second = fakeTurn({ id: "22222222-2222-4222-8222-222222222222", prompt: "second" });
+    let resolveSteer!: (response: SessionQueueMutationResponse) => void;
+    const client = fakeClient({
+      getQueue: async () => queueSnapshot([first, second], { version: 7 }),
+      steerQueueItem: async () =>
+        await new Promise<SessionQueueMutationResponse>((resolve) => {
+          resolveSteer = resolve;
+        }),
+    });
+    const hook = await renderHook(
+      () =>
+        useTurnQueue(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
+      undefined,
+    );
+    await flush();
+
+    let steering!: Promise<boolean>;
+    await flushing(() => {
+      steering = hook.result.current.steerTurn(second.id);
+    });
+    expect(hook.result.current.mutationFor(second.id)).toBe("steer");
+    expect(hook.result.current.mutating).toBe(true);
+    expect(hook.result.current.queue.map((turn) => turn.id)).toEqual([first.id, second.id]);
+
+    await flushing(async () => {
+      resolveSteer({
+        receipt: {
+          id: crypto.randomUUID(),
+          action: "queue.steer",
+          operationKey: "delayed-steer",
+          targetSessionId: SESSION_ID,
+          targetTurnId: second.id,
+          appliedControlRevision: null,
+          appliedQueueVersion: 8,
+          appliedTurnVersion: 2,
+          appliedDraftRevision: null,
+          createdAt: new Date().toISOString(),
+        },
+        snapshot: queueSnapshot([second, first], { version: 8 }),
+      });
+      expect(await steering).toBe(true);
+    });
+    expect(hook.result.current.mutationFor(second.id)).toBeNull();
+    expect(hook.result.current.queue.map((turn) => turn.id)).toEqual([second.id, first.id]);
     await hook.unmount();
   });
 

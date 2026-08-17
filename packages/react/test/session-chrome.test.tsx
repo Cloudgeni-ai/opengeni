@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { act } from "react";
+import { act, useState } from "react";
 
-import { SessionChrome, sessionChromeGoalPillState } from "../src/components/session-chrome";
+import {
+  SessionChrome,
+  sessionChromeGoalPillState,
+  sessionChromeQueueWaitCopy,
+} from "../src/components/session-chrome";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseGoalResult } from "../src/hooks/use-goal";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
@@ -195,10 +199,60 @@ describe("sessionChromeGoalPillState", () => {
   });
 });
 
+describe("sessionChromeQueueWaitCopy", () => {
+  test("explains only durable queue conditions the host actually knows", () => {
+    expect(sessionChromeQueueWaitCopy("running", null, false)).toContain("after the current turn");
+    expect(sessionChromeQueueWaitCopy("waiting_capacity", null, false)).toContain(
+      "available capacity",
+    );
+    expect(sessionChromeQueueWaitCopy("requires_action", null, false)).toContain("your response");
+    expect(sessionChromeQueueWaitCopy("running", null, true)).toContain(
+      "previous command to stop safely",
+    );
+    expect(sessionChromeQueueWaitCopy("failed", null, false)).toBeNull();
+
+    const paused = pausedEffectiveControl();
+    paused.primaryBlocker = {
+      kind: "workspace",
+      displayName: "Workspace",
+      actor: null,
+      reason: "Maintenance window",
+      changedAt: null,
+      revision: 4,
+    };
+    expect(sessionChromeQueueWaitCopy("running", paused, false)).toBe(
+      "Paused by Workspace. Maintenance window. Resume it before queued prompts can run.",
+    );
+  });
+});
+
 describe("SessionChrome", () => {
   test("hides when there are no signals", async () => {
     mounted = await renderComponent(<SessionChrome queue={queue({ queue: [] })} />);
     expect(mounted.container.querySelector("[data-og-session-chrome]")).toBeNull();
+  });
+
+  test("can gain its first signal after mounting empty", async () => {
+    mounted = await renderComponent(<SessionChrome queue={queue({ queue: [] })} />);
+    await mounted.rerender(<SessionChrome queue={queue()} composer={composer()} />);
+
+    expect(mounted.container.querySelector("[data-og-session-chrome]")).not.toBeNull();
+    expect(mounted.container.textContent).toContain("2 queued prompts");
+  });
+
+  test("shows the current durable reason ahead of a queued prompt", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue()}
+        composer={composer()}
+        sessionStatus="waiting_capacity"
+        defaultActive="queue"
+      />,
+    );
+    expect(
+      mounted.container.querySelector('[data-testid="session-chrome-queue-wait-reason"]')
+        ?.textContent,
+    ).toContain("Waiting for available capacity before the next prompt can start.");
   });
 
   test("renders separate incoming and queue segments", async () => {
@@ -225,6 +279,72 @@ describe("SessionChrome", () => {
     expect(
       mounted.container.querySelector('[data-og-session-chrome-signal="agents"]'),
     ).not.toBeNull();
+  });
+
+  test("shows an ordinary Send receipt before the server queue refresh arrives", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [] })}
+        composer={composer({
+          optimisticMessages: [
+            {
+              clientEventId: "client-send-1",
+              text: "Investigate the startup delay",
+              annotations: [],
+              resources: [],
+              occurredAt: "2026-08-14T10:00:00.000Z",
+              state: "sending",
+            },
+          ],
+        })}
+      />,
+    );
+
+    const queueChip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="queue"]',
+    );
+    expect(queueChip?.textContent).toContain("Sending prompt");
+    expect(queueChip?.textContent).toContain("Investigate the startup delay");
+
+    await act(async () => queueChip?.click());
+    const localRow = mounted.container.querySelector(
+      '[data-queue-client-event-id="client-send-1"]',
+    );
+    expect(localRow?.textContent).toContain("Investigate the startup delay");
+    expect(localRow?.textContent).toContain("Sending");
+    expect(localRow?.querySelector("button")).toBeNull();
+  });
+
+  test("deduplicates an accepted Send receipt against its durable queued turn", async () => {
+    const durable = fakeTurn({
+      triggerEventId: "99999999-9999-4999-8999-999999999999",
+      prompt: "Investigate the startup delay",
+    });
+    mounted = await renderComponent(
+      <SessionChrome
+        defaultActive="queue"
+        queue={queue({ queue: [durable] })}
+        composer={composer({
+          optimisticMessages: [
+            {
+              clientEventId: "client-send-2",
+              triggerEventId: durable.triggerEventId,
+              text: durable.prompt,
+              annotations: [],
+              resources: [],
+              occurredAt: "2026-08-14T10:00:00.000Z",
+              state: "queued",
+            },
+          ],
+        })}
+      />,
+    );
+
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-signal="queue"]')?.textContent,
+    ).toContain("1 queued prompt");
+    expect(mounted.container.querySelectorAll("[data-queue-turn-id]")).toHaveLength(1);
+    expect(mounted.container.querySelector("[data-queue-client-event-id]")).toBeNull();
   });
 
   test("presents queued realtime work as voice instead of leaking agent context", async () => {
@@ -422,7 +542,7 @@ describe("SessionChrome", () => {
     ).toContain("current command to stop safely");
   });
 
-  test("expands queue and reveals hover actions wired to queue APIs", async () => {
+  test("expands queue with clear direct and disclosed actions wired to queue APIs", async () => {
     const calls: string[] = [];
     const q = queue({
       removeTurn: async (turnId) => {
@@ -456,11 +576,35 @@ describe("SessionChrome", () => {
     ).not.toBeNull();
     expect(mounted.container.querySelector('[data-og-session-chrome-open="true"]')).not.toBeNull();
 
-    const remove = mounted.container.querySelector<HTMLButtonElement>(
-      '[aria-label="Remove queued prompt 1"]',
-    );
     const steer = mounted.container.querySelector<HTMLButtonElement>(
       '[aria-label="Steer queued prompt 1"]',
+    );
+    const more = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="More actions for queued prompt 1"]',
+    );
+    expect(steer?.textContent).toBe("Steer");
+    expect(more?.textContent).toBe("More");
+    expect(more?.getAttribute("aria-expanded")).toBe("false");
+    const firstQueueRow = mounted.container.querySelector<HTMLElement>(
+      '[data-queue-turn-id="11111111-1111-4111-8111-111111111111"]',
+    );
+    expect(firstQueueRow?.style.contentVisibility).toBe("auto");
+    expect(firstQueueRow?.style.containIntrinsicSize).toBe(
+      "auto var(--_og-session-chrome-queue-row-intrinsic-size)",
+    );
+    expect(firstQueueRow?.className).toContain(
+      "[--_og-session-chrome-queue-row-intrinsic-size:1.75rem]",
+    );
+    expect(firstQueueRow?.className).toContain(
+      "pointer-coarse:[--_og-session-chrome-queue-row-intrinsic-size:2.75rem]",
+    );
+    expect(mounted.container.querySelector('[aria-label="Remove queued prompt 1"]')).toBeNull();
+    await act(async () => {
+      more?.click();
+    });
+
+    const remove = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Remove queued prompt 1"]',
     );
     const edit = mounted.container.querySelector<HTMLButtonElement>(
       '[aria-label="Edit queued prompt 1"]',
@@ -472,6 +616,15 @@ describe("SessionChrome", () => {
     expect(steer).not.toBeNull();
     expect(edit).not.toBeNull();
     expect(moveDown).not.toBeNull();
+    expect(remove?.textContent).toBe("Delete");
+    expect(edit?.textContent).toBe("Edit");
+    expect(more?.getAttribute("aria-expanded")).toBe("true");
+    expect(
+      mounted.container.querySelector(`#${more?.getAttribute("aria-controls")}`),
+    ).not.toBeNull();
+    expect(moveDown?.dataset.queueCommand).toBe("move");
+    expect(moveDown?.dataset.queueCommandTurnId).toBe("11111111-1111-4111-8111-111111111111");
+    expect(remove?.querySelector("svg")).toBeNull();
 
     await act(async () => {
       steer?.click();
@@ -485,6 +638,226 @@ describe("SessionChrome", () => {
     expect(
       calls.some((entry) => entry.startsWith("move:11111111-1111-4111-8111-111111111111:")),
     ).toBe(true);
+  });
+
+  test("keeps the complete projected order visible while a production queue move is pending", async () => {
+    const first = fakeTurn({
+      id: "11111111-1111-4111-8111-111111111111",
+      prompt: "first queued prompt",
+    });
+    const second = fakeTurn({
+      id: "22222222-2222-4222-8222-222222222222",
+      prompt: "second queued prompt",
+    });
+    let releaseMove!: () => void;
+    const moveGate = new Promise<void>((resolve) => {
+      releaseMove = resolve;
+    });
+
+    function Harness() {
+      const [items, setItems] = useState([first, second]);
+      const [pendingTurnId, setPendingTurnId] = useState<string | null>(null);
+      return (
+        <SessionChrome
+          defaultActive="queue"
+          composer={composer()}
+          queue={queue({
+            queue: items,
+            pendingByTurn: pendingTurnId ? { [pendingTurnId]: "move" } : {},
+            mutationFor: (turnId) => (turnId === pendingTurnId ? "move" : null),
+            mutating: pendingTurnId !== null,
+            moveTurn: async (turnId) => {
+              setPendingTurnId(turnId);
+              await moveGate;
+              setItems([second, first]);
+              setPendingTurnId(null);
+              return true;
+            },
+          })}
+        />
+      );
+    }
+
+    mounted = await renderComponent(<Harness />);
+    await act(async () => {
+      mounted?.container
+        .querySelector<HTMLButtonElement>('[aria-label="More actions for queued prompt 1"]')
+        ?.click();
+    });
+    const moveDown = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Move queued prompt 1 down"]',
+    );
+    await act(async () => {
+      moveDown?.click();
+      await Promise.resolve();
+    });
+    expect(
+      [...mounted.container.querySelectorAll("[data-queue-turn-id]")].map((row) =>
+        row.getAttribute("data-queue-turn-id"),
+      ),
+    ).toEqual([second.id, first.id]);
+    expect(
+      mounted.container.querySelector('[data-testid="session-chrome-queue-mutation-move"]')
+        ?.textContent,
+    ).toContain("Saving new position…");
+
+    await act(async () => {
+      releaseMove();
+      await moveGate;
+    });
+    expect(
+      [...mounted.container.querySelectorAll("[data-queue-turn-id]")].map((row) =>
+        row.getAttribute("data-queue-turn-id"),
+      ),
+    ).toEqual([second.id, first.id]);
+  });
+
+  test("restores canonical order and explains a rejected production queue move", async () => {
+    const first = fakeTurn({
+      id: "11111111-1111-4111-8111-111111111111",
+      prompt: "first queued prompt",
+    });
+    const second = fakeTurn({
+      id: "22222222-2222-4222-8222-222222222222",
+      prompt: "second queued prompt",
+    });
+    let releaseMove!: () => void;
+    const moveGate = new Promise<void>((resolve) => {
+      releaseMove = resolve;
+    });
+
+    function Harness() {
+      const [pendingTurnId, setPendingTurnId] = useState<string | null>(null);
+      const [mutationError, setMutationError] = useState<Error | null>(null);
+      return (
+        <SessionChrome
+          defaultActive="queue"
+          composer={composer()}
+          queue={queue({
+            queue: [first, second],
+            pendingByTurn: pendingTurnId ? { [pendingTurnId]: "move" } : {},
+            mutationFor: (turnId) => (turnId === pendingTurnId ? "move" : null),
+            mutating: pendingTurnId !== null,
+            mutationError,
+            moveTurn: async (turnId) => {
+              setPendingTurnId(turnId);
+              await moveGate;
+              setMutationError(new Error("Queue version changed on the server"));
+              setPendingTurnId(null);
+              return false;
+            },
+          })}
+        />
+      );
+    }
+
+    mounted = await renderComponent(<Harness />);
+    await act(async () => {
+      mounted?.container
+        .querySelector<HTMLButtonElement>('[aria-label="More actions for queued prompt 1"]')
+        ?.click();
+    });
+    await act(async () => {
+      mounted?.container
+        .querySelector<HTMLButtonElement>('[aria-label="Move queued prompt 1 down"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      [...mounted.container.querySelectorAll("[data-queue-turn-id]")].map((row) =>
+        row.getAttribute("data-queue-turn-id"),
+      ),
+    ).toEqual([second.id, first.id]);
+
+    await act(async () => {
+      releaseMove();
+      await moveGate;
+    });
+    expect(
+      [...mounted.container.querySelectorAll("[data-queue-turn-id]")].map((row) =>
+        row.getAttribute("data-queue-turn-id"),
+      ),
+    ).toEqual([first.id, second.id]);
+    expect(
+      mounted.container.querySelector('[data-testid="session-chrome-queue-error"]')?.textContent,
+    ).toContain("Queue version changed on the server");
+  });
+
+  test("applies the checked-out queue draft to the production composer immediately", async () => {
+    const applied: string[] = [];
+    const source = fakeTurn({
+      id: "11111111-1111-4111-8111-111111111111",
+      prompt: "edit this exact queued prompt",
+    });
+    mounted = await renderComponent(
+      <SessionChrome
+        defaultActive="queue"
+        queue={queue({
+          queue: [source],
+          editTurn: async () => ({
+            revision: 3,
+            text: source.prompt,
+            resources: source.resources,
+            tools: source.tools,
+            toolsProvided: true,
+            model: source.model,
+            reasoningEffort: source.reasoningEffort,
+            latencyMode: source.latencyMode,
+            sourceTurnId: source.id,
+            sourceTurnVersion: source.version,
+            updatedAt: new Date().toISOString(),
+          }),
+        })}
+        composer={composer({ applyDraft: (draft) => applied.push(draft.text) })}
+      />,
+    );
+
+    await act(async () => {
+      mounted?.container
+        .querySelector<HTMLButtonElement>('[aria-label="More actions for queued prompt 1"]')
+        ?.click();
+    });
+    await act(async () => {
+      mounted?.container
+        .querySelector<HTMLButtonElement>('[aria-label="Edit queued prompt 1"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(applied).toEqual([source.prompt]);
+  });
+
+  test("surfaces queue mutation failures with canonical refresh and dismissal actions", async () => {
+    let refreshed = 0;
+    let dismissed = 0;
+    mounted = await renderComponent(
+      <SessionChrome
+        defaultActive="queue"
+        queue={queue({
+          queue: [],
+          mutationError: new Error("Queue version changed on the server"),
+          refresh: async () => {
+            refreshed += 1;
+          },
+          clearMutationError: () => {
+            dismissed += 1;
+          },
+        })}
+        composer={composer()}
+      />,
+    );
+
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-signal="queue"]')?.textContent,
+    ).toContain("Queue action failed");
+    const alert = mounted.container.querySelector('[data-testid="session-chrome-queue-error"]');
+    expect(alert?.textContent).toContain("The queue action was not applied.");
+    expect(alert?.textContent).toContain("Queue version changed on the server");
+    await act(async () => {
+      [...alert!.querySelectorAll("button")].forEach((button) => button.click());
+      await Promise.resolve();
+    });
+    expect(refreshed).toBe(1);
+    expect(dismissed).toBe(1);
   });
 
   test("inbox dismiss action appears when onDismissIncoming is provided", async () => {
@@ -513,7 +886,7 @@ describe("SessionChrome", () => {
     expect(dismissed).toEqual(["33333333-3333-4333-8333-333333333333"]);
   });
 
-  test("segment switches keep the panel shell and drop native title tooltips", async () => {
+  test("segment switches keep the panel shell and queue actions explain themselves on touch", async () => {
     mounted = await renderComponent(
       <SessionChrome
         queue={queue({ pendingInputs: [pendingInput()] })}
@@ -550,20 +923,29 @@ describe("SessionChrome", () => {
     ).not.toBeNull();
     expect(mounted.container.querySelector('[data-og-session-chrome-open="true"]')).not.toBeNull();
 
-    const remove = mounted.container.querySelector<HTMLButtonElement>(
-      '[aria-label="Remove queued prompt 1"]',
-    );
-    expect(remove).not.toBeNull();
-    expect(remove?.getAttribute("title")).toBeNull();
-    expect(remove?.getAttribute("data-slot")).toBe("tooltip-trigger");
-
     const steer = mounted.container.querySelector<HTMLButtonElement>(
       '[aria-label="Steer queued prompt 1"]',
     );
     expect(steer).not.toBeNull();
-    expect(steer?.getAttribute("data-slot")).toBe("tooltip-trigger");
+    expect(steer?.textContent).toBe("Steer");
+    expect(steer?.getAttribute("title")).toBeNull();
+    const more = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="More actions for queued prompt 1"]',
+    );
+    expect(more?.textContent).toBe("More");
+    expect(mounted.container.querySelector('[aria-label="Remove queued prompt 1"]')).toBeNull();
+    await act(async () => {
+      more?.click();
+    });
+    const remove = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Remove queued prompt 1"]',
+    );
+    expect(remove?.textContent).toBe("Delete");
+    expect(remove?.getAttribute("title")).toBeNull();
+    expect(more?.getAttribute("aria-expanded")).toBe("true");
+    expect(document.body.querySelector('[role="tooltip"]')).toBeNull();
 
-    // Truncated prompt / signal chips stay tip-free; only icon actions use Tooltip.
+    // Truncated prompt / signal chips stay tip-free; queue controls use visible copy.
     const prompt = mounted.container.querySelector('[data-og-session-chrome-panel="queue"] p');
     expect(prompt?.closest('[data-slot="tooltip-trigger"]')).toBeNull();
     expect(queueChip?.getAttribute("data-slot")).not.toBe("tooltip-trigger");

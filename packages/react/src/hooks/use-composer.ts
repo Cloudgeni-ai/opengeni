@@ -10,7 +10,7 @@ import {
   type SendMessageInput,
   type SessionEvent,
 } from "@opengeni/sdk";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 
@@ -68,6 +68,8 @@ type StoredPendingComposerOperation = Omit<PendingComposerOperation, "input" | "
 
 export type ComposerOptimisticMessage = {
   clientEventId: string;
+  /** Durable user.message event once the server accepts this local receipt. */
+  triggerEventId?: string | undefined;
   text: string;
   annotations: DraftTimelineAnnotation[];
   resources: ResourceRef[];
@@ -1121,7 +1123,7 @@ export function useComposer(
           ...operation.input,
           ...(expectedDraftRevision !== undefined ? { expectedDraftRevision } : {}),
         };
-        await client.sendMessage(workspaceId, sessionId, wireInput);
+        const accepted = await client.sendMessage(workspaceId, sessionId, wireInput);
         if (
           targetKeyRef.current !== ownedTargetKey ||
           targetGeneration.current !== ownedGeneration
@@ -1134,7 +1136,13 @@ export function useComposer(
           replaceOptimisticSends((current) =>
             current.map((candidate) =>
               candidate.clientEventId === operation.clientEventId
-                ? { ...candidate, input: wireInput, state: "queued", error: undefined }
+                ? {
+                    ...candidate,
+                    input: wireInput,
+                    triggerEventId: accepted.id,
+                    state: "queued",
+                    error: undefined,
+                  }
                 : candidate,
             ),
           );
@@ -2030,6 +2038,42 @@ export function useComposer(
 
   const identityMatches = stateTargetKey === targetKey;
   const visibleSteering = identityMatches ? steering : null;
+  const previousVisibleOptimisticMessagesRef = useRef<ComposerOptimisticMessage[]>([]);
+  const visibleOptimisticMessages = useMemo<ComposerOptimisticMessage[]>(() => {
+    const projected = identityMatches
+      ? optimisticSends.map(
+          ({
+            input: _input,
+            draftPayload: _payload,
+            canRetry: _retry,
+            newerShadow: _shadow,
+            ...item
+          }) => item,
+        )
+      : [];
+    const previous = previousVisibleOptimisticMessagesRef.current;
+    return previous.length === projected.length &&
+      previous.every((message, index) => {
+        const next = projected[index];
+        return (
+          next !== undefined &&
+          message.clientEventId === next.clientEventId &&
+          message.triggerEventId === next.triggerEventId &&
+          message.text === next.text &&
+          message.annotations === next.annotations &&
+          message.resources === next.resources &&
+          message.occurredAt === next.occurredAt &&
+          message.state === next.state &&
+          message.error === next.error &&
+          message.outcomeUnknown === next.outcomeUnknown
+        );
+      })
+      ? previous
+      : projected;
+  }, [identityMatches, optimisticSends]);
+  useLayoutEffect(() => {
+    previousVisibleOptimisticMessagesRef.current = visibleOptimisticMessages;
+  }, [visibleOptimisticMessages]);
   const reloadDraft = useCallback(async () => await loadDraft(true), [loadDraft]);
   const clearError = useCallback(() => {
     if (targetKeyRef.current !== targetKey) return;
@@ -2048,11 +2092,7 @@ export function useComposer(
     clearAnnotationReviewTarget,
     hasDraftContent,
     send,
-    optimisticMessages: identityMatches
-      ? optimisticSends.map(
-          ({ input: _input, draftPayload: _payload, canRetry: _retry, ...item }) => item,
-        )
-      : [],
+    optimisticMessages: visibleOptimisticMessages,
     retryOptimisticMessage,
     removeOptimisticMessage,
     steer,

@@ -13,7 +13,109 @@ export function isTerminalSessionStatus(value: SessionStatus): boolean {
  * The console's timeline projection over exact session events. Falls back to
  * the session's initial message while the event log is still empty.
  */
-export function projectSessionTimeline(session: Session, events: SessionEvent[]): TimelineItem[] {
+export type TimelineFallbackSession = Pick<
+  Session,
+  "id" | "initialMessage" | "resources" | "tools" | "createdAt"
+>;
+
+function timelineItemKey(item: TimelineItem): string {
+  return `${item.kind}:${item.id}`;
+}
+
+/**
+ * Retain exact objects for unchanged durable timeline items. History paging
+ * rebuilds the full projection, but React must only revisit rows whose visible
+ * data actually changed. Comparison is fail-closed for non-JSON objects and
+ * duplicate item keys; all rows remain in the returned projection.
+ */
+export function retainEqualTimelineItems(
+  previous: TimelineItem[],
+  projected: TimelineItem[],
+): TimelineItem[] {
+  if (previous.length === 0 || projected.length === 0) return projected;
+
+  const previousByKey = new Map<string, TimelineItem | null>();
+  for (const item of previous) {
+    const key = timelineItemKey(item);
+    previousByKey.set(key, previousByKey.has(key) ? null : item);
+  }
+  const projectedKeyCounts = new Map<string, number>();
+  for (const item of projected) {
+    const key = timelineItemKey(item);
+    projectedKeyCounts.set(key, (projectedKeyCounts.get(key) ?? 0) + 1);
+  }
+
+  return projected.map((item) => {
+    const key = timelineItemKey(item);
+    const candidate = projectedKeyCounts.get(key) === 1 ? previousByKey.get(key) : null;
+    return candidate && timelineValuesEqual(candidate, item) ? candidate : item;
+  });
+}
+
+export function projectRetainedSessionTimeline(
+  previous: TimelineItem[],
+  events: SessionEvent[],
+): TimelineItem[] {
+  return retainEqualTimelineItems(previous, buildTimeline(events));
+}
+
+function timelineValuesEqual(left: unknown, right: unknown): boolean {
+  const pending: Array<[unknown, unknown]> = [[left, right]];
+  const seen = new WeakMap<object, WeakSet<object>>();
+  while (pending.length > 0) {
+    const [leftValue, rightValue] = pending.pop()!;
+    if (Object.is(leftValue, rightValue)) continue;
+    if (
+      leftValue === null ||
+      rightValue === null ||
+      typeof leftValue !== "object" ||
+      typeof rightValue !== "object"
+    ) {
+      return false;
+    }
+    const leftArray = Array.isArray(leftValue);
+    if (leftArray !== Array.isArray(rightValue)) return false;
+    if (!leftArray) {
+      const leftPrototype = Object.getPrototypeOf(leftValue);
+      const rightPrototype = Object.getPrototypeOf(rightValue);
+      if (
+        leftPrototype !== rightPrototype ||
+        (leftPrototype !== Object.prototype && leftPrototype !== null)
+      ) {
+        return false;
+      }
+    }
+    const seenRights = seen.get(leftValue);
+    if (seenRights?.has(rightValue)) continue;
+    if (seenRights) seenRights.add(rightValue);
+    else seen.set(leftValue, new WeakSet([rightValue]));
+
+    if (leftArray) {
+      const leftItems = leftValue as unknown[];
+      const rightItems = rightValue as unknown[];
+      if (leftItems.length !== rightItems.length) return false;
+      for (let index = 0; index < leftItems.length; index += 1) {
+        if (index in leftItems !== index in rightItems) return false;
+        pending.push([leftItems[index], rightItems[index]]);
+      }
+      continue;
+    }
+    const leftRecord = leftValue as Record<string, unknown>;
+    const rightRecord = rightValue as Record<string, unknown>;
+    const leftKeys = Object.keys(leftRecord);
+    if (leftKeys.length !== Object.keys(rightRecord).length) return false;
+    for (const key of leftKeys) {
+      if (!Object.prototype.hasOwnProperty.call(rightRecord, key)) return false;
+      pending.push([leftRecord[key], rightRecord[key]]);
+    }
+  }
+  return true;
+}
+
+export function projectSessionTimeline(
+  session: TimelineFallbackSession,
+  events: SessionEvent[],
+): TimelineItem[] {
   const items = buildTimeline(events);
   if (events.length === 0 && items.length === 0 && session.initialMessage) {
     return [

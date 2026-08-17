@@ -48,6 +48,8 @@ export type MarkdownProps = {
   streaming?: boolean | undefined;
 };
 
+export type SettledMarkdownProps = Omit<MarkdownProps, "streaming">;
+
 /* --- element renderers (themed to og-* tokens) ------------------------------ */
 
 const components: Components = {
@@ -284,6 +286,45 @@ function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutR
   );
 }
 
+function MarkdownDocument({
+  text,
+  className,
+  settling = false,
+  bodyRef,
+  rehypePlugins,
+}: {
+  text: string;
+  className?: string | undefined;
+  settling?: boolean | undefined;
+  bodyRef?: { current: HTMLDivElement | null } | undefined;
+  rehypePlugins?: NonNullable<Parameters<typeof ReactMarkdown>[0]["rehypePlugins"]> | undefined;
+}) {
+  return (
+    <TooltipProvider delayDuration={400}>
+      <div
+        ref={bodyRef}
+        className={cn(
+          "og-markdown-body min-w-0 break-words",
+          settling && "og-markdown-settle",
+          className,
+        )}
+      >
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          rehypePlugins={rehypePlugins}
+          components={components}
+        >
+          {text}
+        </ReactMarkdown>
+      </div>
+    </TooltipProvider>
+  );
+}
+
+function SettledMarkdownImpl({ children, className }: SettledMarkdownProps) {
+  return <MarkdownDocument text={children} className={className} />;
+}
+
 function MarkdownImpl({ children, className, streaming = false }: MarkdownProps) {
   // Tip-ink engine for THIS body: created on the first streaming render, kept
   // through a short linger after the stream ends (so the last age window can
@@ -377,26 +418,18 @@ function MarkdownImpl({ children, className, streaming = false }: MarkdownProps)
   // `min-w-0` lets the prose shrink inside flex parents (message bubbles) so
   // long links and code blocks wrap/scroll instead of forcing overflow.
   return (
-    <TooltipProvider delayDuration={400}>
-      <div
-        ref={bodyRef}
-        className={cn(
-          "og-markdown-body min-w-0 break-words",
-          settling && "og-markdown-settle",
-          className,
-        )}
-      >
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={rehypePlugins}
-          components={components}
-        >
-          {parseText}
-        </ReactMarkdown>
-      </div>
-    </TooltipProvider>
+    <MarkdownDocument
+      text={parseText}
+      className={className}
+      settling={settling}
+      bodyRef={bodyRef}
+      rehypePlugins={rehypePlugins}
+    />
   );
 }
 
 /** Memoized so streaming re-renders of the parent don't re-parse settled bodies. */
 export const Markdown = memo(MarkdownImpl);
+
+/** Settled history uses the identical renderer without streaming-only lifecycle state/effects. */
+export const SettledMarkdown = memo(SettledMarkdownImpl);

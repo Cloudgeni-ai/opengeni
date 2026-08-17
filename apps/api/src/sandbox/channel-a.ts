@@ -17,22 +17,13 @@
 // IMPORT DISCIPLINE: sandbox symbols come ONLY from @opengeni/runtime/sandbox
 // (the agent-loop-free leaf) — enforced by sandbox-access-import-guard.test.ts.
 
-import {
-  applyGitAuthPointerEnvironment,
-  hasGitCredentialRepositorySelection,
-  hasGitHubRepositorySelection,
-  sandboxLifecycleTransitionWaitMs,
-  stableSandboxEnvironmentForRun,
-  type Settings,
-} from "@opengeni/config";
-import { githubAppBotIdentity } from "@opengeni/github";
+import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
 import type { Session } from "@opengeni/contracts";
 import {
   acquireLease,
   getSandboxSessionEnvelope,
   getLiveEnrollmentConnection,
   getSandbox,
-  loadWorkspaceEnvironmentForRun,
   markWarmLeaseInstanceLost,
   readActiveSandbox,
   readLease,
@@ -83,6 +74,7 @@ import {
   wrapChannelABoxWithRouting,
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
+import { sessionAttachEnvironment } from "./session-environment";
 
 export type ChannelAServices = {
   db: Database;
@@ -530,27 +522,7 @@ async function withChannelAOperation<T>(
 
   // The STABLE run-environment used by both a cloud home and a machine home.
   // It also carries the per-session Codemode pointer selected below.
-  const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
-    db,
-    settings,
-    workspaceId,
-    session.environmentId,
-  );
-  const settingsForSession =
-    session.sandboxBackend !== settings.sandboxBackend
-      ? { ...settings, sandboxBackend: session.sandboxBackend }
-      : settings;
-  const environment = stableSandboxEnvironmentForRun(
-    settingsForSession,
-    workspaceEnvironment?.values ?? {},
-    { workspaceId },
-  );
-  if (hasGitCredentialRepositorySelection(session.resources)) {
-    applyGitAuthPointerEnvironment(
-      environment,
-      hasGitHubRepositorySelection(session.resources) ? githubAppBotIdentity(settings) : null,
-    );
-  }
+  const environment = await sessionAttachEnvironment(services, workspaceId, session);
 
   const runEstablished = async (
     routed: EstablishedSandboxSession,

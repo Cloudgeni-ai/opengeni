@@ -8,6 +8,7 @@ import {
   recordModelInputTokens,
   recordModelRequestPhase,
   recordSessionEventAppendLatency,
+  recordSessionEventAppendPhaseLatency,
   recordSessionEventPublishLatency,
   recordTurnSandboxEstablishPolicy,
   recordTurnStartupPhase,
@@ -288,10 +289,17 @@ describe("event I/O latency split (write path vs delivery)", () => {
   test("append and publish latency are distinct series", async () => {
     const observability = worker();
     recordSessionEventAppendLatency(observability, { durationSeconds: 0.02 });
+    recordSessionEventAppendPhaseLatency(observability, {
+      phase: "attempt_fence",
+      durationSeconds: 0.015,
+    });
     recordSessionEventPublishLatency(observability, { durationSeconds: 0.03 });
 
     const metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(/opengeni_session_event_append_seconds_sum\{[^}]*\} 0\.02\b/);
+    expect(metrics).toMatch(
+      /opengeni_session_event_append_phase_seconds_sum\{[^}]*phase="attempt_fence"[^}]*\} 0\.015\b/,
+    );
     expect(metrics).toMatch(/opengeni_session_event_publish_seconds_sum\{[^}]*\} 0\.03\b/);
   });
 });

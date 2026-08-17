@@ -11,8 +11,13 @@ import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { formatTimestamp } from "@/lib/format";
 import { withOccurrenceKeys } from "@/lib/react-key";
-import { rigActorLabel, rigCheckHealthView, versionHasChecks } from "@/lib/rig-status";
-import type { Rig, RigChange, RigChangeVerification } from "@/types";
+import {
+  rigActorLabel,
+  rigCheckHealthView,
+  rigProviderImageStatusView,
+  versionHasChecks,
+} from "@/lib/rig-status";
+import type { Rig, RigChange, RigChangeVerification, RigProviderImage } from "@/types";
 
 export function RigOverview({
   rig,
@@ -59,6 +64,9 @@ export function RigOverview({
           ? "failing"
           : "passing"
         : "unknown"));
+  const providerImages = Object.values(active.providerImages).filter(
+    (image): image is RigProviderImage => image !== undefined,
+  );
 
   return (
     <div className="grid gap-5">
@@ -97,6 +105,41 @@ export function RigOverview({
             </div>
           )}
         </Field>
+      </div>
+
+      <div className="grid gap-2.5 border-t border-border/70 pt-4">
+        <h3 className="text-sm font-medium">Fast sandbox startup</h3>
+        {providerImages.length === 0 ? (
+          <Notice tone="muted" title="No provider image prepared yet">
+            Fresh sandboxes use the base image and run this version&apos;s setup script. No rig
+            content is skipped.
+          </Notice>
+        ) : (
+          <div className="grid gap-2">
+            {providerImages.map((image) => {
+              const status = rigProviderImageStatusView(image.status);
+              return (
+                <div
+                  key={image.backend}
+                  className="rounded-md border border-border/70 bg-bg/20 p-2.5"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-medium capitalize">{image.backend} image</span>
+                    <RigStatusChip view={status} />
+                  </div>
+                  <p className="mt-1 text-xs text-fg-muted">
+                    {image.error?.message ?? status.description}
+                  </p>
+                  <p className="mt-1 text-2xs text-fg-subtle">
+                    {image.status === "building"
+                      ? `Started ${formatTimestamp(image.startedAt)}`
+                      : `Finished ${formatTimestamp(image.finishedAt ?? image.startedAt)}`}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <div className="grid gap-2.5 border-t border-border/70 pt-4">

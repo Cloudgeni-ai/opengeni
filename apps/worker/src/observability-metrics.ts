@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { errorCodeToJSON } from "@opengeni/agent-proto";
 import { SandboxBackend, type SessionEventType } from "@opengeni/contracts";
+import type { SessionEventAppendPhase } from "@opengeni/db";
 import type { EventLogger } from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
 import type { CompanyBrainContributionReceipt } from "./model-context-contributions";
@@ -1172,6 +1173,22 @@ export function recordSessionEventAppendLatency(
     name: "opengeni_session_event_append_seconds",
     help: "Duration in seconds of an appendSessionEvents DB write (the durable write path).",
     buckets: STREAM_IO_BUCKETS,
+    value: input.durationSeconds,
+  });
+}
+
+/** Bounded subphases of the durable fenced append. These distinguish waiting
+ * for a transaction/pool slot from waiting on the attempt fence and from the
+ * actual event write/commit without exposing tenant or session identifiers. */
+export function recordSessionEventAppendPhaseLatency(
+  observability: Observability,
+  input: { phase: SessionEventAppendPhase; durationSeconds: number },
+): void {
+  observability.observeHistogram({
+    name: "opengeni_session_event_append_phase_seconds",
+    help: "Duration in seconds of one bounded durable session-event append subphase.",
+    buckets: STREAM_IO_BUCKETS,
+    labels: { phase: input.phase },
     value: input.durationSeconds,
   });
 }

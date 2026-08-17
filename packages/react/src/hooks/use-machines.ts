@@ -6,7 +6,7 @@ import type {
   UpdateMachineAgentResponse,
 } from "@opengeni/sdk";
 import { useOpenGeni, type ClientOverride } from "../provider";
-import { useMutationRunner, usePolledValue } from "./internal";
+import { equalJsonValue, useMutationRunner, usePolledValue } from "./internal";
 import type { MachinesResponse, MachineView, MetricSample } from "../types/machines";
 
 /**
@@ -166,6 +166,9 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
   } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled,
+    // The endpoint returns fresh JSON objects on every poll. Preserve identity
+    // for a no-op snapshot so large session consumers do not rerender.
+    isEqual: equalJsonValue,
   });
   const { run, mutating, mutationError, clearMutationError } = useMutationRunner(identityKey);
   // The sandbox id of the in-flight attach (drives the per-card spinner).

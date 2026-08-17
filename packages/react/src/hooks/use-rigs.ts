@@ -3,10 +3,12 @@ import type {
   ProposeRigChangeRequest,
   Rig,
   RigChange,
+  RigSummary,
   RigVersion,
   UpdateRigRequest,
 } from "@opengeni/sdk";
 import { useCallback } from "react";
+import type { SessionClientLike } from "../client";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { useMutationRunner, usePolledValue } from "./internal";
 
@@ -15,8 +17,8 @@ export type UseRigsOptions = ClientOverride & {
   enabled?: boolean | undefined;
 };
 
-export type UseRigsResult = {
-  rigs: Rig[];
+type UseRigCollectionResult<TRig> = {
+  rigs: TRig[];
   loading: boolean;
   error: Error | null;
   refresh: () => Promise<void>;
@@ -32,14 +34,46 @@ export type UseRigsResult = {
   clearMutationError: () => void;
 };
 
+export type UseRigsResult = UseRigCollectionResult<Rig>;
+export type UseRigSummariesResult = UseRigCollectionResult<RigSummary>;
+
 /**
  * Rigs (workspace-scoped, versioned sandbox machine definitions). The list
  * polls; version/change reads are on-demand (they are per-rig detail, not part
  * of the list surface).
  */
 export function useRigs(options: UseRigsOptions = {}): UseRigsResult {
+  return useRigCollection(options, listFullRigs);
+}
+
+/**
+ * Compact rig metadata for list and picker surfaces. Every rig is returned,
+ * but large definition-only fields remain on `useRigs` and `useRig`.
+ */
+export function useRigSummaries(options: UseRigsOptions = {}): UseRigSummariesResult {
+  return useRigCollection(options, listRigSummaries);
+}
+
+async function listFullRigs(client: SessionClientLike, workspaceId: string): Promise<Rig[]> {
+  return await client.listRigs(workspaceId);
+}
+
+async function listRigSummaries(
+  client: SessionClientLike,
+  workspaceId: string,
+): Promise<RigSummary[]> {
+  return await client.listRigSummaries(workspaceId);
+}
+
+function useRigCollection<TRig>(
+  options: UseRigsOptions,
+  list: (client: SessionClientLike, workspaceId: string) => Promise<TRig[]>,
+): UseRigCollectionResult<TRig> {
   const { client, workspaceId } = useOpenGeni(options);
-  const load = useCallback(async () => await client.listRigs(workspaceId), [client, workspaceId]);
+  const load = useCallback(
+    async () => await list(client, workspaceId),
+    [client, workspaceId, list],
+  );
   const { data, loading, error, refresh } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled,

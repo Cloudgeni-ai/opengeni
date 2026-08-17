@@ -1,17 +1,19 @@
 import { OpenGeniApiError } from "@opengeni/sdk";
 
+const clockTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
 /** Local finished-at stamp for message footers: "Aug 2, 3:42 PM" / locale-equivalent. */
 export function formatClockTime(iso: string): string {
   const then = new Date(iso);
   if (Number.isNaN(then.getTime())) {
     return "";
   }
-  return then.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  return clockTimeFormatter.format(then);
 }
 
 /** Compact relative time: "now", "42s", "7m", "3h", "2d", then a date. */

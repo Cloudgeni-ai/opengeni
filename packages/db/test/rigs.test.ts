@@ -29,6 +29,7 @@ import {
   getRigVersion,
   getRigVersionById,
   listRigChanges,
+  listRigSummaries,
   listRigVersions,
   listRigs,
   markSandboxCheckpointArtifactDeletePending,
@@ -248,6 +249,37 @@ describe("rig CRUD lifecycle", () => {
     expect(listed).toHaveLength(1);
     expect(listed[0]!.activeVersion?.version).toBe(1);
     expect(listed[0]!.versionCount).toBe(1);
+
+    const summaries = await listRigSummaries(db, ws.workspaceId);
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]!.activeVersion).toEqual({
+      id: rig.activeVersion!.id,
+      rigId: rig.id,
+      version: 1,
+      image: "ubuntu:24.04",
+      checkCount: 1,
+      defaultVariableSetIds: [],
+      managedSandboxImage: null,
+    });
+    expect("setupScript" in summaries[0]!.activeVersion!).toBe(false);
+
+    const unsupportedSummaries = await listRigSummaries(db, ws.workspaceId, {
+      backend: "none",
+      supportsImmutableImages: false,
+    });
+    expect(unsupportedSummaries[0]!.activeVersion!.managedSandboxImage).toEqual({
+      backend: "none",
+      status: "unsupported",
+    });
+
+    const unpreparedSummaries = await listRigSummaries(db, ws.workspaceId, {
+      backend: "modal",
+      supportsImmutableImages: true,
+    });
+    expect(unpreparedSummaries[0]!.activeVersion!.managedSandboxImage).toEqual({
+      backend: "modal",
+      status: "unprepared",
+    });
 
     expect(await countRigs(db, ws.workspaceId)).toBe(1);
   });
@@ -838,6 +870,7 @@ describe("rig change lifecycle", () => {
     );
 
     const listed = await listRigs(db, ws.workspaceId);
+    const summaries = await listRigSummaries(db, ws.workspaceId);
     expect(listed.find((rig) => rig.id === neverVerified.id)?.activeVersionHealth).toEqual({
       checkHealth: "unknown",
       lastVerifiedAt: null,
@@ -849,6 +882,15 @@ describe("rig change lifecycle", () => {
       checkHealth: "passing",
       lastVerifiedAt: "2026-07-08T00:01:00.000Z",
     });
+    expect(summaries.find((rig) => rig.id === neverVerified.id)?.activeVersionHealth).toEqual(
+      listed.find((rig) => rig.id === neverVerified.id)?.activeVersionHealth,
+    );
+    expect(summaries.find((rig) => rig.id === verifiedRig.id)?.activeVersionHealth).toEqual(
+      listed.find((rig) => rig.id === verifiedRig.id)?.activeVersionHealth,
+    );
+    expect(summaries.find((rig) => rig.id === verifiedRig.id)?.activeVersion?.id).toBe(
+      listed.find((rig) => rig.id === verifiedRig.id)?.activeVersion?.id,
+    );
     expect(
       (await getRig(db, ws.workspaceId, verifiedRig.id))?.activeVersionHealth?.checkHealth,
     ).toBe("passing");

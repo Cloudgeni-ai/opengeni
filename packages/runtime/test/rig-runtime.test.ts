@@ -14,6 +14,7 @@ import {
   runRigSetupHook,
   type RigSetupDescriptor,
 } from "../src/index";
+import { cancellableShellCommand } from "../src/sandbox/turn-tool-cancellation";
 
 // A rig setup descriptor with a per-test timeout; rigName/ids are cosmetic.
 function rigSetup(overrides: Partial<RigSetupDescriptor> = {}): RigSetupDescriptor {
@@ -243,6 +244,78 @@ function fakeSession(result: unknown) {
 }
 
 describe("runRigSetupHook (M3)", () => {
+  test("exact cold-boot-verified provider image skips without a remote marker command", async () => {
+    const events: Array<{ type: string; payload: any }> = [];
+    const calls: Array<Record<string, unknown>> = [];
+    const session = {
+      state: { imageId: "im-exact-verified" },
+      exec: async (args: Record<string, unknown>) => {
+        calls.push(args);
+        throw new Error("the exact provider image must not need a marker probe");
+      },
+    };
+
+    await runRigSetupHook(session as any, {
+      environment: {},
+      rigSetup: rigSetup({
+        contentHash: `sha256:${"a".repeat(64)}`,
+        verifiedProviderImageId: "im-exact-verified",
+      }),
+      onRuntimeEvent: (event) => {
+        events.push(event as any);
+      },
+    });
+
+    expect(calls).toHaveLength(0);
+    expect(events.map((event) => event.type)).toEqual(["rig.setup.started", "rig.setup.skipped"]);
+    expect(events.at(-1)?.payload.proof).toBe("verified_provider_image");
+  });
+
+  test("provider image identity mismatch retains the in-box marker fallback", async () => {
+    const events: Array<{ type: string; payload: any }> = [];
+    const calls: Array<Record<string, unknown>> = [];
+    const session = {
+      state: { imageId: "im-other" },
+      exec: async (args: Record<string, unknown>) => {
+        calls.push(args);
+        return { status: 0, output: "__OPENGENI_RIG_SETUP_SKIPPED__\n" };
+      },
+    };
+
+    await runRigSetupHook(session as any, {
+      environment: {},
+      rigSetup: rigSetup({
+        contentHash: `sha256:${"a".repeat(64)}`,
+        verifiedProviderImageId: "im-exact-verified",
+      }),
+      onRuntimeEvent: (event) => {
+        events.push(event as any);
+      },
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(events.map((event) => event.type)).toEqual(["rig.setup.started", "rig.setup.skipped"]);
+    expect(events.at(-1)?.payload.proof).toBeUndefined();
+  });
+
+  test("provider image identity without a content hash cannot bypass the in-box proof", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const session = {
+      state: { imageId: "im-exact-verified" },
+      exec: async (args: Record<string, unknown>) => {
+        calls.push(args);
+        return { status: 0, output: "__OPENGENI_RIG_SETUP_SKIPPED__\n" };
+      },
+    };
+
+    await runRigSetupHook(session as any, {
+      environment: {},
+      rigSetup: rigSetup({ verifiedProviderImageId: "im-exact-verified" }),
+    });
+
+    expect(calls).toHaveLength(1);
+  });
+
   test("marker present → completed{skipped:true}, no throw", async () => {
     const events: Array<{ type: string; payload: any }> = [];
     const { session } = fakeSession({ status: 0, output: "__OPENGENI_RIG_SETUP_SKIPPED__\n" });
@@ -346,6 +419,7 @@ describe("runRigSetupHook (M3)", () => {
 
     await runRigSetupHook(session as any, {
       environment: {},
+      runAs: "root",
       rigSetup: rigSetup({ script }),
     });
 
@@ -353,7 +427,59 @@ describe("runRigSetupHook (M3)", () => {
     expect(calls.every((call) => Buffer.byteLength(String(call.cmd), "utf8") < 32 * 1024)).toBe(
       true,
     );
+    const quote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
+    const modalRunAsWrapper = (command: string) =>
+      [
+        "target_user='root'",
+        'current_uid="$(id -u)"',
+        'current_user="$(id -un 2>/dev/null || id -u)"',
+        'if [ "$current_uid" = "$target_user" ] || [ "$current_user" = "$target_user" ]; then',
+        `  sh -lc ${quote(command)}`,
+        'elif [ "$current_uid" -eq 0 ]; then',
+        `  su -s /bin/sh "$target_user" -c ${quote(command)}`,
+        "else",
+        `  sudo -n -u "$target_user" -- sh -lc ${quote(command)}`,
+        "fi",
+      ].join("\n");
+    expect(
+      calls.every((call) => {
+        const cancellable = cancellableShellCommand(
+          String(call.cmd),
+          "/tmp/opengeni-turn-shell/00000000-0000-4000-8000-000000000000",
+        );
+        return Buffer.byteLength(modalRunAsWrapper(cancellable), "utf8") + 9 < 64 * 1024;
+      }),
+    ).toBe(true);
     expect(calls.some((call) => String(call.cmd).includes("base64 -d"))).toBe(true);
+    expect(calls.some((call) => String(call.cmd).includes("exec bash '/tmp/opengeni/"))).toBe(true);
+    expect(calls.every((call) => !String(call.cmd).includes(script))).toBe(true);
+  });
+
+  test("uses a native filesystem writer once for a large setup payload", async () => {
+    const script = `set -eu\n${"printf x >/dev/null\n".repeat(20_000)}`;
+    const calls: Array<Record<string, unknown>> = [];
+    const writes: Array<{ path: string; content: string }> = [];
+    const session = {
+      exec: async (args: Record<string, unknown>) => {
+        calls.push(args);
+        return calls.length === 1 ? { status: 42, output: "" } : { status: 0, output: "" };
+      },
+      writeSandboxFile: async (path: string, content: string) => {
+        writes.push({ path, content });
+      },
+    };
+
+    await runRigSetupHook(session as any, {
+      environment: {},
+      runAs: "root",
+      rigSetup: rigSetup({ script }),
+    });
+
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.content).toBe(script);
+    expect(writes[0]?.path).toMatch(/^\/tmp\/opengeni\/rig-setup-payloads\/.+\.sh$/);
+    expect(calls.some((call) => String(call.cmd).includes("base64"))).toBe(false);
+    expect(calls.some((call) => String(call.cmd).includes("chmod 0600"))).toBe(true);
     expect(calls.some((call) => String(call.cmd).includes("exec bash '/tmp/opengeni/"))).toBe(true);
     expect(calls.every((call) => !String(call.cmd).includes(script))).toBe(true);
   });

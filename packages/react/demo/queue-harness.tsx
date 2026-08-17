@@ -1,5 +1,5 @@
 import type { SessionTurn } from "@opengeni/sdk";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { QueueSurface, type ComposerState, type UseTurnQueueResult } from "@opengeni/react";
 import {
@@ -28,7 +28,10 @@ declare global {
 }
 
 const params = new URLSearchParams(window.location.search);
-const initialCount = Math.min(100, Math.max(1, Number(params.get("count") ?? "1") || 1));
+const initialCount = Math.min(10_000, Math.max(1, Number(params.get("count") ?? "1") || 1));
+const mutationDelayMs = Math.min(10_000, Math.max(0, Number(params.get("delayMs") ?? "0") || 0));
+type QueueHarnessMutationKind = "move" | "edit" | "steer" | "delete";
+const failMutation = parseMutationKind(params.get("failMutation"));
 const theme = params.get("theme") === "light" ? "light" : "dark";
 const readOnly = params.get("readOnly") === "1";
 const boundaryMaximum = parseBoundaryMaximum(params.get("boundaryMax"));
@@ -132,6 +135,12 @@ function parseErrorShape(value: string | null): QueueHarnessErrorShape {
   return value === "multiline" ? "multiline" : "unbroken";
 }
 
+function parseMutationKind(value: string | null): QueueHarnessMutationKind | null {
+  return value === "move" || value === "edit" || value === "steer" || value === "delete"
+    ? value
+    : null;
+}
+
 const composer: ComposerState & { hasDraftContent: () => boolean } = {
   value: "",
   setValue: () => {},
@@ -172,6 +181,36 @@ function QueueHarness() {
   );
   const [refreshCount, setRefreshCount] = useState(0);
   const [clearMutationErrorCount, setClearMutationErrorCount] = useState(0);
+  const [pendingByTurn, setPendingByTurn] = useState<Record<string, QueueHarnessMutationKind>>({});
+
+  const mutate = useCallback(
+    async <Result,>(
+      turnId: string,
+      kind: QueueHarnessMutationKind,
+      commit: () => Result,
+      rejected: Result,
+    ): Promise<Result> => {
+      setPendingByTurn((current) => ({ ...current, [turnId]: kind }));
+      setMutationError(null);
+      try {
+        if (mutationDelayMs > 0) {
+          await new Promise<void>((resolve) => setTimeout(resolve, mutationDelayMs));
+        }
+        if (failMutation === kind) {
+          setMutationError(new Error(`Server rejected delayed ${kind} mutation`));
+          return rejected;
+        }
+        return commit();
+      } finally {
+        setPendingByTurn((current) => {
+          const next = { ...current };
+          delete next[turnId];
+          return next;
+        });
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     window.__queuePrompt = turns[0]?.prompt ?? "";
@@ -199,20 +238,90 @@ function QueueHarness() {
         setRefreshCount((current) => current + 1);
         setQueueError(null);
       },
-      moveTurn: async () => true,
-      editTurn: async () => null,
-      steerTurn: async () => true,
-      removeTurn: async () => true,
-      pendingByTurn: {},
-      mutationFor: () => null,
-      mutating: false,
+      moveTurn: async (turnId, beforeTurnId) =>
+        await mutate(
+          turnId,
+          "move",
+          () => {
+            setTurns((current) => {
+              const sourceIndex = current.findIndex((turn) => turn.id === turnId);
+              if (sourceIndex < 0) return current;
+              const ordered = [...current];
+              const [moving] = ordered.splice(sourceIndex, 1);
+              if (!moving) return current;
+              const targetIndex =
+                beforeTurnId === null
+                  ? ordered.length
+                  : ordered.findIndex((turn) => turn.id === beforeTurnId);
+              ordered.splice(targetIndex < 0 ? ordered.length : targetIndex, 0, moving);
+              return ordered.map((turn, index) => ({ ...turn, position: index + 1 }));
+            });
+            return true;
+          },
+          false,
+        ),
+      editTurn: async (turnId) =>
+        await mutate(
+          turnId,
+          "edit",
+          () => {
+            const source = turns.find((turn) => turn.id === turnId);
+            if (!source) return null;
+            setTurns((current) => current.filter((turn) => turn.id !== turnId));
+            return {
+              revision: 1,
+              text: source.prompt,
+              resources: source.resources,
+              model: source.model,
+              reasoningEffort: source.reasoningEffort,
+              latencyMode: source.latencyMode,
+              sourceTurnId: source.id,
+              sourceTurnVersion: source.version,
+              updatedAt: new Date().toISOString(),
+            };
+          },
+          null,
+        ),
+      steerTurn: async (turnId) =>
+        await mutate(
+          turnId,
+          "steer",
+          () => {
+            setTurns((current) => {
+              const sourceIndex = current.findIndex((turn) => turn.id === turnId);
+              if (sourceIndex <= 0) return current;
+              const ordered = [...current];
+              const [steering] = ordered.splice(sourceIndex, 1);
+              if (!steering) return current;
+              return [steering, ...ordered].map((turn, index) => ({
+                ...turn,
+                position: index + 1,
+              }));
+            });
+            return true;
+          },
+          false,
+        ),
+      removeTurn: async (turnId) =>
+        await mutate(
+          turnId,
+          "delete",
+          () => {
+            setTurns((current) => current.filter((turn) => turn.id !== turnId));
+            return true;
+          },
+          false,
+        ),
+      pendingByTurn,
+      mutationFor: (turnId) => pendingByTurn[turnId] ?? null,
+      mutating: Object.keys(pendingByTurn).length > 0,
       mutationError,
       clearMutationError: () => {
         setClearMutationErrorCount((current) => current + 1);
         setMutationError(null);
       },
     }),
-    [loading, mutationError, queueError, turns],
+    [loading, mutate, mutationError, pendingByTurn, queueError, turns],
   );
 
   return (
@@ -223,6 +332,10 @@ function QueueHarness() {
       data-theme={theme}
       data-refresh-count={refreshCount}
       data-clear-mutation-error-count={clearMutationErrorCount}
+      data-mutation-delay-ms={mutationDelayMs}
+      data-fail-mutation={failMutation ?? undefined}
+      data-pending-mutation-count={Object.keys(pendingByTurn).length}
+      data-queue-order={turns.map((turn) => turn.id).join(",")}
     >
       <section
         className="flex w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-lg max-sm:h-dvh max-sm:rounded-none max-sm:border-0"

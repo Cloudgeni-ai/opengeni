@@ -65,6 +65,17 @@ function makeClient(responder: (request: RecordedRequest) => Response): {
 }
 
 describe("OpenGeniClient", () => {
+  test("requests the bounded rig list projection without changing the full list method", async () => {
+    const { client, requests } = makeClient(() => jsonResponse([]));
+
+    expect(await client.listRigSummaries(WORKSPACE_ID)).toEqual([]);
+    expect(await client.listRigs(WORKSPACE_ID)).toEqual([]);
+    expect(requests.map((request) => request.url)).toEqual([
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/rigs?view=summary`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/rigs`,
+    ]);
+  });
+
   test("identity-scoped workspace reads forward AbortSignal cancellation", async () => {
     let receivedSignal: AbortSignal | undefined;
     const client = new OpenGeniClient({

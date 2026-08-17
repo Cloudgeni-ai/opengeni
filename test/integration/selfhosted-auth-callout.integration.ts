@@ -39,7 +39,7 @@ import {
   handleAuthorizationRequest,
   type AuthCalloutDeps,
 } from "../../apps/api/src/sandbox/auth-callout";
-import { freePort } from "@opengeni/testing";
+import { freePort, waitFor } from "@opengeni/testing";
 
 // ── A minimal in-memory DB stand-in for getEnrollment ────────────────────────
 // The responder only calls db.getEnrollment via the @opengeni/db helper, which runs
@@ -132,6 +132,10 @@ function makeDeps(callout: {
   user: string;
   password: string;
 }): AuthCalloutDeps {
+  const testUserJwtTtlSeconds = Number.parseInt(
+    process.env.OPENGENI_NATS_EXPIRY_PROBE_SECONDS ?? "",
+    10,
+  );
   return {
     // The db is unused beyond getEnrollment (mocked above).
     db: {} as AuthCalloutDeps["db"],
@@ -139,6 +143,9 @@ function makeDeps(callout: {
       enrollmentSigningSecret: SIGNING_SECRET,
     } as AuthCalloutDeps["settings"],
     callout,
+    ...(Number.isSafeInteger(testUserJwtTtlSeconds) && testUserJwtTtlSeconds > 0
+      ? { testUserJwtTtlSeconds }
+      : {}),
   };
 }
 
@@ -325,6 +332,7 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
   let responder: ResponderConnection;
   let accountSeed: string;
   let accountPublicKey: string;
+  let authorizationRequestCount = 0;
 
   beforeAll(async () => {
     // Generate the callout issuer account keypair (its seed signs every JWT).
@@ -346,7 +354,10 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
       nats.url,
       { kind: "user-password", user: "auth", pass: "auth" },
       AUTH_CALLOUT_SUBJECT,
-      (bytes) => handleAuthorizationRequest(deps, bytes),
+      (bytes) => {
+        authorizationRequestCount += 1;
+        return handleAuthorizationRequest(deps, bytes);
+      },
       { name: "test-auth-callout" },
     );
   }, 120_000);
@@ -566,4 +577,102 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
     expect(competingError).toBeDefined();
     expect(/auth|denied|violation|another runner|timeout/i.test(String(competingError))).toBe(true);
   }, 30_000);
+
+  test.skipIf(process.env.OPENGENI_NATS_EXPIRY_PROBE !== "1")(
+    "(7) ROTATION: an actual five-minute user JWT expiry reauthenticates and keeps request/reply usable",
+    async () => {
+      const bearer = await bearerFor(WS_A, AGENT_A);
+      const requestCountBeforeConnect = authorizationRequestCount;
+      const statuses: Array<{ at: string; data: string; type: string }> = [];
+      const agent = await connect({
+        servers: nats.url,
+        token: bearer,
+        name: connectionName(INSTANCE_A),
+        reconnect: true,
+        maxReconnectAttempts: -1,
+        reconnectTimeWait: 50,
+        reconnectJitter: 0,
+        reconnectJitterTLS: 0,
+      });
+      const controlPlane = await connect({
+        servers: nats.url,
+        user: "control",
+        pass: "control",
+      });
+      const statusIterator = agent.status()[Symbol.asyncIterator]();
+      const statusCollector = (async () => {
+        for (;;) {
+          const next = await statusIterator.next();
+          if (next.done) return;
+          const status = next.value;
+          statuses.push({
+            at: new Date().toISOString(),
+            data: String(status.data ?? ""),
+            type: status.type,
+          });
+          if (status.type === "reconnect") break;
+        }
+      })();
+      const subject = `agent.${WS_A}.${AGENT_A}.connection.${INSTANCE_A}.rpc`;
+      const sub = agent.subscribe(subject);
+      const responderLoop = (async () => {
+        for await (const msg of sub) {
+          if (msg.reply) msg.respond(new TextEncoder().encode("pong-after-rotation"));
+        }
+      })();
+
+      try {
+        await agent.flush();
+        const initial = await controlPlane.request(subject, new TextEncoder().encode("before"), {
+          timeout: 5_000,
+        });
+        expect(new TextDecoder().decode(initial.data)).toBe("pong-after-rotation");
+        expect(authorizationRequestCount).toBe(requestCountBeforeConnect + 1);
+
+        await waitFor(() => authorizationRequestCount >= requestCountBeforeConnect + 2, {
+          timeoutMs: 330_000,
+          intervalMs: 100,
+        });
+        expect(authorizationRequestCount).toBeGreaterThanOrEqual(requestCountBeforeConnect + 2);
+
+        await agent.flush();
+        const after = await controlPlane.request(subject, new TextEncoder().encode("after"), {
+          timeout: 5_000,
+        });
+        expect(new TextDecoder().decode(after.data)).toBe("pong-after-rotation");
+        expect(
+          statuses.some(
+            (status) =>
+              /disconnect|reconnect|update|error/i.test(status.type) ||
+              /authentication expired/i.test(status.data),
+          ),
+        ).toBe(true);
+
+        console.error(
+          JSON.stringify(
+            {
+              authorizationRequests: authorizationRequestCount - requestCountBeforeConnect,
+              statuses,
+            },
+            null,
+            2,
+          ),
+        );
+      } finally {
+        // Drain the subscription so its pending iterator resolves. Do not call
+        // return() on the status async generator: nats.js queues it behind the
+        // collector's pending next(), which can wait forever when no later status
+        // arrives. Connection close explicitly stops status listeners and resolves
+        // that pending next().
+        await sub.drain();
+        await responderLoop;
+        await statusCollector;
+        await Promise.all([
+          agent.close().catch(() => undefined),
+          controlPlane.close().catch(() => undefined),
+        ]);
+      }
+    },
+    360_000,
+  );
 });

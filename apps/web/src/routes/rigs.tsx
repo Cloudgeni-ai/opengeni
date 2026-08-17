@@ -2,7 +2,7 @@
 // team's machine — a base image + setup script + health checks + default
 // variable sets, versioned and self-healing. This page lists them and creates
 // new ones; the per-rig detail owns versions, changes, and promotion.
-import { useRigs, useVariableSets } from "@opengeni/react";
+import { useRigSummaries, useVariableSets } from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
 import {
   CheckIcon,
@@ -38,13 +38,13 @@ import { formatTimestamp } from "@/lib/format";
 import { rigCheckHealthView, versionHasChecks } from "@/lib/rig-status";
 import { listViewState } from "@/lib/load-state";
 import { hasWorkspacePermission } from "@/lib/permissions";
-import type { CreateRigRequest, Rig } from "@/types";
+import type { CreateRigRequest, Rig, RigSummary } from "@/types";
 
 export function RigsRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const canView = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:use");
   const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:manage");
-  const rigs = useRigs({ enabled: canView });
+  const rigs = useRigSummaries({ enabled: canView });
   const defaultRigId =
     context.workspaces.find((workspace) => workspace.id === workspaceId)?.defaultRigId ?? null;
   const [createOpen, setCreateOpen] = useState(false);
@@ -200,11 +200,11 @@ function RigCard({
   isDefault,
 }: {
   workspaceId: string;
-  rig: Rig;
+  rig: RigSummary;
   isDefault: boolean;
 }) {
   const active = rig.activeVersion;
-  const checkCount = active?.checks.length ?? 0;
+  const checkCount = active?.checkCount ?? 0;
   return (
     <Link
       to="/workspaces/$workspaceId/rigs/$rigId"

@@ -376,6 +376,7 @@ import type {
   CreateChannelRequest,
   UpdateChannelRequest,
   Rig,
+  RigSummary,
   RigVersion,
   RigChange,
   ProposeRigChangeRequest,
@@ -4133,6 +4134,13 @@ export class OpenGeniClient {
 
   async listRigs(workspaceId: string): Promise<Rig[]> {
     return await this.requestJson<Rig[]>("GET", `/v1/workspaces/${workspaceId}/rigs`);
+  }
+
+  async listRigSummaries(workspaceId: string): Promise<RigSummary[]> {
+    return await this.requestJson<RigSummary[]>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/rigs?view=summary`,
+    );
   }
 
   async createRig(workspaceId: string, request: CreateRigRequest): Promise<Rig> {

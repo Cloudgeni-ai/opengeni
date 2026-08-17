@@ -13,6 +13,7 @@ import {
 import { rigSetupScriptCommand } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import {
+  resolveRigProviderImageForRun,
   resolveRigProviderImageSelection,
   rigProviderImageSourceImage,
   settingsWithRigImage,
@@ -360,6 +361,23 @@ describe("build-once rig provider image runtime", () => {
       }),
     );
     expect(selected.modalImageId).toBe(image.imageId);
+
+    const selectedReceipt = await resolveRigProviderImageForRun(
+      logicalSettings,
+      verified,
+      "modal",
+      async () => ({
+        key: PROVIDER_BINDING_KEY,
+        binding: {
+          version: 1,
+          serverUrl: "https://api.modal.com",
+          workspaceName: "workspace-a",
+          environment: "main",
+        },
+      }),
+    );
+    expect(selectedReceipt.reason).toBe("selected");
+    expect(selectedReceipt.imageId).toBe(image.imageId);
 
     const unavailable = await settingsWithRigProviderImage(
       logicalSettings,

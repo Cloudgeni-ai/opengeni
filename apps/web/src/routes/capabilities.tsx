@@ -15,7 +15,7 @@ import {
   OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
 } from "@opengeni/contracts/slack-bot-scopes";
-import { usePacks, useRigs, useVariableSets } from "@opengeni/react";
+import { usePacks, useRigSummaries, useVariableSets } from "@opengeni/react";
 import {
   CheckCircle2Icon,
   ChevronDownIcon,
@@ -401,7 +401,7 @@ export function CapabilitiesRoute({
   const [registrySearched, setRegistrySearched] = useState<string | null>(null);
 
   const packs = usePacks({ workspaceId });
-  const rigs = useRigs({ workspaceId });
+  const rigs = useRigSummaries({ workspaceId });
   const variableSets = useVariableSets({ workspaceId });
 
   const counts = useMemo(() => capabilityCounts(items), [items]);

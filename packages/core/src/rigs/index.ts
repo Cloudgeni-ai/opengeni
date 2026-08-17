@@ -33,9 +33,11 @@ import {
   RigActiveVersionChangedError,
   RigChangeTransitionError,
   updateRig,
+  withRigCreationLock,
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { boundedParallelMap } from "@opengeni/runtime/mcp-network";
 import { rigProviderImagesFromVerification } from "./provider-images";
 
 export * from "./provider-images";
@@ -44,6 +46,34 @@ export const MAX_RIGS_PER_WORKSPACE = 50;
 export const MAX_CHECKS_PER_RIG = 100;
 export const MAX_CREDENTIAL_HOOKS_PER_RIG = 50;
 export const MAX_DEFAULT_VARIABLE_SETS_PER_RIG = 25;
+export const RIG_DEFAULT_VARIABLE_SET_LOAD_CONCURRENCY = 4;
+
+type VariableSetEnvironment = { values: Record<string, string> } | null;
+
+/** Load complete rig-default variable sets with stable listed-order precedence. */
+export async function loadRigDefaultVariableSetEnvironment(
+  variableSetIds: readonly string[],
+  load: (variableSetId: string) => Promise<VariableSetEnvironment>,
+): Promise<Record<string, string>> {
+  const variableSets = await boundedParallelMap(
+    variableSetIds,
+    RIG_DEFAULT_VARIABLE_SET_LOAD_CONCURRENCY,
+    load,
+  );
+  const values: Record<string, string> = {};
+  for (const variableSet of variableSets) {
+    Object.assign(values, variableSet?.values ?? {});
+  }
+  return values;
+}
+
+/** Rig defaults layer below the session's explicitly selected variable set. */
+export function mergeRigDefaultVariableSetEnvironment(
+  rigDefaultValues: Record<string, string>,
+  sessionValues: Record<string, string>,
+): Record<string, string> {
+  return { ...rigDefaultValues, ...sessionValues };
+}
 
 export type RigServices = {
   db: Database;
@@ -167,30 +197,32 @@ export async function createRigForApi(
   const name = trimmedRigName(payload.name);
   assertUniqueCheckNames(payload.checks);
   await assertVariableSetsExist(deps.db, workspaceId, payload.defaultVariableSetIds);
-  if ((await countRigs(deps.db, workspaceId)) >= MAX_RIGS_PER_WORKSPACE) {
-    throw new HTTPException(422, {
-      message: `a workspace supports at most ${MAX_RIGS_PER_WORKSPACE} rigs`,
-    });
-  }
-  if (await getRigByName(deps.db, workspaceId, name)) {
-    throw new HTTPException(409, { message: `rig name is already in use: ${name}` });
-  }
   const createdBy = rigActorForGrant(grant);
-  const rig = await createRig(deps.db, {
-    accountId: grant.accountId,
-    workspaceId,
-    name,
-    description: payload.description ?? null,
-    createdBy,
-    initialVersion: {
-      image: payload.image ?? null,
-      setupScript: payload.setupScript ?? null,
-      checks: payload.checks,
-      credentialHooks: payload.credentialHooks,
-      defaultVariableSetIds: payload.defaultVariableSetIds,
-      changelog: "Initial version",
+  const rig = await withRigCreationLock(deps.db, workspaceId, async (lockedDb) => {
+    if ((await countRigs(lockedDb, workspaceId)) >= MAX_RIGS_PER_WORKSPACE) {
+      throw new HTTPException(422, {
+        message: `a workspace supports at most ${MAX_RIGS_PER_WORKSPACE} rigs`,
+      });
+    }
+    if (await getRigByName(lockedDb, workspaceId, name)) {
+      throw new HTTPException(409, { message: `rig name is already in use: ${name}` });
+    }
+    return await createRig(lockedDb, {
+      accountId: grant.accountId,
+      workspaceId,
+      name,
+      description: payload.description ?? null,
       createdBy,
-    },
+      initialVersion: {
+        image: payload.image ?? null,
+        setupScript: payload.setupScript ?? null,
+        checks: payload.checks,
+        credentialHooks: payload.credentialHooks,
+        defaultVariableSetIds: payload.defaultVariableSetIds,
+        changelog: "Initial version",
+        createdBy,
+      },
+    });
   });
   await recordRigAuditEvent(deps.db, { grant, action: "rig.created", rigId: rig.id });
   return rig;

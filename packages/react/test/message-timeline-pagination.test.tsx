@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
-import { MessageTimeline, type TimelineItem } from "../src";
+import {
+  MessageTimeline,
+  type AgentMessageItem,
+  type TimelineItem,
+  type UserMessageItem,
+} from "../src";
 import { setScrollEndSupportForTests } from "../src/components/tip-follow";
 import { actRun, registerDom, renderComponent, flush } from "./render-hook";
 
@@ -38,7 +43,7 @@ function reasoningDelta(sequence: number, text: string): SessionEvent {
   };
 }
 
-function userItem(id: string, text: string): TimelineItem {
+function userItem(id: string, text: string): UserMessageItem {
   return {
     kind: "user-message",
     id,
@@ -183,6 +188,50 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("optimistic delivery updates keep every durable row mounted without revisiting it", async () => {
+    const durable = Array.from({ length: 20 }, (_, index) =>
+      userItem(`durable-${index}`, `durable ${index}`),
+    );
+    const sending: UserMessageItem = {
+      ...userItem("optimistic-1", "complete optimistic prompt"),
+      delivery: { state: "sending" },
+    };
+    let durableRenders = 0;
+    const renderMessageText = (text: string, item: AgentMessageItem | UserMessageItem) => {
+      if (item.id.startsWith("durable-")) {
+        durableRenders += 1;
+      }
+      return text;
+    };
+    const r = await renderComponent(
+      <MessageTimeline
+        items={durable}
+        optimisticItems={[sending]}
+        renderMessageText={renderMessageText}
+      />,
+    );
+    const initialDurableRenders = durableRenders;
+    expect(initialDurableRenders).toBe(20);
+    expect(r.container.textContent).toContain("complete optimistic prompt");
+    expect(r.container.textContent).toContain("Sending…");
+
+    await r.rerender(
+      <MessageTimeline
+        items={durable}
+        optimisticItems={[{ ...sending, delivery: { state: "queued" } }]}
+        renderMessageText={renderMessageText}
+      />,
+    );
+
+    expect(durableRenders).toBe(initialDurableRenders);
+    expect(r.container.textContent).toContain("complete optimistic prompt");
+    expect(r.container.textContent).toContain("Queued");
+    for (let index = 0; index < durable.length; index += 1) {
+      expect(r.container.textContent).toContain(`durable ${index}`);
+    }
+    await r.unmount();
+  });
+
   test("same-key streaming content invalidates the memoized group immediately", async () => {
     const first = agentDelta(1, "hello ");
     const r = await renderComponent(<MessageTimeline events={[first]} />);
@@ -281,6 +330,43 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("prepending stable items renders the new rows without revisiting retained rows", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const retained = [userItem("u2", "second"), userItem("u3", "third")];
+    const renderCounts = new Map<string, number>();
+    const renderMessageText = (text: string, item: TimelineItem) => {
+      renderCounts.set(item.id, (renderCounts.get(item.id) ?? 0) + 1);
+      return <span>{text}</span>;
+    };
+    const r = await renderComponent(
+      <MessageTimeline items={retained} renderMessageText={renderMessageText} />,
+    );
+    await drainFrames(frames);
+    const retainedCounts = new Map(renderCounts);
+
+    await r.rerender(
+      <MessageTimeline
+        items={[userItem("u1", "first"), ...retained]}
+        renderMessageText={renderMessageText}
+      />,
+    );
+
+    expect(renderCounts.get("u1")).toBe(1);
+    expect(renderCounts.get("u2")).toBe(retainedCounts.get("u2"));
+    expect(renderCounts.get("u3")).toBe(retainedCounts.get("u3"));
+    const text = r.container.textContent ?? "";
+    expect(text.indexOf("first")).toBeLessThan(text.indexOf("second"));
+    expect(text.indexOf("second")).toBeLessThan(text.indexOf("third"));
+    await drainFrames(frames);
+    await r.unmount();
+  });
+
   test("a raw-event prepend that merges reasoning keeps the hydrated suffix mounted", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
@@ -338,6 +424,8 @@ describe("MessageTimeline pagination affordances", () => {
     for (const group of groups) {
       expect(group.className).not.toContain("content-visibility");
       expect(group.className).not.toContain("contain-intrinsic-size");
+      expect((group as HTMLElement).style.contentVisibility).toBe("");
+      expect((group as HTMLElement).style.containIntrinsicBlockSize).toBe("");
     }
     await r.unmount();
   });

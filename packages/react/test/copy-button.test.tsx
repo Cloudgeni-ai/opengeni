@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { CopyButton } from "../src/components/copy-button";
-import { Markdown } from "../src/components/markdown";
+import { Markdown, SettledMarkdown } from "../src/components/markdown";
 import { tableElementToTsv } from "../src/lib/clipboard";
 import { TooltipProvider } from "../src/components/tooltip";
 
@@ -27,6 +27,7 @@ describe("CopyButton", () => {
     );
     const button = r.container.querySelector("button[data-og-copy]");
     expect(button).not.toBeNull();
+    expect(document.body.querySelector('[data-slot="tooltip-content"]')).toBeNull();
     await act(async () => {
       button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
@@ -90,6 +91,28 @@ describe("CopyButton", () => {
 });
 
 describe("Markdown copy chrome", () => {
+  test("settled history renders the same complete Markdown document", async () => {
+    const source = [
+      "# Heading",
+      "",
+      "A [link](https://example.test) with **bold** text.",
+      "",
+      "| A | B |",
+      "| - | - |",
+      "| 1 | 2 |",
+      "",
+      "```ts",
+      "const x = 1;",
+      "```",
+    ].join("\n");
+    const animated = await renderComponent(<Markdown>{source}</Markdown>);
+    const expectedHtml = animated.container.innerHTML;
+    await animated.unmount();
+    const settled = await renderComponent(<SettledMarkdown>{source}</SettledMarkdown>);
+    expect(settled.container.innerHTML).toBe(expectedHtml);
+    await settled.unmount();
+  });
+
   test("fenced code exposes a ghost Copy control with the fence body", async () => {
     const writes: string[] = [];
     Object.defineProperty(navigator, "clipboard", {

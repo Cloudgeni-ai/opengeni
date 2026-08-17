@@ -347,28 +347,52 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   if (typeof context.accountId !== "string" || context.accountId.trim() === "") {
     throw new Error("setRlsContext: a non-empty accountId is required to establish an RLS context");
   }
-  await db.execute(sql`select set_config('opengeni.account_id', ${context.accountId}, true)`);
-  await db.execute(
-    sql`select set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true)`,
-  );
-  // Transaction-local writer identity covers supported injected/embedded
-  // database handles whose connection-level application_name is host-owned.
-  // Old OpenGeni binaries do not set this GUC, so migration-installed update
-  // fences can distinguish their partial writes without inspecting content.
-  await db.execute(sql`select set_config('opengeni.lossless_content_writer', '1', true)`);
-  await db.execute(sql`select
-    set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
-    set_config('opengeni.pending_tool_event_output_v1', '1', true)`);
   const sessionActor = sessionRlsActorContext.getStore();
+  // These are one transaction-local context mutation, not four independent
+  // operations. Keeping them in one statement removes three database round
+  // trips from every workspace-scoped query while preserving the separate
+  // read-back guard in withRlsContext. Transaction-local writer identity covers
+  // injected/embedded handles whose connection application_name is host-owned;
+  // the protocol flags let migration-installed fences reject older writers.
   if (sessionActor) {
-    await setSubjectRlsContext(db, sessionActor.subjectId);
-    await db.execute(
-      sql`select set_config(
+    await db.execute(sql`select
+      set_config('opengeni.account_id', ${context.accountId}, true),
+      set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true),
+      set_config('opengeni.lossless_content_writer', '1', true),
+      set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
+      set_config('opengeni.pending_tool_event_output_v1', '1', true),
+      set_config('opengeni.subject_id', ${sessionActor.subjectId}, true),
+      set_config(
         'opengeni.initiating_human_subject_id',
         ${sessionActor.initiatingHumanSubjectId ?? ""},
         true
-      )`,
+      )`);
+    const [appliedActor] = await rawRows<{
+      subject_id: string | null;
+      initiating_human_subject_id: string | null;
+    }>(
+      db,
+      sql`select
+        current_setting('opengeni.subject_id', true) as subject_id,
+        current_setting(
+          'opengeni.initiating_human_subject_id',
+          true
+        ) as initiating_human_subject_id`,
     );
+    if (
+      (appliedActor?.subject_id ?? "") !== sessionActor.subjectId ||
+      (appliedActor?.initiating_human_subject_id ?? "") !==
+        (sessionActor.initiatingHumanSubjectId ?? "")
+    ) {
+      throw new Error("Session actor RLS context was not applied on the active backend");
+    }
+  } else {
+    await db.execute(sql`select
+      set_config('opengeni.account_id', ${context.accountId}, true),
+      set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true),
+      set_config('opengeni.lossless_content_writer', '1', true),
+      set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
+      set_config('opengeni.pending_tool_event_output_v1', '1', true)`);
   }
 }
 

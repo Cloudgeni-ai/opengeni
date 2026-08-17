@@ -46,7 +46,7 @@ async function main() {
 
   const env: Record<string, string> = {
     OPENGENI_ENVIRONMENT: "test",
-    OPENGENI_DATABASE_URL: services.databaseUrl,
+    OPENGENI_DATABASE_URL: services.runtimeDatabaseUrl,
     OPENGENI_NATS_URL: services.natsUrl,
     OPENGENI_TEMPORAL_HOST: services.temporalHost,
     OPENGENI_TEMPORAL_NAMESPACE: "default",

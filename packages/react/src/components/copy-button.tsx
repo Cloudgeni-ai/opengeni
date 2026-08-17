@@ -110,7 +110,7 @@ export function CopyButton({
           )}
         </button>
       </TooltipTrigger>
-      <TooltipContent side="top">{tip}</TooltipContent>
+      {tipOpen || copied ? <TooltipContent side="top">{tip}</TooltipContent> : null}
     </Tooltip>
   );
 }

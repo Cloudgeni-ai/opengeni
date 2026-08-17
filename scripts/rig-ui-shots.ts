@@ -1,6 +1,7 @@
 // Playwright screenshot pass for the Rigs UI (M5). Reads the running stack from
 // scripts/rig-ui-stack.ts (state file), then captures every rig UI state at 1440
-// and 800 px into .agent/evidence/m5-ui/. Re-runnable: edit UI → vite HMRs → run
+// at desktop, tablet, and phone widths into .agent/evidence/m5-ui/. Re-runnable:
+// edit UI → vite HMRs → run
 // this again.
 //
 // Run: bun scripts/rig-ui-shots.ts
@@ -104,7 +105,7 @@ async function main() {
       name: "01-list-empty",
       url: `${base}/rigs`,
       intercepts: async (page) => {
-        await page.route(`**/v1/workspaces/${workspaceId}/rigs`, (route) =>
+        await page.route(`**/v1/workspaces/${workspaceId}/rigs*`, (route) =>
           route.request().method() === "GET"
             ? route.fulfill({ status: 200, contentType: "application/json", body: "[]" })
             : route.continue(),
@@ -141,6 +142,8 @@ async function main() {
       url: `${base}/rigs/${devRig.id}`,
       prepare: async (page) => {
         await page.getByText("Health checks").waitFor({ timeout: 15_000 });
+        await page.getByText("Fast sandbox startup").waitFor({ timeout: 10_000 });
+        await page.getByText("No provider image prepared yet").waitFor({ timeout: 10_000 });
       },
     },
     {
@@ -247,16 +250,16 @@ async function main() {
   ];
 
   for (const shot of shots) {
-    for (const width of [1440, 800]) {
+    for (const width of [1440, 800, 390]) {
       const page = await browser.newPage({
-        viewport: { width, height: 900 },
+        viewport: { width, height: width === 390 ? 844 : 900 },
         deviceScaleFactor: 1,
       });
       try {
         if (shot.intercepts) {
           await shot.intercepts(page);
         }
-        await page.goto(shot.url, { waitUntil: "networkidle", timeout: 30_000 });
+        await page.goto(shot.url, { waitUntil: "domcontentloaded", timeout: 30_000 });
         if (shot.prepare) {
           await shot.prepare(page);
         }

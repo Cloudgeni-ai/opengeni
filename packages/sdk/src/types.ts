@@ -4002,6 +4002,33 @@ export type RigVerificationHealth = {
   lastVerifiedAt: string | null;
 };
 
+export type RigVersionSummary = {
+  id: string;
+  rigId: string;
+  version: number;
+  image: string | null;
+  checkCount: number;
+  defaultVariableSetIds: string[];
+  managedSandboxImage: {
+    backend: SandboxBackend;
+    status: RigProviderImageBuildStatus | "unprepared";
+  } | null;
+};
+
+export type RigSummary = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  name: string;
+  description: string | null;
+  createdBy: string | null;
+  activeVersion: RigVersionSummary | null;
+  activeVersionHealth: RigVerificationHealth | null;
+  versionCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 /**
  * Workspace-shared channel organizing root sessions ("workstreams") by work
  * type in the rail. Pure organizational metadata.

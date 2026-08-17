@@ -83,6 +83,7 @@ import type {
   UpdateChannelRequest,
   UpdateSessionChannelRequest,
   Rig,
+  RigSummary,
   RigVersion,
   RigChange,
   CreateWorkspaceRequest,
@@ -1189,6 +1190,32 @@ export class MockOpenGeniClient implements SessionClientLike {
 
   async listRigs(): Promise<Rig[]> {
     return [...this.rigs];
+  }
+
+  async listRigSummaries(): Promise<RigSummary[]> {
+    return this.rigs.map((rig) => ({
+      id: rig.id,
+      accountId: rig.accountId,
+      workspaceId: rig.workspaceId,
+      name: rig.name,
+      description: rig.description,
+      createdBy: rig.createdBy,
+      activeVersion: rig.activeVersion
+        ? {
+            id: rig.activeVersion.id,
+            rigId: rig.activeVersion.rigId,
+            version: rig.activeVersion.version,
+            image: rig.activeVersion.image,
+            checkCount: rig.activeVersion.checks.length,
+            defaultVariableSetIds: rig.activeVersion.defaultVariableSetIds,
+            managedSandboxImage: null,
+          }
+        : null,
+      activeVersionHealth: rig.activeVersionHealth ?? null,
+      versionCount: rig.versionCount,
+      createdAt: rig.createdAt,
+      updatedAt: rig.updatedAt,
+    }));
   }
 
   async createRig(_workspaceId: string, request: CreateRigRequest): Promise<Rig> {

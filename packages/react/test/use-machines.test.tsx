@@ -104,6 +104,33 @@ describe("useMachines", () => {
     await hook.unmount();
   });
 
+  test("identical polling snapshots do not rerender consumers", async () => {
+    let listCalls = 0;
+    let renders = 0;
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => {
+        listCalls += 1;
+        return structuredClone(response);
+      },
+    };
+    const hook = await renderHook(() => {
+      renders += 1;
+      return useMachines({
+        client,
+        workspaceId: WORKSPACE_ID,
+        machinesClient,
+        pollIntervalMs: 5,
+      });
+    }, undefined);
+    await flush(25);
+    const settledRenders = renders;
+    await flush(25);
+
+    expect(listCalls).toBeGreaterThanOrEqual(3);
+    expect(renders).toBe(settledRenders);
+    await hook.unmount();
+  });
+
   test("attach swaps via the default swapActiveSandbox path (session-scoped) + refetches", async () => {
     const swappedTo: Array<{ sessionId: string; target: string }> = [];
     let current = response;

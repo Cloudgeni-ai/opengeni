@@ -14,13 +14,13 @@ import {
   useLightboxOptional,
   type UserMessageItem,
 } from "@opengeni/react";
+import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
 import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { MarkdownText } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
-import { useAppContext } from "@/context";
 import type { SessionFailureSummary } from "@/lib/events";
 import { formatTimestamp } from "@/lib/format";
 import { repositoryDisplayName } from "@/lib/session-tools";
@@ -162,6 +162,9 @@ export function TerminalSessionArchive(props: { session: Session; eventCount: nu
 
 type FileResource = Extract<ResourceRef, { kind: "file" }>;
 
+const EMPTY_FILE_ASSETS = new Map<string, FileAsset | null>();
+const EMPTY_LOADED_FILE_ASSETS = { key: "", assets: EMPTY_FILE_ASSETS };
+
 /**
  * Fetch the {@link FileAsset} for each attached file in one batch. The map is
  * empty while loading and populated all at once (a file whose lookup failed maps
@@ -169,24 +172,22 @@ type FileResource = Extract<ResourceRef, { kind: "file" }>;
  * concatenated ids so re-renders with the same attachments don't refetch.
  */
 function useFileAssets(
+  client: OpenGeniCoreClient,
   workspaceId: string,
   resources: FileResource[],
 ): { assets: Map<string, FileAsset | null>; ready: boolean } {
-  const { client } = useAppContext();
   // The map remembers WHICH id-key it was fetched for: when the attachments
   // change, the stale map must not masquerade as this message's metadata while
   // the new fetch is in flight (previews briefly showed the previous message's
   // files). `ready` is key-matched, never inferred from map size.
-  const [loaded, setLoaded] = useState<{ key: string; assets: Map<string, FileAsset | null> }>({
-    key: "",
-    assets: new Map(),
-  });
+  const [loaded, setLoaded] = useState<{ key: string; assets: Map<string, FileAsset | null> }>(
+    EMPTY_LOADED_FILE_ASSETS,
+  );
   const key = resources.map((resource) => resource.fileId).join(",");
   useEffect(() => {
     let mounted = true;
     const ids = key ? key.split(",") : [];
     if (ids.length === 0) {
-      setLoaded({ key, assets: new Map() });
       return;
     }
     void Promise.all(
@@ -206,7 +207,10 @@ function useFileAssets(
       mounted = false;
     };
   }, [client, workspaceId, key]);
-  return { assets: loaded.key === key ? loaded.assets : new Map(), ready: loaded.key === key };
+  return {
+    assets: loaded.key === key ? loaded.assets : EMPTY_FILE_ASSETS,
+    ready: loaded.key === key,
+  };
 }
 
 function isImageAsset(asset: FileAsset | null | undefined): boolean {
@@ -215,9 +219,11 @@ function isImageAsset(asset: FileAsset | null | undefined): boolean {
 
 /** Attachment previews/chips + repository chips + markdown body inside the user bubble. */
 export function UserMessageBody({
+  client,
   workspaceId,
   item,
 }: {
+  client: OpenGeniCoreClient;
   workspaceId: string;
   item: UserMessageItem;
 }) {
@@ -228,7 +234,7 @@ export function UserMessageBody({
     (resource): resource is Extract<ResourceRef, { kind: "repository" }> =>
       resource.kind === "repository",
   );
-  const { assets, ready } = useFileAssets(workspaceId, fileResources);
+  const { assets, ready } = useFileAssets(client, workspaceId, fileResources);
   // A single all-at-once populate: until THIS message's fetch lands every file
   // is "pending" and renders as a neutral skeleton, so an image never briefly
   // shows as a file chip — or as the PREVIOUS message's file — before its
@@ -271,6 +277,7 @@ export function UserMessageBody({
           {imageResources.map((resource) => (
             <MessageImagePreview
               key={`${resource.fileId}:${resource.mountPath ?? ""}`}
+              client={client}
               workspaceId={workspaceId}
               resource={resource}
               asset={assets.get(resource.fileId) as FileAsset}
@@ -285,6 +292,7 @@ export function UserMessageBody({
           {otherFileResources.map((resource) => (
             <MessageFileAttachment
               key={`${resource.fileId}:${resource.mountPath ?? ""}`}
+              client={client}
               workspaceId={workspaceId}
               resource={resource}
               asset={assets.get(resource.fileId) ?? undefined}
@@ -303,7 +311,7 @@ export function UserMessageBody({
       ) : null}
 
       <CollapsibleUserMessageBody messageId={item.id} text={item.text}>
-        <MarkdownText text={item.text} compact />
+        <MarkdownText text={item.text} compact settled />
       </CollapsibleUserMessageBody>
 
       {item.presentation ? (
@@ -328,17 +336,18 @@ export function UserMessageBody({
  * card rather than a broken-image glyph.
  */
 function MessageImagePreview({
+  client,
   workspaceId,
   resource,
   asset,
   grid,
 }: {
+  client: OpenGeniCoreClient;
   workspaceId: string;
   resource: FileResource;
   asset: FileAsset;
   grid: boolean;
 }) {
-  const { client } = useAppContext();
   const lightbox = useLightboxOptional();
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -370,7 +379,14 @@ function MessageImagePreview({
 
   // A dead/expired signed URL degrades to the plain file card — never a broken image.
   if (failed) {
-    return <MessageFileAttachment workspaceId={workspaceId} resource={resource} asset={asset} />;
+    return (
+      <MessageFileAttachment
+        client={client}
+        workspaceId={workspaceId}
+        resource={resource}
+        asset={asset}
+      />
+    );
   }
 
   const openFull = () => {
@@ -440,16 +456,17 @@ function MessageImagePreview({
 
 /** File chip with the download-url affordance (signed URL on click). */
 export function MessageFileAttachment({
+  client,
   workspaceId,
   resource,
   asset: preloaded,
 }: {
+  client: OpenGeniCoreClient;
   workspaceId: string;
   resource: FileResource;
   /** When the parent already fetched the asset, skip the redundant lookup. */
   asset?: FileAsset | undefined;
 }) {
-  const { client } = useAppContext();
   const [file, setFile] = useState<FileAsset | null>(preloaded ?? null);
   const [busy, setBusy] = useState(false);
 

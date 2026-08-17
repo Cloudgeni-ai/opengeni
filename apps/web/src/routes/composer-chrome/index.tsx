@@ -15,7 +15,11 @@ export function ComposerChromeGalleryRoute() {
   const composer = useMemo(() => idleComposer(), []);
   const scenarios = useGalleryScenarios();
   const [mode, setMode] = useState<ViewMode>("phone");
-  const [phoneScenarioId, setPhoneScenarioId] = useState<ChromeScenarioId>("agents-only");
+  const [phoneScenarioId, setPhoneScenarioId] = useState<ChromeScenarioId>(() => {
+    if (typeof window === "undefined") return "agents-only";
+    return (new URLSearchParams(window.location.search).get("scenario") ??
+      "agents-only") as ChromeScenarioId;
+  });
   const [galleryFilter, setGalleryFilter] = useState<"all" | ChromeScenarioId>("all");
 
   const phoneScenario = scenarios.find((row) => row.id === phoneScenarioId) ?? scenarios[0] ?? null;

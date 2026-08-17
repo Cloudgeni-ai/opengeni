@@ -378,7 +378,30 @@ describe("observability", () => {
       console.warn = originalWarn;
     }
 
-    expect(observed).toEqual(["Startup dependency connection failed; retrying"]);
+    expect(observed).toEqual([
+      "Startup dependency failed; retrying: Temporal (attempt 1/3, delay 100 ms)",
+    ]);
+
+    observed.length = 0;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(
+        { ...settings, observabilityStructuredLogs: true },
+        { component: "api", now: () => 1 },
+      );
+      logStartupDependencyRetry(obs, {
+        label: "NATS",
+        attempt: 2,
+        attempts: 5,
+        delayMs: 250,
+        error: new Error("authorization violation"),
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(JSON.parse(observed[0]!).message).toBe(
+      "Startup dependency failed; retrying: NATS (attempt 2/5, delay 250 ms)",
+    );
   });
 
   test("public structured logs omit identifiers and arbitrary source fields", () => {

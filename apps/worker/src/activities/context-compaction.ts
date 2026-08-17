@@ -11,6 +11,7 @@ import {
   SUMMARY_BUFFER_TOKENS,
   buildCompactionReplacementHistory,
   buildRemoteV2ReplacementHistory,
+  compactionThresholdTokens,
   compactionReplacementFingerprint,
   decideCompaction,
   estimateTokens,
@@ -112,6 +113,24 @@ export async function maybeCompactContext(
     );
   }
   const useRemoteV2 = options.codexCompactionMode === "remote_v2";
+
+  // Automatic compaction is gated only by the provider-accounted prior input
+  // size. When that signal is below threshold, loading and projecting the full
+  // transcript cannot change the verdict; the ordinary model-input path will
+  // load it once immediately afterward. Forced/operator requests still need
+  // the transcript even below threshold, including the empty-history receipt.
+  if (!options.force && !options.clearRequestedCompaction) {
+    const providerInputTokens =
+      typeof lastInputTokens === "number" && lastInputTokens > 0 ? lastInputTokens : 0;
+    if (providerInputTokens < compactionThresholdTokens(settings)) {
+      return {
+        compacted: false,
+        reason: "below_threshold",
+        events: [],
+        requestConsumed: false,
+      };
+    }
+  }
 
   // Preserve the complete ordered transcript while bounding each Postgres
   // driver result frame beside the decoded history already held by this turn.

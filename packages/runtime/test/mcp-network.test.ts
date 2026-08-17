@@ -326,4 +326,37 @@ describe("MCP network and payload boundary", () => {
     expect(maxActive).toBe(3);
     expect(output).toEqual(Array.from({ length: 19 }, (_, index) => `value-${index}`));
   });
+
+  test("bounded parallel map stops launching after the first error and drains active work", async () => {
+    const launched: number[] = [];
+    const settled: number[] = [];
+    let active = 0;
+    const failure = new Error("provider failure");
+
+    await expect(
+      boundedParallelMap(
+        Array.from({ length: 12 }, (_, index) => index),
+        3,
+        async (value) => {
+          launched.push(value);
+          active += 1;
+          try {
+            if (value === 1) {
+              await Bun.sleep(1);
+              throw failure;
+            }
+            await Bun.sleep(10);
+            settled.push(value);
+            return value;
+          } finally {
+            active -= 1;
+          }
+        },
+      ),
+    ).rejects.toBe(failure);
+
+    expect(launched).toEqual([0, 1, 2]);
+    expect(settled).toEqual([0, 2]);
+    expect(active).toBe(0);
+  });
 });

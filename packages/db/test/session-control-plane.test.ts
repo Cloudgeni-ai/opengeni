@@ -4829,6 +4829,60 @@ describe("clean session control plane", () => {
     });
   });
 
+  test("attempt event append reports bounded persistence subphases without trusting the observer", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "observe append phases");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("phase-observer turn was not claimed");
+
+    const phases: Array<{
+      phase: string;
+      durationSeconds: number;
+      persistenceAttempt: number;
+    }> = [];
+    const observed = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      turn.id,
+      turn.executionGeneration,
+      attemptId,
+      [{ type: "agent.message.delta", payload: { text: "observed" } }],
+      (phase) => phases.push(phase),
+    );
+    expect(observed).toMatchObject({ accepted: true });
+    expect(phases.map((phase) => phase.phase)).toEqual([
+      "transaction_ready",
+      "mutation",
+      "attempt_fence",
+      "event_write",
+      "commit",
+    ]);
+    expect(phases.every((phase) => phase.durationSeconds >= 0)).toBe(true);
+    expect(phases.every((phase) => phase.persistenceAttempt === 1)).toBe(true);
+
+    const survivesThrowingObserver = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      turn.id,
+      turn.executionGeneration,
+      attemptId,
+      [{ type: "agent.message.delta", payload: { text: "still durable" } }],
+      () => {
+        throw new Error("metrics sink failed");
+      },
+    );
+    expect(survivesThrowingObserver).toMatchObject({ accepted: true });
+  });
+
   test("attempt writes run concurrently across sessions while workspace control stays exclusive", async () => {
     const { grant, session: firstSession } = await fixture();
     const secondSession = await createSession(client.db, {

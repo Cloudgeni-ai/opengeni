@@ -5,8 +5,10 @@ import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import {
   createDb,
+  createRig,
   createRigVersion,
   createSession,
+  countRigs,
   getRigChange,
   listRigVersions,
   updateRigChangeStatus,
@@ -129,6 +131,7 @@ describe("rig route permission matrix", () => {
     const createBody = JSON.stringify({
       name: "gate",
       image: "ubuntu:24.04",
+      setupScript: "echo exact-full-definition",
       checks: [{ name: "ok", command: "true" }],
     });
     expect(
@@ -142,6 +145,21 @@ describe("rig route permission matrix", () => {
     expect(created.status).toBe(201);
     const rig = await created.json();
     expect(rig.activeVersion.version).toBe(1);
+
+    const fullList = await app().request(base, { headers: useOnly });
+    expect(fullList.status).toBe(200);
+    expect((await fullList.json())[0].activeVersion.setupScript).toBe("echo exact-full-definition");
+    const summaryList = await app().request(`${base}?view=summary`, { headers: useOnly });
+    expect(summaryList.status).toBe(200);
+    const [summary] = await summaryList.json();
+    expect(summary.id).toBe(rig.id);
+    expect(summary.activeVersion.checkCount).toBe(1);
+    expect(summary.activeVersion.managedSandboxImage).toEqual({
+      backend: settings.sandboxBackend,
+      status: "unsupported",
+    });
+    expect("setupScript" in summary.activeVersion).toBe(false);
+    expect("providerImages" in summary.activeVersion).toBe(false);
 
     // Get: rigs:use OK.
     expect((await app().request(`${base}/${rig.id}`, { headers: useOnly })).status).toBe(200);
@@ -481,5 +499,31 @@ describe("rig route permission matrix", () => {
       }),
     });
     expect(badRef.status).toBe(422);
+  });
+
+  test("concurrent creates cannot race past the workspace rig limit", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    for (let index = 0; index < 49; index += 1) {
+      await createRig(client.db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        name: `existing-${index}`,
+      });
+    }
+    const manage = { authorization: await bearer(ws, "user:m", ["rigs:manage"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const responses = await Promise.all(
+      Array.from({ length: 4 }, (_, index) =>
+        app().request(base, {
+          method: "POST",
+          headers: manage,
+          body: JSON.stringify({ name: `concurrent-${index}` }),
+        }),
+      ),
+    );
+
+    expect(responses.map((response) => response.status).sort()).toEqual([201, 422, 422, 422]);
+    expect(await countRigs(client.db, ws.workspaceId)).toBe(50);
   });
 });
