@@ -3,6 +3,7 @@ import { useState } from "react";
 import type {
   IntegrationChip,
   IntegrationFooter,
+  IntegrationOption,
   IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
 import type { IntegrationAdapter } from "@/components/capabilities/use-google-drive-integration";
@@ -13,6 +14,9 @@ import type { GitHubAppInfo } from "@/types";
 
 export const GITHUB_APP_DESCRIPTION =
   "Read code and open pull requests in the repositories you allow.";
+// GitHub is the workspace App binding, not a catalog item, so there is no
+// catalogAssetUrl logo path for it; like the other integration marks this is a
+// provider-hosted logo with the monogram as the offline fallback.
 export const GITHUB_LOGO_URL = "https://github.githubassets.com/favicons/favicon.svg";
 
 /**
@@ -31,7 +35,11 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const installations = status?.installations ?? [];
   const busy = context.githubAppBusy || disconnecting;
 
-  const chip = githubChip(status, canManage);
+  // A failed status fetch with no prior snapshot is unknown, not unbound: show a
+  // visible failure with a retry instead of pinning the tile at Loading.
+  const statusFailed = status === null && !context.repoBusy && context.githubStatusFailed;
+  const catalogLoading = context.repoBusy || !context.githubCatalogReady;
+  const chip = githubChip(status, canManage, statusFailed);
   const bound = status?.status === "bound" && installations.length > 0;
   const broken = bound && installations.some((installation) => installation.lifecycle !== "active");
   const connectUrl = status?.installUrl ?? status?.linkUrl ?? null;
@@ -68,10 +76,17 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   async function disconnectAll(): Promise<boolean> {
     setDisconnecting(true);
     try {
+      // ConfirmDialog contract: return false when anything failed so the dialog
+      // stays open instead of closing as a success.
+      let allSucceeded = true;
       for (const installation of installations) {
-        await context.disconnectGitHubInstallation(workspaceId, installation.installationId);
+        const succeeded = await context.disconnectGitHubInstallation(
+          workspaceId,
+          installation.installationId,
+        );
+        if (!succeeded) allSucceeded = false;
       }
-      return true;
+      return allSucceeded;
     } finally {
       setDisconnecting(false);
     }
@@ -97,8 +112,28 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
             busy,
           };
 
-  const configureUrl =
-    installations.find((installation) => installation.configureUrl)?.configureUrl ?? null;
+  const configurableInstallations = installations.filter(
+    (installation) => installation.configureUrl,
+  );
+  const configureUrl = configurableInstallations[0]?.configureUrl ?? null;
+
+  // With several installations, one shared "Change repositories" link would
+  // silently open only the first installation's GitHub settings; emit one
+  // action per installation instead.
+  const options: IntegrationOption[] =
+    bound && canManage && configurableInstallations.length > 1
+      ? configurableInstallations.map((installation) => ({
+          kind: "link" as const,
+          id: `github-repositories-${installation.installationId}`,
+          label:
+            installation.accountLogin ?? `GitHub installation ${installation.installationId}`,
+          description: "Choose which repositories this installation shares.",
+          action: {
+            label: "Change repositories",
+            onClick: () => window.location.assign(installation.configureUrl!),
+          },
+        }))
+      : [];
 
   const model: IntegrationViewModel = {
     id: "github",
@@ -115,8 +150,10 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
               name: repository.fullName,
               meta: repository.private ? "private" : "public",
             })),
-            emptyMessage: githubEmptyRepositoriesMessage(installations),
-            ...(canManage && configureUrl
+            emptyMessage: catalogLoading
+              ? "Loading repositories…"
+              : githubEmptyRepositoriesMessage(installations),
+            ...(canManage && configureUrl && configurableInstallations.length === 1
               ? {
                   editLabel: "Change repositories",
                   onEdit: () => window.location.assign(configureUrl),
@@ -125,16 +162,28 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
           },
         }
       : {}),
-    options: [],
+    options,
     footer,
-    ...(status && !status.configured && status.setupMode === "platform"
+    ...(statusFailed
       ? {
           notice: {
-            tone: "muted" as const,
-            title: "GitHub is temporarily unavailable for this OpenGeni deployment.",
+            tone: "failed" as const,
+            title: "GitHub status could not be loaded.",
+            description: "The GitHub App binding is unknown until the status loads.",
+            action: {
+              label: "Retry",
+              onClick: () => void context.refreshGitHub(workspaceId),
+            },
           },
         }
-      : {}),
+      : status && !status.configured && status.setupMode === "platform"
+        ? {
+            notice: {
+              tone: "muted" as const,
+              title: "GitHub is temporarily unavailable for this OpenGeni deployment.",
+            },
+          }
+        : {}),
   };
 
   const dialogs = (
@@ -156,8 +205,16 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   return { model, dialogs };
 }
 
-export function githubChip(status: GitHubAppInfo | null, canManage: boolean): IntegrationChip {
-  if (status === null) return { label: "Loading", tone: "plain" };
+export function githubChip(
+  status: GitHubAppInfo | null,
+  canManage: boolean,
+  statusFailed = false,
+): IntegrationChip {
+  if (status === null) {
+    return statusFailed
+      ? { label: "Needs attention", tone: "warn" }
+      : { label: "Loading", tone: "plain" };
+  }
   const bound = status.status === "bound" && status.installations.length > 0;
   if (bound) {
     if (status.installations.some((installation) => installation.lifecycle !== "active")) {

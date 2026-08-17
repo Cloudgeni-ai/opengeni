@@ -31,12 +31,15 @@ export function useAtlassianIntegration({
   workspaceId,
   connections,
   connectionsLoaded,
+  connectionsLoadFailed = false,
   refresh,
   replaceConnection,
 }: {
   workspaceId: string;
   connections: ConnectionMetadata[] | null;
   connectionsLoaded: boolean;
+  /** True when the connection list failed to load (so the state is unknown, not empty). */
+  connectionsLoadFailed?: boolean;
   refresh: () => Promise<void>;
   replaceConnection: (connection: ConnectionMetadata) => void;
 }): IntegrationAdapter {
@@ -92,7 +95,7 @@ export function useAtlassianIntegration({
   }, [workspaceId]);
 
   async function connect(reconnect = false) {
-    if (!canWrite) return;
+    if (!canWrite || readOnly) return;
     setBusy(true);
     try {
       const start = await apiRequest<{ authorizationUrl: string }>(
@@ -164,10 +167,16 @@ export function useAtlassianIntegration({
   }
 
   const connected = status === "connected" || status === "paused" || status === "needs_attention";
-  const chip = atlassianChip(status, canRead, canWrite);
+  // A failed connection-list load means the state is unknown, not "still
+  // loading": say so, offer a retry, and keep the Connect affordance usable.
+  const loadFailed = status === "loading" && connectionsLoadFailed;
+  const chip: IntegrationChip =
+    canRead && loadFailed
+      ? { label: "Needs attention", tone: "warn" }
+      : atlassianChip(status, canRead, canWrite);
 
   const facts: IntegrationViewModel["connection"] = [];
-  if (canRead && metadata) {
+  if (canRead && metadata && connected) {
     facts.push({ label: "Atlassian account", value: metadata.email ?? metadata.displayName });
     if (metadata.sites.length > 0) {
       facts.push({
@@ -178,7 +187,7 @@ export function useAtlassianIntegration({
   }
 
   const options: IntegrationOption[] = [];
-  if (canRead && metadata && selectedSources.length > 0) {
+  if (canRead && metadata && connected && selectedSources.length > 0) {
     options.push({
       kind: "toggle",
       id: "atlassian-sync",
@@ -195,7 +204,9 @@ export function useAtlassianIntegration({
   const footer: IntegrationFooter = !canRead
     ? { kind: "locked" }
     : status === "loading"
-      ? { kind: "setup", onSetup: () => {}, disabled: true }
+      ? loadFailed && canWrite
+        ? { kind: "setup", onSetup: () => void connect(), busy }
+        : { kind: "setup", onSetup: () => {}, disabled: true }
       : !connected
         ? canWrite
           ? { kind: "setup", onSetup: () => void connect(), busy }
@@ -205,6 +216,7 @@ export function useAtlassianIntegration({
               kind: status === "needs_attention" ? "repair" : "connected",
               onReconnect: () => void connect(true),
               onDisconnect: () => setDisconnectOpen(true),
+              reconnectDisabled: readOnly,
               disconnectDisabled: readOnly,
               busy,
             }
@@ -227,23 +239,39 @@ export function useAtlassianIntegration({
             })),
             emptyMessage:
               "No projects or spaces selected yet. Agents cannot read Jira or Confluence until you choose some.",
-            ...(canWrite && !busy
-              ? { editLabel: "Change sources", onEdit: () => setSourceDialogOpen(true) }
+            // In needs_attention there is no source browsing: the repair footer
+            // routes to reconnect instead. While busy the affordance stays
+            // mounted but disabled so it does not jump in and out.
+            ...(canWrite && status !== "needs_attention"
+              ? {
+                  editLabel: "Change sources",
+                  onEdit: () => setSourceDialogOpen(true),
+                  editDisabled: busy,
+                }
               : {}),
           },
         }
       : {}),
     options,
     footer,
-    ...(status === "paused"
+    ...(loadFailed && canRead
       ? {
           notice: {
-            tone: "waiting" as const,
-            title: "Knowledge sync is paused",
-            description: "Agents can still read the selected sources live.",
+            tone: "failed" as const,
+            title: "Connections could not be loaded",
+            description: "The Atlassian status is unknown until the connection list loads.",
+            action: { label: "Retry", onClick: () => void refresh() },
           },
         }
-      : {}),
+      : status === "paused"
+        ? {
+            notice: {
+              tone: "waiting" as const,
+              title: "Knowledge sync is paused",
+              description: "Agents can still read the selected sources live.",
+            },
+          }
+        : {}),
   };
 
   const dialogs = canRead ? (

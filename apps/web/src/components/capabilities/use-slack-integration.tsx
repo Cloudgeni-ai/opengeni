@@ -152,9 +152,26 @@ export function slackBotDocumentDestinationAuthority(
 }
 
 /**
- * Maps Slack onto the shared integration view-model. A workspace admin sees the
- * OpenGeni bot (its installation, what it can see, and its options); everyone
- * else sees their own personal Slack account. Nobody is offered both.
+ * Slack bot knowledge destinations are shared-only (workspace or organization).
+ * A legacy stored `personal` value displays as Workspace, and every save
+ * persists the same shared coercion instead of echoing `personal` back.
+ */
+export function slackBotPersistableDestinationAuthority(
+  value: string,
+): ConnectorDocumentDestinationAuthority {
+  return value === "organization" ? "organization" : "workspace";
+}
+
+/** The member-facing sentence when personal Slack needs connections:write. */
+export const SLACK_PERSONAL_PERMISSION_SENTENCE =
+  "Slack connects here as your own personal Slack account. Connection management permission is required to connect or change it; ask a workspace admin to grant it.";
+
+/**
+ * Maps Slack onto the shared integration view-model. Anyone with connection
+ * management permission (connections:write or workspace admin) sees the
+ * OpenGeni bot (its installation, what it can see, and install/reconnect/
+ * disconnect; the options stay admin-gated); everyone else sees their own
+ * personal Slack account. Nobody is offered both.
  */
 export function useSlackIntegration({
   workspaceId,
@@ -202,6 +219,9 @@ export function useSlackIntegration({
   const [personalDisconnectOpen, setPersonalDisconnectOpen] = useState(false);
   const [botDisconnectOpen, setBotDisconnectOpen] = useState(false);
   const [reactionChannelsOpen, setReactionChannelsOpen] = useState(false);
+  // True while the channel dialog was opened by an enable attempt on an empty
+  // allowlist, so saving from it actually enables the shortcut.
+  const [reactionEnableIntent, setReactionEnableIntent] = useState(false);
   const [publicationOpen, setPublicationOpen] = useState(false);
   const [invitedChannels, setInvitedChannels] = useState<SlackReactionChannel[] | null>(null);
   const [publication, setPublication] = useState<MemorySlackPublicationConfiguration | null>(null);
@@ -220,6 +240,9 @@ export function useSlackIntegration({
   const botActive = botConnection?.status === "active";
   const botHealthy = Boolean(botConnection && botActive && bindingActive);
   const canMutateInstalledBot = canInstallBot && bindingActive;
+  // Reaction summon, knowledge destination, and decision publication remain
+  // admin-gated even though any connections:write holder sees the bot sheet.
+  const canManageReaction = isAdmin && bindingActive;
   const scopeReady = botConnection
     ? hasOpenGeniSlackReactionScope(botConnection.grantedScopes)
     : false;
@@ -253,6 +276,12 @@ export function useSlackIntegration({
   // Invited channels and the publication configuration are loaded only while the
   // admin sheet is open; both are cheap reads but not needed for the row.
   const botConnectionId = botConnection?.id ?? null;
+  // A reconnect or reinstall may point at a different connection row; drop the
+  // cached publication configuration so the sheet refetches it.
+  useEffect(() => {
+    setPublication(null);
+    setPublicationLoaded(false);
+  }, [botConnectionId]);
   useEffect(() => {
     if (!sheetOpen || !isAdmin || !botConnectionId || !botHealthy || readOnly) return;
     let cancelled = false;
@@ -389,12 +418,19 @@ export function useSlackIntegration({
     }
   }
 
-  async function saveDestination(authorityKind: ConnectorDocumentDestinationAuthority) {
+  async function saveDestination(authorityKind: string) {
     if (!botConnection || !bindingActive) return;
     setDestinationBusy(true);
     try {
       await client.updateConnection(workspaceId, botConnection.id, {
-        metadata: { documentDestination: { authorityKind, collectionId: null } },
+        metadata: {
+          documentDestination: {
+            // Shared destinations only: a legacy `personal` value can never be
+            // echoed back through this save path.
+            authorityKind: slackBotPersistableDestinationAuthority(authorityKind),
+            collectionId: null,
+          },
+        },
       });
       await refresh();
       toast.success("Slack knowledge destination saved");
@@ -432,6 +468,7 @@ export function useSlackIntegration({
       reactionSettings.channelPolicy.mode === "allowlist" &&
       reactionSettings.channelPolicy.channelIds.length === 0
     ) {
+      setReactionEnableIntent(true);
       setReactionChannelsOpen(true);
       return;
     }
@@ -466,9 +503,11 @@ export function useSlackIntegration({
     }
   }
 
-  const model = isAdmin ? adminModel() : memberModel();
+  // Anyone who can manage workspace connections (connections:write or admin)
+  // manages the bot; everyone else sees their own personal Slack account.
+  const model = canInstallBot ? botModel() : memberModel();
 
-  function adminModel(): IntegrationViewModel {
+  function botModel(): IntegrationViewModel {
     const chip: IntegrationChip = !loaded
       ? { label: "Loading", tone: "plain" }
       : !botConnection
@@ -529,10 +568,10 @@ export function useSlackIntegration({
             }`
           : "Reconnect Slack to allow reading reactions first.",
         checked: reactionSettings.enabled,
-        disabled: !canMutateInstalledBot || !botActive || !scopeReady || readOnly,
+        disabled: !canManageReaction || !botActive || !scopeReady || readOnly,
         busy: reactionBusy,
         onChange: toggleReaction,
-        ...(canMutateInstalledBot && botActive && scopeReady && !readOnly
+        ...(canManageReaction && botActive && scopeReady && !readOnly
           ? {
               action: {
                 label: "Choose where it works",
@@ -555,9 +594,12 @@ export function useSlackIntegration({
             disabled: !canManageOrganizationDestination,
           },
         ],
-        disabled: !canMutateInstalledBot || readOnly,
+        disabled:
+          !canMutateInstalledBot ||
+          readOnly ||
+          (!canManageWorkspaceDestination && !canManageOrganizationDestination),
         busy: destinationBusy,
-        onChange: (value) => void saveDestination(value as ConnectorDocumentDestinationAuthority),
+        onChange: (value) => void saveDestination(value),
       });
       options.push({
         kind: "toggle",
@@ -678,13 +720,24 @@ export function useSlackIntegration({
           : undefined;
 
     const canStartOAuth = personalAvailable && canManagePersonal && !readOnly;
+    // Personal Slack is personal-only: no admin can connect it for a member, so
+    // a member without connections:write gets the truthful permission sentence
+    // rather than the generic admin-managed one.
+    const lockedFooter: IntegrationFooter = !canManagePersonal
+      ? { kind: "locked", message: SLACK_PERSONAL_PERMISSION_SENTENCE }
+      : !personalAvailable
+        ? {
+            kind: "locked",
+            message: "Personal Slack is not available in this deployment's catalog.",
+          }
+        : { kind: "locked" };
     const footer: IntegrationFooter =
       state.state === "unverified"
         ? { kind: "setup", onSetup: () => {}, disabled: true }
         : state.state === "not_connected"
           ? canStartOAuth
             ? { kind: "setup", onSetup: () => void startPersonalOAuth(), busy: personalBusy }
-            : { kind: "locked" }
+            : lockedFooter
           : canManagePersonal
             ? {
                 kind: connectedPersonal ? "connected" : "repair",
@@ -694,7 +747,7 @@ export function useSlackIntegration({
                 disconnectDisabled: readOnly || state.state === "disconnected",
                 busy: personalBusy,
               }
-            : { kind: "locked" };
+            : lockedFooter;
 
     return {
       id: "slack",
@@ -747,10 +800,17 @@ export function useSlackIntegration({
           <SlackReactionChannelsDialog
             workspaceId={workspaceId}
             connectionId={botConnectionId}
-            settings={reactionSettings}
+            // Opened by an enable attempt, the dialog carries that intent so
+            // picking channels and saving actually enables the shortcut.
+            settings={
+              reactionEnableIntent ? { ...reactionSettings, enabled: true } : reactionSettings
+            }
             open={reactionChannelsOpen}
-            canManage={canMutateInstalledBot && !readOnly}
-            onOpenChange={setReactionChannelsOpen}
+            canManage={canManageReaction && !readOnly}
+            onOpenChange={(open) => {
+              setReactionChannelsOpen(open);
+              if (!open) setReactionEnableIntent(false);
+            }}
             onSave={saveReactionSettings}
           />
           {publicationOpen ? (

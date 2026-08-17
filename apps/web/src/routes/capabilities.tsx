@@ -121,6 +121,10 @@ export function CapabilitiesRoute({
   // connections:read); an array = loaded, even when empty. Health must not treat a
   // failed load as "every connection was deleted".
   const [connections, setConnections] = useState<ConnectionMetadata[] | null>(null);
+  // True when the last connections fetch failed. Combined with a still-null
+  // `connections`, the integration adapters surface a visible failure with a
+  // retry instead of pinning their tiles at Loading forever.
+  const [connectionsLoadFailed, setConnectionsLoadFailed] = useState(false);
   const [socialConnections, setSocialConnections] = useState<SocialConnection[]>([]);
   const [slackInstallationBindings, setSlackInstallationBindings] = useState<
     SlackInstallationBinding[]
@@ -175,21 +179,25 @@ export function CapabilitiesRoute({
       ),
     [items, filter, query],
   );
-  // The Enabled strip is the daily-management surface; Browse shows the rest of
-  // the catalog so an enabled item never appears in both places.
-  const enabledItems = useMemo(() => filtered.filter((item) => item.enabled), [filtered]);
-  // Curated featured connectors lead the browse grid. The partition is stable,
-  // so within the featured and non-featured groups the server order (kind,
-  // category, name) is preserved.
   // The Featured strip shows curated connectors when nothing narrows the list;
   // the grid then carries the long tail. A search or a non-MCP filter hides the
-  // strip and the grid shows every match again.
+  // strip and the grid shows every match again. The partition is stable, so
+  // within the featured and non-featured groups the server order (kind,
+  // category, name) is preserved.
   const showFeatured = query.trim().length === 0 && (filter === "all" || filter === "mcp");
   const featured = useMemo(
     () => (showFeatured ? featuredConnectors(filtered) : []),
     [filtered, showFeatured],
   );
   const featuredIds = useMemo(() => new Set(featured.map((item) => item.id)), [featured]);
+  // One placement per integration: a featured tile carries its own Enabled
+  // badge, so an enabled featured item stays in the strip and is excluded from
+  // the Enabled section; everything else enabled lives in the Enabled section
+  // and Browse shows only the rest of the catalog.
+  const enabledItems = useMemo(
+    () => filtered.filter((item) => item.enabled && !featuredIds.has(item.id)),
+    [filtered, featuredIds],
+  );
   const browseItems = useMemo(
     () => sortFeaturedFirst(filtered.filter((item) => !item.enabled && !featuredIds.has(item.id))),
     [filtered, featuredIds],
@@ -240,6 +248,7 @@ export function CapabilitiesRoute({
     workspaceId,
     connections,
     connectionsLoaded,
+    connectionsLoadFailed,
     refresh,
     replaceConnection,
   });
@@ -247,6 +256,7 @@ export function CapabilitiesRoute({
     workspaceId,
     connections,
     connectionsLoaded,
+    connectionsLoadFailed,
     refresh,
     replaceConnection,
   });
@@ -368,7 +378,9 @@ export function CapabilitiesRoute({
       // Don't clobber previously-loaded connections with null on a failed refetch
       // (that would flip healthy items to "unverified" until the next reload); a
       // first-load failure leaves the prior null = "not loaded", which is correct.
+      // The failure itself is tracked so the integrations can say so and retry.
       if (conns !== null) setConnections(conns);
+      setConnectionsLoadFailed(conns === null);
       if (socials !== null) setSocialConnections(socials);
       if (slackBindings !== null) setSlackInstallationBindings(slackBindings);
       setLoadError(null);
@@ -872,7 +884,10 @@ export function CapabilitiesRoute({
       setItems(catalog.items);
       // Don't clobber previously-loaded connections with null on a failed refetch
       // (that would flip healthy items to "unverified" until the next reload).
-      if (conns !== null) setConnections(conns);
+      if (conns !== null) {
+        setConnections(conns);
+        setConnectionsLoadFailed(false);
+      }
       const item =
         (itemId ? catalog.items.find((candidate) => candidate.id === itemId) : undefined) ?? null;
       const action = oauthResumeAction(item, connectionId);

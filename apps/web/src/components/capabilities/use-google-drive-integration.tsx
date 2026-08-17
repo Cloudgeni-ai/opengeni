@@ -17,9 +17,12 @@ import type {
   IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import {
+  GOOGLE_DRIVE_ACCESS_DISCLOSURE,
   GOOGLE_DRIVE_APP_DESCRIPTION,
+  GOOGLE_DRIVE_PUBLISHING_DISCLOSURE,
   googleDriveAccountState,
   googleDriveCanPublish,
   googleDriveCanReadSources,
@@ -57,12 +60,15 @@ export function useGoogleDriveIntegration({
   workspaceId,
   connections,
   connectionsLoaded,
+  connectionsLoadFailed = false,
   refresh,
   replaceConnection,
 }: {
   workspaceId: string;
   connections: ConnectionMetadata[] | null;
   connectionsLoaded: boolean;
+  /** True when the connection list failed to load (so the state is unknown, not empty). */
+  connectionsLoadFailed?: boolean;
   refresh: () => Promise<void>;
   replaceConnection: (connection: ConnectionMetadata) => void;
 }): IntegrationAdapter {
@@ -176,6 +182,7 @@ export function useGoogleDriveIntegration({
         expectedVersion: connection.version,
       });
       replaceConnection(updated);
+      setFolderDialogOpen(false);
       toast.success(action === "pause" ? "Google Drive paused" : "Google Drive resumed");
     } catch (error) {
       toast.error(
@@ -200,6 +207,7 @@ export function useGoogleDriveIntegration({
       });
       replaceConnection(revoked);
       setPendingDisconnect(null);
+      setFolderDialogOpen(false);
       toast.success("Google Drive disconnected");
       return true;
     } catch (error) {
@@ -212,8 +220,27 @@ export function useGoogleDriveIntegration({
     }
   }
 
+  // The source-save API applies one cadence/destination/read-policy set to every
+  // source in the request, so a blanket toggle can only be written losslessly
+  // when the saved sources already agree on those settings.
+  const savedSettingsUniform = savedSources.every(
+    (source) =>
+      source.syncCadence === savedDefaults?.syncCadence &&
+      source.readPolicy === savedDefaults?.readPolicy &&
+      source.authorityKind === savedDefaults?.authorityKind,
+  );
+
   async function setSyncEnabled(enabled: boolean) {
     if (!connection || !savedDefaults || !canWrite) return;
+    if (!savedSettingsUniform) {
+      // Never silently flatten per-source settings; route through the folder
+      // dialog where the settings being written are visible and confirmed.
+      toast.error("These folders have different sync settings", {
+        description: "Use Change folders to review them before turning sync on or off.",
+      });
+      if (canReadSources) setFolderDialogOpen(true);
+      return;
+    }
     setBusy(true);
     try {
       const updated = await saveGoogleDriveSources(workspaceId, connection.id, {
@@ -235,8 +262,21 @@ export function useGoogleDriveIntegration({
     }
   }
 
-  const chip = googleDriveChip(accountState.state, canRead, canWrite);
-  const stateNotice = googleDriveStateNotice(accountState.state);
+  // A failed connection-list load means the state is unknown, not "still
+  // loading": say so, offer a retry, and keep the Connect affordance usable.
+  const loadFailed = accountState.state === "unverified" && connectionsLoadFailed;
+  const chip: IntegrationChip =
+    canRead && loadFailed
+      ? { label: "Needs attention", tone: "warn" }
+      : googleDriveChip(accountState.state, canRead, canWrite);
+  const stateNotice: IntegrationViewModel["notice"] = loadFailed
+    ? {
+        tone: "failed",
+        title: "Connections could not be loaded",
+        description: "The Google Drive status is unknown until the connection list loads.",
+        action: { label: "Retry", onClick: () => void refresh() },
+      }
+    : googleDriveStateNotice(accountState.state);
   const connected = accountState.state !== "not_connected" && accountState.state !== "disconnected";
 
   const facts: IntegrationViewModel["connection"] = [];
@@ -302,6 +342,7 @@ export function useGoogleDriveIntegration({
       checked: canPublish,
       disabled: !canChange || canPublish,
       busy,
+      disclosureId: "google-drive-publishing",
       onChange: (checked) => {
         if (checked) void connect(true, "publish");
       },
@@ -319,10 +360,23 @@ export function useGoogleDriveIntegration({
   const footer: IntegrationFooter = !canRead
     ? { kind: "locked" }
     : accountState.state === "unverified"
-      ? { kind: "setup", onSetup: () => {}, disabled: true }
+      ? loadFailed && canWrite
+        ? {
+            kind: "setup",
+            onSetup: () => void connect(),
+            busy,
+            disclosureId: "google-drive-access",
+          }
+        : { kind: "setup", onSetup: () => {}, disabled: true }
       : !connected
         ? canWrite
-          ? { kind: "setup", onSetup: () => void connect(), disabled: readOnly, busy }
+          ? {
+              kind: "setup",
+              onSetup: () => void connect(),
+              disabled: readOnly,
+              busy,
+              disclosureId: "google-drive-access",
+            }
           : { kind: "locked" }
         : canWrite
           ? {
@@ -335,6 +389,7 @@ export function useGoogleDriveIntegration({
               reconnectDisabled: readOnly,
               disconnectDisabled: readOnly,
               busy,
+              disclosureId: "google-drive-access",
             }
           : { kind: "locked" };
 
@@ -361,6 +416,7 @@ export function useGoogleDriveIntegration({
                   onEdit: canReadSources
                     ? () => setFolderDialogOpen(true)
                     : () => void connect(true, "source_read"),
+                  ...(canReadSources ? {} : { editDisclosureId: "google-drive-access" }),
                 }
               : {}),
           },
@@ -369,6 +425,12 @@ export function useGoogleDriveIntegration({
     options,
     footer,
     ...(stateNotice ? { notice: stateNotice } : {}),
+    // Google OAuth limited-use disclosures: rendered with every state so the
+    // connect and publish affordances can point at them via aria-describedby.
+    disclosures: [
+      { id: "google-drive-access", text: GOOGLE_DRIVE_ACCESS_DISCLOSURE },
+      { id: "google-drive-publishing", text: GOOGLE_DRIVE_PUBLISHING_DISCLOSURE },
+    ],
   };
 
   const dialogs = canRead ? (
@@ -383,7 +445,11 @@ export function useGoogleDriveIntegration({
         onConfirm={disconnect}
       />
       {folderDialogOpen ? (
-        <Suspense fallback={null}>
+        <Suspense
+          fallback={
+            <Skeleton className="fixed left-1/2 top-1/2 z-50 h-72 w-[min(90vw,32rem)] -translate-x-1/2 -translate-y-1/2 rounded-xl" />
+          }
+        >
           <GoogleDriveFolderDialog
             workspaceId={workspaceId}
             connection={connection}
