@@ -117,6 +117,7 @@ import {
   run,
   Runner,
   Usage,
+  UserError,
   tool as agentTool,
   // Hosted web_search tool factory. Re-exported from @openai/agents-openai via
   // `export * from '@openai/agents-openai'` in @openai/agents' index;
@@ -5886,9 +5887,29 @@ export async function restoreInterruptedRunState(
   agent: Agent<any, any>,
   serializedRunState: string,
 ): Promise<RunState<any, any>> {
-  return await RunState.fromString(agent, serializedRunState, {
-    clientToolSearchRehydration: "preserve_history",
-  });
+  const restore = async () =>
+    await RunState.fromString(agent, serializedRunState, {
+      clientToolSearchRehydration: "preserve_history",
+    });
+  try {
+    return await restore();
+  } catch (error) {
+    const lazyRuntime = lazyToolRuntimeForAgent(agent);
+    if (
+      !(error instanceof UserError) ||
+      !/^Tool .+ not found$/.test(error.message) ||
+      !lazyRuntime?.hasPendingPreparation()
+    ) {
+      throw error;
+    }
+    // A durable approval may resume in a new worker after its real tool was
+    // disclosed through client tool_search. Rehydration correctly refuses to
+    // bind that pending call until the current authorized catalogue contains
+    // the same routed identity. Join preparation only on this exact miss, then
+    // retry from the untouched serialized state; revoked tools still fail.
+    await lazyRuntime.ensurePrepared();
+    return await restore();
+  }
 }
 
 export async function prepareRunInput(
@@ -6330,6 +6351,9 @@ export async function runAgentStream(
       historyOwnership: "external",
       modelResponseRetention: "last",
       toolExecution: { preApprovalInputGuardrails: true },
+      ...(lazyToolRuntimeForAgent(agent)?.transport === "generic_dispatch"
+        ? { toolNotFoundBehavior: "return_error_to_model" as const }
+        : {}),
       callModelInputFilter: ownedFilter,
       ...(overrides.signal ? { signal: overrides.signal } : {}),
     };
@@ -6468,6 +6492,9 @@ export async function runAgentStream(
     historyOwnership: "external",
     modelResponseRetention: "last",
     toolExecution: { preApprovalInputGuardrails: true },
+    ...(lazyToolRuntimeForAgent(agent)?.transport === "generic_dispatch"
+      ? { toolNotFoundBehavior: "return_error_to_model" as const }
+      : {}),
     // Built-in per-call guard chain: normalize computer calls, optionally strip
     // provider ids, trim to the input budget on the client-compaction path, and
     // raise the proactive compaction signal. This runs for turn-start replay AND

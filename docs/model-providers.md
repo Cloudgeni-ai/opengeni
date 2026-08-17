@@ -157,12 +157,13 @@ DeepSeek V4 Flash 0731 and Kimi K3 use OpenGeni's provider-neutral lazy-tool
 dispatcher on the Responses wire. Their initial tool block contains the stable
 ordinary `tool_search` and `tool_invoke` schemas plus local control tools and
 exact session MCP refs marked `eager: true`, never the deferred MCP catalogue. A search result carries only bounded
-matching definitions. A valid `tool_invoke` call is rewritten inside the runtime
-to the real authorized tool before the Agents SDK performs approval, guardrail,
-timeout, MCP error, and event handling. Provider history is restored to the
+matching definitions. A valid `tool_invoke` call late-registers the exact real
+authorized tool through the Agents SDK client registry and executes it in that
+same model response before normal approval, guardrail, timeout, MCP error, and
+event handling. The internal registration call/output stays out of provider and
+user-visible history. Provider history is restored to the
 original dispatcher call before every later request—including exact stateless
 Responses replay, provider changes, lazy-mode rollback, and compaction input.
-This path completed live on both curated models on 2026-08-07.
 
 A workspace admin can instead connect **Vercel AI Gateway** in workspace Settings.
 The key is stored in the encrypted workspace connection table, resolved only in
