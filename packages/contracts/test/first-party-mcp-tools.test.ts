@@ -7,6 +7,7 @@ import {
 } from "../src";
 
 const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
+  "memory_save",
   "social_connections_list",
   "social_posts_recent",
   "social_daily_analysis_context",

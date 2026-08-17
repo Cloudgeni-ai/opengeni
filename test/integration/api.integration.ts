@@ -7484,8 +7484,11 @@ describe("API component integration", () => {
       await prepared.close();
       prepared = null;
 
+      // This fixture exercises the legacy Memory V1 write surface, which is
+      // retained only under the explicit legacy_standing rollback mode.
       await updateWorkspaceSettings(dbClient.db, workspaceId, {
         memoryEnabled: true,
+        memoryPromptMode: "legacy_standing",
       });
 
       prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "opengeni" }], {

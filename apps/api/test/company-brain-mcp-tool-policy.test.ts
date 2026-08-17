@@ -74,9 +74,30 @@ describe("Company Brain first-party MCP policy", () => {
       expect(tools.find((tool) => tool.name === "memory_search")?.description).toContain(
         "structured preferences are the only behavioral authority",
       );
-      expect(tools.find((tool) => tool.name === "memory_save")?.description).toContain(
-        "cannot become behavioral authority",
+      // Memory V1 writes are retired from the default retrieval-only surface;
+      // explicit user-directed knowledge goes through `remember`.
+      expect(tools.find((tool) => tool.name === "memory_save")).toBeUndefined();
+      expect(tools.find((tool) => tool.name === "memory_search")?.description).toContain(
+        "use `remember`",
       );
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  test("legacy standing mode keeps memory_save only as the rollback surface", async () => {
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant([...Permission.options], ["memory_search", "memory_save"]),
+      { workspaceMemoryEnabled: true, workspaceMemoryPromptMode: "legacy_standing" },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "memory-legacy-description-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const names = (await client.listTools()).tools.map((tool) => tool.name).sort();
+      expect(names).toEqual(["memory_save", "memory_search"]);
     } finally {
       await Promise.all([client.close(), server.close()]);
     }
