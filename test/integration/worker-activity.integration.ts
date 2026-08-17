@@ -1991,7 +1991,7 @@ describe("worker activities integration", () => {
       'printf \'%s\' "$OPENGENI_CODEMODE_TOKEN_SEED" > "$token_file.tmp.$$"',
     );
     expect(String(sandboxExecCalls[1]?.cmd)).toContain(
-      "clone_repository '/workspace/repos/github.com/Futhark-AS/aifilesearch.git'",
+      "start_repository_clone '/workspace/repos/github.com/Futhark-AS/aifilesearch.git'",
     );
     expect(String(sandboxExecCalls[1]?.cmd)).toContain(
       'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',
