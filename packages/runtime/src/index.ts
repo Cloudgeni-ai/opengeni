@@ -1386,7 +1386,13 @@ export type ConnectorActionExecutionAdmission =
       allowed: false;
       managed: true;
       requestId: string;
-      reason: "approval_required" | "blocked" | "rejected" | "already_executed" | "uncertain_retry";
+      reason:
+        | "approval_required"
+        | "blocked"
+        | "rejected"
+        | "already_executed"
+        | "uncertain_retry"
+        | "not_executed";
     };
 
 /** Secret-free persistence boundary supplied by the worker for one attempt. */

@@ -5937,6 +5937,34 @@ describe("clean session control plane", () => {
       reason: "already_executed",
     });
 
+    // A begun action whose provider request never happened settles
+    // not_executed (terminal status failed); a same-approval replay is denied
+    // with the precise not_executed reason instead of a false unknown outcome.
+    const notExecutedCall = call("connector-not-executed", "read");
+    const notExecutedAdmission = await beginConnectorActionExecution(
+      client.db,
+      firstIdentity,
+      notExecutedCall,
+    );
+    expect(notExecutedAdmission).toMatchObject({ allowed: true, managed: true });
+    if (!notExecutedAdmission.allowed || !notExecutedAdmission.managed) {
+      throw new Error("not-executed fixture was denied");
+    }
+    await completeConnectorActionExecution(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      requestId: notExecutedAdmission.requestId,
+      attemptId: firstAttemptId,
+      outcome: "not_executed",
+    });
+    const [notExecutedRow] = await shared.admin<Array<{ status: string; outcome: string }>>`
+      select status, outcome from connector_action_requests
+      where id = ${notExecutedAdmission.requestId}`;
+    expect(notExecutedRow).toEqual({ status: "failed", outcome: "not_executed" });
+    expect(
+      await beginConnectorActionExecution(client.db, firstIdentity, notExecutedCall),
+    ).toMatchObject({ allowed: false, reason: "not_executed" });
+
     const askCall = call("connector-ask", "write");
     const askPreparation = await prepareConnectorActionApproval(client.db, firstIdentity, askCall);
     expect(askPreparation).toMatchObject({ managed: true, decision: "ask" });

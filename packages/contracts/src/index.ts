@@ -3491,6 +3491,24 @@ export const McpPersonalConnectionDelegation = z
      * the organization-user authority lifecycle.
      */
     userDelegation: UserResourceDelegation.optional(),
+    /**
+     * Google Drive publication only: the exact output destination frozen when
+     * this delegation was accepted, so a later connection-settings change can
+     * never redirect an already-accepted turn's publication. Structurally
+     * mirrors GoogleDriveOutputDestination (defined in ./google-drive, which
+     * imports this module - hence the inline shape). Absent on pre-freeze
+     * turns, which keep the bounded legacy live-resolution behavior.
+     */
+    outputDestination: z
+      .object({
+        folderId: z.string().min(1).max(256),
+        folderName: z.string().min(1).max(1024),
+        driveId: z.string().min(1).max(256).nullable(),
+        location: z.enum(["my_drive", "shared_drive"]),
+        selectedAt: z.string().datetime({ offset: true }),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type McpPersonalConnectionDelegation = z.infer<typeof McpPersonalConnectionDelegation>;

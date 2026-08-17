@@ -387,6 +387,14 @@ export function googleDrivePublicationDelegationFromVisibleConnections(input: {
   } else if (selection) {
     throw new Error("connection authority is not available for legacy Google Drive publication");
   }
+  // Freeze the exact output destination on the accepted delegation: a later
+  // connection-settings change must never redirect an already-accepted turn's
+  // publication. Eligibility above already proved the metadata parses and the
+  // destination exists.
+  const frozenMetadata = GoogleDriveConnectionMetadata.parse(connection.metadata);
+  if (!frozenMetadata.outputDestination) {
+    throw new Error("Google Drive publication destination disappeared during acceptance");
+  }
   return {
     serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
     connectionId: connection.id,
@@ -395,6 +403,7 @@ export function googleDrivePublicationDelegationFromVisibleConnections(input: {
     providerDomain: connection.providerDomain,
     kind: connection.kind,
     ...(selection ? { userDelegation: selection.userDelegation } : {}),
+    outputDestination: frozenMetadata.outputDestination,
   };
 }
 
