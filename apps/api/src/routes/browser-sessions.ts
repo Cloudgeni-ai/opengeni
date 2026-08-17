@@ -195,7 +195,7 @@ import {
   resolveProtectedAuthFieldValues,
 } from "../browser-auth-broker";
 import { managedNetworkRouteForPlacement } from "../browser-network-route";
-import { allowedCorsOrigin } from "../http/cors";
+import { validateInteractionRequestOrigin } from "../http/cors";
 import { interactionControlApiError } from "../http/interaction-control-error";
 import {
   observeAuthMutation,
@@ -302,7 +302,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     const request = await parseJsonBody(context, CreateBrowserSessionRequest);
     const startedAtMs = performance.now();
     await authorizeSourceSession(deps, grant, request.sessionId, "session.control");
-    const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
+    const origin = requestOrigin(context, deps.settings);
     const authority = browserAuthorityRoot(deps);
 
     try {
@@ -1683,7 +1683,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         context,
         "stream:view",
       );
-      const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
+      const origin = requestOrigin(context, deps.settings);
       const request = await parseJsonBody(context, BrowserSessionAttachmentRequest);
       const result = await withActiveBrowserController(
         context,
@@ -1978,7 +1978,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       const browserSessionId = requireUuidParam(context, "browserSessionId");
       const request = await parseJsonBody(context, BrowserSessionLifecycleRequest);
       const startedAtMs = performance.now();
-      const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
+      const origin = requestOrigin(context, deps.settings);
       try {
         const before = await getBrowserSessionControlRecord(deps.db, {
           accountId: grant.accountId,
@@ -2204,7 +2204,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       const browserSessionId = requireUuidParam(context, "browserSessionId");
       const request = await parseJsonBody(context, BrowserSessionLifecycleRequest);
       const startedAtMs = performance.now();
-      const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
+      const origin = requestOrigin(context, deps.settings);
       let restore: RestorePlacementBrowserStateInput | null = null;
       try {
         let before = await getBrowserSessionControlRecord(deps.db, {
@@ -2447,7 +2447,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       const browserSessionId = requireUuidParam(context, "browserSessionId");
       const request = await parseJsonBody(context, BrowserSessionLifecycleRequest);
       const startedAtMs = performance.now();
-      const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
+      const origin = requestOrigin(context, deps.settings);
       try {
         const before = await getBrowserSessionControlRecord(deps.db, {
           accountId: grant.accountId,
@@ -3092,7 +3092,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             grant,
             record,
             placement,
-            requestOrigin(context, deps.settings.corsAllowOriginRegex),
+            requestOrigin(context, deps.settings),
           );
           await endCapturedBrowserController(client, browserSessionId, binding);
           await clearSuspendedBrowserSessionController(deps.db, {
@@ -3963,32 +3963,8 @@ function isUuid(value: unknown): value is string {
   );
 }
 
-function requestOrigin(context: Context, allowedPattern: string): string | null {
-  return validateBrowserRequestOrigin(context.req.header("origin"), allowedPattern);
-}
-
-export function validateBrowserRequestOrigin(
-  value: string | undefined,
-  allowedPattern: string,
-): string | null {
-  if (!value) return null;
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new HTTPException(400, { message: "invalid request origin" });
-  }
-  if (
-    url.origin === "null" ||
-    (url.protocol !== "http:" && url.protocol !== "https:") ||
-    url.origin !== value
-  ) {
-    throw new HTTPException(400, { message: "invalid request origin" });
-  }
-  if (!allowedCorsOrigin(allowedPattern, url.origin)) {
-    throw new HTTPException(403, { message: "request origin is not allowed" });
-  }
-  return url.origin;
+function requestOrigin(context: Context, settings: ApiRouteDeps["settings"]): string | null {
+  return validateInteractionRequestOrigin(context.req.header("origin"), settings);
 }
 
 export function interactionActorForGrant(

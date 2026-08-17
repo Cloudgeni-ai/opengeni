@@ -84,7 +84,7 @@ import {
 } from "../browser-controller-authority";
 import { withCachedController } from "../controller-data-plane";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
-import { allowedCorsOrigin } from "../http/cors";
+import { validateInteractionRequestOrigin } from "../http/cors";
 import { interactionControlApiError } from "../http/interaction-control-error";
 import { observeComputerActionResult, observeLifecycleResult } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
@@ -143,7 +143,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     const request = await parseJsonBody(context, CreateComputerSessionRequest);
     const startedAtMs = performance.now();
     await authorizeSourceSession(deps, grant, request.sessionId, "session.control");
-    const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
+    const origin = requestOrigin(context, deps.settings);
     const authority = controllerAuthorityRoot(deps);
 
     try {
@@ -454,7 +454,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/attachments",
     async (context) => {
       const { workspaceId, grant, computerSessionId } = await routePreamble(context, "stream:view");
-      const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
+      const origin = requestOrigin(context, deps.settings);
       const request = await parseJsonBody(context, ComputerSessionAttachmentRequest);
       const result = await withActiveComputerController(
         context,
@@ -628,7 +628,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       const computerSessionId = requireUuidParam(context, "computerSessionId");
       const request = await parseJsonBody(context, ComputerSessionLifecycleRequest);
       const startedAtMs = performance.now();
-      const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
+      const origin = requestOrigin(context, deps.settings);
       try {
         const before = await getComputerSessionControlRecord(deps.db, {
           accountId: grant.accountId,
@@ -1480,26 +1480,8 @@ function requireOpaqueParam(context: Context, name: string): string {
   return value;
 }
 
-function requestOrigin(context: Context, allowedPattern: string): string | null {
-  const value = context.req.header("origin");
-  if (!value) return null;
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new HTTPException(400, { message: "invalid request origin" });
-  }
-  if (
-    url.origin === "null" ||
-    (url.protocol !== "http:" && url.protocol !== "https:") ||
-    url.origin !== value
-  ) {
-    throw new HTTPException(400, { message: "invalid request origin" });
-  }
-  if (!allowedCorsOrigin(allowedPattern, url.origin)) {
-    throw new HTTPException(403, { message: "request origin is not allowed" });
-  }
-  return url.origin;
+function requestOrigin(context: Context, settings: ApiRouteDeps["settings"]): string | null {
+  return validateInteractionRequestOrigin(context.req.header("origin"), settings);
 }
 
 function interactionActorForGrant(grant: AccessGrant): ReturnType<typeof InteractionActor.parse> {

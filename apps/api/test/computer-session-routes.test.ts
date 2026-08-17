@@ -36,7 +36,7 @@ describe("ComputerSession route discipline", () => {
         '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/heartbeat"',
       ),
     );
-    expect(attachment).toContain("requestOrigin(context, deps.settings.corsAllowOriginRegex)");
+    expect(attachment).toContain("requestOrigin(context, deps.settings)");
     expect(attachment).toContain("client.addAllowedOrigins([origin])");
     expect(attachment).toContain("sessionClient.listTargets()");
     expect(attachment).toContain('target.kind === "screen"');
