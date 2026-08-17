@@ -1801,7 +1801,8 @@ export type WorkspaceMemoryPromptMode = z.infer<typeof WorkspaceMemoryPromptMode
 
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
 // (future) keys rather than stripping them. memoryEnabled defaults off and the
-// reversible Memory V1 containment rollout defaults to legacy standing context;
+// Memory V1 prompt mode defaults to retrieval-only composition since OPE-249
+// (`legacy_standing` remains an explicit per-workspace opt-out);
 // voiceInput defaults to enabled when the deployment has a provider.
 export const WorkspaceSettingsSchema = z
   .object({
@@ -1836,10 +1837,15 @@ export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
   return parsed.success ? parsed.data.memoryEnabled === true : false;
 }
 
-/** Reversible Memory V1 prompt rollout. Absent preserves legacy composition. */
+/**
+ * Memory V1 prompt mode. Absent or unrecognized resolves to `retrieval_only`
+ * (the default since OPE-249); only an explicit `legacy_standing` restores the
+ * old standing pinned/recency block. Migration 0271 applies the same fallback
+ * at turn acceptance, so this resolver and the frozen SQL snapshot agree.
+ */
 export function resolveWorkspaceMemoryPromptMode(settings: unknown): WorkspaceMemoryPromptMode {
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
-  return parsed.success ? (parsed.data.memoryPromptMode ?? "legacy_standing") : "legacy_standing";
+  return parsed.success ? (parsed.data.memoryPromptMode ?? "retrieval_only") : "retrieval_only";
 }
 
 /** Default Codex compaction mode for new Codex sessions (remote_v2 when unset). */

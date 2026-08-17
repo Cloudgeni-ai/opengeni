@@ -62,7 +62,7 @@ async function fixture(
   options: {
     child?: boolean;
     privateRoot?: boolean;
-    mode?: "legacy_standing" | "retrieval_only";
+    mode?: "legacy_standing" | "retrieval_only" | "absent";
   } = {},
 ) {
   if (!shared || !client) throw new Error("test database unavailable");
@@ -76,10 +76,11 @@ async function fixture(
   });
   const grant = access.workspaceGrants[0]!;
   await shared.admin`
-    update workspaces set settings = ${shared.admin.json({
-      memoryEnabled: true,
-      memoryPromptMode: options.mode ?? "legacy_standing",
-    })}::jsonb
+    update workspaces set settings = ${shared.admin.json(
+      options.mode === "absent"
+        ? { memoryEnabled: true }
+        : { memoryEnabled: true, memoryPromptMode: options.mode ?? "legacy_standing" },
+    )}::jsonb
     where id = ${grant.workspaceId}
   `;
   const root = await withSessionRlsActorContext({ subjectId: ownerSubjectId }, async () =>
@@ -283,6 +284,124 @@ describe("accepted-turn Company Brain context selection", () => {
       expect(installed?.function_schema).toBe(installed?.current_schema);
     }
   });
+
+  test("defaults an absent memoryPromptMode to retrieval_only at turn acceptance", async () => {
+    if (!shared || !client) return;
+    const f = await fixture({ child: true, mode: "absent" });
+    await saveWorkspaceMemory(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      text: "Standing memory that must not be injected by default.",
+      kind: "semantic",
+      pinned: true,
+    });
+    const rootAttempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.root.id,
+      ownerSubjectId: f.ownerSubjectId,
+    });
+    const childAttempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.child!.id,
+      ownerSubjectId: f.ownerSubjectId,
+    });
+    const [snapshot] = await shared.admin<Array<{ mode: string; source: string }>>`
+      select memory_prompt_mode as "mode", snapshot_source as "source"
+      from company_brain_turn_context_snapshots
+      where workspace_id = ${f.grant.workspaceId} and turn_id = ${rootAttempt.turnId}
+    `;
+    expect(snapshot).toEqual({ mode: "retrieval_only", source: "accepted_turn" });
+    await prepareSnapshots(rootAttempt);
+    await prepareSnapshots(childAttempt);
+    const root = await resolve(rootAttempt);
+    expect(root.receipt).toMatchObject({
+      sessionRole: "root",
+      memoryEnabled: true,
+      memoryPromptMode: "retrieval_only",
+      companyProfileIncluded: true,
+      selectedMemoryCount: 0,
+      renderedMemoryCount: 0,
+    });
+    expect(root.workspaceMemory).toBeNull();
+    const child = await resolve(childAttempt);
+    expect(child.receipt).toMatchObject({
+      sessionRole: "child",
+      memoryPromptMode: "retrieval_only",
+      companyProfileIncluded: false,
+      selectedMemoryCount: 0,
+    });
+    expect(child.workspaceMemory).toBeNull();
+  }, 180_000);
+
+  test("defaults an absent memoryPromptMode to retrieval_only on the pre-0259 legacy first-claim path", async () => {
+    if (!shared || !client) return;
+    const f = await fixture({ mode: "absent" });
+    await saveWorkspaceMemory(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      text: "Pre-migration turns must not regain standing injection.",
+      kind: "semantic",
+      pinned: true,
+    });
+    const attempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.root.id,
+      ownerSubjectId: f.ownerSubjectId,
+    });
+    // Simulate a turn accepted before migration 0259: remove its insert-time
+    // snapshot with triggers bypassed so the first claim must freeze a
+    // `legacy_first_claim` projection from current workspace settings.
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`
+        delete from company_brain_turn_context_snapshots
+        where workspace_id = ${f.grant.workspaceId} and turn_id = ${attempt.turnId}
+      `;
+    });
+    await prepareSnapshots(attempt);
+    const selected = await resolve(attempt);
+    expect(selected.receipt).toMatchObject({
+      memoryEnabled: true,
+      memoryPromptMode: "retrieval_only",
+      turnContextSnapshotSource: "legacy_first_claim",
+      selectedMemoryCount: 0,
+    });
+    expect(selected.workspaceMemory).toBeNull();
+
+    // Explicit legacy_standing remains the opt-out on the same path.
+    const legacy = await fixture({ mode: "legacy_standing" });
+    await saveWorkspaceMemory(client.db, {
+      accountId: legacy.grant.accountId,
+      workspaceId: legacy.grant.workspaceId,
+      text: "Explicit legacy standing keeps injection.",
+      kind: "semantic",
+      pinned: true,
+    });
+    const legacyAttempt = await seedAttempt({
+      accountId: legacy.grant.accountId,
+      workspaceId: legacy.grant.workspaceId,
+      sessionId: legacy.root.id,
+      ownerSubjectId: legacy.ownerSubjectId,
+    });
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`
+        delete from company_brain_turn_context_snapshots
+        where workspace_id = ${legacy.grant.workspaceId} and turn_id = ${legacyAttempt.turnId}
+      `;
+    });
+    await prepareSnapshots(legacyAttempt);
+    const legacySelected = await resolve(legacyAttempt);
+    expect(legacySelected.receipt).toMatchObject({
+      memoryPromptMode: "legacy_standing",
+      turnContextSnapshotSource: "legacy_first_claim",
+      selectedMemoryCount: 1,
+    });
+    expect(legacySelected.workspaceMemory).toContain("Explicit legacy standing keeps injection.");
+  }, 180_000);
 
   test("freezes mode and bounded legacy workspace instructions when the turn is accepted", async () => {
     if (!shared || !client) return;
