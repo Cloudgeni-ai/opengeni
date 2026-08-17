@@ -90,6 +90,7 @@ describe("get.<domain> install routes", () => {
     expect(body).toContain("connect --token $enrollToken --non-interactive");
     expect(body).toContain("OPENGENI_ALLOW_DOWNGRADE");
     expect(body).toContain("Test-KeepNewerAgent");
+    expect(body).toContain("--api-url '$quotedApiUrl' connect");
   });
 
   test("GET /uninstall.sh serves the uninstall script", async () => {

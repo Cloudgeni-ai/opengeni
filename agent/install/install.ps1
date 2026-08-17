@@ -357,9 +357,14 @@ function Complete-Install($bin) {
     return
   }
 
+  # The installer process's environment does not survive into the command the
+  # operator pastes later. Preserve this served deployment explicitly, including
+  # paths/origins containing PowerShell's single-quote character.
+  $quotedBin = ([string]$bin).Replace("'", "''")
+  $quotedApiUrl = ([string]$script:ApiUrl).Replace("'", "''")
   Write-Host "opengeni-agent installed at: $bin"
   Write-Host ""
-  Write-Host "Next: $bin connect; if (`$?) { $bin start }"
+  Write-Host "Next: & '$quotedBin' --api-url '$quotedApiUrl' connect; if (`$?) { & '$quotedBin' start }"
   Write-Host "Use '$bin run' only when you explicitly want foreground mode."
   Write-Host "Uninstall any time:  $bin uninstall"
 }
