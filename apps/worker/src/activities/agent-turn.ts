@@ -4207,7 +4207,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let modelCanReceiveRetainedSessionImages = true;
     const generatedImageReceiptsByProviderItemId = new Map<string, GeneratedImageReceipt>();
     const generatedImageReceiptsByArtifactId = new Map<string, GeneratedImageReceipt>();
-    const generatedImageArtifactIdsCreatedThisTurn = new Set<string>();
+    const generatedImageReceiptsCreatedThisTurn = new Map<string, GeneratedImageReceipt>();
+    const rememberGeneratedImageCreatedThisTurn = (receipt: GeneratedImageReceipt): void => {
+      generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
+      generatedImageReceiptsCreatedThisTurn.set(receipt.artifact.artifactId, receipt);
+    };
     const videoGenerationAcceptancesByCallId = new Map<
       string,
       { operationId: string; requestDigest: string }
@@ -4393,11 +4397,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         output,
       });
       generatedImageReceiptsByProviderItemId.set(output.providerItemId, retained.receipt);
-      generatedImageReceiptsByArtifactId.set(
-        retained.receipt.artifact.artifactId,
-        retained.receipt,
-      );
-      generatedImageArtifactIdsCreatedThisTurn.add(retained.receipt.artifact.artifactId);
+      rememberGeneratedImageCreatedThisTurn(retained.receipt);
       await materializeGeneratedImage(retained.receipt);
       return retained.receipt;
     };
@@ -6045,24 +6045,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const supportsImageInput = modelInputPolicy.supportsImageInput;
       modelCanReceiveRetainedSessionImages = supportsImageInput;
       const attachmentProjector = createModelHistoryAttachmentProjector(
-        db,
-        {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: fileAuthoritySubjectId,
-        },
         modelInputPolicy,
-        objectStorage
-          ? async (file) => {
-              await requireFileForSubject(db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                subjectId: fileAuthoritySubjectId,
-                fileId: file.id,
-              });
-              return await objectStorage.getFileBytes(file);
-            }
-          : undefined,
+        objectStorage ? async (file) => await objectStorage.getFileBytes(file) : undefined,
       );
       const modelHistoryProjector = async (
         items: Array<Record<string, unknown>>,
@@ -8425,8 +8409,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   codexContext: imageAuthority.credentialContext,
                   ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
                 });
-                generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
-                generatedImageArtifactIdsCreatedThisTurn.add(receipt.artifact.artifactId);
+                rememberGeneratedImageCreatedThisTurn(receipt);
                 await materializeGeneratedImage(receipt);
                 return receipt;
               },
@@ -8460,8 +8443,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   xaiContext: imageAuthority.credentialContext,
                   ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
                 });
-                generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
-                generatedImageArtifactIdsCreatedThisTurn.add(receipt.artifact.artifactId);
+                rememberGeneratedImageCreatedThisTurn(receipt);
                 await materializeGeneratedImage(receipt);
                 return receipt;
               },
@@ -8496,8 +8478,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 toolCallId,
                 ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
               });
-              generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
-              generatedImageArtifactIdsCreatedThisTurn.add(receipt.artifact.artifactId);
+              rememberGeneratedImageCreatedThisTurn(receipt);
               await materializeGeneratedImage(receipt);
               return receipt;
             },
@@ -9116,9 +9097,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               // until this hook returns. Only images created during this exact
               // turn can require deferred delivery here; historical images stay
               // as durable receipts and are restored explicitly when requested.
-              for (const artifactId of generatedImageArtifactIdsCreatedThisTurn) {
-                const receipt = generatedImageReceiptsByArtifactId.get(artifactId);
-                if (!receipt) continue;
+              for (const receipt of generatedImageReceiptsCreatedThisTurn.values()) {
                 await materializeGeneratedImageInSandbox(
                   receipt,
                   provisioned,
