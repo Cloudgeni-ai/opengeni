@@ -259,7 +259,7 @@ function parsePresentation(raw: unknown, where: string): CuratedPresentation {
         `${where}: presentation.icon must be one of ${[...PRESENTATION_ICONS].join(", ")}`,
       );
     }
-    presentation.icon = record.icon as CuratedPresentation["icon"];
+    presentation.icon = record.icon as NonNullable<CuratedPresentation["icon"]>;
   }
   if (record.capabilities !== undefined) {
     if (
