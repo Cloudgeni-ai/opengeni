@@ -306,9 +306,11 @@ describe("accepted-turn Company Brain context selection", () => {
       "capture_company_brain_turn_context_snapshot",
       "company_brain_context_get_or_create_selection",
     ]);
-    const [{ schema }] = await shared.admin<Array<{ schema: string }>>`
+    const [schemaRow] = await shared.admin<Array<{ schema: string }>>`
       select current_schema() as "schema"
     `;
+    const schema = schemaRow?.schema;
+    expect(schema).toBeString();
     for (const routine of routines) {
       expect(routine.securityDefiner).toBe(true);
       expect(routine.settings).toEqual([`search_path=${schema}, pg_catalog`]);
