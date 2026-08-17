@@ -25,6 +25,15 @@ import {
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 
+/** Stable element id for a disclosure so affordances can aria-describedby it. */
+export function integrationDisclosureElementId(disclosureId: string): string {
+  return `integration-disclosure-${disclosureId}`;
+}
+
+function describedBy(disclosureId: string | undefined): string | undefined {
+  return disclosureId ? integrationDisclosureElementId(disclosureId) : undefined;
+}
+
 /**
  * The one detail sheet for every integration. Four blocks in a fixed order
  * (Connection, Access, Options, Action); empty blocks are omitted and there is
@@ -79,7 +88,22 @@ export function IntegrationSheetBody({ model }: { model: IntegrationViewModel })
 
       <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-5 py-5">
         {model.notice ? (
-          <Notice tone={model.notice.tone} title={model.notice.title}>
+          <Notice
+            tone={model.notice.tone}
+            title={model.notice.title}
+            action={
+              model.notice.action ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={model.notice.action.onClick}
+                >
+                  {model.notice.action.label}
+                </Button>
+              ) : undefined
+            }
+          >
             {model.notice.description}
           </Notice>
         ) : null}
@@ -97,6 +121,19 @@ export function IntegrationSheetBody({ model }: { model: IntegrationViewModel })
               ))}
             </div>
           </Block>
+        ) : null}
+        {model.disclosures && model.disclosures.length > 0 ? (
+          <div className="space-y-2 border-t border-border pt-4">
+            {model.disclosures.map((disclosure) => (
+              <p
+                key={disclosure.id}
+                id={integrationDisclosureElementId(disclosure.id)}
+                className="text-xs leading-5 text-fg-muted"
+              >
+                {disclosure.text}
+              </p>
+            ))}
+          </div>
         ) : null}
       </div>
 
@@ -128,9 +165,9 @@ function Block({
 function ConnectionFacts({ facts }: { facts: IntegrationFact[] }) {
   return (
     <dl className="divide-y divide-border overflow-hidden rounded-lg border border-border bg-surface">
-      {facts.map((fact) => (
+      {facts.map((fact, index) => (
         <div
-          key={`${fact.label}:${fact.value}`}
+          key={`${index}:${fact.label}`}
           className="flex items-start justify-between gap-4 px-3 py-2 text-xs"
         >
           <dt className="shrink-0 text-fg-muted">{fact.label}</dt>
@@ -150,7 +187,9 @@ function AccessBlock({ access }: { access: IntegrationAccess }) {
           <button
             type="button"
             onClick={access.onEdit}
-            className="text-xs font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded-sm"
+            disabled={access.editDisabled}
+            aria-describedby={describedBy(access.editDisclosureId)}
+            className="text-xs font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded-sm disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline"
           >
             {access.editLabel}
           </button>
@@ -163,9 +202,9 @@ function AccessBlock({ access }: { access: IntegrationAccess }) {
         </p>
       ) : (
         <ul className="space-y-1.5">
-          {access.items.map((item) => (
+          {access.items.map((item, index) => (
             <li
-              key={`${item.name}:${item.meta ?? ""}`}
+              key={`${index}:${item.name}`}
               className="flex items-center gap-2.5 rounded-lg border border-border bg-surface px-3 py-2 text-xs"
             >
               <FolderIcon className="size-3.5 shrink-0 text-fg-subtle" aria-hidden="true" />
@@ -196,13 +235,15 @@ function OptionRow({ option }: { option: IntegrationOption }) {
           <button
             type="button"
             onClick={option.action.onClick}
-            className="mt-1 text-2xs font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded-sm"
+            disabled={option.disabled || (option.kind !== "link" && option.busy)}
+            aria-describedby={describedBy(option.disclosureId)}
+            className="mt-1 text-2xs font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded-sm disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline"
           >
             {option.action.label}
           </button>
         ) : null}
       </div>
-      {option.busy ? (
+      {option.kind !== "link" && option.busy ? (
         <Loader2Icon className="size-3.5 shrink-0 animate-spin text-fg-subtle" aria-hidden />
       ) : null}
       {option.kind === "toggle" ? (
@@ -211,6 +252,7 @@ function OptionRow({ option }: { option: IntegrationOption }) {
           role="switch"
           aria-checked={option.checked}
           aria-labelledby={labelId}
+          aria-describedby={describedBy(option.disclosureId)}
           disabled={option.disabled || option.busy}
           onClick={() => option.onChange(!option.checked)}
           className={cn(
@@ -226,9 +268,10 @@ function OptionRow({ option }: { option: IntegrationOption }) {
             )}
           />
         </button>
-      ) : (
+      ) : option.kind === "choice" ? (
         <Select
           aria-labelledby={labelId}
+          aria-describedby={describedBy(option.disclosureId)}
           value={option.value}
           disabled={option.disabled || option.busy}
           onChange={(event) => option.onChange(event.target.value)}
@@ -240,7 +283,7 @@ function OptionRow({ option }: { option: IntegrationOption }) {
             </option>
           ))}
         </Select>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -249,12 +292,15 @@ function IntegrationFooterView({ footer }: { footer: IntegrationFooter }) {
   return (
     <div className="flex items-center gap-2 border-t border-border bg-surface px-5 py-3">
       {footer.kind === "locked" ? (
-        <p className="text-xs leading-5 text-fg-muted">{INTEGRATION_LOCKED_SENTENCE}</p>
+        <p className="text-xs leading-5 text-fg-muted">
+          {footer.message ?? INTEGRATION_LOCKED_SENTENCE}
+        </p>
       ) : footer.kind === "setup" ? (
         <Button
           type="button"
           className="flex-1"
           disabled={footer.disabled || footer.busy}
+          aria-describedby={describedBy(footer.disclosureId)}
           onClick={footer.onSetup}
         >
           {footer.busy ? <Loader2Icon className="animate-spin" /> : null}
@@ -267,6 +313,7 @@ function IntegrationFooterView({ footer }: { footer: IntegrationFooter }) {
             variant={footer.kind === "repair" ? "default" : "secondary"}
             className="flex-1"
             disabled={footer.reconnectDisabled || footer.busy}
+            aria-describedby={describedBy(footer.disclosureId)}
             onClick={footer.onReconnect}
           >
             {footer.busy ? <Loader2Icon className="animate-spin" /> : null}

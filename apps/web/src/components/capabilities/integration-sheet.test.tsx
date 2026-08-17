@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 
 import { IntegrationRow } from "./integration-row";
 import { Sheet } from "@/components/ui/sheet";
-import { IntegrationSheetBody } from "./integration-sheet";
+import { IntegrationSheetBody, integrationDisclosureElementId } from "./integration-sheet";
 import { INTEGRATION_LOCKED_SENTENCE, type IntegrationViewModel } from "./integration-view-model";
 
 beforeAll(() => {
@@ -196,6 +196,117 @@ describe("IntegrationSheet", () => {
       ).not.toContain("Disconnect");
     } finally {
       await locked.unmount();
+    }
+  });
+
+  test("locked footers render the adapter-supplied sentence when given", async () => {
+    const rendered = await render(
+      <Sheet open>
+        <IntegrationSheetBody
+          model={model({
+            options: [],
+            footer: { kind: "locked", message: "Connection management permission is required." },
+          })}
+        />
+      </Sheet>,
+    );
+    try {
+      const sheet = document.querySelector('[data-integration-sheet="slack"]')!;
+      expect(sheet.textContent).toContain("Connection management permission is required.");
+      expect(sheet.textContent).not.toContain(INTEGRATION_LOCKED_SENTENCE);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("disclosures render in a fixed place and affordances point at them", async () => {
+    const rendered = await render(
+      <Sheet open>
+        <IntegrationSheetBody
+          model={model({
+            options: [
+              {
+                kind: "toggle",
+                id: "publish",
+                label: "Publish finished documents",
+                checked: false,
+                disclosureId: "example-publishing",
+                onChange: () => {},
+              },
+            ],
+            footer: {
+              kind: "setup",
+              onSetup: () => {},
+              disclosureId: "example-access",
+            },
+            disclosures: [
+              { id: "example-access", text: "Read-only access limited-use disclosure." },
+              { id: "example-publishing", text: "Publishing consent disclosure." },
+            ],
+          })}
+        />
+      </Sheet>,
+    );
+    try {
+      const sheet = document.querySelector('[data-integration-sheet="slack"]')!;
+      const access = sheet.querySelector(`#${integrationDisclosureElementId("example-access")}`);
+      const publishing = sheet.querySelector(
+        `#${integrationDisclosureElementId("example-publishing")}`,
+      );
+      expect(access?.textContent).toBe("Read-only access limited-use disclosure.");
+      expect(publishing?.textContent).toBe("Publishing consent disclosure.");
+      const setupButton = [...sheet.querySelectorAll("button")].find(
+        (node) => node.textContent?.trim() === "Set up",
+      )!;
+      expect(setupButton.getAttribute("aria-describedby")).toBe(
+        integrationDisclosureElementId("example-access"),
+      );
+      const toggle = sheet.querySelector('[role="switch"]')!;
+      expect(toggle.getAttribute("aria-describedby")).toBe(
+        integrationDisclosureElementId("example-publishing"),
+      );
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("link options render one action per row", async () => {
+    const first = mock(() => {});
+    const second = mock(() => {});
+    const rendered = await render(
+      <Sheet open>
+        <IntegrationSheetBody
+          model={model({
+            options: [
+              {
+                kind: "link",
+                id: "install-a",
+                label: "acme-org",
+                action: { label: "Change repositories", onClick: first },
+              },
+              {
+                kind: "link",
+                id: "install-b",
+                label: "second-org",
+                action: { label: "Change repositories", onClick: second },
+              },
+            ],
+          })}
+        />
+      </Sheet>,
+    );
+    try {
+      const sheet = document.querySelector('[data-integration-sheet="slack"]')!;
+      const actions = [...sheet.querySelectorAll("button")].filter(
+        (node) => node.textContent?.trim() === "Change repositories",
+      );
+      expect(actions).toHaveLength(2);
+      expect(sheet.querySelector('[role="switch"]')).toBeNull();
+      await act(async () => actions[1]!.click());
+      expect(first).not.toHaveBeenCalled();
+      expect(second).toHaveBeenCalledTimes(1);
+    } finally {
+      await rendered.unmount();
     }
   });
 

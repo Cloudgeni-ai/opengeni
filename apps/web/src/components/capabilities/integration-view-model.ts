@@ -32,6 +32,10 @@ export type IntegrationAccess = {
   /** The single edit affordance for this block. Omitted when the viewer cannot change it. */
   editLabel?: string;
   onEdit?: () => void;
+  /** Keep the edit affordance visible but inert (e.g. while a mutation is in flight). */
+  editDisabled?: boolean;
+  /** Disclosure the edit affordance points at via aria-describedby. */
+  editDisclosureId?: string;
   items: IntegrationAccessItem[];
   /** Shown instead of the list when there is nothing scoped yet. */
   emptyMessage?: string;
@@ -48,6 +52,8 @@ export type IntegrationToggleOption = {
   onChange: (checked: boolean) => void;
   /** Optional secondary affordance for a setting that needs more than a switch. */
   action?: { label: string; onClick: () => void };
+  /** Disclosure this option's control and action point at via aria-describedby. */
+  disclosureId?: string;
 };
 
 export type IntegrationChoiceOption = {
@@ -61,14 +67,30 @@ export type IntegrationChoiceOption = {
   busy?: boolean;
   onChange: (value: string) => void;
   action?: { label: string; onClick: () => void };
+  disclosureId?: string;
 };
 
-export type IntegrationOption = IntegrationToggleOption | IntegrationChoiceOption;
+/** A row whose only control is its action link (e.g. one entry per installation). */
+export type IntegrationLinkOption = {
+  kind: "link";
+  id: string;
+  label: string;
+  description?: string;
+  disabled?: boolean;
+  action: { label: string; onClick: () => void };
+  disclosureId?: string;
+};
+
+export type IntegrationOption =
+  | IntegrationToggleOption
+  | IntegrationChoiceOption
+  | IntegrationLinkOption;
 
 /**
  * Closed footer set. `connected` and `repair` both render Reconnect + Disconnect
  * (Reconnect is primary only for `repair`); `setup` renders one Set up button;
- * `locked` renders the admin-managed sentence.
+ * `locked` renders the adapter-supplied sentence, defaulting to the
+ * admin-managed one.
  */
 export type IntegrationFooter =
   | {
@@ -78,9 +100,24 @@ export type IntegrationFooter =
       reconnectDisabled?: boolean;
       disconnectDisabled?: boolean;
       busy?: boolean;
+      /** Disclosure the Reconnect button points at via aria-describedby. */
+      disclosureId?: string;
     }
-  | { kind: "setup"; onSetup: () => void; disabled?: boolean; busy?: boolean }
-  | { kind: "locked" };
+  | {
+      kind: "setup";
+      onSetup: () => void;
+      disabled?: boolean;
+      busy?: boolean;
+      /** Disclosure the Set up button points at via aria-describedby. */
+      disclosureId?: string;
+    }
+  | { kind: "locked"; message?: string };
+
+/**
+ * A provider-supplied consent/limited-use disclosure the sheet renders in a
+ * fixed place. Affordances reference one by `disclosureId` (aria-describedby).
+ */
+export type IntegrationDisclosure = { id: string; text: string };
 
 export type IntegrationViewModel = {
   id: string;
@@ -93,7 +130,15 @@ export type IntegrationViewModel = {
   options: IntegrationOption[];
   footer: IntegrationFooter;
   /** Optional plain-language notice shown above the blocks (state explanations). */
-  notice?: { tone: "muted" | "waiting" | "failed"; title: string; description?: string };
+  notice?: {
+    tone: "muted" | "waiting" | "failed";
+    title: string;
+    description?: string;
+    /** Optional recovery affordance (e.g. Retry after a failed load). */
+    action?: { label: string; onClick: () => void };
+  };
+  /** Provider disclosures rendered after the blocks, before the footer. */
+  disclosures?: IntegrationDisclosure[];
 };
 
 export const INTEGRATION_LOCKED_SENTENCE =
