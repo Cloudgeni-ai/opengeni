@@ -520,6 +520,7 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
     anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
   },
   slack_bot_list_channels: { allOf: ["connections:read"] },
+  slack_bot_search: { allOf: ["connections:read"] },
   slack_bot_channel_history: { allOf: ["connections:read"] },
   slack_bot_thread_replies: { allOf: ["connections:read"] },
   slack_bot_list_users: { allOf: ["connections:read"] },
@@ -1816,6 +1817,57 @@ function registerSlackBotTools(
         await (
           await clientFor(connectionId)
         ).listChannels({
+          ...(cursor ? { cursor } : {}),
+          ...(limit !== undefined ? { limit } : {}),
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "slack_bot_search",
+    {
+      description:
+        "Search public Slack channels workspace-wide as the workspace-shared OpenGeni bot: messages by default, plus files and channels via contentTypes. Public content only; private channels, DMs, and group DMs are searchable only through a member's personal Slack connection. Requires a bot install with the search scopes; older installs must be reinstalled by an admin. Continue with cursor for more results.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        query: z4.string().min(1).max(500),
+        contentTypes: z4
+          .array(z4.enum(["messages", "files", "channels"]))
+          .min(1)
+          .max(3)
+          .optional(),
+        includeBots: z4.boolean().optional(),
+        before: z4.number().int().min(0).optional(),
+        after: z4.number().int().min(0).optional(),
+        sort: z4.enum(["score", "timestamp"]).optional(),
+        sortDir: z4.enum(["asc", "desc"]).optional(),
+        cursor: z4.string().max(1024).optional(),
+        limit: z4.number().int().min(1).max(20).optional(),
+      },
+    },
+    async ({
+      connectionId,
+      query,
+      contentTypes,
+      includeBots,
+      before,
+      after,
+      sort,
+      sortDir,
+      cursor,
+      limit,
+    }) =>
+      json(
+        await (
+          await clientFor(connectionId)
+        ).searchContext({
+          query,
+          ...(contentTypes ? { contentTypes } : {}),
+          ...(includeBots !== undefined ? { includeBots } : {}),
+          ...(before !== undefined ? { before } : {}),
+          ...(after !== undefined ? { after } : {}),
+          ...(sort ? { sort } : {}),
+          ...(sortDir ? { sortDir } : {}),
           ...(cursor ? { cursor } : {}),
           ...(limit !== undefined ? { limit } : {}),
         }),

@@ -29,6 +29,7 @@ const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
   "reddit_posts_sync",
   "reddit_post_reply",
   "slack_bot_list_channels",
+  "slack_bot_search",
   "slack_bot_channel_history",
   "slack_bot_thread_replies",
   "slack_bot_list_users",

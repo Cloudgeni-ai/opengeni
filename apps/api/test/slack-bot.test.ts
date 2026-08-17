@@ -163,6 +163,9 @@ type SlackCall = {
   unfurlMedia: string | null;
   hasText: boolean;
   query: string;
+  searchQuery: string | null;
+  channelTypes: string | null;
+  contentTypes: string | null;
 };
 
 type CommittedSlackPost = {
@@ -283,6 +286,9 @@ function fakeSlack(
       unfurlMedia: params.get("unfurl_media"),
       hasText: params.has("text"),
       query: url.search,
+      searchQuery: params.get("query"),
+      channelTypes: params.get("channel_types"),
+      contentTypes: params.get("content_types"),
     });
     const headers =
       method === "auth.test"
@@ -338,6 +344,52 @@ function fakeSlack(
             real_name: "OpenGeni",
           },
         },
+      });
+    }
+    if (method === "assistant.search.context") {
+      return Response.json({
+        ok: true,
+        results: {
+          messages: [
+            {
+              author_name: "Ada",
+              author_user_id: "U_ADA",
+              team_id: "T_TEAM",
+              channel_id: "C_MEMBER",
+              channel_name: "general",
+              message_ts: "1755300000.000100",
+              content: `decision: ${"x".repeat(3000)}`,
+              is_author_bot: false,
+              permalink: "https://team.slack.com/archives/C_MEMBER/p1755300000000100",
+            },
+            { content: "no channel or ts; must be dropped" },
+          ],
+          files: [
+            {
+              file_id: "F_DOC",
+              title: "Launch plan",
+              file_type: "canvas",
+              author_user_id: "U_ADA",
+              author_name: "Ada",
+              date_created: 1755200000,
+              date_updated: 1755210000,
+              content: "plan excerpt",
+              permalink: "http://attacker.example/not-https",
+            },
+          ],
+          channels: [
+            {
+              team_id: "T_TEAM",
+              creator_user_id: "U_ADA",
+              date_created: 1755100000,
+              name: "launch",
+              topic: "Launch coordination",
+              purpose: "Ship the launch",
+              permalink: "https://team.slack.com/archives/C_LAUNCH",
+            },
+          ],
+        },
+        response_metadata: { next_cursor: "search-cursor-2" },
       });
     }
     if (method === "conversations.list") {
@@ -3016,6 +3068,85 @@ describe("OpenGeni Slack bot connection", () => {
         ),
       ).toMatchObject({ status: "outcome_unknown", claimHolderId: null });
     }
+  });
+
+  test("searches public Slack through the bot with pinned channel types and bounded projections", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const { bot } = await connectedTestBot(workspace, slack.fetch);
+
+    const result = await bot.searchContext({
+      query: "launch decision",
+      contentTypes: ["messages", "files", "channels"],
+      limit: 5,
+      sort: "timestamp",
+      sortDir: "asc",
+    });
+
+    const call = slack.calls.find((entry) => entry.method === "assistant.search.context");
+    expect(call).toBeDefined();
+    // The bot identity is public-only: channel_types is pinned server-side and
+    // is not a caller input at any layer.
+    expect(call!.channelTypes).toBe("public_channel");
+    expect(call!.contentTypes).toBe("messages,files,channels");
+    expect(call!.searchQuery).toBe("launch decision");
+    expect(call!.limit).toBe("5");
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({
+      channelId: "C_MEMBER",
+      channelName: "general",
+      ts: "1755300000.000100",
+      authorUserId: "U_ADA",
+      authorName: "Ada",
+      isAuthorBot: false,
+      permalink: "https://team.slack.com/archives/C_MEMBER/p1755300000000100",
+    });
+    // Content excerpts are bounded; the fixture message is 3000+ chars.
+    expect(result.messages[0]!.content.length).toBeLessThanOrEqual(2_000);
+    expect(result.files).toHaveLength(1);
+    expect(result.files[0]).toMatchObject({
+      id: "F_DOC",
+      title: "Launch plan",
+      filetype: "canvas",
+      dateCreated: 1755200000,
+      // Non-https permalinks are dropped rather than surfaced.
+      permalink: null,
+    });
+    expect(result.channels).toHaveLength(1);
+    expect(result.channels[0]).toMatchObject({
+      name: "launch",
+      topic: "Launch coordination",
+      permalink: "https://team.slack.com/archives/C_LAUNCH",
+    });
+    expect(result.nextCursor).toBe("search-cursor-2");
+    expect(result.receipt).toMatchObject({ operation: "search.context" });
+  });
+
+  test("defaults search to messages and Slack's page cap when the caller omits options", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const { bot } = await connectedTestBot(workspace, slack.fetch);
+    await bot.searchContext({ query: "standup" });
+    const call = slack.calls.find((entry) => entry.method === "assistant.search.context");
+    expect(call!.contentTypes).toBe("messages");
+    expect(call!.channelTypes).toBe("public_channel");
+    expect(call!.limit).toBe("20");
+  });
+
+  test("fails search closed with a reinstall hint when the install predates the search scopes", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    // A legacy install: required scopes only, no search:read.* grants.
+    const slack = fakeSlack({ scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES] });
+    const { bot } = await connectedTestBot(workspace, slack.fetch);
+    await expect(bot.searchContext({ query: "anything" })).rejects.toThrow(
+      "slack_bot_search_scopes_missing",
+    );
+    // Fails before any provider call: Slack never sees the request.
+    expect(slack.calls.some((entry) => entry.method === "assistant.search.context")).toBe(false);
   });
 
   test("retries explicit provider rejection and preserves distinct operation IDs", async () => {
