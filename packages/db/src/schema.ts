@@ -7620,17 +7620,14 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
     initiator: index("sandbox_workspace_mutation_admissions_initiator_idx")
       .on(table.accountId, table.initiatorOrganizationMembershipId)
       .where(sql`${table.settledAt} is null`),
-    authorityValid: check(
-      "sandbox_workspace_mutation_admissions_authority_check",
+    initiatorValid: check(
+      "sandbox_workspace_mutation_admissions_initiator_check",
       sql`(
           ${table.initiatorKind} = 'legacy_unattributed'
           and ${table.initiatorSubjectId} = 'unattributed-legacy'
           and ${table.initiatingHumanSubjectId} is null
           and ${table.initiatorOrganizationMembershipId} is null
           and ${table.initiatorAuthorizationRevision} is null
-          and ${table.authorityEpoch} is null
-          and ${table.authorityVisibility} is null
-          and ${table.authorityOwnerOrganizationMembershipId} is null
         ) or (
           ${table.initiatorKind} in ('subject', 'service')
           and length(btrim(${table.initiatorSubjectId})) between 1 and 1024
@@ -7650,6 +7647,17 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
               and ${table.initiatorOrganizationMembershipId} is not null
             )
           )
+        )`,
+    ),
+    tenancyValid: check(
+      "sandbox_workspace_mutation_admissions_tenancy_check",
+      sql`(
+          ${table.authorityEpoch} is null
+          and ${table.authorityVisibility} is null
+          and ${table.authorityOwnerOrganizationMembershipId} is null
+        ) or (
+          ${table.authorityEpoch} is not null
+          and ${table.authorityVisibility} is not null
           and ${table.authorityEpoch} > 0
           and ${table.authorityVisibility} in ('user_private', 'workspace_shared')
           and (
@@ -7867,17 +7875,14 @@ export const sandboxRetainedProcesses = pgTable(
     initiatingHuman: index("sandbox_retained_processes_initiating_human_idx")
       .on(table.accountId, table.initiatingHumanSubjectId)
       .where(sql`${table.state} = 'active'`),
-    authorityValid: check(
-      "sandbox_retained_processes_authority_check",
+    initiatorValid: check(
+      "sandbox_retained_processes_initiator_check",
       sql`(
           ${table.initiatorKind} = 'legacy_unattributed'
           and ${table.initiatorSubjectId} = 'unattributed-legacy'
           and ${table.initiatingHumanSubjectId} is null
           and ${table.initiatorOrganizationMembershipId} is null
           and ${table.initiatorAuthorizationRevision} is null
-          and ${table.authorityEpoch} is null
-          and ${table.authorityVisibility} is null
-          and ${table.authorityOwnerOrganizationMembershipId} is null
         ) or (
           ${table.initiatorKind} in ('subject', 'service')
           and length(btrim(${table.initiatorSubjectId})) between 1 and 1024
@@ -7897,6 +7902,17 @@ export const sandboxRetainedProcesses = pgTable(
               and ${table.initiatorOrganizationMembershipId} is not null
             )
           )
+        )`,
+    ),
+    tenancyValid: check(
+      "sandbox_retained_processes_tenancy_check",
+      sql`(
+          ${table.authorityEpoch} is null
+          and ${table.authorityVisibility} is null
+          and ${table.authorityOwnerOrganizationMembershipId} is null
+        ) or (
+          ${table.authorityEpoch} is not null
+          and ${table.authorityVisibility} is not null
           and ${table.authorityEpoch} > 0
           and ${table.authorityVisibility} in ('user_private', 'workspace_shared')
           and (

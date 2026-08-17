@@ -74,6 +74,14 @@ ALTER TABLE "sandbox_retained_processes"
     ON DELETE RESTRICT NOT VALID;
 
 -- 2. Promote the unambiguous historical rows ----------------------------
+-- The retained-process identity constraint trigger is INITIALLY DEFERRED.
+-- Fire it per-row instead: a deferred event queued by this backfill would
+-- otherwise make the later ALTER TABLE in this same transaction fail with
+-- "pending trigger events" on any deployment that has retained processes.
+-- The promotion touches only the new authority columns, so the re-validation
+-- against the parent admission is unaffected.
+SET CONSTRAINTS "sandbox_retained_processes_identity_v2" IMMEDIATE;
+
 -- Only a `turn` actor has a frozen accepted-authority snapshot. Copy it
 -- verbatim: the attempt owns tenancy epoch/visibility/owner membership and the
 -- logical turn owns the causal initiator. Nothing here derives an owner from
@@ -81,9 +89,18 @@ ALTER TABLE "sandbox_retained_processes"
 
 UPDATE "sandbox_workspace_mutation_admissions" AS admission
 SET
-  "initiator_kind" = turn."initiator_kind",
+  -- A turn frozen before migration 0096 carries the subject sentinel with the
+  -- default 'service' kind. That is honestly "no causal initiator", so it is
+  -- normalized to the explicit sentinel rather than promoted to a real one.
+  "initiator_kind" = CASE
+    WHEN turn."initiator_subject_id" = 'unattributed-legacy' THEN 'legacy_unattributed'
+    ELSE turn."initiator_kind"
+  END,
   "initiator_subject_id" = turn."initiator_subject_id",
-  "initiating_human_subject_id" = turn."initiating_human_subject_id",
+  "initiating_human_subject_id" = CASE
+    WHEN turn."initiator_subject_id" = 'unattributed-legacy' THEN NULL
+    ELSE turn."initiating_human_subject_id"
+  END,
   "authority_epoch" = attempt."authority_epoch",
   "authority_visibility" = attempt."authority_visibility",
   "authority_owner_organization_membership_id" =
@@ -100,9 +117,18 @@ WHERE admission."actor_kind" = 'turn'
 
 UPDATE "sandbox_retained_processes" AS process
 SET
-  "initiator_kind" = turn."initiator_kind",
+  -- A turn frozen before migration 0096 carries the subject sentinel with the
+  -- default 'service' kind. That is honestly "no causal initiator", so it is
+  -- normalized to the explicit sentinel rather than promoted to a real one.
+  "initiator_kind" = CASE
+    WHEN turn."initiator_subject_id" = 'unattributed-legacy' THEN 'legacy_unattributed'
+    ELSE turn."initiator_kind"
+  END,
   "initiator_subject_id" = turn."initiator_subject_id",
-  "initiating_human_subject_id" = turn."initiating_human_subject_id",
+  "initiating_human_subject_id" = CASE
+    WHEN turn."initiator_subject_id" = 'unattributed-legacy' THEN NULL
+    ELSE turn."initiating_human_subject_id"
+  END,
   "authority_epoch" = attempt."authority_epoch",
   "authority_visibility" = attempt."authority_visibility",
   "authority_owner_organization_membership_id" =
@@ -144,13 +170,24 @@ WHERE process."initiator_kind" <> 'legacy_unattributed'
   AND membership."subject_id" = process."initiating_human_subject_id";
 
 -- 3. Contract -----------------------------------------------------------
--- Either the row is an explicit unattributed legacy row (every authority field
--- absent, so it can never masquerade as a partial grant), or it carries a
--- complete tenancy tuple. A private session must name its owning membership,
--- exactly as `sessions` and `session_turn_attempts` already require.
+-- The tuple has two INDEPENDENT halves, and conflating them was the mistake
+-- worth avoiding: a legacy turn frozen before migration 0096 legitimately has
+-- no causal initiator while still having a perfectly real session tenancy
+-- epoch and visibility. Requiring both together would fence ordinary turn work
+-- on those sessions for no security gain.
+--
+--   * initiator half - either a complete causal identity, or the explicit
+--     `legacy_unattributed` sentinel with every initiator field absent, so a
+--     partial grant can never masquerade as a whole one.
+--   * tenancy half - either the complete epoch/visibility/owner triple, or
+--     nothing. A private session must name its owning membership, exactly as
+--     `sessions` and `session_turn_attempts` already require.
+--
+-- Only a MISSING TENANCY HALF marks a row as predating this migration, and
+-- that is the condition that fails a retained process closed.
 
 ALTER TABLE "sandbox_workspace_mutation_admissions"
-  ADD CONSTRAINT "sandbox_workspace_mutation_admissions_authority_check"
+  ADD CONSTRAINT "sandbox_workspace_mutation_admissions_initiator_check"
   CHECK (
     (
       "initiator_kind" = 'legacy_unattributed'
@@ -158,9 +195,6 @@ ALTER TABLE "sandbox_workspace_mutation_admissions"
       AND "initiating_human_subject_id" IS NULL
       AND "initiator_organization_membership_id" IS NULL
       AND "initiator_authorization_revision" IS NULL
-      AND "authority_epoch" IS NULL
-      AND "authority_visibility" IS NULL
-      AND "authority_owner_organization_membership_id" IS NULL
     ) OR (
       "initiator_kind" IN ('subject', 'service')
       AND length(btrim("initiator_subject_id")) BETWEEN 1 AND 1024
@@ -180,6 +214,19 @@ ALTER TABLE "sandbox_workspace_mutation_admissions"
           AND "initiator_organization_membership_id" IS NOT NULL
         )
       )
+    )
+  ) NOT VALID;
+
+ALTER TABLE "sandbox_workspace_mutation_admissions"
+  ADD CONSTRAINT "sandbox_workspace_mutation_admissions_tenancy_check"
+  CHECK (
+    (
+      "authority_epoch" IS NULL
+      AND "authority_visibility" IS NULL
+      AND "authority_owner_organization_membership_id" IS NULL
+    ) OR (
+      "authority_epoch" IS NOT NULL
+      AND "authority_visibility" IS NOT NULL
       AND "authority_epoch" > 0
       AND "authority_visibility" IN ('user_private', 'workspace_shared')
       AND (
@@ -190,7 +237,7 @@ ALTER TABLE "sandbox_workspace_mutation_admissions"
   ) NOT VALID;
 
 ALTER TABLE "sandbox_retained_processes"
-  ADD CONSTRAINT "sandbox_retained_processes_authority_check"
+  ADD CONSTRAINT "sandbox_retained_processes_initiator_check"
   CHECK (
     (
       "initiator_kind" = 'legacy_unattributed'
@@ -198,9 +245,6 @@ ALTER TABLE "sandbox_retained_processes"
       AND "initiating_human_subject_id" IS NULL
       AND "initiator_organization_membership_id" IS NULL
       AND "initiator_authorization_revision" IS NULL
-      AND "authority_epoch" IS NULL
-      AND "authority_visibility" IS NULL
-      AND "authority_owner_organization_membership_id" IS NULL
     ) OR (
       "initiator_kind" IN ('subject', 'service')
       AND length(btrim("initiator_subject_id")) BETWEEN 1 AND 1024
@@ -220,6 +264,19 @@ ALTER TABLE "sandbox_retained_processes"
           AND "initiator_organization_membership_id" IS NOT NULL
         )
       )
+    )
+  ) NOT VALID;
+
+ALTER TABLE "sandbox_retained_processes"
+  ADD CONSTRAINT "sandbox_retained_processes_tenancy_check"
+  CHECK (
+    (
+      "authority_epoch" IS NULL
+      AND "authority_visibility" IS NULL
+      AND "authority_owner_organization_membership_id" IS NULL
+    ) OR (
+      "authority_epoch" IS NOT NULL
+      AND "authority_visibility" IS NOT NULL
       AND "authority_epoch" > 0
       AND "authority_visibility" IN ('user_private', 'workspace_shared')
       AND (
@@ -230,9 +287,13 @@ ALTER TABLE "sandbox_retained_processes"
   ) NOT VALID;
 
 ALTER TABLE "sandbox_workspace_mutation_admissions"
-  VALIDATE CONSTRAINT "sandbox_workspace_mutation_admissions_authority_check";
+  VALIDATE CONSTRAINT "sandbox_workspace_mutation_admissions_initiator_check";
+ALTER TABLE "sandbox_workspace_mutation_admissions"
+  VALIDATE CONSTRAINT "sandbox_workspace_mutation_admissions_tenancy_check";
 ALTER TABLE "sandbox_retained_processes"
-  VALIDATE CONSTRAINT "sandbox_retained_processes_authority_check";
+  VALIDATE CONSTRAINT "sandbox_retained_processes_initiator_check";
+ALTER TABLE "sandbox_retained_processes"
+  VALIDATE CONSTRAINT "sandbox_retained_processes_tenancy_check";
 
 ALTER TABLE "sandbox_workspace_mutation_admissions"
   VALIDATE CONSTRAINT "sandbox_workspace_mutation_admissions_initiator_membership_fk";
@@ -243,7 +304,59 @@ ALTER TABLE "sandbox_retained_processes"
 ALTER TABLE "sandbox_retained_processes"
   VALIDATE CONSTRAINT "sandbox_retained_processes_authority_owner_fk";
 
--- 4. Revocation sweep support -------------------------------------------
+-- 4. The grant-identity seam --------------------------------------------
+-- `organization_memberships` stays FORCE-RLS with no runtime DML and no
+-- runtime SELECT (migration 0263). Admission still has to answer one narrow
+-- question inside its own transaction - "is this exact subject's grant still
+-- live, and which membership is it?" - so expose exactly that and nothing
+-- more: an id, a lifecycle status and an authorization revision, fenced to the
+-- caller's own tenant. No role, no personal workspace, no retention state, no
+-- other subject's row, and never a secret value.
+--
+-- The existing 0263 assertion cannot serve this: it is scoped to the CURRENT
+-- RLS subject, while a workspace writer must resolve the initiator frozen on
+-- an accepted turn - a subject the worker's transaction is not acting as.
+
+CREATE FUNCTION resolve_workspace_writer_grant_identity(
+  p_account_id uuid,
+  p_subject_id text
+) RETURNS TABLE(membership_id uuid, membership_status text, authorization_revision bigint)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+  SELECT membership.id, membership.status, membership.authorization_revision
+  FROM organization_memberships membership
+  WHERE p_account_id IS NOT NULL
+    AND p_subject_id IS NOT NULL
+    AND membership.account_id = p_account_id
+    -- Tenant fence: a caller can only resolve grants inside the organization
+    -- its own RLS context already establishes.
+    AND membership.account_id = opengeni_private.current_account_id()
+    AND membership.subject_id = p_subject_id
+$body$;
+
+REVOKE ALL ON FUNCTION resolve_workspace_writer_grant_identity(uuid,text) FROM PUBLIC;
+
+DO $workspace_writer_grant_seam$
+DECLARE
+  data_schema text := pg_catalog.current_schema();
+BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION %I.resolve_workspace_writer_grant_identity(uuid,text) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'GRANT EXECUTE ON FUNCTION %I.resolve_workspace_writer_grant_identity(uuid,text) '
+      || 'TO opengeni_app',
+    data_schema
+  );
+END
+$workspace_writer_grant_seam$;
+
+-- 5. Revocation sweep support -------------------------------------------
 -- Membership revocation and workspace-membership removal need the live
 -- unsettled writers owned by one exact grant identity, cheaply.
 

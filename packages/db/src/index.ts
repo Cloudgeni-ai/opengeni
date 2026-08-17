@@ -37802,7 +37802,10 @@ type DirectWorkspaceMutationAuthority = {
 /** Identity-and-epoch attribution recorded with an admitted workspace writer
  * (migration 0276). Never contains a secret value. */
 type AdmittedWorkspaceMutationAuthority = {
-  initiatorKind: "subject" | "service";
+  /** `legacy_unattributed` is honest, not broken: a turn frozen before
+   * migration 0096 has no causal initiator to copy, and inventing one would be
+   * exactly the ownership inference OPE-203 forbids. */
+  initiatorKind: "subject" | "service" | "legacy_unattributed";
   initiatorSubjectId: string;
   initiatingHumanSubjectId: string | null;
   initiatorOrganizationMembershipId: string | null;
@@ -38030,33 +38033,60 @@ async function resolveWorkspaceMutationGrantIdentityTx(
   input: { accountId: string; humanSubjectId: string | null },
 ): Promise<{ membershipId: string | null; authorizationRevision: number | null }> {
   if (!input.humanSubjectId) return { membershipId: null, authorizationRevision: null };
-  const [membership] = await tx
-    .select({
-      id: schema.organizationMemberships.id,
-      status: schema.organizationMemberships.status,
-      authorizationRevision: schema.organizationMemberships.authorizationRevision,
-    })
-    .from(schema.organizationMemberships)
-    .where(
-      and(
-        eq(schema.organizationMemberships.accountId, input.accountId),
-        eq(schema.organizationMemberships.subjectId, input.humanSubjectId),
-      ),
+  // `organization_memberships` has no runtime SELECT (0263). Migration 0276
+  // installs one narrow tenant-fenced SECURITY DEFINER seam that returns only
+  // this identity/status/revision triple.
+  const rows = await tx.execute<{
+    membership_id: string;
+    membership_status: string;
+    authorization_revision: number | string;
+  }>(sql`
+    select membership_id, membership_status, authorization_revision
+    from resolve_workspace_writer_grant_identity(
+      ${input.accountId}::uuid, ${input.humanSubjectId}::text
     )
-    .limit(1);
+  `);
+  const membership = rows[0];
   if (!membership) return { membershipId: null, authorizationRevision: null };
-  if (membership.status === "revoked" || membership.status === "suspended") {
+  if (membership.membership_status === "revoked" || membership.membership_status === "suspended") {
     throw new SandboxWorkspaceMutationFencedError(
       "authority_revoked",
-      `Workspace mutation rejected because its organization grant is ${membership.status}`,
+      `Workspace mutation rejected because its organization grant is ${membership.membership_status}`,
     );
   }
-  if (membership.status !== "active") {
+  if (membership.membership_status !== "active") {
     return { membershipId: null, authorizationRevision: null };
   }
   return {
-    membershipId: membership.id,
-    authorizationRevision: membership.authorizationRevision,
+    membershipId: membership.membership_id,
+    authorizationRevision: Number(membership.authorization_revision),
+  };
+}
+
+/** The initiator half, copied verbatim from the accepted turn. A turn frozen
+ * before migration 0096 carries the subject sentinel with the default
+ * `service` kind; that is honestly "no causal initiator", so it is normalized
+ * to the explicit sentinel instead of being promoted to a real one. Turn work
+ * is never refused for this - the attempt fence remains its authority - but
+ * anything the turn retains inherits the honest absence. */
+function frozenTurnInitiator(
+  turn: typeof schema.sessionTurns.$inferSelect,
+): Pick<
+  AdmittedWorkspaceMutationAuthority,
+  "initiatorKind" | "initiatorSubjectId" | "initiatingHumanSubjectId"
+> {
+  const kind = turn.initiatorKind === "subject" ? "subject" : "service";
+  if (turn.initiatorSubjectId === "unattributed-legacy") {
+    return {
+      initiatorKind: "legacy_unattributed",
+      initiatorSubjectId: "unattributed-legacy",
+      initiatingHumanSubjectId: null,
+    };
+  }
+  return {
+    initiatorKind: kind,
+    initiatorSubjectId: turn.initiatorSubjectId,
+    initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
   };
 }
 
@@ -38076,8 +38106,7 @@ function directSessionAuthorityTx(
   if (visibility === "user_private") {
     const ownedBySubject = session.ownerSubjectId === initiatorSubjectId;
     const ownedByMembership =
-      grant.membershipId !== null &&
-      session.ownerOrganizationMembershipId === grant.membershipId;
+      grant.membershipId !== null && session.ownerOrganizationMembershipId === grant.membershipId;
     if (!ownedBySubject && !ownedByMembership) {
       throw new SandboxWorkspaceMutationFencedError(
         "authority_revoked",
@@ -38139,19 +38168,10 @@ async function lockWorkspaceMutationAuthorityTx(
     // The accepted turn already froze its causal initiator and tenancy tuple.
     // Copy them verbatim - recovery, retry and continuation must all record the
     // same authority, so nothing is re-derived from live state here.
-    const turnInitiatorKind =
-      fence.turn.initiatorKind === "subject" || fence.turn.initiatorKind === "service"
-        ? fence.turn.initiatorKind
-        : null;
-    if (!turnInitiatorKind || fence.turn.initiatorSubjectId === "unattributed-legacy") {
-      throw new SandboxWorkspaceMutationFencedError(
-        "authority_unattributed",
-        "Workspace mutation rejected because its accepted turn carries no causal initiator",
-      );
-    }
+    const turnInitiator = frozenTurnInitiator(fence.turn);
     const turnGrant = await resolveWorkspaceMutationGrantIdentityTx(tx, {
       accountId: authority.accountId,
-      humanSubjectId: fence.turn.initiatingHumanSubjectId,
+      humanSubjectId: turnInitiator.initiatingHumanSubjectId,
     });
     return {
       accountId: authority.accountId,
@@ -38173,9 +38193,7 @@ async function lockWorkspaceMutationAuthorityTx(
       routeTargetId: authority.routeKind === "home" ? null : authority.routeTargetId,
       routeEpoch,
       authority: {
-        initiatorKind: turnInitiatorKind,
-        initiatorSubjectId: fence.turn.initiatorSubjectId,
-        initiatingHumanSubjectId: fence.turn.initiatingHumanSubjectId,
+        ...turnInitiator,
         initiatorOrganizationMembershipId: turnGrant.membershipId,
         initiatorAuthorizationRevision: turnGrant.authorizationRevision,
         authorityEpoch: fence.attempt.authorityEpoch,
@@ -38343,15 +38361,16 @@ async function lockWorkspaceMutationAuthorityTx(
 }
 
 /** Read the frozen authority of a retained process, refusing a pre-0276 row.
- * The refusal is a write fence only: the caller never terminates the process. */
+ * The refusal is a write fence only: the caller never terminates the process.
+ *
+ * The MISSING TENANCY HALF is what marks a pre-0276 row. A recorded but
+ * `legacy_unattributed` initiator is not the same thing: that process still has
+ * a real session epoch and visibility to be fenced against, and refusing it
+ * would fence ordinary work on sessions whose turns predate migration 0096. */
 function assertRetainedProcessAuthority(
   process: typeof schema.sandboxRetainedProcesses.$inferSelect,
 ): AdmittedWorkspaceMutationAuthority {
-  if (
-    (process.initiatorKind !== "subject" && process.initiatorKind !== "service") ||
-    process.authorityEpoch === null ||
-    process.authorityVisibility === null
-  ) {
+  if (process.authorityEpoch === null || process.authorityVisibility === null) {
     throw new SandboxWorkspaceMutationFencedError(
       "authority_unattributed",
       "Workspace mutation rejected because the retained process predates recorded authority; " +

@@ -521,6 +521,11 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
+      if (migrations.has("0276_workspace_writer_authority_attribution.sql")) {
+        return includesActivation
+          ? "c1edb4ba378b4c8f1762425f6b7703c0738f553c3b4f308854de24cb86978e3e"
+          : "592d80a70283e991735276e0850fd08f777dddacc1991370d81e7583448aa438";
+      }
       if (migrations.has("0276_onboarding_proposal_initiating_human_guc.sql")) {
         return includesActivation
           ? "cfd46060ee901c35fa53774626f677f107bd2342823c335089b250f77eab55a6"
@@ -954,7 +959,8 @@ describe("release schema contract", () => {
         (migrations.has("0274_human_confirmed_knowledge_review.sql") ? 1 : 0) +
         (migrations.has("0263_organization_membership_lifecycle.sql") ? 1 : 0) +
         (migrations.has("0275_scheduled_connection_authority.sql") ? 1 : 0) +
-        (migrations.has("0276_onboarding_proposal_initiating_human_guc.sql") ? 1 : 0),
+        (migrations.has("0276_onboarding_proposal_initiating_human_guc.sql") ? 1 : 0) +
+        (migrations.has("0276_workspace_writer_authority_attribution.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -989,8 +995,10 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0276_onboarding_proposal_initiating_human_guc.sql")
-        ? "0276_onboarding_proposal_initiating_human_guc.sql"
+      migrations.has("0276_workspace_writer_authority_attribution.sql")
+        ? "0276_workspace_writer_authority_attribution.sql"
+        : migrations.has("0276_onboarding_proposal_initiating_human_guc.sql")
+          ? "0276_onboarding_proposal_initiating_human_guc.sql"
         : migrations.has("0275_scheduled_connection_authority.sql")
           ? "0275_scheduled_connection_authority.sql"
           : migrations.has("0274_human_confirmed_knowledge_review.sql")
@@ -1039,6 +1047,10 @@ describe("release schema contract", () => {
     );
     expect(migrations.get("0263_organization_membership_lifecycle.sql")).toMatchObject({
       sha256: "1119554dc06a768c92f7189a97b438ebdc011747a6c8d7cefc992962f2293593",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0276_workspace_writer_authority_attribution.sql")).toMatchObject({
+      sha256: "5e50249566c97dfb216caddb688510291505d28559003aa5b709739b644a4cd3",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0275_scheduled_connection_authority.sql")).toMatchObject({

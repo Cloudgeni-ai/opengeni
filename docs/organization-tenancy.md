@@ -202,10 +202,23 @@ never old grants. Offboarding applies the same canonical
 workspace/session/turn/attempt teardown, then terminally revokes membership and
 retains resource authority and physical data. Owned-session authority epochs
 advance with content-free audit events; unrelated users' shared-session state
-is not changed. The lifecycle does not infer membership ownership for retained
-processes or other direct provider operations that lack an exact membership
-authority field; adding that attribution and stream-token invalidation belongs
-to the separate live-access hardening program. `retain` has no deletion deadline;
+is not changed. Since migration 0276, every persistable `/workspace` writer
+admission and retained process carries its own authority tuple: causal
+initiator, initiating human, the exact organization-membership grant identity
+with its observed authorization revision, and the session tenancy
+epoch/visibility/owner frozen at admission. `turn` actors copy the accepted
+turn's frozen snapshot; `direct` (API request) actors resolve the request
+principal's grant through the tenant-fenced
+`resolve_workspace_writer_grant_identity` SECURITY DEFINER seam; retained
+processes inherit their parent admission's tuple verbatim. A revoked or
+suspended grant fences a NEW direct mutation immediately
+(`authority_revoked`), and a pre-0276 row with no tenancy half fences a
+retained process's next mutation (`authority_unattributed`) - in both cases the
+running provider process is never terminated or re-owned, and the fence
+consumes no workspace generation. The lifecycle still never infers ownership
+for a historical row whose authority was never recorded; stream-token
+invalidation remains in the separate live-access hardening program. `retain`
+has no deletion deadline;
 `delete_after` accepts the initial 30–90 day policy window and stamps a bounded
 future deadline. Destructive expiry is an explicit operator lifecycle, not an
 API request or background service. The command
