@@ -109,6 +109,32 @@ fn message_is_authentication_denial(message: &str) -> bool {
         || lower.contains("auth violation")
 }
 
+/// Build the exact refresh command for a rejected durable enrollment bearer.
+/// Persisted connection metadata predates strict URL validation, so unexpected
+/// shell metacharacters are replaced by a visible placeholder instead of being
+/// reflected into copy/pasteable operator guidance.
+fn rejected_bearer_reconnect_command(api_url: Option<&str>, workspace_id: &str) -> String {
+    fn safe_argument(value: &str) -> bool {
+        !value.is_empty()
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'/' | b'.' | b'_' | b'-')
+            })
+    }
+
+    let api_url = api_url.unwrap_or(crate::DEFAULT_API_URL);
+    let api_url = if safe_argument(api_url) {
+        api_url
+    } else {
+        "<api-url>"
+    };
+    let workspace_id = if safe_argument(workspace_id) {
+        workspace_id
+    } else {
+        "<workspace-id>"
+    };
+    format!("opengeni-agent connect --force --api-url {api_url} --workspace-id {workspace_id}")
+}
+
 /// NATS emits this server error when the intentionally short-lived user JWT
 /// reaches its expiry. The enrollment bearer remains valid and reconnecting
 /// mints a fresh user JWT, so this is planned credential rotation rather than
@@ -692,7 +718,15 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // knows a re-enroll may be needed, then treat it as a (slow) retry —
                 // a re-enroll can rotate the bearer in place and the next attempt
                 // re-presents it.
-                error!(connection_id = %link.connection_id, error = %e, "control plane rejected the enrollment bearer; will keep retrying — reconnect if this persists");
+                let reconnect_command = rejected_bearer_reconnect_command(
+                    link.api_url.as_deref(),
+                    &link.creds.workspace_id,
+                );
+                error!(
+                    connection_id = %link.connection_id,
+                    error = %e,
+                    "control plane rejected the enrollment bearer; run `{reconnect_command}` to replace the rejected credential (the agent will keep retrying in the meantime)"
+                );
                 return ConnectionOutcome::Disconnected(e.to_string());
             }
             Err(e) => return ConnectionOutcome::Disconnected(e.to_string()),
@@ -1444,7 +1478,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             // No bearer means the control plane never minted one (an enrollment from
             // before the credential plane was configured). Surface a clear, typed
             // disconnect rather than dial with an empty token the callout will deny.
-            return Err(SupervisorError::Connect(
+            return Err(SupervisorError::Authentication(
                 "no enrollment bearer; re-enroll to obtain a control-plane credential".to_string(),
             ));
         }
@@ -2076,6 +2110,28 @@ mod tests {
         // A plain transport drop is NOT an auth denial.
         assert!(!message_is_authentication_denial("connection refused"));
         assert!(!message_is_authentication_denial("broken pipe"));
+    }
+
+    #[test]
+    fn rejected_bearer_guidance_is_forceful_and_deployment_specific() {
+        assert_eq!(
+            rejected_bearer_reconnect_command(
+                Some("https://app.opengeni.ai"),
+                "9c7b6e0e-7e3b-4aa3-9530-f3d914c08736",
+            ),
+            "opengeni-agent connect --force --api-url https://app.opengeni.ai --workspace-id 9c7b6e0e-7e3b-4aa3-9530-f3d914c08736",
+        );
+        assert_eq!(
+            rejected_bearer_reconnect_command(None, "workspace-id"),
+            "opengeni-agent connect --force --api-url https://app.opengeni.ai --workspace-id workspace-id",
+        );
+        assert_eq!(
+            rejected_bearer_reconnect_command(
+                Some("https://safe.example\nmalicious"),
+                "workspace-id"
+            ),
+            "opengeni-agent connect --force --api-url <api-url> --workspace-id workspace-id",
+        );
     }
 
     #[test]

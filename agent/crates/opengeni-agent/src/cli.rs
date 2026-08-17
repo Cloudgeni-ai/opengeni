@@ -27,8 +27,9 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// The control-plane API base URL used for enrollment (e.g.
-    /// `https://api.opengeni.ai`). Falls back to `$OPENGENI_API_URL`.
+    /// The control-plane API base URL used for enrollment (for managed OpenGeni,
+    /// `https://app.opengeni.ai`). Falls back to `$OPENGENI_API_URL`, then the
+    /// managed OpenGeni origin.
     #[arg(long, global = true, env = "OPENGENI_API_URL")]
     pub api_url: Option<String>,
 }
@@ -307,6 +308,11 @@ mod tests {
     fn cli_definition_is_valid() {
         // clap's own assert catches duplicate args / bad definitions at test time.
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn managed_cloud_default_is_the_reachable_app_origin() {
+        assert_eq!(crate::DEFAULT_API_URL, "https://app.opengeni.ai");
     }
 
     #[test]

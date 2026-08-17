@@ -22,14 +22,14 @@ never `git clone`s a repo onto the machine.
 
 ## Crates
 
-| Crate | Role |
+| Crate                     | Role                                                                                                                         |
 |---|---|
-| `opengeni-agent-proto` | Generated wire-protocol types (Rust side of the codegen). |
-| `opengeni-agent` | The binary: `run`/`connect`/`connections`/`disconnect`/`service`/`update`/`uninstall`, plus the exact-attempt `codemode list|call` client; multi-deployment dial, RPC dispatch, supervisor. |
-| `opengeni-agent-platform` | Per-OS `Platform` + the `service` (systemd/launchd/SCM) renderer. |
-| `opengeni-agent-stream` | Relay-edge stream transport + pty/framebuffer pumps. |
-| `opengeni-agent-update` | Self-update: signed-manifest discovery, minisign+sha256 verify, atomic replace, rollback. |
-| `opengeni-relay` | The stateless stream-relay edge image. |
+| `opengeni-agent-proto`    | Generated wire-protocol types (Rust side of the codegen).                                                                    |
+| `opengeni-agent`          | The binary: `run`/`connect`/`connections`/`disconnect`/`service`/`update`/`uninstall`, plus the exact-attempt `codemode list | call` client; multi-deployment dial, RPC dispatch, supervisor. |
+| `opengeni-agent-platform` | Per-OS `Platform` + the `service` (systemd/launchd/SCM) renderer.                                                            |
+| `opengeni-agent-stream`   | Relay-edge stream transport + pty/framebuffer pumps.                                                                         |
+| `opengeni-agent-update`   | Self-update: signed-manifest discovery, minisign+sha256 verify, atomic replace, rollback.                                    |
+| `opengeni-relay`          | The stateless stream-relay edge image.                                                                                       |
 
 ## Distribution + self-update (M11)
 
@@ -43,7 +43,10 @@ The agent reaches a user's machine via one trusted line and keeps itself current
   requested workspace, and leaves the ordinary background service running. It
   contains **no secrets**. Read it before
   piping. `OPENGENI_INSTALL_BASE_URL` overrides the asset base (e.g. a local mock
-  dir or the direct GitHub-Releases URL). [`install/uninstall.sh`](install/uninstall.sh)
+  dir or the direct GitHub-Releases URL). A script served by a deployment also
+  defaults `OPENGENI_API_URL` to that deployment's public origin; the committed
+  managed-cloud fallback is `https://app.opengeni.ai`.
+  [`install/uninstall.sh`](install/uninstall.sh)
   removes it (`--purge` also deletes credentials + deactivates the enrollment).
 - **Signing key** — the minisign **public** key is committed at
   [`install/opengeni-agent-minisign.pub`](install/opengeni-agent-minisign.pub) and
@@ -128,6 +131,13 @@ the background-service definition when a release requires it): matching
 per-connection channels are used automatically, while mixed `stable`/`beta` links
 require an explicit `opengeni-agent update --channel …` choice instead of silently
 picking one.
+
+If the control plane rejects a saved enrollment bearer, refresh only that exact
+deployment/workspace connection with the force flag shown in the agent log:
+
+```sh
+opengeni-agent connect --force --api-url https://<deployment> --workspace-id <workspace-uuid>
+```
 
 ## Wire protocol — single source of truth
 

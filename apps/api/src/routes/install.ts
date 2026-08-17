@@ -44,9 +44,18 @@ const BAKED_DIR = new URL("baked/", INSTALL_DIR);
 // The static text artifacts served verbatim, with their content types. Each is
 // read once at first request and memoized (committed files; immutable per deploy).
 const TEXT_ASSETS: Record<string, { file: string; contentType: string }> = {
-  "/install.sh": { file: "install.sh", contentType: "text/x-shellscript; charset=utf-8" },
-  "/install.ps1": { file: "install.ps1", contentType: "text/plain; charset=utf-8" },
-  "/uninstall.sh": { file: "uninstall.sh", contentType: "text/x-shellscript; charset=utf-8" },
+  "/install.sh": {
+    file: "install.sh",
+    contentType: "text/x-shellscript; charset=utf-8",
+  },
+  "/install.ps1": {
+    file: "install.ps1",
+    contentType: "text/plain; charset=utf-8",
+  },
+  "/uninstall.sh": {
+    file: "uninstall.sh",
+    contentType: "text/x-shellscript; charset=utf-8",
+  },
   "/opengeni-agent-minisign.pub": {
     file: "opengeni-agent-minisign.pub",
     contentType: "text/plain; charset=utf-8",
@@ -73,26 +82,40 @@ async function loadAsset(file: string): Promise<string> {
 // `curl https://<this-host>/install.sh | sh` installs the exact agent that
 // matches the API it enrolls against, with NO dependency on a public CDN (which a
 // private/air-gapped deploy may not even resolve). When a public base URL is
-// configured we therefore rewrite each script's default-base-URL marker line to
-// that origin before serving. The user's OPENGENI_INSTALL_BASE_URL env override
-// still wins at run time (the scripts use `:-default`); only the built-in DEFAULT
-// changes. The marker lines are kept shape-stable in agent/install/install.{sh,ps1}.
-const DEFAULT_BASE_REWRITES: Record<string, (base: string) => { from: string; to: string }> = {
-  "install.sh": (base) => ({
-    from: 'OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"',
-    to: `OPENGENI_INSTALL_DEFAULT_BASE_URL="${base}"`,
-  }),
-  "install.ps1": (base) => ({
-    from: "$OpengeniInstallDefaultBaseUrl = 'https://get.opengeni.ai'",
-    to: `$OpengeniInstallDefaultBaseUrl = '${base}'`,
-  }),
+// configured we therefore rewrite each script's release-asset AND connection-API
+// default markers to that origin before serving. The user's
+// OPENGENI_INSTALL_BASE_URL / OPENGENI_API_URL overrides still win at run time;
+// only the built-in defaults change. The marker lines are kept shape-stable in
+// agent/install/install.{sh,ps1}.
+type DefaultRewrite = { from: string; to: string };
+
+const DEFAULT_BASE_REWRITES: Record<string, (base: string) => DefaultRewrite[]> = {
+  "install.sh": (base) => [
+    {
+      from: 'OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"',
+      to: `OPENGENI_INSTALL_DEFAULT_BASE_URL="${base}"`,
+    },
+    {
+      from: 'OPENGENI_API_DEFAULT_URL="https://app.opengeni.ai"',
+      to: `OPENGENI_API_DEFAULT_URL="${base}"`,
+    },
+  ],
+  "install.ps1": (base) => [
+    {
+      from: "$OpengeniInstallDefaultBaseUrl = 'https://get.opengeni.ai'",
+      to: `$OpengeniInstallDefaultBaseUrl = '${base}'`,
+    },
+    {
+      from: "$OpengeniApiDefaultUrl = 'https://app.opengeni.ai'",
+      to: `$OpengeniApiDefaultUrl = '${base}'`,
+    },
+  ],
 };
 
-// Rewrite a served script's default release-asset base URL to this deployment's
-// own public origin. A no-op when no public base URL is configured (the public
-// archive default stands), when the URL is not absolute http(s) (never serve a
-// script with a broken base), or when the file has no marker (script drift — fail
-// safe to serving it verbatim rather than crashing the install surface).
+// Rewrite a served script's default release-asset and connection-API URLs to this
+// deployment's own public origin. A no-op when no public base URL is configured,
+// when the URL is not absolute http(s), or when either marker is absent (script
+// drift — fail safe to serving it verbatim rather than splitting the two origins).
 function rewriteDefaultBaseUrl(
   file: string,
   body: string,
@@ -102,11 +125,11 @@ function rewriteDefaultBaseUrl(
     return body;
   }
   const base = publicBaseUrl.replace(/\/+$/, "");
-  const rule = DEFAULT_BASE_REWRITES[file]?.(base);
-  if (!rule || !body.includes(rule.from)) {
+  const rules = DEFAULT_BASE_REWRITES[file]?.(base);
+  if (!rules || rules.some((rule) => !body.includes(rule.from))) {
     return body;
   }
-  return body.replace(rule.from, rule.to);
+  return rules.reduce((rewritten, rule) => rewritten.replace(rule.from, rule.to), body);
 }
 
 // The content type for a baked release asset. The binary is an
@@ -189,7 +212,10 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     // Not baked here → the GitHub Release is the source of truth (the public
     // archive + the documented install.sh fallback). 302 so the client refetches.
-    return new Response(null, { status: 302, headers: { location: redirectUrl } });
+    return new Response(null, {
+      status: 302,
+      headers: { location: redirectUrl },
+    });
   }
 
   // `latest` → the BAKED binary if present, else the operator-selected immutable
@@ -217,10 +243,14 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
     app.get(`/agent/${channel}/:manifestAsset`, (c) => {
       const manifestAsset = c.req.param("manifestAsset");
       if (manifestAsset !== "manifest.json" && manifestAsset !== "manifest.json.minisig") {
-        throw new HTTPException(404, { message: "update manifest asset not found" });
+        throw new HTTPException(404, {
+          message: "update manifest asset not found",
+        });
       }
       if (!version) {
-        throw new HTTPException(404, { message: `${channel} agent channel is not configured` });
+        throw new HTTPException(404, {
+          message: `${channel} agent channel is not configured`,
+        });
       }
       return new Response(null, {
         status: 302,
@@ -240,7 +270,9 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
     // `/agent/latest/<asset>` is handled by the more specific route above; any
     // other version segment must be the `v<ver>` shape.
     if (!VERSION_SEG.test(versionSeg) || !ASSET_NAME.test(asset)) {
-      throw new HTTPException(400, { message: "invalid version or asset name" });
+      throw new HTTPException(400, {
+        message: "invalid version or asset name",
+      });
     }
     return serveAsset(asset, `${releasesBase}/download/agent-${versionSeg}/${asset}`);
   });

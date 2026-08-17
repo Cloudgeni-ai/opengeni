@@ -58,6 +58,10 @@ function Get-EnvOr($name, $default) {
 $OpengeniInstallDefaultBaseUrl = 'https://get.opengeni.ai'
 $BaseUrl = Get-EnvOr 'OPENGENI_INSTALL_BASE_URL' $OpengeniInstallDefaultBaseUrl
 $Version = Get-EnvOr 'OPENGENI_AGENT_VERSION' 'latest'
+# A served installer rewrites this stable marker to the deployment that served
+# it. Keep the caller override process-local and avoid mutating the parent shell.
+$OpengeniApiDefaultUrl = 'https://app.opengeni.ai'
+$script:ApiUrl = Get-EnvOr 'OPENGENI_API_URL' $OpengeniApiDefaultUrl
 $script:AgentWasUpgraded = $false
 
 function Log($msg)  { Write-Host "opengeni-install: $msg" }
@@ -339,12 +343,7 @@ function Complete-Install($bin) {
     Log "non-interactive connection (OPENGENI_ENROLL_TOKEN set)"
     # This upserts only the token's deployment/workspace connection; unrelated
     # OpenGeni connections remain configured and online.
-    $apiUrl = [Environment]::GetEnvironmentVariable('OPENGENI_API_URL')
-    if ([string]::IsNullOrEmpty($apiUrl)) {
-      & $bin connect --token $enrollToken --non-interactive
-    } else {
-      & $bin --api-url $apiUrl connect --token $enrollToken --non-interactive
-    }
+    & $bin --api-url $script:ApiUrl connect --token $enrollToken --non-interactive
     if ($LASTEXITCODE -ne 0) { Fail 7 "machine connection failed; background service was not changed" }
     Start-BackgroundAgent $bin
     return
@@ -352,12 +351,7 @@ function Complete-Install($bin) {
 
   $workspaceId = [Environment]::GetEnvironmentVariable('OPENGENI_WORKSPACE_ID')
   if (-not [string]::IsNullOrEmpty($workspaceId)) {
-    $apiUrl = [Environment]::GetEnvironmentVariable('OPENGENI_API_URL')
-    if ([string]::IsNullOrEmpty($apiUrl)) {
-      & $bin connect --workspace-id $workspaceId
-    } else {
-      & $bin --api-url $apiUrl connect --workspace-id $workspaceId
-    }
+    & $bin --api-url $script:ApiUrl connect --workspace-id $workspaceId
     if ($LASTEXITCODE -ne 0) { Fail 7 "machine connection failed; background service was not changed" }
     Start-BackgroundAgent $bin
     return

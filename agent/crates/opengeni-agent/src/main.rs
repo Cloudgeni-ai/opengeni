@@ -74,7 +74,7 @@ use supervisor::{Supervisor, SupervisorLink};
 
 /// The default control-plane API base URL when neither `--api-url` nor
 /// `$OPENGENI_API_URL` is set.
-const DEFAULT_API_URL: &str = "https://api.opengeni.ai";
+pub(crate) const DEFAULT_API_URL: &str = "https://app.opengeni.ai";
 
 /// Local connection-file reconciliation cadence. This is a responsiveness
 /// setpoint, not a network or operation timeout.

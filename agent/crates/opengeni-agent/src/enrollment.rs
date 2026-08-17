@@ -73,7 +73,7 @@ pub struct EnrollmentOffer {
 /// Inputs to a device-flow enrollment.
 #[derive(Debug, Clone)]
 pub struct EnrollmentRequest {
-    /// The control-plane API base URL (e.g. `https://api.opengeni.ai`).
+    /// The control-plane API base URL (e.g. `https://app.opengeni.ai`).
     pub api_base_url: String,
     /// The workspace (UUID) this machine enrolls into. REQUIRED by the API's
     /// device/start: the user who approves must hold a grant in THIS workspace, and

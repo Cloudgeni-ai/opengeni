@@ -418,6 +418,26 @@ jobs:
           rcodesign staple "$APP"
           rm -f "OpenGeni-Agent.app.zip"
           ditto -c -k --keepParent "$APP" "OpenGeni-Agent.app.zip"
+          # Validate the FINAL post-staple archive rather than trusting the
+          # staging tree. Missing interaction helpers make screen/browser control
+          # unusable and must fail publication before signatures are generated.
+          VERIFY_DIR="$(mktemp -d)"
+          trap 'rm -rf "$VERIFY_DIR"; rm -f /tmp/cert.p12 /tmp/asc.json' EXIT
+          ditto -x -k "OpenGeni-Agent.app.zip" "$VERIFY_DIR"
+          for executable in \
+            "Contents/MacOS/opengeni-agent" \
+            "Contents/Helpers/opengeni-browserd" \
+            "Contents/Helpers/agent-browser" \
+            "Contents/Helpers/opengeni-computer-native"
+          do
+            if [ ! -x "$VERIFY_DIR/$APP/$executable" ]; then
+              echo "::error::final macOS app archive is missing executable $executable" >&2
+              exit 1
+            fi
+          done
+          test -f "$VERIFY_DIR/$APP/Contents/Info.plist"
+          codesign --verify --deep --strict "$VERIFY_DIR/$APP"
+          rm -rf "$VERIFY_DIR"
           rm -f /tmp/cert.p12 /tmp/asc.json
 
       # ---- Windows Authenticode (POLISH, guarded). ----

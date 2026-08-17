@@ -172,7 +172,7 @@ export async function startDeviceEnrollment(
     throw lastError instanceof Error ? lastError : new Error("failed to start device enrollment");
   }
 
-  const base = input.verificationOrigin.replace(/\/$/, "");
+  const base = input.verificationOrigin.replace(/\/+$/, "");
   const verificationUri = `${base}/device`;
   const verificationUriComplete = `${verificationUri}?user_code=${encodeURIComponent(request.userCode)}`;
   return {

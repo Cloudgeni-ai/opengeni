@@ -951,6 +951,26 @@ describe("release image workflow contract", () => {
     expect(agentRelease).not.toContain(
       'rcodesign notary-submit --api-key-path /tmp/asc.json --wait "${{ matrix.asset }}"',
     );
+    const finalBundleArchive = agentRelease.lastIndexOf(
+      'ditto -c -k --keepParent "$APP" "OpenGeni-Agent.app.zip"',
+    );
+    const finalBundleValidation = agentRelease.indexOf(
+      'ditto -x -k "OpenGeni-Agent.app.zip" "$VERIFY_DIR"',
+      finalBundleArchive,
+    );
+    expect(finalBundleArchive).toBeGreaterThan(-1);
+    expect(finalBundleValidation).toBeGreaterThan(finalBundleArchive);
+    for (const executable of [
+      "Contents/MacOS/opengeni-agent",
+      "Contents/Helpers/opengeni-browserd",
+      "Contents/Helpers/agent-browser",
+      "Contents/Helpers/opengeni-computer-native",
+    ]) {
+      expect(agentRelease.slice(finalBundleValidation)).toContain(executable);
+    }
+    expect(agentRelease.slice(finalBundleValidation)).toContain(
+      'codesign --verify --deep --strict "$VERIFY_DIR/$APP"',
+    );
     expect(agentRelease).not.toContain("manifest publish is wired via");
     expect(agentRelease).not.toContain("gh release delete");
     expect(agentRelease).not.toContain("gh release create agent-latest");

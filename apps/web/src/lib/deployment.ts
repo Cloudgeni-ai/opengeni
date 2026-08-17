@@ -16,7 +16,7 @@ function originOf(baseUrl: string): string {
  * other OpenGeni instances.
  *
  * It ALWAYS bakes `OPENGENI_API_URL=${origin}` so the agent targets *this*
- * deployment rather than the hardcoded `api.opengeni.ai` default. Pass:
+ * deployment rather than relying on the managed-cloud fallback. Pass:
  *  - `{ workspaceId }` for the interactive (human device-approve) path — adds
  *    `OPENGENI_WORKSPACE_ID` so the user never hand-types the workspace UUID.
  *  - `{ enrollToken }` for the headless / fleet path — adds

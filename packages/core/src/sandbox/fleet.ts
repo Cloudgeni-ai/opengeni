@@ -1033,17 +1033,19 @@ export async function provisionSandbox(
   input: { kind: "selfhosted" | "modal"; name?: string },
 ): Promise<ProvisionResult> {
   if (input.kind === "selfhosted") {
-    const base = (services.settings.publicBaseUrl ?? "https://get.opengeni.ai").replace(/\/+$/, "");
+    const base = (services.settings.publicBaseUrl ?? "https://app.opengeni.ai").replace(/\/+$/, "");
+    const unixEnvironment = `OPENGENI_API_URL=${base} OPENGENI_WORKSPACE_ID=${ctx.workspaceId}`;
+    const windowsEnvironment = `$env:OPENGENI_API_URL='${base}'; $env:OPENGENI_WORKSPACE_ID='${ctx.workspaceId}';`;
     return {
       kind: "selfhosted",
       instructions:
-        "Share these instructions with a human operator. They install the OpenGeni agent on the machine, run `opengeni-agent connect`, complete the device-flow at the verification URL (the loud whole-machine + screen-control consent), and the machine then appears here as an attachable selfhosted sandbox. Existing connections to other OpenGeni workspaces or deployments are preserved.",
+        "Share one of these deployment-specific commands with a human operator. It installs the OpenGeni agent and starts `opengeni-agent connect` for this exact deployment and workspace; do not run a second bare `connect`. Complete the device-flow at the verification URL (the loud whole-machine + screen-control consent), and the machine then appears here as an attachable selfhosted sandbox. Existing connections to other OpenGeni workspaces or deployments are preserved.",
       // Install from THIS control plane's origin (not a hardcoded public CDN): the
       // served install script is rewritten to pull the per-SHA agent baked into
       // this exact deployment (see apps/api/src/routes/install.ts), so a deployed
       // env is self-contained and a private/air-gapped one works with no public DNS.
-      installCommandUnix: `curl -fsSL ${base}/install.sh | sh`,
-      installCommandWindows: `irm ${base}/install.ps1 | iex`,
+      installCommandUnix: `curl -fsSL ${base}/install.sh | ${unixEnvironment} sh`,
+      installCommandWindows: `${windowsEnvironment} irm ${base}/install.ps1 | iex`,
       verificationUri: `${base}/device`,
       note: "Whole-machine access requires explicit human consent in the device-flow web page; the agent cannot self-consent.",
     };
