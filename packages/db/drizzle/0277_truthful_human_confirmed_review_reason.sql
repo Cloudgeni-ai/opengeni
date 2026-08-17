@@ -888,7 +888,26 @@ REVOKE ALL ON FUNCTION confirm_remember_knowledge_claim(uuid, uuid, uuid, uuid, 
 DO $governed_learning_truthful_reason_hardening$
 DECLARE
   target_schema text := current_schema();
+  capability_owner text;
 BEGIN
+  -- The guard trigger resolves the 9-arg signature's owner as the
+  -- governed-learning capability writer, but the review INSERT now runs inside
+  -- the new 10-arg overload. Align its owner with the preserved 9-arg owner so
+  -- a deployment whose 0277 migration role differs from the 0269 role cannot
+  -- fail every service Knowledge review with 42501.
+  SELECT pg_catalog.pg_get_userbyid(procedure_row.proowner) INTO capability_owner
+  FROM pg_catalog.pg_proc procedure_row
+  WHERE procedure_row.oid = pg_catalog.to_regprocedure(pg_catalog.format(
+    '%I.governed_learning_apply_knowledge_review(uuid,uuid,uuid,uuid,uuid,bigint,text,text,text)',
+    target_schema
+  ));
+  IF capability_owner IS NOT NULL THEN
+    EXECUTE format(
+      'ALTER FUNCTION %I.governed_learning_apply_knowledge_review('
+        || 'uuid,uuid,uuid,uuid,uuid,bigint,text,text,text,text) OWNER TO %I',
+      target_schema, capability_owner
+    );
+  END IF;
   EXECUTE format(
     'ALTER FUNCTION %I.governed_learning_apply_knowledge_review('
       || 'uuid,uuid,uuid,uuid,uuid,bigint,text,text,text,text) '

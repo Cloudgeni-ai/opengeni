@@ -44,5 +44,8 @@ describe("migration 0277 truthful human-confirmed review reason", () => {
       "'ALTER FUNCTION %I.activate_human_confirmed_learning_decision(uuid,uuid,uuid,uuid,uuid) '",
     );
     expect(sql).toContain("SET search_path = pg_catalog, %I, pg_temp");
+    // The 10-arg overload must share the guard-resolved 9-arg owner even when
+    // the 0277 migration role differs from the 0269 role.
+    expect(sql).toContain("|| 'uuid,uuid,uuid,uuid,uuid,bigint,text,text,text,text) OWNER TO %I'");
   });
 });
