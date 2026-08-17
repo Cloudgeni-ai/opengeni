@@ -350,4 +350,36 @@ describe("migration 0280 audit attribution", () => {
       attemptId: fixture.attemptId,
     });
   });
+
+  test("a transient secret-read failure records no denial evidence", async () => {
+    if (!available) return;
+    const human = `user:secret-transient-${crypto.randomUUID()}`;
+    const fixture = await claimedTurnFixture(human);
+    // A nonexistent variable set fails with P0002 (no_data_found), not an
+    // authority denial: the typed rejection is preserved but no durable
+    // "denied" fact may be fabricated for a failure that was not one.
+    const attempt = readVariableSetSecretAtomically(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      subjectId: human,
+      variableSetId: crypto.randomUUID(),
+      name: "TOKEN",
+      actor: {
+        kind: "agent_attempt",
+        sessionId: fixture.sessionId,
+        turnId: fixture.turnId,
+        attemptId: fixture.attemptId,
+        executionGeneration: fixture.executionGeneration,
+      },
+      decrypt: () => {
+        throw new Error("must never decrypt");
+      },
+    });
+    await expect(attempt).rejects.toBeInstanceOf(VariableSetSecretReadAuthorityError);
+    const [denied] = await admin<{ count: number }[]>`
+      select count(*)::int as count from audit_events
+      where workspace_id = ${fixture.workspaceId}
+        and action = 'variable_set.secret.read.denied'`;
+    expect(denied!.count).toBe(0);
+  });
 });

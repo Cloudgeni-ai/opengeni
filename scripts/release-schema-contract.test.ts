@@ -523,8 +523,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0280_connection_and_variable_set_audit_attribution.sql")) {
         return includesActivation
-          ? "dc46674de20a57228cc485eda22e85e5c7af759d9e4f8b4123f836c13bdeb95d"
-          : "6618ffdacd4204631bdf1a28e93f95a6852a94c8e2788256e53669c58cf705b1";
+          ? "55f64e92a35ddd19dedcc7704fa809f0d6436f8c4377c6122956093a6a542592"
+          : "36400bc39b43e365b8621b7744e85328fa80b508a6625ffee92f0ddef333c004";
       }
       if (migrations.has("0279_workspace_connection_use_lane.sql")) {
         return includesActivation
@@ -1080,7 +1080,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0280_connection_and_variable_set_audit_attribution.sql")).toMatchObject({
-      sha256: "a351e9b9c96449c109d28a01da043c8ad227e2cb7456dd4156233d7e90431bc3",
+      sha256: "6157e7d2023622a332faddf0f7a823bc941f0bce6e866523736866b1eabad556",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0279_workspace_connection_use_lane.sql")).toMatchObject({

@@ -15288,6 +15288,12 @@ export async function readVariableSetSecretAtomically(
           });
         } catch (error) {
           if (input.actor.kind === "agent_attempt") {
+            // Only an actual authority denial (42501) is durable denial
+            // evidence. A transient failure (deadlock, timeout, missing row)
+            // keeps the typed rejection but must not fabricate a denial fact.
+            if (nestedPostgresSqlState(error) !== "42501") {
+              return DENIED_VARIABLE_SET_SECRET_READ_UNRECORDED;
+            }
             // The denied read was a savepoint; this outer transaction is
             // alive, so the metadata-only denial fact commits with it while
             // the typed rejection still reaches the caller (thrown outside
@@ -15329,13 +15335,19 @@ export async function readVariableSetSecretAtomically(
         };
       }),
   );
-  if (outcome === DENIED_VARIABLE_SET_SECRET_READ) {
+  if (
+    outcome === DENIED_VARIABLE_SET_SECRET_READ ||
+    outcome === DENIED_VARIABLE_SET_SECRET_READ_UNRECORDED
+  ) {
     throw new VariableSetSecretReadAuthorityError();
   }
   return outcome;
 }
 
 const DENIED_VARIABLE_SET_SECRET_READ = Symbol("denied-variable-set-secret-read");
+const DENIED_VARIABLE_SET_SECRET_READ_UNRECORDED = Symbol(
+  "denied-variable-set-secret-read-unrecorded",
+);
 
 export async function updateVariableSet(
   db: Database,

@@ -49,6 +49,7 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
     WHERE conname = 'connection_use_audit_attribution_check'
+      AND conrelid = 'connection_use_audit_facts'::regclass
   ) THEN
     ALTER TABLE "connection_use_audit_facts"
       ADD CONSTRAINT "connection_use_audit_attribution_check"
