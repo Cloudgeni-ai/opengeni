@@ -25,6 +25,7 @@ export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
 export * from "./tool-catalog";
 export * from "./interaction";
+export * from "./sandbox-file-artifacts";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -931,6 +932,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "artifacts_create",
   "artifacts_publish",
   "artifacts_rollback",
+  "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",
   "editable_artifact_import",

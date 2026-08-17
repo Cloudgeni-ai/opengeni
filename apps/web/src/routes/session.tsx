@@ -85,6 +85,7 @@ import { resolveSessionComposerModel } from "@/lib/session-model";
 import { sessionTimelineEmptyStateCopy } from "@/lib/session-empty-state";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
+import { downloadSandboxFileArtifact } from "@/lib/sandbox-artifact-download";
 import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
 import { createWorkspaceRetainedVideoLoader } from "@/lib/retained-video-loader";
 import {
@@ -862,6 +863,17 @@ function SessionChatPane(props: {
     () => createWorkspaceRetainedVideoLoader(context.client, props.session.workspaceId),
     [context.client, props.session.workspaceId],
   );
+  const downloadSandboxFile = useCallback(
+    async (path: string) => {
+      await downloadSandboxFileArtifact(
+        context.client,
+        props.session.workspaceId,
+        props.session.id,
+        path,
+      );
+    },
+    [context.client, props.session.id, props.session.workspaceId],
+  );
   const terminal = isTerminalSessionStatus(props.session.status);
   const agentsSignal = useMemo(() => {
     const agents = props.agentNodes;
@@ -1282,11 +1294,15 @@ function SessionChatPane(props: {
       }
       return (
         <div data-testid="assistant-markdown">
-          <MarkdownText text={text} streaming={item.streaming} />
+          <MarkdownText
+            text={text}
+            streaming={item.streaming}
+            onSandboxFile={downloadSandboxFile}
+          />
         </div>
       );
     },
-    [props.session.workspaceId],
+    [downloadSandboxFile, props.session.workspaceId],
   );
 
   return (

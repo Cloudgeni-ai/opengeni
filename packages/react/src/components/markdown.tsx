@@ -3,13 +3,14 @@ import {
   isValidElement,
   memo,
   useEffect,
+  useMemo,
   useReducer,
   useRef,
   useState,
   type ComponentPropsWithoutRef,
   type ReactNode,
 } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "../lib/cn";
 import { tableElementToTsv } from "../lib/clipboard";
@@ -46,11 +47,13 @@ export type MarkdownProps = {
    * transition — that blinked the whole document).
    */
   streaming?: boolean | undefined;
+  /** Resolve a session-local `sandbox:/workspace/...` link into a durable download. */
+  onSandboxFile?: ((path: string) => void | Promise<void>) | undefined;
 };
 
 /* --- element renderers (themed to og-* tokens) ------------------------------ */
 
-const components: Components = {
+const baseComponents: Components = {
   h1: ({ children, ...props }) => (
     <h1
       className="mt-5 mb-2.5 text-xl font-semibold tracking-tight text-og-fg first:mt-0"
@@ -94,16 +97,6 @@ const components: Components = {
     <em className="italic" {...props}>
       {children}
     </em>
-  ),
-  a: ({ children, ...props }) => (
-    <a
-      className="break-words font-medium text-og-accent-strong underline-offset-2 hover:underline"
-      target="_blank"
-      rel="noreferrer noopener"
-      {...props}
-    >
-      {children}
-    </a>
   ),
   ul: ({ children, ...props }) => (
     <ul
@@ -192,6 +185,100 @@ const components: Components = {
     />
   ),
 };
+
+const MARKDOWN_LINK_CLASS =
+  "break-words font-medium text-og-accent-strong underline-offset-2 hover:underline";
+
+function markdownComponents(onSandboxFile: MarkdownProps["onSandboxFile"]): Components {
+  return {
+    ...baseComponents,
+    a: ({ children, href, ...props }) => {
+      const sandboxPath = sandboxFilePathFromHref(href);
+      if (sandboxPath !== null) {
+        return (
+          <SandboxMarkdownLink path={sandboxPath} onSandboxFile={onSandboxFile}>
+            {children}
+          </SandboxMarkdownLink>
+        );
+      }
+      return (
+        <a
+          className={MARKDOWN_LINK_CLASS}
+          target="_blank"
+          rel="noreferrer noopener"
+          href={href}
+          {...props}
+        >
+          {children}
+        </a>
+      );
+    },
+  };
+}
+
+function SandboxMarkdownLink({
+  path,
+  onSandboxFile,
+  children,
+}: {
+  path: string;
+  onSandboxFile: MarkdownProps["onSandboxFile"];
+  children: ReactNode;
+}) {
+  const [state, setState] = useState<"idle" | "loading" | "error">("idle");
+  if (!onSandboxFile) {
+    return (
+      <span
+        className="break-words font-medium text-og-fg-subtle underline decoration-dotted underline-offset-2"
+        aria-disabled="true"
+        title="This sandbox file requires a session-aware download handler"
+      >
+        {children}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className={cn(MARKDOWN_LINK_CLASS, "cursor-pointer disabled:cursor-wait disabled:opacity-70")}
+      disabled={state === "loading"}
+      aria-busy={state === "loading"}
+      title={state === "error" ? "Download failed. Select to retry." : undefined}
+      onClick={() => {
+        setState("loading");
+        void Promise.resolve(onSandboxFile(path)).then(
+          () => setState("idle"),
+          () => setState("error"),
+        );
+      }}
+    >
+      {children}
+      {state === "loading" ? " (preparing…)" : state === "error" ? " (retry)" : null}
+    </button>
+  );
+}
+
+/** Return the workspace-relative path for the one supported sandbox-link shape. */
+export function sandboxFilePathFromHref(href: string | undefined): string | null {
+  if (!href) return null;
+  const match = /^sandbox:\/workspace\/([^?#]+)$/u.exec(href);
+  if (!match?.[1]) return null;
+  try {
+    const path = decodeURIComponent(match[1]);
+    const segments = path.split("/");
+    return path &&
+      !path.includes("\0") &&
+      segments.every((segment) => segment && segment !== "." && segment !== "..")
+      ? path
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function markdownUrlTransform(url: string): string {
+  return sandboxFilePathFromHref(url) !== null ? url : defaultUrlTransform(url);
+}
 
 /** How long after the stream ends the reveal pipeline stays for trailing animations. */
 /** Trailing ink window after stream end — keep ≥ {@link INK_FADE_MS}. */
@@ -284,7 +371,7 @@ function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutR
   );
 }
 
-function MarkdownImpl({ children, className, streaming = false }: MarkdownProps) {
+function MarkdownImpl({ children, className, streaming = false, onSandboxFile }: MarkdownProps) {
   // Tip-ink engine for THIS body: created on the first streaming render, kept
   // through a short linger after the stream ends (so the last age window can
   // finish), then dropped so settled bodies pay zero cost. Observing during
@@ -373,6 +460,7 @@ function MarkdownImpl({ children, className, streaming = false }: MarkdownProps)
   // fences don't snap to final GFM one commit before the crystallize morph.
   // Reveal identity still tracks the true source (`children`).
   const parseText = streaming || revealActive ? softenStreamingMarkdown(children) : children;
+  const components = useMemo(() => markdownComponents(onSandboxFile), [onSandboxFile]);
 
   // `min-w-0` lets the prose shrink inside flex parents (message bubbles) so
   // long links and code blocks wrap/scroll instead of forcing overflow.
@@ -390,6 +478,7 @@ function MarkdownImpl({ children, className, streaming = false }: MarkdownProps)
           remarkPlugins={[remarkGfm]}
           rehypePlugins={rehypePlugins}
           components={components}
+          urlTransform={markdownUrlTransform}
         >
           {parseText}
         </ReactMarkdown>

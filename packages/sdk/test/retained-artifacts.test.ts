@@ -6,6 +6,8 @@ import {
   parseMediaGenerationResult,
   parseRetainedGeneratedImageReference,
   parseRetainedGeneratedVideoReference,
+  parseRetainedWorkspaceFileReference,
+  parseSandboxFileArtifactReceipt,
 } from "../src/retained-artifacts";
 import type { RetainedArtifactReference } from "../src/types";
 
@@ -84,6 +86,41 @@ describe("retained generated image wire validation", () => {
           retrieval: { ...reference.retrieval, maxRangeBytes: 512 * 1024 },
         },
       }),
+    ).toBeNull();
+  });
+});
+
+describe("retained sandbox file wire validation", () => {
+  const { dimensions: _dimensions, ...referenceWithoutDimensions } = reference;
+  const fileReference = {
+    ...referenceWithoutDimensions,
+    kind: "file" as const,
+    contentType: "application/pdf",
+  } satisfies RetainedArtifactReference;
+  const receipt = {
+    type: "sandbox_file" as const,
+    sandboxPath: "/workspace/reports/summary.pdf",
+    filename: "summary.pdf",
+    artifact: fileReference,
+  };
+
+  test("accepts the exact closed workspace-file receipt", () => {
+    expect(parseRetainedWorkspaceFileReference(fileReference, workspaceId)).toEqual(fileReference);
+    expect(parseSandboxFileArtifactReceipt(receipt, workspaceId)).toEqual(receipt);
+    expect(parseSandboxFileArtifactReceipt(JSON.stringify(receipt), workspaceId)).toEqual(receipt);
+  });
+
+  test("rejects traversal, filename drift, extra metadata, and workspace drift", () => {
+    expect(
+      parseSandboxFileArtifactReceipt({
+        ...receipt,
+        sandboxPath: "/workspace/reports/../summary.pdf",
+      }),
+    ).toBeNull();
+    expect(parseSandboxFileArtifactReceipt({ ...receipt, filename: "other.pdf" })).toBeNull();
+    expect(parseSandboxFileArtifactReceipt({ ...receipt, provider: "secret" })).toBeNull();
+    expect(
+      parseSandboxFileArtifactReceipt(receipt, "22222222-2222-4222-8222-222222222222"),
     ).toBeNull();
   });
 });

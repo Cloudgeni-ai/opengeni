@@ -172,7 +172,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath } from "node:path";
 
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
-import { installCodexToolSearch } from "./codex-tool-search";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
   CompactionProviderResponseError,

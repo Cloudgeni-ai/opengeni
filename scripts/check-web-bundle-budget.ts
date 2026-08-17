@@ -36,13 +36,10 @@ const budgets = {
   // reconciled 0262 stack adds another 270 bytes. The current-main organization
   // membership and connection-authority integration brings the combined default/4-digit/5-digit
   // graph to a worst observed 2,042,520 raw bytes. Truthful zero-step lifecycle
-  // copy and the shared large-history disclosure scheduler bring the configured
-  // direct-session graph to 2,045,440 raw bytes. A 1,999 KiB envelope retains a
-  // narrow regression fence without relaxing gzip. Linux
-  // produces a slightly larger gzip graph than
-  // macOS for identical sources: the reconciled matrix's worst configured graph
-  // is 568,585 bytes. The unchanged 558 KiB envelope leaves 2,807 bytes of Linux
-  // headroom while preserving a narrow regression fence.
+  // copy, the shared large-history disclosure scheduler, and durable sandbox-file
+  // receipt/download controls bring the configured graph to 2,052,836 raw bytes
+  // and 571,587 gzip bytes on both macOS/arm64 and Linux/x64. The 2,006/559 KiB
+  // envelopes retain 1,308/829 bytes of headroom.
   initialRaw: 1448 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
@@ -50,8 +47,8 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 1999 * kib,
-  directSessionGzip: 558 * kib,
+  directSessionRaw: 2006 * kib,
+  directSessionGzip: 559 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

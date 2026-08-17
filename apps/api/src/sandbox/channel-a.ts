@@ -96,6 +96,7 @@ export type ChannelAOperation =
   | "fs.list"
   | "fs.list-batch"
   | "fs.read"
+  | "artifact.publish"
   | "fs.write"
   | "fs.delete"
   | "fs.move"

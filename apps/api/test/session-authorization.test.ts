@@ -60,6 +60,7 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["POST", "/fs/list", "session.files.read"],
   ["POST", "/fs/list-batch", "session.files.read"],
   ["POST", "/fs/read", "session.files.read"],
+  ["POST", "/artifacts/publish", "session.files.write"],
   ["POST", "/fs/write", "session.files.write"],
   ["POST", "/fs/delete", "session.files.write"],
   ["POST", "/fs/move", "session.files.write"],

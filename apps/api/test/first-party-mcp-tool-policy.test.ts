@@ -173,6 +173,25 @@ describe("first-party MCP tool visibility policy", () => {
     expect(registeredToolNames(admitted)).toEqual(["session_create"]);
   });
 
+  test("sandbox file publication requires both read and upload authority", () => {
+    const readOnly = buildOpenGeniMcpServer(
+      deps(),
+      grant(["files:read"], ["sandbox_file_publish"]),
+    );
+    const uploadOnly = buildOpenGeniMcpServer(
+      deps(),
+      grant(["files:upload"], ["sandbox_file_publish"]),
+    );
+    const admitted = buildOpenGeniMcpServer(
+      deps(),
+      grant(["files:read", "files:upload"], ["sandbox_file_publish"]),
+    );
+
+    expect(registeredToolNames(readOnly)).toEqual([]);
+    expect(registeredToolNames(uploadOnly)).toEqual([]);
+    expect(registeredToolNames(admitted)).toEqual(["sandbox_file_publish"]);
+  });
+
   test("trusted exhausted depth hides session_create while legacy and remaining-depth grants retain it", () => {
     const legacy = buildOpenGeniMcpServer(deps(), grant(["sessions:create"], ["session_create"]));
     const remaining = buildOpenGeniMcpServer(

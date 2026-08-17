@@ -2801,6 +2801,9 @@
 :where(.og-root).decoration-og-border-strong,:where(.og-root) .decoration-og-border-strong {
     text-decoration-color: var(--og-color-border-strong);
   }
+:where(.og-root).decoration-dotted,:where(.og-root) .decoration-dotted {
+    text-decoration-style: dotted;
+  }
 :where(.og-root).underline-offset-2,:where(.og-root) .underline-offset-2 {
     text-underline-offset: 2px;
   }
@@ -4067,6 +4070,11 @@
 :where(.og-root).disabled\:cursor-not-allowed,:where(.og-root) .disabled\:cursor-not-allowed {
     &:disabled {
       cursor: not-allowed;
+    }
+  }
+:where(.og-root).disabled\:cursor-wait,:where(.og-root) .disabled\:cursor-wait {
+    &:disabled {
+      cursor: wait;
     }
   }
 :where(.og-root).disabled\:bg-og-surface-3,:where(.og-root) .disabled\:bg-og-surface-3 {

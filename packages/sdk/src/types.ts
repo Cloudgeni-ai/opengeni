@@ -1881,6 +1881,14 @@ export type FsReadResponse = {
   isBinary: boolean;
   revision: number;
 };
+export const SANDBOX_FILE_ARTIFACT_MAX_BYTES = 25 * 1024 * 1024 - 1;
+export type PublishSandboxFileArtifactRequest = { path: string };
+export type SandboxFileArtifactReceipt = {
+  type: "sandbox_file";
+  sandboxPath: string;
+  filename: string;
+  artifact: RetainedArtifactReference;
+};
 export type FsWriteRequest = {
   path: string;
   encoding?: FsEncoding;
@@ -2582,6 +2590,7 @@ export type FirstPartyMcpToolName =
   | "atlassian_sources_list"
   | "atlassian_search"
   | "atlassian_get"
+  | "sandbox_file_publish"
   | "artifacts_list"
   | "artifacts_get_source"
   | "artifacts_create"
