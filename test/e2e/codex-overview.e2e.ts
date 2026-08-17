@@ -481,10 +481,15 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     const expandAccount = async (name: string) => {
       const card = accountCard(name);
       const show = card.getByRole("button", { name: `Show details for ${name}` });
+      const hide = card.getByRole("button", { name: `Hide details for ${name}` });
+      // Wait for either toggle to render before deciding; an early
+      // `isVisible()` snapshot on a slow runner skipped the click and then
+      // waited forever for the collapsed card to expand itself.
+      await show.or(hide).first().waitFor();
       if (await show.isVisible()) {
         await show.click();
       }
-      await card.getByRole("button", { name: `Hide details for ${name}` }).waitFor();
+      await hide.waitFor();
     };
     await expandAccount("Detailed account");
     await accountCard("Detailed account")
