@@ -43,8 +43,10 @@ function keepsSpecializedWorkloadPackagesCoalesced(source: string): boolean {
     ) &&
     aptTransactions(api) === 1 &&
     api.includes(
-      "apt-get install -y --no-install-recommends ca-certificates ffmpeg git openssh-client",
+      "apt-get install -y --no-install-recommends ca-certificates curl ffmpeg git gnupg openssh-client",
     ) &&
+    api.includes("apt-get install -y --no-install-recommends docker-ce-cli") &&
+    api.includes("docker --version") &&
     worker.startsWith("FROM source-base AS worker") &&
     aptTransactions(worker) === 1 &&
     worker.includes(
@@ -72,10 +74,16 @@ describe("workload image system package contract", () => {
     expect(keepsSpecializedWorkloadPackagesCoalesced(inheritedCommonInstall)).toBe(false);
 
     const missingApiRuntimeTools = dockerfile.replace(
-      "ca-certificates ffmpeg git openssh-client",
+      "ca-certificates curl ffmpeg git gnupg openssh-client",
       "ffmpeg",
     );
     expect(keepsSpecializedWorkloadPackagesCoalesced(missingApiRuntimeTools)).toBe(false);
+
+    const missingApiDockerCli = dockerfile.replace(
+      "apt-get install -y --no-install-recommends docker-ce-cli",
+      "true",
+    );
+    expect(keepsSpecializedWorkloadPackagesCoalesced(missingApiDockerCli)).toBe(false);
 
     const duplicateApiTransaction = dockerfile.replace(
       "FROM artifact-runtime-base AS api\n",
