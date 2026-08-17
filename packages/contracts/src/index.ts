@@ -983,6 +983,8 @@ const FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
  */
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "slack_bot_post_message",
+  // Memory V1 write: registered only under the legacy_standing rollback mode.
+  "memory_save",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -1015,6 +1017,10 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
  */
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
+    // Memory V1 writes are retired from the default surface; `remember` and
+    // task-note promotion own durable agent writes. Explicit selection under
+    // the legacy_standing rollback mode still registers memory_save.
+    name !== "memory_save" &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
