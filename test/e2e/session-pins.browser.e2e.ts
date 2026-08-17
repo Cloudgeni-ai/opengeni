@@ -1287,7 +1287,21 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       `);
       await barrier`select pg_advisory_lock(${barrierClass}, ${removalLock})`;
 
-      removalPromise = removeWorkspaceMember(removalClient.db, workspaceId, raceSubject);
+      removalPromise = (async () => {
+        const removerSubjectId = `user:remover-${crypto.randomUUID()}`;
+        await grantWorkspaceAccess(removalClient.db, {
+          accountId: workspace!.accountId,
+          workspaceId,
+          subjectId: removerSubjectId,
+          permissions: ["workspace:admin"],
+        });
+        return await removeWorkspaceMember(removalClient.db, {
+          accountId: workspace!.accountId,
+          workspaceId,
+          actorSubjectId: removerSubjectId,
+          targetSubjectId: raceSubject,
+        });
+      })();
       await waitForAdvisoryWait(barrier, barrierClass, removalLock);
 
       const listingPromise = raceApp.request(
@@ -1404,7 +1418,21 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       `);
       await barrier`select pg_advisory_lock(${barrierClass}, ${removalLock})`;
 
-      removalPromise = removeWorkspaceMember(removalClient.db, workspaceId, raceSubject);
+      removalPromise = (async () => {
+        const removerSubjectId = `user:remover-${crypto.randomUUID()}`;
+        await grantWorkspaceAccess(removalClient.db, {
+          accountId: workspace!.accountId,
+          workspaceId,
+          subjectId: removerSubjectId,
+          permissions: ["workspace:admin"],
+        });
+        return await removeWorkspaceMember(removalClient.db, {
+          accountId: workspace!.accountId,
+          workspaceId,
+          actorSubjectId: removerSubjectId,
+          targetSubjectId: raceSubject,
+        });
+      })();
       await waitForAdvisoryWait(barrier, barrierClass, removalLock);
 
       const pinPromise = raceApp.request(
