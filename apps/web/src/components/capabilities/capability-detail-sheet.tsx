@@ -17,6 +17,11 @@ import {
 } from "react";
 
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
+import {
+  capabilityPresentation,
+  presentationPermissions,
+  type IntegrationPresentationCopy,
+} from "@/components/capabilities/integration-experience";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -461,6 +466,10 @@ export function DetailBody({
             </div>
           ) : plan.mode === "oauth" ? (
             <div className="space-y-3">
+              <ConnectorConsentCopy
+                presentation={capabilityPresentation(item.metadata)}
+                requestedScopes={plan.requestedScopes}
+              />
               {personalOnly ? (
                 <PersonalOnlyConnectionNotice itemName={item.name} />
               ) : (
@@ -567,6 +576,54 @@ function SkillControls({
         Skills add reviewed instructions only. They never grant credentials or connect provider
         accounts.
       </p>
+    </div>
+  );
+}
+
+/**
+ * Curated consent copy for a connector's OAuth connect: what agents will do
+ * and what the requested scopes mean in plain language. Rendered only when the
+ * catalog row carries `metadata.presentation`; an uncurated connector keeps
+ * the plain connect button exactly as before. Presentation-only - the actual
+ * grant is whatever the provider's consent screen shows.
+ */
+function ConnectorConsentCopy({
+  presentation,
+  requestedScopes,
+}: {
+  presentation: IntegrationPresentationCopy | undefined;
+  requestedScopes: string[];
+}) {
+  if (!presentation) return null;
+  const permissions = presentationPermissions(requestedScopes, presentation);
+  return (
+    <div className="space-y-3 rounded-lg border border-border bg-surface p-3 text-left">
+      {presentation.introduction ? (
+        <p className="text-sm text-fg">{presentation.introduction}</p>
+      ) : null}
+      {presentation.capabilities?.length ? (
+        <ul className="space-y-1.5">
+          {presentation.capabilities.map((capability) => (
+            <li key={capability.title} className="text-xs">
+              <span className="font-medium text-fg">{capability.title}</span>{" "}
+              <span className="text-fg-muted">{capability.description}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {permissions.length > 0 ? (
+        <ul className="space-y-1">
+          {permissions.map((permission) => (
+            <li key={permission.label} className="text-xs">
+              <span className="font-medium text-fg">{permission.label}</span>{" "}
+              <span className="text-fg-muted">{permission.description}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {presentation.permissionSummary ? (
+        <p className="text-xs text-fg-subtle">{presentation.permissionSummary}</p>
+      ) : null}
     </div>
   );
 }

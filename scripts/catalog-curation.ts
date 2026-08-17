@@ -40,6 +40,12 @@ export type CuratedCatalogEntry = {
    * validated here structurally and again by the API's zod schema at use time.
    */
   readonly oauthProfile?: CuratedOAuthProfile;
+  /**
+   * Presentation-only consent copy for the connector's sheet: never grants a
+   * scope or replaces server-side authorization. Any omitted field keeps the
+   * generic fallback copy.
+   */
+  readonly presentation?: CuratedPresentation;
   /** `null` deliberately suppresses a logo fetch and keeps the monogram. */
   readonly logoSourceUrl?: string | null;
   readonly homepageUrl?: string;
@@ -66,6 +72,17 @@ export type CuratedOAuthProfile = {
   readonly allowedOwnership?: readonly ("personal" | "workspace")[];
   readonly requestedScopes?: readonly string[];
   readonly extraAuthorizeParams?: Readonly<Record<string, string>>;
+};
+
+export type CuratedPresentation = {
+  readonly providerName?: string;
+  readonly icon?: "calendar" | "cloud" | "contacts" | "files" | "mail";
+  readonly introduction?: string;
+  readonly capabilities?: readonly { readonly title: string; readonly description: string }[];
+  readonly permissionSummary?: string;
+  readonly scopeLabels?: Readonly<
+    Record<string, { readonly label: string; readonly description: string }>
+  >;
 };
 
 export type CuratedCatalog = {
@@ -165,9 +182,108 @@ const KNOWN_KEYS: ReadonlySet<string> = new Set<string>([
   "tier",
   "connectionOwnership",
   "oauthProfile",
+  "presentation",
   "logoSourceUrl",
   "requireApproval",
 ]);
+
+const PRESENTATION_KEYS: ReadonlySet<string> = new Set([
+  "providerName",
+  "icon",
+  "introduction",
+  "capabilities",
+  "permissionSummary",
+  "scopeLabels",
+]);
+
+const PRESENTATION_ICONS: ReadonlySet<string> = new Set([
+  "calendar",
+  "cloud",
+  "contacts",
+  "files",
+  "mail",
+]);
+
+function parsePresentation(raw: unknown, where: string): CuratedPresentation {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new CuratedCatalogError(`${where}: presentation must be an object`);
+  }
+  const record = raw as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!PRESENTATION_KEYS.has(key)) {
+      throw new CuratedCatalogError(`${where}: presentation has unknown key "${key}"`);
+    }
+  }
+  const copyPair = (value: unknown, label: string): { title: string; description: string } => {
+    const pair = asRecord(value);
+    if (
+      !pair ||
+      typeof pair.title !== "string" ||
+      !pair.title.trim() ||
+      typeof pair.description !== "string" ||
+      !pair.description.trim() ||
+      Object.keys(pair).length !== 2
+    ) {
+      throw new CuratedCatalogError(
+        `${where}: presentation.${label} entries must be { title, description } strings`,
+      );
+    }
+    return { title: pair.title, description: pair.description };
+  };
+  const presentation: { -readonly [K in keyof CuratedPresentation]: CuratedPresentation[K] } = {};
+  for (const key of ["providerName", "introduction", "permissionSummary"] as const) {
+    const value = record[key];
+    if (value === undefined) continue;
+    if (typeof value !== "string" || !value.trim()) {
+      throw new CuratedCatalogError(`${where}: presentation.${key} must be a non-empty string`);
+    }
+    presentation[key] = value;
+  }
+  if (record.icon !== undefined) {
+    if (typeof record.icon !== "string" || !PRESENTATION_ICONS.has(record.icon)) {
+      throw new CuratedCatalogError(
+        `${where}: presentation.icon must be one of ${[...PRESENTATION_ICONS].join(", ")}`,
+      );
+    }
+    presentation.icon = record.icon as CuratedPresentation["icon"];
+  }
+  if (record.capabilities !== undefined) {
+    if (!Array.isArray(record.capabilities) || record.capabilities.length === 0) {
+      throw new CuratedCatalogError(
+        `${where}: presentation.capabilities must be a non-empty array`,
+      );
+    }
+    presentation.capabilities = record.capabilities.map((value) => copyPair(value, "capabilities"));
+  }
+  if (record.scopeLabels !== undefined) {
+    const labels = asRecord(record.scopeLabels);
+    if (!labels || Object.keys(labels).length === 0) {
+      throw new CuratedCatalogError(
+        `${where}: presentation.scopeLabels must be a non-empty object`,
+      );
+    }
+    const scopeLabels: Record<string, { label: string; description: string }> = {};
+    for (const [scope, value] of Object.entries(labels)) {
+      const pair = asRecord(value);
+      if (
+        !scope.trim() ||
+        !pair ||
+        typeof pair.label !== "string" ||
+        !pair.label.trim() ||
+        typeof pair.description !== "string" ||
+        !pair.description.trim() ||
+        Object.keys(pair).length !== 2
+      ) {
+        throw new CuratedCatalogError(
+          `${where}: presentation.scopeLabels values must be { label, description } strings`,
+        );
+      }
+      scopeLabels[scope] = { label: pair.label, description: pair.description };
+    }
+    presentation.scopeLabels = scopeLabels;
+  }
+  return presentation;
+}
 
 const OAUTH_PROFILE_KEYS: ReadonlySet<string> = new Set([
   "clientSource",
@@ -381,6 +497,10 @@ function parseEntry(value: unknown, index: number): CuratedCatalogEntry {
 
   if ("oauthProfile" in record) {
     entry.oauthProfile = parseOAuthProfile(record.oauthProfile, where);
+  }
+
+  if ("presentation" in record) {
+    entry.presentation = parsePresentation(record.presentation, where);
   }
 
   // `logoSourceUrl: null` is meaningful: it suppresses the logo fetch and

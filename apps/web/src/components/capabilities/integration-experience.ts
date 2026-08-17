@@ -29,13 +29,21 @@ export type IntegrationExperienceDescriptor = {
 type PresentationDefinition = Pick<IntegrationDefinitionSummary, "id" | "name" | "summary"> & {
   provider: { id: string; domain: string };
   authentication: { scopes: string[] };
+  presentation?: IntegrationPresentationCopy | undefined;
 };
 
-type ReviewedIntegrationExperience = Omit<
-  IntegrationExperienceDescriptor,
-  "serviceName" | "technicalDetails" | "permissions"
-> & {
-  scopeLabels: Readonly<Record<string, { label: string; description: string }>>;
+/**
+ * Server-supplied consent copy: an API definition's `presentation` field or a
+ * connector catalog row's `metadata.presentation`. Every field is optional and
+ * presentation-only; anything missing keeps the generic fallback below.
+ */
+export type IntegrationPresentationCopy = {
+  providerName?: string;
+  icon?: IntegrationExperienceIcon;
+  introduction?: string;
+  capabilities?: IntegrationExperienceCapability[];
+  permissionSummary?: string;
+  scopeLabels?: Readonly<Record<string, { label: string; description: string }>>;
 };
 
 const COMMON_SCOPE_LABELS: Readonly<Record<string, { label: string; description: string }>> = {
@@ -70,202 +78,18 @@ const PROVIDER_NAMES: Readonly<Record<string, string>> = {
   stripe: "Stripe",
 };
 
-const REVIEWED_INTEGRATION_EXPERIENCES: Readonly<Record<string, ReviewedIntegrationExperience>> = {
-  "google-gmail": {
-    providerName: "Google",
-    icon: "mail",
-    introduction: "Let agents work with the Gmail account you choose.",
-    capabilities: [
-      {
-        title: "Find and understand mail",
-        description: "Search messages and threads, then use them as context for your work.",
-      },
-      {
-        title: "Draft and send messages",
-        description: "Prepare replies and send mail through the reviewed Gmail tools.",
-      },
-      {
-        title: "Organize the mailbox",
-        description: "Work with labels, drafts, messages, and threads.",
-      },
-    ],
-    permissionSummary:
-      "Google grants broad mailbox access. OpenGeni still exposes only the reviewed tools configured for this integration.",
-    scopeLabels: {
-      "https://mail.google.com/": {
-        label: "Work with your Gmail mailbox",
-        description: "Read, organize, draft, and send mail for the account you approve.",
-      },
-    },
-  },
-  "google-drive": {
-    providerName: "Google",
-    icon: "files",
-    introduction: "Let agents work with files in the Google Drive account you choose.",
-    capabilities: [
-      {
-        title: "Find files and folders",
-        description: "Browse and search content in My Drive and shared drives.",
-      },
-      {
-        title: "Create and update content",
-        description: "Work with files and folders through the reviewed Drive tools.",
-      },
-      {
-        title: "Manage sharing",
-        description: "Review and update links, permissions, and shared-drive content.",
-      },
-    ],
-    permissionSummary:
-      "Google asks for access to the Drive account you approve, including files shared with that account.",
-    scopeLabels: {
-      "https://www.googleapis.com/auth/drive": {
-        label: "Work with Google Drive files",
-        description: "See, create, edit, organize, and share files available to this account.",
-      },
-    },
-  },
-  "microsoft-outlook-mail": {
-    providerName: "Microsoft",
-    icon: "mail",
-    introduction: "Let agents work with mail in the Microsoft account you choose.",
-    capabilities: [
-      {
-        title: "Find and understand mail",
-        description: "Search messages, folders, and attachments for useful context.",
-      },
-      {
-        title: "Draft and send messages",
-        description: "Prepare, update, and send mail through the reviewed Outlook tools.",
-      },
-      {
-        title: "Manage mailbox settings",
-        description: "Work with supported folders, classifications, and mailbox preferences.",
-      },
-    ],
-    permissionSummary:
-      "Microsoft asks for mail and mailbox-setting access for the account you approve.",
-    scopeLabels: {
-      "Mail.ReadWrite": {
-        label: "Read and update mail",
-        description: "Work with messages, folders, and attachments in this mailbox.",
-      },
-      "Mail.Send": {
-        label: "Send mail",
-        description: "Send messages as the connected Microsoft account.",
-      },
-      "MailboxSettings.ReadWrite": {
-        label: "Manage mailbox settings",
-        description: "Read and update supported Outlook mailbox preferences.",
-      },
-    },
-  },
-  "microsoft-outlook-calendar": {
-    providerName: "Microsoft",
-    icon: "calendar",
-    introduction: "Let agents help coordinate the calendars in your Microsoft account.",
-    capabilities: [
-      {
-        title: "Understand your schedule",
-        description: "Review calendars, events, availability, and reminders.",
-      },
-      {
-        title: "Plan meetings",
-        description: "Find suitable times and coordinate calendar activity.",
-      },
-      {
-        title: "Manage events",
-        description: "Create and update events through the reviewed calendar tools.",
-      },
-    ],
-    permissionSummary:
-      "Microsoft asks for permission to view and manage calendars for the account you approve.",
-    scopeLabels: {
-      "Calendars.ReadWrite": {
-        label: "View and manage calendars",
-        description: "Read, create, update, and organize calendar events.",
-      },
-    },
-  },
-  "microsoft-outlook-contacts": {
-    providerName: "Microsoft",
-    icon: "contacts",
-    introduction: "Let agents work with contacts in your Microsoft account.",
-    capabilities: [
-      {
-        title: "Find people",
-        description: "Look up contacts and relevant people suggestions.",
-      },
-      {
-        title: "Organize contacts",
-        description: "Work with contacts and contact folders.",
-      },
-      {
-        title: "Keep details current",
-        description: "Create or update contact information through reviewed tools.",
-      },
-    ],
-    permissionSummary:
-      "Microsoft asks for contact access and people suggestions for the account you approve.",
-    scopeLabels: {
-      "Contacts.ReadWrite": {
-        label: "View and manage contacts",
-        description: "Read, create, update, and organize contacts and contact folders.",
-      },
-      "People.Read.All": {
-        label: "Find relevant people",
-        description: "Use people suggestions available to the connected account.",
-      },
-    },
-  },
-  "microsoft-onedrive": {
-    providerName: "Microsoft",
-    icon: "cloud",
-    introduction: "Let agents work with files in the Microsoft account you choose.",
-    capabilities: [
-      {
-        title: "Find files and folders",
-        description: "Browse drives, folders, shared items, and sites available to the account.",
-      },
-      {
-        title: "Create and update content",
-        description: "Work with OneDrive and SharePoint files through reviewed tools.",
-      },
-      {
-        title: "Manage sharing",
-        description: "Review and update sharing links and permissions.",
-      },
-    ],
-    permissionSummary:
-      "Microsoft asks for file and site access anywhere the connected account already has access.",
-    scopeLabels: {
-      "Files.ReadWrite.All": {
-        label: "Work with accessible files",
-        description: "Read, create, update, and organize files available to this account.",
-      },
-      "Sites.ReadWrite.All": {
-        label: "Work with accessible sites",
-        description: "Read and update files in SharePoint sites available to this account.",
-      },
-    },
-  },
-};
-
 /**
- * Builds presentation-only copy from a Definition. The returned metadata never
- * grants a scope, selects a Connection, or replaces server-side authorization.
+ * Builds presentation-only copy from a Definition. Reviewed copy arrives on
+ * the definition's server-supplied `presentation`; every fallback below keeps
+ * an uncurated definition rendering exactly as before. The returned metadata
+ * never grants a scope, selects a Connection, or replaces server-side
+ * authorization.
  */
 export function integrationExperience(
   definition: PresentationDefinition,
 ): IntegrationExperienceDescriptor {
-  const reviewed = REVIEWED_INTEGRATION_EXPERIENCES[definition.id];
+  const reviewed = definition.presentation;
   const providerName = reviewed?.providerName ?? friendlyProviderName(definition.provider);
-  const scopeLabels = { ...COMMON_SCOPE_LABELS, ...(reviewed?.scopeLabels ?? {}) };
-  const permissions = definition.authentication.scopes.flatMap((scope) => {
-    const copy = scopeLabels[scope];
-    return copy ? [copy] : [];
-  });
-
   return {
     serviceName: definition.name,
     providerName,
@@ -283,12 +107,81 @@ export function integrationExperience(
     permissionSummary:
       reviewed?.permissionSummary ??
       `${providerName} will show the exact access request before you approve it. OpenGeni uses that access only through this integration's reviewed tools.`,
-    permissions: deduplicatePermissions(permissions),
+    permissions: presentationPermissions(definition.authentication.scopes, reviewed),
     technicalDetails: {
       providerDomain: definition.provider.domain,
       oauthScopes: [...definition.authentication.scopes],
     },
   };
+}
+
+/**
+ * Human labels for the scopes a connect will request: the provider-neutral
+ * common labels plus the presentation's own scope labels; unlabeled scopes are
+ * deliberately omitted so raw scope strings never become UX copy.
+ */
+export function presentationPermissions(
+  scopes: readonly string[],
+  presentation: IntegrationPresentationCopy | undefined,
+): IntegrationExperiencePermission[] {
+  const scopeLabels = { ...COMMON_SCOPE_LABELS, ...(presentation?.scopeLabels ?? {}) };
+  return deduplicatePermissions(
+    scopes.flatMap((scope) => {
+      const copy = scopeLabels[scope];
+      return copy ? [copy] : [];
+    }),
+  );
+}
+
+/**
+ * Validated `metadata.presentation` from a catalog row, or undefined when
+ * absent or malformed. Presentation is cosmetic, so a malformed object simply
+ * degrades to the generic copy.
+ */
+export function capabilityPresentation(metadata: unknown): IntegrationPresentationCopy | undefined {
+  if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) {
+    return undefined;
+  }
+  const raw = (metadata as Record<string, unknown>).presentation;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return undefined;
+  }
+  const record = raw as Record<string, unknown>;
+  const copy: IntegrationPresentationCopy = {};
+  const text = (value: unknown): string | undefined =>
+    typeof value === "string" && value.trim() ? value : undefined;
+  const providerName = text(record.providerName);
+  if (providerName) copy.providerName = providerName;
+  const icon = text(record.icon);
+  if (icon && ["calendar", "cloud", "contacts", "files", "mail"].includes(icon)) {
+    copy.icon = icon as IntegrationExperienceIcon;
+  }
+  const introduction = text(record.introduction);
+  if (introduction) copy.introduction = introduction;
+  const permissionSummary = text(record.permissionSummary);
+  if (permissionSummary) copy.permissionSummary = permissionSummary;
+  if (Array.isArray(record.capabilities)) {
+    const capabilities = record.capabilities.flatMap((value) => {
+      if (typeof value !== "object" || value === null) return [];
+      const pair = value as Record<string, unknown>;
+      const title = text(pair.title);
+      const description = text(pair.description);
+      return title && description ? [{ title, description }] : [];
+    });
+    if (capabilities.length > 0) copy.capabilities = capabilities;
+  }
+  if (typeof record.scopeLabels === "object" && record.scopeLabels !== null) {
+    const scopeLabels: Record<string, { label: string; description: string }> = {};
+    for (const [scope, value] of Object.entries(record.scopeLabels as Record<string, unknown>)) {
+      if (typeof value !== "object" || value === null) continue;
+      const pair = value as Record<string, unknown>;
+      const label = text(pair.label);
+      const description = text(pair.description);
+      if (scope.trim() && label && description) scopeLabels[scope] = { label, description };
+    }
+    if (Object.keys(scopeLabels).length > 0) copy.scopeLabels = scopeLabels;
+  }
+  return Object.keys(copy).length > 0 ? copy : undefined;
 }
 
 function friendlyProviderName(provider: { id: string; domain: string }): string {

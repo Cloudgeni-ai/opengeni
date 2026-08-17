@@ -119,6 +119,49 @@ describe("curated catalog overlay document", () => {
     }
   });
 
+  test("parses presentation copy and rejects malformed shapes loudly", () => {
+    const parsed = parseCuratedCatalog({
+      version: 1,
+      entries: [
+        {
+          mcpUrl: "https://mcp.copy.example/mcp",
+          presentation: {
+            providerName: "Copy",
+            icon: "files",
+            introduction: "Let agents work with Copy.",
+            capabilities: [{ title: "Find things", description: "Search your Copy content." }],
+            permissionSummary: "Copy asks for access you approve.",
+            scopeLabels: { "copy:read": { label: "Read Copy", description: "Read your content." } },
+          },
+        },
+      ],
+    });
+    expect(parsed.entries[0]!.presentation).toEqual({
+      providerName: "Copy",
+      icon: "files",
+      introduction: "Let agents work with Copy.",
+      capabilities: [{ title: "Find things", description: "Search your Copy content." }],
+      permissionSummary: "Copy asks for access you approve.",
+      scopeLabels: { "copy:read": { label: "Read Copy", description: "Read your content." } },
+    });
+
+    const entry = (presentation: unknown) => ({
+      version: 1,
+      entries: [{ mcpUrl: "https://a.example/mcp", presentation }],
+    });
+    expect(() => parseCuratedCatalog(entry("copy"))).toThrow(/must be an object/);
+    expect(() => parseCuratedCatalog(entry({ surprise: true }))).toThrow(/unknown key "surprise"/);
+    expect(() => parseCuratedCatalog(entry({ icon: "rocket" }))).toThrow(/icon must be one of/);
+    expect(() => parseCuratedCatalog(entry({ capabilities: [] }))).toThrow(/non-empty array/);
+    expect(() => parseCuratedCatalog(entry({ capabilities: [{ title: "x" }] }))).toThrow(
+      /title, description/,
+    );
+    expect(() => parseCuratedCatalog(entry({ scopeLabels: { s: { label: "x" } } }))).toThrow(
+      /label, description/,
+    );
+    expect(() => parseCuratedCatalog(entry({ introduction: " " }))).toThrow(/non-empty string/);
+  });
+
   test("preserves an explicit null logoSourceUrl and distinguishes it from omission", () => {
     const parsed = parseCuratedCatalog({
       version: 1,

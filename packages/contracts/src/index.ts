@@ -9085,6 +9085,43 @@ export const IntegrationFacetDefinitionSummary = z
   .strict();
 export type IntegrationFacetDefinitionSummary = z.infer<typeof IntegrationFacetDefinitionSummary>;
 
+/**
+ * Presentation-only consent copy for an integration or connector. Never grants
+ * a scope, selects a connection, or replaces server-side authorization; the UI
+ * falls back to generic copy for any omitted field.
+ */
+export const IntegrationPresentation = z
+  .object({
+    providerName: z.string().min(1).max(120).optional(),
+    icon: z.enum(["calendar", "cloud", "contacts", "files", "mail"]).optional(),
+    introduction: z.string().min(1).max(500).optional(),
+    capabilities: z
+      .array(
+        z
+          .object({
+            title: z.string().min(1).max(160),
+            description: z.string().min(1).max(500),
+          })
+          .strict(),
+      )
+      .max(8)
+      .optional(),
+    permissionSummary: z.string().min(1).max(500).optional(),
+    scopeLabels: z
+      .record(
+        z.string().min(1).max(1024),
+        z
+          .object({
+            label: z.string().min(1).max(160),
+            description: z.string().min(1).max(500),
+          })
+          .strict(),
+      )
+      .optional(),
+  })
+  .strict();
+export type IntegrationPresentation = z.infer<typeof IntegrationPresentation>;
+
 export const IntegrationDefinitionSummary = z
   .object({
     id: z.string().min(1).max(128),
@@ -9103,6 +9140,7 @@ export const IntegrationDefinitionSummary = z
         scopes: z.array(z.string().min(1).max(1024)).max(256),
       })
       .strict(),
+    presentation: IntegrationPresentation.optional(),
     facets: z.array(IntegrationFacetDefinitionSummary).max(128),
   })
   .strict();

@@ -247,6 +247,23 @@ describe("API Integration routes", () => {
     );
     expect(JSON.stringify(payload)).not.toContain("clientSecret");
     expect(JSON.stringify(payload)).not.toContain("clientId");
+
+    // Reviewed consent copy is served with the definition (presentation-only;
+    // grants nothing). Every core definition carries it.
+    const gmail = payload.definitions.find(
+      (definition: { id: string }) => definition.id === "google-gmail",
+    );
+    expect(gmail.presentation).toMatchObject({
+      providerName: "Google",
+      icon: "mail",
+      introduction: "Let agents work with the Gmail account you choose.",
+    });
+    expect(gmail.presentation.scopeLabels["https://mail.google.com/"]).toMatchObject({
+      label: "Work with your Gmail mailbox",
+    });
+    for (const definition of payload.definitions) {
+      expect(definition.presentation).toBeDefined();
+    }
   });
 
   test("previews, fences source drift, installs, lists, and OCC-uninstalls", async () => {
