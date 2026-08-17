@@ -642,8 +642,11 @@ offline reruns.
 Standard Helm installs and upgrades import that committed snapshot by
 default through the `catalogImport` hook Job; set `catalogImport.enabled=false`
 to opt out. The default `catalogImport.skipLogos=true` keeps deployment success
-independent of third-party logo hosts and uses generic monograms; set it to
-`false` to fetch, validate, and self-host the reviewed logos. `bun run dev` also
+independent of third-party logo hosts by skipping network logo fetches for the
+uncurated long tail; curated connectors still ship their logos from the
+vendored assets described below, so the default install is not monogram-only.
+Set it to `false` to additionally fetch, validate, and self-host long-tail
+logos. `bun run dev` also
 imports metadata after migrations by default; set
 `OPENGENI_CATALOG_IMPORT_ENABLED=false` to opt out locally. Operators using a
 different deployment system should run `bun run catalog:import --snapshot
@@ -693,10 +696,40 @@ map in the web app; the catalog sort key is `kind`, then `category`, then
 `name`, so assigning a category moves a row into that group in the merged
 listing.
 
-Imported logos are fetched during import, validated as images below 512KB, and
-stored through OpenGeni object storage under `catalog-assets/...`; catalog rows
-store only the self-hosted `logoAssetPath`, never the third-party logo URL. The
-normalization pass strips raw control characters from string fields, collapses
-duplicate `(domain, name)` clusters to the best deterministic row, skips
-known-dead demo domains, and quarantines flagged suspicious URLs in the batch
-details for manual review.
+Imported logos are validated as images below 512KB and stored through OpenGeni
+object storage under `catalog-assets/...`; catalog rows store only the
+self-hosted `logoAssetPath`, never the third-party logo URL, and record where
+the bytes came from in `metadata.logoSource` (`vendored`, `integrations.sh`, or
+`generic_monogram` when no asset exists). The normalization pass strips raw
+control characters from string fields, collapses duplicate `(domain, name)`
+clusters to the best deterministic row, skips known-dead demo domains, and
+quarantines flagged suspicious URLs in the batch details for manual review.
+
+### Vendored logos
+
+A default deployment must not depend on integrations.sh or any other logo host
+being reachable at deploy time, yet the curated connectors should still render
+their logos rather than monograms. `data/catalog/logos/` therefore holds one
+committed asset per curated row whose effective logo source is published,
+plus `manifest.json` recording provenance for each (capability id, domain,
+canonical MCP URL, source URL, SHA-256, content type, byte size, fetch time).
+The importer copies a vendored asset into object storage under the same
+`catalog-assets/...` key a fetched logo would use, in every mode: `--skip-logos`
+suppresses only network fetches for the uncurated long tail, because a
+vendored copy adds no third-party dependency. A curated `logoSourceUrl: null`
+(currently Gmail and Mobbin, which publish no reusable logo licence) always
+wins: no asset is vendored for such a row and a stray vendored file for it is
+ignored. A vendored entry whose recorded source no longer matches the row's
+effective source, or whose bytes no longer match its digest, is not served;
+the import records a visible logo failure and the row falls back to the
+monogram until the directory is regenerated. The manifest's canonical form is
+part of the `--if-changed` import fingerprint, so adding or replacing a
+vendored asset lands on the next deploy.
+
+Regenerate the directory with `bun run catalog:vendor-logos` (add `--dry-run`
+to preview). It fetches each curated row's logo once, applies the same
+image-content-type and size validation the importer applies, refuses to write
+an invalid response, keeps a still-valid prior asset when a refetch fails, and
+removes files no curated row references. Review the diff and commit it like a
+snapshot or overlay change; the committed manifest is checked in tests to cover
+exactly the curated rows that permit a logo, byte for byte.

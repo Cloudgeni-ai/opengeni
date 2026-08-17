@@ -33,6 +33,7 @@
     "db:sweep-organization-retention": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/sweep-organization-retention.ts",
     "db:generate": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; cd packages/db && bun run generate",
     "catalog:refresh": "bun scripts/refresh-integrations-catalog.ts",
+    "catalog:vendor-logos": "bun scripts/vendor-catalog-logos.ts",
     "catalog:import": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/import-integrations-catalog.ts",
     "slack:manifest": "bun scripts/generate-slack-bot-manifest.ts",
     "typecheck": "bun scripts/typecheck.ts",

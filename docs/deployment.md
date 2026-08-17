@@ -271,9 +271,14 @@ from the migration-only Secret because global catalog and import-provenance
 tables are deliberately unavailable to the runtime role. The Job uses a SHA-256
 snapshot reference and performs no database, network, or logo-storage work when
 that exact revision already completed. Set `catalogImport.enabled=false` to opt
-out. Logo fetching is disabled by default so third-party availability cannot
-block a rollout; set `catalogImport.skipLogos=false` to opt into validated,
-self-hosted catalog logos.
+out. Network logo fetching is disabled by default so third-party availability
+cannot block a rollout, but the curated connector set still renders logos: the
+importer copies the reviewed assets vendored under `data/catalog/logos/` into
+object storage regardless of `skipLogos`, so a default install shows logos for
+every curated connector without an external image request. Set
+`catalogImport.skipLogos=false` to additionally fetch, validate, and self-host
+logos for the uncurated long tail. See the vendored-logo notes in
+[`capabilities.md`](capabilities.md#vendored-logos).
 
 The provisioner converges `opengeni_app` to `LOGIN NOSUPERUSER NOBYPASSRLS
 NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT`, refuses to guess through any
