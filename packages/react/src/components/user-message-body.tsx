@@ -112,6 +112,7 @@ type RestoreDisclosureAnchor = (() => void) | null;
 type SharedResizeObserverState = {
   callbacks: Map<Element, () => void>;
   observer: ResizeObserver;
+  handleWindowResize: () => void;
 };
 
 type DisclosureMeasurementJob = {
@@ -157,16 +158,20 @@ function observeSharedResize(element: Element, callback: () => void): (() => voi
   let state = sharedResizeObservers.get(view);
   if (!state) {
     const callbacks = new Map<Element, () => void>();
+    const handleWindowResize = () => {
+      for (const registered of new Set(callbacks.values())) registered();
+    };
     const observer = new ResizeObserver((entries) => {
       if (entries.length === 0) {
-        for (const registered of new Set(callbacks.values())) registered();
+        handleWindowResize();
       } else {
         for (const entry of entries) {
           callbacks.get(entry.target)?.();
         }
       }
     });
-    state = { callbacks, observer };
+    view.addEventListener("resize", handleWindowResize);
+    state = { callbacks, observer, handleWindowResize };
     sharedResizeObservers.set(view, state);
   }
   state.callbacks.set(element, callback);
@@ -179,6 +184,7 @@ function observeSharedResize(element: Element, callback: () => void): (() => voi
     state.observer.unobserve(element);
     if (state.callbacks.size === 0) {
       state.observer.disconnect();
+      view.removeEventListener("resize", state.handleWindowResize);
       sharedResizeObservers.delete(view);
     }
   };

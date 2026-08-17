@@ -78,7 +78,7 @@ function elementRect(top: number, bottom: number, left = 0, right = 240): DOMRec
 }
 
 describe("UserMessageBody", () => {
-  test("uses the element observer instead of one redundant window listener per message", async () => {
+  test("shares one observer and one resize listener across every message", async () => {
     let observerCount = 0;
     globalThis.ResizeObserver = class {
       constructor() {
@@ -108,7 +108,7 @@ describe("UserMessageBody", () => {
           </UserMessageBody>
         </>,
       );
-      expect(resizeListeners).toHaveLength(0);
+      expect(resizeListeners).toHaveLength(1);
       expect(observerCount).toBe(1);
       await r.unmount();
     } finally {
