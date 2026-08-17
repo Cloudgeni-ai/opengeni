@@ -1,5 +1,35 @@
 # @opengeni/documents
 
+## 0.6.0
+
+### Minor Changes
+
+- c297fc0: Add permission-first Company Brain guidance, Knowledge, proposal, and content-free accepted-turn context inspection surfaces.
+- c297fc0: Add permission-first Knowledge search selection facts, pre-window relevance floors, deterministic ranking, search/browse response budgets, exact textual-content deduplication, freshness-aware ordering, revision-fenced cursors, and authorization-rechecked document/chunk traversal links.
+
+### Patch Changes
+
+- Updated dependencies [ca75ed9]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [02e21fa]
+- Updated dependencies [c297fc0]
+- Updated dependencies [db758f3]
+- Updated dependencies [e9aabaa]
+- Updated dependencies [c297fc0]
+- Updated dependencies [22c0c21]
+- Updated dependencies [89d4ab3]
+- Updated dependencies [16cbd7b]
+- Updated dependencies [6860c5f]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+  - @opengeni/contracts@1.2.0
+  - @opengeni/db@1.1.0
+  - @opengeni/config@0.16.6
+  - @opengeni/storage@0.2.98
+
 ## 0.5.42
 
 ### Patch Changes
