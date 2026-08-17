@@ -512,6 +512,7 @@ describe("worker activities integration", () => {
     try {
       const settings = {
         ...apiSettings,
+        opengeniMcpInternalUrl: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
         mcpServers: [
           {
             id: "opengeni",
@@ -626,6 +627,7 @@ describe("worker activities integration", () => {
         timeoutMs: undefined,
         cacheToolsList: false,
       });
+      apiSettings.opengeniMcpInternalUrl = `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`;
       const settings = apiSettings;
       const model = new ScriptedModel([
         {
