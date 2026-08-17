@@ -521,10 +521,10 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0273_human_confirmed_knowledge_review.sql")) {
+      if (migrations.has("0274_human_confirmed_knowledge_review.sql")) {
         return includesActivation
-          ? "a00a101b31923aa9b062b85aa68984d6649464776fdbf5a3647954e7a38c76ee"
-          : "2bedf49f81e81a9719d32c51830f605ad49a40724fc94b30c3f149d4bc29a875";
+          ? "f82d0b53ee48801a15d6a76cdd5ecf08a830bf1687037068b30d58f191778e51"
+          : "2d98effee255ae4a24c790920c5aabeea91e64714b6a9a2bfa03664bca51bf43";
       }
       if (migrations.has("0272_human_confirmed_learning_activation.sql")) {
         return includesActivation
@@ -941,7 +941,7 @@ describe("release schema contract", () => {
         (migrations.has("0270_governed_learning_history_inspection.sql") ? 1 : 0) +
         (migrations.has("0271_company_brain_retrieval_only_default.sql") ? 1 : 0) +
         (migrations.has("0272_human_confirmed_learning_activation.sql") ? 1 : 0) +
-        (migrations.has("0273_human_confirmed_knowledge_review.sql") ? 1 : 0) +
+        (migrations.has("0274_human_confirmed_knowledge_review.sql") ? 1 : 0) +
         (migrations.has("0263_organization_membership_lifecycle.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
@@ -977,8 +977,8 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0273_human_confirmed_knowledge_review.sql")
-        ? "0273_human_confirmed_knowledge_review.sql"
+      migrations.has("0274_human_confirmed_knowledge_review.sql")
+        ? "0274_human_confirmed_knowledge_review.sql"
         : migrations.has("0272_human_confirmed_learning_activation.sql")
           ? "0272_human_confirmed_learning_activation.sql"
           : migrations.has("0271_company_brain_retrieval_only_default.sql")

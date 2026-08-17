@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 
 const migrationUrl = new URL(
-  "../drizzle/0273_human_confirmed_knowledge_review.sql",
+  "../drizzle/0274_human_confirmed_knowledge_review.sql",
   import.meta.url,
 );
 
-describe("migration 0273 human-confirmed knowledge review", () => {
+describe("migration 0274 human-confirmed knowledge review", () => {
   test("adds an immutable receipt ledger and a hardened confirmation capability", async () => {
     const sql = await readFile(migrationUrl, "utf8");
     expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);

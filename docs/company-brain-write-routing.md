@@ -175,7 +175,7 @@ the capability requires the turn's current live attempt rather than the minting
 attempt. Agents cannot fabricate that answer: the human-input row is written only
 by the authenticated human's response route.
 
-For the Knowledge lane, `remember_confirm` invokes migration 0273's
+For the Knowledge lane, `remember_confirm` invokes migration 0274's
 `confirm_remember_knowledge_claim`. It performs the same live-turn,
 responder, canonical-prompt (`Save this as workspace knowledge for everyone in
 this workspace?`), exact-note-text, fixed-options, and `save` checks bound to
