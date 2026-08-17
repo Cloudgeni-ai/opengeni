@@ -148,6 +148,7 @@ import {
   listWorkspaceGitHubRepositories,
 } from "../github-access";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
+import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
 import {
   assertSocialConnectionProvider,
   socialMentionsLive,
@@ -550,6 +551,10 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   artifacts_create: { sessionRequired: true, allOf: ["artifacts:publish"] },
   artifacts_publish: { sessionRequired: true, allOf: ["artifacts:publish"] },
   artifacts_rollback: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  sandbox_file_publish: {
+    sessionRequired: true,
+    allOf: ["files:read", "files:upload"],
+  },
   editable_artifact_list: { sessionRequired: true, allOf: ["artifacts:read"] },
   editable_artifact_create: {
     sessionRequired: true,
@@ -781,6 +786,7 @@ export function buildOpenGeniMcpServer(
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerWorkspaceArtifactTools(server, deps, grant, sessionId, json);
+    registerSandboxFileArtifactTool(server, deps, grant, sessionId, json);
     registerEditableArtifactAgentTools({
       server,
       deps,
@@ -1757,6 +1763,36 @@ export function buildOpenGeniMcpServer(
   server.ensureToolsListHandler();
 
   return server;
+}
+
+function registerSandboxFileArtifactTool(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  json: JsonResult,
+): void {
+  server.registerTool(
+    "sandbox_file_publish",
+    {
+      description:
+        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Returns a permanent, authenticated artifact receipt; never invent or expose a sandbox: URL as the durable result.",
+      inputSchema: {
+        path: z4.string().min(1).max(4_096),
+      },
+    },
+    async ({ path }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      const session = await requireSession(deps.db, grant.workspaceId, sessionId);
+      return json(
+        await publishSandboxFileArtifact(deps, {
+          grant,
+          session,
+          path,
+        }),
+      );
+    },
+  );
 }
 
 function registerSlackBotTools(

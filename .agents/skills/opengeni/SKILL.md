@@ -201,7 +201,13 @@ When working on file flows, trace the full path end to end:
 6. User-facing prompt text that tells the agent where files are available.
 7. Any result/artifact flow, if present in current code.
 
-Do not claim a generic artifact system, write-back path, or live mid-session remount behavior unless current code proves it.
+The current generic sandbox-output write-back is deliberately narrow: `sandbox_file_publish`
+and the matching session API publish one current non-empty `/workspace` file of at most
+`25 MiB - 1 byte` into a permanent, integrity-addressed workspace `files` artifact. The
+closed receipt exposes only authenticated retrieval metadata. A historical raw sandbox
+link may invoke that route when selected, but publication uses the file's current bytes and
+does not rewrite message/event history. Do not generalize this into automatic retention of
+every sandbox file, live mid-session remount, or an unbounded artifact system.
 
 ## Sandbox Backend Discovery
 
@@ -262,7 +268,7 @@ Avoid absolute claims until verified in current code:
 - Exactly-once public API idempotency.
 - Dead-letter queues or automatic retries.
 - Network policy/egress controls.
-- Artifact storage/write-back.
+- Artifact storage/write-back beyond the bounded flows verified in current code.
 - Any specific cloud/deployment target beyond configured dependencies.
 - Any exact model/backend/tool list.
 

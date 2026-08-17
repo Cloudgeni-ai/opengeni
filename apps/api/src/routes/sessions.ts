@@ -33,6 +33,7 @@ import {
   PtyOpenRequest,
   PtyResizeRequest,
   PtyWriteRequest,
+  PublishSandboxFileArtifactRequest,
   RenewSessionRealtimeRequest,
   SyncSessionRealtimeLedgerRequest,
   SessionControlRequest,
@@ -243,6 +244,7 @@ import {
   serveWorkspaceCaptureFile,
   WorkspaceCaptureManifestCache,
 } from "./workspace-capture";
+import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
@@ -3088,6 +3090,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // (rides files:read); Terminal exec + PTY ride terminal:attach.
 
   type ChannelARouteCtx = ChannelAContext & {
+    grant: AccessGrant;
     waitSignal: AbortSignal;
     operation: ChannelAOperation;
   };
@@ -3108,6 +3111,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw new HTTPException(404, { message: "session not found" });
     }
     return {
+      grant,
       accountId: grant.accountId,
       workspaceId,
       session,
@@ -3155,6 +3159,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const req = await parseChannelABody(c, FsReadRequest);
     const out = await withChannelARead(channelAServices, ctx, ({ service }) => service.fsRead(req));
     return c.json(out);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/publish", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "files:upload");
+    const ctx = await channelAPreamble(c, "files:read", "artifact.publish");
+    const request = await parseChannelABody(c, PublishSandboxFileArtifactRequest);
+    return c.json(
+      await publishSandboxFileArtifact(deps, {
+        grant: ctx.grant,
+        session: ctx.session,
+        path: request.path,
+        signal: ctx.waitSignal,
+      }),
+    );
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/write", async (c) => {
@@ -3734,6 +3753,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/fs/list" || suffix === "/fs/list-batch" || suffix === "/fs/read") {
     return verb === "POST" ? "session.files.read" : null;
   }
+  if (suffix === "/artifacts/publish" && verb === "POST") return "session.files.write";
   if (["/fs/write", "/fs/delete", "/fs/move", "/fs/mkdir"].includes(suffix)) {
     return verb === "POST" ? "session.files.write" : null;
   }

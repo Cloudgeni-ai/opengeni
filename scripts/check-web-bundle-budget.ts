@@ -35,8 +35,10 @@ const budgets = {
   // cap. The lazy residual inspector adds 769 raw bytes in every case. The
   // reconciled 0262 stack adds another 270 bytes. The current-main organization
   // membership and connection-authority integration brings the combined default/4-digit/5-digit
-  // graph to a worst observed 2,042,520 raw bytes. A 1,996 KiB envelope leaves
-  // 1,384 raw bytes of worst-case headroom without relaxing gzip. Linux
+  // graph to a worst observed 2,042,520 raw bytes. Durable sandbox-file receipt
+  // validation plus session-aware publish/download controls bring the measured
+  // macOS graph to 2,048,768 raw bytes. A 2,002 KiB envelope leaves 1,280 raw
+  // bytes of headroom without relaxing gzip. Linux
   // produces a slightly larger gzip graph than
   // macOS for identical sources: the reconciled matrix's worst configured graph
   // is 568,585 bytes. The unchanged 558 KiB envelope leaves 2,807 bytes of Linux
@@ -48,7 +50,7 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 1996 * kib,
+  directSessionRaw: 2002 * kib,
   directSessionGzip: 558 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,

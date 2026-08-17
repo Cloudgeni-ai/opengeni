@@ -188,6 +188,44 @@ describe("OpenGeniClient Channel-A batches", () => {
       },
     ]);
   });
+
+  test("publishes a sandbox file through the session-scoped artifact route", async () => {
+    const artifactId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const receipt = {
+      type: "sandbox_file" as const,
+      sandboxPath: "/workspace/reports/summary.pdf",
+      filename: "summary.pdf",
+      artifact: {
+        available: true as const,
+        artifactId,
+        kind: "file" as const,
+        contentType: "application/pdf",
+        originalBytes: 4,
+        sha256: "a".repeat(64),
+        retainedAt: "2026-08-17T00:00:00.000Z",
+        retention: { policy: "workspace_file" as const, expiresAt: null },
+        retrieval: {
+          method: "GET" as const,
+          path: `/v1/workspaces/${WORKSPACE_ID}/artifacts/${artifactId}/content`,
+          acceptRanges: "bytes" as const,
+          maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+        },
+      },
+    };
+    const { client, requests } = makeClient(() => jsonResponse(receipt));
+
+    expect(
+      await client.publishSandboxFileArtifact(WORKSPACE_ID, SESSION_ID, {
+        path: "reports/summary.pdf",
+      }),
+    ).toEqual(receipt);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      method: "POST",
+      url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/artifacts/publish`,
+    });
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ path: "reports/summary.pdf" });
+  });
 });
 
 describe("OpenGeniClient turn queue", () => {

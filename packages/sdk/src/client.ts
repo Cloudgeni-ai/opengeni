@@ -342,6 +342,8 @@ import type {
   FsListBatchResponse,
   FsReadRequest,
   FsReadResponse,
+  PublishSandboxFileArtifactRequest,
+  SandboxFileArtifactReceipt,
   FsWriteRequest,
   FsWriteResponse,
   FsDeleteRequest,
@@ -419,7 +421,10 @@ import type {
   UninstallSkillResult,
 } from "./types";
 import { GENERATED_VIDEO_MAX_BYTES } from "./types";
-import { parseRetainedGeneratedImageReference } from "./retained-artifacts";
+import {
+  parseRetainedGeneratedImageReference,
+  parseRetainedWorkspaceFileReference,
+} from "./retained-artifacts";
 import type {
   ActivateWorkspaceInstructionPolicyRequest,
   CreateWorkspaceInstructionPolicyDraftRequest,
@@ -2213,6 +2218,22 @@ export class OpenGeniClient {
     return await this.requestJson<FsReadResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/read`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  /** Publish one exact sandbox file into permanent workspace artifact storage. */
+  async publishSandboxFileArtifact(
+    workspaceId: string,
+    sessionId: string,
+    request: PublishSandboxFileArtifactRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<SandboxFileArtifactReceipt> {
+    return await this.requestJson<SandboxFileArtifactReceipt>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/artifacts/publish`,
       request,
       {},
       options,
@@ -4767,24 +4788,24 @@ export class OpenGeniClient {
     );
   }
 
-  /** Assemble one permanent generated-image receipt from bounded authenticated ranges. */
+  /** Assemble one permanent image or file artifact from bounded authenticated ranges. */
   async downloadRetainedArtifact(
     workspaceId: string,
     artifact: RetainedArtifactReference,
     options: RetainedArtifactDownloadOptions = {},
   ): Promise<RetainedArtifactDownload> {
-    assertRetainedGeneratedImageReceipt(workspaceId, artifact);
+    assertRetainedWorkspaceArtifactReceipt(workspaceId, artifact);
     const bytes = await this.downloadRetainedArtifactBytes(artifact, options);
     return { artifact, bytes };
   }
 
-  /** Mint a short-lived, zero-copy browser source for a validated generated image. */
+  /** Mint a short-lived, zero-copy browser source for a validated workspace artifact. */
   async createRetainedArtifactDownloadUrl(
     workspaceId: string,
     artifact: RetainedArtifactReference,
     options: OpenGeniRequestOptions = {},
   ): Promise<FileDownloadUrlResponse> {
-    assertRetainedGeneratedImageReceipt(workspaceId, artifact);
+    assertRetainedWorkspaceArtifactReceipt(workspaceId, artifact);
     const download = await this.createFileDownloadUrl(workspaceId, artifact.artifactId, options);
     assertSafeArtifactDownloadUrl(download);
     return download;
@@ -6633,12 +6654,15 @@ async function cancelResponseBody(response: Response, reason: string): Promise<v
   await response.body?.cancel(reason).catch(() => undefined);
 }
 
-function assertRetainedGeneratedImageReceipt(
+function assertRetainedWorkspaceArtifactReceipt(
   workspaceId: string,
   artifact: RetainedArtifactReference,
 ): void {
-  if (!parseRetainedGeneratedImageReference(artifact, workspaceId)) {
-    throw new OpenGeniApiError(502, "retained generated image receipt is invalid");
+  if (
+    !parseRetainedGeneratedImageReference(artifact, workspaceId) &&
+    !parseRetainedWorkspaceFileReference(artifact, workspaceId)
+  ) {
+    throw new OpenGeniApiError(502, "retained workspace artifact receipt is invalid");
   }
 }
 
