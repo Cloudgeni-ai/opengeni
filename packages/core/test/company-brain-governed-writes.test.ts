@@ -6,8 +6,13 @@ import type {
 } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import {
+  GovernedLearningActivationConflictError,
+  GovernedLearningEvaluationAuthorityError,
+} from "@opengeni/db";
+import {
   createCompanyBrainGovernedWriteRouter,
   createCompanyBrainLearningPolicyRouter,
+  derivedGovernedLearningOperationId,
 } from "../src/domain/company-brain-governed-writes";
 
 const ACCOUNT_ID = "00000000-0000-4000-8000-000000000101";
@@ -28,7 +33,11 @@ const attempt = {
   executionGeneration: 3,
 };
 
-function receiptFor(request: CompanyBrainGovernedWriteRequest): CompanyBrainGovernedWriteReceipt {
+const HUMAN_SUBJECT_ID = "user:owner-1";
+
+function receiptFor(
+  request: CompanyBrainGovernedWriteRequest,
+): CompanyBrainGovernedWriteReceipt & { initiatingHumanSubjectId: string } {
   const destination =
     request.kind === "propose_instruction_policy" ||
     request.kind === "promote_task_note_instruction_policy"
@@ -59,6 +68,7 @@ function receiptFor(request: CompanyBrainGovernedWriteRequest): CompanyBrainGove
       destination === "knowledge" ? null : "00000000-0000-4000-8000-000000000113",
     effectiveBoundary: "human_review_required",
     rollback: { supported: false, mechanism: "not_applicable_proposal_only" },
+    initiatingHumanSubjectId: HUMAN_SUBJECT_ID,
   };
 }
 
@@ -285,7 +295,7 @@ describe("Company Brain learning-policy router", () => {
     const result = await router.write({ attempt, request });
     expect(result.decision).toBe("blocked");
     expect(result.write).toBeNull();
-    expect(result.activation).toEqual({
+    expect(result.activation).toMatchObject({
       requested: false,
       activated: false,
       boundary: "policy_off",
@@ -321,11 +331,12 @@ describe("Company Brain learning-policy router", () => {
     });
     const result = await router.write({ attempt, request });
     expect(result.decision).toBe("activation_requested");
-    expect(result.activation).toEqual({
+    expect(result.activation).toMatchObject({
       requested: true,
       activated: false,
       boundary: "destination_authority",
     });
+    expect(result.learning).toBeNull();
     expect(result.write?.effectiveBoundary).toBe("human_review_required");
   });
 
@@ -430,5 +441,330 @@ describe("Company Brain learning-policy router", () => {
       expect(result.decision).toBe("blocked");
       expect(result.effectivePolicy.source).toEqual({ kind: "task-note", id: noteId });
     }
+  });
+});
+
+describe("Company Brain learning-policy router: evaluator and activation wiring", () => {
+  const preferenceRequest: CompanyBrainGovernedWriteRequest = {
+    kind: "propose_preference",
+    operationId: OPERATION_ID,
+    claimId: CLAIM_ID,
+    evidenceId: EVIDENCE_ID,
+    stableKey: "support.escalation-tone",
+    title: "Support escalation tone",
+    description: "Suggested communication style during customer-impacting incidents.",
+    content: "Use concise, direct status updates.",
+    precedenceRank: 0,
+    conflictStrategy: "override",
+    conflictsWith: [],
+    expiresAt: null,
+    reason: "Materialize an inactive workspace preference for human review.",
+  };
+  const knowledgeRequest: CompanyBrainGovernedWriteRequest = {
+    kind: "propose_knowledge",
+    operationId: OPERATION_ID,
+    claimId: CLAIM_ID,
+    evidenceId: EVIDENCE_ID,
+    reason: "Route derived evidence through the frozen workspace policy.",
+  };
+  const DECISION_ID = "00000000-0000-4000-8000-000000000301";
+  const ACTIVATION_ID = "00000000-0000-4000-8000-000000000302";
+  const DESTINATION_REVISION_ID = "00000000-0000-4000-8000-000000000303";
+
+  function decisionReceipt(input: {
+    outcome: "suggest" | "automatic" | "confidence" | "conflict";
+    automaticEligible: boolean;
+    reasons?: string[];
+  }) {
+    return {
+      id: DECISION_ID,
+      outcome: input.outcome,
+      automaticEligible: input.automaticEligible,
+      reasons: input.reasons ?? [],
+    } as never;
+  }
+  function activationReceipt() {
+    return {
+      id: ACTIVATION_ID,
+      destination: "preference",
+      destinationRevisionId: DESTINATION_REVISION_ID,
+      effectiveAt: "2026-08-17T10:00:00.000Z",
+    } as never;
+  }
+
+  test("suggest evaluates a Ways proposal with the frozen snapshot and initiating human but never activates", async () => {
+    const evaluations: unknown[] = [];
+    let activations = 0;
+    const router = createCompanyBrainLearningPolicyRouter({
+      db: {} as Database,
+      async learningPolicySnapshot() {
+        return policySnapshot("suggest");
+      },
+      async authority() {
+        return receiptFor(preferenceRequest);
+      },
+      async evaluate(_db, input) {
+        evaluations.push(input);
+        return decisionReceipt({ outcome: "suggest", automaticEligible: false });
+      },
+      async activate() {
+        activations += 1;
+        return activationReceipt();
+      },
+    });
+    const result = await router.write({ attempt, request: preferenceRequest });
+    expect(evaluations).toEqual([
+      {
+        attempt: {
+          workspaceId: WORKSPACE_ID,
+          subjectId: HUMAN_SUBJECT_ID,
+          sessionId: SESSION_ID,
+          turnId: TURN_ID,
+          attemptId: ATTEMPT_ID,
+          executionGeneration: 3,
+        },
+        request: {
+          operationId: derivedGovernedLearningOperationId(OPERATION_ID, "evaluation"),
+          policySnapshotId: "00000000-0000-4000-8000-000000000201",
+          proposalId: "00000000-0000-4000-8000-000000000111",
+          claimId: CLAIM_ID,
+          evidenceId: EVIDENCE_ID,
+        },
+      },
+    ]);
+    expect(activations).toBe(0);
+    expect(result.decision).toBe("proposal_created");
+    expect(result.learning).toEqual({
+      receiptId: DECISION_ID,
+      outcome: "suggest",
+      automaticEligible: false,
+      reasons: [],
+    });
+    expect(result.learningFailure).toBeNull();
+    expect(result.activation).toMatchObject({
+      requested: false,
+      activated: false,
+      boundary: "human_review",
+      receiptId: null,
+    });
+  });
+
+  test("automatic activates a final eligible decision through the destination controller", async () => {
+    const activations: unknown[] = [];
+    const router = createCompanyBrainLearningPolicyRouter({
+      db: {} as Database,
+      async learningPolicySnapshot() {
+        return policySnapshot("automatic");
+      },
+      async authority() {
+        return receiptFor(preferenceRequest);
+      },
+      async evaluate() {
+        return decisionReceipt({ outcome: "automatic", automaticEligible: true });
+      },
+      async activate(_db, input) {
+        activations.push(input);
+        return activationReceipt();
+      },
+    });
+    const result = await router.write({ attempt, request: preferenceRequest });
+    expect(activations).toEqual([
+      {
+        caller: { workspaceId: WORKSPACE_ID, subjectId: HUMAN_SUBJECT_ID },
+        request: {
+          operationId: derivedGovernedLearningOperationId(OPERATION_ID, "activation"),
+          decisionReceiptId: DECISION_ID,
+        },
+      },
+    ]);
+    expect(result.decision).toBe("activated");
+    expect(result.write?.knowledgeChangeProposalId).toBe("00000000-0000-4000-8000-000000000111");
+    expect(result.activation).toEqual({
+      requested: true,
+      activated: true,
+      boundary: "activated",
+      receiptId: ACTIVATION_ID,
+      destination: "preference",
+      destinationRevisionId: DESTINATION_REVISION_ID,
+      effectiveAt: "2026-08-17T10:00:00.000Z",
+    });
+  });
+
+  test("automatic without eligibility keeps the proposal for human review", async () => {
+    let activations = 0;
+    const router = createCompanyBrainLearningPolicyRouter({
+      db: {} as Database,
+      async learningPolicySnapshot() {
+        return policySnapshot("automatic");
+      },
+      async authority() {
+        return receiptFor(preferenceRequest);
+      },
+      async evaluate() {
+        return decisionReceipt({
+          outcome: "confidence",
+          automaticEligible: false,
+          reasons: ["confidence_below_floor"],
+        });
+      },
+      async activate() {
+        activations += 1;
+        return activationReceipt();
+      },
+    });
+    const result = await router.write({ attempt, request: preferenceRequest });
+    expect(activations).toBe(0);
+    expect(result.decision).toBe("activation_requested");
+    expect(result.learning?.outcome).toBe("confidence");
+    expect(result.activation).toMatchObject({
+      requested: true,
+      activated: false,
+      boundary: "not_eligible",
+    });
+  });
+
+  test("automatic never activates mandatory instruction policy by default", async () => {
+    const instructionRequest: CompanyBrainGovernedWriteRequest = {
+      kind: "propose_instruction_policy",
+      operationId: OPERATION_ID,
+      claimId: CLAIM_ID,
+      evidenceId: EVIDENCE_ID,
+      target: { kind: "policy", scope: "role", roleKey: "support" },
+      content: "Escalate customer-impacting incidents immediately.",
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      reason: "Materialize an inactive draft for human review.",
+    };
+    let activations = 0;
+    const router = createCompanyBrainLearningPolicyRouter({
+      db: {} as Database,
+      async learningPolicySnapshot() {
+        return policySnapshot("automatic");
+      },
+      async authority() {
+        return receiptFor(instructionRequest);
+      },
+      async evaluate() {
+        return decisionReceipt({ outcome: "automatic", automaticEligible: true });
+      },
+      async activate() {
+        activations += 1;
+        return activationReceipt();
+      },
+    });
+    const result = await router.write({ attempt, request: instructionRequest });
+    expect(activations).toBe(0);
+    expect(result.decision).toBe("activation_requested");
+    expect(result.learning?.automaticEligible).toBe(true);
+    expect(result.activation).toMatchObject({
+      requested: true,
+      activated: false,
+      boundary: "human_activation_required",
+    });
+
+    const optedIn = createCompanyBrainLearningPolicyRouter({
+      db: {} as Database,
+      automaticDestinations: ["preference", "instruction_policy"],
+      async learningPolicySnapshot() {
+        return policySnapshot("automatic");
+      },
+      async authority() {
+        return receiptFor(instructionRequest);
+      },
+      async evaluate() {
+        return decisionReceipt({ outcome: "automatic", automaticEligible: true });
+      },
+      async activate() {
+        activations += 1;
+        return { ...(activationReceipt() as object), destination: "instruction_policy" } as never;
+      },
+    });
+    const activated = await optedIn.write({ attempt, request: instructionRequest });
+    expect(activations).toBe(1);
+    expect(activated.decision).toBe("activated");
+    expect(activated.activation.destination).toBe("instruction_policy");
+  });
+
+  test("evaluation and activation failures never discard the durable proposal", async () => {
+    const evaluatorFails = createCompanyBrainLearningPolicyRouter({
+      db: {} as Database,
+      async learningPolicySnapshot() {
+        return policySnapshot("automatic");
+      },
+      async authority() {
+        return receiptFor(preferenceRequest);
+      },
+      async evaluate() {
+        throw new GovernedLearningEvaluationAuthorityError("stale attempt");
+      },
+      async activate() {
+        throw new Error("must not activate without a decision");
+      },
+    });
+    const evaluationFailure = await evaluatorFails.write({ attempt, request: preferenceRequest });
+    expect(evaluationFailure.write?.outcome).toBe("proposed");
+    expect(evaluationFailure.learning).toBeNull();
+    expect(evaluationFailure.learningFailure).toEqual({ stage: "evaluation", code: "authority" });
+    expect(evaluationFailure.activation).toMatchObject({
+      requested: true,
+      activated: false,
+      boundary: "destination_authority",
+    });
+
+    const activationFails = createCompanyBrainLearningPolicyRouter({
+      db: {} as Database,
+      async learningPolicySnapshot() {
+        return policySnapshot("automatic");
+      },
+      async authority() {
+        return receiptFor(preferenceRequest);
+      },
+      async evaluate() {
+        return decisionReceipt({ outcome: "automatic", automaticEligible: true });
+      },
+      async activate() {
+        throw new GovernedLearningActivationConflictError("destination head moved");
+      },
+    });
+    const activationFailure = await activationFails.write({ attempt, request: preferenceRequest });
+    expect(activationFailure.write?.outcome).toBe("proposed");
+    expect(activationFailure.learning?.receiptId).toBe(DECISION_ID);
+    expect(activationFailure.learningFailure).toEqual({ stage: "activation", code: "conflict" });
+    expect(activationFailure.activation.activated).toBe(false);
+  });
+
+  test("Knowledge destinations are never evaluated or activated", async () => {
+    const router = createCompanyBrainLearningPolicyRouter({
+      db: {} as Database,
+      async learningPolicySnapshot() {
+        return policySnapshot("automatic");
+      },
+      async authority() {
+        return receiptFor(knowledgeRequest);
+      },
+      async evaluate() {
+        throw new Error("knowledge proposals have no change proposal to evaluate");
+      },
+      async activate() {
+        throw new Error("knowledge proposals cannot activate");
+      },
+    });
+    const result = await router.write({ attempt, request: knowledgeRequest });
+    expect(result.decision).toBe("activation_requested");
+    expect(result.learning).toBeNull();
+    expect(result.learningFailure).toBeNull();
+    expect(result.activation.activated).toBe(false);
+  });
+
+  test("derived governed-learning operation ids are stable per stage and distinct across stages", () => {
+    const evaluation = derivedGovernedLearningOperationId(OPERATION_ID, "evaluation");
+    expect(evaluation).toBe(derivedGovernedLearningOperationId(OPERATION_ID, "evaluation"));
+    expect(evaluation).not.toBe(derivedGovernedLearningOperationId(OPERATION_ID, "activation"));
+    expect(evaluation).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+    );
+    expect(evaluation).not.toBe(
+      derivedGovernedLearningOperationId("00000000-0000-4000-8000-000000000999", "evaluation"),
+    );
   });
 });

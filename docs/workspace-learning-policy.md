@@ -37,12 +37,14 @@ Workspaces without an active revision snapshot deterministically as `off`, with 
 4. Its receipt retains the snapshot id/hash, policy revision identity, activation version, and source reference.
 5. `workspaceLearningPolicyRouterContext(effectiveMode)` projects the exact immutable `{mode,snapshotId,revisionId}` object consumed by the canonical router. A snapshot with no active revision uses the explicit stable `workspace-learning-policy:default-off:v1` revision sentinel, preserving the deterministic `off` policy instead of misrepresenting it as a missing snapshot.
 
-Migration `0268_governed_learning_decision_receipts.sql` adds the first inert evaluator over this frozen policy state. It accepts only an exact live attempt, its accepted policy snapshot, and one workspace-scoped proposal/claim/supporting-evidence lineage. Before recording a verdict it rechecks current Task-note or scoped-Document authority, the latest review, expiry/staleness, conflicts, and a platform-owned confidence floor. The result is one immutable, content-free receipt with exact IDs, hashes, versions, bounded facts, and canonical reason order.
+Migration `0268_governed_learning_decision_receipts.sql` adds the deterministic evaluator over this frozen policy state. The Company Brain learning-policy router (`createCompanyBrainLearningPolicyRouter` in `packages/core/src/domain/company-brain-governed-writes.ts`) invokes it after every committed Ways-of-working proposal (instruction policy or preference) with the accepted snapshot and the turn's immutable initiating human; see [`company-brain-write-routing.md`](company-brain-write-routing.md). It accepts only an exact live attempt, its accepted policy snapshot, and one workspace-scoped proposal/claim/supporting-evidence lineage. Before recording a verdict it rechecks current Task-note or scoped-Document authority, the latest review, expiry/staleness, conflicts, and a platform-owned confidence floor. The result is one immutable, content-free receipt with exact IDs, hashes, versions, bounded facts, and canonical reason order.
 
 `automatic` is only an eligibility verdict. The evaluator has no destination-writer call, head privilege, activation grant, or reusable capability. Exact retries converge on the original receipt; a changed operation input, another task tree, another subject, or another proposal for the same accepted snapshot conflicts or denies. The receipt table is FORCE RLS with no direct runtime DML, and the app role can call only the target-schema-local SECURITY DEFINER evaluator.
 
-Migration `0269_governed_learning_activation_controller.sql` adds the separate,
-inert controller that may consume one final `automatic` receipt. It revalidates
+Migration `0269_governed_learning_activation_controller.sql` adds the separate
+controller that consumes one final `automatic` receipt. The learning-policy
+router invokes it for eligible **preference** decisions; instruction-policy
+decisions are recorded but keep a human activation boundary. It revalidates
 the accepted attempt and initiating human, current policy head and source
 override, current evidence ACL/lifecycle/hash, latest Knowledge review, inactive
 proposal, conflict facts, and destination CAS before invoking the destination's

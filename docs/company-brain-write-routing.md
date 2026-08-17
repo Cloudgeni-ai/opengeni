@@ -88,19 +88,37 @@ is `not_applicable_proposal_only` and no authority rollback token exists.
 Rejection/revocation and the existing human-governed destination lifecycle are
 the only later rollback/review mechanisms. No selector snapshot,
 logical-turn context receipt, generic Task-note write surface, external REST/UI,
-or automatic policy/preference activation is part of this slice.
+or automatic instruction-policy activation is part of this slice; automatic
+preference activation is routed through the governed-learning evaluator and
+controller as described below.
 
 The transport-neutral learning-policy router resolves an exact
 `scoped-knowledge-evidence/<evidenceId>` source from the immutable policy
 snapshot owned by the accepted attempt. Callers cannot supply another source
 key to select a more permissive override. `off` produces no destination write;
-`suggest` creates the existing inactive proposal; and `automatic` creates the
-same auditable proposal while requesting activation at the destination-owned
-lifecycle boundary. Its receipt explicitly reports that activation has not
-occurred. Mandatory instruction policy and preferences therefore remain
-inactive until their existing authority accepts them, even in automatic mode.
-The public receipt exposes only the effective source-specific decision and
-snapshot identity/hash, not the snapshot's other source overrides.
+`suggest` and `automatic` both create the same auditable proposal. After the
+proposal commits, a Ways-of-working proposal (one that materialized a
+`knowledge_change_proposals` row: instruction policy or preference) is passed to
+the migration 0268 evaluator with the same frozen snapshot, the exact accepted
+attempt, and the turn's immutable initiating human; the evaluator records a
+content-free decision receipt that the receipt's `learning` summary reports
+(`outcome`, `automaticEligible`, ordered `reasons`). Under `automatic`, a final
+eligible decision for a **preference** is handed to the migration 0269
+activation controller, which revalidates current authority and applies the
+change only through the preference lifecycle; the receipt then reports
+`decision: "activated"` with the activation receipt id, destination revision,
+and effective boundary, and the change is undoable from Learning & autonomy.
+Mandatory instruction policy keeps a human activation boundary even under
+`automatic` (`activation.boundary = "human_activation_required"`): its decision
+receipt is recorded and its inactive draft waits for a human. Knowledge
+destinations create no change proposal and are never evaluated; the human
+Knowledge review lifecycle owns them. Evaluator or controller failures never
+roll back the durable proposal; they surface as a bounded content-free
+`learningFailure` and the proposal remains for review. Evaluation and
+activation operation ids are derived deterministically from the proposal
+operation id, so exact retries converge on the same receipts. The public
+receipt exposes only the effective source-specific decision and snapshot
+identity/hash, not the snapshot's other source overrides.
 
 The first-party proposal surface is intentionally explicit:
 `knowledge_propose`, `knowledge_correct`, `task_note_promote_knowledge`,
@@ -218,8 +236,9 @@ Still required outside this workspace-local slice:
 
 - Personal/Organization promotion and explicit scope commands after their
   canonical cross-workspace authorities are active;
-- automatic activation destinations beyond the workspace-scoped Knowledge,
-  Instruction Policy, and Preference lifecycles owned by migration 0269; and
+- automatic activation destinations beyond the workspace-scoped Preference
+  lifecycle (instruction policy stays human-activated; Knowledge is
+  review-owned) owned by migration 0269; and
 - bounded expiry cleanup and user-facing Advanced/search/export surfaces.
 
 Canonical implementation: `packages/contracts/src/task-notes.ts`,
