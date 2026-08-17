@@ -103,7 +103,7 @@ import {
   sandboxArtifactRuntimeAdmission,
   sandboxDeadlineRotationRecoveryDelayMs,
   shouldEstablishSandboxForTurn,
-  shouldDeferBestEffortToolPreparation,
+  shouldDeferNonEagerToolPreparation,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
@@ -4844,7 +4844,7 @@ describe("lazyToolTransportForTurn", () => {
   });
 });
 
-describe("shouldDeferBestEffortToolPreparation", () => {
+describe("shouldDeferNonEagerToolPreparation", () => {
   const eligible = {
     lazyToolTransport: "codex_native" as const,
     progressiveDisclosureEnabled: true,
@@ -4854,9 +4854,9 @@ describe("shouldDeferBestEffortToolPreparation", () => {
   };
 
   test("overlaps only a brand-new lazy-capable turn", () => {
-    expect(shouldDeferBestEffortToolPreparation(eligible)).toBe(true);
+    expect(shouldDeferNonEagerToolPreparation(eligible)).toBe(true);
     expect(
-      shouldDeferBestEffortToolPreparation({
+      shouldDeferNonEagerToolPreparation({
         ...eligible,
         triggerType: "system.update.delivered",
       }),
@@ -4864,14 +4864,14 @@ describe("shouldDeferBestEffortToolPreparation", () => {
   });
 
   test("keeps approval resumes, editable artifacts, and disabled disclosure eager", () => {
-    expect(shouldDeferBestEffortToolPreparation({ ...eligible, triggerKind: "approval" })).toBe(
+    expect(shouldDeferNonEagerToolPreparation({ ...eligible, triggerKind: "approval" })).toBe(
       false,
     );
     expect(
-      shouldDeferBestEffortToolPreparation({ ...eligible, artifactRuntimeAvailable: true }),
+      shouldDeferNonEagerToolPreparation({ ...eligible, artifactRuntimeAvailable: true }),
     ).toBe(false);
     expect(
-      shouldDeferBestEffortToolPreparation({
+      shouldDeferNonEagerToolPreparation({
         ...eligible,
         progressiveDisclosureEnabled: false,
       }),

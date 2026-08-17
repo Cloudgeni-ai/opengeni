@@ -371,6 +371,17 @@ choose_port OPENGENI_TURN_WORKER_HTTP_PORT 8002
 choose_port OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT 9465
 choose_port OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT 9466
 choose_port OPENGENI_WEB_PORT 3000
+
+# Host workers always reach first-party MCP through this worktree's API port.
+# OPENGENI_MCP_URL may later become a public Cloudflare edge for Modal and must
+# never drag worker traffic through that tunnel.
+default_internal_mcp_url="http://127.0.0.1:8000/v1/workspaces/{workspaceId}/mcp"
+if [ -z "${OPENGENI_MCP_INTERNAL_URL:-}" ] ||
+  [ "${OPENGENI_MCP_INTERNAL_URL}" = "$default_internal_mcp_url" ]; then
+  export OPENGENI_MCP_INTERNAL_URL="http://127.0.0.1:${OPENGENI_API_PORT}/v1/workspaces/{workspaceId}/mcp"
+else
+  export OPENGENI_MCP_INTERNAL_URL="$(rewrite_loopback_port "$OPENGENI_MCP_INTERNAL_URL" "$OPENGENI_API_PORT")"
+fi
 if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "modal" ]; then
   choose_port OPENGENI_SANDBOX_EDGE_PORT 10080
 fi
@@ -850,6 +861,7 @@ fi
   printf 'OPENGENI_OBJECT_STORAGE_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_ENDPOINT}"
   printf 'OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT}"
   printf 'OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}"
+  printf 'OPENGENI_MCP_INTERNAL_URL=%s\n' "${OPENGENI_MCP_INTERNAL_URL}"
   if [ -n "${OPENGENI_MCP_URL:-}" ]; then
     printf 'OPENGENI_MCP_URL=%s\n' "${OPENGENI_MCP_URL}"
   fi

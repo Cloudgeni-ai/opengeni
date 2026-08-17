@@ -4519,9 +4519,15 @@ export type WorkspaceMemorySearchResponse = z.infer<typeof WorkspaceMemorySearch
 export const ToolRef = z.object({
   kind: z.literal("mcp"),
   id: z.string().min(1),
+  // Session-scoped startup choice. `true` prepares this server's authorized
+  // schemas before the first model request; absent/false keeps it behind
+  // progressive discovery. This never grants a server or tool permission.
+  eager: z.boolean().optional(),
   // Non-fatal-on-connect marker for MCP server refs that can degrade
   // gracefully. On new input, absent/false is STRICT: the id must be configured
-  // and an unavailable registered server fails the turn. Persisted refs are
+  // and an unavailable registered server fails closed when its preparation is
+  // demanded. Only the independent eager marker makes that a startup failure.
+  // Persisted refs are
   // intersected with the current registry at each turn boundary, so a server
   // disconnected after admission is retained in policy/audit truth but skipped
   // until it is registered again. `optional:true` additionally makes runtime
@@ -4718,10 +4724,14 @@ export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRe
     // strict occurrence upgrades the merged ref so an unavailable server fails
     // the turn. This preserves the fail-loud default when defaults, packs, and
     // per-turn tool selections are combined.
-    if (prior.optional === true && tool.optional !== true) {
-      const { optional: _dropped, ...strict } = prior;
-      byKey.set(key, strict);
-    }
+    const optional = prior.optional === true && tool.optional === true ? true : undefined;
+    const eager = prior.eager === true || tool.eager === true ? true : undefined;
+    byKey.set(key, {
+      kind: "mcp",
+      id: prior.id,
+      ...(optional ? { optional } : {}),
+      ...(eager ? { eager } : {}),
+    });
   }
   return order.map((key) => byKey.get(key)!);
 }

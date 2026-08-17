@@ -79,6 +79,14 @@ describe("Helm database upgrade contract", () => {
     }
   });
 
+  test("routes worker first-party MCP over the private service by default", async () => {
+    const configMap = await source("deploy/helm/opengeni/templates/configmap.yaml");
+
+    expect(configMap).toContain('hasKey .Values.config "OPENGENI_MCP_INTERNAL_URL"');
+    expect(configMap).toContain("-api:%d/v1/workspaces/{workspaceId}/mcp");
+    expect(configMap).not.toContain('hasKey .Values.config "OPENGENI_MCP_URL"');
+  });
+
   test("projects only dedicated credentials into the artifact materializer", async () => {
     const values = await source("deploy/helm/opengeni/values.yaml");
     const materializer = await source(

@@ -301,6 +301,7 @@ function toolIdentity(
       kind: tool.kind,
       id: id.value,
       ...(tool.optional !== undefined ? { optional: tool.optional } : {}),
+      ...(tool.eager !== undefined ? { eager: tool.eager } : {}),
     },
     truncatedFieldCount: Number(id.truncated),
   };

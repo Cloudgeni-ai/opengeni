@@ -184,11 +184,17 @@ attempt-fenced configuration and request-time resolver, including forced refresh
 after a 401. Normal session reads return only safe metadata and the non-secret
 connection pointer.
 
-Fresh turns on a progressive-disclosure provider prepare required MCPs before
-the provider call, but may connect/list optional session or capability MCPs in
-parallel with the first streamed response. Search and execution wait for the
-same combined attempt catalog; optional preparation is never a second registry
-or a weaker authorization path. Resume and editable-artifact turns remain eager.
+Each durable session tool ref may set `eager: true`. Eagerness is not inferred
+from mandatory/strict selection: on a fresh progressive-disclosure turn, only
+those exact servers join the first-provider-request barrier. Every other MCP,
+including strict first-party OpenGeni, begins connection/listing concurrently.
+Ordinary text may settle without waiting; `tool_search`, deferred invocation,
+Codemode activation, and catalog-dependent work join the same attempt promise.
+This is never a second registry or a weaker authorization path. Duplicate refs
+merge conservatively: strict wins for failure semantics and eager wins for the
+startup choice. Approval/human-input resumes and editable-artifact turns remain
+fully prepared because continuation requires their exact prior execution/catalog
+identity.
 
 For model MCP execution, the worker also supplies attempt-bound connector policy
 hooks to the runtime. The runtime wraps converted MCP function tools and every

@@ -469,6 +469,10 @@ const SettingsSchema = z.object({
   apiHost: z.string().default("0.0.0.0"),
   apiPort: z.coerce.number().int().positive().default(8000),
   workerHttpPort: z.coerce.number().int().positive().default(8001),
+  // Worker-side first-party MCP traffic stays on the deployment's internal
+  // network. OPENGENI_MCP_URL remains the sandbox/external route used by
+  // Codemode and remote placements.
+  opengeniMcpInternalUrl: z.string().url().optional(),
   opengeniMcpUrl: z.string().url().optional(),
   // Origins allowed to send browser cookies cross-origin. Other origins may
   // call the public API with bearer credentials, but never receive credentialed
@@ -617,12 +621,13 @@ const SettingsSchema = z.object({
   codexConnectedAppsEnabled: EnvBoolean.default(false), // OPENGENI_CODEX_CONNECTED_APPS_ENABLED
   codexProductSku: z.string().optional(), // OPENGENI_CODEX_PRODUCT_SKU (X-OpenAI-Product-Sku, apps only)
   // Progressive MCP disclosure (Codex-CLI-style tool_search): on a codex turn,
-  // flag non-mandatory selected MCP tools `defer_loading:true` (dropping their
+  // flag non-eager selected MCP tools `defer_loading:true` (dropping their
   // schemas from model context) and add one client-executed tool_search tool
-  // that BM25-discloses bounded matches. The mandatory OpenGeni tools stay
-  // eager. Default ON so selected connector catalogues do not consume every
-  // Codex turn's context. Operators may explicitly disable it for emergency
-  // compatibility diagnosis.
+  // that BM25-discloses bounded matches. Only an exact session tool ref with
+  // `eager:true` stays on the startup path; mandatory selection alone does not
+  // imply eagerness. Default ON so selected connector catalogues do not consume
+  // every Codex turn's context. Operators may explicitly disable it for
+  // emergency compatibility diagnosis.
   // OPENGENI_CODEX_TOOL_SEARCH_ENABLED
   codexToolSearchEnabled: EnvBoolean.default(true),
   // Provider-neutral progressive disclosure for direct OpenAI/Azure native
@@ -2133,6 +2138,7 @@ export function getSettings(): Settings {
     apiHost: optional("OPENGENI_API_HOST"),
     apiPort: optional("OPENGENI_API_PORT"),
     workerHttpPort: optional("OPENGENI_WORKER_HTTP_PORT"),
+    opengeniMcpInternalUrl: optional("OPENGENI_MCP_INTERNAL_URL"),
     opengeniMcpUrl: optional("OPENGENI_MCP_URL"),
     corsAllowOriginRegex: optional("OPENGENI_CORS_ALLOW_ORIGIN_REGEX"),
     openaiProvider: optional("OPENGENI_OPENAI_PROVIDER"),
@@ -4811,18 +4817,11 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
 }
 
 /**
- * The base URL of OpenGeni's own first-party MCP endpoint, as a `{workspaceId}`
- * template — the SINGLE source of truth for the `opengeniMcpUrl`-or-loopback
- * decision. Every site that needs the first-party MCP base (config's tool
- * registry here, and the worker-side `firstPartyMcpServerUrlForRun` /
- * `firstPartyMcpUrls` in @opengeni/runtime) MUST route through this so the
- * default lives in exactly one place.
+ * The sandbox/external base URL of OpenGeni's first-party MCP endpoint, as a
+ * `{workspaceId}` template. Codemode and remote placements use this route.
  *
  * BINDING CONTRACT (`opengeniMcpUrl`):
- *   - STANDALONE (unset): falls back to the loopback default
- *     `http://127.0.0.1:${apiPort}/v1/workspaces/{workspaceId}/mcp` — the worker
- *     and API are in/next to the same host:port, so loopback resolves the
- *     workspace-scoped MCP. Byte-for-byte today's behavior.
+ *   - STANDALONE (unset): falls back to the loopback default.
  *   - EMBEDDED / MOUNTED (must set): when OpenGeni's API is mounted as a host
  *     sub-app under a prefix (e.g. `https://host/og/v1/...`), the loopback
  *     default is WRONG — the worker runs in the host process and `127.0.0.1:
@@ -4838,8 +4837,19 @@ export function firstPartyMcpBaseUrl(settings: Settings): string {
   );
 }
 
-export function firstPartyMcpWorkspaceUrl(settings: Settings, workspaceId: string): string {
-  const raw = firstPartyMcpBaseUrl(settings);
+/**
+ * Worker-side first-party MCP base. It never inherits the public/tunnel URL:
+ * an operator may intentionally expose that route to Modal or a Connected
+ * Machine, while the worker should still use loopback or cluster service DNS.
+ */
+export function firstPartyMcpInternalBaseUrl(settings: Settings): string {
+  return (
+    settings.opengeniMcpInternalUrl ??
+    `http://127.0.0.1:${settings.apiPort}/v1/workspaces/{workspaceId}/mcp`
+  );
+}
+
+function scopedFirstPartyMcpUrl(raw: string, workspaceId: string): string {
   if (raw.includes("{workspaceId}")) {
     return raw.replaceAll("{workspaceId}", workspaceId);
   }
@@ -4848,6 +4858,14 @@ export function firstPartyMcpWorkspaceUrl(settings: Settings, workspaceId: strin
   url.search = "";
   url.hash = "";
   return url.toString();
+}
+
+export function firstPartyMcpWorkspaceUrl(settings: Settings, workspaceId: string): string {
+  return scopedFirstPartyMcpUrl(firstPartyMcpBaseUrl(settings), workspaceId);
+}
+
+export function firstPartyMcpInternalWorkspaceUrl(settings: Settings, workspaceId: string): string {
+  return scopedFirstPartyMcpUrl(firstPartyMcpInternalBaseUrl(settings), workspaceId);
 }
 
 export function codemodeWorkspaceUrl(settings: Settings, workspaceId: string): string {

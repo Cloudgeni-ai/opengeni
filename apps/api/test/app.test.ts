@@ -334,6 +334,12 @@ describe("API helpers", () => {
         runtimeSettings as never,
       ),
     ).toEqual([{ kind: "mcp", id: "cap-notebook", optional: true }]);
+    expect(
+      validateToolRefs(
+        [{ kind: "mcp", id: "cap-notebook", eager: true }],
+        runtimeSettings as never,
+      ),
+    ).toEqual([{ kind: "mcp", id: "cap-notebook", eager: true }]);
     expect(() =>
       validateToolRefs([{ kind: "mcp", id: "missing" }], runtimeSettings as never),
     ).toThrow("unknown MCP server id: missing");

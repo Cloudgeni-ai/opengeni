@@ -6351,7 +6351,7 @@ describe("runtime event normalization", () => {
       testSettings({
         authRequired: true,
         accessKey,
-        opengeniMcpUrl: mcp.url,
+        opengeniMcpInternalUrl: mcp.url,
         mcpServers: [
           {
             id: "opengeni",
@@ -6410,6 +6410,7 @@ describe("runtime event normalization", () => {
     try {
       const prepared = await prepareAgentTools(
         testSettings({
+          opengeniMcpInternalUrl: `${mcp.url}?ws={workspaceId}`,
           // A `{workspaceId}` template keeps the config first-party (isFirstParty
           // short-circuits on it) and resolves to the test server's /mcp path
           // (the token goes in a query param the server ignores), so the real
@@ -6479,6 +6480,7 @@ describe("runtime event normalization", () => {
     });
     const prepared = await prepareAgentTools(
       testSettings({
+        opengeniMcpInternalUrl: `${mcp.url}?ws={workspaceId}`,
         mcpServers: [
           {
             id: "opengeni",
@@ -6522,6 +6524,7 @@ describe("runtime event normalization", () => {
     });
     const prepared = await prepareAgentTools(
       testSettings({
+        opengeniMcpInternalUrl: `${mcp.url}?ws={workspaceId}`,
         mcpServers: [
           {
             id: "opengeni",
@@ -6563,6 +6566,7 @@ describe("runtime event normalization", () => {
       await expect(
         prepareAgentTools(
           testSettings({
+            opengeniMcpInternalUrl: `${mcp.url}?ws={workspaceId}`,
             mcpServers: [
               {
                 id: "opengeni",
@@ -7810,7 +7814,7 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("defers only optional MCP preparation while required tools remain eager", async () => {
+  test("waits only for session-eager MCP preparation and defers strict and optional servers", async () => {
     let releaseOptional!: () => void;
     const optionalConnect = new Promise<void>((resolve) => {
       releaseOptional = resolve;
@@ -7838,13 +7842,20 @@ describe("runtime event normalization", () => {
       },
       async invalidateToolsCache() {},
     });
-    const required = makeServer("required-inner", async () => {});
+    const eager = makeServer("eager-inner", async () => {});
+    const strict = makeServer("strict-inner", async () => await optionalConnect);
     const optional = makeServer("optional-inner", async () => await optionalConnect);
     const configs = [
       {
-        id: "required",
-        name: "Required",
-        url: "https://required.invalid/mcp",
+        id: "eager",
+        name: "Eager",
+        url: "https://eager.invalid/mcp",
+        cacheToolsList: false,
+      },
+      {
+        id: "strict",
+        name: "Strict",
+        url: "https://strict.invalid/mcp",
         cacheToolsList: false,
       },
       {
@@ -7858,13 +7869,15 @@ describe("runtime event normalization", () => {
     const prepared = await prepareAgentTools(
       settings,
       [
-        { kind: "mcp", id: "required" },
+        { kind: "mcp", id: "eager", eager: true },
+        { kind: "mcp", id: "strict" },
         { kind: "mcp", id: "optional", optional: true },
       ],
       {
-        deferBestEffortUntilModelResponse: true,
+        deferNonEagerUntilToolDemand: true,
         localMcpServers: [
-          { id: "required", server: required },
+          { id: "eager", server: eager },
+          { id: "strict", server: strict },
           { id: "optional", server: optional },
         ],
       },
@@ -7875,14 +7888,15 @@ describe("runtime event normalization", () => {
         mcpServers: prepared.mcpServers,
       });
       expect((await agent.getMcpTools(new RunContext())).map((tool) => tool.name)).toEqual([
-        "required__lookup",
+        "eager__lookup",
       ]);
 
       releaseOptional();
       const complete = await prepared.ready!;
       expect((await agent.getMcpTools(new RunContext())).map((tool) => tool.name).sort()).toEqual([
+        "eager__lookup",
         "optional__lookup",
-        "required__lookup",
+        "strict__lookup",
       ]);
       expect(complete.attemptToolEnvironment).toBeNull();
     } finally {
@@ -8316,7 +8330,7 @@ describe("runtime event normalization", () => {
       try {
         await prepareAgentTools(
           testSettings({
-            opengeniMcpUrl: url,
+            opengeniMcpInternalUrl: url,
             mcpServers: [
               {
                 id: "opengeni",
@@ -10627,7 +10641,7 @@ describe("provider item id stripping", () => {
   });
 
   test("first-call accounting excludes MCP schemas deferred behind Codex tool_search", async () => {
-    let selectedSchemaAccountingDeferred = false;
+    let selectedSchemaAccountingDeferred = true;
     let mandatorySchemaAccountingDeferred = false;
     const selectedMcp = {
       name: "selected",
@@ -10640,6 +10654,7 @@ describe("provider item id stripping", () => {
       deferModelToolSchemaAccounting: () => {
         selectedSchemaAccountingDeferred = true;
       },
+      modelToolSchemasAreDeferred: () => true,
     } as unknown as MCPServer;
     const mandatoryMcp = {
       name: "opengeni",
@@ -10652,6 +10667,7 @@ describe("provider item id stripping", () => {
       deferModelToolSchemaAccounting: () => {
         mandatorySchemaAccountingDeferred = true;
       },
+      modelToolSchemasAreDeferred: () => false,
     } as unknown as MCPServer;
     const settings = testSettings({
       codexToolSearchEnabled: true,

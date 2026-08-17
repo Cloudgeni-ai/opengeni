@@ -2467,6 +2467,7 @@ function toolPolicyAuditSnapshot(
       kind: tool.kind,
       id: tool.id,
       ...(tool.optional === undefined ? {} : { optional: tool.optional }),
+      ...(tool.eager === undefined ? {} : { eager: tool.eager }),
     }));
   const toolRefs = allToolRefs.slice(0, maxToolPolicyAuditRefs);
   return {
