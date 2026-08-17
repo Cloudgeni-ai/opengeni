@@ -35,6 +35,7 @@ import {
   MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
   MODEL_CONTEXT_LABEL,
+  SESSION_GOAL_CONTEXT_LABEL,
   ModelContextContributionSummaries,
   McpServerConnectionRef,
   ModelBillingAttributionV1,
@@ -62,7 +63,9 @@ import {
   DraftTimelineAnnotations,
   SubmittedTimelineAnnotations,
   renderTimelineAnnotationsForModel,
+  renderSessionGoalContext,
   renderUserMessageContentForModel,
+  sessionSystemUpdateBatchHistoryItem,
   numberTimelineAnnotations,
   UpdateSessionMcpApprovalPolicyRequest,
   CLEARED_RUN_STATE_BLOB,
@@ -1213,6 +1216,45 @@ describe("contracts", () => {
       { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\nselected record 42` },
       { type: "input_text", text: "Visible request" },
     ]);
+  });
+
+  test("renders the frozen goal on the newest durable turn input", () => {
+    const goalSnapshot = {
+      state: "active" as const,
+      goalId: "11111111-1111-4111-8111-111111111111",
+      objectiveRevision: 3,
+      text: "Ship the cache-safe goal context",
+      successCriteria: "The persistent instruction prefix remains stable",
+      rootConstraints: ["Do not deploy"],
+      mutationPolicy: "preserve_intent" as const,
+      capturedAt: "2026-08-17T12:00:00.000Z",
+    };
+    const goalContext = renderSessionGoalContext(goalSnapshot)!;
+    expect(
+      renderUserMessageContentForModel("Continue", [], "selected record 42", goalSnapshot),
+    ).toEqual([
+      { type: "input_text", text: `${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}` },
+      { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\nselected record 42` },
+      { type: "input_text", text: "Continue" },
+    ]);
+
+    const update = {
+      id: "22222222-2222-4222-8222-222222222222",
+      kind: "goal_continuation" as const,
+      classification: "action_required" as const,
+      sourceId: "goal",
+      summary: "Continue the goal",
+      payload: {
+        type: "goal_continuation" as const,
+        goalId: goalSnapshot.goalId,
+        goalVersion: 1,
+        prompt: "Continue working.",
+      },
+      lineage: {},
+    };
+    const internal = sessionSystemUpdateBatchHistoryItem([update], goalSnapshot);
+    expect(internal.content).toStartWith(`${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}`);
+    expect(internal.content).toContain("[OpenGeni internal updates]");
   });
 
   test("accepts client config payloads", () => {
