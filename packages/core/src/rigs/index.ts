@@ -36,6 +36,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { boundedParallelMap } from "@opengeni/runtime/mcp-network";
 import { requirePermission } from "../access";
 import { rigProviderImagesFromVerification } from "./provider-images";
 
@@ -45,6 +46,34 @@ export const MAX_RIGS_PER_WORKSPACE = 50;
 export const MAX_CHECKS_PER_RIG = 100;
 export const MAX_CREDENTIAL_HOOKS_PER_RIG = 50;
 export const MAX_DEFAULT_VARIABLE_SETS_PER_RIG = 25;
+export const RIG_DEFAULT_VARIABLE_SET_LOAD_CONCURRENCY = 4;
+
+type VariableSetEnvironment = { values: Record<string, string> } | null;
+
+/** Load complete rig defaults concurrently while preserving listed precedence. */
+export async function loadRigDefaultVariableSetEnvironment(
+  variableSetIds: readonly string[],
+  load: (variableSetId: string) => Promise<VariableSetEnvironment>,
+): Promise<Record<string, string>> {
+  const variableSets = await boundedParallelMap(
+    variableSetIds,
+    RIG_DEFAULT_VARIABLE_SET_LOAD_CONCURRENCY,
+    load,
+  );
+  const values: Record<string, string> = {};
+  for (const variableSet of variableSets) {
+    Object.assign(values, variableSet?.values ?? {});
+  }
+  return values;
+}
+
+/** Rig defaults layer below the session's explicitly selected variable set. */
+export function mergeRigDefaultVariableSetEnvironment(
+  rigDefaultValues: Record<string, string>,
+  sessionValues: Record<string, string>,
+): Record<string, string> {
+  return { ...rigDefaultValues, ...sessionValues };
+}
 
 export type RigServices = {
   db: Database;

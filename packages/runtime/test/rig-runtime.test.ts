@@ -418,6 +418,11 @@ describe("runRigSetupHook (M3)", () => {
     expect(calls.every((call) => Buffer.byteLength(String(call.cmd), "utf8") < 32 * 1024)).toBe(
       true,
     );
+    expect(
+      calls
+        .filter((call) => String(call.cmd).startsWith("printf '%s'"))
+        .every((call) => Buffer.byteLength(String(call.cmd), "utf8") < 8 * 1024),
+    ).toBe(true);
     expect(calls.some((call) => String(call.cmd).includes("base64 -d"))).toBe(true);
     expect(calls.some((call) => String(call.cmd).includes("exec bash '/tmp/opengeni/"))).toBe(true);
     expect(calls.every((call) => !String(call.cmd).includes(script))).toBe(true);

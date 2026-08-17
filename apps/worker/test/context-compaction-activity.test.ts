@@ -30,6 +30,7 @@ import {
   submitHumanPromptInTransaction,
   withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls,
+  type Database,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import {
@@ -95,6 +96,39 @@ describe("standalone context compaction execution", () => {
     expect(ACTIVE_SESSION_HISTORY_MAX_ROWS).toBe(8_192);
     expect(ACTIVE_SESSION_HISTORY_MAX_JSON_NODES).toBe(131_072);
     expect(ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES).toBe(65_536);
+  });
+
+  test("does not touch durable history when provider accounting is below threshold", async () => {
+    const inaccessibleDb = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("durable history was touched");
+        },
+      },
+    ) as Database;
+    const scope = {
+      accountId: crypto.randomUUID(),
+      workspaceId: crypto.randomUUID(),
+      sessionId: crypto.randomUUID(),
+      turnId: crypto.randomUUID(),
+      executionGeneration: 1,
+      attemptId: crypto.randomUUID(),
+    };
+    const settings = testSettings({
+      contextWindowTokens: 272_000,
+      contextAutoCompactThresholdTokens: 244_800,
+    });
+
+    await expect(maybeCompactContext(inaccessibleDb, settings, scope, 244_799)).resolves.toEqual({
+      compacted: false,
+      reason: "below_threshold",
+      events: [],
+      requestConsumed: false,
+    });
+    await expect(maybeCompactContext(inaccessibleDb, settings, scope, 244_800)).rejects.toThrow(
+      "durable history was touched",
+    );
   });
 
   test("rejects an oversized active UTF-8 JSON transcript before paged item decoding", async () => {
