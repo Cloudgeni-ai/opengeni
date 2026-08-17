@@ -28,6 +28,14 @@ describe("migration 0271 retrieval-only default", () => {
     // No table, grant, or trigger changes: immutable snapshots/receipts and the
     // runtime capability surface stay exactly as 0259 declared them.
     expect(sql).not.toMatch(/CREATE TABLE|ALTER TABLE|CREATE TRIGGER|GRANT|REVOKE/u);
+    // CREATE OR REPLACE resets proconfig, so the 0259 definer search_path pin
+    // must be re-applied to both replaced functions.
+    expect(sql).toContain(
+      "ALTER FUNCTION %1$I.capture_company_brain_turn_context_snapshot() SET search_path = %1$I, pg_catalog",
+    );
+    expect(sql).toContain(
+      "ALTER FUNCTION %1$I.company_brain_context_get_or_create_selection(uuid,uuid,uuid,uuid,uuid,integer) SET search_path = %1$I, pg_catalog",
+    );
   });
 
   test("keeps the redefined function bodies byte-identical to 0259 apart from the fallback", async () => {

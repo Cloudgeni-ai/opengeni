@@ -5,6 +5,10 @@
 -- still preserves the old standing composition, and existing immutable
 -- accepted-turn snapshots and selection receipts are untouched. Both frozen
 -- resolution sites from migration 0259 are redefined with the new fallback.
+-- Rolling window: a pre-0271 API/worker image only describes the default in
+-- settings/tool metadata; prompt composition is driven by the DB-frozen
+-- snapshot, so mixed versions compose retrieval_only consistently and the
+-- described default converges once the application rolls forward.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
@@ -502,3 +506,19 @@ EXCEPTION WHEN OTHERS THEN
   RAISE;
 END;
 $$;
+
+-- CREATE OR REPLACE ... SET search_path FROM CURRENT resets the stored config,
+-- so re-pin the hardened definer search path exactly as migration 0259 did.
+DO $company_brain_context_search_paths_0271$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION %1$I.capture_company_brain_turn_context_snapshot() SET search_path = %1$I, pg_catalog',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %1$I.company_brain_context_get_or_create_selection(uuid,uuid,uuid,uuid,uuid,integer) SET search_path = %1$I, pg_catalog',
+    data_schema
+  );
+END
+$company_brain_context_search_paths_0271$;

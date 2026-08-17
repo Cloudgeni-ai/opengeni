@@ -285,6 +285,36 @@ describe("accepted-turn Company Brain context selection", () => {
     }
   });
 
+  test("keeps the 0259 definer hardening after migration 0271 replaces both resolution functions", async () => {
+    if (!shared) return;
+    const routines = await shared.admin<
+      Array<{ name: string; securityDefiner: boolean; settings: string[] | null }>
+    >`
+      select procedure.proname as "name",
+        procedure.prosecdef as "securityDefiner",
+        procedure.proconfig as "settings"
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = current_schema()
+        and procedure.proname in (
+          'capture_company_brain_turn_context_snapshot',
+          'company_brain_context_get_or_create_selection'
+        )
+      order by procedure.proname
+    `;
+    expect(routines.map((routine) => routine.name)).toEqual([
+      "capture_company_brain_turn_context_snapshot",
+      "company_brain_context_get_or_create_selection",
+    ]);
+    const [{ schema }] = await shared.admin<Array<{ schema: string }>>`
+      select current_schema() as "schema"
+    `;
+    for (const routine of routines) {
+      expect(routine.securityDefiner).toBe(true);
+      expect(routine.settings).toEqual([`search_path=${schema}, pg_catalog`]);
+    }
+  });
+
   test("defaults an absent memoryPromptMode to retrieval_only at turn acceptance", async () => {
     if (!shared || !client) return;
     const f = await fixture({ child: true, mode: "absent" });
