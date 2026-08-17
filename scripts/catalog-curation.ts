@@ -214,6 +214,16 @@ function parsePresentation(raw: unknown, where: string): CuratedPresentation {
       throw new CuratedCatalogError(`${where}: presentation has unknown key "${key}"`);
     }
   }
+  // Mirrors the bounds the contracts IntegrationPresentation schema declares,
+  // so a curated row can never carry copy the definitions lane would reject.
+  const bounded = (value: string, max: number, label: string): string => {
+    if (value.length > max) {
+      throw new CuratedCatalogError(
+        `${where}: presentation.${label} must be at most ${max} characters`,
+      );
+    }
+    return value;
+  };
   const copyPair = (value: unknown, label: string): { title: string; description: string } => {
     const pair = asRecord(value);
     if (
@@ -228,16 +238,20 @@ function parsePresentation(raw: unknown, where: string): CuratedPresentation {
         `${where}: presentation.${label} entries must be { title, description } strings`,
       );
     }
-    return { title: pair.title, description: pair.description };
+    return {
+      title: bounded(pair.title, 160, `${label} title`),
+      description: bounded(pair.description, 500, `${label} description`),
+    };
   };
   const presentation: { -readonly [K in keyof CuratedPresentation]: CuratedPresentation[K] } = {};
+  const STRING_BOUNDS = { providerName: 120, introduction: 500, permissionSummary: 500 } as const;
   for (const key of ["providerName", "introduction", "permissionSummary"] as const) {
     const value = record[key];
     if (value === undefined) continue;
     if (typeof value !== "string" || !value.trim()) {
       throw new CuratedCatalogError(`${where}: presentation.${key} must be a non-empty string`);
     }
-    presentation[key] = value;
+    presentation[key] = bounded(value, STRING_BOUNDS[key], key);
   }
   if (record.icon !== undefined) {
     if (typeof record.icon !== "string" || !PRESENTATION_ICONS.has(record.icon)) {
@@ -248,9 +262,13 @@ function parsePresentation(raw: unknown, where: string): CuratedPresentation {
     presentation.icon = record.icon as CuratedPresentation["icon"];
   }
   if (record.capabilities !== undefined) {
-    if (!Array.isArray(record.capabilities) || record.capabilities.length === 0) {
+    if (
+      !Array.isArray(record.capabilities) ||
+      record.capabilities.length === 0 ||
+      record.capabilities.length > 8
+    ) {
       throw new CuratedCatalogError(
-        `${where}: presentation.capabilities must be a non-empty array`,
+        `${where}: presentation.capabilities must be an array of 1 to 8 entries`,
       );
     }
     presentation.capabilities = record.capabilities.map((value) => copyPair(value, "capabilities"));
@@ -267,6 +285,7 @@ function parsePresentation(raw: unknown, where: string): CuratedPresentation {
       const pair = asRecord(value);
       if (
         !scope.trim() ||
+        scope.length > 1024 ||
         !pair ||
         typeof pair.label !== "string" ||
         !pair.label.trim() ||
@@ -278,9 +297,15 @@ function parsePresentation(raw: unknown, where: string): CuratedPresentation {
           `${where}: presentation.scopeLabels values must be { label, description } strings`,
         );
       }
-      scopeLabels[scope] = { label: pair.label, description: pair.description };
+      scopeLabels[scope] = {
+        label: bounded(pair.label, 160, "scopeLabels label"),
+        description: bounded(pair.description, 500, "scopeLabels description"),
+      };
     }
     presentation.scopeLabels = scopeLabels;
+  }
+  if (Object.keys(presentation).length === 0) {
+    throw new CuratedCatalogError(`${where}: presentation must declare at least one field`);
   }
   return presentation;
 }

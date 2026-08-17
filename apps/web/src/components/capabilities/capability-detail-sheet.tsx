@@ -438,6 +438,10 @@ export function DetailBody({
             </div>
           ) : plan.mode === "api_key" ? (
             <div className="space-y-3">
+              <ConnectorConsentCopy
+                presentation={capabilityPresentation(item.metadata)}
+                requestedScopes={[]}
+              />
               {personalOnly ? (
                 <PersonalOnlyConnectionNotice itemName={item.name} />
               ) : (
@@ -596,6 +600,22 @@ function ConnectorConsentCopy({
 }) {
   if (!presentation) return null;
   const permissions = presentationPermissions(requestedScopes, presentation);
+  // Content-derived keys with an ordinal suffix only for exact duplicates, so
+  // reordering or removing unrelated entries never remounts a row.
+  const uniqueKeys = (contents: string[]): string[] => {
+    const seen = new Map<string, number>();
+    return contents.map((content) => {
+      const occurrence = seen.get(content) ?? 0;
+      seen.set(content, occurrence + 1);
+      return occurrence === 0 ? content : `${content}#${occurrence}`;
+    });
+  };
+  const capabilityKeys = uniqueKeys(
+    (presentation.capabilities ?? []).map((entry) => `${entry.title}:${entry.description}`),
+  );
+  const permissionKeys = uniqueKeys(
+    permissions.map((entry) => `${entry.label}:${entry.description}`),
+  );
   return (
     <div className="space-y-3 rounded-lg border border-border bg-surface p-3 text-left">
       {presentation.introduction ? (
@@ -603,8 +623,8 @@ function ConnectorConsentCopy({
       ) : null}
       {presentation.capabilities?.length ? (
         <ul className="space-y-1.5">
-          {presentation.capabilities.map((capability) => (
-            <li key={capability.title} className="text-xs">
+          {presentation.capabilities.map((capability, index) => (
+            <li key={capabilityKeys[index]} className="text-xs">
               <span className="font-medium text-fg">{capability.title}</span>{" "}
               <span className="text-fg-muted">{capability.description}</span>
             </li>
@@ -613,8 +633,8 @@ function ConnectorConsentCopy({
       ) : null}
       {permissions.length > 0 ? (
         <ul className="space-y-1">
-          {permissions.map((permission) => (
-            <li key={permission.label} className="text-xs">
+          {permissions.map((permission, index) => (
+            <li key={permissionKeys[index]} className="text-xs">
               <span className="font-medium text-fg">{permission.label}</span>{" "}
               <span className="text-fg-muted">{permission.description}</span>
             </li>

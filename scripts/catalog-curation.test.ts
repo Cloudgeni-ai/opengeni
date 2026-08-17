@@ -152,7 +152,7 @@ describe("curated catalog overlay document", () => {
     expect(() => parseCuratedCatalog(entry("copy"))).toThrow(/must be an object/);
     expect(() => parseCuratedCatalog(entry({ surprise: true }))).toThrow(/unknown key "surprise"/);
     expect(() => parseCuratedCatalog(entry({ icon: "rocket" }))).toThrow(/icon must be one of/);
-    expect(() => parseCuratedCatalog(entry({ capabilities: [] }))).toThrow(/non-empty array/);
+    expect(() => parseCuratedCatalog(entry({ capabilities: [] }))).toThrow(/1 to 8/);
     expect(() => parseCuratedCatalog(entry({ capabilities: [{ title: "x" }] }))).toThrow(
       /title, description/,
     );
@@ -160,6 +160,25 @@ describe("curated catalog overlay document", () => {
       /label, description/,
     );
     expect(() => parseCuratedCatalog(entry({ introduction: " " }))).toThrow(/non-empty string/);
+    // Contract bounds are enforced at review time, matching the definitions lane.
+    expect(() => parseCuratedCatalog(entry({ introduction: "x".repeat(501) }))).toThrow(
+      /at most 500/,
+    );
+    expect(() => parseCuratedCatalog(entry({ providerName: "x".repeat(121) }))).toThrow(
+      /at most 120/,
+    );
+    expect(() =>
+      parseCuratedCatalog(
+        entry({
+          capabilities: Array.from({ length: 9 }, (_, index) => ({
+            title: `t${index}`,
+            description: "d",
+          })),
+        }),
+      ),
+    ).toThrow(/1 to 8/);
+    // An empty presentation is a reviewer error, not a silent no-op.
+    expect(() => parseCuratedCatalog(entry({}))).toThrow(/at least one field/);
   });
 
   test("preserves an explicit null logoSourceUrl and distinguishes it from omission", () => {
@@ -288,6 +307,42 @@ describe("curated fields flow through import normalization", () => {
     // OAuth client resolves at start time.
     expect(linear.oauthProfile).toEqual({ clientSource: "dcr" });
     expect(dbInput.metadata).toMatchObject({ oauthProfile: { clientSource: "dcr" } });
+  });
+
+  test("the curated Gmail presentation flows through normalization into the DB metadata", () => {
+    const normalized = normalizeCatalogSnapshot({
+      generatedAt: "2026-08-17T00:00:00.000Z",
+      importRows: [
+        {
+          domain: "gmailmcp.googleapis.com",
+          name: "gmail",
+          mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+          transport: "streamable-http",
+          authKind: "oauth2",
+          probe: { status: "real", reason: "auth_challenge", httpStatus: 401 },
+        },
+      ],
+    });
+    const gmail = normalized.rows[0]!;
+    expect(gmail.presentation).toMatchObject({
+      providerName: "Google",
+      icon: "mail",
+    });
+    const dbInput = catalogRowToDbInput(gmail, { importBatchId: "batch-1" });
+    expect(dbInput.metadata).toMatchObject({
+      presentation: {
+        providerName: "Google",
+        icon: "mail",
+        introduction:
+          "Let agents work with the Gmail account you choose through Google's official hosted MCP server.",
+      },
+    });
+    // The three curated scope labels cover exactly the row's scopesHint, so
+    // every requested scope renders with a human label.
+    const presentation = dbInput.metadata.presentation as {
+      scopeLabels: Record<string, unknown>;
+    };
+    expect(Object.keys(presentation.scopeLabels).sort()).toEqual([...gmail.scopesHint].sort());
   });
 
   test("an uncurated row carries no category, no curation, and no metadata curation key", () => {

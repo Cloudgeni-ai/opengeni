@@ -5608,12 +5608,12 @@ export type IntegrationFacetRemovalResult = {
  * generic fallback for any omitted field.
  */
 export type IntegrationPresentation = {
-  providerName?: string;
-  icon?: "calendar" | "cloud" | "contacts" | "files" | "mail";
-  introduction?: string;
-  capabilities?: { title: string; description: string }[];
-  permissionSummary?: string;
-  scopeLabels?: Record<string, { label: string; description: string }>;
+  providerName?: string | undefined;
+  icon?: "calendar" | "cloud" | "contacts" | "files" | "mail" | undefined;
+  introduction?: string | undefined;
+  capabilities?: { title: string; description: string }[] | undefined;
+  permissionSummary?: string | undefined;
+  scopeLabels?: Record<string, { label: string; description: string }> | undefined;
 };
 
 export type IntegrationDefinitionSummary = {
@@ -5629,7 +5629,7 @@ export type IntegrationDefinitionSummary = {
     kind: "oauth2";
     scopes: string[];
   };
-  presentation?: IntegrationPresentation;
+  presentation?: IntegrationPresentation | undefined;
   facets: IntegrationFacetDefinitionSummary[];
 };
 

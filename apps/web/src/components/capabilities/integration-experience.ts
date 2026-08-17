@@ -170,7 +170,11 @@ export function capabilityPresentation(metadata: unknown): IntegrationPresentati
     });
     if (capabilities.length > 0) copy.capabilities = capabilities;
   }
-  if (typeof record.scopeLabels === "object" && record.scopeLabels !== null) {
+  if (
+    typeof record.scopeLabels === "object" &&
+    record.scopeLabels !== null &&
+    !Array.isArray(record.scopeLabels)
+  ) {
     const scopeLabels: Record<string, { label: string; description: string }> = {};
     for (const [scope, value] of Object.entries(record.scopeLabels as Record<string, unknown>)) {
       if (typeof value !== "object" || value === null) continue;

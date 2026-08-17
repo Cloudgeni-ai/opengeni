@@ -1,12 +1,21 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { GOOGLE_DRIVE_INTEGRATION_DEFINITION } from "@opengeni/capabilities";
+import {
+  CORE_INTEGRATION_DEFINITIONS,
+  GOOGLE_DRIVE_INTEGRATION_DEFINITION,
+  INTEGRATION_DEFINITION_PRESENTATIONS,
+} from "@opengeni/capabilities";
+import { CURATED_CATALOG } from "../../../scripts/catalog-curation";
 import {
   GOOGLE_DRIVE_CREDENTIAL_LABEL,
   GOOGLE_DRIVE_CREDENTIAL_ROLE,
   GOOGLE_DRIVE_READONLY_SCOPE,
   GoogleDriveConnectionMetadata,
 } from "@opengeni/contracts/google-drive";
-import { signDelegatedAccessToken } from "@opengeni/contracts";
+import {
+  IntegrationPresentation,
+  ListIntegrationDefinitionsResponse,
+  signDelegatedAccessToken,
+} from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   bootstrapWorkspace,
@@ -249,20 +258,37 @@ describe("API Integration routes", () => {
     expect(JSON.stringify(payload)).not.toContain("clientId");
 
     // Reviewed consent copy is served with the definition (presentation-only;
-    // grants nothing). Every core definition carries it.
-    const gmail = payload.definitions.find(
-      (definition: { id: string }) => definition.id === "google-gmail",
-    );
-    expect(gmail.presentation).toMatchObject({
+    // grants nothing). Every core definition carries it, and the whole payload
+    // must satisfy the published contract, bounds included.
+    const parsed = ListIntegrationDefinitionsResponse.parse(payload);
+    const gmail = parsed.definitions.find((definition) => definition.id === "google-gmail");
+    expect(gmail?.presentation).toMatchObject({
       providerName: "Google",
       icon: "mail",
       introduction: "Let agents work with the Gmail account you choose.",
     });
-    expect(gmail.presentation.scopeLabels["https://mail.google.com/"]).toMatchObject({
+    expect(gmail?.presentation?.scopeLabels?.["https://mail.google.com/"]).toMatchObject({
       label: "Work with your Gmail mailbox",
     });
-    for (const definition of payload.definitions) {
+    for (const definition of parsed.definitions) {
       expect(definition.presentation).toBeDefined();
+    }
+  });
+
+  test("every shipped presentation satisfies the contracts schema, bounds included", () => {
+    // A copy edit that exceeds a contract bound (or an invalid icon) must fail
+    // here, not ship a response that violates the published contract.
+    for (const [id, presentation] of Object.entries(INTEGRATION_DEFINITION_PRESENTATIONS)) {
+      expect(() => IntegrationPresentation.parse(presentation), id).not.toThrow();
+    }
+    expect(Object.keys(INTEGRATION_DEFINITION_PRESENTATIONS).sort()).toEqual(
+      CORE_INTEGRATION_DEFINITIONS.map((definition) => definition.id).sort(),
+    );
+    // The connector lane's curated copy rides the same shape.
+    for (const entry of CURATED_CATALOG.entries) {
+      if (entry.presentation !== undefined) {
+        expect(() => IntegrationPresentation.parse(entry.presentation), entry.mcpUrl).not.toThrow();
+      }
     }
   });
 
