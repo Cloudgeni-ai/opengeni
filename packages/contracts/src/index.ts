@@ -5889,23 +5889,54 @@ export function renderTimelineAnnotationsForModel(
 }
 
 export const MODEL_CONTEXT_LABEL = "[Application context attached to this user message]" as const;
+export const SESSION_GOAL_CONTEXT_LABEL =
+  "[Session goal frozen when this turn was accepted]" as const;
+
+/**
+ * Render the exact goal authority frozen with one accepted logical turn. Goal
+ * state belongs at the chronological input boundary, not in the mutable
+ * Agent.instructions prefix.
+ */
+export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string | undefined {
+  if (!snapshot || snapshot.state === "none") return undefined;
+  const rootConstraints = snapshot.rootConstraints.length
+    ? `\nRoot constraints (must remain satisfied):\n${snapshot.rootConstraints.map((constraint) => `- ${constraint}`).join("\n")}`
+    : "";
+  if (snapshot.state === "completed") {
+    return `Previous session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status completed): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints} This goal is complete and remains as historical context. If the user provides a new long-running objective, create it with opengeni__goal_set; goal_update cannot revise a completed goal.`;
+  }
+  const policy =
+    snapshot.mutationPolicy === "review_changes"
+      ? "Semantic changes are proposals until a user applies them."
+      : snapshot.mutationPolicy === "preserve_intent"
+        ? "You may directly refine wording without changing intent; adaptations and replacements are proposals until a user applies them."
+        : "You may autonomously refine, adapt, or replace the goal when explicit user direction or material new evidence justifies it.";
+  return `Standing session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status ${snapshot.state}): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints}\nMutation policy: ${snapshot.mutationPolicy}. ${policy} Treat later ordinary messages as additional context unless they explicitly redirect this objective. Root constraints are user/API authority and cannot be widened, removed, or rewritten by an agent. Record concrete execution progress with opengeni__goal_progress; semantic goal changes use opengeni__goal_update with the expected objective revision, change kind, and rationale and do not count as progress.`;
+}
 
 /**
  * Build one canonical user-role message body. `modelContext` is ordinary
- * message content: it is model-visible in the same chronological position as
- * the visible text, but presentation layers may omit it. It is not a secret or
- * an instruction-authority boundary.
+ * message content, while `goalSnapshot` is the exact goal authority frozen at
+ * turn acceptance. Both remain in the visible message's chronological
+ * position, and presentation layers may omit their leading parts.
  */
 export function renderUserMessageContentForModel(
   text: string,
   annotations: readonly TimelineAnnotation[],
   modelContext?: string | null,
+  goalSnapshot?: SessionGoalSnapshot,
 ): string | Array<{ type: "input_text"; text: string }> {
   const visibleContent = renderTimelineAnnotationsForModel(text, annotations);
   const context = modelContext?.trim();
-  if (!context) return visibleContent;
+  const goalContext = renderSessionGoalContext(goalSnapshot);
+  if (!context && !goalContext) return visibleContent;
   return [
-    { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\n${context}` },
+    ...(goalContext
+      ? [{ type: "input_text" as const, text: `${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}` }]
+      : []),
+    ...(context
+      ? [{ type: "input_text" as const, text: `${MODEL_CONTEXT_LABEL}\n${context}` }]
+      : []),
     { type: "input_text", text: visibleContent },
   ];
 }
@@ -6505,11 +6536,16 @@ export function renderSessionSystemUpdateBatch(
 
 export function sessionSystemUpdateBatchHistoryItem(
   updates: Parameters<typeof renderSessionSystemUpdateBatch>[0],
+  goalSnapshot?: SessionGoalSnapshot,
 ): { type: "message"; role: "system"; content: string } {
+  const goalContext = renderSessionGoalContext(goalSnapshot);
   return {
     type: "message",
     role: "system",
-    content: renderSessionSystemUpdateBatch(updates),
+    content: [
+      ...(goalContext ? [`${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}`] : []),
+      renderSessionSystemUpdateBatch(updates),
+    ].join("\n\n"),
   };
 }
 

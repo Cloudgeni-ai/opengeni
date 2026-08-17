@@ -5003,6 +5003,7 @@ export function durableUserHistoryItem(
   resources: readonly ResourceRef[],
   annotations: readonly TimelineAnnotation[] = [],
   modelContext?: string | null,
+  goalSnapshot?: SessionGoalSnapshot,
 ): Record<string, unknown> {
   const attachmentRefs = resources.filter(
     (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file",
@@ -5010,7 +5011,7 @@ export function durableUserHistoryItem(
   return {
     type: "message",
     role: "user",
-    content: renderUserMessageContentForModel(prompt, annotations, modelContext),
+    content: renderUserMessageContentForModel(prompt, annotations, modelContext, goalSnapshot),
     ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
     ...(annotations.length > 0
       ? {
@@ -50030,6 +50031,7 @@ export async function claimSessionWorkForAttempt(
           delivered: Awaited<ReturnType<typeof deliverPendingUpdates>>,
           accountId: string,
           turnId: string,
+          goalSnapshot?: SessionGoalSnapshot,
         ): Promise<void> => {
           if (!delivered.historyItemId || !delivered.historyItem) {
             if (delivered.count !== 0) {
@@ -50057,7 +50059,12 @@ export async function claimSessionWorkForAttempt(
                 sessionId,
                 turnId,
                 position: Number(position),
-                item: delivered.historyItem,
+                item: goalSnapshot
+                  ? sessionSystemUpdateBatchHistoryItem(
+                      delivered.updates.map((update) => mapSessionSystemUpdate(update)),
+                      goalSnapshot,
+                    )
+                  : delivered.historyItem,
               },
               "item",
               "itemCodecVersion",
@@ -51133,7 +51140,12 @@ export async function claimSessionWorkForAttempt(
             )
             .returning();
           if (!internalTurn) throw new Error("Failed to create internal update inference");
-          await persistDeliveredUpdateBatch(delivered, session.accountId, internalTurn.id);
+          await persistDeliveredUpdateBatch(
+            delivered,
+            session.accountId,
+            internalTurn.id,
+            SessionGoalSnapshot.parse(internalTurn.goalSnapshot),
+          );
           await registerAttempt(internalTurn);
           if (!delivered.event) throw new Error("Delivered update batch has no durable event");
           await tx
@@ -51231,6 +51243,7 @@ export async function claimSessionWorkForAttempt(
                 Array.isArray(row.resources) ? (row.resources as ResourceRef[]) : [],
                 TimelineAnnotations.parse(row.annotations),
                 row.modelContext,
+                SessionGoalSnapshot.parse(row.goalSnapshot),
               ),
             },
             "item",

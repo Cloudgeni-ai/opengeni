@@ -182,9 +182,9 @@ describe("exact-attempt workspace governance prompt", () => {
       "USER_PREF_SENTINEL descriptor sentinel",
       "ROLE_POLICY_SENTINEL",
       "SESSION_SENTINEL",
-      "Persistent session settings already in effect",
       "MEMORY_SENTINEL",
     ];
+    expect(instructions).not.toContain("Persistent session settings");
     for (let index = 1; index < ordered.length; index += 1) {
       expect(instructions.indexOf(ordered[index - 1]!)).toBeLessThan(
         instructions.indexOf(ordered[index]!),

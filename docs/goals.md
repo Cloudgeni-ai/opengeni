@@ -24,8 +24,12 @@ The standing objective has a separate monotonic `objective_revision`; the
 existing `version` remains the continuation/lifecycle fence. Every logical
 turn freezes either the exact goal projection or an explicit no-goal projection
 in `session_turns.goal_snapshot` when the turn is accepted. Ordinary turns,
-goal continuations, recovery, and both compaction modes compose only that
-snapshot, never a later mutable goal head.
+goal continuations, recovery, and both compaction modes use only that snapshot,
+never a later mutable goal head. The snapshot is rendered on the turn's newest
+durable model-input item: a leading part of a human/API user message, or the
+internal-update batch for a machine-only turn. It never mutates the persistent
+agent-instruction prefix or exists only in activity memory, so later requests
+extend the same prompt-cache prefix and recovery replays identical authority.
 
 ## Migration 0257 deployment boundary
 

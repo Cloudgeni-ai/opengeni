@@ -33,6 +33,7 @@ import {
   normalizeResourceMountPath,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
   resourceMountPath,
+  renderSessionGoalContext,
   signDelegatedAccessToken,
   GenerateImageToolInput,
   GenerateVideoToolInput,
@@ -56,6 +57,7 @@ import {
   type VideoGenerationCapabilities,
   type VideoGenerationToolResult,
 } from "@opengeni/contracts";
+export { renderSessionGoalContext } from "@opengeni/contracts";
 import {
   MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
   MCP_MAX_TOOL_RESULT_BYTES,
@@ -171,6 +173,7 @@ import { dirname, isAbsolute, join, posix as posixPath } from "node:path";
 
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { installCodexToolSearch } from "./codex-tool-search";
+import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
@@ -1528,8 +1531,6 @@ export type BuildAgentOptions = {
   // runtime uses the structured governance precedence branch; absent preserves
   // the historical instruction composition byte-for-byte.
   workspaceGovernance?: string;
-  /** Standing goal frozen when this logical turn was accepted. */
-  goalSnapshot?: SessionGoalSnapshot;
   workspaceEnvironment?: WorkspaceEnvironmentContext;
   // M3 rig runtime binding (all absent ⇒ a rig-less turn, byte-for-byte today).
   //  - `rig`: renders the non-bypassable rig doctrine block in the CORE.
@@ -1576,11 +1577,10 @@ export type BuildAgentOptions = {
   // Keeping this out of the persistent Agent.instructions prevents every
   // tool-follow-up model call in a long first turn from re-running setup.
   genesisTitleHint?: boolean;
-  // Persistent session settings, resolved by the worker from the durable
-  // session row at turn start. Tool schemas are rebuilt on every turn, so
-  // without this factual state the model can mistake persistent metadata tools
-  // for per-turn initialization and re-apply the same title/notification mode.
-  // Values only — never the user-controlled title text — enter instructions.
+  /**
+   * @deprecated Retained as an input-compatibility shim. Persistent display
+   * metadata no longer enters the prompt-cache-critical system instructions.
+   */
   persistentSessionSettings?: PersistentSessionSettings;
   // Per-call agent persona override (the white-label surface). Resolved by the
   // caller as session > workspace > deployment default; when omitted the
@@ -1633,6 +1633,7 @@ export type WorkspaceEnvironmentContext = {
   variableNames?: string[];
 };
 
+/** @deprecated Persistent display metadata is no longer model-visible. */
 export type PersistentSessionSettings = {
   titleIsSet: boolean;
 };
@@ -1731,44 +1732,18 @@ export function appendSessionInstructions(composed: string, sessionInstructions?
   return trimmed ? `${composed} ${trimmed}` : composed;
 }
 
-/**
- * Append the standing goal accepted with this logical turn. The worker passes
- * the persisted turn snapshot, never the mutable current goal head, so queued
- * work and recovery cannot observe a later rewrite. A no-goal snapshot remains
- * intentionally prompt-silent while still being durable execution authority.
- */
+/** @deprecated Goal context now belongs on the accepted turn's durable input item. */
 export function appendSessionGoal(composed: string, snapshot?: SessionGoalSnapshot): string {
-  if (!snapshot || snapshot.state === "none") return composed;
-  const rootConstraints = snapshot.rootConstraints.length
-    ? `\nRoot constraints (must remain satisfied):\n${snapshot.rootConstraints.map((constraint) => `- ${constraint}`).join("\n")}`
-    : "";
-  if (snapshot.state === "completed") {
-    return `${composed} Previous session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status completed): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints} This goal is complete and remains as historical context. If the user provides a new long-running objective, create it with opengeni__goal_set; goal_update cannot revise a completed goal.`;
-  }
-  const policy =
-    snapshot.mutationPolicy === "review_changes"
-      ? "Semantic changes are proposals until a user applies them."
-      : snapshot.mutationPolicy === "preserve_intent"
-        ? "You may directly refine wording without changing intent; adaptations and replacements are proposals until a user applies them."
-        : "You may autonomously refine, adapt, or replace the goal when explicit user direction or material new evidence justifies it.";
-  return `${composed} Standing session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status ${snapshot.state}): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints}\nMutation policy: ${snapshot.mutationPolicy}. ${policy} Treat later ordinary messages as additional context unless they explicitly redirect this objective. Root constraints are user/API authority and cannot be widened, removed, or rewritten by an agent. Record concrete execution progress with opengeni__goal_progress; semantic goal changes use opengeni__goal_update with the expected objective revision, change kind, and rationale and do not count as progress.`;
+  const context = renderSessionGoalContext(snapshot);
+  return context ? `${composed} ${context}` : composed;
 }
 
-/**
- * Append the durable session metadata the model otherwise cannot observe.
- * This is deliberately declarative and excludes the title text: the title is
- * user-controlled display metadata, while the agent only needs to know whether
- * initialization has already happened. The block is present on every turn when
- * supplied so compaction cannot erase knowledge that these settings persist.
- */
+/** @deprecated Persistent display metadata must not alter system instructions. */
 export function appendPersistentSessionSettings(
   composed: string,
-  settings?: PersistentSessionSettings,
+  _settings?: PersistentSessionSettings,
 ): string {
-  if (!settings) {
-    return composed;
-  }
-  return `${composed} Persistent session settings already in effect: the display title is ${settings.titleIsSet ? "set" : "not set"}. This setting persists across turns, continuations, and interruptions. Do not call opengeni__set_session_title merely to reassert an unchanged value; call it only when the current value actually needs to change.`;
+  return composed;
 }
 
 /**
@@ -1792,25 +1767,20 @@ function composedPersistentAgentInstructions(
     options.workspaceEnvironment,
     options.rig,
   );
+  const operationalPersonaAndCore = `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${personaAndCore}`;
   if (!options.workspaceGovernance?.trim()) {
-    // Preserve the legacy path byte-for-byte when no structured governance
+    // Preserve the existing relative ordering when no structured governance
     // authority is active for this exact attempt.
-    return appendPersistentSessionSettings(
-      appendSessionGoal(
-        appendSessionInstructions(
-          appendWorkspaceMemory(
-            appendGitCredentialBindingInstructions(
-              appendCodemodeInstructions(personaAndCore, codemodeIsAvailable(options)),
-              options.gitCredentialBindings,
-              options.activeSandboxBackend,
-            ),
-            options.workspaceMemory,
-          ),
-          options.sessionInstructions,
+    return appendSessionInstructions(
+      appendWorkspaceMemory(
+        appendGitCredentialBindingInstructions(
+          appendCodemodeInstructions(operationalPersonaAndCore, codemodeIsAvailable(options)),
+          options.gitCredentialBindings,
+          options.activeSandboxBackend,
         ),
-        options.goalSnapshot,
+        options.workspaceMemory,
       ),
-      options.persistentSessionSettings,
+      options.sessionInstructions,
     );
   }
 
@@ -1820,15 +1790,9 @@ function composedPersistentAgentInstructions(
   return appendWorkspaceMemory(
     appendGitCredentialBindingInstructions(
       appendCodemodeInstructions(
-        appendPersistentSessionSettings(
-          appendSessionGoal(
-            appendSessionInstructions(
-              appendWorkspaceGovernance(personaAndCore, options.workspaceGovernance),
-              options.sessionInstructions,
-            ),
-            options.goalSnapshot,
-          ),
-          options.persistentSessionSettings,
+        appendSessionInstructions(
+          appendWorkspaceGovernance(operationalPersonaAndCore, options.workspaceGovernance),
+          options.sessionInstructions,
         ),
         codemodeIsAvailable(options),
       ),
@@ -2178,22 +2142,21 @@ export function buildOpenGeniAgent(
     // (settings.agentInstructionsTemplate, default DEFAULT_AGENT_INSTRUCTIONS).
     // composeAgentInstructions substitutes the non-bypassable CORE (goal-loop
     // ownership + workspace-environment block) at the {{core}} marker, or
-    // appends it when the template omits the marker. With the default template
-    // and no environment this is byte-identical to the historical preamble.
-    // Persona composition order (all one system-level instructions string):
-    //   1. workspace instructionsTemplate (or deployment default) with the
+    // appends it when the template omits the marker. The configurable
+    // persona+CORE slice remains byte-identical to the historical preamble.
+    // Instruction composition order (all one system-level instructions string):
+    //   1. non-configurable, provider-neutral operational contract,
+    //   2. workspace instructionsTemplate (or deployment default) with the
     //      non-bypassable CORE substituted at {{core}} — composeAgentInstructions,
-    //   2. + the generic programmatic-tool-calling (codemode) directive, ONLY
+    //   3. + the generic programmatic-tool-calling (codemode) directive, ONLY
     //      when a codemode token was minted for this managed-sandbox turn,
-    //   3. + managed-sandbox Git binding discovery, ONLY when one provider has
+    //   4. + managed-sandbox Git binding discovery, ONLY when one provider has
     //      multiple credential bindings,
-    //   4. + workspace memory working set, ONLY when the workspace setting is on
+    //   5. + workspace memory working set, ONLY when the workspace setting is on
     //      and the worker resolved a nonblank block — appendWorkspaceMemory,
-    //   5. + the per-session persona instructions (session-specific, so it
+    //   6. + the per-session persona instructions (session-specific, so it
     //      refines both the workspace persona and the substrate note),
-    //   6. + host context for this exact turn, when supplied,
-    //   7. + durable session-setting state (title present + child notification
-    //      mode), when supplied by the worker,
+    //   7. + host context for this exact turn, when supplied,
     // The genesis title directive is deliberately NOT part of this persistent
     // string. runAgentStream injects it into the first model call only.
     instructions: composedPersistentAgentInstructions(settings, options),

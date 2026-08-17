@@ -131,8 +131,6 @@ import {
   restoreGenericDispatchHistoryItems,
   sanitizeHistoryItemsForModel,
   projectModelInputForCapabilities,
-  appendPersistentSessionSettings,
-  appendSessionGoal,
   appendSessionInstructions,
   appendWorkspaceGovernance,
   appendWorkspaceMemory,
@@ -6524,30 +6522,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const remoteV2CompactionNeedsAgentPrefix =
         Boolean(remoteCompactionRequester) && session.codexCompactionMode === "remote_v2";
       if (compactionOnlyTurn && !remoteV2CompactionNeedsAgentPrefix) {
-        const persistentSessionSettings = {
-          titleIsSet: Boolean(session.title?.trim()),
-        };
         const compactionInstructions = appendWorkspaceMemory(
-          appendPersistentSessionSettings(
-            appendSessionGoal(
-              appendSessionInstructions(
-                appendWorkspaceGovernance(
-                  composeAgentInstructions(
-                    structuredWorkspacePolicyActive
-                      ? modelRunSettings.agentInstructionsTemplate
-                      : (workspaceAgentInstructions ?? modelRunSettings.agentInstructionsTemplate),
-                    undefined,
-                    rigVersion && rigName
-                      ? { name: rigName, version: rigVersion.version }
-                      : undefined,
-                  ),
-                  workspaceGovernance ?? undefined,
-                ),
-                session.instructions ?? undefined,
+          appendSessionInstructions(
+            appendWorkspaceGovernance(
+              composeAgentInstructions(
+                structuredWorkspacePolicyActive
+                  ? modelRunSettings.agentInstructionsTemplate
+                  : (workspaceAgentInstructions ?? modelRunSettings.agentInstructionsTemplate),
+                undefined,
+                rigVersion && rigName ? { name: rigName, version: rigVersion.version } : undefined,
               ),
-              turn.goalSnapshot,
+              workspaceGovernance ?? undefined,
             ),
-            persistentSessionSettings,
+            session.instructions ?? undefined,
           ),
           workspaceMemory ?? undefined,
         );
@@ -8590,9 +8577,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
             humanInputEnabled: agentHumanInputEnabled,
             genesisTitleHint: isGenesisTurn,
-            persistentSessionSettings: {
-              titleIsSet: Boolean(session.title?.trim()),
-            },
             sandboxEnvironment,
             ...(preparedTools.attemptToolCatalog
               ? { attemptToolCatalog: preparedTools.attemptToolCatalog }
@@ -8708,7 +8692,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               : {}),
             ...(workspaceGovernance ? { workspaceGovernance } : {}),
             ...(workspaceMemory ? { workspaceMemory } : {}),
-            goalSnapshot: turn.goalSnapshot,
             // Per-session persona tier (session > workspace > deployment default).
             // Composed system-level AFTER the workspace persona so it refines it for
             // this one session; absent ⇒ byte-identical to today's composition.
