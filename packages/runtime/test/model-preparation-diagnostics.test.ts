@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  recordModelPreparationMeasurement,
   recordModelTransportStarted,
   recordModelPreparationManifestInventory,
   type ModelPreparationMeasurement,
@@ -9,6 +10,48 @@ import {
 import { instrumentedModelFetch } from "../src/model-provider-client";
 
 describe("model preparation diagnostics", () => {
+  test("separates the SDK tail after the first routed sandbox operation", () => {
+    const measurements: ModelPreparationMeasurement[] = [];
+
+    withModelPreparationObserver(
+      (measurement) => measurements.push(measurement),
+      () => {
+        recordModelPreparationMeasurement({
+          phase: "sandbox_first_routed_operation",
+          outcome: "completed",
+          durationSeconds: 0.01,
+        });
+        recordModelPreparationMeasurement({
+          phase: "sandbox_first_routed_resolution",
+          outcome: "completed",
+          durationSeconds: 0.005,
+        });
+        recordModelPreparationMeasurement({
+          phase: "input_filter_base",
+          outcome: "completed",
+          durationSeconds: 0,
+        });
+        recordModelPreparationMeasurement({
+          phase: "input_filter_context",
+          outcome: "completed",
+          durationSeconds: 0,
+        });
+      },
+    );
+
+    expect(measurements.map(({ phase }) => phase)).toEqual([
+      "sandbox_first_routed_operation",
+      "sandbox_first_routed_resolution",
+      "sdk_after_first_sandbox_operation",
+      "input_filter_base",
+      "input_filter_context",
+    ]);
+    expect(
+      measurements.find(({ phase }) => phase === "sdk_after_first_sandbox_operation")
+        ?.durationSeconds,
+    ).toBeGreaterThanOrEqual(0);
+  });
+
   test("manifest inventory remains fail-open when iteration throws", () => {
     const measurements: ModelPreparationMeasurement[] = [];
     const manifest = {

@@ -510,6 +510,8 @@ export {
   type RoutableBackendSession,
   type ResolvedActiveBackend,
   type RoutingMutationSettlementResult,
+  type RoutingSandboxFirstOperationObservation,
+  type RoutingSandboxFirstOperationObserver,
   type RoutingSandboxOperationObservation,
   type RoutingSandboxOperationObserver,
   type RoutingRetainedProcess,

@@ -14,6 +14,7 @@ import {
   type StreamEvent,
   type Tool,
 } from "@openai/agents";
+import { SandboxAgent } from "@openai/agents/sandbox";
 import {
   LazyToolModelProvider,
   installLazyToolRuntime,
@@ -299,6 +300,71 @@ function baseRequest(tools: ModelRequest["tools"]): ModelRequest {
 }
 
 describe("generic lazy tool dispatch", () => {
+  test("overlaps deferred preparation with the first generic-provider request", async () => {
+    let releasePreparation!: () => void;
+    let preparationSettled = false;
+    const preparation = new Promise<void>((resolve) => {
+      releasePreparation = () => {
+        preparationSettled = true;
+        resolve();
+      };
+    });
+    let executions = 0;
+    const deferredTool = weatherTool({
+      execute: ({ city }) => {
+        executions += 1;
+        return `clear:${city}`;
+      },
+    });
+    const agent = agentWith(deferredTool);
+    const baseGetAllTools = agent.getAllTools.bind(agent);
+    agent.getAllTools = async (runContext) =>
+      preparationSettled ? await baseGetAllTools(runContext) : [];
+    const runtime = installLazyToolRuntime(
+      agent,
+      "generic_dispatch",
+      new Set([SERVER_ID]),
+      preparation,
+      new Set([SERVER_ID]),
+    );
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "deferred-generic-search",
+          name: "tool_search",
+          arguments: JSON.stringify({ query: "weather city" }),
+        },
+      ],
+      [
+        {
+          type: "function_call",
+          callId: "deferred-generic-invoke",
+          name: "tool_invoke",
+          arguments: JSON.stringify({ name: WEATHER_TOOL, arguments: { city: "Oslo" } }),
+        },
+      ],
+      [finalMessage("done")],
+    ]);
+
+    const running = runStreamed(agent, model, runtime);
+    await Bun.sleep(0);
+
+    expect(model.requests).toHaveLength(1);
+    expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
+      "tool_search",
+      "tool_invoke",
+    ]);
+    expect(executions).toBe(0);
+
+    releasePreparation();
+    const result = await running;
+
+    expect(result.finalOutput).toBe("done");
+    expect(executions).toBe(1);
+    expect(JSON.stringify(model.requests[1]!.input)).toContain(WEATHER_TOOL);
+  });
+
   test("hides and searches first-party function tools without an MCP registry id", async () => {
     const firstPartyTool = tool({
       name: "interaction__browser_act",
@@ -733,6 +799,99 @@ describe("generic lazy tool dispatch", () => {
 });
 
 describe("OpenAI/Azure native client tool search", () => {
+  test("survives the real SandboxAgent clone path", async () => {
+    const agent = new SandboxAgent({
+      name: "sandbox-lazy-test",
+      model: "gpt-5.6-sol",
+      tools: [weatherTool()],
+    } as never);
+    installLazyToolRuntime(agent as never, "codex_native", new Set([SERVER_ID]));
+
+    const cloned = (agent as unknown as { clone: (config: unknown) => Agent<any, any> }).clone({});
+    const tools = await cloned.getAllTools(undefined as never);
+
+    expect(tools.map((candidate) => candidate.name)).toEqual([WEATHER_TOOL, "tool_search"]);
+  });
+
+  test("starts the first model request before deferred tools settle, then searches and executes them", async () => {
+    let releasePreparation!: () => void;
+    let preparationSettled = false;
+    const preparation = new Promise<void>((resolve) => {
+      releasePreparation = () => {
+        preparationSettled = true;
+        resolve();
+      };
+    });
+    let executions = 0;
+    const deferredTool = weatherTool({
+      execute: ({ city }) => {
+        executions += 1;
+        return `clear:${city}`;
+      },
+    });
+    const requiredServerId = "required_tools";
+    const requiredTool = tool({
+      name: `${requiredServerId}__status`,
+      description: "Read required service status",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      strict: false,
+      execute: () => "ready",
+    }) as unknown as Tool;
+    const agent = new Agent({
+      name: "lazy-test",
+      instructions: "Use tools.",
+      model: "scripted",
+      tools: [requiredTool, deferredTool],
+    });
+    const baseGetAllTools = agent.getAllTools.bind(agent);
+    agent.getAllTools = async (runContext) =>
+      preparationSettled ? await baseGetAllTools(runContext) : [requiredTool];
+    const runtime = installLazyToolRuntime(
+      agent,
+      "openai_native",
+      new Set([requiredServerId, SERVER_ID]),
+      preparation,
+      new Set([SERVER_ID]),
+    );
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "tool_search_call",
+          call_id: "deferred-search",
+          execution: "client",
+          status: "completed",
+          arguments: { query: "weather in a city" },
+        },
+      ],
+      [
+        {
+          type: "function_call",
+          callId: "deferred-call",
+          name: WEATHER_TOOL,
+          arguments: JSON.stringify({ city: "Oslo" }),
+        },
+      ],
+      [finalMessage("done")],
+    ]);
+
+    const running = runStreamed(agent, model, runtime);
+    await Bun.sleep(0);
+
+    expect(model.requests).toHaveLength(1);
+    expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual(["tool_search"]);
+    expect(executions).toBe(0);
+
+    releasePreparation();
+    const result = await running;
+
+    expect(result.finalOutput).toBe("done");
+    expect(executions).toBe(1);
+    expect(JSON.stringify(model.requests[1]!.input)).toContain(WEATHER_TOOL);
+    expect(
+      (await agent.getAllTools(undefined as never)).map((candidate) => candidate.name),
+    ).toEqual([`${requiredServerId}__status`, "tool_search"]);
+  });
+
   test("keeps the callback tool pool unique across multiple searches in one response", async () => {
     const deferredTool = weatherTool();
     (deferredTool as { deferLoading?: boolean }).deferLoading = true;

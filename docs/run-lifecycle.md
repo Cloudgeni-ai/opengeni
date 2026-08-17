@@ -357,6 +357,15 @@ settles and the continuation is a new follow-up — the completed tool call/full
 turn is never blindly replayed. Budget/credit exhaustion likewise idles the turn
 rather than failing the session, so a top-up lets the same session continue.
 
+Fresh progressive-disclosure attempts complete required MCP connection and
+schema admission before inference. Best-effort connector connection/listing and
+the combined attempt catalog may continue in parallel with the first provider
+request and streamed text. One fence still precedes terminal model settlement,
+search disclosure, tool execution, and Codemode activation, so a deferred setup
+failure cannot turn into a completed response or authorize a partial catalog.
+Approval/human-interaction resumes and editable-artifact turns retain the eager
+catalog path.
+
 Retryable provider connectivity and 5xx failures recover the same accepted turn
 after a durable 2 s, 5 s, 15 s, 30 s, then 60 s capped delay, indexed by that
 turn's durable provider-recovery count rather than unrelated execution attempts.

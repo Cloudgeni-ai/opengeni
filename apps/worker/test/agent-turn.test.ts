@@ -102,6 +102,7 @@ import {
   sandboxArtifactRuntimeAdmission,
   sandboxDeadlineRotationRecoveryDelayMs,
   shouldEstablishSandboxForTurn,
+  shouldDeferBestEffortToolPreparation,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
@@ -4815,6 +4816,41 @@ describe("lazyToolTransportForTurn", () => {
       "generic_dispatch",
     );
     expect(lazyToolTransportForTurn(resolved("api-key", "chat"))).toBe("generic_dispatch");
+  });
+});
+
+describe("shouldDeferBestEffortToolPreparation", () => {
+  const eligible = {
+    lazyToolTransport: "codex_native" as const,
+    progressiveDisclosureEnabled: true,
+    artifactRuntimeAvailable: false,
+    triggerKind: "next" as const,
+    triggerType: "user.message" as const,
+  };
+
+  test("overlaps only a brand-new lazy-capable turn", () => {
+    expect(shouldDeferBestEffortToolPreparation(eligible)).toBe(true);
+    expect(
+      shouldDeferBestEffortToolPreparation({
+        ...eligible,
+        triggerType: "system.update.delivered",
+      }),
+    ).toBe(true);
+  });
+
+  test("keeps approval resumes, editable artifacts, and disabled disclosure eager", () => {
+    expect(shouldDeferBestEffortToolPreparation({ ...eligible, triggerKind: "approval" })).toBe(
+      false,
+    );
+    expect(
+      shouldDeferBestEffortToolPreparation({ ...eligible, artifactRuntimeAvailable: true }),
+    ).toBe(false);
+    expect(
+      shouldDeferBestEffortToolPreparation({
+        ...eligible,
+        progressiveDisclosureEnabled: false,
+      }),
+    ).toBe(false);
   });
 });
 
