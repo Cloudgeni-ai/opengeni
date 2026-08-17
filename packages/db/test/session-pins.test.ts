@@ -68,6 +68,27 @@ async function session(input: {
   });
 }
 
+/** Removal now requires an explicit administering actor (migration 0278). */
+async function removeMemberAsAdmin(
+  handle: Database,
+  workspace: { accountId: string; workspaceId: string },
+  targetSubjectId: string,
+): Promise<boolean> {
+  const actorSubjectId = `user:remover-${crypto.randomUUID()}`;
+  await grantWorkspaceAccess(handle, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    subjectId: actorSubjectId,
+    permissions: ["workspace:admin"],
+  });
+  return await removeWorkspaceMember(handle, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    actorSubjectId,
+    targetSubjectId,
+  });
+}
+
 async function grantMember(
   workspace: { accountId: string; workspaceId: string },
   subjectId: string,
@@ -1031,7 +1052,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       pinned: true,
     });
 
-    expect(await removeWorkspaceMember(db, workspace.workspaceId, subjectId)).toBe(true);
+    expect(await removeMemberAsAdmin(db, workspace, subjectId)).toBe(true);
     const [counts] = await admin<{ memberships: number; pins: number }[]>`
       select
         (select count(*)::int from workspace_memberships
@@ -1108,7 +1129,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       sessionId: staleTarget.id,
       pinned: true,
     });
-    expect(await removeWorkspaceMember(db, workspace.workspaceId, staleSubject)).toBe(true);
+    expect(await removeMemberAsAdmin(db, workspace, staleSubject)).toBe(true);
     await expect(
       listSessionsForSubject(db, workspace.workspaceId, {
         subjectId: staleSubject,
@@ -1189,14 +1210,12 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       await waitForAdvisoryWait(admin, barrierClass, listingLock);
 
       let removalSettled = false;
-      removalPromise = removeWorkspaceMember(
-        removalClient.db,
-        workspace.workspaceId,
-        lockedSubject,
-      ).then((removed) => {
-        removalSettled = true;
-        return removed;
-      });
+      removalPromise = removeMemberAsAdmin(removalClient.db, workspace, lockedSubject).then(
+        (removed) => {
+          removalSettled = true;
+          return removed;
+        },
+      );
 
       await barrier`select pg_advisory_unlock(${barrierClass}, ${listingLock})`;
       const listed = await listingPromise;
@@ -1318,7 +1337,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       `);
       await barrier`select pg_advisory_lock(${barrierClass}, ${removalLock})`;
 
-      removalPromise = removeWorkspaceMember(removalClient.db, workspace.workspaceId, subjectId);
+      removalPromise = removeMemberAsAdmin(removalClient.db, workspace, subjectId);
       await waitForAdvisoryWait(admin, barrierClass, removalLock);
 
       // Start listing while removal owns the personal-state fence. The list must
@@ -1702,7 +1721,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       `);
       await barrier`select pg_advisory_lock(${barrierClass}, ${removalLock})`;
 
-      removalPromise = removeWorkspaceMember(removalClient.db, workspace.workspaceId, subjectId);
+      removalPromise = removeMemberAsAdmin(removalClient.db, workspace, subjectId);
       await waitForAdvisoryWait(admin, barrierClass, removalLock);
 
       // The API grant is intentionally stale: the pin transaction must wait on
@@ -1810,7 +1829,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
 
       // Pin mutation owns membership first; removal waits, then cleans the
       // committed pin after the insert barrier is released.
-      removalPromise = removeWorkspaceMember(removalClient.db, workspace.workspaceId, subjectId);
+      removalPromise = removeMemberAsAdmin(removalClient.db, workspace, subjectId);
       await waitForDatabaseQueryWait(admin, "pg_advisory_xact_lock");
 
       await barrier`select pg_advisory_unlock(${barrierClass}, ${pinInsertLock})`;

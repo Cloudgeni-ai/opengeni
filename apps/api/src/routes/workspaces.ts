@@ -468,8 +468,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const subjectId = decodeURIComponent(c.req.param("subjectId"));
     const members = await listWorkspaceMembers(deps.db, workspaceId);
     // Never remove yourself, and never remove the last administering member.
+    // The fenced removal command re-enforces both guards fail-closed.
     assertWorkspaceMemberRemovable({ members, subjectId, callerSubjectId: grant.subjectId });
-    await removeWorkspaceMember(deps.db, workspaceId, subjectId);
+    await removeWorkspaceMember(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      actorSubjectId: grant.subjectId,
+      targetSubjectId: subjectId,
+    });
     return c.body(null, 204);
   });
 }

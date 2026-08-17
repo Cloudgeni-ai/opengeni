@@ -13,6 +13,7 @@ import {
   createDb,
   createSession,
   getNewSessionDraftInTransaction,
+  grantWorkspaceAccess,
   initializeSessionStartAtomically,
   NewSessionDraftAccessError,
   NewSessionDraftConflictError,
@@ -454,8 +455,20 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     const context = await fixture();
     await saveDraft(context, 0);
 
+    const removerSubjectId = `user:remover-${crypto.randomUUID()}`;
+    await grantWorkspaceAccess(client.db, {
+      accountId: context.grant.accountId,
+      workspaceId: context.grant.workspaceId!,
+      subjectId: removerSubjectId,
+      permissions: ["workspace:admin"],
+    });
     expect(
-      await removeWorkspaceMember(client.db, context.grant.workspaceId!, context.subjectId),
+      await removeWorkspaceMember(client.db, {
+        accountId: context.grant.accountId,
+        workspaceId: context.grant.workspaceId!,
+        actorSubjectId: removerSubjectId,
+        targetSubjectId: context.subjectId,
+      }),
     ).toBe(true);
 
     const [count] = await shared.admin<{ count: number }[]>`
