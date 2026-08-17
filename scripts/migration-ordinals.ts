@@ -14,7 +14,7 @@
  * - the release contract hash pins are refreshed by re-running the contract
  *   test and substituting only exact SHA-256 mismatches (`renumber-migration.ts`).
  */
-import { readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 
 export const MIGRATIONS_DIR = "packages/db/drizzle";
@@ -153,11 +153,30 @@ export type RenumberPlan = {
   unrewrittenBare: string[];
 };
 
-/** Companion tests are matched by ordinal prefix, not slug: names diverge in the wild. */
-export function companionTestFiles(root: string, ordinal: string): string[] {
-  const prefix = `migration-${ordinal}-`;
+/**
+ * Companion tests carry the ordinal prefix (`migration-NNNN-*.test.ts`) but
+ * their slug often diverges from the SQL slug, and the ledger contains duplicate
+ * ordinals (and a merged base may bring another `NNNN_*.sql` beside ours), so
+ * the prefix alone is not enough. A candidate is a companion only when it
+ * either references this migration's file/basename in its text or its
+ * hyphenated slug equals the SQL slug, and it never references a different
+ * local migration with the same ordinal.
+ */
+export function companionTestFiles(
+  root: string,
+  migration: MigrationName,
+  siblingsWithSameOrdinal: readonly MigrationName[] = [],
+): string[] {
+  const prefix = `migration-${migration.ordinal}-`;
+  const hyphenSlug = migration.slug.replace(/_/g, "-");
+  const others = siblingsWithSameOrdinal.filter((sibling) => sibling.file !== migration.file);
   return readdirSync(join(root, MIGRATION_TESTS_DIR))
     .filter((file) => file.startsWith(prefix) && file.endsWith(".test.ts"))
+    .filter((file) => {
+      const text = readFileSync(join(root, MIGRATION_TESTS_DIR, file), "utf8");
+      if (others.some((other) => text.includes(other.basename))) return false;
+      return text.includes(migration.basename) || file === `${prefix}${hyphenSlug}.test.ts`;
+    })
     .sort()
     .map((file) => `${MIGRATION_TESTS_DIR}/${file}`);
 }
@@ -192,7 +211,7 @@ export function rewriteText(
 ): { text: string; replacements: number; bareOrdinal: number } {
   let replacements = 0;
   let bareOrdinal = 0;
-  let next = text.replace(new RegExp(escapeRegExp(from.basename), "g"), () => {
+  let next = text.replace(new RegExp(`${escapeRegExp(from.basename)}(?![A-Za-z0-9_])`, "g"), () => {
     replacements += 1;
     return to.basename;
   });
@@ -202,7 +221,7 @@ export function rewriteText(
     // (tests are cited by full file name, by import specifier, or by slug).
     const stem = companion.replace(/\.test\.ts$/, "");
     const renamedStem = renamed.replace(/\.test\.ts$/, "");
-    next = next.replace(new RegExp(escapeRegExp(stem), "g"), () => {
+    next = next.replace(new RegExp(`${escapeRegExp(stem)}(?![A-Za-z0-9-])`, "g"), () => {
       replacements += 1;
       return renamedStem;
     });
@@ -300,21 +319,22 @@ const SHA256 = /"([0-9a-f]{64})"/;
  * else means the contract broke for a real reason and must not be auto-pinned.
  */
 export function parseHashMismatch(output: string): { expected: string; received: string } | null {
-  const expected = /Expected: *"([0-9a-f]{64})"/.exec(output);
-  const received = /Received: *"([0-9a-f]{64})"/.exec(output);
-  if (expected && received) return { expected: expected[1]!, received: received[1]! };
-  const objectExpected = /Expected: *\{[^}]*sha256: *"([0-9a-f]{64})"/.exec(output);
-  const objectReceived = /Received: *\{[^}]*sha256: *"([0-9a-f]{64})"/.exec(output);
-  if (objectExpected && objectReceived) {
-    return { expected: objectExpected[1]!, received: objectReceived[1]! };
-  }
+  // Pairs must be adjacent within one failure block so a multi-failure run can
+  // never pair an Expected from one block with a Received from another.
+  const pair = /Expected: *"([0-9a-f]{64})"\s*\n\s*Received: *"([0-9a-f]{64})"/.exec(output);
+  if (pair) return { expected: pair[1]!, received: pair[2]! };
+  const objectPair =
+    /Expected: *\{[^}]*sha256: *"([0-9a-f]{64})"[^}]*\}\s*\n\s*Received: *\{[^}]*sha256: *"([0-9a-f]{64})"/.exec(
+      output,
+    );
+  if (objectPair) return { expected: objectPair[1]!, received: objectPair[2]! };
   // `toMatchObject` prints a unified diff: `-   "sha256": "<expected>",` then
-  // `+   "sha256": "<received>",`.
-  const diffExpected = /^- +"sha256": *"([0-9a-f]{64})"/m.exec(output);
-  const diffReceived = /^\+ +"sha256": *"([0-9a-f]{64})"/m.exec(output);
-  if (diffExpected && diffReceived) {
-    return { expected: diffExpected[1]!, received: diffReceived[1]! };
-  }
+  // (possibly after other `+` lines) `+   "sha256": "<received>",`.
+  const diffPair =
+    /^- +"sha256": *"([0-9a-f]{64})"[^\n]*\n(?:\+[^\n]*\n)*?\+ +"sha256": *"([0-9a-f]{64})"/m.exec(
+      output,
+    );
+  if (diffPair) return { expected: diffPair[1]!, received: diffPair[2]! };
   return null;
 }
 

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -103,6 +104,12 @@ async function fixtureRepo(): Promise<{ root: string; upstream: string }> {
     join(root, "docs/other.md"),
     "Migration 0003 applies the fallback (unrelated feature).\n",
   );
+  // A miniature release contract: one per-file pin and one chain pin computed
+  // like the real one (sorted names + bytes), so the re-pin loop is exercised
+  // end to end against real `bun test` failure output.
+  await mkdir(join(root, "scripts"), { recursive: true });
+  await writeFile(join(root, "scripts/release-schema-contract.test.ts"), MINI_CONTRACT_TEST);
+  await pinMiniContract(root);
   await git(root, "add", "-A");
   await git(root, "commit", "-q", "-m", "feature");
   // Main advances with a different 0003 and a companion test sharing the digits.
@@ -114,7 +121,7 @@ async function fixtureRepo(): Promise<{ root: string; upstream: string }> {
   );
   await writeFile(
     join(root, "packages/db/test/migration-0003-company-brain.test.ts"),
-    "export {};\n",
+    'import { test } from "bun:test";\ntest("migration 0003 company brain", () => {\n  void "0003_company_brain.sql";\n});\n',
   );
   await git(root, "add", "-A");
   await git(root, "commit", "-q", "-m", "main advances");
@@ -124,47 +131,98 @@ async function fixtureRepo(): Promise<{ root: string; upstream: string }> {
   return { root, upstream };
 }
 
+const MINI_CONTRACT_TEST = [
+  'import { expect, test } from "bun:test";',
+  'import { createHash } from "node:crypto";',
+  'import { readdirSync, readFileSync } from "node:fs";',
+  'import { join } from "node:path";',
+  "",
+  'const dir = join(import.meta.dir, "../packages/db/drizzle");',
+  'const files = readdirSync(dir).filter((f) => f.endsWith(".sql")).sort();',
+  "const perFile = new Map(",
+  '  files.map((f) => [f, createHash("sha256").update(readFileSync(join(dir, f))).digest("hex")]),',
+  ");",
+  'const chain = createHash("sha256")',
+  '  .update(files.map((f) => `${f}:${perFile.get(f)}`).join("\\n"))',
+  '  .digest("hex");',
+  "",
+  'test("pins the newest migration and the chain", () => {',
+  "  const newest = files.at(-1)!;",
+  "  expect({ path: newest, sha256: perFile.get(newest) }).toMatchObject({",
+  '    path: "0003_scheduled_authority.sql",',
+  '    sha256: "PERFILE",',
+  "  });",
+  '  expect(chain).toBe("CHAIN");',
+  "});",
+  "",
+].join("\n");
+
+/** Pin the mini contract to the current migration bytes (like a maintainer would). */
+async function pinMiniContract(root: string): Promise<void> {
+  const dir = join(root, "packages/db/drizzle");
+  const files = readdirSync(dir)
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
+  const perFile = new Map(
+    files.map((f) => [
+      f,
+      createHash("sha256")
+        .update(readFileSync(join(dir, f)))
+        .digest("hex"),
+    ]),
+  );
+  const chain = createHash("sha256")
+    .update(files.map((f) => `${f}:${perFile.get(f)}`).join("\n"))
+    .digest("hex");
+  const path = join(root, "scripts/release-schema-contract.test.ts");
+  const text = await readFile(path, "utf8");
+  await writeFile(
+    path,
+    text
+      .replace(/sha256: "[0-9a-fA-Z_]+"/, `sha256: "${perFile.get(files.at(-1)!)}"`)
+      .replace(/toBe\("[0-9a-fA-Z_]+"\)/, `toBe("${chain}")`),
+  );
+}
+
 describe("migration ordinal helpers", () => {
   test("parses names, ledgers, and next free ordinal across ledgers", () => {
-    expect(
-      parseMigrationFile("packages/db/drizzle/0271_scheduled_connection_authority.sql"),
-    ).toEqual({
-      ordinal: "0271",
-      slug: "scheduled_connection_authority",
-      basename: "0271_scheduled_connection_authority",
-      file: "0271_scheduled_connection_authority.sql",
+    expect(parseMigrationFile("packages/db/drizzle/9871_alpha_widgets.sql")).toEqual({
+      ordinal: "9871",
+      slug: "alpha_widgets",
+      basename: "9871_alpha_widgets",
+      file: "9871_alpha_widgets.sql",
     });
     expect(parseMigrationFile("meta/_journal.json")).toBeNull();
     const base = parseLsTree(
-      "packages/db/drizzle/0271_company_brain.sql\npackages/db/drizzle/meta/_journal.json\npackages/db/drizzle/0270_x.sql\n",
+      "packages/db/drizzle/9871_beta_gadgets.sql\npackages/db/drizzle/meta/_journal.json\npackages/db/drizzle/9870_x.sql\n",
     );
-    expect(base.map((m) => m.file)).toEqual(["0270_x.sql", "0271_company_brain.sql"]);
-    expect(nextFreeOrdinal(base, [name("0272_local.sql")])).toBe("0273");
+    expect(base.map((m) => m.file)).toEqual(["9870_x.sql", "9871_beta_gadgets.sql"]);
+    expect(nextFreeOrdinal(base, [name("9872_local.sql")])).toBe("9873");
     expect(nextFreeOrdinal([], [])).toBe("0000");
   });
 
   test("resolves selectors exactly and reports ambiguity", () => {
-    const local = [name("0271_a.sql"), name("0271_b.sql"), name("0272_c.sql")];
-    expect(resolveMigration(local, "0272").file).toBe("0272_c.sql");
-    expect(resolveMigration(local, "0271_b").file).toBe("0271_b.sql");
-    expect(resolveMigration(local, "packages/db/drizzle/0271_a.sql").file).toBe("0271_a.sql");
-    expect(() => resolveMigration(local, "0271")).toThrow(/ambiguous/);
+    const local = [name("9871_a.sql"), name("9871_b.sql"), name("9872_c.sql")];
+    expect(resolveMigration(local, "9872").file).toBe("9872_c.sql");
+    expect(resolveMigration(local, "9871_b").file).toBe("9871_b.sql");
+    expect(resolveMigration(local, "packages/db/drizzle/9871_a.sql").file).toBe("9871_a.sql");
+    expect(() => resolveMigration(local, "9871")).toThrow(/ambiguous/);
     expect(() => resolveMigration(local, "0299")).toThrow(/no migration/);
   });
 
   test("detects head ordinals already taken on the base and local duplicates", () => {
-    const base = [name("0270_x.sql"), name("0271_company_brain.sql")];
+    const base = [name("9870_x.sql"), name("9871_beta_gadgets.sql")];
     const head = [
-      name("0270_x.sql"),
-      name("0271_scheduled.sql"),
-      name("0272_a.sql"),
-      name("0272_b.sql"),
+      name("9870_x.sql"),
+      name("9871_scheduled.sql"),
+      name("9872_a.sql"),
+      name("9872_b.sql"),
     ];
     expect(findOrdinalCollisions(head, base)).toEqual({
       collisions: [
-        { headFile: "0271_scheduled.sql", baseFile: "0271_company_brain.sql", ordinal: "0271" },
+        { headFile: "9871_scheduled.sql", baseFile: "9871_beta_gadgets.sql", ordinal: "9871" },
       ],
-      duplicates: [["0272_a.sql", "0272_b.sql"]],
+      duplicates: [["9872_a.sql", "9872_b.sql"]],
     });
     // Same file on both sides is never a collision, and duplicates that already
     // exist on the base (the historical ledger has many) are not reported.
@@ -180,26 +238,26 @@ describe("migration ordinal helpers", () => {
   });
 
   test("rewrites the basename, companion slug, and bare ordinal without touching neighbours", () => {
-    const from = name("0271_scheduled_connection_authority.sql");
-    const to = name("0272_scheduled_connection_authority.sql");
-    const companions = ["migration-0271-scheduled-connection-authority.test.ts"];
+    const from = name("9871_alpha_widgets.sql");
+    const to = name("9872_alpha_widgets.sql");
+    const companions = ["migration-9871-alpha-widgets.test.ts"];
     const text = [
-      'const url = "../drizzle/0271_scheduled_connection_authority.sql";',
-      'const other = "0271_company_brain_retrieval_only_default.sql";',
-      'const otherTest = "migration-0271-retrieval-only-default.test.ts";',
-      'const ownTest = "migration-0271-scheduled-connection-authority";',
-      "-- 0271 requires drain; see 0252/0271; version 10271; x0271y",
-      'const filter = file < "0271_";',
+      'const url = "../drizzle/9871_alpha_widgets.sql";',
+      'const other = "9871_beta_gadgets.sql";',
+      'const otherTest = "migration-9871-beta-gadgets.test.ts";',
+      'const ownTest = "migration-9871-alpha-widgets";',
+      "-- 9871 requires drain; see 9852/9871; version 19871; x9871y",
+      'const filter = file < "9871_";',
     ].join("\n");
     const result = rewriteText(text, from, to, companions, { bareOrdinal: true });
     expect(result.text).toBe(
       [
-        'const url = "../drizzle/0272_scheduled_connection_authority.sql";',
-        'const other = "0271_company_brain_retrieval_only_default.sql";',
-        'const otherTest = "migration-0271-retrieval-only-default.test.ts";',
-        'const ownTest = "migration-0272-scheduled-connection-authority";',
-        "-- 0272 requires drain; see 0252/0272; version 10271; x0271y",
-        'const filter = file < "0272_";',
+        'const url = "../drizzle/9872_alpha_widgets.sql";',
+        'const other = "9871_beta_gadgets.sql";',
+        'const otherTest = "migration-9871-beta-gadgets.test.ts";',
+        'const ownTest = "migration-9872-alpha-widgets";',
+        "-- 9872 requires drain; see 9852/9872; version 19871; x9871y",
+        'const filter = file < "9872_";',
       ].join("\n"),
     );
     expect(result.replacements).toBe(2);
@@ -291,8 +349,15 @@ describe("migration ordinal helpers", () => {
         `@@ -2,3 +2,4 @@\n    "deploymentMode": "maintenance",\n-   "sha256": "${a}",\n+   "path": "x.sql",\n+   "sha256": "${b}",\n`,
       ),
     ).toEqual({ expected: a, received: b });
-    expect(parseHashMismatch('Expected: "0271_x.sql"\nReceived: "0272_x.sql"')).toBeNull();
+    expect(parseHashMismatch('Expected: "9871_x.sql"\nReceived: "9872_x.sql"')).toBeNull();
     expect(parseHashMismatch("Expected length: 5\nReceived length: 6")).toBeNull();
+    // Pairs are only taken when adjacent inside one failure block: an Expected
+    // hash with a non-hash Received must not pair with a later block.
+    expect(
+      parseHashMismatch(
+        `Expected: "${a}"\nReceived: undefined\n\n(fail) one\n\nExpected: "9871_x.sql"\nReceived: "${b}"\n`,
+      ),
+    ).toBeNull();
   });
 });
 
@@ -318,11 +383,18 @@ describe("migration ordinal CLIs", () => {
       "--next",
       "--base",
       "origin/main",
-      "--no-refresh-release-contract",
     ]);
+    expect(renumber.stderr).toBe("");
     expect(renumber.code).toBe(0);
     expect(renumber.stdout).toContain(
       "renumber 0003_scheduled_authority.sql -> 0004_scheduled_authority.sql",
+    );
+    // The mini release contract was re-pinned (per-file + chain) and is green.
+    expect(renumber.stdout).toMatch(/repin +scripts\/release-schema-contract\.test\.ts/);
+    const contract = await run(root, ["bun", "test", "scripts/release-schema-contract.test.ts"]);
+    expect(contract.code).toBe(0);
+    expect(await readFile(join(root, "scripts/release-schema-contract.test.ts"), "utf8")).toContain(
+      'path: "0004_scheduled_authority.sql"',
     );
     expect(existsSync(join(root, "packages/db/drizzle/0004_scheduled_authority.sql"))).toBe(true);
     expect(existsSync(join(root, "packages/db/drizzle/0003_scheduled_authority.sql"))).toBe(false);
@@ -365,6 +437,63 @@ describe("migration ordinal CLIs", () => {
     const after = await run(root, guard);
     expect(after.code).toBe(0);
     expect(after.stdout).toContain("[migration-ordinals] ok");
+  });
+
+  test("after merging main, only this migration's companion is renamed and the sibling is untouched", async () => {
+    const { root } = await fixtureRepo();
+    await git(root, "merge", "-q", "--no-edit", "origin/main");
+    // Both 0003_scheduled_authority.sql and 0003_company_brain.sql now coexist locally.
+    const renumber = await run(root, [
+      "bun",
+      join(scripts, "renumber-migration.ts"),
+      "0003_scheduled_authority",
+      "--next",
+      "--base",
+      "origin/main",
+      "--no-refresh-release-contract",
+    ]);
+    expect(renumber.stderr).toBe("");
+    expect(renumber.code).toBe(0);
+    expect(existsSync(join(root, "packages/db/drizzle/0004_scheduled_authority.sql"))).toBe(true);
+    expect(existsSync(join(root, "packages/db/drizzle/0003_company_brain.sql"))).toBe(true);
+    expect(existsSync(join(root, "packages/db/test/migration-0003-company-brain.test.ts"))).toBe(
+      true,
+    );
+    expect(
+      await readFile(join(root, "packages/db/test/migration-0003-company-brain.test.ts"), "utf8"),
+    ).toContain('test("migration 0003 company brain"');
+    expect(
+      existsSync(join(root, "packages/db/test/migration-0004-scheduled-authority.test.ts")),
+    ).toBe(true);
+  });
+
+  test("--to refuses to fill a gap below the ledger head unless --allow-gap", async () => {
+    const { root } = await fixtureRepo();
+    // 0002 is taken; 0000 is a free gap below the head.
+    const gap = await run(root, [
+      "bun",
+      join(scripts, "renumber-migration.ts"),
+      "0003_scheduled_authority",
+      "--to",
+      "0000",
+      "--base",
+      "origin/main",
+    ]);
+    expect(gap.code).toBe(1);
+    expect(gap.stderr).toContain("below the ledger head");
+    const allowed = await run(root, [
+      "bun",
+      join(scripts, "renumber-migration.ts"),
+      "0003_scheduled_authority",
+      "--to",
+      "0000",
+      "--base",
+      "origin/main",
+      "--allow-gap",
+      "--no-refresh-release-contract",
+    ]);
+    expect(allowed.code).toBe(0);
+    expect(existsSync(join(root, "packages/db/drizzle/0000_scheduled_authority.sql"))).toBe(true);
   });
 
   test("renumber refuses a taken target, dry-run writes nothing, and untracked files are renamed", async () => {

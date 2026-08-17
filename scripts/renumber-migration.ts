@@ -42,6 +42,7 @@ type Args = {
   dryRun: boolean;
   refreshContract: boolean;
   also: string[];
+  allowGap: boolean;
 };
 
 function usage(message?: string): never {
@@ -52,7 +53,9 @@ function usage(message?: string): never {
       "         [--base <ref>] [--dry-run] [--no-refresh-release-contract]",
       "",
       "  --next        first ordinal free on both the local ledger and --base (default origin/main)",
-      "  --to NNNN     explicit target ordinal (must be free on both sides)",
+      "  --to NNNN     explicit target ordinal (must be free on both sides and above every",
+      "                existing ordinal unless --allow-gap; the migrator applies unapplied files",
+      "                in name order, so a gap-filled ordinal runs late on existing databases)",
       "  --dry-run     print the plan without renaming or writing",
       "  --also <path> also rewrite bare ordinal mentions in this file (repeatable); use it for",
       "                docs/changesets that name the migration by number only",
@@ -72,12 +75,14 @@ function parseArgs(argv: readonly string[]): Args {
     dryRun: false,
     refreshContract: true,
     also: [],
+    allowGap: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index]!;
     if (value === "--next") args.next = true;
     else if (value === "--dry-run") args.dryRun = true;
     else if (value === "--no-refresh-release-contract") args.refreshContract = false;
+    else if (value === "--allow-gap") args.allowGap = true;
     else if (value === "--to") {
       const target = argv[++index];
       if (!target || !/^\d{1,4}$/.test(target)) usage("--to expects a four-digit ordinal");
@@ -180,8 +185,11 @@ async function refreshReleaseContract(root: string): Promise<string[]> {
         `${RELEASE_CONTRACT_TEST} expects ${mismatch.expected} but that literal is not in the file`,
       );
     }
+    const occurrences = text.split(mismatch.expected).length - 1;
     await writeFile(path, text.split(mismatch.expected).join(mismatch.received));
-    applied.push(`${mismatch.expected.slice(0, 12)}… -> ${mismatch.received.slice(0, 12)}…`);
+    applied.push(
+      `${mismatch.expected.slice(0, 12)}… -> ${mismatch.received.slice(0, 12)}… (${occurrences} occurrence${occurrences === 1 ? "" : "s"})`,
+    );
   }
   throw new Error(`${RELEASE_CONTRACT_TEST} still red after 16 hash substitutions`);
 }
@@ -206,7 +214,17 @@ async function main(): Promise<void> {
     throw new Error(`ordinal ${toOrdinal} is already used on ${args.base} by ${takenOnBase.file}`);
   if (toOrdinal === from.ordinal) throw new Error(`${from.file} already has ordinal ${toOrdinal}`);
 
-  const companions = companionTestFiles(root, from.ordinal);
+  const highest = nextFreeOrdinal(local, base);
+  if (!args.allowGap && toOrdinal < highest && !args.next) {
+    throw new Error(
+      `ordinal ${toOrdinal} is below the ledger head (${highest} is the next free ordinal); pass --allow-gap to fill a gap deliberately`,
+    );
+  }
+  const companions = companionTestFiles(
+    root,
+    from,
+    local.filter((migration) => migration.ordinal === from.ordinal),
+  );
   const files = await repoTextFiles(root);
   const plan = planRenumber({
     from,
@@ -226,6 +244,10 @@ async function main(): Promise<void> {
           : ""
       })`,
     );
+  }
+  for (const path of args.also) {
+    if (!files.has(path))
+      console.log(`  warn   --also ${path} matches no tracked or untracked file`);
   }
   for (const path of plan.unrewrittenBare) {
     console.log(
