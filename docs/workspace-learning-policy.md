@@ -44,7 +44,14 @@ Migration `0268_governed_learning_decision_receipts.sql` adds the deterministic 
 Migration `0269_governed_learning_activation_controller.sql` adds the separate
 controller that consumes one final `automatic` receipt. The learning-policy
 router invokes it for eligible **preference** decisions; instruction-policy
-decisions are recorded but keep a human activation boundary. It revalidates
+decisions are recorded but keep a human activation boundary. Migration 0272 adds
+the sibling `activate_human_confirmed_learning_decision`, used by the explicit
+`remember_confirm` tool: it activates a `suggest`/`automatic`/`confidence`
+receipt only after the exact initiating human answered the bound
+`remember:<proposalId>` structured human-input question with `save` on the same
+turn generation, and stamps `authority_kind = human_confirmed` plus the
+human-input request id on the activation receipt. See
+[`company-brain-write-routing.md`](company-brain-write-routing.md). It revalidates
 the accepted attempt and initiating human, current policy head and source
 override, current evidence ACL/lifecycle/hash, latest Knowledge review, inactive
 proposal, conflict facts, and destination CAS before invoking the destination's

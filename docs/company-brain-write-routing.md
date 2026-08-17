@@ -127,6 +127,53 @@ The first-party proposal surface is intentionally explicit:
 the exact attempt tuple. Tool input cannot select authority scope, active
 authority, a different learning-policy source, or replacement evidence bytes.
 
+## Explicit user-directed remember
+
+`remember` (`apps/api/src/mcp/remember.ts`, router
+`packages/core/src/domain/remember.ts`) is the one tool for "remember this for
+the workspace". Its lane is the Company Brain area (`preference`,
+`instruction_policy`, or `knowledge`); v1 supports the workspace scope only. The
+content becomes one exact task note (the evidence, expiring after 30 days), the
+note is promoted through the learning-policy router above with full user
+confidence, and the receipt is one of:
+
+- `blocked` - the frozen learning policy is `off` for this source; nothing durable
+  was written;
+- `proposed_for_review` - Knowledge facts are proposals for the human Knowledge
+  review lifecycle;
+- `activated` - a preference under `automatic` was activated by the governed
+  controller and is undoable from Learning & autonomy;
+- `confirmation_required` - the proposal is durable but the policy will not
+  activate it (Suggest mode, an ineligible decision, or a mandatory rule, which
+  always keeps a human boundary). The receipt carries the exact
+  `request_human_input` payload: one `single_select` question whose id is
+  `remember:<proposalId>` with options `save` / `skip`. The agent asks the human
+  through the built-in tool, then calls `remember_confirm` with the proposal id,
+  the decision receipt id, and the returned `requestId`.
+
+`remember_confirm` invokes migration 0272's
+`activate_human_confirmed_learning_decision`. That SECURITY DEFINER capability
+requires the exact initiating human's `session_human_input_requests` row: same
+session and turn, same execution generation as the decision receipt, status
+`answered`, `responded_by` equal to the turn's initiating human, and the bound
+question answered with exactly `save`. The question the human saw is not
+trusted from the agent: the capability reconstructs the canonical prompt from
+the proposal lane, the help text from the exact Task-note text, and the fixed
+`Save` / `Don't save` options, and refuses any human-input row whose question
+differs, so a misleading agent-authored prompt cannot obtain confirmation (only
+Task-note-backed proposals, i.e. those created by `remember`, are confirmable).
+It accepts `suggest`, `automatic`, and
+`confidence` decision receipts (never `off`, `revoked`, `stale`, or `conflict`),
+revalidates the current learning policy (not `off`), evidence, review, and
+destination CAS, and writes only through the destination-native lifecycle. The
+activation receipt records `authorityKind = human_confirmed` and the human-input
+request id, so Learning & autonomy history shows who authorized it and exact
+undo remains available. Because the receipt is minted before the human-input
+pause and the turn resumes on a new attempt of the same execution generation,
+the capability requires the turn's current live attempt rather than the minting
+attempt. Agents cannot fabricate that answer: the human-input row is written only
+by the authenticated human's response route.
+
 `task_note_promote_knowledge` accepts an active, unexpired version-one note from
 the exact caller's root tree plus normalized entity/predicate metadata. The note
 text becomes the proposed workspace Knowledge fact value. Migration

@@ -715,6 +715,15 @@ BEGIN
       );
     END IF;
     IF to_regprocedure(
+      format('%I.activate_human_confirmed_learning_decision(uuid,uuid,uuid,uuid,uuid)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.activate_human_confirmed_learning_decision(uuid, uuid, uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
       format('%I.undo_governed_learning_activation(uuid,uuid,uuid,uuid)', ${literal(schema)})
     ) IS NOT NULL THEN
       EXECUTE format(

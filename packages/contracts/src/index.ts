@@ -826,6 +826,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "task_note_promote_preference",
   "instruction_policy_propose",
   "preference_propose",
+  "remember",
+  "remember_confirm",
   "sandboxes_list",
   "sandbox_attach",
   "sandbox_swap",
@@ -13623,3 +13625,4 @@ export * from "./knowledge";
 export * from "./task-notes";
 export * from "./canonical-human-identities";
 export * from "./organization-membership-lifecycle";
+export * from "./remember";

@@ -1,10 +1,12 @@
 import {
   ActivateGovernedLearningDecisionRequest,
+  ActivateHumanConfirmedLearningDecisionRequest,
   GovernedLearningActivationCaller,
   GovernedLearningActivationReceipt,
   GovernedLearningActivationUndoReceipt,
   UndoGovernedLearningActivationRequest,
   type ActivateGovernedLearningDecisionRequest as ActivateRequest,
+  type ActivateHumanConfirmedLearningDecisionRequest as ActivateHumanConfirmedRequest,
   type GovernedLearningActivationCaller as ActivationCaller,
   type GovernedLearningActivationReceipt as ActivationReceipt,
   type GovernedLearningActivationUndoReceipt as UndoReceipt,
@@ -28,6 +30,8 @@ export class GovernedLearningActivationInvalidOperationError extends Error {
 }
 
 type ActivationRow = {
+  authority_kind?: string | null;
+  human_input_request_id?: string | null;
   id: string;
   operation_id: string;
   input_hash: string;
@@ -127,6 +131,8 @@ function activationFromRow(row: ActivationRow): ActivationReceipt {
     destinationEventId: row.destination_event_id,
     outcome: "activated",
     effectiveAt: iso(row.effective_at),
+    authorityKind: row.authority_kind ?? "automatic",
+    humanInputRequestId: row.human_input_request_id ?? null,
     rollback: { supported: true, mechanism: "exact_head_and_latest_review" },
     createdAt: iso(row.created_at),
   });
@@ -265,6 +271,48 @@ export async function activateGovernedLearningDecision(
   }
 }
 
+/**
+ * Activate one confirmable evaluator receipt (`suggest`, `automatic`, or
+ * `confidence`) because the exact initiating human answered the bound
+ * `remember:<proposalId>` structured human-input question with `save` on the
+ * same session/turn generation. The database capability revalidates the human
+ * answer, current policy (not `off`), evidence, and destination CAS.
+ */
+export async function activateHumanConfirmedLearningDecision(
+  db: Database,
+  raw: { caller: ActivationCaller; request: ActivateHumanConfirmedRequest },
+): Promise<ActivationReceipt> {
+  const caller = GovernedLearningActivationCaller.parse(raw.caller);
+  const request = ActivateHumanConfirmedLearningDecisionRequest.parse(raw.request);
+  try {
+    return await withWorkspaceSubjectRls(
+      db,
+      caller.workspaceId,
+      caller.subjectId,
+      async (scoped) => {
+        const rows = await rawRows<ActivationRow>(
+          scoped,
+          sql`SELECT * FROM activate_human_confirmed_learning_decision(
+          current_setting('opengeni.account_id')::uuid,
+          ${caller.workspaceId}::uuid,
+          ${request.operationId}::uuid,
+          ${request.decisionReceiptId}::uuid,
+          ${request.humanInputRequestId}::uuid
+        )`,
+        );
+        if (rows.length !== 1 || !rows[0]) {
+          throw new Error(
+            "Human-confirmed governed-learning activation returned no unique receipt",
+          );
+        }
+        return activationFromRow(rows[0]);
+      },
+    );
+  } catch (error) {
+    translate(error);
+  }
+}
+
 export async function undoGovernedLearningActivation(
   db: Database,
   raw: { caller: ActivationCaller; request: UndoRequest },
@@ -338,5 +386,56 @@ export async function resolveGovernedLearningEvidenceOrigin(
     if (!row) return null;
     if (row.task_note_id) return { kind: "task-note" };
     return { kind: "document", providerKey: row.provider_key };
+  });
+}
+
+export type GovernedLearningProposalSummary = {
+  id: string;
+  claimId: string;
+  evidenceId: string;
+  status: string;
+  targetKind: string;
+  initiatingHumanSubjectId: string | null;
+};
+
+/**
+ * Read one workspace-scoped `knowledge_change_proposals` row under workspace
+ * RLS. Used by `remember_confirm` to rebuild the evaluator request for the
+ * exact proposal the human confirmed; it exposes no content.
+ */
+export async function getWorkspaceKnowledgeChangeProposalSummary(
+  db: Database,
+  input: { workspaceId: string; proposalId: string },
+): Promise<GovernedLearningProposalSummary | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scoped) => {
+    const rows = await rawRows<{
+      id: string;
+      claim_id: string;
+      evidence_id: string;
+      status: string;
+      target_kind: string;
+      initiating_human_subject_id: string | null;
+    }>(
+      scoped,
+      sql`SELECT proposal.id, proposal.claim_id, proposal.evidence_id, proposal.status,
+                 proposal.target_kind, proposal.initiating_human_subject_id
+          FROM knowledge_change_proposals proposal
+          WHERE proposal.account_id = current_setting('opengeni.account_id')::uuid
+            AND proposal.scope_kind = 'workspace'
+            AND proposal.scope_workspace_id = ${input.workspaceId}::uuid
+            AND proposal.scope_subject_id IS NULL
+            AND proposal.id = ${input.proposalId}::uuid
+          LIMIT 1`,
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      id: row.id,
+      claimId: row.claim_id,
+      evidenceId: row.evidence_id,
+      status: row.status,
+      targetKind: row.target_kind,
+      initiatingHumanSubjectId: row.initiating_human_subject_id,
+    };
   });
 }

@@ -1,0 +1,114 @@
+import {
+  PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS,
+  PREFERENCE_REGISTRY_TITLE_MAX_CHARS,
+  REMEMBER_CONTENT_MAX_CHARS,
+  WorkspaceInstructionPolicyTarget,
+  type CompanyBrainGovernedWriteAttempt,
+} from "@opengeni/contracts";
+import { RememberError, createRememberRouter } from "@opengeni/core";
+import type { Database } from "@opengeni/db";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import * as z from "zod/v4";
+
+type JsonResult = (value: unknown) => {
+  content: { type: "text"; text: string }[];
+};
+
+export type RegisterRememberToolsInput = {
+  server: McpServer;
+  db: Database;
+  attempt: CompanyBrainGovernedWriteAttempt;
+  authorize: () => Promise<void>;
+  json: JsonResult;
+  router?: Pick<ReturnType<typeof createRememberRouter>, "remember" | "confirm">;
+};
+
+const laneFields = {
+  operationId: z.string().uuid(),
+  content: z.string().trim().min(1).max(REMEMBER_CONTENT_MAX_CHARS),
+  reason: z.string().trim().min(1).max(4_096),
+};
+
+/**
+ * Explicit user-directed remember. Content becomes exact task-note evidence,
+ * promotion runs through the frozen workspace learning policy, and activation
+ * is either automatic (preference under Automatic mode) or requires exactly one
+ * bound human confirmation through the built-in `request_human_input` tool.
+ * Tool input cannot select scope beyond the workspace, active authority, or
+ * another learning-policy source.
+ */
+export function registerRememberTools(input: RegisterRememberToolsInput): void {
+  const router = input.router ?? createRememberRouter({ db: input.db });
+  input.server.registerTool(
+    "remember",
+    {
+      description:
+        "Durably remember something the user explicitly asked to keep for this workspace. Use lane=preference for how agents should act, lane=instruction_policy only when the user stated a hard always/never rule, lane=knowledge for a company/product/people fact. Under Automatic learning a preference activates immediately; otherwise the receipt returns status=confirmation_required with the exact `humanInput` payload: call `request_human_input` with it verbatim, then call `remember_confirm` with the returned requestId. Mandatory rules always need that confirmation. Do not use this for facts you merely inferred; use knowledge_propose or task notes for those.",
+      inputSchema: {
+        lane: z.enum(["preference", "instruction_policy", "knowledge"]),
+        ...laneFields,
+        stableKey: z
+          .string()
+          .trim()
+          .min(1)
+          .max(128)
+          .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/)
+          .optional(),
+        title: z.string().trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS).optional(),
+        description: z
+          .string()
+          .trim()
+          .min(1)
+          .max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS)
+          .optional(),
+        target: WorkspaceInstructionPolicyTarget.optional(),
+        subject: z.string().trim().min(1).max(512).optional(),
+      },
+    },
+    async (request) => {
+      await input.authorize();
+      const { lane, operationId, content, reason } = request;
+      const base = { operationId, content, reason, scope: "workspace" as const };
+      const rememberRequest =
+        lane === "preference"
+          ? {
+              ...base,
+              lane,
+              stableKey: request.stableKey ?? `remember.${operationId.replaceAll("-", "")}`,
+              title: request.title ?? content.slice(0, 80),
+              description: request.description ?? content.slice(0, 200),
+            }
+          : lane === "instruction_policy"
+            ? { ...base, lane, target: request.target }
+            : { ...base, lane, subject: request.subject ?? content.slice(0, 80) };
+      return input.json(
+        await router.remember({ attempt: input.attempt, request: rememberRequest }),
+      );
+    },
+  );
+
+  input.server.registerTool(
+    "remember_confirm",
+    {
+      description:
+        "Complete a `remember` that returned status=confirmation_required after the human answered the bound `request_human_input` question. Pass the proposalId and learning.receiptId from that receipt and the requestId returned by request_human_input. Activation only succeeds when the exact initiating human answered Save on this turn; otherwise the proposal stays for review.",
+      inputSchema: {
+        operationId: z.string().uuid(),
+        proposalId: z.string().uuid(),
+        decisionReceiptId: z.string().uuid(),
+        humanInputRequestId: z.string().uuid(),
+      },
+    },
+    async (request) => {
+      await input.authorize();
+      try {
+        return input.json(await router.confirm({ attempt: input.attempt, request }));
+      } catch (error) {
+        if (error instanceof RememberError) {
+          return input.json({ status: "not_confirmed", code: error.code, message: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+}
