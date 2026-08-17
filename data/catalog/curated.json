@@ -1,0 +1,350 @@
+{
+  "version": 1,
+  "readme": [
+    "Curated overlay applied to the reviewed integrations.sh snapshot during catalog import.",
+    "Keyed by exact canonical MCP URL. Every field is optional: a supplied value wins over the",
+    "snapshot, an omitted one falls through to the snapshot exactly as before.",
+    "",
+    "Every entry must be backed by the provider's own current documentation, not inferred from an",
+    "aggregator. Use `notes` to record why a value was chosen so the reasoning survives review.",
+    "",
+    "`featured` promotes an entry to the top of the connector catalog. `official` means the MCP",
+    "server is published by the provider on its own domain. Neither is a security review, and",
+    "neither may be presented as one."
+  ],
+  "entries": [
+    {
+      "mcpUrl": "https://gmailmcp.googleapis.com/mcp/v1",
+      "name": "Gmail",
+      "description": "Search and read Gmail, create drafts, and organize messages through Google's official hosted MCP server.",
+      "category": "communication",
+      "featured": true,
+      "official": true,
+      "tier": "verified",
+      "provenance": "official:developers.google.com/workspace/gmail/api/reference/mcp",
+      "authKind": "oauth2",
+      "scopesHint": [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/gmail.modify"
+      ],
+      "allowedTools": [
+        "create_draft",
+        "get_message",
+        "get_thread",
+        "label_message",
+        "label_thread",
+        "list_drafts",
+        "list_labels",
+        "search_threads",
+        "unlabel_message",
+        "unlabel_thread"
+      ],
+      "requireApproval": [
+        "create_draft",
+        "label_message",
+        "label_thread",
+        "unlabel_message",
+        "unlabel_thread"
+      ],
+      "connectionOwnership": "personal_only",
+      "logoSourceUrl": null,
+      "homepageUrl": "https://developers.google.com/workspace/gmail/api/reference/mcp",
+      "installUrl": "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
+      "documentationUrl": "https://developers.google.com/workspace/gmail/api/reference/mcp",
+      "notes": [
+        "scopesHint keeps the consent surface to the union required by the reviewed tools instead of requesting every scope advertised by PRM.",
+        "allowedTools freezes the reviewed Developer Preview surface. Newly introduced remote tools stay unavailable until this contract is reviewed again.",
+        "connectionOwnership is personal_only: a consumer Gmail account is never a workspace credential. Each member authorizes their own mailbox.",
+        "logoSourceUrl is null because Google has not published a reusable Gmail MCP logo asset. Keep the self-hosted monogram rather than hotlinking a brand asset."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.slack.com/mcp",
+      "name": "Slack",
+      "category": "communication",
+      "featured": true,
+      "official": true,
+      "tier": "verified",
+      "provenance": "official:docs.slack.dev/ai/slack-mcp-server",
+      "authKind": "oauth2",
+      "scopesHint": [
+        "search:read.public",
+        "search:read.private",
+        "search:read.mpim",
+        "search:read.im",
+        "search:read.files",
+        "search:read.users",
+        "chat:write",
+        "channels:history",
+        "groups:history",
+        "mpim:history",
+        "im:history",
+        "canvases:read",
+        "canvases:write",
+        "users:read",
+        "users:read.email",
+        "reactions:write",
+        "reactions:read",
+        "emoji:read",
+        "files:read",
+        "channels:write",
+        "groups:write",
+        "im:write",
+        "mpim:write",
+        "channels:read",
+        "groups:read",
+        "mpim:read"
+      ],
+      "notes": [
+        "Slack's tools/list is grant-dependent. scopesHint is the complete set advertised by its official OAuth protected-resource metadata.",
+        "This is the personal hosted Slack MCP. The separate OpenGeni Slack bot is an Integration, not a catalog connector."
+      ]
+    },
+    {
+      "mcpUrl": "https://api.mobbin.com/mcp",
+      "name": "Mobbin",
+      "description": "Search Mobbin’s library for real-world product screens, flows, and UI/UX references. Requires a paid Mobbin plan (Pro, Team, or Enterprise). Provider-managed usage credits apply.",
+      "category": "design",
+      "official": true,
+      "tier": "verified",
+      "provenance": "official:mcp-registry:com.mobbin/mobbin@1.0.1",
+      "authKind": "oauth2",
+      "scopesHint": ["openid"],
+      "logoSourceUrl": null,
+      "homepageUrl": "https://mobbin.com/mcp",
+      "installUrl": "https://docs.mobbin.com/mcp/clients/overview",
+      "documentationUrl": "https://docs.mobbin.com/mcp/introduction",
+      "registryName": "com.mobbin/mobbin",
+      "registryVersion": "1.0.1",
+      "registryStatus": "active",
+      "registryIsLatest": true,
+      "registryPublishedAt": "2026-06-03T10:01:47.928592Z",
+      "repositorySource": "github",
+      "repositoryUrl": "https://github.com/mobbin/mobbin-mcp-server",
+      "sourceCommit": "bbee2a6be34d251c580ba80bb8b407c87587aba7",
+      "notes": [
+        "logoSourceUrl is null because Mobbin has not published a reusable logo license with its MCP listing. Keep the calm monogram rather than copying an unlicensed vendor asset."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.linear.app/mcp",
+      "name": "Linear",
+      "category": "project-management",
+      "featured": true,
+      "official": true,
+      "notes": [
+        "Name only. Tier, provenance, auth kind, and scopes stay snapshot-derived.",
+        "Linear advertises CIMD but only issues MCP-accepted tokens to DCR clients; that compatibility override lives in the OAuth client, not here."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.asana.com/v2/mcp",
+      "name": "Asana",
+      "description": "Tasks, projects, and portfolios in the workspaces you can already see.",
+      "category": "project-management",
+      "featured": true,
+      "official": true,
+      "notes": [
+        "Snapshot tier is community only because the aggregator could not confirm PRM; the server is Asana's own at mcp.asana.com."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.stripe.com/",
+      "name": "Stripe",
+      "description": "Look up customers, subscriptions, invoices, and payments.",
+      "category": "finance",
+      "featured": true,
+      "official": true,
+      "notes": ["Snapshot name was lowercase 'stripe'."]
+    },
+    {
+      "mcpUrl": "https://mcp.figma.com/mcp",
+      "name": "Figma",
+      "description": "Read frames, components, and comments straight from a design file.",
+      "category": "design",
+      "featured": true,
+      "official": true
+    },
+    {
+      "mcpUrl": "https://mcp.canva.com/mcp",
+      "name": "Canva",
+      "description": "Find and work with designs and brand kits.",
+      "category": "design",
+      "featured": true,
+      "official": true
+    },
+    {
+      "mcpUrl": "https://mcp.sentry.dev/mcp",
+      "name": "Sentry",
+      "description": "Errors, issues, and releases across your projects.",
+      "category": "developer-tools",
+      "featured": true,
+      "notes": [
+        "Snapshot name was 'sentry-cli', which is the CLI, not the hosted server.",
+        "Not marked official: the server is Sentry's own but lives on sentry.dev, which is not mechanically checkable against the snapshot domain sentry.io. official must stay a checkable claim."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.vercel.com/",
+      "name": "Vercel",
+      "description": "Deployments, projects, and logs.",
+      "category": "developer-tools",
+      "featured": true,
+      "official": true,
+      "notes": ["Snapshot name was lowercase 'vercel'."]
+    },
+    {
+      "mcpUrl": "https://bindings.mcp.cloudflare.com/mcp",
+      "name": "Cloudflare",
+      "description": "Workers bindings, KV, R2, and D1 for your account.",
+      "category": "developer-tools",
+      "featured": true,
+      "official": true,
+      "notes": [
+        "Snapshot name was 'wrangler', which is the CLI. This is the Bindings server; Cloudflare publishes several."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.paypal.com/mcp",
+      "name": "PayPal",
+      "description": "Orders, invoices, and payouts.",
+      "category": "finance",
+      "official": true
+    },
+    {
+      "mcpUrl": "https://mcp.monday.com/mcp",
+      "name": "monday.com",
+      "description": "Boards, items, and updates.",
+      "category": "project-management",
+      "official": true
+    },
+    {
+      "mcpUrl": "https://mcp.airtable.com/mcp",
+      "name": "Airtable",
+      "description": "Bases, tables, and records.",
+      "category": "data",
+      "featured": true,
+      "official": true
+    },
+    {
+      "mcpUrl": "https://mcp.zapier.com/api/v1/connect",
+      "name": "Zapier",
+      "description": "Run actions across the apps connected to your Zapier account.",
+      "category": "automation",
+      "official": true,
+      "notes": ["Snapshot name was 'zapier.com – nla'."]
+    },
+    {
+      "mcpUrl": "https://mcp.webflow.com/mcp",
+      "name": "Webflow",
+      "description": "Sites, pages, and CMS collections.",
+      "category": "web",
+      "official": true,
+      "notes": ["Snapshot name was 'Lucidtech API', a mislabel from the aggregator."]
+    },
+    {
+      "mcpUrl": "https://mcp.supabase.com/mcp",
+      "name": "Supabase",
+      "description": "Projects, tables, and SQL for your Supabase organisation.",
+      "category": "developer-tools",
+      "featured": true,
+      "official": true,
+      "notes": ["Snapshot name was lowercase 'supabase'."]
+    },
+    {
+      "mcpUrl": "https://mcp.clickup.com/mcp",
+      "name": "ClickUp",
+      "description": "Tasks, lists, and spaces.",
+      "category": "project-management",
+      "official": true,
+      "notes": ["Snapshot name was 'clickup20', an internal aggregator id."]
+    },
+    {
+      "mcpUrl": "https://mcp.calendly.com/",
+      "name": "Calendly",
+      "description": "Event types, scheduled events, and availability.",
+      "category": "scheduling",
+      "official": true
+    },
+    {
+      "mcpUrl": "https://mcp.box.com/",
+      "name": "Box",
+      "description": "Files and folders in the Box account you connect.",
+      "category": "files",
+      "official": true,
+      "notes": ["Snapshot name was 'Box Platform API'."]
+    },
+    {
+      "mcpUrl": "https://mcp.dropbox.com/chatgpt_app_mcp",
+      "name": "Dropbox",
+      "description": "Search and read files in the Dropbox account you connect.",
+      "category": "files",
+      "official": true,
+      "notes": ["Snapshot name was 'Dropbox Dash'."]
+    },
+    {
+      "mcpUrl": "https://mcp.amplitude.com/mcp",
+      "name": "Amplitude",
+      "description": "Product analytics: charts, cohorts, and events.",
+      "category": "analytics",
+      "official": true
+    },
+    {
+      "mcpUrl": "https://mcp.posthog.com/mcp",
+      "name": "PostHog",
+      "description": "Product analytics, feature flags, and session insights.",
+      "category": "analytics",
+      "featured": true,
+      "official": true
+    },
+    {
+      "mcpUrl": "https://mcp.pagerduty.com/mcp",
+      "name": "PagerDuty",
+      "description": "Incidents, services, and on-call schedules.",
+      "category": "developer-tools",
+      "official": true,
+      "notes": [
+        "Snapshot tier is community only because the aggregator could not confirm PRM; the server is PagerDuty's own."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.apollo.io/mcp",
+      "name": "Apollo.io",
+      "description": "Contacts, companies, and sequences.",
+      "category": "sales",
+      "official": true
+    },
+    {
+      "mcpUrl": "https://api.ahrefs.com/mcp/mcp",
+      "name": "Ahrefs",
+      "description": "Backlinks, keywords, and site audits.",
+      "category": "marketing",
+      "official": true
+    },
+    {
+      "mcpUrl": "https://mcp.semrush.com/openai/v1/mcp",
+      "name": "Semrush",
+      "description": "Keyword and domain research.",
+      "category": "marketing",
+      "official": true
+    },
+    {
+      "mcpUrl": "https://mcp.frontapp.com/mcp",
+      "name": "Front",
+      "description": "Shared inbox conversations and contacts.",
+      "category": "communication",
+      "notes": [
+        "Snapshot name was the bare domain 'front.com'. Snapshot tier is community only because the aggregator could not confirm PRM.",
+        "Not marked official: the server is Front's own but lives on frontapp.com, not the snapshot domain front.com. official must stay a checkable claim."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.otter.ai/mcp",
+      "name": "Otter.ai",
+      "description": "Meeting transcripts and summaries.",
+      "category": "productivity",
+      "official": true
+    }
+  ]
+}

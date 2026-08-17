@@ -4396,6 +4396,8 @@ export type RegistryCapabilityCatalogItemInput = {
   scopesHint?: string[];
   homepageUrl?: string | null;
   installUrl?: string | null;
+  /** Curated catalog grouping. Defaults to the registry-wide "integrations". */
+  category?: string | null;
   tags?: string[];
   metadata?: Record<string, unknown>;
 };
@@ -6454,7 +6456,7 @@ export async function upsertRegistryCapabilityCatalogItem(
     source: registryCapabilitySource,
     name: input.name,
     description: input.description ?? null,
-    category: "integrations",
+    category: input.category ?? "integrations",
     tags: input.tags ?? ["mcp", "integration", input.tier],
     homepageUrl: input.homepageUrl ?? `https://${input.providerDomain}`,
     endpointUrl: input.mcpUrl,
