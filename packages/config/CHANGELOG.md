@@ -1,5 +1,41 @@
 # @opengeni/config
 
+## 0.16.6
+
+### Patch Changes
+
+- 1aa02d4: Ship the branded macOS Connected Machine icon from every control plane and
+  promote the existing signed agent 0.1.15 release as the default stable channel.
+- 91d5caf: Add a provider-neutral operational instruction contract for consistent agent collaboration, execution safety, file editing, and skill usage across every OpenGeni persona. Keep persistent system instructions prompt-cache stable, project goal continuations once as canonical user messages, let authoritative human input supersede a pending continuation, and remove the unreliable inferred-progress pause.
+- 6c45ceb: Start fresh progressive-disclosure turns with only local tools, `tool_search`,
+  and MCP servers explicitly marked eager by the session. Prepare every other
+  strict or optional MCP concurrently, join the exact catalog only when searched
+  or invoked, and keep worker first-party MCP traffic on an internal endpoint
+  instead of a sandbox-facing public route while preserving the distinct root,
+  documents, and files MCP paths.
+- Updated dependencies [ca75ed9]
+- Updated dependencies [c297fc0]
+- Updated dependencies [91d5caf]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [e9aabaa]
+- Updated dependencies [1f860f0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [22c0c21]
+- Updated dependencies [4eb7abd]
+- Updated dependencies [89d4ab3]
+- Updated dependencies [7454580]
+- Updated dependencies [16cbd7b]
+- Updated dependencies [30ba620]
+- Updated dependencies [d168b8f]
+- Updated dependencies [6860c5f]
+- Updated dependencies [f72563d]
+- Updated dependencies [c297fc0]
+- Updated dependencies [6c45ceb]
+- Updated dependencies [c297fc0]
+  - @opengeni/contracts@1.2.0
+
 ## 0.16.5
 
 ### Patch Changes
