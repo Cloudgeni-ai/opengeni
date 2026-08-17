@@ -5,11 +5,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 import { Sheet } from "@/components/ui/sheet";
-import type {
-  AccessContext,
-  ConnectionMetadata,
-  SlackInstallationBinding,
-} from "@/types";
+import type { AccessContext, ConnectionMetadata, SlackInstallationBinding } from "@/types";
 import { IntegrationSheetBody } from "./integration-sheet";
 import type {
   IntegrationChoiceOption,

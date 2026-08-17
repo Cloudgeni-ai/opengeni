@@ -125,8 +125,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
       ? configurableInstallations.map((installation) => ({
           kind: "link" as const,
           id: `github-repositories-${installation.installationId}`,
-          label:
-            installation.accountLogin ?? `GitHub installation ${installation.installationId}`,
+          label: installation.accountLogin ?? `GitHub installation ${installation.installationId}`,
           description: "Choose which repositories this installation shares.",
           action: {
             label: "Change repositories",
