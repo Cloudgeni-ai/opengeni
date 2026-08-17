@@ -1327,6 +1327,7 @@ describe("API component integration", () => {
       prepared = await prepareAgentTools(
         {
           ...settings,
+          opengeniMcpInternalUrl: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
           mcpServers: [
             {
               id: "opengeni",
@@ -7196,6 +7197,7 @@ describe("API component integration", () => {
     });
     const settings = {
       ...appSettings,
+      opengeniMcpInternalUrl: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
       mcpServers: [
         {
           id: "docs",
@@ -7435,6 +7437,7 @@ describe("API component integration", () => {
     });
     const settings = {
       ...appSettings,
+      opengeniMcpInternalUrl: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
       mcpServers: [
         {
           id: "opengeni",
@@ -8917,6 +8920,7 @@ describe("API component integration", () => {
     try {
       const runtimeSettings = {
         ...appSettings,
+        opengeniMcpInternalUrl: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
         mcpServers: [
           {
             id: "opengeni",
@@ -10546,6 +10550,7 @@ describe("API component integration", () => {
     const settings = testSettings({
       databaseUrl: services.databaseUrl,
       delegationSecret: "test-delegation-secret",
+      opengeniMcpInternalUrl: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
       mcpServers: [
         {
           id: "files",

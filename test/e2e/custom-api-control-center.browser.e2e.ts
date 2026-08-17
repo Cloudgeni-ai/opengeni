@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 
+import { INTEGRATION_DEFINITION_PRESENTATIONS } from "@opengeni/capabilities";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
@@ -708,6 +709,9 @@ function integrationDefinitions() {
     protocol: "openapi",
     provider: { id: providerId, domain: providerDomain },
     authentication: { kind: "oauth2", scopes: scopes[id!] ?? [] },
+    ...(INTEGRATION_DEFINITION_PRESENTATIONS[id!]
+      ? { presentation: INTEGRATION_DEFINITION_PRESENTATIONS[id!] }
+      : {}),
     facets: id === "google-gmail" ? gmailFacetDefinitions() : [],
   }));
 }

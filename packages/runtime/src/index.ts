@@ -5272,8 +5272,8 @@ function firstPartyMcpServerUrlForRun(
   }
   const rawBase = firstPartyMcpInternalWorkspaceUrl(settings, workspaceId);
   const url = new URL(rawBase);
-  if (config.id === "docs") {
-    url.pathname = `${url.pathname.replace(/\/+$/, "")}/docs`;
+  if (config.id === "docs" || config.id === "files") {
+    url.pathname = `${url.pathname.replace(/\/+$/, "")}/${config.id}`;
   }
   return url.toString();
 }
@@ -5287,10 +5287,12 @@ function firstPartyMcpUrls(settings: Settings): string[] {
     const base = normalizeUrl(candidate);
     if (!base) continue;
     urls.add(base);
-    const docs = new URL(base);
-    docs.pathname = `${docs.pathname.replace(/\/+$/, "")}/docs`;
-    const normalizedDocs = normalizeUrl(docs.toString());
-    if (normalizedDocs) urls.add(normalizedDocs);
+    for (const suffix of ["docs", "files"] as const) {
+      const scoped = new URL(base);
+      scoped.pathname = `${scoped.pathname.replace(/\/+$/, "")}/${suffix}`;
+      const normalizedScoped = normalizeUrl(scoped.toString());
+      if (normalizedScoped) urls.add(normalizedScoped);
+    }
   }
   return [...urls];
 }
