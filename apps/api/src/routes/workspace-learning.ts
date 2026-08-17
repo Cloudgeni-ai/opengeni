@@ -9,7 +9,11 @@ import {
   WorkspaceLearningPolicyMutationResponse,
   WorkspaceLearningPolicyRevision,
 } from "@opengeni/contracts";
-import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  publishGovernedLearningEventToSlack,
+  requireAccessGrant,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   activateWorkspaceLearningPolicyRevision,
   createWorkspaceLearningPolicyRevision,
@@ -205,15 +209,18 @@ export function registerWorkspaceLearningRoutes(app: Hono, deps: ApiRouteDeps): 
     const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:admin");
     const request = await parseBody(context, UndoGovernedLearningActivationHttpRequest);
     try {
-      return context.json(
-        await undoGovernedLearningActivation(deps.db, {
-          caller: { workspaceId, subjectId: grant.subjectId },
-          request: {
-            operationId: request.operationId ?? randomUUID(),
-            activationReceiptId: activationReceiptId.data,
-          },
-        }),
+      const undo = await undoGovernedLearningActivation(deps.db, {
+        caller: { workspaceId, subjectId: grant.subjectId },
+        request: {
+          operationId: request.operationId ?? randomUUID(),
+          activationReceiptId: activationReceiptId.data,
+        },
+      });
+      // Best-effort notification; the undo receipt is already durable.
+      await publishGovernedLearningEventToSlack(deps.db, { kind: "undone", receipt: undo }).catch(
+        () => undefined,
       );
+      return context.json(undo);
     } catch (error) {
       learningError(error);
     }

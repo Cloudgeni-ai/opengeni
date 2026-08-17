@@ -551,6 +551,7 @@ describe("Company Brain learning-policy router: evaluator and activation wiring"
 
   test("automatic activates a final eligible decision through the destination controller", async () => {
     const activations: unknown[] = [];
+    const notifications: unknown[] = [];
     const router = createCompanyBrainLearningPolicyRouter({
       db: {} as Database,
       async learningPolicySnapshot() {
@@ -566,8 +567,19 @@ describe("Company Brain learning-policy router: evaluator and activation wiring"
         activations.push(input);
         return activationReceipt();
       },
+      async notifyActivation(input) {
+        notifications.push({
+          receiptId: (input.receipt as { id: string }).id,
+          sessionId: input.sessionId,
+          attemptId: input.attemptId,
+        });
+        throw new Error("notification failure must not change the receipt");
+      },
     });
     const result = await router.write({ attempt, request: preferenceRequest });
+    expect(notifications).toEqual([
+      { receiptId: ACTIVATION_ID, sessionId: SESSION_ID, attemptId: ATTEMPT_ID },
+    ]);
     expect(activations).toEqual([
       {
         caller: { workspaceId: WORKSPACE_ID, subjectId: HUMAN_SUBJECT_ID },
@@ -594,6 +606,9 @@ describe("Company Brain learning-policy router: evaluator and activation wiring"
     let activations = 0;
     const router = createCompanyBrainLearningPolicyRouter({
       db: {} as Database,
+      async notifyActivation() {
+        throw new Error("nothing was activated, so nothing may be published");
+      },
       async learningPolicySnapshot() {
         return policySnapshot("automatic");
       },

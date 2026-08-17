@@ -12,7 +12,7 @@ import {
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import type { Database } from "./database";
-import { rawRows, withWorkspaceSubjectRls } from "./database";
+import { rawRows, withWorkspaceRls, withWorkspaceSubjectRls } from "./database";
 import { nestedPostgresSqlState } from "./persistence-errors";
 
 export class GovernedLearningActivationAuthorityError extends Error {
@@ -295,4 +295,48 @@ export async function undoGovernedLearningActivation(
   } catch (error) {
     translate(error);
   }
+}
+
+export type GovernedLearningEvidenceOrigin =
+  | { kind: "task-note" }
+  | { kind: "document"; providerKey: string | null };
+
+/**
+ * Resolve where the evidence behind a governed-learning receipt came from, so
+ * notification sinks can fail closed for evidence that originated in the same
+ * connector they publish to (loop prevention). Returns `null` when the exact
+ * evidence row is not visible under the workspace authority.
+ */
+export async function resolveGovernedLearningEvidenceOrigin(
+  db: Database,
+  input: { workspaceId: string; evidenceId: string },
+): Promise<GovernedLearningEvidenceOrigin | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scoped) => {
+    const rows = await rawRows<{
+      task_note_id: string | null;
+      provider_key: string | null;
+    }>(
+      scoped,
+      sql`SELECT evidence.task_note_id, provider.provider_key
+          FROM knowledge_claim_evidence evidence
+          LEFT JOIN knowledge_document_versions version
+            ON version.account_id = evidence.account_id
+           AND version.id = evidence.document_version_id
+          LEFT JOIN knowledge_sources source
+            ON source.account_id = version.account_id
+           AND source.id = version.source_id
+          LEFT JOIN knowledge_providers provider
+            ON provider.account_id = source.account_id
+           AND provider.id = source.provider_id
+          WHERE evidence.account_id = current_setting('opengeni.account_id')::uuid
+            AND evidence.scope_kind = 'workspace'
+            AND evidence.scope_workspace_id = ${input.workspaceId}::uuid
+            AND evidence.id = ${input.evidenceId}::uuid
+          LIMIT 1`,
+    );
+    const row = rows[0];
+    if (!row) return null;
+    if (row.task_note_id) return { kind: "task-note" };
+    return { kind: "document", providerKey: row.provider_key };
+  });
 }
