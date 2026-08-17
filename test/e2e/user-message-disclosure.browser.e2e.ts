@@ -77,7 +77,7 @@ describe("long sent user-message browser acceptance", () => {
               ?.getAttribute("aria-expanded"),
             clipHeight: clipNode.getBoundingClientRect().height,
             clipScrollHeight: clipNode.scrollHeight,
-            hasFade: Boolean(node.querySelector("[data-og-user-message-fade]")),
+            fadeVisible: !node.querySelector<HTMLElement>("[data-og-user-message-fade]")?.hidden,
             hasFinalParagraph: (node.textContent ?? "").includes("Final paragraph after the URL"),
             hasUnicode: (node.textContent ?? "").includes("こんにちは · مرحبا · 👩🏽‍💻"),
             attachmentOutsideClip: !clipNode.contains(
@@ -96,7 +96,7 @@ describe("long sent user-message browser acceptance", () => {
         expect(collapsed.ariaExpanded).toBe("false");
         expect(collapsed.clipHeight).toBeLessThanOrEqual(viewport.width < 640 ? 225 : 289);
         expect(collapsed.clipScrollHeight).toBeGreaterThan(collapsed.clipHeight + 100);
-        expect(collapsed.hasFade).toBe(true);
+        expect(collapsed.fadeVisible).toBe(true);
         expect(collapsed.hasFinalParagraph).toBe(true);
         expect(collapsed.hasUnicode).toBe(true);
         expect(collapsed.attachmentOutsideClip).toBe(true);
@@ -210,7 +210,7 @@ describe("long sent user-message browser acceptance", () => {
         expect(await showLess.getAttribute("aria-expanded")).toBe("true");
         const expandedHeight = await clip.evaluate((node) => node.getBoundingClientRect().height);
         expect(expandedHeight).toBeGreaterThan(collapsed.clipHeight + 100);
-        expect(await body.locator("[data-og-user-message-fade]").count()).toBe(0);
+        expect(await body.locator("[data-og-user-message-fade]").isHidden()).toBe(true);
         expect(await hiddenLink.evaluate((node) => node.hasAttribute("inert"))).toBe(false);
         expect(await hiddenAction.evaluate((node) => node.hasAttribute("inert"))).toBe(false);
         expect(await shadowHost.evaluate((node) => node.hasAttribute("inert"))).toBe(false);
