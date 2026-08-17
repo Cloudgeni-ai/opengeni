@@ -1832,3 +1832,40 @@ function snapshotEntryMatchesRevision(
     revision.roleKey === entry.roleKey
   );
 }
+
+/**
+ * Current activation baseline for one instruction-policy target: the active
+ * head's revision (or null) and the CAS activation version that a new draft
+ * proposal must expect. A deactivated-to-null target keeps its monotonic
+ * boundary, so the version is the max of the head and latest deactivation.
+ * Read-only under workspace RLS; used by `remember` to bind a user-directed
+ * rule to the exact current baseline instead of assuming an empty workspace.
+ */
+export async function getWorkspaceInstructionPolicyBaseline(
+  db: Database,
+  input: { workspaceId: string; target: WorkspaceInstructionPolicyTarget },
+): Promise<{ expectedCurrentRevisionId: string | null; expectedActivationVersion: number }> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scoped) => {
+    const [head] = await scoped
+      .select()
+      .from(schema.workspaceInstructionPolicyHeads)
+      .where(and(...headTargetConditions(input.workspaceId, input.target)))
+      .limit(1);
+    const [deactivation] = await scoped
+      .select()
+      .from(schema.workspaceInstructionPolicyDeactivationEvents)
+      .where(and(...deactivationTargetConditions(input.workspaceId, input.target)))
+      .orderBy(
+        desc(schema.workspaceInstructionPolicyDeactivationEvents.activationVersion),
+        desc(schema.workspaceInstructionPolicyDeactivationEvents.id),
+      )
+      .limit(1);
+    return {
+      expectedCurrentRevisionId: head?.revisionId ?? null,
+      expectedActivationVersion: Math.max(
+        Number(head?.activationVersion ?? 0),
+        Number(deactivation?.activationVersion ?? 0),
+      ),
+    };
+  });
+}

@@ -19,6 +19,7 @@ import {
   activateHumanConfirmedLearningDecision,
   confirmRememberKnowledgeClaim,
   createTaskNote,
+  getWorkspaceInstructionPolicyBaseline,
   getWorkspaceKnowledgeChangeProposalSummary,
   getWorkspaceKnowledgeClaimInitiatingHuman,
 } from "@opengeni/db";
@@ -50,6 +51,7 @@ export type RememberRouterOptions = {
   confirmKnowledgeClaim?: typeof confirmRememberKnowledgeClaim;
   proposalSummary?: typeof getWorkspaceKnowledgeChangeProposalSummary;
   claimInitiatingHuman?: typeof getWorkspaceKnowledgeClaimInitiatingHuman;
+  instructionPolicyBaseline?: typeof getWorkspaceInstructionPolicyBaseline;
   notifyActivation?: (input: {
     db: Database;
     receipt: GovernedLearningActivationReceipt;
@@ -83,6 +85,10 @@ function normalizedKeyFor(noteId: string): string {
 function promotionRequest(
   request: RememberRequest,
   noteId: string,
+  instructionBaseline: {
+    expectedCurrentRevisionId: string | null;
+    expectedActivationVersion: number;
+  },
 ): CompanyBrainGovernedWriteRequest {
   const common = {
     operationId: derivedRememberOperationId(request.operationId, "promotion"),
@@ -118,8 +124,8 @@ function promotionRequest(
         displayName: "User-directed rule",
         predicateKey: "remember.instruction",
         target: request.target,
-        expectedCurrentRevisionId: null,
-        expectedActivationVersion: 0,
+        expectedCurrentRevisionId: instructionBaseline.expectedCurrentRevisionId,
+        expectedActivationVersion: instructionBaseline.expectedActivationVersion,
       };
     case "knowledge":
       return {
@@ -197,6 +203,8 @@ export function createRememberRouter(options: RememberRouterOptions): {
   const proposalSummary = options.proposalSummary ?? getWorkspaceKnowledgeChangeProposalSummary;
   const claimInitiatingHuman =
     options.claimInitiatingHuman ?? getWorkspaceKnowledgeClaimInitiatingHuman;
+  const instructionPolicyBaseline =
+    options.instructionPolicyBaseline ?? getWorkspaceInstructionPolicyBaseline;
   const notifyActivation =
     options.notifyActivation ??
     (async ({ db, receipt, sessionId, attemptId }) =>
@@ -222,9 +230,18 @@ export function createRememberRouter(options: RememberRouterOptions): {
         text: request.content,
         expiresInDays: 30,
       });
+      // A user-directed rule must bind to the exact current activation
+      // baseline of its target; a workspace with an active head is the norm.
+      const instructionBaseline =
+        request.lane === "instruction_policy"
+          ? await instructionPolicyBaseline(options.db, {
+              workspaceId: attempt.workspaceId,
+              target: request.target,
+            })
+          : { expectedCurrentRevisionId: null, expectedActivationVersion: 0 };
       const route: CompanyBrainLearningPolicyRouteReceipt = await learningRouter.write({
         attempt,
-        request: promotionRequest(request, note.note.id),
+        request: promotionRequest(request, note.note.id, instructionBaseline),
       });
       const base = {
         operationId: request.operationId,
