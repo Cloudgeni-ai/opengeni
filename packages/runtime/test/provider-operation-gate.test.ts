@@ -28,9 +28,14 @@ describe("sandbox provider operation gate", () => {
       await captureBlocked;
       order.push("capture:end");
     });
-    const second = withSandboxProviderOperation(session, async () => {
-      order.push("second");
-    });
+    const waits: Array<{ durationMs: number; outcome: string }> = [];
+    const second = withSandboxProviderOperation(
+      session,
+      async () => {
+        order.push("second");
+      },
+      (observation) => waits.push(observation),
+    );
     await Bun.sleep(0);
     expect(order).toEqual(["first:start"]);
 
@@ -43,6 +48,21 @@ describe("sandbox provider operation gate", () => {
     await capture;
     await second;
     expect(order).toEqual(["first:start", "first:end", "capture:start", "capture:end", "second"]);
+    expect(waits).toHaveLength(1);
+    expect(waits[0]).toMatchObject({ outcome: "completed" });
+    expect(waits[0]!.durationMs).toBeGreaterThan(0);
+  });
+
+  test("omits capture-wait telemetry when operation admission is immediate", async () => {
+    let observed = false;
+    await withSandboxProviderOperation(
+      {},
+      async () => undefined,
+      () => {
+        observed = true;
+      },
+    );
+    expect(observed).toBe(false);
   });
 
   test("releases both operation and capture paths after rejection", async () => {

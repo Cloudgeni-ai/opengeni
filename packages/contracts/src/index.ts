@@ -3939,6 +3939,8 @@ export type FileResourceRef = z.infer<typeof FileResourceRef>;
  * reconstruct the same typed attachment input after a model switch or retry.
  */
 export const MODEL_ATTACHMENT_REFS_FIELD = "opengeni_attachment_refs" as const;
+/** Private marker for the compact attachment-reference carrier created by compaction. */
+export const MODEL_ATTACHMENT_CATALOG_MARKER = "opengeni_attachment_catalog" as const;
 /**
  * Structured timeline annotations retained beside the deterministic user-text
  * projection in canonical history. Provider adapters remove this OpenGeni

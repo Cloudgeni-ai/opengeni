@@ -82,6 +82,7 @@ import {
 } from "@/lib/composer-launch";
 import { coerceReasoningEffortForModel, findPickerRow } from "@/lib/model-policy";
 import { resolveSessionComposerModel } from "@/lib/session-model";
+import { sessionTimelineEmptyStateCopy } from "@/lib/session-empty-state";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
 import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
@@ -1242,6 +1243,10 @@ function SessionChatPane(props: {
     return [...props.timeline, ...optimisticItems];
   }, [composer, props.events, props.timeline]);
   const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
+  const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
+    props.session.status,
+    (props.queue.effectiveControl ?? props.session.effectiveControl).state === "paused",
+  );
 
   // Slash-command palette context: the operator controls (/goal, /clear,
   // /compact, /help) act on THIS session. Permissions come from the workspace
@@ -1361,9 +1366,16 @@ function SessionChatPane(props: {
                 ) : (
                   <EmptyState
                     className="min-h-[24rem]"
-                    icon={<MessagesSquareIcon className="size-4" />}
-                    title="Waiting for the first step"
-                    description="The agent's steps will appear here as it works."
+                    icon={
+                      props.session.status === "running" ||
+                      props.session.status === "recovering" ? (
+                        <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+                      ) : (
+                        <MessagesSquareIcon className="size-4" />
+                      )
+                    }
+                    title={timelineEmptyStateCopy.title}
+                    description={timelineEmptyStateCopy.description}
                   />
                 )
               }

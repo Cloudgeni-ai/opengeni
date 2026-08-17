@@ -110,6 +110,7 @@ import {
   sandboxCommandExitCode,
   sandboxArtifactRuntimeDoctorHooks,
   sandboxFileDownloadsForAgent,
+  sandboxLifecycleHooksForIds,
   sandboxRunAs,
   codemodeTokenSeedCommand,
   withSandboxFileDownloads,
@@ -4036,7 +4037,7 @@ describe("runtime event normalization", () => {
     expect(command).toContain("ensure_git");
     expect(command).toContain("apt-get install -y --no-install-recommends ca-certificates git");
     expect(command).toContain(
-      "clone_repository '/workspace/repos/github.com/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'",
+      "start_repository_clone '/workspace/repos/github.com/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'",
     );
     expect(command).not.toContain("githubInstallationId");
     expect(command).not.toContain("githubRepositoryId");
@@ -4046,6 +4047,30 @@ describe("runtime event normalization", () => {
     // token-carrying env assignment ever rides the command text.
     expect(command).not.toContain("GITHUB_TOKEN=");
     expect(command).not.toContain("ghs_liveToken123");
+  });
+
+  test("runs independent repository clones in bounded batches of four", () => {
+    const resources = Array.from({ length: 5 }, (_, index) => ({
+      kind: "repository" as const,
+      uri: `https://github.com/acme/repo-${index}.git`,
+      ref: "main",
+    }));
+    const command = repositoryCloneCommand(resources);
+    const lines = command.split("\n");
+    const starts = lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.startsWith("start_repository_clone "));
+    const waits = lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line === "wait_repository_clone_batch");
+
+    expect(starts).toHaveLength(5);
+    expect(waits).toHaveLength(2);
+    expect(waits[0]!.index).toBeGreaterThan(starts[3]!.index);
+    expect(waits[0]!.index).toBeLessThan(starts[4]!.index);
+    expect(waits[1]!.index).toBeGreaterThan(starts[4]!.index);
+    expect(command).toContain('if ! wait "$clone_pid"; then');
+    expect(command).toContain('if [ "$clone_failed" -ne 0 ]; then');
   });
 
   test("TOKEN-BROKER (B1/B2): the clone command writes provider token FILES and provisions askpass + CLI wrappers before the clone", () => {
@@ -7785,6 +7810,87 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("defers only optional MCP preparation while required tools remain eager", async () => {
+    let releaseOptional!: () => void;
+    const optionalConnect = new Promise<void>((resolve) => {
+      releaseOptional = resolve;
+    });
+    const makeServer = (name: string, connect: () => Promise<void>): MCPServer => ({
+      name,
+      cacheToolsList: false,
+      connect,
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "lookup",
+            description: `Lookup through ${name}`,
+            inputSchema: {
+              type: "object" as const,
+              properties: {},
+              additionalProperties: false,
+            },
+          },
+        ];
+      },
+      async callTool() {
+        return [{ type: "text", text: name }];
+      },
+      async invalidateToolsCache() {},
+    });
+    const required = makeServer("required-inner", async () => {});
+    const optional = makeServer("optional-inner", async () => await optionalConnect);
+    const configs = [
+      {
+        id: "required",
+        name: "Required",
+        url: "https://required.invalid/mcp",
+        cacheToolsList: false,
+      },
+      {
+        id: "optional",
+        name: "Optional",
+        url: "https://optional.invalid/mcp",
+        cacheToolsList: false,
+      },
+    ];
+    const settings = testSettings({ sandboxBackend: "none", mcpServers: configs });
+    const prepared = await prepareAgentTools(
+      settings,
+      [
+        { kind: "mcp", id: "required" },
+        { kind: "mcp", id: "optional", optional: true },
+      ],
+      {
+        deferBestEffortUntilModelResponse: true,
+        localMcpServers: [
+          { id: "required", server: required },
+          { id: "optional", server: optional },
+        ],
+      },
+    );
+    try {
+      expect(prepared.ready).toBeDefined();
+      const agent = buildOpenGeniAgent(settings, [], {
+        mcpServers: prepared.mcpServers,
+      });
+      expect((await agent.getMcpTools(new RunContext())).map((tool) => tool.name)).toEqual([
+        "required__lookup",
+      ]);
+
+      releaseOptional();
+      const complete = await prepared.ready!;
+      expect((await agent.getMcpTools(new RunContext())).map((tool) => tool.name).sort()).toEqual([
+        "optional__lookup",
+        "required__lookup",
+      ]);
+      expect(complete.attemptToolEnvironment).toBeNull();
+    } finally {
+      releaseOptional();
+      await prepared.close();
+    }
+  });
+
   test("SDK MCP lifecycle logs are structural while callers receive exact errors", async () => {
     const sentinel = "synthetic-mcp-lifecycle-boundary-123456";
     const registryId = "registry-mcp-lifecycle-boundary";
@@ -8840,6 +8946,106 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("does not reuse an SDK-global tools-list across attempt-scoped allowedTools", async () => {
+    const registryId = `scoped_${crypto.randomUUID().replaceAll("-", "_")}`;
+    let remoteLists = 0;
+    const localServer = (): MCPServer => ({
+      name: `inner-${crypto.randomUUID()}`,
+      cacheToolsList: true,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        remoteLists += 1;
+        return [
+          {
+            name: "read_records",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+          {
+            name: "delete_records",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+      async invalidateToolsCache() {},
+    });
+    const toolNamesFor = async (allowedTools: string[]): Promise<string[]> => {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: registryId,
+              name: "Attempt-scoped server",
+              url: "https://attempt-scoped.example.test/mcp",
+              cacheToolsList: true,
+              allowedTools,
+            },
+          ],
+        }),
+        [{ kind: "mcp", id: registryId }],
+        {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: crypto.randomUUID(),
+          executionGeneration: 1,
+          localMcpServers: [{ id: registryId, server: localServer() }],
+        },
+      );
+      try {
+        return (await getAllMcpTools({ mcpServers: prepared.mcpServers }))
+          .map((tool) => tool.name)
+          .sort();
+      } finally {
+        await prepared.close();
+      }
+    };
+
+    expect(await toolNamesFor(["read_records", "delete_records"])).toEqual([
+      prefixedMcpToolName(registryId, "delete_records"),
+      prefixedMcpToolName(registryId, "read_records"),
+    ]);
+    expect(await toolNamesFor(["read_records"])).toEqual([
+      prefixedMcpToolName(registryId, "read_records"),
+    ]);
+    expect(remoteLists).toBe(2);
+  });
+
+  test("does not reuse an SDK-global list across in-process attempt definitions", async () => {
+    const toolNamesFor = async (modelName: string): Promise<string[]> => {
+      const prepared = await prepareAgentTools(testSettings(), [], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: crypto.randomUUID(),
+        executionGeneration: 1,
+        attemptToolDefinitions: [
+          {
+            identity: { serverId: "attempt", toolName: modelName },
+            modelName,
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+            source: "mcp",
+            approval: "none",
+            execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+          },
+        ],
+      });
+      try {
+        return (await getAllMcpTools({ mcpServers: prepared.mcpServers })).map((tool) => tool.name);
+      } finally {
+        await prepared.close();
+      }
+    };
+
+    expect(await toolNamesFor("attempt_alpha")).toEqual(["attempt_alpha"]);
+    expect(await toolNamesFor("attempt_beta")).toEqual(["attempt_beta"]);
+  });
+
   test("routes selected local MCP adapters through prefixing, bounds, connection identity, and cancellation", async () => {
     const connectionId = "11111111-2222-4333-8444-555555555555";
     let connected = 0;
@@ -9141,6 +9347,30 @@ describe("runtime Skill activation", () => {
         { environment: {} },
       ),
     ).rejects.toThrow("Artifact runtime doctor failed");
+  });
+
+  test("credential hook resolution validates every id and deduplicates first-seen hooks", async () => {
+    const hooks = sandboxLifecycleHooksForIds([
+      "azure-cli-login",
+      "azure-cli-login",
+      "azure-cli-login",
+    ]);
+    const commands: string[] = [];
+    await runBeforeAgentStartHooks({} as any, hooks, {
+      environment: {
+        AZURE_CLIENT_ID: "client",
+        AZURE_CLIENT_SECRET: "secret",
+        AZURE_TENANT_ID: "tenant",
+      },
+      commandRunner: async (_session, { cmd }) => {
+        commands.push(cmd);
+        return { exitCode: 0, output: "" };
+      },
+    });
+    expect(commands).toEqual([azureCliLoginCommand()]);
+    expect(() =>
+      sandboxLifecycleHooksForIds(["azure-cli-login", "unknown", "azure-cli-login"]),
+    ).toThrow("Unknown sandbox lifecycle hook unknown");
   });
 
   test("an explicit curated library selection is materialized and indexed", () => {

@@ -111,10 +111,11 @@ Generated pixels are artifacts, not conversation memory.
 ## Sandbox and browser delivery
 
 After retention, the worker materializes the exact file at
-`/workspace/generated-images/generated-image-<artifact-id>.<ext>` whenever the
-turn has a sandbox. The object write is already durable, so a transient sandbox
-copy failure cannot replay generation; the missing materialization is retried
-from the receipt on a later turn.
+`/workspace/generated-images/generated-image-<artifact-id>.<ext>` when the
+creating turn has a sandbox. The object write is already durable, so a transient
+sandbox copy failure cannot replay generation. Later turns keep the receipt and
+do not eagerly inspect or restore historical images; an agent that needs the
+bytes retrieves the permanent workspace file explicitly.
 
 Browsers receive only the compact receipt in the timeline. The SDK validates
 its closed shape and either verifies bounded range downloads or mints a

@@ -25,8 +25,13 @@ into authority. All first-party OpenGeni, Files, Docs, Codex Apps, capability,
 pack, interaction, and per-session MCP tools admitted to the attempt can enter
 the catalog. Codemode never rediscovers or reconnects an MCP server.
 
-The catalog is persisted in `session_attempt_tool_catalogs` before model
-execution is allowed to begin. It is immutable for the attempt. A recovery or
+The catalog is persisted in `session_attempt_tool_catalogs` before any model
+tool can execute, before Codemode is activated, and before the terminal model
+response can settle. On a fresh progressive-disclosure turn, required MCPs and
+in-process tools are prepared eagerly while best-effort connector discovery may
+overlap the first provider request and streamed text; the same single readiness
+fence then publishes the combined immutable catalog. Resume and
+editable-artifact turns prepare it fully before model execution. A recovery or
 successor attempt receives its own catalog and digest.
 
 ## Public attempt-scoped surface

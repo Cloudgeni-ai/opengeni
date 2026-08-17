@@ -184,6 +184,12 @@ attempt-fenced configuration and request-time resolver, including forced refresh
 after a 401. Normal session reads return only safe metadata and the non-secret
 connection pointer.
 
+Fresh turns on a progressive-disclosure provider prepare required MCPs before
+the provider call, but may connect/list optional session or capability MCPs in
+parallel with the first streamed response. Search and execution wait for the
+same combined attempt catalog; optional preparation is never a second registry
+or a weaker authorization path. Resume and editable-artifact turns remain eager.
+
 For model MCP execution, the worker also supplies attempt-bound connector policy
 hooks to the runtime. The runtime wraps converted MCP function tools and every
 sandbox clone, evaluates approval before interruption, rechecks durable

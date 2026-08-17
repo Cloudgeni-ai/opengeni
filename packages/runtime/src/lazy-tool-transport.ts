@@ -139,16 +139,93 @@ export class LazyToolRuntime {
   private currentTools: Tool[] = [];
   private readonly functionTools = new Map<string, Tool>();
   private readonly searchableToolNames = new Set<string>();
+  private readonly originalToolLoaders = new WeakMap<
+    object,
+    (runContext: unknown) => Promise<Tool[]>
+  >();
+  private preparationSettled = false;
+  private preparedToolsLoaded = false;
+  private activeAgent: object | null = null;
+  private activeRunContext: unknown;
   readonly controlTools: Tool[];
 
   constructor(
-    readonly transport: Exclude<LazyToolTransport, "codex_native">,
+    readonly transport: LazyToolTransport,
     private readonly mcpServerIds: ReadonlySet<string>,
+    private readonly toolPreparationReady?: Promise<void>,
+    private readonly deferredMcpServerIds: ReadonlySet<string> = new Set(),
   ) {
     this.controlTools =
-      transport === "openai_native"
+      transport !== "generic_dispatch"
         ? [this.buildNativeSearchTool()]
         : [this.buildGenericSearchTool(), this.buildGenericInvokeTool()];
+    if (toolPreparationReady) {
+      void toolPreparationReady.then(
+        () => {
+          this.preparationSettled = true;
+        },
+        () => {
+          // The exact failure is rethrown at the model-response/tool boundary.
+        },
+      );
+    } else {
+      this.preparationSettled = true;
+    }
+  }
+
+  hasPendingPreparation(): boolean {
+    return !this.preparationSettled;
+  }
+
+  async ensurePrepared(): Promise<void> {
+    await this.toolPreparationReady;
+    this.preparationSettled = true;
+    if (this.transport === "generic_dispatch" && !this.preparedToolsLoaded && this.activeAgent) {
+      const loader = this.originalToolLoaders.get(this.activeAgent);
+      if (!loader) {
+        throw new Error("Lazy tool search lost the agent's exact tool loader");
+      }
+      this.refresh(await loader(this.activeRunContext));
+      this.preparedToolsLoaded = true;
+    }
+  }
+
+  noteToolResolution(agent: object, runContext: unknown): void {
+    this.activeAgent = agent;
+    this.activeRunContext = runContext;
+  }
+
+  registerOriginalToolLoader(
+    agent: object,
+    loader: (runContext: unknown) => Promise<Tool[]>,
+  ): void {
+    this.originalToolLoaders.set(agent, loader);
+  }
+
+  async preparedToolsForAgent(
+    agent: object,
+    runContext: unknown,
+    availableTools: readonly Tool[],
+  ): Promise<Tool[]> {
+    await this.ensurePrepared();
+    const loader = this.originalToolLoaders.get(agent);
+    if (!loader) {
+      throw new Error("Lazy tool search lost the agent's exact tool loader");
+    }
+    const preparedTools = await loader(runContext);
+    const availableFunctionsByName = new Map(
+      availableTools.filter(isFunctionTool).map((tool) => [tool.name, tool] as const),
+    );
+    // Preserve the exact configured object already held by Runner, adding only
+    // tools that did not exist when the first request began. Returning a newly
+    // materialized duplicate for an existing routing key is correctly rejected
+    // by the SDK as an authority/identity collision.
+    const tools = preparedTools.map((tool) =>
+      isFunctionTool(tool) ? (availableFunctionsByName.get(tool.name) ?? tool) : tool,
+    );
+    this.refresh(tools);
+    this.preparedToolsLoaded = true;
+    return tools;
   }
 
   refresh(tools: Tool[]): void {
@@ -188,6 +265,16 @@ export class LazyToolRuntime {
 
   shouldHideSerializedTool(tool: SerializedTool): boolean {
     return tool.type === "function" && this.searchableToolNames.has(tool.name);
+  }
+
+  configuredExecutionTools(tools: Tool[]): Tool[] {
+    if (!this.toolPreparationReady || this.transport === "generic_dispatch") return tools;
+    // Tools materialized after the first request enter Runner through the
+    // client tool_search runtime registry. Re-adding them as configured tools
+    // on the following model turn creates a routed-identity collision in the
+    // SDK. Required/eager tools remain configured; deferred tools remain
+    // available exclusively through their exact disclosed runtime objects.
+    return tools.filter((tool) => !isSearchableMcpFunctionTool(tool, this.deferredMcpServerIds));
   }
 
   resolveFunctionTool(name: string): Tool | undefined {
@@ -231,12 +318,17 @@ export class LazyToolRuntime {
       execution: "client",
       description: SEARCH_DESCRIPTION,
       parameters: SEARCH_PARAMETERS as never,
-      execute: ((args: { availableTools?: Tool[]; toolCall?: { arguments?: unknown } }) =>
-        searchMcpTools(
-          args.availableTools ?? [],
-          args.toolCall?.arguments,
-          this.mcpServerIds,
-        )) as never,
+      execute: (async (args: {
+        agent?: object;
+        availableTools?: Tool[];
+        runContext?: unknown;
+        toolCall?: { arguments?: unknown };
+      }) => {
+        const tools = args.agent
+          ? await this.preparedToolsForAgent(args.agent, args.runContext, args.availableTools ?? [])
+          : (args.availableTools ?? []);
+        return searchMcpTools(tools, args.toolCall?.arguments, this.mcpServerIds);
+      }) as never,
     }) as unknown as Tool;
   }
 
@@ -279,10 +371,17 @@ export function lazyToolRuntimeForAgent(agent: object): LazyToolRuntime | undefi
  */
 export function installLazyToolRuntime(
   agent: CloneCapableAgent,
-  transport: Exclude<LazyToolTransport, "codex_native">,
+  transport: LazyToolTransport,
   mcpServerIds: ReadonlySet<string>,
+  toolPreparationReady?: Promise<void>,
+  deferredMcpServerIds: ReadonlySet<string> = new Set(),
 ): LazyToolRuntime {
-  const runtime = new LazyToolRuntime(transport, mcpServerIds);
+  const runtime = new LazyToolRuntime(
+    transport,
+    mcpServerIds,
+    toolPreparationReady,
+    deferredMcpServerIds,
+  );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;
 }
@@ -302,10 +401,20 @@ function installLazyToolRuntimeOnAgent(agent: CloneCapableAgent, runtime: LazyTo
   }
 
   const originalGetAllTools = agent.getAllTools.bind(agent);
+  runtime.registerOriginalToolLoader(agent, originalGetAllTools);
   agent.getAllTools = (async (runContext: unknown) => {
+    runtime.noteToolResolution(agent, runContext);
+    if (runtime.hasPendingPreparation()) {
+      // Deferred MCP projections return an empty list until their shared
+      // preparation fence settles, while required/eager MCP and ordinary agent
+      // tools resolve normally through the policy-wrapped SDK path.
+      const tools = await originalGetAllTools(runContext);
+      runtime.refresh(tools);
+      return [...tools, ...runtime.controlTools];
+    }
     const tools = await originalGetAllTools(runContext);
     runtime.refresh(tools);
-    return [...tools, ...runtime.controlTools];
+    return [...runtime.configuredExecutionTools(tools), ...runtime.controlTools];
   }) as typeof agent.getAllTools;
 
   const originalClone = agent.clone?.bind(agent);
@@ -480,6 +589,7 @@ class LazyToolModel implements Model {
 
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
     const response = await this.inner.getResponse(prepareLazyToolRequest(request, this.runtime));
+    await this.runtime.ensurePrepared();
     return this.runtime.transport === "generic_dispatch"
       ? transformGenericDispatchResponse(response, this.runtime)
       : response;
@@ -489,6 +599,12 @@ class LazyToolModel implements Model {
     for await (const event of this.inner.getStreamedResponse(
       prepareLazyToolRequest(request, this.runtime),
     )) {
+      if (event.type === "response_done") {
+        // Remote optional MCP discovery overlaps the model request and streamed
+        // text, but the terminal response cannot cross the exact-attempt tool
+        // boundary until catalog persistence and Codemode activation complete.
+        await this.runtime.ensurePrepared();
+      }
       if (this.runtime.transport === "generic_dispatch" && event.type === "response_done") {
         yield {
           ...event,

@@ -4942,7 +4942,7 @@ export async function resolveDocumentOriginalFileForSubject(
   );
 }
 
-/** Batch form of requireFileForSubject for durable model-history projection. */
+/** Batch form of requireFileForSubject; unauthorized or missing ids are omitted. */
 export async function getFilesForSubject(
   db: Database,
   input: {
@@ -22545,7 +22545,13 @@ export async function recordSessionActiveCodexCredential(
     await scopedDb
       .update(schema.sessions)
       .set({ codexLastCredentialId: credentialId, updatedAt: new Date() })
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, workspaceId),
+          eq(schema.sessions.id, sessionId),
+          sql`${schema.sessions.codexLastCredentialId} is distinct from ${credentialId}`,
+        ),
+      );
   });
 }
 
@@ -29463,7 +29469,7 @@ export async function getActiveSessionHistoryItemsPaged(
   db: Database,
   workspaceId: string,
   sessionId: string,
-  pageSize = 16,
+  pageSize = ACTIVE_SESSION_HISTORY_MAX_ROWS,
   maximumJsonBytes = ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES,
   maximumRows = ACTIVE_SESSION_HISTORY_MAX_ROWS,
   maximumJsonNodes = ACTIVE_SESSION_HISTORY_MAX_JSON_NODES,
@@ -29476,8 +29482,14 @@ export async function getActiveSessionHistoryItemsPaged(
     providerArtifactInvalidatedAt: Date | null;
   }>
 > {
-  if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) {
-    throw new Error("active session history page size must be an integer between 1 and 100");
+  if (
+    !Number.isSafeInteger(pageSize) ||
+    pageSize < 1 ||
+    pageSize > ACTIVE_SESSION_HISTORY_MAX_ROWS
+  ) {
+    throw new Error(
+      `active session history page size must be an integer between 1 and ${ACTIVE_SESSION_HISTORY_MAX_ROWS}`,
+    );
   }
   if (!Number.isSafeInteger(maximumJsonBytes) || maximumJsonBytes < 1) {
     throw new Error("active session history JSON limit must be a positive safe integer");
@@ -29648,7 +29660,7 @@ export async function getActiveSessionHistoryItemsPaged(
             item: fromPostgresLosslessJson(row.item, itemCodecVersion),
           })),
         );
-        if (page.length < pageSize) return rows;
+        if (rows.length === actualRows || page.length < pageSize) return rows;
         const nextPosition = page.at(-1)!.position;
         if (afterPosition !== null && nextPosition <= afterPosition) {
           throw new Error("active session history keyset did not advance");
@@ -37495,29 +37507,52 @@ async function advanceWorkspaceGenerationForAuthority(
   operationInput: string,
   captureWaitMs = 0,
   waitSignal?: AbortSignal,
+  onCaptureWait?: (observation: { durationMs: number; outcome: "completed" | "failed" }) => void,
 ): Promise<SandboxWorkspaceMutationAdmission> {
   if (!Number.isSafeInteger(captureWaitMs) || captureWaitMs < 0 || captureWaitMs > 60 * 60_000) {
     throw new Error("Workspace archive capture wait is invalid");
   }
   const deadline = performance.now() + captureWaitMs;
   let delayMs = 25;
-  for (;;) {
-    try {
-      return await advanceWorkspaceGenerationForAuthorityOnce(db, authority, operationInput);
-    } catch (error) {
-      if (
-        !(error instanceof SandboxWorkspaceMutationFencedError) ||
-        error.code !== "capture_in_progress" ||
-        performance.now() >= deadline
-      ) {
-        throw error;
+  let captureWaitStartedAt: number | undefined;
+  let captureWaitOutcome: "completed" | "failed" = "failed";
+  try {
+    for (;;) {
+      try {
+        const admission = await advanceWorkspaceGenerationForAuthorityOnce(
+          db,
+          authority,
+          operationInput,
+        );
+        captureWaitOutcome = "completed";
+        return admission;
+      } catch (error) {
+        if (
+          !(error instanceof SandboxWorkspaceMutationFencedError) ||
+          error.code !== "capture_in_progress" ||
+          performance.now() >= deadline
+        ) {
+          throw error;
+        }
+        captureWaitStartedAt ??= performance.now();
+        await waitForSandboxTransition(
+          Math.min(delayMs, Math.max(1, deadline - performance.now())),
+          waitSignal,
+          "Sandbox workspace mutation wait cancelled",
+        );
+        delayMs = Math.min(500, delayMs * 2);
       }
-      await waitForSandboxTransition(
-        Math.min(delayMs, Math.max(1, deadline - performance.now())),
-        waitSignal,
-        "Sandbox workspace mutation wait cancelled",
-      );
-      delayMs = Math.min(500, delayMs * 2);
+    }
+  } finally {
+    if (captureWaitStartedAt !== undefined && onCaptureWait) {
+      try {
+        onCaptureWait({
+          durationMs: Math.max(0, performance.now() - captureWaitStartedAt),
+          outcome: captureWaitOutcome,
+        });
+      } catch {
+        // Diagnostics must never alter mutation admission authority.
+      }
     }
   }
 }
@@ -37548,6 +37583,8 @@ export async function advanceWorkspaceGeneration(
     captureWaitMs?: number;
     /** Cancel the bounded transition wait without creating an admission. */
     waitSignal?: AbortSignal;
+    /** Observe only time actually spent blocked behind an archive capture. */
+    onCaptureWait?: (observation: { durationMs: number; outcome: "completed" | "failed" }) => void;
     /** Active-routed mutations bind to the exact session pointer. Omitted means
      * an intentional home-provider write outside the routing surface. */
     routeKind?: "home" | "active";
@@ -37577,6 +37614,7 @@ export async function advanceWorkspaceGeneration(
     input.operation,
     input.captureWaitMs,
     input.waitSignal,
+    input.onCaptureWait,
   );
 }
 
