@@ -1,0 +1,261 @@
+import curatedDocument from "../data/catalog/curated.json";
+
+/**
+ * The curated catalog overlay.
+ *
+ * Reviewed first-party contracts and branding override weaker registry
+ * metadata. This used to live as two hand-maintained maps inside the import
+ * script; it is data now so that adding a connector is a reviewable data diff
+ * rather than a TypeScript change.
+ *
+ * Every field is optional. A supplied value wins over the snapshot; an omitted
+ * one falls through to the snapshot unchanged, so a name-only entry behaves
+ * exactly like the old branded-name map.
+ */
+
+export type CuratedAuthKind = "oauth2" | "api_key" | "none" | "unknown";
+export type CuratedTier = "verified" | "community";
+
+export type CuratedCatalogEntry = {
+  /** Exact canonical MCP URL. The overlay key. */
+  readonly mcpUrl: string;
+  readonly name?: string;
+  readonly description?: string;
+  /** Catalog grouping shown in the connector browser. */
+  readonly category?: string;
+  /** Promotes the entry to the featured strip. Not a security review. */
+  readonly featured?: boolean;
+  /** The provider publishes this server on its own domain. Not a security review. */
+  readonly official?: boolean;
+  readonly tier?: CuratedTier;
+  readonly provenance?: string;
+  readonly authKind?: CuratedAuthKind;
+  readonly scopesHint?: readonly string[];
+  readonly allowedTools?: readonly string[];
+  readonly requireApproval?: boolean | readonly string[];
+  readonly connectionOwnership?: "personal_only";
+  /** `null` deliberately suppresses a logo fetch and keeps the monogram. */
+  readonly logoSourceUrl?: string | null;
+  readonly homepageUrl?: string;
+  readonly installUrl?: string;
+  readonly documentationUrl?: string;
+  readonly registryName?: string;
+  readonly registryVersion?: string;
+  readonly registryStatus?: string;
+  readonly registryIsLatest?: boolean;
+  readonly registryPublishedAt?: string;
+  readonly repositorySource?: string;
+  readonly repositoryUrl?: string;
+  readonly sourceCommit?: string;
+  /** Reviewer-facing rationale. Never rendered to end users. */
+  readonly notes?: readonly string[];
+};
+
+export type CuratedCatalog = {
+  readonly version: number;
+  readonly entries: readonly CuratedCatalogEntry[];
+};
+
+class CuratedCatalogError extends Error {
+  constructor(message: string) {
+    super(`data/catalog/curated.json: ${message}`);
+    this.name = "CuratedCatalogError";
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function optionalString(
+  record: Record<string, unknown>,
+  key: string,
+  where: string,
+): string | undefined {
+  const value = record[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new CuratedCatalogError(`${where}: ${key} must be a non-empty string`);
+  }
+  return value;
+}
+
+function optionalBoolean(
+  record: Record<string, unknown>,
+  key: string,
+  where: string,
+): boolean | undefined {
+  const value = record[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") {
+    throw new CuratedCatalogError(`${where}: ${key} must be a boolean`);
+  }
+  return value;
+}
+
+function optionalStringArray(
+  record: Record<string, unknown>,
+  key: string,
+  where: string,
+): string[] | undefined {
+  const value = record[key];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new CuratedCatalogError(`${where}: ${key} must be an array of strings`);
+  }
+  return value as string[];
+}
+
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
+
+const STRING_FIELDS = [
+  "name",
+  "description",
+  "category",
+  "provenance",
+  "homepageUrl",
+  "installUrl",
+  "documentationUrl",
+  "registryName",
+  "registryVersion",
+  "registryStatus",
+  "registryPublishedAt",
+  "repositorySource",
+  "repositoryUrl",
+  "sourceCommit",
+] as const satisfies readonly (keyof CuratedCatalogEntry)[];
+
+const BOOLEAN_FIELDS = [
+  "featured",
+  "official",
+  "registryIsLatest",
+] as const satisfies readonly (keyof CuratedCatalogEntry)[];
+
+const STRING_ARRAY_FIELDS = [
+  "scopesHint",
+  "allowedTools",
+  "notes",
+] as const satisfies readonly (keyof CuratedCatalogEntry)[];
+
+const AUTH_KINDS: ReadonlySet<string> = new Set(["oauth2", "api_key", "none", "unknown"]);
+const TIERS: ReadonlySet<string> = new Set(["verified", "community"]);
+
+function parseEntry(value: unknown, index: number): CuratedCatalogEntry {
+  const record = asRecord(value);
+  if (!record) throw new CuratedCatalogError(`entries[${index}] must be an object`);
+
+  const mcpUrl = record.mcpUrl;
+  if (typeof mcpUrl !== "string" || mcpUrl.trim().length === 0) {
+    throw new CuratedCatalogError(`entries[${index}]: mcpUrl is required`);
+  }
+  const where = mcpUrl;
+  const entry: Mutable<CuratedCatalogEntry> = { mcpUrl };
+
+  const assign = <K extends keyof CuratedCatalogEntry>(
+    key: K,
+    parsed: CuratedCatalogEntry[K] | undefined,
+  ): void => {
+    if (parsed !== undefined) entry[key] = parsed;
+  };
+
+  for (const key of STRING_FIELDS) {
+    assign(key, optionalString(record, key, where));
+  }
+  for (const key of BOOLEAN_FIELDS) {
+    assign(key, optionalBoolean(record, key, where));
+  }
+  for (const key of STRING_ARRAY_FIELDS) {
+    assign(key, optionalStringArray(record, key, where));
+  }
+
+  const authKind = optionalString(record, "authKind", where);
+  if (authKind !== undefined) {
+    if (!AUTH_KINDS.has(authKind)) {
+      throw new CuratedCatalogError(
+        `${where}: authKind must be one of ${[...AUTH_KINDS].join(", ")}`,
+      );
+    }
+    entry.authKind = authKind as CuratedAuthKind;
+  }
+
+  const tier = optionalString(record, "tier", where);
+  if (tier !== undefined) {
+    if (!TIERS.has(tier)) {
+      throw new CuratedCatalogError(`${where}: tier must be one of ${[...TIERS].join(", ")}`);
+    }
+    entry.tier = tier as CuratedTier;
+  }
+
+  const connectionOwnership = optionalString(record, "connectionOwnership", where);
+  if (connectionOwnership !== undefined) {
+    if (connectionOwnership !== "personal_only") {
+      throw new CuratedCatalogError(`${where}: connectionOwnership must be "personal_only"`);
+    }
+    entry.connectionOwnership = connectionOwnership;
+  }
+
+  // `logoSourceUrl: null` is meaningful — it suppresses the logo fetch and
+  // keeps the monogram — so the omitted and explicitly-null cases differ.
+  if ("logoSourceUrl" in record) {
+    const raw = record.logoSourceUrl;
+    if (raw !== null && (typeof raw !== "string" || raw.trim().length === 0)) {
+      throw new CuratedCatalogError(`${where}: logoSourceUrl must be a non-empty string or null`);
+    }
+    entry.logoSourceUrl = raw as string | null;
+  }
+
+  if ("requireApproval" in record) {
+    const raw = record.requireApproval;
+    if (typeof raw === "boolean") {
+      entry.requireApproval = raw;
+    } else if (Array.isArray(raw) && raw.every((tool) => typeof tool === "string")) {
+      entry.requireApproval = raw as string[];
+    } else {
+      throw new CuratedCatalogError(
+        `${where}: requireApproval must be a boolean or an array of tool names`,
+      );
+    }
+  }
+
+  return entry;
+}
+
+/**
+ * Parses and validates a curated overlay document. Throws rather than dropping
+ * a malformed entry: losing curation silently would ship the raw aggregator
+ * name and tier to users without anyone noticing.
+ */
+export function parseCuratedCatalog(document: unknown): CuratedCatalog {
+  const root = asRecord(document);
+  if (!root) throw new CuratedCatalogError("document must be an object");
+  if (root.version !== 1) {
+    throw new CuratedCatalogError(`unsupported version ${String(root.version)}; expected 1`);
+  }
+  if (!Array.isArray(root.entries)) {
+    throw new CuratedCatalogError("entries must be an array");
+  }
+
+  const entries = root.entries.map(parseEntry);
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    if (seen.has(entry.mcpUrl)) {
+      throw new CuratedCatalogError(`duplicate entry for ${entry.mcpUrl}`);
+    }
+    seen.add(entry.mcpUrl);
+  }
+  return { version: root.version, entries };
+}
+
+export function curatedCatalogByMcpUrl(
+  catalog: CuratedCatalog,
+): ReadonlyMap<string, CuratedCatalogEntry> {
+  return new Map(catalog.entries.map((entry) => [entry.mcpUrl, entry]));
+}
+
+/** The committed overlay, validated at module load so a bad edit fails loudly. */
+export const CURATED_CATALOG: CuratedCatalog = parseCuratedCatalog(curatedDocument);
+
+export const curatedCatalogEntriesByMcpUrl: ReadonlyMap<string, CuratedCatalogEntry> =
+  curatedCatalogByMcpUrl(CURATED_CATALOG);

@@ -4,6 +4,7 @@ import {
   apiKeyConnectionRef,
   capabilityAuthHint,
   capabilityConnectPlan,
+  capabilityCuration,
   capabilityFilterLabel,
   capabilityFormError,
   capabilityItemKindLabel,
@@ -28,6 +29,7 @@ import {
   registryResultsForQuery,
   resolveSheetItem,
   socialConnectionsForOwnership,
+  sortFeaturedFirst,
   subjectOAuthConnectionRef,
   workspaceConnectionForDomain,
 } from "./capabilities";
@@ -1098,5 +1100,48 @@ describe("helpers", () => {
     expect(capabilityMonogram("Linear")).toBe("LI");
     expect(capabilityMonogram("Google Drive")).toBe("GD");
     expect(capabilityMonogram("")).toBe("?");
+  });
+});
+
+describe("capabilityCuration", () => {
+  test("reads featured and official from import curation metadata", () => {
+    expect(
+      capabilityCuration(item({ metadata: { curation: { featured: true, official: true } } })),
+    ).toEqual({ featured: true, official: true });
+  });
+
+  test("defaults both flags to false when curation is absent or malformed", () => {
+    expect(capabilityCuration(item({ metadata: {} }))).toEqual({
+      featured: false,
+      official: false,
+    });
+    expect(capabilityCuration(item({ metadata: { curation: "yes" } }))).toEqual({
+      featured: false,
+      official: false,
+    });
+    expect(capabilityCuration(item({ metadata: { curation: { featured: "true" } } }))).toEqual({
+      featured: false,
+      official: false,
+    });
+  });
+});
+
+describe("sortFeaturedFirst", () => {
+  test("moves featured rows to the front and preserves relative order otherwise", () => {
+    const a = item({ id: "a" });
+    const b = item({ id: "b", metadata: { curation: { featured: true } } });
+    const c = item({ id: "c" });
+    const d = item({ id: "d", metadata: { curation: { featured: true } } });
+    expect(sortFeaturedFirst([a, b, c, d]).map((entry) => entry.id)).toEqual(["b", "d", "a", "c"]);
+  });
+
+  test("returns a new array and leaves the input untouched", () => {
+    const input = [
+      item({ id: "x" }),
+      item({ id: "y", metadata: { curation: { featured: true } } }),
+    ];
+    const sorted = sortFeaturedFirst(input);
+    expect(sorted).not.toBe(input);
+    expect(input.map((entry) => entry.id)).toEqual(["x", "y"]);
   });
 });

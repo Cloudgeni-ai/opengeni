@@ -631,6 +631,28 @@ MIT attribution, and upserts registry entries by `(provider_domain, mcp_url)`.
 Rows removed from a later snapshot are marked `stale`, not deleted, and are
 excluded from default workspace catalog listings.
 
+### Curated overlay
+
+The snapshot is raw aggregator output: names are unnormalized and its `tier`
+says nothing about trust. `data/catalog/curated.json` is the committed overlay
+that fixes that, applied during the same normalization pass and keyed by exact
+canonical MCP URL. Every field is optional; a supplied value wins over the
+snapshot and an omitted one falls through unchanged, so a name-only entry is a
+pure branding fix while a full entry can pin the reviewed first-party contract
+(scopes, allowed tools, approval, ownership, docs, logo policy). It replaces the
+in-code maps that previously carried the Gmail, Slack, and Mobbin contracts, and
+its parser fails the import loudly on any malformed entry rather than silently
+shipping the raw aggregator row.
+
+Two curated flags surface in the product. `featured` promotes a connector to
+the front of the Browse grid. `official` renders an "Official" marker meaning
+the provider publishes the MCP server on its own domain. Both are checkable
+claims recorded in the row's `metadata.curation`; neither is a security review,
+and the UI must never label a connector as reviewed or verified. Every entry
+must be backed by the provider's own current documentation, and its `notes`
+field records the reasoning for reviewers. Editing the overlay is the same PR
+workflow as the snapshot: change the file, re-run the import, review the diff.
+
 Imported logos are fetched during import, validated as images below 512KB, and
 stored through OpenGeni object storage under `catalog-assets/...`; catalog rows
 store only the self-hosted `logoAssetPath`, never the third-party logo URL. The

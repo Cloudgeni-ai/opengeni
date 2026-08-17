@@ -1,7 +1,11 @@
 import { memo } from "react";
 
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
-import { capabilityAuthHint, capabilityItemKindLabel } from "@/lib/capabilities";
+import {
+  capabilityAuthHint,
+  capabilityCuration,
+  capabilityItemKindLabel,
+} from "@/lib/capabilities";
 import { cn } from "@/lib/utils";
 import type { CapabilityCatalogItem } from "@/types";
 
@@ -16,6 +20,7 @@ export const CapabilityTile = memo(function CapabilityTile({
   onOpen: () => void;
 }) {
   const authHint = capabilityAuthHint(item);
+  const curation = capabilityCuration(item);
   return (
     <button
       type="button"
@@ -35,6 +40,15 @@ export const CapabilityTile = memo(function CapabilityTile({
             <span className="inline-flex shrink-0 items-center gap-1 text-2xs font-medium text-status-idle">
               <span className="size-1.5 rounded-full bg-status-idle" />
               Enabled
+            </span>
+          ) : null}
+          {curation.official ? (
+            <span
+              data-capability-official
+              className="inline-flex shrink-0 items-center rounded-full border border-brand/40 bg-brand/10 px-1.5 text-2xs font-medium uppercase tracking-wide text-brand"
+              title="Published by the provider on its own domain"
+            >
+              Official
             </span>
           ) : null}
         </div>

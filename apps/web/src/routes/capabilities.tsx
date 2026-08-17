@@ -85,6 +85,7 @@ import {
   oauthResumeAction,
   registryResultsForQuery,
   resolveSheetItem,
+  sortFeaturedFirst,
   type CapabilityFilter,
   type CapabilityFormState,
   type ConnectionHealth,
@@ -421,7 +422,12 @@ export function CapabilitiesRoute({
   // The Enabled strip is the daily-management surface; Browse shows the rest of
   // the catalog so an enabled item never appears in both places.
   const enabledItems = useMemo(() => filtered.filter((item) => item.enabled), [filtered]);
-  const browseItems = useMemo(() => filtered.filter((item) => !item.enabled), [filtered]);
+  // Curated featured connectors lead the browse grid; the rest keep their
+  // existing relative order so nothing else on the page reshuffles.
+  const browseItems = useMemo(
+    () => sortFeaturedFirst(filtered.filter((item) => !item.enabled)),
+    [filtered],
+  );
   const visibleBrowse = browseItems.slice(0, visibleCount);
   const slackBotConnections = openGeniSlackBotConnections(connections ?? []);
   const slackBotConnection = preferredOpenGeniSlackBotConnection(slackBotConnections);

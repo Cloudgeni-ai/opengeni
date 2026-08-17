@@ -276,6 +276,37 @@ export function capabilityRequiresPersonalConnection(item: CapabilityCatalogItem
   );
 }
 
+/**
+ * Curation facts written by the catalog import from `data/catalog/curated.json`.
+ * Both are checkable claims, not a security review: `official` means the
+ * provider publishes the server on its own domain; `featured` means we chose
+ * to promote it. Neither must ever be rendered as "reviewed" or "verified".
+ */
+export function capabilityCuration(item: Pick<CapabilityCatalogItem, "metadata">): {
+  featured: boolean;
+  official: boolean;
+} {
+  const raw = item.metadata.curation;
+  const record =
+    raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+  return {
+    featured: record?.featured === true,
+    official: record?.official === true,
+  };
+}
+
+/** Stable order: featured first, everything else in its existing order. */
+export function sortFeaturedFirst<T extends Pick<CapabilityCatalogItem, "metadata">>(
+  items: readonly T[],
+): T[] {
+  const featured: T[] = [];
+  const rest: T[] = [];
+  for (const item of items) {
+    (capabilityCuration(item).featured ? featured : rest).push(item);
+  }
+  return [...featured, ...rest];
+}
+
 /** Short auth hint for a tile ("OAuth" / "API key"), or null when none applies. */
 export function capabilityAuthHint(item: CapabilityCatalogItem): string | null {
   const plan = capabilityConnectPlan(item);
