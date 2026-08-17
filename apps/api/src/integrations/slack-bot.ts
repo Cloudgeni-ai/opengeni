@@ -69,6 +69,8 @@ const MAX_USER_PAGE = 200;
 const MAX_SEARCH_PAGE = 20;
 /** Bounded projection cap for one search result's content excerpt. */
 const MAX_SEARCH_CONTENT_CHARS = 2_000;
+/** Matches the MCP input schema's cap; Slack signals its own via query_too_long. */
+const MAX_SEARCH_QUERY_CHARS = 500;
 const MAX_FILE_PAGE = 200;
 const MAX_FILE_CURSOR_LENGTH = 1_024;
 const SLACK_FILE_CURSOR_VERSION = "files-v1";
@@ -878,14 +880,19 @@ export class OpenGeniSlackBotClient {
     cursor?: string;
     limit?: number;
   }) {
-    if (!hasOpenGeniSlackBotSearchScopes(this.connection.grantedScopes)) {
-      throw new SlackBotProviderError("slack_bot_search_scopes_missing");
+    const query = typeof input.query === "string" ? input.query.trim() : "";
+    if (!query || query.length > MAX_SEARCH_QUERY_CHARS) {
+      throw new SlackBotProviderError("invalid_query");
     }
-    const query = requiredSlackString(input.query, "query");
     const contentTypes = input.contentTypes?.length
       ? [...new Set(input.contentTypes)]
       : ["messages"];
     return await this.withAudit("search.context", async (headers) => {
+      // Inside the audit boundary so a fail-closed denial on a legacy install
+      // leaves the same `failed` evidence as a provider rejection.
+      if (!hasOpenGeniSlackBotSearchScopes(this.connection.grantedScopes)) {
+        throw new SlackBotProviderError("slack_bot_search_scopes_missing");
+      }
       const payload = await this.call(headers, "assistant.search.context", {
         query,
         channel_types: "public_channel",
@@ -2837,7 +2844,8 @@ function slackUnixSeconds(value: unknown): number | null {
 }
 
 function safeSlackPermalink(value: unknown): string | null {
-  const raw = boundedSlackString(value, 1_024);
+  // An over-long URL is dropped, never truncated into a still-parseable one.
+  const raw = typeof value === "string" && value.length <= 1_024 ? value : "";
   if (!raw) return null;
   try {
     return new URL(raw).protocol === "https:" ? raw : null;

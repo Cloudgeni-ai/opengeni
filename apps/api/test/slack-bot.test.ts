@@ -3147,6 +3147,34 @@ describe("OpenGeni Slack bot connection", () => {
     );
     // Fails before any provider call: Slack never sees the request.
     expect(slack.calls.some((entry) => entry.method === "assistant.search.context")).toBe(false);
+    // The denial leaves the same failed audit evidence as a provider rejection.
+    const audits = await shared!.admin<{ metadata: Record<string, unknown> }[]>`
+      select metadata from audit_events
+      where workspace_id = ${workspace.workspaceId}
+        and action = 'slack_bot.search.context'
+      order by occurred_at desc`;
+    expect(audits.length).toBeGreaterThan(0);
+    expect(audits[0]!.metadata).toMatchObject({
+      outcome: "failed",
+      failureCode: "slack_bot_search_scopes_missing",
+    });
+  });
+
+  test("accepts long natural-language queries up to the schema cap and rejects beyond it", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const { bot } = await connectedTestBot(workspace, slack.fetch);
+
+    // A 300-char semantic prompt is a legitimate Real-time Search query.
+    const longQuery = "what did we decide about the launch ".repeat(9).slice(0, 300);
+    await bot.searchContext({ query: longQuery });
+    const call = slack.calls.find((entry) => entry.method === "assistant.search.context");
+    // The client sends the trimmed query.
+    expect(call!.searchQuery).toBe(longQuery.trim());
+
+    await expect(bot.searchContext({ query: "x".repeat(501) })).rejects.toThrow("invalid_query");
+    await expect(bot.searchContext({ query: "   " })).rejects.toThrow("invalid_query");
   });
 
   test("retries explicit provider rejection and preserves distinct operation IDs", async () => {
