@@ -4065,12 +4065,14 @@ describe("OpenGeni Slack bot connection", () => {
       ).connection,
     ).toMatchObject({ id: connectionId, version: 4 });
 
-    const capabilitiesSource = await Bun.file(
-      new URL("../../web/src/routes/capabilities.tsx", import.meta.url),
+    // The destination UI moved from the capabilities route into the Slack
+    // integration adapter when every integration adopted the shared sheet.
+    const slackAdapterSource = await Bun.file(
+      new URL("../../web/src/components/capabilities/use-slack-integration.tsx", import.meta.url),
     ).text();
-    expect(capabilitiesSource).toContain("Slack knowledge destination");
-    expect(capabilitiesSource).toContain("slackDestinationAuthority");
-    expect(capabilitiesSource).toContain("collectionId: null");
-    expect(capabilitiesSource).toContain("Save destination");
+    expect(slackAdapterSource).toContain("Slack knowledge destination");
+    expect(slackAdapterSource).toContain("slackBotPersistableDestinationAuthority");
+    expect(slackAdapterSource).toContain("collectionId: null");
+    expect(slackAdapterSource).toContain("saveDestination");
   });
 });

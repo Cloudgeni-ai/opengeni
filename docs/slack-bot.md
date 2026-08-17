@@ -162,13 +162,13 @@ Generate the canonical JSON manifest with `bun run slack:manifest`. It defaults 
 
 ## Install and connect the workspace bot
 
-1. In the intended OpenGeni workspace, open **Capabilities → Slack connections → OpenGeni workspace bot**.
-2. Choose the official **Add to Slack** visual. The button calls OpenGeni's authenticated OAuth-start API; it is not a static provider link.
+1. In the intended OpenGeni workspace, open **Capabilities → Integrations → Slack**.
+2. Use the Slack sheet's **Set up** action (or **Reconnect** for a repair reinstall). The button calls OpenGeni's authenticated OAuth-start API; it is not a static provider link.
 3. OpenGeni creates high-entropy, signed, single-use state bound to the exact account, workspace, subject, and install or reinstall action, then redirects to Slack workspace selection and consent.
 4. Slack returns the browser to `/v1/integrations/slack/callback`. OpenGeni consumes the state once and exchanges the temporary code server-side.
 5. OpenGeni verifies the exact Slack workspace, bot ID, bot user ID, token type, display name, and scope set before storing the bot token in the encrypted connection credential column.
 
-Expand **Connection details** to inspect the secret-free installation binding: exact Slack team ID/name, bot ID, bot-user ID, OpenGeni account name/ID, workspace name/ID, binding state, and binding version. Configuration actions still require the existing `connections:write` or workspace-admin authority. Tokens, OAuth codes, authorization headers, and raw state are never projected.
+The sheet's **Connection** block shows the secret-free installation binding: exact Slack team ID/name, bot ID, bot-user ID, OpenGeni account name/ID, workspace name/ID, binding state, and binding version. Configuration actions still require the existing `connections:write` or workspace-admin authority. Tokens, OAuth codes, authorization headers, and raw state are never projected.
 
 Slack's bot installation endpoint is protected by the bound one-time state and exact redirect URI. The implementation does not claim or add PKCE to this provider-specific bot flow unless Slack documents support for it.
 

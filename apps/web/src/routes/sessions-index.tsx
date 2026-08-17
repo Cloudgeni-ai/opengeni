@@ -866,8 +866,9 @@ function workspaceRepositoryPickerProps(
     onGitHubAppOpenChange: context.setGithubAppOpen,
     onOrgChange: context.setGithubOrg,
     onStartGitHubApp: () => void context.startGitHubAppManifestFlow(workspaceId),
-    onDisconnectInstallation: (installationId: number) =>
-      context.disconnectGitHubInstallation(workspaceId, installationId),
+    onDisconnectInstallation: async (installationId: number) => {
+      await context.disconnectGitHubInstallation(workspaceId, installationId);
+    },
   };
 }
 

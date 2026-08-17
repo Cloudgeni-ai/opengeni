@@ -158,6 +158,8 @@ export type AppContextValue = {
   setSelectedRepoRefs: Dispatch<SetStateAction<Record<number, string>>>;
   githubRepos: GitHubRepository[];
   githubStatus: GitHubAppInfo | null;
+  /** True when the last GitHub status/catalog fetch failed (unknown, not unbound). */
+  githubStatusFailed: boolean;
   /** True once the current workspace's repository catalog has completed its first load. */
   githubCatalogReady: boolean;
   githubAppOpen: boolean;
@@ -214,7 +216,8 @@ export type AppContextValue = {
   ) => Promise<void>;
   refreshWorkspaceMcpServers: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
   startGitHubAppManifestFlow: (workspaceId: string) => Promise<void>;
-  disconnectGitHubInstallation: (workspaceId: string, installationId: number) => Promise<void>;
+  /** Resolves true when the unlink succeeded; failures self-toast and resolve false. */
+  disconnectGitHubInstallation: (workspaceId: string, installationId: number) => Promise<boolean>;
   toggleGitHubRepository: (repo: GitHubRepository) => void;
   startSession: (
     workspaceId: string,
@@ -414,6 +417,7 @@ export function RootRouteComponent() {
   const [selectedRepoRefs, setSelectedRepoRefs] = useState<Record<number, string>>({});
   const [githubRepos, setGithubRepos] = useState<GitHubRepository[]>([]);
   const [githubStatus, setGithubStatus] = useState<GitHubAppInfo | null>(null);
+  const [githubStatusFailed, setGithubStatusFailed] = useState(false);
   const [githubCatalogReady, setGithubCatalogReady] = useState(false);
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
@@ -868,6 +872,7 @@ export function RootRouteComponent() {
           return;
         }
         setGithubStatus(status);
+        setGithubStatusFailed(false);
         setGithubAppOpen(status.status !== "bound");
         if (status.status === "bound") {
           // Explicit refreshes re-sync from GitHub (POST /github/repositories/sync)
@@ -893,6 +898,7 @@ export function RootRouteComponent() {
         // that the last-known installation or repository identities vanished.
         // Keep the last successful snapshot and readiness fence so draft
         // hydration cannot project it to [] and autosave destructive loss.
+        setGithubStatusFailed(true);
         toast.error("GitHub status unavailable", {
           description: String(error),
         });
@@ -1033,7 +1039,7 @@ export function RootRouteComponent() {
   async function disconnectGitHubInstallation(
     workspaceId: string,
     installationId: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       await client.unlinkGitHubInstallation(workspaceId, installationId);
       const removedRepositoryIds = new Set(
@@ -1054,10 +1060,12 @@ export function RootRouteComponent() {
       );
       await refreshGitHub(workspaceId, undefined, { sync: true });
       toast.success("GitHub installation unlinked from this workspace");
+      return true;
     } catch (error) {
       toast.error("Failed to unlink GitHub installation", {
         description: error instanceof Error ? error.message : String(error),
       });
+      return false;
     }
   }
 
@@ -1201,6 +1209,7 @@ export function RootRouteComponent() {
 
   const resetWorkspaceIntegrations = useCallback(() => {
     setGithubStatus(null);
+    setGithubStatusFailed(false);
     setGithubRepos([]);
     setGithubCatalogReady(false);
     setWorkspaceMcpServers([]);
@@ -1282,6 +1291,7 @@ export function RootRouteComponent() {
           setSelectedRepoRefs,
           githubRepos,
           githubStatus,
+          githubStatusFailed,
           githubCatalogReady,
           githubAppOpen,
           setGithubAppOpen,
@@ -1351,6 +1361,7 @@ export function RootRouteComponent() {
     githubOrg,
     githubRepos,
     githubStatus,
+    githubStatusFailed,
     githubCatalogReady,
     inspectorOpen,
     keyAuthRequired,

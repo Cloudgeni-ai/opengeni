@@ -33,11 +33,15 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
-              // Keep Radix and Lucide's eager icon factory in one UI runtime.
-              // entriesAware route merging can otherwise split Popper scopes,
-              // or place an icon and its factory across a circular chunk.
+              // Keep Radix, Lucide's eager icon factory, and the two class-name
+              // helpers (web `cn` and @opengeni/react `cn` with clsx and
+              // tailwind-merge) in one UI runtime. entriesAware route merging
+              // can otherwise split Popper scopes, place an icon and its
+              // factory across a circular chunk, or fold a tiny universally
+              // shared helper into a route-only chunk and drag that route's
+              // code into the initial graph.
               name: "ui-runtime",
-              test: /(?:(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/))|[\\/]lucide-react[\\/]dist[\\/]esm[\\/](?:(?:createLucideIcon|Icon|context|defaultAttributes)\.mjs|shared[\\/]))/,
+              test: /(?:(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/)|clsx(?:@|\/)|tailwind-merge(?:@|\/))|apps[\\/]web[\\/]src[\\/]lib[\\/]utils\.ts$|packages[\\/]react[\\/]src[\\/]lib[\\/]cn\.ts$|[\\/]lucide-react[\\/]dist[\\/]esm[\\/](?:(?:createLucideIcon|Icon|context|defaultAttributes)\.mjs|shared[\\/]))/,
               priority: 15,
             },
             {
@@ -45,7 +49,7 @@ export default defineConfig({
               // one app-shell unit. Keeping them together avoids an extra
               // request without pulling any route implementation into startup.
               name: "app-shell",
-              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/]routes\.ts|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:chevron-down|circle-alert)\.mjs)$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/]routes\.ts|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:chevron-down|chevron-left|circle-alert)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 4,
             },
@@ -53,11 +57,15 @@ export default defineConfig({
               // The session workbench is the primary interactive route. Keep
               // its static graph route-aware, but coalesce tiny shared groups
               // so a cold navigation does not fan out into dozens of requests.
+              // 192 KiB (up from 92) keeps the initial and direct-session file
+              // counts inside the budget after the capabilities route stopped
+              // importing several small shared modules; the smaller threshold
+              // left three sub-50 KiB shared chunks in both graphs.
               name: "session",
               test: /src[\\/]routes[\\/]session\.tsx$/,
               includeDependenciesRecursively: true,
               entriesAware: true,
-              entriesAwareMergeThreshold: 92 * 1024,
+              entriesAwareMergeThreshold: 192 * 1024,
               priority: 2,
             },
             {

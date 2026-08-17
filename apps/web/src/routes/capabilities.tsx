@@ -1,46 +1,19 @@
 // Capabilities: the workspace integrations marketplace. A single scrollable
-// page — a large search, kind filters, an "Enabled" strip the user manages
-// daily, and a logo tile grid over the full catalog (1,000+ items, rendered
-// incrementally). Credentialed MCP servers connect through the connections
-// spine (OAuth redirect or an API-key form) in a right-hand detail sheet, never
-// by hand-editing enable headers. Packs keep their first-class register/enable/
-// disable/unregister surface, restyled flat.
-import {
-  ATLASSIAN_APP_DESCRIPTION,
-  atlassianStatus,
-  localConnectedAtlassianPreview,
-  preferredAtlassianConnection,
-} from "@/lib/atlassian-connection";
-import {
-  OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
-  OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
-} from "@opengeni/contracts/slack-bot-scopes";
+// page with two user-facing objects. Integrations (Slack, GitHub, Google Drive,
+// Jira and Confluence) are built and run by OpenGeni and render through one row
+// and one detail sheet each. Connectors are MCP servers from the catalog: a
+// curated Featured strip, then a large search, kind filters, an "Enabled" strip
+// the user manages daily, and a logo tile grid over the full catalog (1,000+
+// items, rendered incrementally). Credentialed MCP servers connect through the
+// connections spine (OAuth redirect or an API-key form) in a right-hand detail
+// sheet, never by hand-editing enable headers. Packs keep their first-class
+// register/enable/disable/unregister surface, restyled flat.
 import { usePacks, useRigs, useVariableSets } from "@opengeni/react";
-import {
-  CheckCircle2Icon,
-  ChevronDownIcon,
-  GlobeIcon,
-  HardDriveIcon,
-  Loader2Icon,
-  MessagesSquareIcon,
-  PlugIcon,
-  PlusIcon,
-  RefreshCwIcon,
-} from "lucide-react";
-import {
-  lazy,
-  Suspense,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { PlugIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
+import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
-import { AtlassianConnectorCard } from "@/components/capabilities/atlassian-connector-card";
 import {
   CapabilityBrowseSection,
   CapabilityDiscoveryControls,
@@ -50,22 +23,25 @@ import {
   CapabilityDetailSheet,
   type ConnectAction,
 } from "@/components/capabilities/capability-detail-sheet";
+import {
+  FeaturedConnectorsStrip,
+  featuredConnectors,
+} from "@/components/capabilities/featured-connectors";
+import { IntegrationRow } from "@/components/capabilities/integration-row";
+import { IntegrationSheet } from "@/components/capabilities/integration-sheet";
 import { PacksSection } from "@/components/capabilities/packs-section";
-import { PersonalSlackAccountCard } from "@/components/capabilities/personal-slack-account-card";
-import { SlackReactionSummonCard } from "@/components/capabilities/slack-reaction-summon-card";
 import { isWorkspaceImportedSkill } from "@/components/capabilities/source-import-flow";
 import { SourcePackagesSection } from "@/components/capabilities/source-packages-section";
+import { useAtlassianIntegration } from "@/components/capabilities/use-atlassian-integration";
+import { useGitHubIntegration } from "@/components/capabilities/use-github-integration";
+import { useGoogleDriveIntegration } from "@/components/capabilities/use-google-drive-integration";
+import {
+  canManageSlackReactionSummon,
+  useSlackIntegration,
+} from "@/components/capabilities/use-slack-integration";
 import { PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { Select } from "@/components/ui/select";
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import {
@@ -91,27 +67,9 @@ import {
   type ConnectionHealth,
   type SheetSelection,
 } from "@/lib/capabilities";
-import {
-  GOOGLE_DRIVE_APP_DESCRIPTION,
-  googleDriveAccountState,
-  localConnectedGoogleDrivePreview,
-  preferredGoogleDriveConnection,
-} from "@/lib/google-drive-connection";
 import { listViewState } from "@/lib/load-state";
 import { mcpOAuthCallbackFailureMessage, startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
-import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
-import {
-  personalSlackAccountState,
-  personalSlackCapability,
-  personalSlackOAuthTarget,
-  preferredPersonalSlackConnection,
-} from "@/lib/personal-slack";
-import {
-  openGeniSlackBotConnections,
-  openGeniSlackBotInstallInput,
-  openGeniSlackBotUiMetadata,
-  preferredOpenGeniSlackBotConnection,
-} from "@/lib/slack-bot";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import { request } from "@/api";
 
@@ -119,20 +77,11 @@ const IntegrationControlCenter = lazy(async () => {
   const module = await import("@/components/capabilities/integration-control-center");
   return { default: module.IntegrationControlCenter };
 });
-const GoogleDriveConnectorCard = lazy(async () => {
-  const module = await import("@/components/capabilities/google-drive-connector-card");
-  return { default: module.GoogleDriveConnectorCard };
-});
-const MemorySlackPublicationCard = lazy(async () => {
-  const module = await import("@/components/capabilities/memory-slack-publication-card");
-  return { default: module.MemorySlackPublicationCard };
-});
 
 import type {
   AccessContext,
   CapabilityCatalogItem,
   CapabilityPack,
-  ConnectorDocumentDestinationAuthority,
   ConnectionMetadata,
   ConnectionOwnership,
   PackInstallationPreview,
@@ -144,197 +93,11 @@ import type {
 
 const PAGE_SIZE = 48;
 
-export function googleDriveStatusLabel(
-  state: ReturnType<typeof googleDriveAccountState>["state"],
-): string {
-  if (state === "connected") return "Connected";
-  if (state === "paused") return "Paused";
-  if (state === "not_connected" || state === "disconnected") return "Not connected";
-  if (state === "unverified") return "Loading";
-  return "Needs attention";
-}
-
-export function atlassianStatusLabel(status: ReturnType<typeof atlassianStatus>): string {
-  if (status === "connected") return "Connected";
-  if (status === "paused") return "Paused";
-  if (status === "loading") return "Loading";
-  if (status === "not_connected") return "Not connected";
-  return "Needs attention";
-}
-
-export function localConnectedSlackPreview(
-  search: string,
-  workspaceId: string,
-  enabled = import.meta.env.DEV,
-) {
-  if (!enabled || new URLSearchParams(search).get("previewSlack") !== "connected") return null;
-  const now = new Date().toISOString();
-  const shared = {
-    accountId: "00000000-0000-4000-8000-000000000001",
-    workspaceId,
-    providerDomain: "slack.com",
-    status: "active" as const,
-    expiresAt: null,
-    lastRefreshAt: now,
-    lastUsedAt: now,
-    lastError: null,
-    version: 1,
-    createdBySubjectId: "preview-user",
-    updatedBySubjectId: "preview-user",
-    createdAt: now,
-    updatedAt: now,
-  };
-  const personal: ConnectionMetadata = {
-    ...shared,
-    id: "00000000-0000-4000-8000-000000000002",
-    subjectId: "preview-user",
-    kind: "oauth2",
-    grantedScopes: ["search:read.public", "channels:history", "chat:write"],
-    metadata: {},
-  };
-  return {
-    bot: {
-      ...shared,
-      id: "00000000-0000-4000-8000-000000000003",
-      subjectId: null,
-      kind: "app_install" as const,
-      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
-      verifiedInstallAt: now,
-      verifiedInstallVersion: 1,
-      metadata: {
-        credentialRole: "opengeni_slack_bot",
-        credentialLabel: "OpenGeni Slack bot",
-        slackTeamId: "T_CLOUDGENI_PREVIEW",
-        slackTeamName: "CloudGeni",
-        botDisplayName: "OpenGeni",
-      },
-    } satisfies ConnectionMetadata,
-    personal: {
-      state: "connected" as const,
-      connection: personal,
-      accessTokenRefreshDue: false,
-    },
-  };
-}
-
-export function canWriteWorkspaceConnections(
-  accessContext: AccessContext | null,
-  workspaceId: string,
-): boolean {
-  const grant = accessContext?.workspaceGrants.find(
-    (candidate) => candidate.workspaceId === workspaceId,
-  );
-  return Boolean(
-    grant &&
-    (grant.permissions.includes("connections:write") ||
-      grant.permissions.includes("workspace:admin")),
-  );
-}
-
-export function canInstallOpenGeniSlackBot(
-  accessContext: AccessContext | null,
-  workspaceId: string,
-): boolean {
-  return canWriteWorkspaceConnections(accessContext, workspaceId);
-}
-
-export function canManageSlackReactionSummon(
-  accessContext: AccessContext | null,
-  workspaceId: string,
-): boolean {
-  const grant = accessContext?.workspaceGrants.find(
-    (candidate) => candidate.workspaceId === workspaceId,
-  );
-  return grant?.permissions.includes("workspace:admin") === true;
-}
-
 export function canManageApiIntegrations(
   accessContext: AccessContext | null,
   workspaceId: string,
 ): boolean {
   return hasWorkspacePermission(accessContext, workspaceId, "workspace:admin");
-}
-
-export function WorkspaceSlackBotRequestedScopes() {
-  return (
-    <p className="mt-2 max-w-3xl break-words font-mono text-2xs leading-relaxed text-fg-subtle">
-      {OPENGENI_SLACK_BOT_REQUESTED_SCOPES.join(", ")}
-    </p>
-  );
-}
-
-export function SlackBotInstallControls({
-  canInstall,
-  hasConnection,
-  busy,
-  onInstall,
-}: {
-  canInstall: boolean;
-  hasConnection: boolean;
-  busy: boolean;
-  onInstall: (createNewConnection: boolean) => void;
-}) {
-  if (hasConnection) {
-    return (
-      <div className="mt-3 space-y-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            disabled={!canInstall || busy}
-            onClick={() => onInstall(false)}
-          >
-            {busy ? <Loader2Icon className="animate-spin" /> : null}
-            Reconnect
-          </Button>
-          {canInstall ? (
-            <Button type="button" variant="ghost" disabled={busy} onClick={() => onInstall(true)}>
-              Install in another workspace
-            </Button>
-          ) : null}
-        </div>
-        {!canInstall ? <SlackBotInstallPermissionNotice /> : null}
-      </div>
-    );
-  }
-
-  return (
-    <div className="mt-4">
-      <button
-        type="button"
-        aria-busy={busy}
-        aria-label="Install OpenGeni in Slack"
-        data-opengeni-slack-install
-        className="relative inline-flex h-10 w-[139px] items-center justify-center overflow-hidden rounded-md outline-none ring-focus transition-opacity focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-60"
-        disabled={!canInstall || busy}
-        onClick={() => onInstall(false)}
-      >
-        <img
-          src="https://platform.slack-edge.com/img/add_to_slack.png"
-          srcSet="https://platform.slack-edge.com/img/add_to_slack@2x.png 2x"
-          alt=""
-          aria-hidden="true"
-          width={139}
-          height={40}
-          className="h-10 w-[139px]"
-        />
-        {busy ? (
-          <span className="absolute inset-0 grid place-items-center bg-bg/75" aria-hidden="true">
-            <Loader2Icon className="animate-spin" />
-          </span>
-        ) : null}
-      </button>
-      {!canInstall ? <SlackBotInstallPermissionNotice /> : null}
-    </div>
-  );
-}
-
-function SlackBotInstallPermissionNotice() {
-  return (
-    <p className="mt-2 max-w-xl text-xs leading-5 text-fg-muted">
-      Ask a workspace administrator or connection manager to install the OpenGeni Slack bot.
-    </p>
-  );
 }
 
 export function CapabilitiesRoute({
@@ -358,6 +121,10 @@ export function CapabilitiesRoute({
   // connections:read); an array = loaded, even when empty. Health must not treat a
   // failed load as "every connection was deleted".
   const [connections, setConnections] = useState<ConnectionMetadata[] | null>(null);
+  // True when the last connections fetch failed. Combined with a still-null
+  // `connections`, the integration adapters surface a visible failure with a
+  // retry instead of pinning their tiles at Loading forever.
+  const [connectionsLoadFailed, setConnectionsLoadFailed] = useState(false);
   const [socialConnections, setSocialConnections] = useState<SocialConnection[]>([]);
   const [slackInstallationBindings, setSlackInstallationBindings] = useState<
     SlackInstallationBinding[]
@@ -365,14 +132,6 @@ export function CapabilitiesRoute({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [personalSlackBusy, setPersonalSlackBusy] = useState(false);
-  const [personalSlackDisconnectOpen, setPersonalSlackDisconnectOpen] = useState(false);
-  const [slackBotBusy, setSlackBotBusy] = useState(false);
-  const [slackDestinationBusy, setSlackDestinationBusy] = useState(false);
-  const [slackDestinationAuthority, setSlackDestinationAuthority] =
-    useState<ConnectorDocumentDestinationAuthority>("workspace");
-  const [savedSlackDestinationAuthority, setSavedSlackDestinationAuthority] =
-    useState<ConnectorDocumentDestinationAuthority>("workspace");
 
   const [filter, setFilter] = useState<CapabilityFilter>(
     initialSection === "packs" ? "pack" : "all",
@@ -390,7 +149,8 @@ export function CapabilitiesRoute({
   const capabilityFocusFallbackRef = useRef<HTMLDivElement | null>(null);
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
-  const [managedApp, setManagedApp] = useState<"google-drive" | "atlassian" | "slack" | null>(null);
+  // Which integration's detail sheet is open (one sheet, one open id).
+  const [openIntegration, setOpenIntegration] = useState<string | null>(null);
   const [skillRemoval, setSkillRemoval] = useState<{
     item: CapabilityCatalogItem;
     preview: SkillUninstallPreview;
@@ -419,34 +179,30 @@ export function CapabilitiesRoute({
       ),
     [items, filter, query],
   );
-  // The Enabled strip is the daily-management surface; Browse shows the rest of
-  // the catalog so an enabled item never appears in both places.
-  const enabledItems = useMemo(() => filtered.filter((item) => item.enabled), [filtered]);
-  // Curated featured connectors lead the browse grid. The partition is stable,
-  // so within the featured and non-featured groups the server order (kind,
+  // The Featured strip shows curated connectors when nothing narrows the list;
+  // the grid then carries the long tail. A search or a non-MCP filter hides the
+  // strip and the grid shows every match again. The partition is stable, so
+  // within the featured and non-featured groups the server order (kind,
   // category, name) is preserved.
+  const showFeatured = query.trim().length === 0 && (filter === "all" || filter === "mcp");
+  const featured = useMemo(
+    () => (showFeatured ? featuredConnectors(filtered) : []),
+    [filtered, showFeatured],
+  );
+  const featuredIds = useMemo(() => new Set(featured.map((item) => item.id)), [featured]);
+  // One placement per integration: a featured tile carries its own Enabled
+  // badge, so an enabled featured item stays in the strip and is excluded from
+  // the Enabled section; everything else enabled lives in the Enabled section
+  // and Browse shows only the rest of the catalog.
+  const enabledItems = useMemo(
+    () => filtered.filter((item) => item.enabled && !featuredIds.has(item.id)),
+    [filtered, featuredIds],
+  );
   const browseItems = useMemo(
-    () => sortFeaturedFirst(filtered.filter((item) => !item.enabled)),
-    [filtered],
+    () => sortFeaturedFirst(filtered.filter((item) => !item.enabled && !featuredIds.has(item.id))),
+    [filtered, featuredIds],
   );
   const visibleBrowse = browseItems.slice(0, visibleCount);
-  const slackBotConnections = openGeniSlackBotConnections(connections ?? []);
-  const slackBotConnection = preferredOpenGeniSlackBotConnection(slackBotConnections);
-  const slackWorkspaceGrant = context.accessContext?.workspaceGrants.find(
-    (grant) => grant.workspaceId === workspaceId,
-  );
-  const canManageSlackWorkspaceDestination = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "workspace:admin",
-  );
-  const canManageSlackOrganizationDestination = Boolean(
-    slackWorkspaceGrant &&
-    hasAccountPermission(context.accessContext, slackWorkspaceGrant.accountId, "account:admin"),
-  );
-  const canInstallSlackBot = canInstallOpenGeniSlackBot(context.accessContext, workspaceId);
-  const canManageSlackReaction = canManageSlackReactionSummon(context.accessContext, workspaceId);
-
   const showPacks = filter === "all" || filter === "pack";
   const showSourcePackages = filter === "all" || filter === "skill" || filter === "plugin";
   const showCatalog = filter !== "pack";
@@ -456,43 +212,15 @@ export function CapabilitiesRoute({
     [client],
   );
   const connectionsLoaded = connections !== null;
-  const googleDrivePreviewConnection = localConnectedGoogleDrivePreview(
-    window.location.search,
-    workspaceId,
-  );
-  const googleDriveConnection =
-    googleDrivePreviewConnection ?? preferredGoogleDriveConnection(connections ?? []);
-  const googleDriveState = googleDriveAccountState(
-    googleDriveConnection,
-    googleDrivePreviewConnection !== null || connectionsLoaded,
-  );
-  const atlassianPreviewConnection = localConnectedAtlassianPreview(
-    window.location.search,
-    workspaceId,
-  );
-  const atlassianConnection =
-    atlassianPreviewConnection ?? preferredAtlassianConnection(connections ?? []);
-  const atlassianConnectionStatus = atlassianStatus(
-    atlassianConnection,
-    atlassianPreviewConnection !== null || connectionsLoaded,
-  );
-  const slackPreview = localConnectedSlackPreview(window.location.search, workspaceId);
-  const personalSlackItem = personalSlackCapability(items);
-  const personalSlackConnection = preferredPersonalSlackConnection(connections ?? []);
-  const personalSlackStatus = personalSlackAccountState(personalSlackConnection, connectionsLoaded);
-  const visiblePersonalSlackStatus = slackPreview?.personal ?? personalSlackStatus;
-  const visibleSlackBotConnection = slackPreview?.bot ?? slackBotConnection;
-  const visibleSlackBotMetadata = visibleSlackBotConnection
-    ? openGeniSlackBotUiMetadata(visibleSlackBotConnection)
-    : null;
-  const visibleSlackInstallationBinding = visibleSlackBotConnection
-    ? (slackInstallationBindings.find(
-        (binding) => binding.connectionId === visibleSlackBotConnection.id,
-      ) ?? null)
-    : null;
-  const hasActiveSlackInstallationBinding = visibleSlackInstallationBinding?.state === "active";
-  const canMutateInstalledSlackBot = canInstallSlackBot && hasActiveSlackInstallationBinding;
-  const canManagePersonalSlack = canWriteWorkspaceConnections(context.accessContext, workspaceId);
+  const replaceConnection = useCallback((updated: ConnectionMetadata) => {
+    setConnections((current) =>
+      current
+        ? current.some((entry) => entry.id === updated.id)
+          ? current.map((entry) => (entry.id === updated.id ? updated : entry))
+          : [...current, updated]
+        : [updated],
+    );
+  }, []);
   const canManageApiIntegrationInstances = canManageApiIntegrations(
     context.accessContext,
     workspaceId,
@@ -502,21 +230,39 @@ export function CapabilitiesRoute({
     workspaceId,
     "workspace:admin",
   );
-  const slackAppStatus = visibleSlackBotConnection
-    ? visibleSlackBotConnection.status === "active"
-      ? "Connected"
-      : "Needs attention"
-    : visiblePersonalSlackStatus.state === "connected"
-      ? "Connected"
-      : connectionsLoaded
-        ? "Not connected"
-        : "Loading";
 
-  useEffect(() => {
-    const authority = slackBotDocumentDestinationAuthority(slackBotConnection?.metadata);
-    setSlackDestinationAuthority(authority);
-    setSavedSlackDestinationAuthority(authority);
-  }, [slackBotConnection?.id, slackBotConnection?.metadata]);
+  // One adapter per integration maps its own data onto the shared view-model.
+  // The row and the sheet know nothing provider-specific.
+  const slack = useSlackIntegration({
+    workspaceId,
+    items,
+    connections,
+    connectionsLoaded,
+    slackInstallationBindings,
+    sheetOpen: openIntegration === "slack",
+    refresh,
+    onRuntimeChanged,
+  });
+  const github = useGitHubIntegration({ workspaceId });
+  const googleDrive = useGoogleDriveIntegration({
+    workspaceId,
+    connections,
+    connectionsLoaded,
+    connectionsLoadFailed,
+    refresh,
+    replaceConnection,
+  });
+  const atlassian = useAtlassianIntegration({
+    workspaceId,
+    connections,
+    connectionsLoaded,
+    connectionsLoadFailed,
+    refresh,
+    replaceConnection,
+  });
+  const integrations = [slack, github, googleDrive, atlassian];
+  const openIntegrationModel =
+    integrations.find((adapter) => adapter.model.id === openIntegration)?.model ?? null;
   // The item the sheet renders, always from the live catalog. Registry items
   // aren't in `items` until persisted, so they fall back to their snapshot; a
   // non-registry selection with no live row resolves to null and the effect
@@ -540,25 +286,6 @@ export function CapabilitiesRoute({
 
   useEffect(() => {
     void refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId]);
-
-  const slackInstallHandled = useRef(false);
-  useEffect(() => {
-    if (slackInstallHandled.current) return;
-    const params = new URLSearchParams(window.location.search);
-    const outcome = params.get("slack");
-    if (!outcome) return;
-    slackInstallHandled.current = true;
-    window.history.replaceState(null, "", window.location.pathname);
-    if (outcome === "connected") {
-      void refresh();
-      toast.success("OpenGeni installed in Slack");
-    } else {
-      toast.error("Couldn't install OpenGeni in Slack", {
-        description: "Try again, or install another Slack workspace/bot as a new connection.",
-      });
-    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
@@ -651,7 +378,9 @@ export function CapabilitiesRoute({
       // Don't clobber previously-loaded connections with null on a failed refetch
       // (that would flip healthy items to "unverified" until the next reload); a
       // first-load failure leaves the prior null = "not loaded", which is correct.
+      // The failure itself is tracked so the integrations can say so and retry.
       if (conns !== null) setConnections(conns);
+      setConnectionsLoadFailed(conns === null);
       if (socials !== null) setSocialConnections(socials);
       if (slackBindings !== null) setSlackInstallationBindings(slackBindings);
       setLoadError(null);
@@ -668,114 +397,6 @@ export function CapabilitiesRoute({
   function refreshAll() {
     void refresh();
     void packs.refresh();
-  }
-
-  async function startPersonalSlackOAuth() {
-    const target = personalSlackOAuthTarget(personalSlackItem);
-    if (!personalSlackItem || !target) {
-      toast.error("Personal Slack is unavailable", {
-        description: "The official hosted Slack integration is not present in this catalog.",
-      });
-      return;
-    }
-    setPersonalSlackBusy(true);
-    try {
-      const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(personalSlackItem.id)}`;
-      const response = await startMcpOAuthWithTimeout(client, workspaceId, {
-        ...target,
-        ...(personalSlackConnection ? { connectionId: personalSlackConnection.id } : {}),
-        returnPath,
-      });
-      if (!response.authorizationUrl) {
-        throw new Error("Slack did not return an authorization link.");
-      }
-      window.location.assign(response.authorizationUrl);
-    } catch (error) {
-      toast.error("Couldn't connect your Slack account", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-      setPersonalSlackBusy(false);
-    }
-  }
-
-  async function disconnectPersonalSlack(): Promise<boolean> {
-    if (!personalSlackConnection) return true;
-    setPersonalSlackBusy(true);
-    try {
-      await client.deleteConnection(workspaceId, personalSlackConnection.id);
-      await refresh();
-      onRuntimeChanged();
-      toast.success("Personal Slack account disconnected");
-      return true;
-    } catch (error) {
-      toast.error("Couldn't disconnect your Slack account", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-      return false;
-    } finally {
-      setPersonalSlackBusy(false);
-    }
-  }
-
-  async function installSlackBot(createNewConnection = false) {
-    if (slackBotConnection && !hasActiveSlackInstallationBinding) {
-      toast.error("Slack installation repair is blocked", {
-        description: "A verified active installation binding is required before Slack can change.",
-      });
-      return;
-    }
-    setSlackBotBusy(true);
-    try {
-      const installation = await client.startOpenGeniSlackBotInstall(
-        workspaceId,
-        openGeniSlackBotInstallInput(slackBotConnection, createNewConnection),
-      );
-      window.location.assign(installation.authorizationUrl);
-    } catch (error) {
-      toast.error("Couldn't start the OpenGeni Slack installation", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-      setSlackBotBusy(false);
-    }
-  }
-
-  async function disconnectSlackBot() {
-    if (!slackBotConnection) return;
-    setSlackBotBusy(true);
-    try {
-      await client.deleteConnection(workspaceId, slackBotConnection.id);
-      await refresh();
-      toast.success("OpenGeni Slack bot disconnected");
-    } catch (error) {
-      toast.error("Couldn't disconnect the OpenGeni Slack bot", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setSlackBotBusy(false);
-    }
-  }
-
-  async function saveSlackBotDestination() {
-    if (!slackBotConnection || !hasActiveSlackInstallationBinding) return;
-    setSlackDestinationBusy(true);
-    try {
-      await client.updateConnection(workspaceId, slackBotConnection.id, {
-        metadata: {
-          documentDestination: {
-            authorityKind: slackDestinationAuthority,
-            collectionId: null,
-          },
-        },
-      });
-      setSavedSlackDestinationAuthority(slackDestinationAuthority);
-      toast.success("Slack knowledge destination saved");
-    } catch (error) {
-      toast.error("Couldn't save the Slack knowledge destination", {
-        description: error instanceof Error ? error.message : "Try again.",
-      });
-    } finally {
-      setSlackDestinationBusy(false);
-    }
   }
 
   // `snapshotFallback` defaults to `registry` (a registry result renders from its
@@ -1263,7 +884,10 @@ export function CapabilitiesRoute({
       setItems(catalog.items);
       // Don't clobber previously-loaded connections with null on a failed refetch
       // (that would flip healthy items to "unverified" until the next reload).
-      if (conns !== null) setConnections(conns);
+      if (conns !== null) {
+        setConnections(conns);
+        setConnectionsLoadFailed(false);
+      }
       const item =
         (itemId ? catalog.items.find((candidate) => candidate.id === itemId) : undefined) ?? null;
       const action = oauthResumeAction(item, connectionId);
@@ -1599,105 +1223,46 @@ export function CapabilitiesRoute({
           }
         />
 
-        <section className="mt-6 space-y-3" aria-labelledby="apps-heading">
+        <section className="mt-8 space-y-3" aria-labelledby="integrations-heading">
           <div>
-            <h2 id="apps-heading" className="text-sm font-semibold text-fg">
-              Apps
+            <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+              Built by OpenGeni
+            </p>
+            <h2 id="integrations-heading" className="mt-1 text-base font-semibold text-fg">
+              Integrations
             </h2>
-            <p className="mt-1 text-xs text-fg-muted">
-              Connect the services your team and agents use most.
+            <p className="mt-1 max-w-2xl text-xs leading-5 text-fg-muted">
+              These do more than call tools. They receive events, post as OpenGeni, and hold their
+              own identity in the other product.
             </p>
           </div>
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            <ManagedAppTile
-              icon={<AppLogo app="googleDrive" />}
-              name="Google Drive"
-              description={GOOGLE_DRIVE_APP_DESCRIPTION}
-              status={googleDriveStatusLabel(googleDriveState.state)}
-              onOpen={() => setManagedApp("google-drive")}
-            />
-            <ManagedAppTile
-              icon={<AppLogo app="slack" />}
-              name="Slack"
-              description="Chat with OpenGeni and start work from Slack."
-              status={slackAppStatus}
-              onOpen={() => setManagedApp("slack")}
-            />
-            <ManagedAppTile
-              icon={<AppLogo app="atlassian" />}
-              name="Jira & Confluence"
-              description={ATLASSIAN_APP_DESCRIPTION}
-              status={atlassianStatusLabel(atlassianConnectionStatus)}
-              onOpen={() => setManagedApp("atlassian")}
-            />
+          <div className="grid gap-2" data-integration-list>
+            {integrations.map((adapter) => (
+              <IntegrationRow
+                key={adapter.model.id}
+                model={adapter.model}
+                onOpen={() => setOpenIntegration(adapter.model.id)}
+              />
+            ))}
           </div>
         </section>
 
-        <Sheet
-          open={managedApp === "google-drive"}
-          onOpenChange={(open) => !open && setManagedApp(null)}
-        >
-          <SheetContent className="w-full overflow-y-auto sm:max-w-2xl">
-            <SheetHeader className="border-b border-border px-5 py-4 pr-12">
-              <SheetTitle>Google Drive</SheetTitle>
-              <SheetDescription>
-                Choose what OpenGeni can index, who can use it, and which accounts agents may act
-                through.
-              </SheetDescription>
-            </SheetHeader>
-            <div className="px-5 pb-6">
-              <Suspense fallback={<Skeleton className="mt-3 h-40 rounded-xl" />}>
-                <GoogleDriveConnectorCard workspaceId={workspaceId} embedded />
-              </Suspense>
-              <details className="group mt-4 rounded-xl border border-border bg-surface p-4">
-                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium text-fg">
-                  <span>Agent file access and additional accounts</span>
-                  <ChevronDownIcon className="size-4 text-fg-subtle transition-transform group-open:rotate-180" />
-                </summary>
-                <p className="mt-2 text-xs leading-5 text-fg-muted">
-                  Add named Personal or workspace accounts for live file discovery and agent file
-                  actions. Scheduled knowledge sync above remains independently governed.
-                </p>
-                <Suspense fallback={<Skeleton className="mt-3 h-40 rounded-xl" />}>
-                  <IntegrationControlCenter
-                    workspaceId={workspaceId}
-                    connections={connections}
-                    canManage={canManageApiIntegrationInstances}
-                    definitionIds={["google-drive"]}
-                    showCustomApis={false}
-                    embedded
-                    onChanged={async () => {
-                      await refresh();
-                      onRuntimeChanged();
-                    }}
-                  />
-                </Suspense>
-              </details>
-            </div>
-          </SheetContent>
-        </Sheet>
-
-        <Sheet
-          open={managedApp === "atlassian"}
-          onOpenChange={(open) => !open && setManagedApp(null)}
-        >
-          <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
-            <SheetHeader className="sr-only">
-              <SheetTitle>Jira & Confluence</SheetTitle>
-              <SheetDescription>Atlassian connection settings.</SheetDescription>
-            </SheetHeader>
-            <Suspense fallback={<Skeleton className="m-5 h-40 rounded-xl" />}>
-              <AtlassianConnectorCard workspaceId={workspaceId} />
-            </Suspense>
-          </SheetContent>
-        </Sheet>
+        <IntegrationSheet
+          model={openIntegrationModel}
+          open={openIntegrationModel !== null}
+          onOpenChange={(open) => {
+            if (!open) setOpenIntegration(null);
+          }}
+        />
+        {integrations.map((adapter) => (
+          <Fragment key={adapter.model.id}>{adapter.dialogs}</Fragment>
+        ))}
 
         <Suspense fallback={<Skeleton className="mt-6 h-64 w-full rounded-xl" />}>
           <IntegrationControlCenter
             workspaceId={workspaceId}
             connections={connections}
             canManage={canManageApiIntegrationInstances}
-            excludedDefinitionIds={["google-drive"]}
             onChanged={async () => {
               await refresh();
               onRuntimeChanged();
@@ -1705,308 +1270,26 @@ export function CapabilitiesRoute({
           />
         </Suspense>
 
-        <Sheet open={managedApp === "slack"} onOpenChange={(open) => !open && setManagedApp(null)}>
-          <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
-            <SheetHeader className="border-b border-border px-5 py-4 pr-12">
-              <SheetTitle>Slack</SheetTitle>
-              <SheetDescription>
-                Chat with OpenGeni, start work, and choose which Slack identity agents may use.
-              </SheetDescription>
-            </SheetHeader>
-            <section className="space-y-3 px-5 pb-6" aria-label="Slack settings">
-              <section className="mt-3 rounded-xl border border-border bg-surface px-4 py-3">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex min-w-0 items-start gap-3">
-                    <span className="grid size-8 shrink-0 place-items-center rounded-lg border border-border bg-bg">
-                      <AppLogo app="slack" className="size-4" />
-                    </span>
-                    <div>
-                      <p className="text-sm font-medium text-fg">Your Slack account</p>
-                      <p className="mt-0.5 text-xs text-fg-muted">
-                        Let agents act through your personal Slack identity.
-                      </p>
-                    </div>
-                  </div>
-                  <PersonalSlackAccountCard
-                    available={personalSlackItem !== null || slackPreview !== null}
-                    canManage={canManagePersonalSlack}
-                    busy={personalSlackBusy}
-                    accountState={visiblePersonalSlackStatus}
-                    embedded
-                    readOnly={slackPreview !== null}
-                    onConnect={() => void startPersonalSlackOAuth()}
-                    onReconnect={() => void startPersonalSlackOAuth()}
-                    onDisconnect={() => setPersonalSlackDisconnectOpen(true)}
-                  />
-                </div>
-              </section>
+        <section className="mt-10 space-y-3" aria-labelledby="connectors-heading">
+          <div>
+            <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+              Model Context Protocol
+            </p>
+            <h2 id="connectors-heading" className="mt-1 text-base font-semibold text-fg">
+              Connectors
+            </h2>
+            <p className="mt-1 max-w-2xl text-xs leading-5 text-fg-muted">
+              Tools published by the service itself. Connect one and its tools become available to
+              agents in this workspace. Featured are the ones most teams start with.
+            </p>
+          </div>
+        </section>
 
-              <section
-                className="rounded-xl border border-border bg-surface p-4"
-                aria-labelledby="workspace-slack-bot-heading"
-              >
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="flex min-w-0 items-start gap-3">
-                    <span className="grid size-9 shrink-0 place-items-center rounded-lg border border-border bg-bg">
-                      <AppLogo app="slack" className="size-5" />
-                    </span>
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <h3
-                          id="workspace-slack-bot-heading"
-                          className="text-sm font-semibold text-fg"
-                        >
-                          OpenGeni workspace bot
-                        </h3>
-                        <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-2xs font-medium text-fg-muted">
-                          Workspace shared · bot identity
-                        </span>
-                      </div>
-                      <p className="mt-1 max-w-xl text-xs leading-5 text-fg-muted">
-                        Install a separate bot principal for first-party Slack tools and explicitly
-                        bound scheduled tasks. Linked users can mention @OpenGeni in a member
-                        channel, run /opengeni, DM the bot, or use the Open in OpenGeni message
-                        shortcut. A shortcut from a human DM creates a private task and continues in
-                        the invoking user's bot DM; it never joins or exposes workspace output in
-                        the source DM. It never uses a person's Slack OAuth grant.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                {visibleSlackBotConnection && visibleSlackBotMetadata ? (
-                  <>
-                    <div className="mt-4 flex items-start gap-3 rounded-lg border border-brand/20 bg-brand/5 p-3">
-                      <CheckCircle2Icon className="mt-0.5 size-5 shrink-0 text-brand" />
-                      <div>
-                        <p className="text-sm font-semibold text-fg">
-                          {visibleSlackBotConnection.status === "active"
-                            ? `Installed in ${visibleSlackBotMetadata.slackTeamName}`
-                            : `Reinstall needed for ${visibleSlackBotMetadata.slackTeamName}`}
-                        </p>
-                        <p className="mt-0.5 text-xs text-fg-muted">
-                          {visibleSlackBotConnection.status === "active"
-                            ? "The workspace bot is ready to use in this Slack workspace."
-                            : "Reinstall the workspace bot to restore its Slack access."}
-                        </p>
-                      </div>
-                    </div>
-
-                    <details className="group mt-3 rounded-lg border border-border bg-bg/40 p-3">
-                      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-medium text-fg">
-                        <span>Settings</span>
-                        <ChevronDownIcon className="size-3.5 text-fg-subtle transition-transform group-open:rotate-180" />
-                      </summary>
-                      <div className="mt-3 border-t border-border/70 pt-3">
-                        <div className="flex flex-wrap items-end justify-between gap-3">
-                          <div>
-                            <p className="text-xs font-semibold text-fg">
-                              Slack knowledge destination
-                            </p>
-                            <p className="mt-1 text-2xs leading-4 text-fg-muted">
-                              Saved as {slackBotDestinationLabel(savedSlackDestinationAuthority)}.
-                              No user-created collection is required.
-                            </p>
-                          </div>
-                          <div className="flex flex-wrap items-end gap-2">
-                            <label className="grid gap-1 text-2xs font-medium text-fg-muted">
-                              Destination
-                              <Select
-                                aria-label="Slack knowledge destination"
-                                value={slackDestinationAuthority}
-                                disabled={!canMutateInstalledSlackBot || slackDestinationBusy}
-                                onChange={(event) =>
-                                  setSlackDestinationAuthority(
-                                    event.target.value as ConnectorDocumentDestinationAuthority,
-                                  )
-                                }
-                              >
-                                <option value="personal">My knowledge</option>
-                                <option
-                                  value="workspace"
-                                  disabled={!canManageSlackWorkspaceDestination}
-                                >
-                                  Workspace knowledge
-                                </option>
-                                <option
-                                  value="organization"
-                                  disabled={!canManageSlackOrganizationDestination}
-                                >
-                                  Organization knowledge
-                                </option>
-                              </Select>
-                            </label>
-                            <Button
-                              type="button"
-                              size="sm"
-                              disabled={
-                                !canMutateInstalledSlackBot ||
-                                slackDestinationBusy ||
-                                (slackDestinationAuthority === "workspace" &&
-                                  !canManageSlackWorkspaceDestination) ||
-                                (slackDestinationAuthority === "organization" &&
-                                  !canManageSlackOrganizationDestination)
-                              }
-                              onClick={() => void saveSlackBotDestination()}
-                            >
-                              {slackDestinationBusy ? (
-                                <Loader2Icon className="size-3.5 animate-spin" />
-                              ) : null}
-                              Save destination
-                            </Button>
-                          </div>
-                        </div>
-                      </div>
-
-                      <SlackReactionSummonCard
-                        workspaceId={workspaceId}
-                        connection={visibleSlackBotConnection}
-                        canManage={canManageSlackReaction && hasActiveSlackInstallationBinding}
-                        installBusy={slackBotBusy}
-                        onUpdatePermissions={() => void installSlackBot(false)}
-                      />
-
-                      <details className="group mt-3 border-t border-border/70 pt-3">
-                        <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
-                          <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
-                          <span>Connection details</span>
-                        </summary>
-                        <div className="mt-3 space-y-1 rounded-md bg-bg/50 p-3 text-2xs text-fg-muted">
-                          {visibleSlackInstallationBinding ? (
-                            <>
-                              <p>
-                                {visibleSlackInstallationBinding.slackTeamName} ·{" "}
-                                {visibleSlackInstallationBinding.slackTeamId}
-                              </p>
-                              <p>
-                                bot {visibleSlackInstallationBinding.botId} · user{" "}
-                                {visibleSlackInstallationBinding.botUserId}
-                              </p>
-                              <p>
-                                {visibleSlackInstallationBinding.accountName} ·{" "}
-                                {visibleSlackInstallationBinding.accountId}
-                              </p>
-                              <p>
-                                {visibleSlackInstallationBinding.workspaceName} ·{" "}
-                                {visibleSlackInstallationBinding.workspaceId}
-                              </p>
-                              <p>
-                                {visibleSlackInstallationBinding.state} · version{" "}
-                                {visibleSlackInstallationBinding.version}
-                              </p>
-                              {visibleSlackInstallationBinding.quarantineReason ? (
-                                <p>
-                                  {visibleSlackInstallationBinding.quarantineReason ===
-                                  "legacy_conflicting_installations"
-                                    ? "legacy installations conflict; repair is blocked until the binding is reconciled."
-                                    : visibleSlackInstallationBinding.quarantineReason}
-                                </p>
-                              ) : null}
-                            </>
-                          ) : (
-                            <p>No verified installation binding is available.</p>
-                          )}
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            className="mt-2"
-                            disabled={
-                              slackBotBusy ||
-                              !canMutateInstalledSlackBot ||
-                              visibleSlackInstallationBinding?.state !== "active"
-                            }
-                            onClick={() => void installSlackBot(false)}
-                          >
-                            {slackBotBusy ? <Loader2Icon className="animate-spin" /> : null}
-                            Reconnect
-                          </Button>
-                        </div>
-                      </details>
-
-                      <Suspense fallback={null}>
-                        <MemorySlackPublicationCard
-                          workspaceId={workspaceId}
-                          connections={slackBotConnections}
-                          canManage={canManageSlackReaction}
-                        />
-                      </Suspense>
-
-                      <details className="group mt-3 border-t border-border/70 pt-3">
-                        <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
-                          <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
-                          <span>Workspace bot permissions and installation details</span>
-                        </summary>
-                        <div className="mt-3 rounded-md bg-bg/50 p-3">
-                          <p className="text-2xs font-medium text-fg-muted">Required bot scopes</p>
-                          <p className="mt-1 break-words font-mono text-2xs leading-relaxed text-fg-subtle">
-                            {OPENGENI_SLACK_BOT_REQUIRED_SCOPES.join(", ")}
-                          </p>
-                          <p className="mt-2 text-2xs text-fg-subtle">
-                            Bot connection ID:{" "}
-                            <span className="font-mono">{visibleSlackBotConnection.id}</span>
-                            {slackBotConnections.length > 1
-                              ? ` · ${slackBotConnections.length} Slack installations`
-                              : ""}
-                          </p>
-                          <SlackBotInstallControls
-                            canInstall={canMutateInstalledSlackBot}
-                            hasConnection
-                            busy={slackBotBusy}
-                            onInstall={(createNewConnection) =>
-                              void installSlackBot(createNewConnection)
-                            }
-                          />
-                          {visibleSlackBotConnection.status === "active" ? (
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              className="mt-1"
-                              disabled={slackBotBusy}
-                              onClick={() => void disconnectSlackBot()}
-                            >
-                              Disconnect workspace bot
-                            </Button>
-                          ) : null}
-                        </div>
-                      </details>
-                    </details>
-                  </>
-                ) : (
-                  <>
-                    <p className="mt-4 max-w-2xl text-xs text-fg-muted">
-                      Install the OpenGeni bot in a Slack workspace to get started.
-                    </p>
-                    <SlackBotInstallControls
-                      canInstall={canInstallSlackBot}
-                      hasConnection={false}
-                      busy={slackBotBusy}
-                      onInstall={(createNewConnection) => void installSlackBot(createNewConnection)}
-                    />
-                    <details className="group mt-3">
-                      <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
-                        <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
-                        <span>Workspace bot permissions requested</span>
-                      </summary>
-                      <WorkspaceSlackBotRequestedScopes />
-                    </details>
-                  </>
-                )}
-              </section>
-            </section>
-          </SheetContent>
-        </Sheet>
-
-        <ConfirmDialog
-          open={personalSlackDisconnectOpen}
-          onOpenChange={setPersonalSlackDisconnectOpen}
-          title="Disconnect your Slack account?"
-          description="OpenGeni will stop using this subject-owned grant. This does not disconnect the workspace bot or revoke provider-side access in Slack."
-          confirmLabel="Disconnect my Slack account"
-          cancelAutoFocus
-          onConfirm={disconnectPersonalSlack}
-        />
+        {showFeatured ? (
+          <div className="mt-4">
+            <FeaturedConnectorsStrip items={featured} logoUrl={logoUrl} onOpen={openItem} />
+          </div>
+        ) : null}
 
         <CapabilityDiscoveryControls
           query={query}
@@ -2158,98 +1441,4 @@ function installedSkillVersion(item: CapabilityCatalogItem): number | null {
   }
   const value = (installedSkill as Record<string, unknown>).installationVersion;
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
-}
-
-const APP_LOGO_URLS = {
-  googleDrive:
-    "https://www.gstatic.com/images/branding/productlogos/drive_2026/v2/web-64dp/logo_drive_2026_color_2x_web_64dp.png",
-  atlassian: "https://wac-cdn.atlassian.com/assets/img/favicons/atlassian/favicon.png",
-  slack: "https://a.slack-edge.com/80588/marketing/img/meta/slack_hash_256.png",
-} as const;
-
-function AppLogo({ app, className }: { app: keyof typeof APP_LOGO_URLS; className?: string }) {
-  const [failed, setFailed] = useState(false);
-  if (failed) {
-    const FallbackIcon =
-      app === "googleDrive" ? HardDriveIcon : app === "slack" ? MessagesSquareIcon : GlobeIcon;
-    return <FallbackIcon className={cn("size-5 text-fg-muted", className)} aria-hidden="true" />;
-  }
-  return (
-    <img
-      src={APP_LOGO_URLS[app]}
-      alt=""
-      aria-hidden="true"
-      draggable={false}
-      onError={() => setFailed(true)}
-      className={cn("size-6 object-contain", className)}
-    />
-  );
-}
-
-function ManagedAppTile({
-  icon,
-  name,
-  description,
-  status,
-  onOpen,
-}: {
-  icon: ReactNode;
-  name: string;
-  description: string;
-  status: string;
-  onOpen: () => void;
-}) {
-  const connected = status === "Connected";
-  const attention = status === "Needs attention";
-
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className="group flex min-w-0 items-center gap-3 rounded-xl border border-border bg-surface p-3 text-left hover:border-border-strong hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
-    >
-      <span className="grid size-10 shrink-0 place-items-center rounded-lg border border-border bg-bg text-fg-muted">
-        {icon}
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-medium text-fg">{name}</span>
-        <span className="mt-0.5 block truncate text-xs text-fg-muted">{description}</span>
-      </span>
-      <span
-        className={cn(
-          "flex shrink-0 items-center gap-1.5 text-2xs",
-          attention ? "text-status-waiting" : "text-fg-muted",
-        )}
-      >
-        <span
-          className={cn(
-            "size-1.5 rounded-full",
-            connected ? "bg-status-idle" : attention ? "bg-status-waiting" : "bg-fg-subtle/50",
-          )}
-        />
-        {status}
-      </span>
-    </button>
-  );
-}
-
-export function slackBotDocumentDestinationAuthority(
-  metadata: Record<string, unknown> | undefined,
-): ConnectorDocumentDestinationAuthority {
-  const destination = metadata?.documentDestination;
-  if (!destination || typeof destination !== "object" || Array.isArray(destination)) {
-    return "workspace";
-  }
-  const authorityKind = (destination as Record<string, unknown>).authorityKind;
-  return authorityKind === "organization" || authorityKind === "workspace"
-    ? authorityKind
-    : "workspace";
-}
-
-export function slackBotDestinationLabel(
-  authorityKind: ConnectorDocumentDestinationAuthority,
-): string {
-  if (authorityKind === "organization") return "organization knowledge";
-  if (authorityKind === "personal") return "your personal knowledge";
-  return "workspace knowledge";
 }

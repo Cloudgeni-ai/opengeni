@@ -467,6 +467,58 @@ If the MCP endpoint initializes successfully, the enabled MCP is returned by the
 
 ## Web Flow
 
+The **Capabilities** view has exactly two user-facing objects.
+
+**Integrations** are built and run by OpenGeni: Slack, GitHub, Google Drive,
+and Jira & Confluence. They receive events, post as OpenGeni, and hold their own
+identity in the other product. Every integration renders through the same two
+components (`apps/web/src/components/capabilities/integration-row.tsx` and
+`integration-sheet.tsx`) fed by one plain view-model
+(`integration-view-model.ts`); one adapter hook per provider
+(`use-slack-integration.tsx`, `use-github-integration.tsx`,
+`use-google-drive-integration.tsx`, `use-atlassian-integration.tsx`) maps that
+provider's data onto the view-model and picks the content for the viewer's role.
+The row and the sheet contain no provider-specific branch.
+
+- Each row is identical apart from mark, name, one-line description, and one
+  state chip. The chip vocabulary is closed: `Connected`, `Needs attention`,
+  `Not connected`, `Set up by an admin` (plus a transient `Loading`). No inline
+  scope text, per-provider buttons, or expandable sub-options.
+- Clicking a row opens the one detail sheet: a fixed frame with four blocks in
+  fixed order, empty blocks omitted. **Connection** is label/value facts;
+  **Access** is the scoped resources (channels, repositories, folders, projects
+  and spaces) with exactly one edit affordance; **Options** are switches (and,
+  where a setting is a choice, a compact select); **Action** is a footer from a
+  closed set: `Reconnect` + `Disconnect` when connected, the same pair with
+  `Reconnect` primary when broken, `Set up` when not connected, or a locked
+  sentence when the viewer cannot change anything. The locked sentence defaults
+  to "A workspace admin looks after this integration. You do not need to
+  connect anything."; an adapter may supply a truthful variant instead (e.g.
+  personal-only Slack tells a member that connection management permission is
+  required, because no admin can connect it for them). Provider limited-use
+  disclosures (Google's OAuth disclosures) render in a fixed place above the
+  footer, and the connect/publish affordances reference them via
+  `aria-describedby`.
+- Role changes content, never layout. Anyone with connection management
+  permission (`connections:write` or workspace admin) sees the Slack bot
+  (installation facts, what OpenGeni can see, and install/reconnect/disconnect);
+  the reaction shortcut, knowledge destination, and decision publication options
+  stay admin-gated inside that sheet. Everyone else sees their own personal
+  Slack account. Nobody is offered both. Deep provider dialogs (the Drive
+  folder picker, the Jira/Confluence source picker, the reaction conversation
+  picker, the Slack decision-publication settings) open from the Access block's
+  single edit affordance or an option's action link.
+- Named per-account API integration instances (Gmail, Outlook, OneDrive, and
+  additional Google Drive accounts) and custom OpenAPI/GraphQL APIs remain in
+  the separate **Connected services** control center below the integrations.
+
+**Connectors** are MCP servers from the catalog. Connection setup defaults to workspace-owned; a personal connection requires the explicit **Connect only for me** choice (official Gmail and Slack's hosted MCP are the personal-only exceptions).
+A **Featured** strip of tiles driven by curated `metadata.curation.featured`
+leads, followed by the searchable long tail. Tile badges are only `Official`
+(curated `metadata.curation.official`) and `Built by OpenGeni` (first-party
+bridges such as Fiken); nothing is ever labelled reviewed or verified. Every
+featured tile opens the same connector detail sheet as the grid.
+
 Open the **Capabilities** view in the web app to:
 
 - filter and search the local catalog
@@ -675,8 +727,8 @@ in-code maps that previously carried the Gmail, Slack, and Mobbin contracts, and
 its parser fails the import loudly on any malformed entry rather than silently
 shipping the raw aggregator row.
 
-Two curated flags surface in the product. `featured` promotes a connector to
-the front of the Browse grid. `official` renders an "Official" marker meaning
+Two curated flags surface in the product. `featured` places a connector in
+the Featured strip above the Browse grid. `official` renders an "Official" marker meaning
 the provider publishes the MCP server on its own domain. Both are checkable
 claims recorded in the row's `metadata.curation`; neither is a security review,
 and the UI must never label a connector as reviewed or verified. Every entry
