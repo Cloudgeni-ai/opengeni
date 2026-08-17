@@ -523,8 +523,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0278_workspace_membership_removal_fencing.sql")) {
         return includesActivation
-          ? "4518a8dd6935f916eea354eb848103796b0b9b5376e4f22c6ae8b58374418a49"
-          : "6d45c017d20b8d50a919437bf0b4075996f66fa8e04e11f8ee70cc83246f3a87";
+          ? "4c6764abf9ef587d79e9c9666bd7e11a329927cb74d794ab8ff0717fd35778a7"
+          : "29df8eda7a6b888e03c665ec13227c0c4900b140eade63042d93032f39319b57";
       }
       if (migrations.has("0277_workspace_writer_authority_attribution.sql")) {
         return includesActivation
@@ -1062,7 +1062,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0278_workspace_membership_removal_fencing.sql")).toMatchObject({
-      sha256: "204b266f09fff7e2884a75f1e408b5be8a606ab284204dcc08e69c3324f46de9",
+      sha256: "d16d4e0632ed1315ae32ba928d84a218729421e7d2ccfad5ad5806eb44ab0771",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0277_workspace_writer_authority_attribution.sql")).toMatchObject({

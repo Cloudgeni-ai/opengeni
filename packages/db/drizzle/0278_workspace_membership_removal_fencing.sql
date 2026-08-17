@@ -99,6 +99,38 @@ BEGIN
   WHERE workspace.account_id = account_id_value
     AND workspace.id = workspace_id_value
   FOR KEY SHARE;
+  -- Scheduled-task rows before session rows, exactly the 0275 wrapper's
+  -- per-workspace task/session prefix: the scheduled-task writers lock
+  -- task -> session -> membership, so removal must never hold the membership
+  -- (or session) rows while waiting on a task row.
+  PERFORM 1 FROM scheduled_tasks task
+  WHERE task.account_id = account_id_value
+    AND task.workspace_id = workspace_id_value
+    AND task.deleted_at IS NULL
+    AND task.status = 'active'
+    AND (
+      (task.created_by_kind = 'subject' AND task.created_by_subject_id = target_subject)
+      OR EXISTS (
+        SELECT 1 FROM scheduled_task_revision_authorities authority
+        WHERE authority.task_id = task.id
+          AND authority.task_authority_revision = task.authority_revision
+          AND authority.subject_id = target_subject
+      )
+      OR EXISTS (
+        SELECT 1 FROM scheduled_task_personal_resource_authorities authority
+        WHERE authority.task_id = task.id
+          AND authority.task_authority_revision = task.authority_revision
+          AND authority.initiating_human_subject_id = target_subject
+      )
+      OR EXISTS (
+        SELECT 1 FROM scheduled_task_connection_authority_snapshots snapshot
+        WHERE snapshot.task_id = task.id
+          AND snapshot.task_authority_revision = task.authority_revision
+          AND snapshot.owner_subject_id = target_subject
+      )
+    )
+  ORDER BY task.id
+  FOR UPDATE;
   PERFORM 1 FROM sessions affected
   WHERE affected.account_id = account_id_value
     AND affected.workspace_id = workspace_id_value
@@ -200,7 +232,13 @@ $body$;
 
 -- 2. Shared actor/guard authority. The exact application guards, restated as
 -- fail-closed database authority so no future caller can skip them:
--- self-removal, last-admin, and actor administration.
+-- self-removal, last-admin, and actor administration. The checks themselves
+-- are pure reads: the removal command serializes the administering roster
+-- (ordered FOR UPDATE on every admin/actor/target membership row plus the
+-- actor's organization membership) BEFORE re-running them, so two concurrent
+-- removals of the two last administering members cannot both pass. The
+-- preparation function's earlier call is a friendly unserialized precheck
+-- only and authorizes nothing by itself.
 
 CREATE FUNCTION opengeni_private.assert_workspace_membership_removal_actor(
   p_account_id uuid,
@@ -323,9 +361,6 @@ BEGIN
   SET CONSTRAINTS sessions_activity_insert_commit_guard,
     sessions_activity_update_commit_guard DEFERRED;
 
-  PERFORM opengeni_private.assert_workspace_membership_removal_actor(
-    account_id_value, workspace_id_value, actor_subject, target_subject
-  );
   -- The personal-state fence the pre-0278 delete path took: session listing
   -- takes its shared counterpart and pin mutation the same exclusive one, so
   -- a racing snapshot/pin writer cannot recreate personal rows after this
@@ -333,19 +368,6 @@ BEGIN
   PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
     'session-personal-state:' || workspace_id_value::text || ':' || target_subject, 0
   ));
-  SELECT membership.id INTO membership_row_id
-  FROM workspace_memberships membership
-  WHERE membership.account_id = account_id_value
-    AND membership.workspace_id = workspace_id_value
-    AND membership.subject_id = target_subject
-  FOR UPDATE;
-  IF membership_row_id IS NULL THEN
-    RETURN pg_catalog.jsonb_build_object('removed', false);
-  END IF;
-  SELECT membership.id INTO target_membership_id
-  FROM organization_memberships membership
-  WHERE membership.account_id = account_id_value
-    AND membership.subject_id = target_subject;
 
   visibility_capability_id := pg_catalog.gen_random_uuid();
   INSERT INTO session_visibility_write_capabilities (
@@ -377,6 +399,89 @@ BEGIN
   WHERE workspace.account_id = account_id_value
     AND workspace.id = workspace_id_value
   FOR KEY SHARE;
+  -- Task rows before membership/session rows (0275 writer order; reentrant
+  -- with the preparation pass in the same transaction).
+  PERFORM 1 FROM scheduled_tasks task
+  WHERE task.account_id = account_id_value
+    AND task.workspace_id = workspace_id_value
+    AND task.deleted_at IS NULL
+    AND task.status = 'active'
+    AND (
+      (task.created_by_kind = 'subject' AND task.created_by_subject_id = target_subject)
+      OR EXISTS (
+        SELECT 1 FROM scheduled_task_revision_authorities authority
+        WHERE authority.task_id = task.id
+          AND authority.task_authority_revision = task.authority_revision
+          AND authority.subject_id = target_subject
+      )
+      OR EXISTS (
+        SELECT 1 FROM scheduled_task_personal_resource_authorities authority
+        WHERE authority.task_id = task.id
+          AND authority.task_authority_revision = task.authority_revision
+          AND authority.initiating_human_subject_id = target_subject
+      )
+      OR EXISTS (
+        SELECT 1 FROM scheduled_task_connection_authority_snapshots snapshot
+        WHERE snapshot.task_id = task.id
+          AND snapshot.task_authority_revision = task.authority_revision
+          AND snapshot.owner_subject_id = target_subject
+      )
+    )
+  ORDER BY task.id
+  FOR UPDATE;
+  -- Serialize the administering roster before re-running the guards: the
+  -- actor's organization membership (shared - the organization lifecycle
+  -- takes it FOR UPDATE) and every admin/actor/target workspace membership
+  -- row in id order. Two concurrent removals of the two last administering
+  -- members therefore serialize, and the loser re-reads a roster with only
+  -- one administering member left and fails closed.
+  PERFORM 1 FROM organization_memberships org_actor
+  WHERE org_actor.account_id = account_id_value
+    AND org_actor.subject_id = actor_subject
+  FOR SHARE;
+  PERFORM 1 FROM workspace_memberships roster
+  WHERE roster.account_id = account_id_value
+    AND roster.workspace_id = workspace_id_value
+    AND (
+      roster.subject_id IN (actor_subject, target_subject)
+      OR roster.permissions ?| ARRAY['workspace:admin', 'members:manage']
+    )
+  ORDER BY roster.id
+  FOR UPDATE;
+  PERFORM opengeni_private.assert_workspace_membership_removal_actor(
+    account_id_value, workspace_id_value, actor_subject, target_subject
+  );
+  SELECT membership.id INTO membership_row_id
+  FROM workspace_memberships membership
+  WHERE membership.account_id = account_id_value
+    AND membership.workspace_id = workspace_id_value
+    AND membership.subject_id = target_subject;
+  IF membership_row_id IS NULL THEN
+    DELETE FROM session_visibility_write_capabilities capability
+    WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+      AND capability.transaction_id = pg_catalog.pg_current_xact_id()
+      AND capability.capability_id = visibility_capability_id;
+    PERFORM pg_catalog.set_config(
+      'opengeni.session_visibility_write_capability',
+      coalesce(previous_visibility_capability, ''), true
+    );
+    PERFORM pg_catalog.set_config(
+      'opengeni.workspace_id', coalesce(previous_workspace, ''), true
+    );
+    PERFORM pg_catalog.set_config(
+      'opengeni.session_activity_gate_state',
+      coalesce(previous_activity_gate_state, ''), true
+    );
+    PERFORM pg_catalog.set_config(
+      'opengeni.session_activity_gate_workspace_id',
+      coalesce(previous_activity_gate_workspace, ''), true
+    );
+    RETURN pg_catalog.jsonb_build_object('removed', false);
+  END IF;
+  SELECT membership.id INTO target_membership_id
+  FROM organization_memberships membership
+  WHERE membership.account_id = account_id_value
+    AND membership.subject_id = target_subject;
   PERFORM 1 FROM sessions affected
   WHERE affected.account_id = account_id_value
     AND affected.workspace_id = workspace_id_value
@@ -850,9 +955,29 @@ BEGIN
     updated_at = now_value
   WHERE task.account_id = account_id_value
     AND task.workspace_id = workspace_id_value
+    AND task.deleted_at IS NULL
     AND task.status = 'active'
-    AND task.created_by_kind = 'subject'
-    AND task.created_by_subject_id = target_subject;
+    AND (
+      (task.created_by_kind = 'subject' AND task.created_by_subject_id = target_subject)
+      OR EXISTS (
+        SELECT 1 FROM scheduled_task_revision_authorities authority
+        WHERE authority.task_id = task.id
+          AND authority.task_authority_revision = task.authority_revision
+          AND authority.subject_id = target_subject
+      )
+      OR EXISTS (
+        SELECT 1 FROM scheduled_task_personal_resource_authorities authority
+        WHERE authority.task_id = task.id
+          AND authority.task_authority_revision = task.authority_revision
+          AND authority.initiating_human_subject_id = target_subject
+      )
+      OR EXISTS (
+        SELECT 1 FROM scheduled_task_connection_authority_snapshots snapshot
+        WHERE snapshot.task_id = task.id
+          AND snapshot.task_authority_revision = task.authority_revision
+          AND snapshot.owner_subject_id = target_subject
+      )
+    );
   UPDATE organization_user_resource_grants grant_row
   SET status = 'revoked', revoked_at = now_value,
     generation = grant_row.generation + 1, updated_at = now_value
@@ -861,6 +986,19 @@ BEGIN
     AND grant_row.status = 'active'
     AND target_membership_id IS NOT NULL
     AND grant_row.owner_organization_membership_id = target_membership_id;
+  UPDATE organization_user_resource_grants grant_row
+  SET status = 'revoked', revoked_at = now_value,
+    generation = grant_row.generation + 1, updated_at = now_value
+  WHERE grant_row.account_id = account_id_value
+    AND grant_row.workspace_id = workspace_id_value
+    AND grant_row.status = 'active'
+    AND target_membership_id IS NOT NULL
+    AND EXISTS (
+      SELECT 1 FROM sessions owned
+      WHERE owned.id = grant_row.session_id
+        AND owned.owner_organization_membership_id = target_membership_id
+        AND owned.authority_epoch = grant_row.authority_epoch
+    );
   IF target_membership_id IS NOT NULL THEN
     WITH advanced AS (
       UPDATE sessions owned SET

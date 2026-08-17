@@ -67,6 +67,19 @@ async function grantAdmin(workspace: Workspace): Promise<string> {
   return subjectId;
 }
 
+/** An active organization admin who is not a workspace member. */
+async function grantOrgAdmin(workspace: Workspace): Promise<string> {
+  const subjectId = `user:org-admin-${crypto.randomUUID()}`;
+  const [personal] = await admin<{ id: string }[]>`
+    insert into workspaces (account_id, name)
+    values (${workspace.accountId}, ${`personal-${subjectId}`}) returning id`;
+  await admin`
+    insert into organization_memberships (
+      account_id, subject_id, role, status, personal_workspace_id, authorization_revision
+    ) values (${workspace.accountId}, ${subjectId}, 'admin', 'active', ${personal!.id}, 1)`;
+  return subjectId;
+}
+
 async function grantOrdinaryMember(workspace: Workspace, subjectId: string): Promise<void> {
   await grantWorkspaceAccess(db, {
     ...workspace,
@@ -410,6 +423,57 @@ describe("workspace membership removal fencing", () => {
       pendingToolCalls: 0,
       sessionStatus: "idle",
     });
+  });
+
+  test("two concurrent removals of the two last administering members leave one standing", async () => {
+    if (!available || !shared) return;
+    const workspace = await freshWorkspace();
+    const adminA = await grantAdmin(workspace);
+    const adminB = await grantAdmin(workspace);
+    // Two independent organization-admin actors race to remove A and B. The
+    // roster locks serialize them: exactly one removal commits and the loser
+    // fails closed on the last-admin guard (55000) - never zero admins left.
+    const actorX = await grantOrgAdmin(workspace);
+    const actorY = await grantOrgAdmin(workspace);
+    const clientX = createDb(shared.appUrl, { max: 1 });
+    const clientY = createDb(shared.appUrl, { max: 1 });
+    try {
+      const [first, second] = await Promise.allSettled([
+        removeWorkspaceMember(clientX.db, {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          actorSubjectId: actorX,
+          targetSubjectId: adminA,
+        }),
+        removeWorkspaceMember(clientY.db, {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          actorSubjectId: actorY,
+          targetSubjectId: adminB,
+        }),
+      ]);
+      const outcomes = [first!, second!];
+      const fulfilled = outcomes.filter(
+        (candidate): candidate is PromiseFulfilledResult<boolean> =>
+          candidate.status === "fulfilled",
+      );
+      const rejected = outcomes.filter(
+        (candidate): candidate is PromiseRejectedResult => candidate.status === "rejected",
+      );
+      expect(fulfilled).toHaveLength(1);
+      expect(fulfilled[0]!.value).toBe(true);
+      expect(rejected).toHaveLength(1);
+      expect(postgresCode(rejected[0]!.reason)).toBe("55000");
+      const [roster] = await admin<{ admins: number }[]>`
+        select count(*)::int as admins
+        from workspace_memberships
+        where workspace_id = ${workspace.workspaceId}
+          and permissions ?| array['workspace:admin', 'members:manage']`;
+      expect(roster!.admins).toBe(1);
+    } finally {
+      await clientX.close();
+      await clientY.close();
+    }
   });
 
   test("refuses self-removal, last-admin removal, and a non-administering actor", async () => {
