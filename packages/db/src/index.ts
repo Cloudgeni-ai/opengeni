@@ -37553,7 +37553,13 @@ export class SandboxWorkspaceMutationFencedError extends Error {
       | "capture_in_progress"
       | "admission_fenced"
       | "operation_invalid"
-      | "generation_exhausted",
+      | "generation_exhausted"
+      // The writer predates migration 0276 and therefore carries no recorded
+      // authority. Nothing may invent one, so a NEW mutation is refused; the
+      // live provider process behind it is deliberately left running.
+      | "authority_unattributed"
+      // The exact grant identity behind this writer is no longer active.
+      | "authority_revoked",
     message: string,
   ) {
     super(message);
@@ -37732,7 +37738,9 @@ export class SandboxRetainedProcessPromotionFencedError extends SandboxWorkspace
       | "lease_fenced"
       | "route_fenced"
       | "process_fenced"
-      | "admission_fenced",
+      | "admission_fenced"
+      | "authority_unattributed"
+      | "authority_revoked",
     message: string,
     public readonly process: SandboxRetainedProcess,
   ) {
@@ -37749,7 +37757,9 @@ type SandboxWorkspaceMutationSettlementResult =
         | "holder_fenced"
         | "lease_fenced"
         | "route_fenced"
-        | "process_fenced";
+        | "process_fenced"
+        | "authority_unattributed"
+        | "authority_revoked";
       detail: string;
     };
 
@@ -37783,6 +37793,23 @@ type DirectWorkspaceMutationAuthority = {
   routeKind: "active";
   routeTargetId: string | null;
   routeEpoch: number;
+  /** The exact authenticated principal that drove this API request. A direct
+   * writer has no frozen turn snapshot, so this is its only causal identity and
+   * it is required: an unattributed direct mutation is refused. */
+  initiatorSubjectId: string;
+};
+
+/** Identity-and-epoch attribution recorded with an admitted workspace writer
+ * (migration 0276). Never contains a secret value. */
+type AdmittedWorkspaceMutationAuthority = {
+  initiatorKind: "subject" | "service";
+  initiatorSubjectId: string;
+  initiatingHumanSubjectId: string | null;
+  initiatorOrganizationMembershipId: string | null;
+  initiatorAuthorizationRevision: number | null;
+  authorityEpoch: number;
+  authorityVisibility: "user_private" | "workspace_shared";
+  authorityOwnerOrganizationMembershipId: string | null;
 };
 
 type ProcessWorkspaceMutationAuthority = {
@@ -37817,6 +37844,7 @@ type LockedWorkspaceMutationAuthority = {
   routeKind: "home" | "active";
   routeTargetId: string | null;
   routeEpoch: number;
+  authority: AdmittedWorkspaceMutationAuthority;
   session: typeof schema.sessions.$inferSelect;
   retainedProcess: typeof schema.sandboxRetainedProcesses.$inferSelect | null;
 };
@@ -37985,6 +38013,91 @@ async function lockWorkspaceMutationSessionTx(
   return session;
 }
 
+/**
+ * Resolve the organization grant identity behind a causal human, and refuse the
+ * operation when that grant has been revoked or suspended.
+ *
+ * `organization_memberships` is unique per (account, subject), so this is an
+ * exact lookup and never a guess. A principal with no membership row at all is
+ * not an organization human (deployment/API-key/local principals): it keeps its
+ * subject attribution and carries no membership, because inventing one would be
+ * exactly the ownership inference OPE-203 forbids. A `provisioning` membership
+ * is not yet a grant and is likewise not recorded, but it is not a revocation
+ * either and must not fence.
+ */
+async function resolveWorkspaceMutationGrantIdentityTx(
+  tx: Database,
+  input: { accountId: string; humanSubjectId: string | null },
+): Promise<{ membershipId: string | null; authorizationRevision: number | null }> {
+  if (!input.humanSubjectId) return { membershipId: null, authorizationRevision: null };
+  const [membership] = await tx
+    .select({
+      id: schema.organizationMemberships.id,
+      status: schema.organizationMemberships.status,
+      authorizationRevision: schema.organizationMemberships.authorizationRevision,
+    })
+    .from(schema.organizationMemberships)
+    .where(
+      and(
+        eq(schema.organizationMemberships.accountId, input.accountId),
+        eq(schema.organizationMemberships.subjectId, input.humanSubjectId),
+      ),
+    )
+    .limit(1);
+  if (!membership) return { membershipId: null, authorizationRevision: null };
+  if (membership.status === "revoked" || membership.status === "suspended") {
+    throw new SandboxWorkspaceMutationFencedError(
+      "authority_revoked",
+      `Workspace mutation rejected because its organization grant is ${membership.status}`,
+    );
+  }
+  if (membership.status !== "active") {
+    return { membershipId: null, authorizationRevision: null };
+  }
+  return {
+    membershipId: membership.id,
+    authorizationRevision: membership.authorizationRevision,
+  };
+}
+
+/** The tenancy half of the tuple, read from the exact locked session row. A
+ * direct writer has no frozen snapshot, so the live session IS its authority -
+ * which is also why the private-session owner check below runs here, inside the
+ * same transaction that advances the generation. */
+function directSessionAuthorityTx(
+  session: typeof schema.sessions.$inferSelect,
+  initiatorSubjectId: string,
+  grant: { membershipId: string | null },
+): Pick<
+  AdmittedWorkspaceMutationAuthority,
+  "authorityEpoch" | "authorityVisibility" | "authorityOwnerOrganizationMembershipId"
+> {
+  const visibility = session.visibility === "user_private" ? "user_private" : "workspace_shared";
+  if (visibility === "user_private") {
+    const ownedBySubject = session.ownerSubjectId === initiatorSubjectId;
+    const ownedByMembership =
+      grant.membershipId !== null &&
+      session.ownerOrganizationMembershipId === grant.membershipId;
+    if (!ownedBySubject && !ownedByMembership) {
+      throw new SandboxWorkspaceMutationFencedError(
+        "authority_revoked",
+        "Direct workspace mutation rejected because the request no longer owns this private session",
+      );
+    }
+    if (!session.ownerOrganizationMembershipId) {
+      throw new SandboxWorkspaceMutationFencedError(
+        "authority_revoked",
+        "Direct workspace mutation rejected because the private session has no owning membership",
+      );
+    }
+  }
+  return {
+    authorityEpoch: session.authorityEpoch,
+    authorityVisibility: visibility,
+    authorityOwnerOrganizationMembershipId: session.ownerOrganizationMembershipId,
+  };
+}
+
 async function lockWorkspaceMutationAuthorityTx(
   tx: Database,
   authority: WorkspaceMutationAuthority,
@@ -38023,6 +38136,23 @@ async function lockWorkspaceMutationAuthorityTx(
         "Workspace mutation rejected because its active route moved before admission",
       );
     }
+    // The accepted turn already froze its causal initiator and tenancy tuple.
+    // Copy them verbatim - recovery, retry and continuation must all record the
+    // same authority, so nothing is re-derived from live state here.
+    const turnInitiatorKind =
+      fence.turn.initiatorKind === "subject" || fence.turn.initiatorKind === "service"
+        ? fence.turn.initiatorKind
+        : null;
+    if (!turnInitiatorKind || fence.turn.initiatorSubjectId === "unattributed-legacy") {
+      throw new SandboxWorkspaceMutationFencedError(
+        "authority_unattributed",
+        "Workspace mutation rejected because its accepted turn carries no causal initiator",
+      );
+    }
+    const turnGrant = await resolveWorkspaceMutationGrantIdentityTx(tx, {
+      accountId: authority.accountId,
+      humanSubjectId: fence.turn.initiatingHumanSubjectId,
+    });
     return {
       accountId: authority.accountId,
       workspaceId: authority.workspaceId,
@@ -38042,6 +38172,20 @@ async function lockWorkspaceMutationAuthorityTx(
       routeKind: authority.routeKind,
       routeTargetId: authority.routeKind === "home" ? null : authority.routeTargetId,
       routeEpoch,
+      authority: {
+        initiatorKind: turnInitiatorKind,
+        initiatorSubjectId: fence.turn.initiatorSubjectId,
+        initiatingHumanSubjectId: fence.turn.initiatingHumanSubjectId,
+        initiatorOrganizationMembershipId: turnGrant.membershipId,
+        initiatorAuthorizationRevision: turnGrant.authorizationRevision,
+        authorityEpoch: fence.attempt.authorityEpoch,
+        authorityVisibility:
+          fence.attempt.authorityVisibility === "user_private"
+            ? "user_private"
+            : "workspace_shared",
+        authorityOwnerOrganizationMembershipId:
+          fence.attempt.authorityOwnerOrganizationMembershipId,
+      },
       session: fence.session,
       retainedProcess: null,
     };
@@ -38074,6 +38218,22 @@ async function lockWorkspaceMutationAuthorityTx(
         "Direct workspace mutation rejected because its active route moved before admission",
       );
     }
+    const initiatorSubjectId = authority.initiatorSubjectId.trim();
+    if (initiatorSubjectId.length === 0 || initiatorSubjectId === "unattributed-legacy") {
+      throw new SandboxWorkspaceMutationFencedError(
+        "authority_unattributed",
+        "Direct workspace mutation rejected because it carries no causal initiator",
+      );
+    }
+    // A direct writer has no frozen snapshot, so its grant is re-proved here, in
+    // the same transaction that advances the generation. That closes the window
+    // between HTTP authorization and the provider write: a revocation committed
+    // in between fences this operation instead of racing it.
+    const directGrant = await resolveWorkspaceMutationGrantIdentityTx(tx, {
+      accountId: authority.accountId,
+      humanSubjectId: initiatorSubjectId,
+    });
+    const directTenancy = directSessionAuthorityTx(session, initiatorSubjectId, directGrant);
     return {
       accountId: authority.accountId,
       workspaceId: authority.workspaceId,
@@ -38093,6 +38253,14 @@ async function lockWorkspaceMutationAuthorityTx(
       routeKind: "active",
       routeTargetId: authority.routeTargetId,
       routeEpoch: authority.routeEpoch,
+      authority: {
+        initiatorKind: "subject",
+        initiatorSubjectId,
+        initiatingHumanSubjectId: directGrant.membershipId ? initiatorSubjectId : null,
+        initiatorOrganizationMembershipId: directGrant.membershipId,
+        initiatorAuthorizationRevision: directGrant.authorizationRevision,
+        ...directTenancy,
+      },
       session,
       retainedProcess: null,
     };
@@ -38123,6 +38291,24 @@ async function lockWorkspaceMutationAuthorityTx(
       "Workspace mutation rejected because the retained process scope is stale",
     );
   }
+  // A retained process outlives the request or turn that started it, so its
+  // frozen authority is the only thing that can license a further write. It is
+  // never re-derived: an unattributed (pre-0276) process is refused rather than
+  // adopted, and the running provider process is deliberately left alone.
+  const processAuthority = assertRetainedProcessAuthority(process);
+  const processGrant = await resolveWorkspaceMutationGrantIdentityTx(tx, {
+    accountId: authority.accountId,
+    humanSubjectId: processAuthority.initiatingHumanSubjectId,
+  });
+  if (
+    processAuthority.authorityEpoch !== session.authorityEpoch ||
+    processAuthority.authorityVisibility !== session.visibility
+  ) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "authority_revoked",
+      "Workspace mutation rejected because the retained process authority no longer matches its session",
+    );
+  }
   return {
     accountId: authority.accountId,
     workspaceId: authority.workspaceId,
@@ -38142,8 +38328,45 @@ async function lockWorkspaceMutationAuthorityTx(
     routeKind: process.routeKind as "home" | "active",
     routeTargetId: process.routeTargetId,
     routeEpoch: process.routeEpoch,
+    authority: {
+      ...processAuthority,
+      // The frozen grant identity stays authoritative; only the observed
+      // revision is refreshed, because it is evidence and not a fence.
+      initiatorOrganizationMembershipId:
+        processAuthority.initiatorOrganizationMembershipId ?? processGrant.membershipId,
+      initiatorAuthorizationRevision:
+        processGrant.authorizationRevision ?? processAuthority.initiatorAuthorizationRevision,
+    },
     session,
     retainedProcess: process,
+  };
+}
+
+/** Read the frozen authority of a retained process, refusing a pre-0276 row.
+ * The refusal is a write fence only: the caller never terminates the process. */
+function assertRetainedProcessAuthority(
+  process: typeof schema.sandboxRetainedProcesses.$inferSelect,
+): AdmittedWorkspaceMutationAuthority {
+  if (
+    (process.initiatorKind !== "subject" && process.initiatorKind !== "service") ||
+    process.authorityEpoch === null ||
+    process.authorityVisibility === null
+  ) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "authority_unattributed",
+      "Workspace mutation rejected because the retained process predates recorded authority; " +
+        "start a new command - the running process is untouched",
+    );
+  }
+  return {
+    initiatorKind: process.initiatorKind,
+    initiatorSubjectId: process.initiatorSubjectId,
+    initiatingHumanSubjectId: process.initiatingHumanSubjectId,
+    initiatorOrganizationMembershipId: process.initiatorOrganizationMembershipId,
+    initiatorAuthorizationRevision: process.initiatorAuthorizationRevision,
+    authorityEpoch: process.authorityEpoch,
+    authorityVisibility: process.authorityVisibility,
+    authorityOwnerOrganizationMembershipId: process.authorityOwnerOrganizationMembershipId,
   };
 }
 
@@ -38206,7 +38429,11 @@ async function advanceWorkspaceGenerationForAuthorityOnce(
             actor_kind, actor_id, turn_id, attempt_id, execution_generation,
             holder_kind, holder_id, lease_epoch, provider_backend,
             provider_instance_id, route_kind, route_target_id, route_epoch,
-            workspace_generation, operation
+            workspace_generation, operation,
+            initiator_kind, initiator_subject_id, initiating_human_subject_id,
+            initiator_organization_membership_id, initiator_authorization_revision,
+            authority_epoch, authority_visibility,
+            authority_owner_organization_membership_id
           )
           select
             ${locked.accountId}, ${locked.workspaceId}, advanced.id,
@@ -38215,7 +38442,13 @@ async function advanceWorkspaceGenerationForAuthorityOnce(
             ${locked.executionGeneration}, ${locked.holderKind}, ${locked.holderId},
             ${locked.expectedEpoch}, advanced.backend, ${locked.expectedInstanceId},
             ${locked.routeKind}, ${locked.routeTargetId}, ${locked.routeEpoch},
-            advanced.workspace_generation, ${operation}
+            advanced.workspace_generation, ${operation},
+            ${locked.authority.initiatorKind}, ${locked.authority.initiatorSubjectId},
+            ${locked.authority.initiatingHumanSubjectId},
+            ${locked.authority.initiatorOrganizationMembershipId},
+            ${locked.authority.initiatorAuthorizationRevision},
+            ${locked.authority.authorityEpoch}, ${locked.authority.authorityVisibility},
+            ${locked.authority.authorityOwnerOrganizationMembershipId}
           from advanced
           returning id, lease_id, sandbox_group_id, session_id, actor_kind,
             actor_id, holder_kind, holder_id, lease_epoch, provider_backend,
@@ -38403,7 +38636,10 @@ export async function advanceWorkspaceGeneration(
 
 /** Admit an API/direct mutation under an exact request holder and active route.
  * Direct actors intentionally have no turn identity and can never inherit the
- * attempt-quiescence archive fallback. */
+ * attempt-quiescence archive fallback. `initiatorSubjectId` is the exact
+ * authenticated principal behind the request and is required: it is this
+ * writer's only causal identity, and it is re-proved against the live grant
+ * inside the admission transaction. */
 export async function advanceWorkspaceGenerationForDirectRequest(
   db: Database,
   input: {
@@ -38412,6 +38648,7 @@ export async function advanceWorkspaceGenerationForDirectRequest(
     sessionId: string;
     requestId: string;
     holderId: string;
+    initiatorSubjectId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
     expectedInstanceId: string;
@@ -38475,6 +38712,16 @@ type AdmissionIdentityRow = {
   route_epoch: number | string;
   workspace_generation: number | string;
   operation: string;
+  // Migration 0276 attribution. A row admitted by a pre-0276 writer carries the
+  // sentinel and null epochs; it is never upgraded in place.
+  initiator_kind: "subject" | "service" | "legacy_unattributed";
+  initiator_subject_id: string;
+  initiating_human_subject_id: string | null;
+  initiator_organization_membership_id: string | null;
+  initiator_authorization_revision: number | string | null;
+  authority_epoch: number | string | null;
+  authority_visibility: "user_private" | "workspace_shared" | null;
+  authority_owner_organization_membership_id: string | null;
   provider_outcome: "resolved" | "rejected" | "retained" | null;
   settled_at: Date | string | null;
 } & Record<string, unknown>;
@@ -38623,7 +38870,12 @@ function workspaceMutationAuthorityFailure(
     error.code !== "holder_fenced" &&
     error.code !== "lease_fenced" &&
     error.code !== "route_fenced" &&
-    error.code !== "process_fenced"
+    error.code !== "process_fenced" &&
+    // A physically yielded provider process must still be promoted durably when
+    // its authority turns out to be unattributed or revoked; the output is
+    // rejected after commit instead of stranding a running process.
+    error.code !== "authority_unattributed" &&
+    error.code !== "authority_revoked"
   ) {
     return null;
   }
@@ -38851,6 +39103,7 @@ export async function verifyDirectWorkspaceMutationSettlement(
     sessionId: string;
     requestId: string;
     holderId: string;
+    initiatorSubjectId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
     expectedInstanceId: string;
@@ -38919,6 +39172,7 @@ export async function retainWorkspaceMutationProcess(
           kind: "direct";
           requestId: string;
           holderId: string;
+          initiatorSubjectId: string;
           sandboxGroupId: string;
           expectedEpoch: number;
           expectedInstanceId: string;
@@ -38971,6 +39225,7 @@ export async function retainWorkspaceMutationProcess(
           sessionId: input.sessionId,
           requestId: input.owner.requestId,
           holderId: input.owner.holderId,
+          initiatorSubjectId: input.owner.initiatorSubjectId,
           sandboxGroupId: input.owner.sandboxGroupId,
           expectedEpoch: input.owner.expectedEpoch,
           expectedInstanceId: input.owner.expectedInstanceId,
@@ -39136,6 +39391,24 @@ export async function retainWorkspaceMutationProcess(
               routeTargetId: admission.route_target_id,
               routeEpoch: Number(admission.route_epoch),
               providerSessionId: input.providerSessionId,
+              // The retained process inherits the EXACT authority admitted with
+              // its parent operation. It is copied, never re-resolved: the
+              // process may outlive the request or turn behind it, and a later
+              // membership or visibility change must fence it rather than
+              // silently re-own it.
+              initiatorKind: admission.initiator_kind,
+              initiatorSubjectId: admission.initiator_subject_id,
+              initiatingHumanSubjectId: admission.initiating_human_subject_id,
+              initiatorOrganizationMembershipId: admission.initiator_organization_membership_id,
+              initiatorAuthorizationRevision:
+                admission.initiator_authorization_revision === null
+                  ? null
+                  : Number(admission.initiator_authorization_revision),
+              authorityEpoch:
+                admission.authority_epoch === null ? null : Number(admission.authority_epoch),
+              authorityVisibility: admission.authority_visibility,
+              authorityOwnerOrganizationMembershipId:
+                admission.authority_owner_organization_membership_id,
               state: "active",
             })
             .returning();

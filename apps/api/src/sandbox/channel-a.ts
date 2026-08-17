@@ -1110,7 +1110,29 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
     return new HTTPException(409, { message: error.message });
   if (error instanceof ChannelAUnsupportedError)
     return new HTTPException(409, { message: error.message });
+  const authorityFence = workspaceMutationAuthorityFenceCode(error);
+  // A revoked grant is an authorization outcome, not a server fault; an
+  // unattributed pre-0276 writer is a conflict the caller resolves by starting
+  // fresh work. Both must be visible instead of surfacing as a 500.
+  if (authorityFence === "authority_revoked")
+    return new HTTPException(403, { message: (error as Error).message });
+  if (authorityFence === "authority_unattributed")
+    return new HTTPException(409, { message: (error as Error).message });
   return error;
+}
+
+/** Structural check: the fence type lives in `@opengeni/db` and is raised deep
+ * inside admission, so match it the same way the worker does. */
+function workspaceMutationAuthorityFenceCode(error: unknown): string | null {
+  if (
+    !(error instanceof Error) ||
+    (error.name !== "SandboxWorkspaceMutationFencedError" &&
+      error.name !== "SandboxRetainedProcessPromotionFencedError")
+  ) {
+    return null;
+  }
+  const code = (error as Error & { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
 }
 
 export function isChannelARequestCancellation(error: unknown, waitSignal?: AbortSignal): boolean {
@@ -1177,6 +1199,16 @@ export function channelAOperationFailureDiagnostic(
     return {
       reason: error.status >= 500 ? "unexpected" : "request_rejected",
       status: error.status,
+      errorCode: "sandbox_channel_a_operation_failed",
+    };
+  }
+  // An authority fence is a deliberate rejection, not a fault: keep it out of
+  // the unexpected-failure signal that operators page on.
+  const authorityFence = workspaceMutationAuthorityFenceCode(error);
+  if (authorityFence === "authority_revoked" || authorityFence === "authority_unattributed") {
+    return {
+      reason: "request_rejected",
+      status: authorityFence === "authority_revoked" ? 403 : 409,
       errorCode: "sandbox_channel_a_operation_failed",
     };
   }
