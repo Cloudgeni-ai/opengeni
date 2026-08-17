@@ -29,7 +29,6 @@ import {
 } from "@/components/capabilities/featured-connectors";
 import { IntegrationRow } from "@/components/capabilities/integration-row";
 import { IntegrationSheet } from "@/components/capabilities/integration-sheet";
-import { LensSetupCard } from "@/components/capabilities/lens-setup-card";
 import { PacksSection } from "@/components/capabilities/packs-section";
 import { isWorkspaceImportedSkill } from "@/components/capabilities/source-import-flow";
 import { SourcePackagesSection } from "@/components/capabilities/source-packages-section";
@@ -77,6 +76,11 @@ import { request } from "@/api";
 const IntegrationControlCenter = lazy(async () => {
   const module = await import("@/components/capabilities/integration-control-center");
   return { default: module.IntegrationControlCenter };
+});
+
+const LensSetupCard = lazy(async () => {
+  const module = await import("@/components/capabilities/lens-setup-card");
+  return { default: module.LensSetupCard };
 });
 
 import type {
@@ -1355,14 +1359,16 @@ export function CapabilitiesRoute({
                 onUnregister={unregisterPack}
               />
               {packs.installationFor("opengeni-lens")?.status === "active" ? (
-                <LensSetupCard
-                  client={client}
-                  workspaceId={workspaceId}
-                  canManage={
-                    canManageApiIntegrationInstances &&
-                    hasWorkspacePermission(context.accessContext, workspaceId, "secrets:write")
-                  }
-                />
+                <Suspense fallback={<Skeleton className="h-64 w-full rounded-xl" />}>
+                  <LensSetupCard
+                    client={client}
+                    workspaceId={workspaceId}
+                    canManage={
+                      canManageApiIntegrationInstances &&
+                      hasWorkspacePermission(context.accessContext, workspaceId, "secrets:write")
+                    }
+                  />
+                </Suspense>
               ) : null}
             </>
           ) : null}

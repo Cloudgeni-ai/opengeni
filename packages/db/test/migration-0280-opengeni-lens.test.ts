@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
 const migration = await Bun.file(
-  new URL("../drizzle/0279_opengeni_lens.sql", import.meta.url),
+  new URL("../drizzle/0280_opengeni_lens.sql", import.meta.url),
 ).text();
 
 const tables = [

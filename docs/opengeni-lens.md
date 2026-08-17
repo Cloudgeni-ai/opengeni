@@ -127,10 +127,23 @@ pause, cancellation, usage, model-policy, and sandbox lifecycle rules.
   are never placed in prompts, session history, events, repository URLs, or
   sandbox manifests.
 
-The Skill permits only review comments. It forbids pushes, merges, approvals,
-closing, labels, and repository-settings changes. Provider-side least privilege
-remains the final enforcement boundary; especially for GitLab and Azure DevOps,
-use a dedicated identity and the narrowest practical token scope.
+The Skill performs an applicability-driven pass over common security,
+application, and infrastructure failure classes. Its rubric covers trust and
+tenant boundaries, injection and disclosure paths, state and concurrency,
+API/data compatibility, cross-layer integration, migrations and recovery,
+IaC/IAM/network exposure, containers, Kubernetes, CI/CD, rollout safety,
+resilience, and cost amplification. Findings require a concrete changed-code
+failure path; style feedback, generic hardening advice, speculative risks, and
+unrelated pre-existing defects are excluded.
+
+Pull-request content is untrusted input. The Skill reads repository guidance
+from the base revision and does not execute PR-controlled code, scripts, builds,
+tests, hooks, packages, binaries, containers, or IaC plans while provider write
+credentials are present. It permits only review comments and forbids pushes,
+merges, approvals, closing, labels, and repository-settings changes. It
+rechecks the exact head before every provider write. Provider-side least
+privilege remains the final enforcement boundary; especially for GitLab and
+Azure DevOps, use a dedicated identity and the narrowest practical token scope.
 
 ## API and implementation map
 
@@ -153,7 +166,7 @@ POST   /v1/webhooks/lens/:accountId/:workspaceId/:registrationId
 - contracts and Pack constants: `packages/contracts/src/index.ts`
 - Skill, webhook verification, and normalization: `packages/core/src/domain/lens.ts`
 - durable authority and delivery journal: `packages/db/src/lens.ts`
-- schema/migration: `packages/db/src/schema.ts`, `packages/db/drizzle/0279_opengeni_lens.sql`
+- schema/migration: `packages/db/src/schema.ts`, `packages/db/drizzle/0280_opengeni_lens.sql`
 - HTTP adapter and session dispatch: `apps/api/src/routes/lens.ts`
 - standalone credential broker: `apps/worker/src/lens-credentials.ts`
 - exact-head repository materialization: `packages/runtime/src/index.ts`

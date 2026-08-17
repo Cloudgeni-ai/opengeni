@@ -185,7 +185,7 @@ const openGeniLensPack: CapabilityPack = {
     "Run provider-neutral, exact-head pull-request reviews from GitHub, GitLab, or Azure DevOps webhooks.",
   role: "software-engineering",
   category: "code-review",
-  version: "0.1.0",
+  version: "0.2.0",
   skills: [OPENGENI_LENS_SKILL],
   components: [],
   tools: [],

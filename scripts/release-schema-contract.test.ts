@@ -521,10 +521,10 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0279_opengeni_lens.sql")) {
+      if (migrations.has("0280_opengeni_lens.sql")) {
         return includesActivation
-          ? "3cd3020fc548c0fd5af9525ae2833a2be70e8867a6717fd590042ab90e3f8c8c"
-          : "5cb124633623594fef57db957d57e506508b4ec635353df9cb21e0ee76dd381d";
+          ? "c9eacbe049e43fd0a8ce7f4dd0057ead86a072f78500cd2e0fa736e82a69f040"
+          : "e0954d2ecd20b67f7b8df55d3de42650c7309b5cae0644426dff7ed95e7f04c2";
       }
       if (migrations.has("0278_workspace_membership_removal_fencing.sql")) {
         return includesActivation
@@ -972,7 +972,7 @@ describe("release schema contract", () => {
         (migrations.has("0276_onboarding_proposal_initiating_human_guc.sql") ? 1 : 0) +
         (migrations.has("0277_workspace_writer_authority_attribution.sql") ? 1 : 0) +
         (migrations.has("0278_workspace_membership_removal_fencing.sql") ? 1 : 0) +
-        (migrations.has("0279_opengeni_lens.sql") ? 1 : 0),
+        (migrations.has("0280_opengeni_lens.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -1007,8 +1007,8 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0279_opengeni_lens.sql")
-        ? "0279_opengeni_lens.sql"
+      migrations.has("0280_opengeni_lens.sql")
+        ? "0280_opengeni_lens.sql"
         : migrations.has("0278_workspace_membership_removal_fencing.sql")
           ? "0278_workspace_membership_removal_fencing.sql"
           : migrations.has("0277_workspace_writer_authority_attribution.sql")
@@ -1075,7 +1075,7 @@ describe("release schema contract", () => {
       sha256: "d16d4e0632ed1315ae32ba928d84a218729421e7d2ccfad5ad5806eb44ab0771",
       deploymentMode: "rolling",
     });
-    expect(migrations.get("0279_opengeni_lens.sql")).toMatchObject({
+    expect(migrations.get("0280_opengeni_lens.sql")).toMatchObject({
       sha256: "a58096c87e6e0ae7ce93883f62a8309fd90604577dee4029ec96502edd9229fa",
       deploymentMode: "rolling",
     });
