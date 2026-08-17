@@ -148,7 +148,7 @@ write surfaces until a later contract/runtime slice adopts typed selectors. The
 workspace setting `memoryPromptMode` controls how that store reaches the
 model:
 
-- absent or `retrieval_only` (the default since OPE-249, migration 0271)
+- absent or `retrieval_only` (the default since migration 0271)
   removes the broad standing pinned/recency block from every agent prompt;
 - an explicit `legacy_standing` opt-out preserves the old working-set block and
   agent search behavior for rollback;

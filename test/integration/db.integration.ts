@@ -2327,7 +2327,7 @@ describe("DB integration", () => {
       memoryEmbedder,
     );
     // Enabled with an absent memoryPromptMode → the retrieval_only default
-    // (OPE-249): no standing block even though records exist.
+    // default: no standing block even though records exist.
     expect(await resolveWorkspaceMemoryBlock(dbClient.db, grant.workspaceId)).toBeNull();
 
     // Explicit legacy_standing is the rollback opt-out and restores the block.

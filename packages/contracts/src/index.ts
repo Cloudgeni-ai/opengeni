@@ -1801,7 +1801,7 @@ export type WorkspaceMemoryPromptMode = z.infer<typeof WorkspaceMemoryPromptMode
 
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
 // (future) keys rather than stripping them. memoryEnabled defaults off and the
-// Memory V1 prompt mode defaults to retrieval-only composition since OPE-249
+// Memory V1 prompt mode defaults to retrieval-only composition
 // (`legacy_standing` remains an explicit per-workspace opt-out);
 // voiceInput defaults to enabled when the deployment has a provider.
 export const WorkspaceSettingsSchema = z
@@ -1839,7 +1839,7 @@ export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
 
 /**
  * Memory V1 prompt mode. Absent or unrecognized resolves to `retrieval_only`
- * (the default since OPE-249); only an explicit `legacy_standing` restores the
+ * (the default); only an explicit `legacy_standing` restores the
  * old standing pinned/recency block. Migration 0271 applies the same fallback
  * at turn acceptance, so this resolver and the frozen SQL snapshot agree.
  */

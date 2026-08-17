@@ -1,6 +1,6 @@
 -- deployment-mode: rolling
 -- Migration 0271: retrieval_only becomes the default Company Brain memory
--- prompt mode (OPE-249). Only the default for an absent/unrecognized
+-- prompt mode. Only the default for an absent/unrecognized
 -- workspaces.settings.memoryPromptMode changes; an explicit 'legacy_standing'
 -- still preserves the old standing composition, and existing immutable
 -- accepted-turn snapshots and selection receipts are untouched. Both frozen

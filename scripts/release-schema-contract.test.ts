@@ -514,8 +514,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0271_company_brain_retrieval_only_default.sql")) {
         return includesActivation
-          ? "a002abfc46683c98fdd4e27caf748e1fc5968bfefc5debf8eb639c8a63fc92b9"
-          : "0febcb7a6dce0a3a07a973a0c9742d52c73fd2c08d7207e4f44566130a7bed69";
+          ? "384a992d0c0cebeec84f5cca6d2fa94b1172caa190908ebe70f4cd7192eb5fce"
+          : "e2d852034d4b8061ac8d004575dea7f67764b9a60cb5c0e1663afb08e3ab7481";
       }
       if (migrations.has("0270_governed_learning_history_inspection.sql")) {
         return includesActivation
