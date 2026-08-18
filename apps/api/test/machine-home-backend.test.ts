@@ -417,7 +417,8 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
       }),
     ).rejects.toMatchObject({
       status: 422,
-      message: "targetSandboxId requires an own sandbox (omit sandbox or pass 'new'); it cannot join a shared group",
+      message:
+        "targetSandboxId requires an own sandbox (omit sandbox or pass 'new'); it cannot join a shared group",
     });
   }, 60_000);
 });

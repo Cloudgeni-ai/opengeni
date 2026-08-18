@@ -1771,11 +1771,7 @@ export async function createSessionForRequestWithOutcome(
   // getAnySessionInGroup are RLS-workspace-scoped, so a foreign parent/group
   // returns null → 404; the group uuid is NOT an access boundary, the workspace
   // filter is (stress (e)).
-  if (
-    payload.targetSandboxId &&
-    payload.sandbox !== undefined &&
-    payload.sandbox !== "new"
-  ) {
+  if (payload.targetSandboxId && payload.sandbox !== undefined && payload.sandbox !== "new") {
     throw new HTTPException(422, {
       message:
         "targetSandboxId requires an own sandbox (omit sandbox or pass 'new'); it cannot join a shared group",
