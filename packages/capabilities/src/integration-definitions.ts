@@ -123,7 +123,7 @@ const driveKnowledgeFacet = (
 });
 
 const mailboxFacets = (
-  provider: "google-gmail" | "microsoft-outlook-mail",
+  provider: "microsoft-outlook-mail",
 ): readonly IntegrationFacetDefinition[] => [
   {
     facetKey: "mail-inbox",
@@ -140,7 +140,7 @@ const mailboxFacets = (
       provider,
       connectionRequired: true,
       delivery: "poll",
-      cursor: provider === "google-gmail" ? "history_id" : "delta_link",
+      cursor: "delta_link",
     },
   },
   {
@@ -160,7 +160,7 @@ const mailboxFacets = (
       delivery: "email",
     },
   },
-  accountIdentityFacet(provider === "google-gmail" ? "google" : "microsoft"),
+  accountIdentityFacet("microsoft"),
 ];
 
 const googleDiscoveryUrl = (service: string, version: string): string =>
@@ -189,22 +189,6 @@ export const GOOGLE_DRIVE_INTEGRATION_DEFINITION: IntegrationDefinition = {
     arguments: { query: { fields: "user" } },
   },
   facets: [driveKnowledgeFacet("google-drive"), accountIdentityFacet("google")],
-};
-
-export const GOOGLE_GMAIL_INTEGRATION_DEFINITION: IntegrationDefinition = {
-  id: "google-gmail",
-  name: "Gmail",
-  summary: "Messages, threads, labels, drafts, and sending mail.",
-  protocol: "openapi",
-  provider: { id: "google", domain: "gmail.googleapis.com" },
-  source: { kind: "google_discovery", url: googleDiscoveryUrl("gmail", "v1") },
-  baseUrl: "https://gmail.googleapis.com/",
-  authentication: googleOAuth(["https://mail.google.com/"]),
-  healthCheck: {
-    operationKey: "gmail.users.labels.list",
-    arguments: { path: { userId: "me" } },
-  },
-  facets: mailboxFacets("google-gmail"),
 };
 
 export const MICROSOFT_GRAPH_OPENAPI_URL =
@@ -338,7 +322,6 @@ export const MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION: IntegrationDefinition = 
 
 export const CORE_INTEGRATION_DEFINITIONS: readonly IntegrationDefinition[] = [
   GOOGLE_DRIVE_INTEGRATION_DEFINITION,
-  GOOGLE_GMAIL_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION,

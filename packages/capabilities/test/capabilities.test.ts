@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { buildSchema, introspectionFromSchema } from "graphql";
 
 import {
-  GOOGLE_GMAIL_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
   applyCredentialPlacements,
   compileGraphqlRevision,
@@ -332,7 +331,7 @@ describe("provider adapters and MCP manifest", () => {
       },
     });
     const revision = compileOpenApiRevision(openapi, {
-      definitionId: GOOGLE_GMAIL_INTEGRATION_DEFINITION.id,
+      definitionId: "gmail-openapi-fixture",
       provider: "google",
     });
     expect(revision.tools).toEqual([
@@ -374,7 +373,7 @@ describe("provider adapters and MCP manifest", () => {
     const pageToken = { type: "string", location: "query" };
     const compile = (parameters: Record<string, unknown>) =>
       compileOpenApiRevision(googleDiscoveryToOpenApi(discovery(parameters)), {
-        integrationId: GOOGLE_GMAIL_INTEGRATION_DEFINITION.id,
+        integrationId: "gmail-openapi-fixture",
         provider: "google",
       });
 

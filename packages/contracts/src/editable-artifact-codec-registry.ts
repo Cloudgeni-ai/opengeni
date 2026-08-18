@@ -54,13 +54,24 @@ import {
   encodeSpreadsheetArtifactKernelQuery,
 } from "./spreadsheet-artifact-query";
 import {
-  EDITABLE_ARTIFACT_MODEL_SCHEMA_VERSION,
-  EDITABLE_ARTIFACT_SNAPSHOT_VERSION,
+  DOCUMENT_ARTIFACT_MODEL_SCHEMA_VERSION,
+  DOCUMENT_ARTIFACT_SNAPSHOT_VERSION,
+  EDITABLE_ARTIFACT_LIVE_WIRE_VERSION,
+  EDITABLE_ARTIFACT_SERIALIZED_COMMIT_VERSION,
+  PRESENTATION_ARTIFACT_MODEL_SCHEMA_VERSION,
+  PRESENTATION_ARTIFACT_SNAPSHOT_VERSION,
+  COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+  SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
+  SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
 } from "./editable-artifact-versions";
 
 export {
-  EDITABLE_ARTIFACT_MODEL_SCHEMA_VERSION,
-  EDITABLE_ARTIFACT_SNAPSHOT_VERSION,
+  DOCUMENT_ARTIFACT_MODEL_SCHEMA_VERSION,
+  DOCUMENT_ARTIFACT_SNAPSHOT_VERSION,
+  PRESENTATION_ARTIFACT_MODEL_SCHEMA_VERSION,
+  PRESENTATION_ARTIFACT_SNAPSHOT_VERSION,
+  SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
+  SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
 } from "./editable-artifact-versions";
 
 export type EditableArtifactModality = "spreadsheet" | "document" | "presentation";
@@ -68,13 +79,22 @@ export type EditableArtifactConcurrencySemantics =
   | "causal-crdt-v1"
   | "authoritative-serialized-stale-base-v1";
 
+export type CurrentEditableArtifactCompatibility = Readonly<{
+  modality: EditableArtifactModality;
+  liveProtocolVersion: number;
+  modelSchemaVersion: number;
+  snapshotVersion: number;
+  commandProtocolVersion: number;
+  committedTransactionProtocolVersion: number;
+}>;
+
 export type EditableArtifactCodecDescriptor = Readonly<{
   modality: EditableArtifactModality;
-  modelSchemaVersion: typeof EDITABLE_ARTIFACT_MODEL_SCHEMA_VERSION;
-  snapshotVersion: typeof EDITABLE_ARTIFACT_SNAPSHOT_VERSION;
+  modelSchemaVersion: 1 | 2;
+  snapshotVersion: 1 | 2;
   command: Readonly<{
-    magic: "OGASC001" | "OGADC001" | "OGAPC001";
-    version: 1;
+    magic: "OGASC002" | "OGADC001" | "OGAPC001";
+    version: 1 | 2;
     maximumBytes: number;
     maximumCommands: number;
     encode: (value: unknown) => Uint8Array;
@@ -97,17 +117,17 @@ export type EditableArtifactCodecDescriptor = Readonly<{
   }>;
   concurrency: Readonly<{
     semantics: EditableArtifactConcurrencySemantics;
-    collaborationEnvelope: "OGACO001" | null;
+    collaborationEnvelope: "OGACO002" | null;
     staleBaseMustBeRejected: boolean;
   }>;
 }>;
 
 const spreadsheet = Object.freeze({
   modality: "spreadsheet",
-  modelSchemaVersion: 1,
-  snapshotVersion: 1,
+  modelSchemaVersion: SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
+  snapshotVersion: SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
   command: Object.freeze({
-    magic: "OGASC001",
+    magic: "OGASC002",
     version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
     maximumBytes: SPREADSHEET_ARTIFACT_COMMAND_MAX_BYTES,
     maximumCommands: SPREADSHEET_ARTIFACT_COMMAND_MAX_COMMANDS,
@@ -140,15 +160,15 @@ const spreadsheet = Object.freeze({
   }),
   concurrency: Object.freeze({
     semantics: "causal-crdt-v1",
-    collaborationEnvelope: "OGACO001",
+    collaborationEnvelope: "OGACO002",
     staleBaseMustBeRejected: false,
   }),
 }) satisfies EditableArtifactCodecDescriptor;
 
 const document = Object.freeze({
   modality: "document",
-  modelSchemaVersion: 1,
-  snapshotVersion: 1,
+  modelSchemaVersion: DOCUMENT_ARTIFACT_MODEL_SCHEMA_VERSION,
+  snapshotVersion: DOCUMENT_ARTIFACT_SNAPSHOT_VERSION,
   command: Object.freeze({
     magic: "OGADC001",
     version: DOCUMENT_ARTIFACT_COMMAND_VERSION,
@@ -188,8 +208,8 @@ const document = Object.freeze({
 
 const presentation = Object.freeze({
   modality: "presentation",
-  modelSchemaVersion: 1,
-  snapshotVersion: 1,
+  modelSchemaVersion: PRESENTATION_ARTIFACT_MODEL_SCHEMA_VERSION,
+  snapshotVersion: PRESENTATION_ARTIFACT_SNAPSHOT_VERSION,
   command: Object.freeze({
     magic: "OGAPC001",
     version: PRESENTATION_ARTIFACT_COMMAND_VERSION,
@@ -232,6 +252,24 @@ const presentation = Object.freeze({
 export const EDITABLE_ARTIFACT_CODEC_REGISTRY: Readonly<
   Record<EditableArtifactModality, EditableArtifactCodecDescriptor>
 > = Object.freeze({ spreadsheet, document, presentation });
+
+/** One exact current compatibility tuple per durable modality. */
+export function currentEditableArtifactCompatibility(
+  modality: EditableArtifactModality,
+): CurrentEditableArtifactCompatibility {
+  const descriptor = EDITABLE_ARTIFACT_CODEC_REGISTRY[modality];
+  return Object.freeze({
+    modality,
+    liveProtocolVersion: EDITABLE_ARTIFACT_LIVE_WIRE_VERSION,
+    modelSchemaVersion: descriptor.modelSchemaVersion,
+    snapshotVersion: descriptor.snapshotVersion,
+    commandProtocolVersion: descriptor.command.version,
+    committedTransactionProtocolVersion:
+      modality === "spreadsheet"
+        ? COMMITTED_TRANSACTION_PROTOCOL_VERSION
+        : EDITABLE_ARTIFACT_SERIALIZED_COMMIT_VERSION,
+  });
+}
 
 /**
  * Selects solely from the durable artifact modality plus persisted versions.

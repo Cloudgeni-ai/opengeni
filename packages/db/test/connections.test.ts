@@ -1110,23 +1110,10 @@ describe("buildHostConnectionTokenResolver", () => {
         providerDomain: "gmailmcp.googleapis.com",
       };
     };
-    const disabledResolver = buildHostConnectionTokenResolver(resolveHost, context);
-    await expect(
-      disabledResolver({
-        workspaceId: "ws_1",
-        subjectId: "subject-a",
-        serverId: "gmail",
-        toolName: "list_labels",
-        destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
-        connectionRef: ref,
-      }),
-    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
-    expect(received).toEqual([]);
-
-    const resolver = buildHostConnectionTokenResolver(resolveHost, {
-      ...context,
-      allowOfficialGmailRestDestination: true,
-    });
+    // The Gmail REST bridge is the unconditional sole execution path (no
+    // deployment flag): the host resolver allows the exact users/me exception
+    // by default.
+    const resolver = buildHostConnectionTokenResolver(resolveHost, context);
 
     await expect(
       resolver({
@@ -1596,31 +1583,9 @@ describe("buildConnectionTokenResolver", () => {
       ],
     });
     const { deps, counts } = resolverDeps({ loadCredential: async () => gmailCredential });
-    const disabledResolver = buildConnectionTokenResolver({} as Database, settings, deps);
-    await expect(
-      disabledResolver({
-        workspaceId: "ws_1",
-        subjectId: "subject-a",
-        serverId: "gmail",
-        toolName: "list_labels",
-        destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
-        connectionRef: {
-          providerDomain: "gmailmcp.googleapis.com",
-          kind: "oauth2",
-          subjectScope: "subject",
-        },
-      }),
-    ).resolves.toMatchObject({ status: "auth_needed", reason: "missing_connection" });
-    expect(counts.recordUsed).toBe(0);
-
-    const resolver = buildConnectionTokenResolver(
-      {} as Database,
-      testSettings({
-        environmentsEncryptionKey: rawKey.toString("base64"),
-        gmailRestAdapterEnabled: true,
-      }) as Settings,
-      deps,
-    );
+    // The Gmail REST bridge is the unconditional sole execution path (no
+    // deployment flag): the exact users/me exception always applies.
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
     const connectionRef = {
       providerDomain: "gmailmcp.googleapis.com",
       kind: "oauth2" as const,

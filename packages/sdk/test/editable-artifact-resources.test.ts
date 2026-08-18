@@ -245,8 +245,9 @@ describe("editable artifact public SDK", () => {
         },
         runtime: {
           kernelVersion: "kernel-1",
-          modelSchemaVersion: 1,
-          commandVersion: 1,
+          modelSchemaVersion: 2,
+          protocolVersion: 1,
+          commandVersion: 2,
           workerUrl: "https://api.example.test/artifact-worker.js",
           wasmGlueUrl: "https://api.example.test/artifact-kernel.js",
           wasmBinaryUrl: "https://api.example.test/artifact-kernel.wasm",

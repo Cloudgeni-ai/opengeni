@@ -151,7 +151,7 @@ export class ArtifactCollaborationSession {
         return ret !== 0;
     }
     /**
-     * Opens one canonical OGACRD01 full-state snapshot.
+     * Opens one canonical OGACRD02 full-state snapshot.
      * @param {Uint8Array} snapshot
      * @returns {ArtifactCollaborationSession}
      */
@@ -217,7 +217,7 @@ export class ArtifactCollaborationSession {
         }
     }
     /**
-     * Returns the full canonical OGACRD01 snapshot.
+     * Returns the full canonical OGACRD02 snapshot.
      * @returns {Uint8Array}
      */
     snapshot() {
@@ -239,7 +239,7 @@ export class ArtifactCollaborationSession {
         }
     }
     /**
-     * Returns SHA-256 of the exact canonical OGACRD01 snapshot.
+     * Returns SHA-256 of the exact canonical OGACRD02 snapshot.
      * @returns {string}
      */
     stateHash() {
@@ -270,6 +270,275 @@ export class ArtifactCollaborationSession {
 if (Symbol.dispose) ArtifactCollaborationSession.prototype[Symbol.dispose] = ArtifactCollaborationSession.prototype.free;
 
 /**
+ * Stateful, in-memory kernel handle for interactive editing.
+ *
+ * A session validates/decodes once, applies many command envelopes directly
+ * to the in-memory model, and serializes only when `snapshot()` is requested.
+ * It remains synchronous so one Web Worker observes mutations in program
+ * order without locks or asynchronous re-entrancy.
+ */
+export class ArtifactKernelSession {
+    static __wrap(ptr) {
+        const obj = Object.create(ArtifactKernelSession.prototype);
+        obj.__wbg_ptr = ptr;
+        ArtifactKernelSessionFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        ArtifactKernelSessionFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_artifactkernelsession_free(ptr, 0);
+    }
+    /**
+     * Atomically applies a command envelope and returns its canonical receipt.
+     * @param {Uint8Array} command_envelope
+     * @returns {Uint8Array}
+     */
+    applyCommands(command_envelope) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passArray8ToWasm0(command_envelope, wasm.__wbindgen_export);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.artifactkernelsession_applyCommands(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
+            var v2 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export2(r0, r1 * 1, 1);
+            return v2;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Releases the in-memory workbook while retaining a closed JS handle.
+     *
+     * Calling this method repeatedly is safe. Further model operations return
+     * the stable `ARTIFACT_SESSION_CLOSED` protocol error.
+     */
+    close() {
+        wasm.artifactkernelsession_close(this.__wbg_ptr);
+    }
+    /**
+     * Creates an empty in-memory workbook from a canonical namespace envelope.
+     * @param {Uint8Array} namespace_envelope
+     * @returns {ArtifactKernelSession}
+     */
+    static create(namespace_envelope) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passArray8ToWasm0(namespace_envelope, wasm.__wbindgen_export);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.artifactkernelsession_create(retptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return ArtifactKernelSession.__wrap(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Idempotent lifecycle alias for `close()`.
+     *
+     * JavaScript may call `free()` afterward to release the small Wasm handle
+     * itself; generated explicit-resource-management support does that
+     * automatically for `using` declarations.
+     */
+    dispose() {
+        wasm.artifactkernelsession_dispose(this.__wbg_ptr);
+    }
+    /**
+     * Creates an independent in-memory branch without snapshot round trips.
+     * @returns {ArtifactKernelSession}
+     */
+    fork() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.artifactkernelsession_fork(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return ArtifactKernelSession.__wrap(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Reports whether the workbook state has already been released.
+     * @returns {boolean}
+     */
+    isClosed() {
+        const ret = wasm.artifactkernelsession_isClosed(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * Opens and validates one canonical snapshot into memory.
+     * @param {Uint8Array} snapshot
+     * @returns {ArtifactKernelSession}
+     */
+    static open(snapshot) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passArray8ToWasm0(snapshot, wasm.__wbindgen_export);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.artifactkernelsession_open(retptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return ArtifactKernelSession.__wrap(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Executes one bounded viewport or workbook-metadata projection.
+     * @param {Uint8Array} query_envelope
+     * @returns {Uint8Array}
+     */
+    query(query_envelope) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passArray8ToWasm0(query_envelope, wasm.__wbindgen_export);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.artifactkernelsession_query(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
+            var v2 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export2(r0, r1 * 1, 1);
+            return v2;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Returns the current workbook revision as a JavaScript `bigint`.
+     * @returns {bigint}
+     */
+    revision() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.artifactkernelsession_revision(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getBigInt64(retptr + 8 * 0, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
+            return BigInt.asUintN(64, r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Serializes the current workbook as a canonical snapshot.
+     * @returns {Uint8Array}
+     */
+    snapshot() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.artifactkernelsession_snapshot(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
+            var v1 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export2(r0, r1 * 1, 1);
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Returns SHA-256 of the exact canonical snapshot as lowercase text.
+     * @returns {string}
+     */
+    stateHash() {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.artifactkernelsession_stateHash(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr1 = r0;
+            var len1 = r1;
+            if (r3) {
+                ptr1 = 0; len1 = 0;
+                throw takeObject(r2);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export2(deferred2_0, deferred2_1, 1);
+        }
+    }
+}
+if (Symbol.dispose) ArtifactKernelSession.prototype[Symbol.dispose] = ArtifactKernelSession.prototype.free;
+
+/**
+ * Atomically applies an encoded command batch to a canonical snapshot.
+ *
+ * Neither input is mutated. A rejected command leaves the supplied snapshot
+ * untouched and is surfaced as a JavaScript `Error`.
+ * @param {Uint8Array} snapshot
+ * @param {Uint8Array} command_envelope
+ * @returns {Uint8Array}
+ */
+export function applyCommands(snapshot, command_envelope) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(snapshot, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(command_envelope, wasm.__wbindgen_export);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.applyCommands(retptr, ptr0, len0, ptr1, len1);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+        if (r3) {
+            throw takeObject(r2);
+        }
+        var v3 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export2(r0, r1 * 1, 1);
+        return v3;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
  * Returns the canonical encoded build-identity envelope.
  *
  * The identity lets loaders fail closed when the operation protocol, snapshot
@@ -291,7 +560,7 @@ export function buildIdentity() {
 }
 
 /**
- * Strictly validates and re-encodes a full OGACRD01 collaboration snapshot.
+ * Strictly validates and re-encodes a full OGACRD02 collaboration snapshot.
  * @param {Uint8Array} snapshot
  * @returns {Uint8Array}
  */
@@ -301,6 +570,32 @@ export function canonicalizeCollaborationSnapshot(snapshot) {
         const ptr0 = passArray8ToWasm0(snapshot, wasm.__wbindgen_export);
         const len0 = WASM_VECTOR_LEN;
         wasm.canonicalizeCollaborationSnapshot(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+        if (r3) {
+            throw takeObject(r2);
+        }
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export2(r0, r1 * 1, 1);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Strictly validates and re-encodes a snapshot in canonical form.
+ * @param {Uint8Array} snapshot
+ * @returns {Uint8Array}
+ */
+export function canonicalizeSnapshot(snapshot) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(snapshot, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.canonicalizeSnapshot(retptr, ptr0, len0);
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -336,6 +631,65 @@ export function capabilities() {
         wasm.__wbindgen_add_to_stack_pointer(16);
     }
 }
+
+/**
+ * Creates a new workbook from an encoded replica namespace.
+ *
+ * On success JavaScript receives the workbook's canonical snapshot as a
+ * `Uint8Array`. Invalid or non-canonical inputs throw a JavaScript `Error`
+ * whose message retains the protocol's stable error code.
+ * @param {Uint8Array} namespace_envelope
+ * @returns {Uint8Array}
+ */
+export function createWorkbook(namespace_envelope) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(namespace_envelope, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.createWorkbook(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+        if (r3) {
+            throw takeObject(r2);
+        }
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export2(r0, r1 * 1, 1);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Executes one bounded OGAKQ001 read against a canonical snapshot.
+ * @param {Uint8Array} snapshot
+ * @param {Uint8Array} query_envelope
+ * @returns {Uint8Array}
+ */
+export function query(snapshot, query_envelope) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(snapshot, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(query_envelope, wasm.__wbindgen_export);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.query(retptr, ptr0, len0, ptr1, len1);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+        if (r3) {
+            throw takeObject(r2);
+        }
+        var v3 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export2(r0, r1 * 1, 1);
+        return v3;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -356,6 +710,9 @@ function __wbg_get_imports() {
 const ArtifactCollaborationSessionFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_artifactcollaborationsession_free(ptr, 1));
+const ArtifactKernelSessionFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_artifactkernelsession_free(ptr, 1));
 
 function addHeapObject(obj) {
     if (heap_next === heap.length) heap.push(heap.length + 1);

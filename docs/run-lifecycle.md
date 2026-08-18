@@ -1381,6 +1381,18 @@ tool connection and model-request preparation; terminal payloads contain only a
 closed phase name and non-negative `durationMs`. In particular, lazy
 `sandbox.provision` completes as soon as the box is established, before owned
 rig/repository/file setup, so “Starting sandbox” never absorbs unrelated work.
+Model-request preparation is an enclosing span: it begins when control enters
+the runtime and ends at the provider transport boundary, so it may include the
+sandbox, rig, repository, and other setup rows whose starts appear below it.
+The timeline labels that overlap explicitly instead of presenting the parent as
+an additional sequential wait.
+
+The periodic warm-workspace snapshot is mid-session durability. The lease
+heartbeat must not start it until the first provider request has reached its
+transport boundary: before then there is no agent-produced work to protect, and
+the snapshot's workspace fence would make first-request sandbox preparation
+wait behind maintenance. Turn-end capture and the existing single-flight gate
+remain unchanged.
 
 Fleet metrics keep this drill-down identity-free:
 `opengeni_turn_worker_preparation_duration_seconds` measures the platform path,

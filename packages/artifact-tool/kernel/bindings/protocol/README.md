@@ -5,8 +5,10 @@ Shared safe-Rust ABI codec for the N-API and WebAssembly adapters.
 The boundary is deliberately byte-only:
 
 - namespaces use a checksummed `OGAKN001` envelope;
-- mutations use a checksummed, bounded `OGAKC001` envelope;
-- model state uses the kernel's canonical `OGARTK01` snapshot envelope;
+- mutations use a checksummed, bounded `OGAKC002` envelope containing authored
+  scalars or formula source, never calculated formula values;
+- model state uses the kernel's canonical authored-only `OGARTK02` snapshot
+  envelope;
 - stateless mutation returns canonical snapshot bytes directly;
 - stateful mutation returns a compact `OGAKR001` receipt and leaves snapshot
   serialization to an explicit durability boundary;

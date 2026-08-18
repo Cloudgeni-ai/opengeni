@@ -242,14 +242,18 @@ describe("API Integration routes", () => {
     const response = await request("/integrations/definitions");
     expect(response.status).toBe(200);
     const payload = await response.json();
-    expect(payload.definitions).toHaveLength(6);
+    // Gmail is not one of these API integration definitions: it is a
+    // Connector, consolidated onto its catalog row and the REST bridge
+    // (packages/runtime/src/gmail-rest-mcp.ts). It must never reappear here.
+    expect(payload.definitions).toHaveLength(5);
+    expect(payload.definitions.some((definition) => definition.id === "google-gmail")).toBe(false);
     expect(payload.definitions).toContainEqual(
       expect.objectContaining({
-        id: "google-gmail",
-        name: "Gmail",
+        id: "google-drive",
+        name: "Google Drive",
         provider: {
           id: "google",
-          domain: "gmail.googleapis.com",
+          domain: "www.googleapis.com",
         },
         authentication: expect.objectContaining({ kind: "oauth2" }),
       }),
@@ -261,15 +265,8 @@ describe("API Integration routes", () => {
     // grants nothing). Every core definition carries it, and the whole payload
     // must satisfy the published contract, bounds included.
     const parsed = ListIntegrationDefinitionsResponse.parse(payload);
-    const gmail = parsed.definitions.find((definition) => definition.id === "google-gmail");
-    expect(gmail?.presentation).toMatchObject({
-      providerName: "Google",
-      icon: "mail",
-      introduction: "Let agents work with the Gmail account you choose.",
-    });
-    expect(gmail?.presentation?.scopeLabels?.["https://mail.google.com/"]).toMatchObject({
-      label: "Work with your Gmail mailbox",
-    });
+    const drive = parsed.definitions.find((definition) => definition.id === "google-drive");
+    expect(drive?.presentation).toMatchObject({ providerName: "Google", icon: "files" });
     for (const definition of parsed.definitions) {
       expect(definition.presentation).toBeDefined();
     }

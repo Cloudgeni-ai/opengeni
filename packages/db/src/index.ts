@@ -7764,8 +7764,10 @@ export async function listEnabledMcpCapabilityServers(
     const allowedTools = stringArrayConfig(config.allowedTools ?? metadata.allowedTools);
     const timeoutMs = positiveIntegerConfig(config.timeoutMs ?? metadata.timeoutMs);
     const cacheToolsList = booleanConfig(config.cacheToolsList ?? metadata.cacheToolsList);
-    const requireApproval = sessionMcpApprovalPolicyConfig(
-      config.requireApproval ?? metadata.requireApproval,
+    const requireApproval = requireApprovalWithFloor(
+      config.requireApproval,
+      metadata.requireApproval,
+      item.workspaceId === null,
     );
     return [
       {
@@ -61534,6 +61536,31 @@ function stringArrayConfig(value: unknown): string[] | undefined {
 function sessionMcpApprovalPolicyConfig(value: unknown): SessionMcpApprovalPolicy | undefined {
   const parsed = SessionMcpApprovalPolicySchema.safeParse(value);
   return parsed.success ? parsed.data : undefined;
+}
+
+/**
+ * Unions a workspace's configured approval policy with a global catalog row's
+ * mandated floor, so `enableCapability`'s ordinary config override can only
+ * ADD approval requirements beyond a curated minimum, never remove one -
+ * closing the gap where a bare `??` let a workspace-supplied `false` or a
+ * narrower array silently erase a reviewed row's mandate (e.g. Gmail's
+ * approval-gated send tools). `true` on either side is maximal. Applies only
+ * to global rows (`workspaceId === null`): a workspace's own custom MCP
+ * registration owns its policy outright, with no OpenGeni-reviewed floor to
+ * protect.
+ */
+function requireApprovalWithFloor(
+  rawConfigValue: unknown,
+  rawMetadataValue: unknown,
+  isGlobalRow: boolean,
+): SessionMcpApprovalPolicy | undefined {
+  const resolved = sessionMcpApprovalPolicyConfig(rawConfigValue ?? rawMetadataValue);
+  if (!isGlobalRow) return resolved;
+  const floor = sessionMcpApprovalPolicyConfig(rawMetadataValue);
+  if (floor === undefined || floor === false) return resolved;
+  if (floor === true || resolved === true) return true;
+  const resolvedNames = resolved === undefined || resolved === false ? [] : resolved;
+  return [...new Set([...resolvedNames, ...floor])].sort();
 }
 
 function cleanDbString(value: string | undefined | null): string | undefined {

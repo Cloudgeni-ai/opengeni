@@ -1,6 +1,8 @@
-import { DOCUMENT_ARTIFACT_COMMAND_VERSION } from "@opengeni/contracts/document-artifact-commands";
-import { PRESENTATION_ARTIFACT_COMMAND_VERSION } from "@opengeni/contracts/presentation-artifact-commands";
-import { SPREADSHEET_ARTIFACT_COMMAND_VERSION } from "@opengeni/contracts/spreadsheet-artifact-commands";
+import { EDITABLE_ARTIFACT_LIVE_WIRE_VERSION } from "@opengeni/contracts/editable-artifact-live";
+import {
+  EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION,
+  currentEditableArtifactCompatibility,
+} from "@opengeni/contracts/editable-artifacts";
 
 import type { EditableArtifactCacheAuthority } from "./controller";
 import {
@@ -10,6 +12,7 @@ import {
 import { createEditableArtifactSession, type EditableArtifactSession } from "./session";
 import type { EditableArtifactStoragePort } from "./storage";
 import type { EditableArtifactModality } from "./types";
+import type { EditableArtifactOpenFailureReporter } from "./open-failure";
 import {
   createBrowserEditableArtifactWorkerKernel,
   type CreateBrowserEditableArtifactWorkerKernelOptions,
@@ -20,10 +23,11 @@ export type EditableArtifactBrowserRuntime = Omit<
   "modality" | "kernelVersion" | "protocolVersion" | "modelSchemaVersion" | "commandVersion"
 > &
   Readonly<{
-    /** Exact native/WASM build identity admitted by the API. */
+    /** Exact package/executable build identity; the API records but does not compatibility-gate it. */
     kernelVersion: string;
     modelSchemaVersion: number;
-    protocolVersion?: number;
+    /** Exact OGATX001 intent protocol version. */
+    protocolVersion: number;
     commandVersion: number;
   }>;
 
@@ -36,11 +40,21 @@ export type CreateBrowserEditableArtifactSessionOptions = Readonly<{
   runtime: EditableArtifactBrowserRuntime;
   transport?: Omit<
     CreateEditableArtifactHttpLiveTransportOptions,
-    "baseUrl" | "workspaceId" | "protocolVersion" | "kernelVersion" | "modelSchemaVersion"
+    | "baseUrl"
+    | "workspaceId"
+    | "modality"
+    | "liveProtocolVersion"
+    | "kernelVersion"
+    | "modelSchemaVersion"
+    | "snapshotVersion"
+    | "commandProtocolVersion"
+    | "committedTransactionProtocolVersion"
   >;
   storage?: EditableArtifactStoragePort;
   /** Reuse the replica used to create the artifact when opening it immediately. */
   replicaId?: string;
+  /** Receives bounded categories/codes only; never workbook or formula content. */
+  onOpenFailure?: EditableArtifactOpenFailureReporter;
 }>;
 
 /**
@@ -53,17 +67,23 @@ export function createBrowserEditableArtifactSession(
   const baseUrl = canonicalBaseUrl(options.baseUrl);
   const workspaceId = boundedIdentity(options.workspaceId, "workspaceId");
   assertCacheAuthority(options.storageAuthority, baseUrl, workspaceId);
-  const protocolVersion = positiveVersion(options.runtime.protocolVersion ?? 1, "protocolVersion");
+  const protocolVersion = positiveVersion(options.runtime.protocolVersion, "protocolVersion");
+  if (protocolVersion !== EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION) {
+    throw new TypeError("protocolVersion is incompatible with the current intent protocol");
+  }
   const modelSchemaVersion = positiveVersion(
     options.runtime.modelSchemaVersion,
     "modelSchemaVersion",
   );
   const kernelVersion = boundedIdentity(options.runtime.kernelVersion, "kernelVersion", 512);
   const commandVersion = positiveVersion(options.runtime.commandVersion, "commandVersion");
-  const expectedCommandVersion = commandVersionFor(options.artifact.modality);
-  if (commandVersion !== expectedCommandVersion) {
+  const current = currentEditableArtifactCompatibility(options.artifact.modality);
+  if (
+    modelSchemaVersion !== current.modelSchemaVersion ||
+    commandVersion !== current.commandProtocolVersion
+  ) {
     throw new TypeError(
-      `commandVersion ${commandVersion} is incompatible with ${options.artifact.modality} ${expectedCommandVersion}`,
+      `runtime versions are incompatible with current ${options.artifact.modality} compatibility`,
     );
   }
   const {
@@ -87,9 +107,13 @@ export function createBrowserEditableArtifactSession(
       ...options.transport,
       baseUrl,
       workspaceId,
-      protocolVersion,
+      modality: options.artifact.modality,
+      liveProtocolVersion: EDITABLE_ARTIFACT_LIVE_WIRE_VERSION,
       kernelVersion,
       modelSchemaVersion,
+      snapshotVersion: current.snapshotVersion,
+      commandProtocolVersion: current.commandProtocolVersion,
+      committedTransactionProtocolVersion: current.committedTransactionProtocolVersion,
     });
     return createEditableArtifactSession({
       artifactId: options.artifact.id,
@@ -102,6 +126,7 @@ export function createBrowserEditableArtifactSession(
       modelSchemaVersion,
       commandVersion,
       protocolVersion,
+      ...(options.onOpenFailure ? { onOpenFailure: options.onOpenFailure } : {}),
       ...(replicaId ? { writerReplicaIdFactory: () => replicaId } : {}),
       ownsWorker: true,
     });
@@ -118,17 +143,6 @@ export function createEditableArtifactReplicaId(): string {
       .map((byte) => byte.toString(16).padStart(2, "0"))
       .join("");
     if (value !== "0000000000000000") return value;
-  }
-}
-
-function commandVersionFor(modality: EditableArtifactModality): number {
-  switch (modality) {
-    case "spreadsheet":
-      return SPREADSHEET_ARTIFACT_COMMAND_VERSION;
-    case "document":
-      return DOCUMENT_ARTIFACT_COMMAND_VERSION;
-    case "presentation":
-      return PRESENTATION_ARTIFACT_COMMAND_VERSION;
   }
 }
 
