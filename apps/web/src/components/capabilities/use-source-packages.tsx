@@ -1,5 +1,23 @@
+/**
+ * Skills and Plugins installed from an immutable source (GitHub, skills.sh, or
+ * a reviewed Plugin manifest URL).
+ *
+ * This owns the data and every mutation - preview, install/update, and the
+ * version-fenced removal - and hands back plain state plus the dialogs those
+ * flows need. The Bundles section renders the rows; nothing about how a row
+ * looks lives here.
+ */
 import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useState,
+  type ReactNode,
+} from "react";
 import { toast } from "sonner";
 
 import {
@@ -19,8 +37,6 @@ import type {
   SkillUninstallPreview,
 } from "@/types";
 
-export type SourcePackageFilter = "all" | "skill" | "plugin";
-
 export type SourceRemoveTarget =
   | {
       kind: "skill";
@@ -34,28 +50,44 @@ export type SourceRemoveTarget =
       operationId: string;
     };
 
-const SourcePackagesSectionView = lazy(async () => {
-  const module = await import("@/components/capabilities/source-packages-view");
-  return { default: module.SourcePackagesSectionView };
+export type SourcePackages = {
+  skills: InstalledSourceSkill[];
+  plugins: PluginInstallationSummary[];
+  loading: boolean;
+  loadError: Error | null;
+  /** `skill:<capabilityId>` or `plugin:<pluginKey>` while that one mutates. */
+  busyKey: string | null;
+  reload: () => void;
+  importSkill: () => void;
+  installPlugin: () => void;
+  updateSkill: (skill: InstalledSourceSkill) => void;
+  updatePlugin: (plugin: PluginInstallationSummary) => void;
+  removeSkill: (skill: InstalledSourceSkill) => void;
+  removePlugin: (plugin: PluginInstallationSummary) => void;
+  /** The import stepper and the removal confirmation, mounted by the caller. */
+  dialogs: ReactNode;
+};
+
+// The URL-paste -> preview -> review -> install stepper is only needed once an
+// admin actually starts an import, so it stays lazy.
+const SourcePackageDialogs = lazy(async () => {
+  const module = await import("@/components/capabilities/source-package-dialogs");
+  return { default: module.SourcePackageDialogs };
 });
 
-export function SourcePackagesSection({
+export function useSourcePackages({
   client,
   workspaceId,
   connections,
   canManage,
-  filter,
-  query,
   onChanged,
 }: {
   client: OpenGeniCoreClient;
   workspaceId: string;
   connections: ConnectionMetadata[] | null;
   canManage: boolean;
-  filter: SourcePackageFilter;
-  query: string;
   onChanged: () => void | Promise<void>;
-}) {
+}): SourcePackages {
   const [installedSkills, setInstalledSkills] = useState<InstalledSkillSummary[]>([]);
   const [plugins, setPlugins] = useState<PluginInstallationSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -275,47 +307,13 @@ export function SourcePackagesSection({
     }
   }
 
-  return (
-    <Suspense
-      fallback={
-        <div
-          className="h-40 rounded-xl border border-border bg-surface"
-          aria-label="Loading Skills and Plugins"
-          aria-busy="true"
-        />
-      }
-    >
-      <SourcePackagesSectionView
-        skills={skills}
-        plugins={plugins}
-        loading={loading}
-        loadError={loadError}
-        canManage={canManage}
-        filter={filter}
-        query={query}
-        busyKey={busyKey}
+  const dialogs = (
+    <Suspense fallback={null}>
+      <SourcePackageDialogs
         sourceImport={sourceImport}
         connections={connections}
+        canManage={canManage}
         removeTarget={removeTarget}
-        onRetry={() => void load()}
-        onImportSkill={() => openNew("skill")}
-        onInstallPlugin={() => openNew("plugin")}
-        onUpdateSkill={(skill) =>
-          dispatchSourceImport({
-            type: "edit_skill",
-            skill,
-            operationId: crypto.randomUUID(),
-          })
-        }
-        onUpdatePlugin={(plugin) =>
-          dispatchSourceImport({
-            type: "edit_plugin",
-            plugin,
-            operationId: crypto.randomUUID(),
-          })
-        }
-        onRemoveSkill={(skill) => void previewSkillRemoval(skill)}
-        onRemovePlugin={(plugin) => void previewPluginRemoval(plugin)}
         onSourceImportOpenChange={(open) => dispatchSourceImport({ type: open ? "open" : "close" })}
         onKindChange={(kind) => dispatchSourceImport({ type: "kind", kind })}
         onUrlChange={(url) => dispatchSourceImport({ type: "url", url })}
@@ -334,4 +332,30 @@ export function SourcePackagesSection({
       />
     </Suspense>
   );
+
+  return {
+    skills,
+    plugins,
+    loading,
+    loadError,
+    busyKey,
+    reload: () => void load(),
+    importSkill: () => openNew("skill"),
+    installPlugin: () => openNew("plugin"),
+    updateSkill: (skill) =>
+      dispatchSourceImport({
+        type: "edit_skill",
+        skill,
+        operationId: crypto.randomUUID(),
+      }),
+    updatePlugin: (plugin) =>
+      dispatchSourceImport({
+        type: "edit_plugin",
+        plugin,
+        operationId: crypto.randomUUID(),
+      }),
+    removeSkill: (skill) => void previewSkillRemoval(skill),
+    removePlugin: (plugin) => void previewPluginRemoval(plugin),
+    dialogs,
+  };
 }

@@ -123,6 +123,19 @@ export function emptyCapabilityForm(): CapabilityFormState {
   };
 }
 
+/**
+ * The Connectors surface owns exactly MCP servers and API connectors. Skills,
+ * Plugins, and Packs are Bundles - a named collection of tools and
+ * instructions, not a live connection - and have their own section with their
+ * own search, so they never enter the Enabled, Browse, or Featured
+ * projections. (No `kind: "plugin"` catalog item is produced at all today;
+ * scoping by kind here keeps that an implementation detail rather than a fact
+ * the UI silently depends on.)
+ */
+export function isConnectorCatalogItem(item: CapabilityCatalogItem): boolean {
+  return item.kind === "mcp" || item.kind === "api";
+}
+
 export function filterCapabilityCatalogItems(
   items: CapabilityCatalogItem[],
   filter: CapabilityFilter,

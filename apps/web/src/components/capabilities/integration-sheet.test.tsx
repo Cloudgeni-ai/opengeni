@@ -130,6 +130,43 @@ describe("IntegrationRow", () => {
     }
   });
 
+  // The row's aria-label replaces its contents, so a caller with a fact that
+  // must be heard supplies it as one opaque string; the row branches on nothing.
+  test("an optional accessible detail is spoken between the name and the state", async () => {
+    const rendered = await render(
+      <>
+        <IntegrationRow
+          model={model({
+            id: "pack:infra-ops",
+            name: "Infrastructure operations",
+            chip: { label: "Not installed", tone: "idle" },
+            accessibleDetail: "Pack, curated by OpenGeni",
+          })}
+          onOpen={() => {}}
+        />
+        <IntegrationRow
+          model={model({ id: "blank-detail", accessibleDetail: "   " })}
+          onOpen={() => {}}
+        />
+      </>,
+    );
+    try {
+      expect(
+        rendered.container
+          .querySelector('[data-integration-row="pack:infra-ops"] > button')
+          ?.getAttribute("aria-label"),
+      ).toBe("Infrastructure operations. Pack, curated by OpenGeni. Not installed");
+      // Nothing meaningful to add: the name reads exactly as it did before.
+      expect(
+        rendered.container
+          .querySelector('[data-integration-row="blank-detail"] > button')
+          ?.getAttribute("aria-label"),
+      ).toBe("Slack. Connected");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("only the not-connected state renders an interactive quick-connect icon", async () => {
     const onOpen = mock(() => {});
     const onQuickConnect = mock(() => {});
@@ -253,6 +290,128 @@ describe("IntegrationSheet", () => {
       ).not.toContain("Disconnect");
     } finally {
       await locked.unmount();
+    }
+  });
+
+  // The Bundle footer: a surface whose real verbs are not connect/disconnect.
+  test("renders the actions footer a Bundle needs, with its unavailability reason", async () => {
+    const onUpdate = mock(() => {});
+    const onRemove = mock(() => {});
+    const rendered = await render(
+      <Sheet open>
+        <IntegrationSheetBody
+          model={model({
+            id: "bundle-skill-release-operator",
+            name: "release-operator",
+            chip: { label: "Installed", tone: "ok" },
+            access: undefined,
+            options: [],
+            footer: {
+              kind: "actions",
+              primary: { label: "Check for update", onClick: onUpdate },
+              secondary: { label: "Remove", onClick: onRemove, destructive: true },
+            },
+          })}
+        />
+      </Sheet>,
+    );
+    try {
+      const sheet = document.querySelector(
+        '[data-integration-sheet="bundle-skill-release-operator"]',
+      )!;
+      // Neither of the connection verbs appears: a Bundle is not connected.
+      const labels = [...sheet.querySelectorAll("button")].map((node) => node.textContent?.trim());
+      expect(labels).toContain("Check for update");
+      expect(labels).toContain("Remove");
+      expect(labels).not.toContain("Reconnect");
+      expect(labels).not.toContain("Disconnect");
+      expect(labels).not.toContain("Set up");
+
+      const update = [...sheet.querySelectorAll("button")].find(
+        (node) => node.textContent?.trim() === "Check for update",
+      )!;
+      const remove = [...sheet.querySelectorAll("button")].find(
+        (node) => node.textContent?.trim() === "Remove",
+      )!;
+      await act(async () => update.click());
+      await act(async () => remove.click());
+      expect(onUpdate).toHaveBeenCalledTimes(1);
+      expect(onRemove).toHaveBeenCalledTimes(1);
+    } finally {
+      await rendered.unmount();
+    }
+
+    // A Plugin that never retained a source URL: the button stays visible and
+    // says why it cannot run, rather than silently doing nothing.
+    const unavailable = await render(
+      <Sheet open>
+        <IntegrationSheetBody
+          model={model({
+            id: "bundle-plugin-research",
+            name: "Research suite",
+            chip: { label: "Installed", tone: "ok" },
+            access: undefined,
+            options: [],
+            footer: {
+              kind: "actions",
+              primary: {
+                label: "Review update",
+                onClick: onUpdate,
+                disabled: true,
+                unavailableReason: "This installed Plugin did not retain a source URL.",
+              },
+              secondary: { label: "Remove", onClick: onRemove, destructive: true },
+            },
+          })}
+        />
+      </Sheet>,
+    );
+    try {
+      const sheet = document.querySelector('[data-integration-sheet="bundle-plugin-research"]')!;
+      const review = [...sheet.querySelectorAll("button")].find(
+        (node) => node.textContent?.trim() === "Review update",
+      )! as HTMLButtonElement;
+      expect(review.disabled).toBe(true);
+      expect(review.title).toBe("This installed Plugin did not retain a source URL.");
+      await act(async () => review.click());
+      expect(onUpdate).toHaveBeenCalledTimes(1);
+    } finally {
+      await unavailable.unmount();
+    }
+  });
+
+  test("a busy actions footer disables both of its verbs", async () => {
+    const onUpdate = mock(() => {});
+    const onRemove = mock(() => {});
+    const rendered = await render(
+      <Sheet open>
+        <IntegrationSheetBody
+          model={model({
+            id: "bundle-busy",
+            access: undefined,
+            options: [],
+            footer: {
+              kind: "actions",
+              primary: { label: "Check for update", onClick: onUpdate },
+              secondary: { label: "Remove", onClick: onRemove, destructive: true },
+              busy: true,
+            },
+          })}
+        />
+      </Sheet>,
+    );
+    try {
+      const sheet = document.querySelector('[data-integration-sheet="bundle-busy"]')!;
+      for (const label of ["Check for update", "Remove"]) {
+        const node = [...sheet.querySelectorAll("button")].find(
+          (candidate) => candidate.textContent?.trim() === label,
+        )! as HTMLButtonElement;
+        expect(node.disabled).toBe(true);
+      }
+      expect(onUpdate).not.toHaveBeenCalled();
+      expect(onRemove).not.toHaveBeenCalled();
+    } finally {
+      await rendered.unmount();
     }
   });
 
