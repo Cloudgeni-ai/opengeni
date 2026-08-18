@@ -465,7 +465,6 @@ export {
   interruptionKindForCallItem,
   invokePreparedAgentTool,
   protocolItemsFromGeneratedItems,
-  serializedRunStateForOpenSuffixPause,
   type OpenSuffixInterruptionKind,
 } from "./open-suffix";
 export { normalizeProtocolJsonValue, UnsupportedProtocolJsonValueError } from "./protocol-json";
@@ -3019,10 +3018,8 @@ function buildAgentCapabilitiesFromComposition(
     settings.sandboxDesktopEnabled &&
     desktopCapableBackend(settings.sandboxBackend)
   ) {
-    // computer-use is transport-aware, exactly like filesystem: `tools()` emits the
-    // HOSTED `computer_use_preview` tool on the structured transport and a set of
-    // FUNCTION `computer_*` tools on the text transport. The ChatGPT/Codex backend
-    // rejects hosted tool types (only function/custom/web_search accepted).
+    // computer-use is ordinary `computer_*` function tools on a proven visual
+    // transport. Chat-wire and omitted/unproven callers fail closed.
     //
     // The worker declares an explicit mode from authoritative provider resolution.
     // Exported/public callers that omit it are unproven and therefore disabled.

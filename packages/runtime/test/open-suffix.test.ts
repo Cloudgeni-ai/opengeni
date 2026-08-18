@@ -1,11 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { OPEN_SUFFIX_RUN_STATE_BLOB } from "@opengeni/contracts";
 import {
   OpenSuffixUnresumableError,
   assertOpenSuffixResumable,
   extractOpenSuffixFromRunState,
   interruptionKindForCallItem,
-  serializedRunStateForOpenSuffixPause,
 } from "../src/open-suffix";
 
 describe("open suffix", () => {
@@ -53,14 +51,6 @@ describe("open suffix", () => {
     });
     expect(() => assertOpenSuffixResumable(members, ["call_computer"])).toThrow(
       OpenSuffixUnresumableError,
-    );
-  });
-
-  test("replaces an oversized leftover heap with the open-suffix sentinel", () => {
-    const oversized = JSON.stringify({ pad: "x".repeat(3 * 1024 * 1024) });
-    expect(serializedRunStateForOpenSuffixPause(oversized)).toBe(OPEN_SUFFIX_RUN_STATE_BLOB);
-    expect(serializedRunStateForOpenSuffixPause(JSON.stringify({ compact: true }))).toBe(
-      JSON.stringify({ compact: true }),
     );
   });
 });

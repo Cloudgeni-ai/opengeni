@@ -1135,16 +1135,11 @@ describe("computer backend selection (native vs xdotool)", () => {
 
   test("ComputerUseCapability bound to a native session drives desktopInput (NOT exec)", async () => {
     const { session, inputs } = makeNativeSession();
-    const cap = computerUse({ readOnly: false, toolMode: "hosted" });
-    // Structured transport → the single hosted computerTool over the selected Computer.
+    const cap = computerUse({ readOnly: false, toolMode: "function-image" });
     cap.bind(session as never).bindModel("responses", structuredModel());
     const tools = cap.tools();
-    expect(tools.length).toBe(1);
-    // Reach through the tool to the selected computer and drive a click — it must
-    // land on the native desktopInput seam, proving NativeDesktopComputer was chosen.
-    const computer = (tools[0] as unknown as { computer: NativeDesktopComputer }).computer;
-    expect(computer).toBeInstanceOf(NativeDesktopComputer);
-    await computer.click(3, 4, "left");
+    expect(tools.map((t) => (t as { name?: string }).name)).toEqual(FUNCTION_TOOL_NAMES);
+    await invokeTool(toolsByName(tools).computer_click, { x: 3, y: 4, button: "left" });
     expect(inputs.length).toBe(1);
     expect(inputs[0]!.$case).toBe("pointer");
   });
@@ -1156,43 +1151,33 @@ describe("computer backend selection (native vs xdotool)", () => {
     const cap = computerUse({
       abortSignal: controller.signal,
       readOnly: false,
-      toolMode: "hosted",
+      toolMode: "function-image",
     });
     cap.bind(session as never).bindModel("responses", structuredModel());
-    const computer = (cap.tools()[0] as unknown as { computer: NativeDesktopComputer }).computer;
-    const result = await computer.screenshot().then(
-      () => null,
-      (error: unknown) => error,
-    );
-    expect(result).toBeInstanceOf(ScreenshotReadError);
-    expect((result as ScreenshotReadError).code).toBe("aborted");
+    const result = await invokeTool(toolsByName(cap.tools()).computer_screenshot, {});
+    expect(String(result)).toMatch(/aborted/);
     expect(attempts()).toBe(0);
   });
 
-  test("ComputerUseCapability bound to a Modal session selects the xdotool SandboxComputer", () => {
-    const { session } = makeMockSession();
-    const cap = computerUse({ readOnly: false, toolMode: "hosted" });
+  test("ComputerUseCapability bound to a Modal session selects the xdotool SandboxComputer", async () => {
+    const { session, execCalls } = makeMockSession();
+    const cap = computerUse({ readOnly: false, toolMode: "function-image" });
     cap.bind(session as never).bindModel("responses", structuredModel());
-    const tools = cap.tools();
-    const computer = (tools[0] as unknown as { computer: unknown }).computer;
-    expect(computer).toBeInstanceOf(SandboxComputer);
+    await invokeTool(toolsByName(cap.tools()).computer_click, { x: 100, y: 200, button: "left" });
+    expect(execCalls.some((cmd) => cmd.includes("xdotool"))).toBe(true);
   });
 });
 
 describe("ComputerUseCapability (the SDK seam)", () => {
-  test("tools() throws before bind(session) and returns one HOSTED computerTool on the structured transport", () => {
-    const cap = computerUse({ readOnly: false, toolMode: "hosted" });
+  test("tools() throws before bind(session) and returns computer_* function tools", () => {
+    const cap = computerUse({ readOnly: false, toolMode: "function-image" });
     expect(cap).toBeInstanceOf(ComputerUseCapability);
     expect(cap.type).toBe("computer-use");
-    // Unbound → requireBoundSession throws.
     expect(() => cap.tools()).toThrow();
     const { session } = makeMockSession();
-    // Structured transport (a non-ChatCompletions model instance) → hosted tool.
     cap.bind(session as never).bindModel("responses", structuredModel());
     const tools = cap.tools();
-    expect(tools.length).toBe(1);
-    // The computer tool wires the model's computer_use_preview surface.
-    expect((tools[0] as { type?: string }).type).toBe("computer");
+    expect(tools.map((t) => (t as { name?: string }).name)).toEqual(FUNCTION_TOOL_NAMES);
   });
 });
 
@@ -1224,15 +1209,12 @@ describe("ComputerUseCapability omitted transport fails closed", () => {
 describe("ComputerUseCapability explicit toolMode (hardening — sniff not consulted)", () => {
   const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-  test('toolMode "hosted" → the single HOSTED tool EVEN when a ChatCompletions model is bound', () => {
+  test('toolMode "function-image" → the 8 FUNCTION tools EVEN when a ChatCompletions model is bound', () => {
     const { session } = makeMockSession();
-    const cap = computerUse({ toolMode: "hosted" });
-    // Bind a ChatCompletions instance: the sniff would say "function tools", so a
-    // hosted result PROVES the explicit mode overrode the constructor-name sniff.
+    const cap = computerUse({ toolMode: "function-image" });
     cap.bind(session as never).bindModel("gpt", chatCompletionsModel());
     const tools = cap.tools();
-    expect(tools.length).toBe(1);
-    expect((tools[0] as { type?: string }).type).toBe("computer");
+    expect(tools.map((t) => (t as { name?: string }).name)).toEqual(FUNCTION_TOOL_NAMES);
   });
 
   test('toolMode "function-image" → the 8 FUNCTION tools EVEN when a structured model is bound; screenshot is a structured image', async () => {
@@ -1587,17 +1569,19 @@ describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
       computerUseEnabled: true,
     });
 
-    // "hosted" → the attached capability emits the hosted tool EVEN with a
-    // ChatCompletions model bound (the sniff alone would pick function tools).
-    const hostedCaps = buildAgentCapabilities(desktopOn, [], { computerToolMode: "hosted" });
-    const hostedCap = hostedCaps.find(
+    // "function-image" → the attached capability emits computer_* tools EVEN with a
+    // ChatCompletions model bound (the sniff alone is never authority).
+    const functionCaps = buildAgentCapabilities(desktopOn, [], {
+      computerToolMode: "function-image",
+    });
+    const functionCap = functionCaps.find(
       (c) => (c as { type?: string }).type === "computer-use",
     ) as unknown as ComputerUseCapability;
     const { session: s1 } = makeMockSession();
-    hostedCap.bind(s1 as never).bindModel("gpt", chatCompletionsModel());
-    const hostedTools = hostedCap.tools();
-    expect(hostedTools.length).toBe(1);
-    expect((hostedTools[0] as { type?: string }).type).toBe("computer");
+    functionCap.bind(s1 as never).bindModel("gpt", chatCompletionsModel());
+    expect(functionCap.tools().map((t) => (t as { name?: string }).name)).toEqual(
+      FUNCTION_TOOL_NAMES,
+    );
 
     // "function-text" is a deprecated fail-closed alias: providers without a proven
     // visual image transport receive no computer capability.

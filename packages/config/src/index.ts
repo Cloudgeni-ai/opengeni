@@ -3377,6 +3377,7 @@ export function withXaiSubscriptionCatalogProvider(settings: Settings): Settings
       const capabilities = legacyModelCapabilities(settings, {
         reasoningEffort: true,
         hostedWebSearch: true,
+        vision: true,
       });
       capabilities.reasoning.efforts = ["low", "medium", "high", "xhigh"];
       capabilities.reasoning.defaultEffort = "high";
