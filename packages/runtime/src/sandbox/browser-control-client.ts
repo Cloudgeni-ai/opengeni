@@ -72,7 +72,7 @@ import {
 import { parseExecResponseBanner } from "./exec-banner";
 import { buildStreamUrl, type ExposedPortEndpoint } from "./stream-port";
 
-const CLIENT_ROOT = "/tmp/opengeni-browser-control-client";
+const CLIENT_ROOT = "/tmp/opengeni-private/browser-control-client";
 export const BROWSER_CONTROL_ADMIN_TOKEN_FILE = "/tmp/opengeni-browserd/authority/admin-token";
 const COMMAND_OK = "OPENGENI_BROWSER_CONTROL_CLIENT_OK";
 const TOKEN_PATTERN = /^[A-Za-z0-9._~-]{32,2048}$/u;

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const TASK_NOTE_TEXT_MAX_BYTES = 4_096;
 export const TASK_NOTE_REASON_MAX_BYTES = 2_048;
-export const TASK_NOTE_MAX_LIFETIME_DAYS = 30;
+export const TASK_NOTE_MAX_LIFETIME_DAYS = 90;
 export const TASK_NOTE_ACTIVE_RECORD_CAP = 500;
 export const TASK_NOTE_LIST_DEFAULT_LIMIT = 10;
 export const TASK_NOTE_LIST_MAX_LIMIT = 20;

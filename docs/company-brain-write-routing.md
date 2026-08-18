@@ -133,7 +133,7 @@ authority, a different learning-policy source, or replacement evidence bytes.
 `packages/core/src/domain/remember.ts`) is the one tool for "remember this for
 the workspace". Its lane is the Company Brain area (`preference`,
 `instruction_policy`, or `knowledge`); v1 supports the workspace scope only. The
-content becomes one exact task note (the evidence, expiring after 30 days), the
+content becomes one exact task note (the evidence, expiring after 90 days), the
 note is promoted through the learning-policy router above with full user
 confidence, and the receipt is one of:
 
@@ -238,7 +238,7 @@ The remote first-party MCP surface is:
 - `task_notes_list`: at most 20 unexpired notes, with a 96 KiB aggregate
   projection bound;
 - `task_note_save`: one 4,096-UTF-8-byte note, a caller operation UUID, and an
-  expiry from one through 30 days;
+  expiry from one through 90 days;
 - `task_note_archive`: an optimistic version-1 archive with a separate bounded
   reason and operation UUID; and
 - `task_note_replace`: atomically archive one exact active version-1 note and

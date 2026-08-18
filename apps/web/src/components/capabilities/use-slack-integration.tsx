@@ -17,7 +17,7 @@ import type {
   IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
 import { SlackReactionChannelsDialog } from "@/components/capabilities/slack-reaction-channels-dialog";
-import type { IntegrationAdapter } from "@/components/capabilities/use-google-drive-integration";
+import type { IntegrationAdapter } from "@/components/capabilities/use-api-integration-accounts";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAppContext } from "@/context";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";

@@ -603,7 +603,7 @@ describe("Google Drive OAuth isolation proof", () => {
       readFile(new URL("../../web/src/lib/google-drive-connection.ts", import.meta.url), "utf8"),
       readFile(
         new URL(
-          "../../web/src/components/capabilities/integration-control-center.tsx",
+          "../../web/src/components/capabilities/use-api-integration-accounts.tsx",
           import.meta.url,
         ),
         "utf8",
@@ -612,6 +612,25 @@ describe("Google Drive OAuth isolation proof", () => {
     expect(googleBrowserSources.join("\n")).not.toMatch(
       /localStorage|sessionStorage|indexedDB|document\.cookie/,
     );
+
+    // The Drive adapter itself keeps exactly one browser-storage marker: which
+    // OAuth capability the redirect asked for. No credential, token, or
+    // connection material may reach any browser store.
+    const driveAdapterSource = await readFile(
+      new URL(
+        "../../web/src/components/capabilities/use-google-drive-integration.tsx",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    expect(driveAdapterSource).not.toMatch(/localStorage|indexedDB|document\.cookie/);
+    const driveStorageKeys = [
+      ...driveAdapterSource.matchAll(/sessionStorage\.\w+\(\s*`([^`]+)`/g),
+    ].map((match) => match[1]!);
+    expect(driveStorageKeys.length).toBeGreaterThan(0);
+    for (const key of driveStorageKeys) {
+      expect(key).toMatch(/^opengeni:google-drive-oauth-capability:/);
+    }
 
     for (const secret of [
       ACCESS_TOKEN,

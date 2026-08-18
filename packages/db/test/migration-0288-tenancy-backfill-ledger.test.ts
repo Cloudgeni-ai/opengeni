@@ -265,28 +265,15 @@ describe("migration 0288 tenancy backfill ledger", () => {
       () => completeReceipt(organizationId, receiptId, 1, 1, "completed"),
       /already settled/u,
     );
-    await expectRejection(
-      () => openReceipt(organizationId, "rigs", "run-b"),
-      /already settled/u,
-    );
+    await expectRejection(() => openReceipt(organizationId, "rigs", "run-b"), /already settled/u);
   }, 180_000);
 
   test("the caller cannot understate its own outstanding obligations", async () => {
     if (!available) return;
     const organizationId = await seedOrganization("obligations");
     const receiptId = await openReceipt(organizationId, "documents", "run-c");
-    await recordUnresolved(
-      organizationId,
-      receiptId,
-      Bun.randomUUIDv7(),
-      "external_lane_owns_row",
-    );
-    await recordUnresolved(
-      organizationId,
-      receiptId,
-      Bun.randomUUIDv7(),
-      "external_lane_owns_row",
-    );
+    await recordUnresolved(organizationId, receiptId, Bun.randomUUIDv7(), "external_lane_owns_row");
+    await recordUnresolved(organizationId, receiptId, Bun.randomUUIDv7(), "external_lane_owns_row");
 
     // completion takes classified/skipped only - unresolved_count is owned by
     // the append path, so settling cannot zero it out.

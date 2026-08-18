@@ -30,6 +30,7 @@ import {
   gitRemotePathAliases,
   gitRemoteUriAliases,
   isClearedRunStateBlob,
+  isOpenSuffixRunStateBlob,
   normalizeRepositorySubpath,
   normalizeResourceMountPath,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
@@ -444,6 +445,7 @@ setSelfhostedApplyDiff(
 
 export {
   elideSupersededViewImagePairs,
+  extractOpenSuffixMembers,
   repairHistoryProtocolItems,
   sanitizeHistoryItemsForModel,
   stripInternalModelMetadata,
@@ -452,7 +454,20 @@ export {
   projectRejectedReasoningArtifact,
   serializedRunStateHasOpaqueProviderArtifact,
 } from "./history-sanitizer";
-export type { HistoryItem } from "./history-sanitizer";
+export type { HistoryItem, OpenSuffixMember } from "./history-sanitizer";
+export {
+  OpenSuffixUnresumableError,
+  OPEN_SUFFIX_MAX_JSON_BYTES,
+  assertOpenSuffixResumable,
+  extractOpenSuffixFromRunState,
+  extractOpenSuffixFromSerializedRunState,
+  functionCallResultItem,
+  interruptionKindForCallItem,
+  invokePreparedAgentTool,
+  protocolItemsFromGeneratedItems,
+  serializedRunStateForOpenSuffixPause,
+  type OpenSuffixInterruptionKind,
+} from "./open-suffix";
 export { normalizeProtocolJsonValue, UnsupportedProtocolJsonValueError } from "./protocol-json";
 export {
   projectHistoryForProvider,
@@ -5982,6 +5997,11 @@ export async function prepareRunInput(
   if (isClearedRunStateBlob(input.serializedRunState)) {
     throw new Error(
       "Cannot resume an interrupted tool: the session context was cleared, so the awaiting run state no longer exists.",
+    );
+  }
+  if (isOpenSuffixRunStateBlob(input.serializedRunState)) {
+    throw new Error(
+      "Cannot resume an interrupted tool from leftover SDK run state; the open suffix is the resume authority.",
     );
   }
   const compatibleRunState = repairSerializedRunStateExposedPorts(input.serializedRunState);
