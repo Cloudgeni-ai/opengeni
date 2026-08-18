@@ -1,4 +1,4 @@
-// Migration 0289: the tenancy inventory seam's `unclassified` counters for
+// Migration 0292: the tenancy inventory seam's `unclassified` counters for
 // Variable Sets, Rigs, and Connected Machines were structurally
 // `total - userScoped` (the authority shape checks REQUIRE a NULL authority_id
 // for every organization/workspace row), so every correctly classified row was
@@ -13,7 +13,7 @@ import postgres from "postgres";
 import { createDb, inventoryOrganizationTenancy, type Database, type DbClient } from "../src";
 
 const migrationUrl = new URL(
-  "../drizzle/0289_truthful_tenancy_inventory_counters.sql",
+  "../drizzle/0292_truthful_tenancy_inventory_counters.sql",
   import.meta.url,
 );
 
@@ -25,7 +25,7 @@ let client: DbClient;
 let db: Database;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0289-tenancy-inventory-counters");
+  shared = await acquireSharedTestDatabase("migration-0292-tenancy-inventory-counters");
   if (!shared) {
     available = false;
     if (requireRealDatabase) throw new Error("OPENGENI_REQUIRE_REAL_DB=1 but no database");
@@ -142,7 +142,7 @@ async function seedOrganization(label: string): Promise<{
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
-describe("migration 0289 truthful tenancy inventory counters", () => {
+describe("migration 0292 truthful tenancy inventory counters", () => {
   test("replaces the seam in place and drops the three untruthful counters", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -180,7 +180,7 @@ describe("migration 0289 truthful tenancy inventory counters", () => {
 
   test("byScope distinguishes a correctly classified workspace row from a user-scoped one, and no `unclassified` counter is reported", async () => {
     if (!available) return;
-    const { accountId } = await seedOrganization("inventory-0289-counters");
+    const { accountId } = await seedOrganization("inventory-0292-counters");
 
     const inventory = (await inventoryOrganizationTenancy(db, {
       organizationId: accountId,
@@ -204,7 +204,7 @@ describe("migration 0289 truthful tenancy inventory counters", () => {
 
   test("the removed predicate was structurally `total - userScoped`, never an unmigrated population", async () => {
     if (!available) return;
-    const { accountId } = await seedOrganization("inventory-0289-predicate");
+    const { accountId } = await seedOrganization("inventory-0292-predicate");
 
     // Prove the old predicate's arithmetic directly against the fixture: for
     // each family, `authority_id IS NULL` counts EXACTLY the correctly
@@ -239,7 +239,7 @@ describe("migration 0289 truthful tenancy inventory counters", () => {
     // The `db` handle connects as the non-superuser opengeni_app login role,
     // so a successful call is the end-to-end proof that the grant survived.
     const [account] = await admin<{ id: string }[]>`
-        insert into managed_accounts (name) values ('inventory-0289-grant') returning id`;
+        insert into managed_accounts (name) values ('inventory-0292-grant') returning id`;
     const inventory = (await inventoryOrganizationTenancy(db, {
       organizationId: account!.id,
     })) as Inventory;
@@ -249,9 +249,9 @@ describe("migration 0289 truthful tenancy inventory counters", () => {
   test("a null organization id still raises 22004 and a cross-organization request still raises 42501", async () => {
     if (!available) return;
     const [account] = await admin<{ id: string }[]>`
-        insert into managed_accounts (name) values ('inventory-0289-scope-a') returning id`;
+        insert into managed_accounts (name) values ('inventory-0292-scope-a') returning id`;
     const [victim] = await admin<{ id: string }[]>`
-        insert into managed_accounts (name) values ('inventory-0289-scope-b') returning id`;
+        insert into managed_accounts (name) values ('inventory-0292-scope-b') returning id`;
 
     // postgres.js query objects are thenables, not real Promises - awaiting
     // them explicitly inside try/catch is the only safe way to assert on the

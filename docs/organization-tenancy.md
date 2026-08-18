@@ -509,7 +509,7 @@ an idempotent lifecycle operation. Record backfill receipts and unresolved rows
 without widening access.
 
 The phase's data source is the read-only inventory seam (migration 0285,
-corrected by 0289): `bun run db:inventory-tenancy --organization-id <uuid>`
+corrected by 0292): `bun run db:inventory-tenancy --organization-id <uuid>`
 reports content-free counts of every legacy-attribution population - ownerless
 sessions, Variable Sets / Rigs / Connected Machines **per authority lane**,
 connections per authority lane, humans with workspace access but no
@@ -522,7 +522,7 @@ cross-organization request.
 
 **There is no "unclassified" count for Variable Sets, Rigs, or Connected
 Machines, and one must not be reintroduced without new schema.** 0285 reported
-one, defined as `authority_id IS NULL`; 0289 removed it. The authority shape
+one, defined as `authority_id IS NULL`; 0292 removed it. The authority shape
 constraints (`workspace_variable_sets_authority_shape_check`,
 `rigs_authority_shape_check`, `enrollments_authority_shape_check`) *require* a
 NULL `authority_id` for every organization- and workspace-scoped row, so that
