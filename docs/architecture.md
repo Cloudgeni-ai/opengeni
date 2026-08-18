@@ -920,9 +920,20 @@ container DNS identity plus its original port. A public browser must never recei
 that internal address: Docker frame and RFB attachments cross the API's bounded
 bidirectional WebSocket proxy with a short-lived encrypted, origin-bound grant.
 Modal retains its provider-scoped direct tunnel; Connected Machines retain their
-native relay. Canonical: `packages/runtime/src/sandbox/index.ts`,
-`apps/api/src/interaction-frame-proxy.ts`, and the Browser/Computer attachment
-routes.
+native relay. Attached Chrome freezes `connectionGeneration` as
+`placementInstanceId`. A later inventory announcement with a new generation
+atomically marks those BrowserSessions/ComputerSessions `lost` with
+`controller_transition_expired` and never rebinds the old controller token.
+In-flight `/end` stays `ending` so physical teardown can finish. Heartbeats
+validate the live device generation before pulsing. `/end` still reaches the
+live agent with the original token fence so browserd can `stopCapture` and
+kill `opengeni-computer-native`; a later generation must not leave
+ScreenCaptureKit/`replayd` streams running. Shared-seat (macOS attached)
+browserd serializes create-and-displace so two helpers cannot start on the
+same seat. Replacement is a new BrowserSession via **Browser → New browser →
+Connected Chrome**, not Reconnect. Canonical: `packages/runtime/src/sandbox/index.ts`,
+`apps/api/src/interaction-frame-proxy.ts`, `packages/db/src/attached-browser-devices.ts`,
+and the Browser/Computer attachment routes.
 
 Scheduled incident-telemetry tasks use an explicit `incident_telemetry`
 execution class plus a contracts-owned preflight declaration. Core admission
@@ -1377,6 +1388,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | SSE / streaming semantics                                                   | `apps/api/src/http/sse.ts`, `packages/sdk/src/stream.ts`                                                                                                                                                                                                    | —                                                                                  |
 | Sandbox backends / the registry                                             | `packages/runtime/src/sandbox/providers/index.ts`, `packages/contracts` (the enum)                                                                                                                                                                          | [`../AGENTS.md`](../AGENTS.md) Sandbox Notes                                       |
 | Selfhosted / BYO-compute control plane                                      | `packages/runtime/src/sandbox/selfhosted/`, `agent/proto/opengeni_agent.proto`                                                                                                                                                                              | [`connected-machines.md`](connected-machines.md)                                  |
+| Attached Chrome inventory / BrowserSession+ComputerSession generation fence | `packages/db/src/attached-browser-devices.ts`, `packages/db/src/browser-sessions.ts`, `packages/db/src/computer-sessions.ts`, `apps/api/src/routes/browser-sessions.ts`, `apps/api/src/routes/computer-sessions.ts`, `packages/browserd/src/computer-supervisor.ts`, `packages/browserd/src/computer-driver.ts` | [`connected-machines.md`](connected-machines.md) |
 | The relay / pixel+terminal data plane                                       | `agent/crates/opengeni-relay/`, `apps/api/src/sandbox/viewer.ts`                                                                                                                                                                                            | [`connected-machines.md`](connected-machines.md)                                  |
 | Sandbox lease / reaper                                                      | `apps/worker/src/activities/sandbox-lease.ts`, `apps/worker/src/sandbox-resume.ts`                                                                                                                                                                          | —                                                                                  |
 | The agent loop / model routing / instructions                               | `packages/runtime/src/index.ts`; provider facade and cohesive leaves in `packages/runtime/src/model-provider*.ts`; final model-wire shaping in `packages/runtime/src/model-input.ts`; stream/usage/interruption normalization in `packages/runtime/src/run-events.ts`                                      | [`model-providers.md`](model-providers.md)                                         |
