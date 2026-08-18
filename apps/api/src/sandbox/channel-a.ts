@@ -47,6 +47,7 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import {
+  recordTenancyCompatibilityLaneUse,
   sandboxLeaseTelemetryKey,
   sandboxOperationMetricObserver,
   type Observability,
@@ -1287,7 +1288,8 @@ export function channelAOperationFailureDiagnostic(
   };
 }
 
-function observeChannelAOperationFailure(
+/** Exported for the telemetry contract tests; not a route surface. */
+export function observeChannelAOperationFailure(
   services: ChannelAServices,
   input: {
     workspaceId: string;
@@ -1300,6 +1302,13 @@ function observeChannelAOperationFailure(
   },
 ): void {
   if (!services.observability) return;
+  // A writer with no recorded authority is a compatibility lane, not a fault:
+  // count the lane itself so an operator can see whether it is still live,
+  // separately from the structural failure signal operators page on below.
+  // Lane name only - never the workspace, sandbox group, backend, or operation.
+  if (workspaceMutationAuthorityFenceCode(input.error) === "authority_unattributed") {
+    recordTenancyCompatibilityLaneUse(services.observability, "workspace_writer_unattributed");
+  }
   const diagnostic = channelAOperationFailureDiagnostic(input.error, input.waitSignal);
   const attributes = {
     sandboxLeaseKey: sandboxLeaseTelemetryKey(input.workspaceId, input.sandboxGroupId),
