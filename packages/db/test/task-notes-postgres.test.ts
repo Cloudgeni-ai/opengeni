@@ -1801,3 +1801,80 @@ describe("task-tree notes PostgreSQL authority", () => {
     ).rejects.toThrow("4096 UTF-8 bytes");
   });
 });
+
+describe("task-tree notes expiry ceiling (widened to 90 days)", () => {
+  test("createTaskNote accepts exactly 90 days and rejects 91", async () => {
+    if (!shared || !client) return;
+    const f = await fixture();
+    const attempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.root.id,
+      initiatorSubjectId: f.ownerSubjectId,
+      initiatingHumanSubjectId: f.ownerSubjectId,
+    });
+    const accepted = await createTaskNote(client.db, {
+      ...claims(attempt),
+      operationId: crypto.randomUUID(),
+      kind: "finding",
+      text: "A note that should survive a long pause between sessions.",
+      expiresInDays: 90,
+    });
+    const createdAt = new Date(accepted.note.createdAt).getTime();
+    const expiresAt = new Date(accepted.note.expiresAt).getTime();
+    expect(Math.round((expiresAt - createdAt) / (24 * 60 * 60 * 1000))).toBe(90);
+
+    await expect(
+      createTaskNote(client.db, {
+        ...claims(attempt),
+        operationId: crypto.randomUUID(),
+        kind: "finding",
+        text: "A note that asks for one day too many.",
+        expiresInDays: 91,
+      }),
+    ).rejects.toThrow("Task note expiry must be 1-90 whole days");
+  });
+
+  test("replaceTaskNote accepts exactly 90 days and rejects 91", async () => {
+    if (!shared || !client) return;
+    const f = await fixture();
+    const attempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.root.id,
+      initiatorSubjectId: f.ownerSubjectId,
+      initiatingHumanSubjectId: f.ownerSubjectId,
+    });
+    const original = await createTaskNote(client.db, {
+      ...claims(attempt),
+      operationId: crypto.randomUUID(),
+      kind: "finding",
+      text: "The original note before a long-lived replacement.",
+      expiresInDays: 7,
+    });
+    const replaced = await replaceTaskNote(client.db, {
+      ...claims(attempt),
+      operationId: crypto.randomUUID(),
+      replacedNoteId: original.note.id,
+      expectedReplacedVersion: 1,
+      replacementKind: "decision",
+      replacementText: "The replacement note that should survive 90 days.",
+      replacementExpiresInDays: 90,
+      reason: "Extend the note lifetime to 90 days.",
+    });
+    expect(replaced.replacement.status).toBe("active");
+
+    await expect(
+      replaceTaskNote(client.db, {
+        ...claims(attempt),
+        operationId: crypto.randomUUID(),
+        replacedNoteId: replaced.replacement.id,
+        expectedReplacedVersion: 1,
+        replacementKind: "decision",
+        replacementText: "A replacement that asks for one day too many.",
+        replacementExpiresInDays: 91,
+        reason: "Try to exceed the widened ceiling.",
+      }),
+    ).rejects.toThrow("Task-note replacement requires version 1 and a 1-90 day expiry");
+  });
+});
