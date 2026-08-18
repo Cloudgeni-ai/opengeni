@@ -1,5 +1,12 @@
 # @opengeni/contracts
 
+## 1.4.0
+
+### Minor Changes
+
+- b05130a: Hard-cut editable spreadsheets to authored-only canonical state, deterministic formula projections, and explicit current compatibility protocols.
+- 55e0417: Raise the durable per-session system-instruction limit from 32768 to 65536 characters across the public and first-party MCP contracts.
+
 ## 1.3.0
 
 ### Minor Changes

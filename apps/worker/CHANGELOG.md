@@ -1,5 +1,28 @@
 # @opengeni/worker-bundle
 
+## 0.20.10
+
+### Patch Changes
+
+- 0a6c577: Keep periodic workspace snapshots off the first provider-request critical path, clarify the overlapping runtime/model-preparation timing in the session timeline, and promote the complete signed Agent 0.1.16 bundle as the default stable installer target.
+- Updated dependencies [0a6c577]
+- Updated dependencies [6937eaf]
+- Updated dependencies [e6c2fee]
+- Updated dependencies [b05130a]
+- Updated dependencies [418b531]
+- Updated dependencies [55e0417]
+  - @opengeni/config@0.16.8
+  - @opengeni/db@1.4.0
+  - @opengeni/storage@0.2.100
+  - @opengeni/contracts@1.4.0
+  - @opengeni/core@1.4.0
+  - @opengeni/documents@0.6.3
+  - @opengeni/github@0.4.63
+  - @opengeni/runtime@1.1.1
+  - @opengeni/events@0.3.117
+  - @opengeni/codemode@0.4.8
+  - @opengeni/observability@0.7.11
+
 ## 0.20.9
 
 ### Patch Changes

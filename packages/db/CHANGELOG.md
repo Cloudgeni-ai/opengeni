@@ -1,5 +1,22 @@
 # @opengeni/db
 
+## 1.4.0
+
+### Minor Changes
+
+- 6937eaf: The API-direct session-attach variable-set materialization lane (viewer attach and direct channel operations cold-creating a box) now records the accepted subject and a `variable_set.materialized` audit fact with the live session authority tuple (migration 0282, rolling; unchanged function signature). Attribution flows through the standard request-context GUCs; an old image that sets no subject records the explicit `service:session` sentinel. Denials keep their fail-closed raise-and-rollback semantics.
+- b05130a: Hard-cut editable spreadsheets to authored-only canonical state, deterministic formula projections, and explicit current compatibility protocols.
+
+### Patch Changes
+
+- 418b531: Human-confirmed Knowledge approvals now record truthful review reasons: migration 0284 adds a reason-carrying overload of `governed_learning_apply_knowledge_review`, and both human-confirmed callers (`confirm_remember_knowledge_claim` and `activate_human_confirmed_learning_decision`) pass an explicit human-confirmed reason instead of the hard-coded "Automatic governed-learning activation." wording; the 9-arg signature keeps that legacy wording for the automatic path and remains the guard-resolved capability writer.
+- Updated dependencies [0a6c577]
+- Updated dependencies [b05130a]
+- Updated dependencies [55e0417]
+  - @opengeni/config@0.16.8
+  - @opengeni/contracts@1.4.0
+  - @opengeni/codemode@0.4.8
+
 ## 1.3.0
 
 ### Minor Changes

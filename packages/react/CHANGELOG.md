@@ -1,5 +1,18 @@
 # @opengeni/react
 
+## 2.0.0
+
+### Minor Changes
+
+- b05130a: Hard-cut editable spreadsheets to authored-only canonical state, deterministic formula projections, and explicit current compatibility protocols.
+
+### Patch Changes
+
+- 0a6c577: Keep periodic workspace snapshots off the first provider-request critical path, clarify the overlapping runtime/model-preparation timing in the session timeline, and promote the complete signed Agent 0.1.16 bundle as the default stable installer target.
+- Updated dependencies [b05130a]
+  - @opengeni/artifact-tool@0.3.0
+  - @opengeni/sdk@2.0.0
+
 ## 1.1.1
 
 ### Patch Changes
