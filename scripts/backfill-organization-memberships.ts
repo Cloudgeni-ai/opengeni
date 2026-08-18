@@ -1,4 +1,4 @@
-// Phase D membership and personal-workspace backfill driver (OPE-204 slice 3).
+// Phase D membership and personal-workspace backfill driver (organization-tenancy slice 3).
 //
 // Provisions the organization-membership anchor and deterministic personal
 // workspace for humans who held workspace access before migration 0219 and
