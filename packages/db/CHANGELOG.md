@@ -1,5 +1,32 @@
 # @opengeni/db
 
+## 1.6.0
+
+### Minor Changes
+
+- 368ee6c: Add the explicit resource-classification assertion seam for Variable Sets, Rigs, and Connected Machines (migration 0291, rolling; organization-tenancy phase D slices 4-5), plus `bun run db:verify-resource-classification`. These three families need no data rewrite and none is performed: `authority_scope` is `NOT NULL DEFAULT 'workspace'` on all three tables and every `*_authority_shape_check` was `VALIDATE`d at creation, so a legacy unmigrated row and a deliberately workspace-scoped row are byte-identical and there is no discriminator to classify on. `connections` (0256) is the one sibling family with a genuine one (`subject_id` plus an active organization membership); none of these tables has it, and phase D forbids substituting `created_by`, connection attribution, a default workspace, a resource name, or current access.
+
+  The seam therefore asserts and receipts instead. It proves per row what no constraint enforces - that a row claiming user ownership points at an authority of the matching `resource_kind`/`resource_id`, that the authority and its owning organization membership are both live, and that the delegation still has an origin workspace - and records every failure as an unresolved obligation with a fixed reason code through the tenancy backfill ledger, never as a guess or a rewrite. Its report states `ledgerAvailable` plainly so a run that could not record its obligations is visible rather than silent.
+
+  It is a `SECURITY DEFINER` capability-claiming seam rather than migration SQL for a structural reason: all three tables are FORCE RLS behind `workspace_rls_visible`, which is false while the workspace GUC is unset, and the documented deployment posture is a non-superuser migration principal without `BYPASSRLS`. A plain migration-time `UPDATE` on these tables matches zero rows and reports success on such a deployment, and only appears to work in a harness that migrates as superuser.
+
+### Patch Changes
+
+- f4afa19: Resume requires_action only from the open suffix plus paired history. Pause stores the sentinel instead of a leftover SDK RunState heap.
+- d581eef: Allow a connected Chrome profile to move from a revoked machine enrollment to its replacement enrollment.
+- 8583779: Resume `requires_action` from paired history plus a bounded open suffix instead of materializing an oversized SDK RunState blob.
+- a99ef33: Test-only: add cross-organization isolation and revocation evidence coverage for the organization-tenancy authority tables. `packages/db/test/organization-isolation-evidence.test.ts` proves, against a real PostgreSQL instance, that a member of one organization cannot read or mutate another organization's workspaces, sessions, or resources, and that revoking a membership takes effect immediately for the exact revoked grant. No shipped runtime behavior changes; this releases the new coverage with the package.
+- 7bc1cd1: Correct the organization tenancy inventory seam (migration 0292, rolling): remove the untruthful `unclassified` counters for Variable Sets, Rigs, and Connected Machines. 0285 defined them as `authority_id IS NULL`, but the authority shape constraints _require_ a NULL `authority_id` for every organization- and workspace-scoped row, so the counter was structurally `total - userScoped` - every correctly classified row was reported as unmigrated and the number could never drain to zero as the documented backfill gate. No corrected predicate exists: `authority_scope` defaults to `'workspace'`, and `origin_workspace_id` means "predates the scoped lifecycle" for Variable Sets, is still produced NULL today by `createRig`'s non-scoped branch for Rigs, and has inverted polarity for Connected Machines (0262 backfilled it while the ordinary enroll path leaves it NULL). The population is unrepresentable in the current schema, so the key is removed rather than renamed - `byScope` already reports every authority distinction the schema can truthfully make. `schemaVersion` moves 1 -> 2; the seam stays read-only, integers-only, and exact-organization scoped, and `CREATE OR REPLACE` preserves its owner and `opengeni_app` EXECUTE grant. The documents gate is unchanged: its `authority_kind = 'personal' AND authority_id IS NULL` names a genuine invariant violation and remains truthful.
+- 6d22ab5: Widen the task-note expiry ceiling from 30 to 90 days. Task notes are pure agent-to-agent coordination within one root session tree; resuming a paused root session/task tree after a longer gap previously lost all coordination notes silently. `TASK_NOTE_MAX_LIFETIME_DAYS` is now the single source of truth, referenced by the application-layer bound checks and `remember`'s evidence note instead of a hardcoded literal. Fully backward compatible: every existing row and every caller supplying 1-30 days keeps working unchanged.
+- Updated dependencies [f4afa19]
+- Updated dependencies [8583779]
+- Updated dependencies [f4afa19]
+- Updated dependencies [4541ab2]
+- Updated dependencies [6d22ab5]
+  - @opengeni/contracts@1.4.1
+  - @opengeni/config@0.17.0
+  - @opengeni/codemode@0.4.9
+
 ## 1.5.0
 
 ### Minor Changes
