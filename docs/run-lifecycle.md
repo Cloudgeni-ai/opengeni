@@ -483,10 +483,13 @@ Request-time filters may normalize computer calls, normalize provider item
 identities, or bound tool output deterministically; they may not classify or
 rewrite arbitrary textual content and may not remove or reorder an
 earlier `view_image` call/result pair. Computer-use tools are likewise exposed
-only when the caller supplies a proven visual transport: responses routes
-use hosted computer tools, Codex subscription routes return structured image
-results, and chat-wire or omitted/unproven public runtime routes receive no
-computer tools rather than screenshot data URLs encoded as text.
+only when the caller supplies a proven visual transport: Responses wires
+(including Gateway Kimi and SuperGrok) and Codex use `computer_*` function
+tools with structured image results when the model catalog lists image input.
+Gateway DeepSeek stays text-only and therefore receives neither image input nor
+computer tools. Chat Completions receives no computer tools: tool results on
+that wire are text, so a screenshot would become a base64 string rather than an
+image the model sees.
 
 Before model/tool work, a claimed turn inserts a first-class
 `session_turn_attempts` row containing its exact Temporal activity id, current
@@ -1152,21 +1155,18 @@ audit reads may return it, so it is never a secret boundary.
    preserves omitted references in one compact catalog. When old bytes are
    actually needed, the model uses the existing dedicated Files MCP download
    URL plus shell instead of startup rematerialization.
-2. **`agent_run_states` — leftover requires-action blob only (expand era).**
-   New pauses flush completed-pair history, then persist the bounded open suffix
+2. **`agent_run_states` — requires-action sentinel plus control snapshots.**
+   Pauses flush completed-pair history, then persist the bounded open suffix
    on `session_pending_tool_calls` (the pending call item, tied reasoning the
    sanitizer would drop, and interruption kind). Unpaired calls never enter
-   model-facing `session_history_items`. Resume settles one suffix member
+   model-facing `session_history_items`. The same settlement writes the
+   open-suffix sentinel into `agent_run_states` with pending-approval /
+   human-input snapshots. Resume settles one suffix member
    (human-input response, approval invoke through the existing MCP execute-once
    fence, or rejection), promotes reasoning + call + bounded result as one pair,
    and either stays `requires_action` without a model call or continues from
-   history. It does not reconstruct synthetic SDK `RunState`.
-   A leftover SDK `generatedItems` heap may still be written when it fits the
-   3 MiB envelope; an oversized heap stores the open-suffix sentinel so pause
-   still succeeds. Settlement insert enforces that envelope. Resume prefers the
-   suffix; the blob is only for writers that never attached interruption rows.
-   Before any leftover blob is written, retained screenshot and generated-image
-   copies inside it are compacted to retry-stable receipts.
+   history. Missing suffix rows fail closed. It does not reconstruct SDK
+   `RunState`.
    Historical sandbox envelopes receive one exact-path compatibility repair before
    SDK validation: invalid non-record `exposedPorts` values are removed only from
    the root and `sessionsByAgent[*]` session envelopes, while provider state and
@@ -1223,8 +1223,9 @@ replays paid work. Canonical:
 
 Structured human input adds a durable control checkpoint, not a fourth memory
 store. When the built-in `request_human_input` tool interrupts a run, the same
-transaction stores its request rows, the opaque `agent_run_states` checkpoint,
-the `requires_action` projection, and requested events. The request row is
+transaction stores its request rows, the open-suffix pending-tool receipts,
+the `agent_run_states` sentinel, the `requires_action` projection, and
+requested events. The request row is
 owned by the exact turn execution generation; its creation attempt is only
 provenance. Answer, allowed skip, expiry, or cancellation is first-writer-wins
 and becomes structured output for that same SDK tool call. It never becomes a

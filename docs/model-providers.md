@@ -149,9 +149,11 @@ rules disabled for the managed key because those rules operate outside the
 request body.
 
 Both models request Gateway automatic caching. Kimi remains catalogued as
-image-capable. OpenGeni verifies finalized attachment bytes and checksums, then
-sends images inline as data URLs through the standard Responses input surface;
-it never gives an endpoint provider an object-store URL.
+image-capable, so the worker also attaches `view_image` and `computer_*`
+screenshot tools. DeepSeek stays text-only. OpenGeni verifies finalized
+attachment bytes and checksums, then sends images inline as data URLs through
+the standard Responses input surface; it never gives an endpoint provider an
+object-store URL.
 
 DeepSeek V4 Flash 0731 and Kimi K3 use OpenGeni's provider-neutral lazy-tool
 dispatcher on the Responses wire. Their initial tool block contains the stable
@@ -194,7 +196,9 @@ portable sessions may use any supported route whose request adapter can express
 their canonical history.
 
 SuperGrok models use the `supergrok/` product namespace and the curated
-`supergrok-subscription` provider. The xAI API-key rail remains separate. See
+`supergrok-subscription` provider. The catalog advertises image input, which is
+the worker gate for user image attachments, `view_image`, and `computer_*`
+screenshot tools. The xAI API-key rail remains separate. See
 [`supergrok-subscription.md`](supergrok-subscription.md) for account authority,
 allocator, lease, and durable capacity-wait semantics.
 
