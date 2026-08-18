@@ -1,13 +1,10 @@
 import type { MemorySlackPublicationDistribution } from "@opengeni/contracts";
 import {
-  correctWorkspaceMemory,
   enqueueMemorySlackPublication,
   getCurrentMemorySlackPublicationConfiguration,
   getWorkspaceMemorySlackPublicationSnapshot,
   saveWorkspaceMemory,
   withWorkspaceRls,
-  type CorrectWorkspaceMemoryInput,
-  type CorrectWorkspaceMemoryResult,
   type Database,
   type EnqueueMemorySlackPublicationResult,
   type MemoryEmbedder,
