@@ -12,7 +12,12 @@ import {
   slackBotDocumentDestinationAuthority,
 } from "@/components/capabilities/use-slack-integration";
 import type { AccessContext, GitHubAppInfo } from "@/types";
-import { canManageApiIntegrations } from "./capabilities";
+import type { IntegrationViewModel } from "@/components/capabilities/integration-view-model";
+import {
+  canManageApiIntegrations,
+  integrationQuickConnect,
+  integrationRowBusy,
+} from "./capabilities";
 
 function accessContext(
   permissions: AccessContext["workspaceGrants"][number]["permissions"],
@@ -143,5 +148,50 @@ describe("Slack integration authority", () => {
       false,
     );
     expect(canManageApiIntegrations(accessContext(["workspace:admin"]), "workspace-a")).toBe(true);
+  });
+});
+
+describe("integration row quick-connect guard", () => {
+  const setup = (
+    footer: IntegrationViewModel["footer"],
+    chip: IntegrationViewModel["chip"] = { label: "Not connected", tone: "idle" },
+  ) => ({ chip, footer });
+
+  test("offers the fast path only for a genuinely not-connected, idle setup footer", () => {
+    const onSetup = () => {};
+    expect(integrationQuickConnect(setup({ kind: "setup", onSetup }))).toBe(onSetup);
+    expect(
+      integrationQuickConnect(
+        setup({ kind: "setup", onSetup }, { label: "Connected", tone: "ok" }),
+      ),
+    ).toBeUndefined();
+    expect(
+      integrationQuickConnect(
+        setup({ kind: "locked" }, { label: "Set up by an admin", tone: "plain" }),
+      ),
+    ).toBeUndefined();
+  });
+
+  test("a busy or disabled setup never fires a second connect", () => {
+    const onSetup = () => {};
+    // A double click must not mint a second instance key and start a second
+    // OAuth redirect.
+    expect(integrationQuickConnect(setup({ kind: "setup", onSetup, busy: true }))).toBeUndefined();
+    expect(
+      integrationQuickConnect(setup({ kind: "setup", onSetup, disabled: true })),
+    ).toBeUndefined();
+  });
+
+  test("row busy comes from the adapter's own footer, never a chip label", () => {
+    expect(integrationRowBusy({ footer: { kind: "setup", onSetup: () => {}, busy: true } })).toBe(
+      true,
+    );
+    expect(integrationRowBusy({ footer: { kind: "setup", onSetup: () => {} } })).toBe(false);
+    expect(
+      integrationRowBusy({
+        footer: { kind: "connected", onReconnect: () => {}, onDisconnect: () => {}, busy: true },
+      }),
+    ).toBe(true);
+    expect(integrationRowBusy({ footer: { kind: "locked" } })).toBe(false);
   });
 });

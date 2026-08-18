@@ -8,6 +8,8 @@
  * sheet; the frame itself never varies.
  */
 
+import type { ReactNode } from "react";
+
 export type IntegrationChipTone = "ok" | "warn" | "idle" | "plain";
 
 export type IntegrationChip = {
@@ -15,7 +17,18 @@ export type IntegrationChip = {
   tone: IntegrationChipTone;
 };
 
-export type IntegrationMark = { logoSrc: string; monogram: string } | { monogram: string };
+/**
+ * The closed icon vocabulary for a provider with no hosted logo asset, mirroring
+ * `IntegrationPresentationIcon` in `@opengeni/capabilities`. A named product
+ * glyph reads far better than an ambiguous two-letter monogram (Outlook
+ * Calendar and Outlook Contacts cannot both be "OC").
+ */
+export type IntegrationMarkIcon = "mail" | "calendar" | "contacts" | "files" | "cloud";
+
+export type IntegrationMark =
+  | { logoSrc: string; monogram: string }
+  | { icon: IntegrationMarkIcon }
+  | { monogram: string };
 
 export type IntegrationFact = {
   label: string;
@@ -23,8 +36,37 @@ export type IntegrationFact = {
 };
 
 export type IntegrationAccessItem = {
+  /**
+   * Stable identity for this entry (an account's instance key, a folder id).
+   * Keying on it keeps a row mounted when only its status text changes, so a
+   * status flip never steals focus from the row's own action. Falls back to
+   * content when omitted (plain resource rows with nothing stabler).
+   */
+  id?: string;
   name: string;
   meta?: string;
+  /** Status dot color for a multi-account entry ("ok" green, "warn" amber). Omitted for a plain resource row. */
+  status?: "ok" | "warn";
+  /** Sub-entries rendered under this one (e.g. the folders an account contributes). */
+  subItems?: Array<{ name: string; meta?: string }>;
+  /** Shown in place of an empty `subItems` list, when the absence itself is the fact. */
+  subItemsEmptyMessage?: string;
+  /** Inline per-item actions (e.g. "Reconnect", "Remove") rendered at the end of the row. */
+  actions?: Array<{
+    label: string;
+    onClick: () => void;
+    disabled?: boolean;
+    /** Disclosure this action points at via aria-describedby. */
+    disclosureId?: string;
+    /** Renders in the destructive tone (still confirm before destroying). */
+    destructive?: boolean;
+  }>;
+  /**
+   * Per-entry expandable detail rendered under the row - the one slot deep
+   * per-instance surfaces (the Integration facets panel) mount into, so they
+   * stay scoped to exactly this account instead of the whole provider row.
+   */
+  detail?: ReactNode;
 };
 
 export type IntegrationAccess = {
@@ -119,6 +161,18 @@ export type IntegrationFooter =
  */
 export type IntegrationDisclosure = { id: string; text: string };
 
+/**
+ * The tool/function names a connected integration actually publishes, shown as
+ * a flat informational chip grid (no toggles, no per-tool detail). Populated
+ * only from an already-available cheap source (a stored allowlist); omitted
+ * entirely when no such source exists for the adapter.
+ */
+export type IntegrationToolsBlock = {
+  /** Defaults to "Tools" when rendered without one. */
+  title?: string;
+  tools: string[];
+};
+
 export type IntegrationViewModel = {
   id: string;
   name: string;
@@ -129,6 +183,8 @@ export type IntegrationViewModel = {
   access?: IntegrationAccess;
   options: IntegrationOption[];
   footer: IntegrationFooter;
+  /** The tools this connection actually publishes; omitted when unavailable. */
+  tools?: IntegrationToolsBlock;
   /** Optional plain-language notice shown above the blocks (state explanations). */
   notice?: {
     tone: "muted" | "waiting" | "failed";

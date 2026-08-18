@@ -151,11 +151,19 @@ function callIdOf(item: unknown): string | undefined {
  * types exist with that id, the call appearing before the result. Calls and
  * results that satisfy that survive untouched.
  */
-export function repairHistoryProtocolItems<T extends HistoryItem>(items: readonly T[]): T[] {
-  if (items.length === 0) {
-    return [];
-  }
+/**
+ * One unpaired tool call plus the reasoning items sanitizer rule 3 would drop
+ * with it. Persist these as the requires_action open suffix, never as model
+ * history, until a result can pair them.
+ */
+export type OpenSuffixMember<T extends HistoryItem = HistoryItem> = {
+  callId: string;
+  callType: string;
+  callItem: T;
+  reasoningItems: T[];
+};
 
+function unpairedHistoryItemIndices<T extends HistoryItem>(items: readonly T[]): Set<number> {
   // Pre-scan: for every (call-type, call_id) record the index of a RESULT that
   // appears strictly after the call. A call is valid only when such a result
   // exists; a result is valid only when its call appears strictly before it.
@@ -240,6 +248,60 @@ export function repairHistoryProtocolItems<T extends HistoryItem>(items: readonl
       }
     }
   }
+  return dropped;
+}
+
+/**
+ * Keep unpaired calls and their tied reasoning out of model-facing history.
+ * Persist them as the requires_action open suffix instead.
+ */
+export function extractOpenSuffixMembers<T extends HistoryItem>(
+  items: readonly T[],
+): Array<OpenSuffixMember<T>> {
+  if (items.length === 0) {
+    return [];
+  }
+  const dropped = unpairedHistoryItemIndices(items);
+  if (dropped.size === 0) {
+    return [];
+  }
+  const members: Array<OpenSuffixMember<T>> = [];
+  for (let index = 0; index < items.length; index += 1) {
+    if (!dropped.has(index)) {
+      continue;
+    }
+    const item = items[index];
+    if (!item) {
+      continue;
+    }
+    const type = itemType(item);
+    const callId = callIdOf(item);
+    if (!type || !callId || !RESULT_TYPE_BY_CALL_TYPE[type]) {
+      continue;
+    }
+    const reasoningItems: T[] = [];
+    for (let previous = index - 1; previous >= 0; previous -= 1) {
+      if (!dropped.has(previous) || itemType(items[previous]) !== "reasoning") {
+        break;
+      }
+      reasoningItems.unshift(items[previous]!);
+    }
+    members.push({
+      callId,
+      callType: type,
+      callItem: item,
+      reasoningItems,
+    });
+  }
+  return members;
+}
+
+export function repairHistoryProtocolItems<T extends HistoryItem>(items: readonly T[]): T[] {
+  if (items.length === 0) {
+    return [];
+  }
+
+  const dropped = unpairedHistoryItemIndices(items);
 
   const paired =
     dropped.size === 0 ? (items as T[]) : items.filter((_item, index) => !dropped.has(index));
