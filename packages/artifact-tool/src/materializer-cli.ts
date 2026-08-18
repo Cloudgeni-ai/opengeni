@@ -13,6 +13,11 @@ import {
   type SpreadsheetArtifactProjectedCellValue,
   type SpreadsheetArtifactFormulaError,
 } from "@opengeni/contracts/editable-artifacts";
+import {
+  COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+  SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
+  SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
+} from "@opengeni/contracts/editable-artifact-versions";
 
 import { NativeSpreadsheetSession } from "./native";
 import { SpreadsheetXlsxCodec } from "./spreadsheet-xlsx-codec";
@@ -46,9 +51,9 @@ export type EditableArtifactNativeMaterializerCapabilities = Readonly<{
   fontRegistryHash: string;
   policyHash: string;
   maxOutputBytes: number;
-  supportedModelSchemaVersions: readonly [1];
-  supportedOperationProtocolVersions: readonly [1];
-  supportedSnapshotProtocolVersions: readonly [1];
+  supportedModelSchemaVersions: readonly [typeof SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION];
+  supportedOperationProtocolVersions: readonly [typeof COMMITTED_TRANSACTION_PROTOCOL_VERSION];
+  supportedSnapshotProtocolVersions: readonly [typeof SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION];
 }>;
 
 type MaterializationManifest = Readonly<{
@@ -467,9 +472,15 @@ export function editableArtifactMaterializerCapabilitiesForRuntime(
     fontRegistryHash: EMPTY_FONT_REGISTRY_HASH,
     policyHash: POLICY_HASH,
     maxOutputBytes: MAX_OUTPUT_BYTES,
-    supportedModelSchemaVersions: Object.freeze([1] as const),
-    supportedOperationProtocolVersions: Object.freeze([1] as const),
-    supportedSnapshotProtocolVersions: Object.freeze([1] as const),
+    supportedModelSchemaVersions: Object.freeze([
+      SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
+    ] as const),
+    supportedOperationProtocolVersions: Object.freeze([
+      COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+    ] as const),
+    supportedSnapshotProtocolVersions: Object.freeze([
+      SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
+    ] as const),
   });
 }
 
@@ -478,9 +489,9 @@ function assertManifestCompatibility(
   capabilities: EditableArtifactNativeMaterializerCapabilities,
 ): void {
   if (
-    manifest.modelSchemaVersion !== 1 ||
-    manifest.operationProtocolVersion !== 1 ||
-    manifest.snapshotProtocolVersion !== 1 ||
+    manifest.modelSchemaVersion !== SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION ||
+    manifest.operationProtocolVersion !== COMMITTED_TRANSACTION_PROTOCOL_VERSION ||
+    manifest.snapshotProtocolVersion !== SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION ||
     manifest.kernelVersion !== capabilities.kernelVersion ||
     manifest.codecVersion !==
       (capabilities.codecVersions as Readonly<Record<string, string>>)[manifest.codecId] ||

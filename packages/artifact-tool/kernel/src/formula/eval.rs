@@ -119,7 +119,7 @@ impl RecalculationBudget {
 
 impl FormulaEngine {
     /// Recalculates only the dirty reverse-dependency closure. Derived values
-    /// are committed together; a resource failure leaves every cached formula
+    /// are committed together; a resource failure leaves every projected formula
     /// value unchanged and the affected graph dirty for a later retry.
     pub fn recalculate(&mut self) -> Result<RecalculationReceipt, FormulaEngineError> {
         let mut dirty = core::mem::take(&mut self.dirty_nodes);
@@ -167,13 +167,13 @@ impl FormulaEngine {
             .collect();
         let mut partition_widths = Vec::new();
         let mut processed = 0usize;
-        let dirty_cached_value_bytes: usize = dirty
+        let dirty_projected_value_bytes: usize = dirty
             .iter()
             .map(|node_id| value_utf8_bytes(&self.nodes[node_id.index()].value))
             .sum();
         let retained_value_bytes = self
-            .cached_value_bytes
-            .saturating_sub(dirty_cached_value_bytes);
+            .projected_value_bytes
+            .saturating_sub(dirty_projected_value_bytes);
         let mut budget = RecalculationBudget::new(retained_value_bytes);
         let calculation = (|| -> Result<usize, FormulaEngineError> {
             while !ready.is_empty() {
@@ -267,7 +267,7 @@ impl FormulaEngine {
         dirty.clear();
         self.dirty_nodes = dirty;
         self.dirty_formula_count = 0;
-        self.cached_value_bytes = budget.pending_value_bytes;
+        self.projected_value_bytes = budget.pending_value_bytes;
         changed_cells.sort_unstable();
         Ok(RecalculationReceipt {
             evaluated_cells,
@@ -460,7 +460,7 @@ impl FormulaEngine {
                         CellValue::Error(FormulaError::DivideByZero)
                     }
                     BinaryOperator::Divide => finite_number(left / right),
-                    BinaryOperator::Power => finite_number(left.powf(right)),
+                    BinaryOperator::Power => finite_number(deterministic_pow(left, right)),
                     _ => unreachable!(),
                 }
             }
@@ -619,7 +619,7 @@ impl FormulaEngine {
                     Ok(value) => value,
                     Err(error) => return Ok(Evaluation::scalar(CellValue::Error(error))),
                 };
-                let factor = 10f64.powf(digits);
+                let factor = deterministic_pow(10.0, digits);
                 if !factor.is_finite() || factor == 0.0 {
                     CellValue::Error(FormulaError::Number)
                 } else {
@@ -636,7 +636,7 @@ impl FormulaEngine {
             FormulaFunction::Power => binary_numeric(
                 &scalar(0, finite_number(0.0)),
                 &scalar(1, finite_number(0.0)),
-                f64::powf,
+                deterministic_pow,
             ),
             FormulaFunction::Sqrt => {
                 let value = match numeric(&scalar(0, finite_number(0.0))) {
@@ -991,6 +991,35 @@ fn finite_number(value: f64) -> CellValue {
     Number::new(value)
         .map(CellValue::Number)
         .unwrap_or(CellValue::Error(FormulaError::Number))
+}
+
+/// Cross-target spreadsheet power profile. Exact finite integers use an
+/// explicitly ordered multiplication tree; every other exponent uses the
+/// pinned pure-Rust libm implementation. This keeps native and wasm32 on one
+/// arithmetic path without changing floating-point behavior for text/layout.
+fn deterministic_pow(base: f64, exponent: f64) -> f64 {
+    const MAX_EXACT_INTEGER: f64 = 9_007_199_254_740_991.0;
+    if exponent.is_finite() && exponent.fract() == 0.0 && exponent.abs() <= MAX_EXACT_INTEGER {
+        let reciprocal = exponent.is_sign_negative();
+        let mut remaining = exponent.abs() as u64;
+        // Invert the base before squaring for negative exponents. Computing the
+        // positive power first would overflow at boundaries such as 2^-1024
+        // and incorrectly collapse a representable subnormal result to zero.
+        let mut factor = if reciprocal { 1.0 / base } else { base };
+        let mut result = 1.0;
+        while remaining != 0 {
+            if remaining & 1 == 1 {
+                result *= factor;
+            }
+            remaining >>= 1;
+            if remaining != 0 {
+                factor *= factor;
+            }
+        }
+        result
+    } else {
+        libm::pow(base, exponent)
+    }
 }
 
 fn numeric(value: &CellValue) -> Result<f64, FormulaError> {

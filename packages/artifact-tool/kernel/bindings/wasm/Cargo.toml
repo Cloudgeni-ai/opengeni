@@ -7,9 +7,8 @@ description = "WebAssembly byte-envelope adapter for the OpenGeni artifact kerne
 publish = false
 
 [features]
-default = ["spreadsheet", "legacy-spreadsheet", "document", "presentation", "text-layout"]
+default = ["spreadsheet", "document", "presentation", "text-layout"]
 spreadsheet = []
-legacy-spreadsheet = ["spreadsheet"]
 document = []
 presentation = []
 text-layout = []

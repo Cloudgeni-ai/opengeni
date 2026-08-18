@@ -11,6 +11,7 @@ import {
   EDITABLE_ARTIFACT_COMMAND_MAX_BYTES,
   EDITABLE_ARTIFACT_INTENT_MAX_BYTES,
   EDITABLE_ARTIFACT_PRODUCT_MAX_SNAPSHOT_BYTES,
+  currentEditableArtifactCompatibility,
   hashEditableArtifactMutationIntentBytes,
 } from "@opengeni/contracts/editable-artifacts";
 import { MAX_COMMITTED_TRANSACTION_BYTES } from "@opengeni/contracts/editable-artifact-committed-transaction";
@@ -34,7 +35,7 @@ import type {
 } from "./types";
 
 const LIVE_PATH = "/v1/editable-artifacts/live";
-const LIVE_SUBPROTOCOL = "opengeni-artifact-v1";
+const LIVE_SUBPROTOCOL = "opengeni-artifact-v2";
 const DEFAULT_MAX_SERVER_FRAME_BYTES = 8 * 1024 * 1024 + 64 * 1024;
 const DEFAULT_MAX_SNAPSHOT_BYTES = EDITABLE_ARTIFACT_PRODUCT_MAX_SNAPSHOT_BYTES;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 20_000;
@@ -81,9 +82,13 @@ export type EditableArtifactWebSocketLike = {
 export type CreateEditableArtifactHttpLiveTransportOptions = Readonly<{
   baseUrl: string | URL;
   workspaceId: string;
-  protocolVersion: number;
+  modality: EditableArtifactModality;
+  liveProtocolVersion: number;
   kernelVersion: string;
   modelSchemaVersion: number;
+  snapshotVersion: number;
+  commandProtocolVersion: number;
+  committedTransactionProtocolVersion: number;
   apiKey?: string;
   headers?: Readonly<Record<string, string>> | (() => Readonly<Record<string, string>>);
   credentials?: RequestCredentials;
@@ -111,9 +116,13 @@ class HttpLiveTransport implements EditableArtifactSyncTransport {
   private readonly baseUrl: URL;
   private readonly socketUrl: URL;
   private readonly workspaceId: string;
-  private readonly protocolVersion: number;
+  private readonly modality: EditableArtifactModality;
+  private readonly liveProtocolVersion: number;
   private readonly kernelVersion: string;
   private readonly modelSchemaVersion: number;
+  private readonly snapshotVersion: number;
+  private readonly commandProtocolVersion: number;
+  private readonly committedTransactionProtocolVersion: number;
   private readonly apiKey: string | undefined;
   private readonly headerSource: CreateEditableArtifactHttpLiveTransportOptions["headers"];
   private readonly credentials: RequestCredentials;
@@ -132,9 +141,34 @@ class HttpLiveTransport implements EditableArtifactSyncTransport {
     const insecure = options.allowInsecureDevelopmentTransport ?? false;
     requireTransportSecurity(this.baseUrl, this.socketUrl, insecure);
     this.workspaceId = boundedString(options.workspaceId, "workspaceId", 256);
-    this.protocolVersion = positiveU16(options.protocolVersion, "protocolVersion");
+    const current = currentEditableArtifactCompatibility(options.modality);
+    this.modality = options.modality;
+    this.liveProtocolVersion = exactVersion(
+      options.liveProtocolVersion,
+      current.liveProtocolVersion,
+      "liveProtocolVersion",
+    );
     this.kernelVersion = boundedString(options.kernelVersion, "kernelVersion", 512);
-    this.modelSchemaVersion = positiveU16(options.modelSchemaVersion, "modelSchemaVersion");
+    this.modelSchemaVersion = exactVersion(
+      options.modelSchemaVersion,
+      current.modelSchemaVersion,
+      "modelSchemaVersion",
+    );
+    this.snapshotVersion = exactVersion(
+      options.snapshotVersion,
+      current.snapshotVersion,
+      "snapshotVersion",
+    );
+    this.commandProtocolVersion = exactVersion(
+      options.commandProtocolVersion,
+      current.commandProtocolVersion,
+      "commandProtocolVersion",
+    );
+    this.committedTransactionProtocolVersion = exactVersion(
+      options.committedTransactionProtocolVersion,
+      current.committedTransactionProtocolVersion,
+      "committedTransactionProtocolVersion",
+    );
     this.apiKey = options.apiKey;
     if (this.apiKey !== undefined) boundedString(this.apiKey, "apiKey", 16 * 1024);
     this.headerSource = options.headers;
@@ -187,9 +221,13 @@ class HttpLiveTransport implements EditableArtifactSyncTransport {
         },
         body: JSON.stringify({
           replicaId: input.replicaId,
-          protocolVersion: this.protocolVersion,
+          modality: this.modality,
+          liveProtocolVersion: this.liveProtocolVersion,
           kernelVersion: this.kernelVersion,
           modelSchemaVersion: this.modelSchemaVersion,
+          snapshotVersion: this.snapshotVersion,
+          commandProtocolVersion: this.commandProtocolVersion,
+          committedTransactionProtocolVersion: this.committedTransactionProtocolVersion,
         }),
         signal: input.signal,
       });
@@ -211,7 +249,7 @@ class HttpLiveTransport implements EditableArtifactSyncTransport {
       );
     }
     const value = await readBoundedJson(response, MAX_TICKET_RESPONSE_BYTES);
-    return validateTicket(value, input.artifactId, input.replicaId, this.protocolVersion);
+    return validateTicket(value, input.artifactId, input.replicaId, this.liveProtocolVersion);
   }
 
   async openLive(input: {
@@ -246,6 +284,7 @@ class HttpLiveTransport implements EditableArtifactSyncTransport {
       input.resume.modality === "spreadsheet"
         ? {
             ...commonResume,
+            modality: "spreadsheet",
             localCausalFrontier: cloneFrontier(input.resume.causalFrontier),
           }
         : {
@@ -458,7 +497,7 @@ class HttpLiveConnection implements EditableArtifactLiveConnection {
     }
     const commonBootstrap = {
       artifactId: this.ticket.artifactId,
-      protocolVersion: this.ticket.protocolVersion,
+      liveProtocolVersion: this.ticket.protocolVersion,
       headSequence: boundarySequence,
       headStateHash: boundaryStateHash,
       kernelVersion: snapshot?.kernelVersion ?? this.kernelVersion,
@@ -549,12 +588,6 @@ class HttpLiveConnection implements EditableArtifactLiveConnection {
     if (pending.artifactId !== this.ticket.artifactId) {
       throw new TypeError("pending transaction belongs to another artifact");
     }
-    if (pending.protocolVersion !== this.ticket.protocolVersion) {
-      throw new EditableArtifactTransportError("pending protocol does not match live stream", {
-        code: "unsupported",
-        retryable: false,
-      });
-    }
     if (
       pending.commandBytes.byteLength >
       Math.min(open.maxCommandBytes, EDITABLE_ARTIFACT_COMMAND_MAX_BYTES)
@@ -581,7 +614,7 @@ class HttpLiveConnection implements EditableArtifactLiveConnection {
     }
     const frame = encodeEditableArtifactLiveMutationWireFrame({
       type: "mutation",
-      protocolVersion: pending.protocolVersion,
+      protocolVersion: this.ticket.protocolVersion,
       artifactId: pending.artifactId,
       streamEpoch: open.streamEpoch,
       requestHash: pending.requestHash,
@@ -756,15 +789,9 @@ class HttpLiveConnection implements EditableArtifactLiveConnection {
         if (frame.transaction.artifactId !== this.ticket.artifactId) {
           throw new TypeError("live transaction belongs to another artifact");
         }
-        if (transactionModality(frame.transaction) !== this.ticket.modality) {
+        if (frame.transaction.modality !== this.ticket.modality) {
           throw new TypeError("live transaction modality mismatch");
         }
-        if (
-          (frame.transaction.modality === undefined ||
-            frame.transaction.modality === "spreadsheet") &&
-          frame.transaction.protocolVersion !== this.ticket.protocolVersion
-        )
-          throw new TypeError("live transaction protocol mismatch");
         if (
           frame.transaction.committedTransactionBytes.byteLength >
           this.limits.maxCommittedTransactionBytes
@@ -849,7 +876,7 @@ class HttpLiveConnection implements EditableArtifactLiveConnection {
     if (frame.protocolVersion !== this.ticket.protocolVersion) {
       throw new TypeError("live snapshot protocol mismatch");
     }
-    if (serverModality(frame.modality) !== this.ticket.modality) {
+    if (frame.modality !== this.ticket.modality) {
       throw new TypeError("live snapshot modality mismatch");
     }
     if (this.snapshotAssembly === null) {
@@ -895,7 +922,8 @@ class HttpLiveConnection implements EditableArtifactLiveConnection {
             ...commonSnapshot,
             modality: "spreadsheet" as const,
             causalFrontier: cloneFrontier(frame.causalFrontier),
-            protocolVersion: frame.protocolVersion,
+            operationProtocolVersion: frame.operationProtocolVersion,
+            snapshotVersion: frame.snapshotVersion,
           })
         : Object.freeze({
             ...commonSnapshot,
@@ -968,7 +996,7 @@ class HttpLiveConnection implements EditableArtifactLiveConnection {
     if (frame.protocolVersion !== this.ticket.protocolVersion) {
       throw new TypeError("live server frame protocol mismatch");
     }
-    if (frame.type === "open" && serverModality(frame.modality) !== this.ticket.modality) {
+    if (frame.type === "open" && frame.modality !== this.ticket.modality) {
       throw new TypeError("live open modality does not match its ticket");
     }
     if (this.openFrame && frame.streamEpoch !== this.openFrame.streamEpoch) {
@@ -1113,16 +1141,6 @@ function cloneCommitted(
   };
 }
 
-function transactionModality(
-  transaction: EditableArtifactCommittedTransaction | ContractCommittedTransaction,
-): EditableArtifactModality {
-  return transaction.modality ?? "spreadsheet";
-}
-
-function serverModality(value: EditableArtifactModality | undefined): EditableArtifactModality {
-  return value ?? "spreadsheet";
-}
-
 function serializedBoundaryRevision(
   snapshot: EditableArtifactSnapshot | null,
   resume:
@@ -1148,8 +1166,7 @@ function snapshotChunkAuthorityEqual(
   frame: Extract<EditableArtifactLiveServerFrame, { type: "snapshot" }>,
   metadata: SnapshotAssembly["metadata"],
 ): boolean {
-  const modality = serverModality(frame.modality);
-  if (modality !== serverModality(metadata.modality)) return false;
+  if (frame.modality !== metadata.modality) return false;
   if ("causalFrontier" in frame) {
     if (!("causalFrontier" in metadata)) return false;
     return frontiersEqual(frame.causalFrontier, metadata.causalFrontier);
@@ -1412,6 +1429,14 @@ function safeSequence(value: unknown, label: string): number {
 function positiveU16(value: unknown, label: string): number {
   const number = positiveBounded(value, 0xffff, label);
   return number;
+}
+
+function exactVersion(value: unknown, expected: number, label: string): number {
+  const actual = positiveU16(value, label);
+  if (actual !== expected) {
+    throw new TypeError(`${label} ${actual} is incompatible with current version ${expected}`);
+  }
+  return actual;
 }
 
 function positiveBounded(value: unknown, maximum: number, label: string): number {

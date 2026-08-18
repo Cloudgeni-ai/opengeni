@@ -175,8 +175,8 @@ function encodeEnvelope(commandCount: number, payloads: readonly Uint8Array[]): 
   const payloadLength = payloads.reduce((total, payload) => total + payload.length, 0);
   const envelope = new Uint8Array(24 + payloadLength + 8);
   const view = new DataView(envelope.buffer);
-  envelope.set(new TextEncoder().encode("OGAKC001"));
-  view.setUint16(8, 1, true);
+  envelope.set(new TextEncoder().encode("OGAKC002"));
+  view.setUint16(8, 2, true);
   view.setUint32(12, commandCount, true);
   view.setBigUint64(16, BigInt(payloadLength), true);
   let offset = 24;

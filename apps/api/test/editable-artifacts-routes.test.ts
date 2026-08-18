@@ -84,7 +84,7 @@ function routeFixture(
         replicaId: input.actor.replicaId,
         token: "ticket.valid_value",
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
-        protocolVersion: options.ticketProtocolVersion ?? input.protocolVersion,
+        protocolVersion: options.ticketProtocolVersion ?? input.liveProtocolVersion,
       };
     },
     openLive: async () => {
@@ -251,7 +251,6 @@ function preparedOfficeImport(modality: "document" | "spreadsheet" | "presentati
     mimeType: "application/vnd.opengeni.editable-artifact-snapshot" as const,
     coveredHeadSequence: 0 as const,
     stateHash: editableArtifactStateHash(`sha256:${"c".repeat(64)}`),
-    modelSchemaVersion: 1,
     kernelVersion: "artifact-kernel-1",
   };
   return {
@@ -267,13 +266,14 @@ function preparedOfficeImport(modality: "document" | "spreadsheet" | "presentati
         ? {
             ...common,
             modality: "spreadsheet" as const,
+            modelSchemaVersion: 2 as const,
             coveredCausalFrontier: editableArtifactCausalFrontier([
               { replicaId: REPLICA_ID as never, counter: 4 },
             ]),
-            operationProtocolVersion: 1,
-            crdtStateVersion: 1,
+            operationProtocolVersion: 2 as const,
+            crdtStateVersion: 2 as const,
           }
-        : { ...common, modality, nativeRevision: 0 },
+        : { ...common, modality, modelSchemaVersion: 1 as const, nativeRevision: 0 },
   } as const;
 }
 
@@ -325,9 +325,13 @@ async function bearer(
 function ticketBody(extra: Record<string, unknown> = {}): string {
   return JSON.stringify({
     replicaId: REPLICA_ID,
-    protocolVersion: 1,
+    modality: "spreadsheet",
+    liveProtocolVersion: 2,
     kernelVersion: "artifact-kernel-1",
-    modelSchemaVersion: 1,
+    modelSchemaVersion: 2,
+    snapshotVersion: 2,
+    commandProtocolVersion: 2,
+    committedTransactionProtocolVersion: 2,
     ...extra,
   });
 }
@@ -701,14 +705,18 @@ describe("editable artifact live-ticket route", () => {
       modality: "spreadsheet",
       replicaId: REPLICA_ID,
       token: "ticket.valid_value",
-      protocolVersion: 1,
+      protocolVersion: 2,
     });
     expect(fixture.calls).toHaveLength(1);
     expect(fixture.calls[0]).toMatchObject({
       artifactId: ARTIFACT_ID,
-      protocolVersion: 1,
+      modality: "spreadsheet",
+      liveProtocolVersion: 2,
       kernelVersion: "artifact-kernel-1",
-      modelSchemaVersion: 1,
+      modelSchemaVersion: 2,
+      snapshotVersion: 2,
+      commandProtocolVersion: 2,
+      committedTransactionProtocolVersion: 2,
       scope: { accountId: ACCOUNT_ID, workspaceId: WORKSPACE_ID },
       actor: {
         kind: "human",
@@ -742,19 +750,28 @@ describe("editable artifact live-ticket route", () => {
     "preserves durable %s modality in the live ticket response",
     async (modality) => {
       const fixture = routeFixture({ modality });
-      const response = await mint(fixture, { authorization: await bearer() });
+      const response = await mint(fixture, {
+        authorization: await bearer(),
+        body: ticketBody({
+          modality,
+          modelSchemaVersion: 1,
+          snapshotVersion: 1,
+          commandProtocolVersion: 1,
+          committedTransactionProtocolVersion: 1,
+        }),
+      });
       expect(response.status).toBe(201);
       expect(await response.json()).toMatchObject({
         artifactId: ARTIFACT_ID,
         modality,
         replicaId: REPLICA_ID,
-        protocolVersion: 1,
+        protocolVersion: 2,
       });
     },
   );
 
   test("rejects an application ticket for a different protocol version", async () => {
-    const fixture = routeFixture({ ticketProtocolVersion: 2 });
+    const fixture = routeFixture({ ticketProtocolVersion: 1 });
     const response = await mint(fixture, { authorization: await bearer() });
     expect(response.status).toBe(500);
   });

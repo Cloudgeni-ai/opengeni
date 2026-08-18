@@ -1,4 +1,5 @@
 import {
+  SPREADSHEET_ARTIFACT_COMMAND_VERSION,
   SPREADSHEET_ARTIFACT_PROJECTION_MAX_BYTES,
   SPREADSHEET_ARTIFACT_VIEWPORT_MAX_CELLS,
   decodeSpreadsheetMetadataKernelProjection,
@@ -292,7 +293,7 @@ function nativeFormula(value: unknown): SpreadsheetCellInput {
     throw new TypeError("Spreadsheet formulas must be strings or null");
   const trimmed = value.trim();
   if (trimmed.length === 0) return null;
-  return { formula: trimmed.startsWith("=") ? trimmed : `=${trimmed}`, cached: null };
+  return { formula: trimmed.startsWith("=") ? trimmed : `=${trimmed}` };
 }
 
 function normalizedSheetName(value: unknown): string {
@@ -485,7 +486,7 @@ class SpreadsheetProjectionAuthor {
             : [{ replicaId: this.#replicaId, counter: this.#transactionCounter }],
         selectiveUndoOperationIds: [],
       },
-      commands: { version: 1, commands },
+      commands: { version: SPREADSHEET_ARTIFACT_COMMAND_VERSION, commands },
       resolvedBaseBytes: this.#session.frontier(),
     });
     this.#transactionCounter = counter;
@@ -578,7 +579,7 @@ function* cellCommands(
 }
 
 function nativeCell(cell: SerializedCell): SpreadsheetCellInput {
-  if (cell.formula !== null) return { formula: cell.formula, cached: null };
+  if (cell.formula !== null) return { formula: cell.formula };
   const value = cell.value;
   if (typeof value === "object" && value !== null) {
     if ("type" in value && value.type === "date") {

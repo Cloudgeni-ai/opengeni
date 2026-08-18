@@ -164,7 +164,6 @@ export class TestArtifactGenesis implements EditableArtifactGenesisPort {
       modality: input.modality,
       coveredHeadSequence: 0,
       stateHash: initialStateHash,
-      modelSchemaVersion: 1,
       kernelVersion: "test-kernel/1",
       verifiedAt: "2026-08-08T09:59:00.000Z",
     } as const;
@@ -172,13 +171,15 @@ export class TestArtifactGenesis implements EditableArtifactGenesisPort {
       ? Object.freeze({
           ...common,
           modality: "spreadsheet" as const,
+          modelSchemaVersion: 2,
           coveredCausalFrontier: editableArtifactCausalFrontier([]),
-          operationProtocolVersion: 1,
-          crdtStateVersion: 1,
+          operationProtocolVersion: 2,
+          crdtStateVersion: 2,
         })
       : Object.freeze({
           ...common,
           modality: input.modality,
+          modelSchemaVersion: 1,
           nativeRevision: 0,
         });
   }
@@ -203,7 +204,6 @@ export class TestArtifactCompaction implements EditableArtifactCompactionPort {
       modality: artifact.modality,
       coveredHeadSequence: artifact.headSequence,
       stateHash: artifact.stateHash,
-      modelSchemaVersion: 1,
       kernelVersion: "test-kernel/1",
       verifiedAt: "2026-08-08T09:59:30.000Z",
     } as const;
@@ -211,9 +211,10 @@ export class TestArtifactCompaction implements EditableArtifactCompactionPort {
       return Object.freeze({
         ...common,
         modality: artifact.modality,
+        modelSchemaVersion: 2,
         coveredCausalFrontier: artifact.causalFrontier,
-        operationProtocolVersion: 1,
-        crdtStateVersion: 1,
+        operationProtocolVersion: 2,
+        crdtStateVersion: 2,
       });
     }
     const serialized = input.state;
@@ -221,6 +222,7 @@ export class TestArtifactCompaction implements EditableArtifactCompactionPort {
     return Object.freeze({
       ...common,
       modality: artifact.modality,
+      modelSchemaVersion: 1,
       nativeRevision:
         serialized.committedTransactionTail.at(-1)?.nativeRevision ??
         serialized.snapshot?.nativeRevision ??
@@ -295,7 +297,7 @@ export class TestAuthoritativeKernel implements AuthoritativeEditableArtifactKer
         stateHash,
       }),
       kernelVersion: "test-kernel/1",
-      modelSchemaVersion: 1,
+      modelSchemaVersion: 2,
     };
     return this.corrupt ? this.corrupt(result, input) : result;
   }
@@ -317,7 +319,7 @@ type TestCommittedTransactionInput = Readonly<{
   stateHash: string;
 }>;
 
-/** Test-only OGACO encoder. Production can author these bytes only in Rust. */
+/** Test-only current committed-transaction encoder. Production can author these bytes only in Rust. */
 export function encodeTestCommittedTransaction(input: TestCommittedTransactionInput): Uint8Array {
   const payload = new TestCommittedWriter()
     .stableId(input.transactionId)
@@ -333,8 +335,8 @@ export function encodeTestCommittedTransaction(input: TestCommittedTransactionIn
   payload.frontier(input.resultingCausalFrontier).hash(input.stateHash);
   const payloadBytes = payload.finish();
   const envelope = new TestCommittedWriter()
-    .raw(new TextEncoder().encode("OGACO001"))
-    .u16(1)
+    .raw(new TextEncoder().encode("OGACO002"))
+    .u16(2)
     .u16(0)
     .u32(input.operationIds.length)
     .u64(BigInt(payloadBytes.byteLength))
@@ -543,21 +545,17 @@ export async function transactionRequest(
     }>
 > {
   const actor = input?.actor ?? humanActor;
+  const modality = input?.modality ?? "spreadsheet";
   const causalBase = input?.causalBase ?? editableArtifactCausalFrontier([]);
   const commandCount = Math.max(1, input?.commands?.length ?? 1);
   const commandVariant = input?.commands ? JSON.stringify(input.commands) : undefined;
   const commandBytes =
-    input?.commandBytes ??
-    editableArtifactTestCommandBytes(
-      input?.modality ?? "spreadsheet",
-      commandCount,
-      commandVariant,
-    );
+    input?.commandBytes ?? editableArtifactTestCommandBytes(modality, commandCount, commandVariant);
   const intent: EditableArtifactMutationIntent = {
     envelopeVersion: EDITABLE_ARTIFACT_INTENT_VERSION,
     protocolVersion: input?.protocolVersion ?? 1,
-    modelSchemaVersion: input?.modelSchemaVersion ?? 1,
-    commandProtocolVersion: input?.commandProtocolVersion ?? 1,
+    modelSchemaVersion: input?.modelSchemaVersion ?? (modality === "spreadsheet" ? 2 : 1),
+    commandProtocolVersion: input?.commandProtocolVersion ?? (modality === "spreadsheet" ? 2 : 1),
     artifactId: input?.artifactId ?? artifactId,
     clientTransactionId: input?.clientTransactionId ?? (`client-${crypto.randomUUID()}` as never),
     replicaId: actor.replicaId,
@@ -608,10 +606,10 @@ export function snapshotRequest(input: {
     coveredHeadSequence: input.coveredHeadSequence,
     coveredCausalFrontier: input.coveredCausalFrontier,
     stateHash: input.stateHash,
-    modelSchemaVersion: 1,
-    operationProtocolVersion: 1,
+    modelSchemaVersion: 2,
+    operationProtocolVersion: 2,
     kernelVersion: "test-kernel/1",
-    crdtStateVersion: 1,
+    crdtStateVersion: 2,
     verifiedAt: "2026-08-08T09:59:00.000Z",
   };
 }
@@ -646,7 +644,7 @@ export function editableArtifactTestCommandBytes(
     });
   }
   return encodeSpreadsheetArtifactCommandBatch({
-    version: 1,
+    version: 2,
     commands: Array.from({ length: count }, (_, index) => ({
       kind: "sheet.create" as const,
       sheetId: spreadsheetSheetId(stableHex(0x900 + index, 1 + testVariantHash(variant))),

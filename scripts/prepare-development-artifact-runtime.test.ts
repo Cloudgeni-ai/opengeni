@@ -167,12 +167,13 @@ async function createRepositoryFixture() {
   await writeFile(
     join(targetRoot, ARTIFACT_KERNEL_BUILD_RECEIPT),
     canonicalArtifactKernelBuildReceiptBytes({
-      schemaVersion: 1,
-      producer: "opengeni-artifact-kernel-smoke-v1",
+      schemaVersion: 2,
+      producer: "opengeni-artifact-kernel-smoke-v2",
       target,
       kind: "native",
       buildIdentity: "opengeni-artifact-kernel/clean-fixture;abi=1",
       capabilities: proof(new TextEncoder().encode("capabilities"), false),
+      spreadsheetFormulaProjectionCorpusSha256: `sha256:${"f".repeat(64)}`,
       runtimeFiles: [{ path: "opengeni_artifact_kernel.node", ...proof(native, false) }],
     }),
   );

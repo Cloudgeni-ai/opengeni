@@ -11,6 +11,23 @@ import {
 } from "../../src/runtime";
 import { resolveCurrentArtifactRuntimeTarget } from "../../src/runtime-cli";
 import packageJson from "../../package.json" with { type: "json" };
+import {
+  EDITABLE_ARTIFACT_INTENT_VERSION,
+  EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION,
+  SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+  SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
+  decodeEditableArtifactCausalFrontier,
+  decodeSpreadsheetMetadataKernelProjection,
+  editableArtifactStableId,
+  encodeEditableArtifactMutationIntent,
+  encodeSpreadsheetArtifactKernelQuery,
+  encodeSpreadsheetArtifactCommandBatch,
+  spreadsheetSheetId,
+} from "@opengeni/contracts/editable-artifacts";
+import {
+  spreadsheetFormulaProjectionCorpusBytes,
+  type FormulaCorpusInput,
+} from "./formula-projection-corpus";
 
 const root = import.meta.dir;
 const nativePath = process.env.OPENGENI_ARTIFACT_KERNEL_NATIVE_PATH;
@@ -48,7 +65,9 @@ const fixture = JSON.parse(fixtureText) as Record<
   | "formulaIncrementalCommand"
   | "formulaInitial"
   | "formulaAfterInitial"
-  | "formulaAfterIncremental",
+  | "formulaAfterIncremental"
+  | "formulaQuery"
+  | "formulaProjection",
   string
 >;
 const command = fromHex(fixture.command);
@@ -61,6 +80,8 @@ const formulaIncrementalCommand = fromHex(fixture.formulaIncrementalCommand);
 const formulaInitial = fromHex(fixture.formulaInitial);
 const formulaAfterInitial = fromHex(fixture.formulaAfterInitial);
 const formulaAfterIncremental = fromHex(fixture.formulaAfterIncremental);
+const formulaQuery = fromHex(fixture.formulaQuery);
+const formulaProjection = fromHex(fixture.formulaProjection);
 
 const native = createRequire(import.meta.url)(resolve(nativePath));
 const wasmModuleUrl = `${pathToFileURL(resolve(wasmDirectory, "artifact_kernel.js")).href}?verify=${Date.now()}`;
@@ -264,14 +285,259 @@ try {
     wasmFormulaSession.snapshot(),
     formulaAfterIncremental,
   );
+  assertBytesEqual(
+    "native deterministic formula projection == direct kernel",
+    nativeFormulaSession.query(formulaQuery),
+    formulaProjection,
+  );
+  assertBytesEqual(
+    "wasm deterministic formula projection == direct kernel",
+    wasmFormulaSession.query(formulaQuery),
+    formulaProjection,
+  );
 } finally {
   disposeRawSession(nativeFormulaSession);
   disposeRawSession(wasmFormulaSession);
 }
 
-const collaborationIntent = fromHex(
-  "4f47415458303031010001000100010020003131313131313131313131313131313131313131313131313131313131313131110062696e64696e672e7061726974792e76311000303030303030303030303030343534350100000000000000000000000000000000000000003c0000004f4741534330303101000000010000001c0000000000000000020000000000000045450000000000000600000050617269747900d2d2aa22ef1d9d0a",
+let collaborationFormulaInput: FormulaCorpusInput | undefined;
+const nativeFormulaProjection = spreadsheetFormulaProjectionCorpusBytes(native, (input) => {
+  collaborationFormulaInput = input;
+});
+assert.ok(collaborationFormulaInput, "formula collaboration input was captured");
+const formulaAuthor = nativeRuntime.createCollaborationSession(collaborationFormulaInput.namespace);
+const formulaWasmReplay = wasmRuntime.createCollaborationSession(
+  collaborationFormulaInput.namespace,
 );
+let formulaWasmReopen: ReturnType<typeof wasmRuntime.openCollaborationSession> | undefined;
+try {
+  const committed = formulaAuthor.authorTransaction(
+    collaborationFormulaInput.intentBytes,
+    collaborationFormulaInput.resolvedBaseBytes,
+  );
+  formulaWasmReplay.applyCommitted(committed);
+  formulaWasmReplay.applyCommitted(committed);
+  assert.equal(formulaAuthor.stateHash(), formulaWasmReplay.stateHash());
+  const compacted = nativeRuntime.canonicalizeCollaborationSnapshot(formulaAuthor.snapshot());
+  formulaWasmReopen = wasmRuntime.openCollaborationSession(compacted);
+  assert.equal(formulaAuthor.stateHash(), formulaWasmReopen.stateHash());
+  assertBytesEqual(
+    "native-authored formula workbook reopens under wasm",
+    formulaWasmReopen.query(collaborationFormulaInput.queryBytes),
+    nativeFormulaProjection,
+  );
+} finally {
+  formulaAuthor.dispose();
+  formulaWasmReplay.dispose();
+  formulaWasmReopen?.dispose();
+}
+
+// Reproduce the incident as a four-head DCF lifecycle: native authors each
+// head, WASM replays each commit (including duplicates), native compacts, and
+// WASM reopens the compacted authored state before calculating the projection.
+const dcfNamespace = 0xdcf0_0000_0000_0001n;
+const dcfReplicaId = "dcf0000000000001";
+const dcfArtifactId = "dcf00000000000010000000000000001";
+const dcfSheetId = spreadsheetSheetId("dcf00000000000010000000000000002");
+const dcfAuthor = nativeRuntime.createCollaborationSession(dcfNamespace);
+const dcfWasmReplay = wasmRuntime.createCollaborationSession(dcfNamespace);
+let dcfWasmReopen: ReturnType<typeof wasmRuntime.openCollaborationSession> | undefined;
+try {
+  let frontierBytes = dcfAuthor.frontier();
+  let previousLocalTransactionId: string | null = null;
+  let generationId: ReturnType<typeof editableArtifactStableId> | null = null;
+  const transactionCommands = [
+    () => [
+      {
+        kind: "sheet.create" as const,
+        sheetId: dcfSheetId,
+        name: "Simple Dummy DCF",
+        after: null,
+      },
+    ],
+    () => [
+      {
+        kind: "cells.set" as const,
+        sheet: {
+          kind: "generation" as const,
+          sheetId: dcfSheetId,
+          creationOperationId: assertGenerationId(generationId),
+        },
+        anchor: { row: 0, column: 0 },
+        rows: 11,
+        columns: 2,
+        cells: [
+          "Revenue",
+          100,
+          "Revenue growth",
+          0.08,
+          "EBIT margin",
+          0.2,
+          "Tax rate",
+          0.25,
+          "Terminal growth",
+          0.03,
+          "Net debt",
+          20,
+          "Shares",
+          10,
+          "D&A / revenue",
+          0.03,
+          "Capex / revenue",
+          0.04,
+          "NWC / revenue",
+          0.02,
+          "WACC",
+          0.1,
+        ],
+      },
+    ],
+    () => [
+      {
+        kind: "cells.set" as const,
+        sheet: {
+          kind: "generation" as const,
+          sheetId: dcfSheetId,
+          creationOperationId: assertGenerationId(generationId),
+        },
+        anchor: { row: 0, column: 3 },
+        rows: 2,
+        columns: 5,
+        cells: [
+          "Year 1",
+          "Year 2",
+          "Year 3",
+          "Year 4",
+          "Year 5",
+          { formula: "=$B$1*(1+$B$2)^1" },
+          { formula: "=$B$1*(1+$B$2)^2" },
+          { formula: "=$B$1*(1+$B$2)^3" },
+          { formula: "=$B$1*(1+$B$2)^4" },
+          { formula: "=$B$1*(1+$B$2)^5" },
+        ],
+      },
+    ],
+    () => [
+      {
+        kind: "cells.set" as const,
+        sheet: {
+          kind: "generation" as const,
+          sheetId: dcfSheetId,
+          creationOperationId: assertGenerationId(generationId),
+        },
+        anchor: { row: 3, column: 3 },
+        rows: 1,
+        columns: 5,
+        cells: [
+          { formula: "=1/(1+$B$11)^1" },
+          { formula: "=1/(1+$B$11)^2" },
+          { formula: "=1/(1+$B$11)^3" },
+          { formula: "=1/(1+$B$11)^4" },
+          { formula: "=1/(1+$B$11)^5" },
+        ],
+      },
+    ],
+  ] as const;
+
+  for (let index = 0; index < transactionCommands.length; index += 1) {
+    const clientTransactionId = `dcf.incident.${index + 1}`;
+    const commandBytes = encodeSpreadsheetArtifactCommandBatch({
+      version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+      commands: transactionCommands[index](),
+    });
+    const intentBytes = encodeEditableArtifactMutationIntent({
+      envelopeVersion: EDITABLE_ARTIFACT_INTENT_VERSION,
+      protocolVersion: EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION,
+      modelSchemaVersion: SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
+      commandProtocolVersion: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+      artifactId: dcfArtifactId,
+      clientTransactionId,
+      replicaId: dcfReplicaId,
+      replicaCounter: index + 1,
+      previousLocalTransactionId,
+      observedHeadSequence: index,
+      causalBase: decodeEditableArtifactCausalFrontier(frontierBytes),
+      selectiveUndoOperationIds: [],
+      commandBytes,
+    });
+    const committed = dcfAuthor.authorTransaction(intentBytes, frontierBytes);
+    dcfWasmReplay.applyCommitted(committed);
+    dcfWasmReplay.applyCommitted(committed);
+    assert.equal(dcfAuthor.stateHash(), dcfWasmReplay.stateHash(), `DCF head ${index + 1}`);
+    assertBytesEqual(`DCF frontier ${index + 1}`, dcfAuthor.frontier(), dcfWasmReplay.frontier());
+    previousLocalTransactionId = clientTransactionId;
+    frontierBytes = dcfAuthor.frontier();
+
+    if (index === 0) {
+      const metadataQuery = { maxSheets: 1, maxBytes: 64 * 1024 } as const;
+      const metadata = decodeSpreadsheetMetadataKernelProjection(
+        dcfAuthor.query(
+          encodeSpreadsheetArtifactKernelQuery({
+            kind: "workbook-metadata",
+            query: metadataQuery,
+          }),
+        ),
+        metadataQuery,
+      );
+      generationId = editableArtifactStableId(
+        metadata.sheets[0]?.generationId ?? fail("DCF sheet generation is missing"),
+      );
+    }
+  }
+
+  const dcfQuery = encodeSpreadsheetArtifactKernelQuery({
+    kind: "viewport",
+    query: {
+      sheetId: dcfSheetId,
+      startRow: 0,
+      startColumn: 0,
+      rowCount: 11,
+      columnCount: 8,
+      maxCells: 88,
+      maxBytes: 256 * 1024,
+    },
+  });
+  const nativeDcfProjection = dcfAuthor.query(dcfQuery);
+  const compacted = nativeRuntime.canonicalizeCollaborationSnapshot(dcfAuthor.snapshot());
+  dcfWasmReopen = wasmRuntime.openCollaborationSession(compacted);
+  assert.equal(dcfAuthor.stateHash(), dcfWasmReopen.stateHash());
+  assertBytesEqual(
+    "four-head DCF compaction reopens under wasm",
+    nativeDcfProjection,
+    dcfWasmReopen.query(dcfQuery),
+  );
+} finally {
+  dcfAuthor.dispose();
+  dcfWasmReplay.dispose();
+  dcfWasmReopen?.dispose();
+}
+
+const collaborationCommands = encodeSpreadsheetArtifactCommandBatch({
+  version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+  commands: [
+    {
+      kind: "sheet.create",
+      sheetId: spreadsheetSheetId("00000000000045450000000000000002"),
+      name: "Parity",
+      after: null,
+    },
+  ],
+});
+const collaborationIntent = encodeEditableArtifactMutationIntent({
+  envelopeVersion: EDITABLE_ARTIFACT_INTENT_VERSION,
+  protocolVersion: EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION,
+  modelSchemaVersion: SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
+  commandProtocolVersion: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+  artifactId: "11111111111111111111111111111111",
+  clientTransactionId: "binding.parity.current",
+  replicaId: "0000000000004545",
+  replicaCounter: 1,
+  previousLocalTransactionId: null,
+  observedHeadSequence: 0,
+  causalBase: [],
+  selectiveUndoOperationIds: [],
+  commandBytes: collaborationCommands,
+});
 const emptyFrontier = fromHex("4f4741434630303101000000000000003fb3b04f29ccf857");
 const metadataQuery = fromHex(
   "4f47414b5130303101000000010000000700000000080000000000007ee599fc5e1006e6",
@@ -346,7 +612,8 @@ assert.throws(() => wasm.createWorkbook(zeroNamespace), /\[ARTIFACT_INVALID_NAME
 console.log(
   JSON.stringify({
     collaboration: "byte-identical",
-    formula: "cross-sheet-range-cycle-error-byte-identical",
+    dcfLifecycle: "four-head-native-wasm-compact-reopen",
+    formula: "cross-sheet-range-cycle-error-and-math-projections-byte-identical",
     directSnapshotBytes: directExpected.byteLength,
     native: "byte-identical",
     sessionFork: "independent",
@@ -406,6 +673,14 @@ function assertBytesEqual(label: string, actual: Uint8Array, expected: Uint8Arra
     actual.every((byte, index) => byte === expected[index]),
     `${label}: content`,
   );
+}
+
+function assertGenerationId<T>(value: T | null): T {
+  return value ?? fail("DCF sheet generation has not been resolved");
+}
+
+function fail(message: string): never {
+  throw new Error(message);
 }
 
 function encodeUncheckedNamespace(uncheckedNamespace: bigint): Uint8Array {

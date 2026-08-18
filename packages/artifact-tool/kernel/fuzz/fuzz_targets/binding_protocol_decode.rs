@@ -44,7 +44,9 @@ fuzz_target!(|input: &[u8]| {
     let receipt = session.apply_commands(&command).expect("seed receipt");
     check(&mutated(&receipt, bytes));
 
-    check(&mutated(&seed_intent(), bytes));
+    let intent = seed_intent();
+    derive_intent_identities(&intent).expect("current seed intent");
+    check(&mutated(&intent, bytes));
 });
 
 fn check(bytes: &[u8]) {
@@ -63,7 +65,7 @@ fn check(bytes: &[u8]) {
         );
     }
     let _ = decode_receipt(bytes);
-    let _ = derive_intent_identities(bytes, 1);
+    let _ = derive_intent_identities(bytes);
 
     if let Ok(canonical) = canonicalize_snapshot(bytes) {
         assert_eq!(
@@ -94,8 +96,8 @@ fn seed_intent() -> Vec<u8> {
     output.extend_from_slice(b"OGATX001");
     output.extend_from_slice(&1u16.to_le_bytes());
     output.extend_from_slice(&1u16.to_le_bytes());
-    output.extend_from_slice(&1u16.to_le_bytes());
-    output.extend_from_slice(&1u16.to_le_bytes());
+    output.extend_from_slice(&2u16.to_le_bytes());
+    output.extend_from_slice(&2u16.to_le_bytes());
     push_string(&mut output, "11111111111111111111111111111111");
     push_string(&mut output, "fuzz-transaction");
     push_string(&mut output, "1111111111111111");
@@ -104,9 +106,28 @@ fn seed_intent() -> Vec<u8> {
     output.extend_from_slice(&0u64.to_le_bytes());
     output.extend_from_slice(&0u16.to_le_bytes());
     output.extend_from_slice(&0u16.to_le_bytes());
-    output.extend_from_slice(&1u32.to_le_bytes());
-    output.push(0);
+    let command = decode_hex(concat!(
+        "4f4741534330303202000000010000001a00000000000000000100000000000000",
+        "11111111111111110400000046757a7a00ab64949ea765f648"
+    ));
+    output.extend_from_slice(&(command.len() as u32).to_le_bytes());
+    output.extend_from_slice(&command);
     output
+}
+
+fn decode_hex(value: &str) -> Vec<u8> {
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let digit = |byte: u8| match byte {
+                b'0'..=b'9' => byte - b'0',
+                b'a'..=b'f' => byte - b'a' + 10,
+                _ => panic!("invalid seed hex"),
+            };
+            (digit(pair[0]) << 4) | digit(pair[1])
+        })
+        .collect()
 }
 
 fn push_string(output: &mut Vec<u8>, value: &str) {

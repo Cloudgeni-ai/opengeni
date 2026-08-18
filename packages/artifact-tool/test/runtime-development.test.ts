@@ -203,12 +203,13 @@ async function createFixture() {
     supportFiles: [],
   };
   const receiptBytes = canonicalArtifactKernelBuildReceiptBytes({
-    schemaVersion: 1,
-    producer: "opengeni-artifact-kernel-smoke-v1",
+    schemaVersion: 2,
+    producer: "opengeni-artifact-kernel-smoke-v2",
     target,
     kind: "native",
     buildIdentity,
     capabilities: descriptor("capabilities", text("capabilities"), false),
+    spreadsheetFormulaProjectionCorpusSha256: `sha256:${"f".repeat(64)}`,
     runtimeFiles: [kernel.asset],
   });
   const identityPath = join(root, "artifact-tool-identity.json");

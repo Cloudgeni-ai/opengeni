@@ -106,10 +106,11 @@ describe("editable artifact WebSocket transport", () => {
     connection.receive(
       encodeEditableArtifactLiveOpenWireFrame({
         type: "open",
-        protocolVersion: 1,
+        protocolVersion: 2,
         artifactId,
         token: "t".repeat(43),
         resume: {
+          modality: "spreadsheet",
           localCursor: 0,
           localStateHash: zeroHash,
           localCausalFrontier: [],
@@ -127,8 +128,8 @@ describe("editable artifact WebSocket transport", () => {
     const authored = hashEditableArtifactMutationIntent({
       envelopeVersion: EDITABLE_ARTIFACT_INTENT_VERSION,
       protocolVersion: 1,
-      modelSchemaVersion: 1,
-      commandProtocolVersion: 1,
+      modelSchemaVersion: 2,
+      commandProtocolVersion: 2,
       artifactId,
       clientTransactionId: "client-1",
       replicaId: "0000000000000001",
@@ -142,7 +143,7 @@ describe("editable artifact WebSocket transport", () => {
     connection.receive(
       encodeEditableArtifactLiveMutationWireFrame({
         type: "mutation",
-        protocolVersion: 1,
+        protocolVersion: 2,
         artifactId,
         streamEpoch: "live_epoch_1",
         requestHash: editableArtifactRequestHash(authored.requestHash),
@@ -176,7 +177,7 @@ describe("editable artifact WebSocket transport", () => {
     connection.receive(
       encodeEditableArtifactLiveAppliedWireFrame({
         type: "applied",
-        protocolVersion: 1,
+        protocolVersion: 2,
         artifactId,
         streamEpoch: "live_epoch_1",
         sequence: 1,
@@ -201,7 +202,7 @@ describe("editable artifact WebSocket transport", () => {
       connection.receive(
         encodeEditableArtifactLiveOpenWireFrame({
           type: "open",
-          protocolVersion: 1,
+          protocolVersion: 2,
           artifactId,
           token: "t".repeat(43),
           resume: {
@@ -248,7 +249,7 @@ describe("editable artifact WebSocket transport", () => {
     if (request.type !== "mutation") throw new Error("test mutation did not decode");
     await connection.send({
       type: "transaction",
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId,
       streamEpoch: "live_epoch_1",
       transaction: committed(request.requestHash),
@@ -256,7 +257,7 @@ describe("editable artifact WebSocket transport", () => {
     connection.receive(
       encodeEditableArtifactLiveAppliedWireFrame({
         type: "applied",
-        protocolVersion: 1,
+        protocolVersion: 2,
         artifactId,
         streamEpoch: "live_epoch_1",
         sequence: 1,
@@ -434,7 +435,7 @@ function committed(
         ...common,
         modality,
         causalFrontier: [],
-        operationProtocolVersion: 1,
+        operationProtocolVersion: 2,
       }
     : {
         ...common,
@@ -448,10 +449,11 @@ function committed(
 function openFrame(): Uint8Array {
   return encodeEditableArtifactLiveOpenWireFrame({
     type: "open",
-    protocolVersion: 1,
+    protocolVersion: 2,
     artifactId,
     token: "t".repeat(43),
     resume: {
+      modality: "spreadsheet",
       localCursor: 0,
       localStateHash: zeroHash,
       localCausalFrontier: [],
@@ -464,8 +466,8 @@ function mutationFrame(): Uint8Array {
   const authored = hashEditableArtifactMutationIntent({
     envelopeVersion: EDITABLE_ARTIFACT_INTENT_VERSION,
     protocolVersion: 1,
-    modelSchemaVersion: 1,
-    commandProtocolVersion: 1,
+    modelSchemaVersion: 2,
+    commandProtocolVersion: 2,
     artifactId,
     clientTransactionId: "client-1",
     replicaId: "0000000000000001",
@@ -478,7 +480,7 @@ function mutationFrame(): Uint8Array {
   });
   return encodeEditableArtifactLiveMutationWireFrame({
     type: "mutation",
-    protocolVersion: 1,
+    protocolVersion: 2,
     artifactId,
     streamEpoch: "live_epoch_1",
     requestHash: editableArtifactRequestHash(authored.requestHash),

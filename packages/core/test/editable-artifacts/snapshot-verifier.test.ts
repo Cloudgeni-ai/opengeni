@@ -123,19 +123,15 @@ describe("production editable-artifact snapshot verifier", () => {
       },
       {
         expectedCode: "version_mismatch",
-        override: { modelSchemaVersion: 2 },
+        override: { modelSchemaVersion: 1 },
       },
       {
         expectedCode: "version_mismatch",
-        override: { operationProtocolVersion: 2 },
+        override: { operationProtocolVersion: 1 },
       },
       {
         expectedCode: "version_mismatch",
-        override: { kernelVersion: "kernel/other" },
-      },
-      {
-        expectedCode: "version_mismatch",
-        override: { crdtStateVersion: 2 },
+        override: { crdtStateVersion: 1 },
       },
     ];
     for (const item of cases) {
@@ -149,6 +145,13 @@ describe("production editable-artifact snapshot verifier", () => {
         }),
       ).rejects.toMatchObject({ code: item.expectedCode });
     }
+
+    await expect(
+      verifierFixture(
+        memoryObject(bytes).backend,
+        kernelFixture(snapshot, { kernelVersion: "kernel/other" }).port,
+      ).verify({ scope, artifactId, actor, snapshot }),
+    ).resolves.toBeUndefined();
   });
 
   test("rejects noncanonical re-encoding and an ignored replay tail", async () => {
@@ -389,10 +392,10 @@ function snapshotRequest(bytes: Uint8Array): PublishEditableArtifactSnapshotRequ
     coveredHeadSequence: 4,
     coveredCausalFrontier: frontier,
     stateHash,
-    modelSchemaVersion: 1,
-    operationProtocolVersion: 1,
+    modelSchemaVersion: 2,
+    operationProtocolVersion: 2,
     kernelVersion: "kernel/1",
-    crdtStateVersion: 1,
+    crdtStateVersion: 2,
     verifiedAt: "2026-08-08T10:00:00.000Z",
   });
 }

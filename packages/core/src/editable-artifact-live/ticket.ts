@@ -31,7 +31,6 @@ export type EditableArtifactLiveTicketAuthorityDependencies = Readonly<{
   tokens: EditableArtifactLiveTokenPort;
   clock: EditableArtifactLiveClockPort;
   ttlMs?: number;
-  protocolVersion?: number;
 }>;
 
 export class EditableArtifactLiveTicketAuthority {
@@ -43,10 +42,7 @@ export class EditableArtifactLiveTicketAuthority {
     if (!Number.isSafeInteger(this.ttlMs) || this.ttlMs < 1_000 || this.ttlMs > MAX_TTL_MS) {
       throw new TypeError(`ticket ttl must be 1000-${MAX_TTL_MS} milliseconds`);
     }
-    this.protocolVersion = dependencies.protocolVersion ?? EDITABLE_ARTIFACT_LIVE_PROTOCOL_VERSION;
-    if (!Number.isSafeInteger(this.protocolVersion) || this.protocolVersion < 1) {
-      throw new TypeError("protocol version must be a positive safe integer");
-    }
+    this.protocolVersion = EDITABLE_ARTIFACT_LIVE_PROTOCOL_VERSION;
   }
 
   async mint(

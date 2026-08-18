@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 
-import { ArtifactCommandBatchCodec, type ArtifactCommandBatch } from "../../src/kernel";
 import { Presentation } from "../../src/presentation";
 import { Workbook } from "../../src/spreadsheet";
 import { random } from "../../bench/support";
@@ -58,53 +57,6 @@ describe("artifact deterministic properties", () => {
       expect(sheet.getRange("A1:A128").values.flat()).toEqual(expected);
     }
   }, 20_000);
-
-  test("random command batches have one canonical binary encoding", () => {
-    for (let seed = 1; seed <= 500; seed += 1) {
-      const next = random(seed ^ 0xa5a5a5a5);
-      const commands = Array.from({ length: 1 + Math.floor(next() * 20) }, (_, index) => ({
-        code: index % 2 === 0 ? "sheet.set" : "shape.move",
-        targetId: `object-${Math.floor(next() * 40)}`,
-        precondition: { objectRevision: Math.floor(next() * 100), exists: next() > 0.2 },
-        payload: {
-          row: Math.floor(next() * 1_000_000),
-          value: Math.floor(next() * 100_000),
-          enabled: next() > 0.5,
-        },
-      }));
-      const batch: ArtifactCommandBatch = {
-        schemaVersion: 1,
-        artifactId: `artifact-${seed}`,
-        modality: seed % 3 === 0 ? "document" : seed % 2 === 0 ? "presentation" : "spreadsheet",
-        transactionId: `transaction-${seed}`,
-        actorId: `actor-${seed % 7}`,
-        baseSequence: seed * 3,
-        baseVector: { z: seed, a: seed + 1 },
-        commands,
-      };
-      const first = ArtifactCommandBatchCodec.encode(batch);
-      const decoded = ArtifactCommandBatchCodec.decode(first);
-      const second = ArtifactCommandBatchCodec.encode(decoded);
-      expect(second).toEqual(first);
-      expect(decoded).toEqual(batch);
-    }
-  });
-
-  test("arbitrary operation bytes are bounded and canonical when accepted", () => {
-    for (let seed = 1; seed <= 2_000; seed += 1) {
-      const next = random(seed ^ 0x7f4a7c15);
-      const bytes = Uint8Array.from({ length: Math.floor(next() * 512) }, () =>
-        Math.floor(next() * 256),
-      );
-      try {
-        const decoded = ArtifactCommandBatchCodec.decode(bytes);
-        const canonical = ArtifactCommandBatchCodec.encode(decoded);
-        expect(ArtifactCommandBatchCodec.decode(canonical)).toEqual(decoded);
-      } catch (error) {
-        expect(error).toBeInstanceOf(Error);
-      }
-    }
-  });
 
   test("spreadsheet SVG and PNG renders are byte deterministic", async () => {
     const workbook = Workbook.create();

@@ -40,7 +40,7 @@ describe("native spreadsheet production facade", () => {
         selectiveUndoOperationIds: [],
       },
       commands: {
-        version: 1,
+        version: 2,
         commands: [
           {
             kind: "sheet.create",
@@ -66,7 +66,7 @@ describe("native spreadsheet production facade", () => {
     });
 
     const intent = decodeEditableArtifactMutationIntent(authored.intentBytes);
-    expect(intent.commandProtocolVersion).toBe(1);
+    expect(intent.commandProtocolVersion).toBe(2);
     expect(decodeSpreadsheetArtifactCommandBatch(intent.commandBytes).commands).toHaveLength(2);
     expect(binding.lastSession?.lastIntent).toEqual(authored.intentBytes);
     expect(binding.lastSession?.lastResolvedBase).toEqual(resolvedBaseBytes);
@@ -131,23 +131,23 @@ describe("native spreadsheet production facade", () => {
     text.dispose();
   });
 
-  test("rejects legacy duplicate-authority command bytes before native apply", () => {
+  test("rejects non-command bytes before native apply", () => {
     const runtime = fakeRuntime("native", "darwin-arm64", fakeBinding());
     const session = NativeSpreadsheetSession.create(runtime, 1n);
     const intentBytes = encodeEditableArtifactMutationIntent({
       envelopeVersion: 1,
       protocolVersion: 1,
-      modelSchemaVersion: 1,
-      commandProtocolVersion: 1,
+      modelSchemaVersion: 2,
+      commandProtocolVersion: 2,
       artifactId: "11111111111111112222222222222222",
-      clientTransactionId: "legacy.ogar",
+      clientTransactionId: "invalid.command",
       replicaId: "0123456789abcdef",
       replicaCounter: 1,
       previousLocalTransactionId: null,
       observedHeadSequence: 0,
       causalBase: [],
       selectiveUndoOperationIds: [],
-      commandBytes: new TextEncoder().encode("OGAR"),
+      commandBytes: new TextEncoder().encode("invalid-command"),
     });
     expect(() => session.authorTransaction(intentBytes, new Uint8Array([1]))).toThrow(
       "spreadsheet command",
@@ -260,13 +260,14 @@ function fakeBinding(): FakeBinding {
         JSON.stringify({
           abiVersion: 1,
           buildIdentityFormat: "utf8",
-          commandSchemaVersion: 1,
-          spreadsheetCommandVersion: 1,
-          kernelSnapshotVersion: 1,
+          commandSchemaVersion: 2,
+          spreadsheetCommandVersion: 2,
+          spreadsheetModelSchemaVersion: 2,
+          kernelSnapshotVersion: 2,
           receiptSchemaVersion: 1,
-          collaborationSnapshotVersion: 1,
+          collaborationSnapshotVersion: 2,
           editableArtifactIntentVersion: 1,
-          committedTransactionVersion: 1,
+          committedTransactionVersion: 2,
           queryVersion: 1,
           queryResponseVersion: 1,
           collaboration: true,

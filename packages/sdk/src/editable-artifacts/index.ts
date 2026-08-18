@@ -16,6 +16,12 @@ export type {
 } from "./browser-session";
 export { EditableArtifactSyncError, EditableArtifactTransportError } from "./errors";
 export type { EditableArtifactSyncErrorCode } from "./errors";
+export { classifyEditableArtifactOpenFailure } from "./open-failure";
+export type {
+  EditableArtifactOpenFailureCategory,
+  EditableArtifactOpenFailureEvent,
+  EditableArtifactOpenFailureReporter,
+} from "./open-failure";
 export { createEditableArtifactHttpLiveTransport } from "./http-live-transport";
 export type {
   CreateEditableArtifactHttpLiveTransportOptions,

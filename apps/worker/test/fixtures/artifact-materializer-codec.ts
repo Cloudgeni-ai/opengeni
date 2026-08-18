@@ -14,9 +14,9 @@ if (argument === "--opengeni-materializer-identity-v1") {
       codecVersions: { "opengeni.xlsx": "fixture-codec-1" },
       fontRegistryHash: HASH,
       policyHash: HASH,
-      supportedModelSchemaVersions: [1],
-      supportedOperationProtocolVersions: [1],
-      supportedSnapshotProtocolVersions: [1],
+      supportedModelSchemaVersions: [2],
+      supportedOperationProtocolVersions: [2],
+      supportedSnapshotProtocolVersions: [2],
     }),
   );
   process.exit(0);

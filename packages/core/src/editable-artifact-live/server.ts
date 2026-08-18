@@ -81,7 +81,6 @@ const MAX_IDENTIFIER_BYTES = 512;
 const MAX_CAUSAL_ACTORS = 1_024;
 
 export type EditableArtifactLiveServerOptions = Readonly<{
-  protocolVersion?: number;
   ticketTtlMs?: number;
   maxClientFrameBytes?: number;
   maxOutboundFrameBytes?: number;
@@ -101,7 +100,10 @@ export type EditableArtifactLiveServerOptions = Readonly<{
 }>;
 
 type NormalizedOptions = Required<Omit<EditableArtifactLiveServerOptions, "ticketTtlMs">> &
-  Readonly<{ ticketTtlMs?: number }>;
+  Readonly<{
+    protocolVersion: typeof EDITABLE_ARTIFACT_LIVE_PROTOCOL_VERSION;
+    ticketTtlMs?: number;
+  }>;
 
 export type OpenEditableArtifactLiveInput = Readonly<{
   token: string;
@@ -147,7 +149,6 @@ export class EditableArtifactLiveServer {
       tickets: dependencies.tickets,
       tokens: dependencies.tokens,
       clock: dependencies.clock,
-      protocolVersion: this.options.protocolVersion,
       ...(this.options.ticketTtlMs === undefined ? {} : { ttlMs: this.options.ticketTtlMs }),
     });
   }
@@ -312,7 +313,6 @@ class EditableArtifactLiveSessionImpl implements EditableArtifactLiveSession {
         scope: this.ticket.scope,
         artifactId: this.artifactId,
         resume: this.resume,
-        protocolVersion: this.options.protocolVersion,
       });
       this.assertOpen();
       validateBootstrap(bootstrap, this.artifactId, this.modality, this.resume, this.options);
@@ -706,7 +706,13 @@ class EditableArtifactLiveSessionImpl implements EditableArtifactLiveSession {
       } as const;
       await this.send(
         snapshot.modality === "spreadsheet"
-          ? { ...common, modality: snapshot.modality, causalFrontier: causalFrontier! }
+          ? {
+              ...common,
+              modality: snapshot.modality,
+              causalFrontier: causalFrontier!,
+              operationProtocolVersion: snapshot.operationProtocolVersion,
+              snapshotVersion: snapshot.snapshotVersion,
+            }
           : {
               ...common,
               modality: snapshot.modality,
@@ -1264,7 +1270,7 @@ function validateResume(
   resume: EditableArtifactLiveResume,
   durableModality: EditableArtifactModality,
 ): void {
-  const resumeModality = resume.modality ?? "spreadsheet";
+  const resumeModality = resume.modality;
   if (resumeModality !== durableModality) {
     throw new EditableArtifactLiveError(
       "invalid_frame",
@@ -1608,7 +1614,7 @@ function boundedString(value: string, label: string, maxBytes: number): void {
 
 function normalizeOptions(options: EditableArtifactLiveServerOptions): NormalizedOptions {
   const normalized = {
-    protocolVersion: options.protocolVersion ?? EDITABLE_ARTIFACT_LIVE_PROTOCOL_VERSION,
+    protocolVersion: EDITABLE_ARTIFACT_LIVE_PROTOCOL_VERSION,
     maxClientFrameBytes: options.maxClientFrameBytes ?? DEFAULT_MAX_CLIENT_FRAME_BYTES,
     maxOutboundFrameBytes: options.maxOutboundFrameBytes ?? DEFAULT_MAX_OUTBOUND_FRAME_BYTES,
     maxSnapshotBytes: options.maxSnapshotBytes ?? DEFAULT_MAX_SNAPSHOT_BYTES,

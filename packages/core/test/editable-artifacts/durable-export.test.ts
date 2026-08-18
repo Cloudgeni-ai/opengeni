@@ -218,10 +218,10 @@ function snapshot() {
       { replicaId: humanActor.replicaId, counter: 7 },
     ]),
     stateHash: initialStateHash,
-    modelSchemaVersion: 1,
-    operationProtocolVersion: 1,
+    modelSchemaVersion: 2,
+    operationProtocolVersion: 2,
     kernelVersion: "artifact-kernel/test",
-    crdtStateVersion: 1,
+    crdtStateVersion: 2,
     verifiedAt: NOW,
     publishedAt: NOW,
   });

@@ -2,18 +2,40 @@ import { describe, expect, test } from "bun:test";
 
 import {
   EDITABLE_ARTIFACT_CODEC_REGISTRY,
+  currentEditableArtifactCompatibility,
   editableArtifactCodecFor,
 } from "../src/editable-artifact-codec-registry";
 import modalityFixture from "./fixtures/editable-artifact-modalities-v1.json";
-import spreadsheetFixture from "./fixtures/editable-artifact-spreadsheet-v1.json";
+import spreadsheetFixture from "./fixtures/editable-artifact-spreadsheet-current.json";
 
 describe("editable artifact codec registry", () => {
+  test("owns one explicit current compatibility tuple per modality", () => {
+    expect(currentEditableArtifactCompatibility("spreadsheet")).toEqual({
+      modality: "spreadsheet",
+      liveProtocolVersion: 2,
+      modelSchemaVersion: 2,
+      snapshotVersion: 2,
+      commandProtocolVersion: 2,
+      committedTransactionProtocolVersion: 2,
+    });
+    for (const modality of ["document", "presentation"] as const) {
+      expect(currentEditableArtifactCompatibility(modality)).toEqual({
+        modality,
+        liveProtocolVersion: 2,
+        modelSchemaVersion: 1,
+        snapshotVersion: 1,
+        commandProtocolVersion: 1,
+        committedTransactionProtocolVersion: 1,
+      });
+    }
+  });
+
   test("selects from durable modality and exact persisted versions", () => {
     for (const modality of ["spreadsheet", "document", "presentation"] as const) {
       const descriptor = editableArtifactCodecFor({
         durableModality: modality,
-        modelSchemaVersion: 1,
-        commandProtocolVersion: 1,
+        modelSchemaVersion: EDITABLE_ARTIFACT_CODEC_REGISTRY[modality].modelSchemaVersion,
+        commandProtocolVersion: EDITABLE_ARTIFACT_CODEC_REGISTRY[modality].command.version,
       });
       expect(descriptor).toBe(EDITABLE_ARTIFACT_CODEC_REGISTRY[modality]);
       expect(descriptor.modality).toBe(modality);
@@ -58,7 +80,7 @@ describe("editable artifact codec registry", () => {
   test("does not misrepresent authoritative document/presentation writes as CRDT", () => {
     expect(EDITABLE_ARTIFACT_CODEC_REGISTRY.spreadsheet.concurrency).toEqual({
       semantics: "causal-crdt-v1",
-      collaborationEnvelope: "OGACO001",
+      collaborationEnvelope: "OGACO002",
       staleBaseMustBeRejected: false,
     });
     for (const modality of ["document", "presentation"] as const) {

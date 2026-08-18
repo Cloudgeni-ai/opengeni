@@ -5,7 +5,8 @@ use opengeni_artifact_kernel::{
     FormulaError, Number, SnapshotError, StableId, Workbook,
 };
 use opengeni_artifact_kernel_binding_protocol::{
-    build_identity, encode_command_batch, encode_namespace,
+    build_identity, encode_command_batch, encode_namespace, encode_viewport_query, query,
+    ViewportQuery,
 };
 
 fn main() {
@@ -26,11 +27,7 @@ fn main() {
                     Cell::from("Revenue"),
                     Cell::from_value(CellValue::Number(Number::new(12.5).expect("finite"))),
                     Cell::from(true),
-                    Cell::formula(
-                        "=B1*2",
-                        CellValue::Number(Number::new(25.0).expect("finite")),
-                    )
-                    .expect("formula"),
+                    Cell::formula("=B1*2").expect("formula"),
                     Cell::from_value(CellValue::Error(FormulaError::NotAvailable)),
                     Cell::from("done"),
                 ],
@@ -47,7 +44,7 @@ fn main() {
     let formula = formula_fixture();
 
     println!(
-        "{{\"buildIdentity\":\"{}\",\"namespace\":\"{}\",\"command\":\"{}\",\"initial\":\"{}\",\"expected\":\"{}\",\"negativeZeroSnapshot\":\"{}\",\"formulaNamespace\":\"{}\",\"formulaInitialCommand\":\"{}\",\"formulaIncrementalCommand\":\"{}\",\"formulaInitial\":\"{}\",\"formulaAfterInitial\":\"{}\",\"formulaAfterIncremental\":\"{}\"}}",
+        "{{\"buildIdentity\":\"{}\",\"namespace\":\"{}\",\"command\":\"{}\",\"initial\":\"{}\",\"expected\":\"{}\",\"negativeZeroSnapshot\":\"{}\",\"formulaNamespace\":\"{}\",\"formulaInitialCommand\":\"{}\",\"formulaIncrementalCommand\":\"{}\",\"formulaInitial\":\"{}\",\"formulaAfterInitial\":\"{}\",\"formulaAfterIncremental\":\"{}\",\"formulaQuery\":\"{}\",\"formulaProjection\":\"{}\"}}",
         hex(build_identity()),
         hex(&encode_namespace(namespace)),
         hex(&encode_command_batch(&command).expect("command envelope")),
@@ -63,6 +60,8 @@ fn main() {
         hex(&formula.initial),
         hex(&formula.after_initial),
         hex(&formula.after_incremental),
+        hex(&formula.query),
+        hex(&formula.projection),
     );
 }
 
@@ -73,19 +72,50 @@ struct FormulaFixture {
     initial: Vec<u8>,
     after_initial: Vec<u8>,
     after_incremental: Vec<u8>,
+    query: Vec<u8>,
+    projection: Vec<u8>,
 }
+
+const DEPENDENCY_CHAIN_LENGTH: usize = 128;
+const MATH_FORMULAS: [&str; 31] = [
+    "=1/(1+0.1)^4",
+    "=POWER(1.1,-4)",
+    "=POWER(2,-1024)",
+    "=POWER(2,-3)",
+    "=POWER(2,-0)",
+    "=POWER(2,0)",
+    "=POWER(2,1)",
+    "=POWER(2,2)",
+    "=POWER(2,3)",
+    "=POWER(2,4)",
+    "=POWER(1,9007199254740991)",
+    "=POWER(2,0.5)",
+    "=POWER(4,-0.5)",
+    "=POWER(-2,3)",
+    "=POWER(-2,0.5)",
+    "=POWER(-0,3)",
+    "=POWER(0,3)",
+    "=POWER(0,-1)",
+    "=POWER(5E-324,1)",
+    "=POWER(1E308,2)",
+    "=ROUND(2.55,1)",
+    "=ROUNDUP(-1.21,1)",
+    "=ROUNDDOWN(-1.29,1)",
+    "=ROUND(1.2345,309)",
+    "=ROUND(1.2345,-324)",
+    "=SQRT(9)",
+    "=SQRT(-1)",
+    "=SQRT(5E-324)",
+    "=-0",
+    "=POWER(-0,-3)",
+    "=1/0",
+];
 
 fn formula_fixture() -> FormulaFixture {
     let namespace = 0x0a11_ce55_1a7e_0001;
     let inputs = StableId::from_parts(namespace, 50);
     let output = StableId::from_parts(namespace, 51);
-    let formula = |source: &str| {
-        Cell::formula(
-            source,
-            CellValue::Number(Number::new(999.0).expect("forged cache")),
-        )
-        .expect("formula")
-    };
+    let formula = |source: &str| Cell::formula(source).expect("formula");
     let initial_command = AtomicBatch::from_commands(vec![
         Command::CreateSheet {
             id: inputs,
@@ -111,6 +141,16 @@ fn formula_fixture() -> FormulaFixture {
                     .collect(),
             )
             .expect("formula inputs"),
+        },
+        Command::SetCells {
+            sheet_id: output,
+            anchor: CellCoord::new(8, 0),
+            cells: CellBlock::new(
+                MATH_FORMULAS.len() as u32,
+                1,
+                MATH_FORMULAS.into_iter().map(formula).collect(),
+            )
+            .expect("deterministic math formulas"),
         },
         Command::SetCells {
             sheet_id: output,
@@ -141,6 +181,24 @@ fn formula_fixture() -> FormulaFixture {
             cells: CellBlock::new(2, 1, vec![formula("=1/0"), formula("=A7+1")])
                 .expect("error formulas"),
         },
+        Command::SetCells {
+            sheet_id: output,
+            anchor: CellCoord::new(0, 2),
+            cells: CellBlock::new(
+                DEPENDENCY_CHAIN_LENGTH as u32,
+                1,
+                (0..DEPENDENCY_CHAIN_LENGTH)
+                    .map(|row| {
+                        if row == 0 {
+                            formula("=1")
+                        } else {
+                            formula(&format!("=C{row}+1"))
+                        }
+                    })
+                    .collect(),
+            )
+            .expect("large dependency chain"),
+        },
     ]);
     let incremental_command = AtomicBatch::from_commands(vec![Command::SetCells {
         sheet_id: inputs,
@@ -167,6 +225,40 @@ fn formula_fixture() -> FormulaFixture {
         .expect("formula incremental apply");
     assert_formula_fixture(&workbook, output, [12.0, 4.0, 1.0, 8.0, 3.0, 3.0]);
     let after_incremental = encode_snapshot(&workbook).expect("formula incremental result");
+    assert_eq!(
+        workbook
+            .sheet(output)
+            .expect("formula output")
+            .cell(CellCoord::new(8, 0))
+            .and_then(|cell| match cell.value() {
+                CellValue::Number(value) => Some(value.get().to_bits()),
+                _ => None,
+            }),
+        Some(0x3fe5_db3f_08b0_ab7d),
+        "incident discount factor bits"
+    );
+    assert_eq!(
+        workbook
+            .sheet(output)
+            .expect("formula output")
+            .cell(CellCoord::new(10, 0))
+            .and_then(|cell| match cell.value() {
+                CellValue::Number(value) => Some(value.get().to_bits()),
+                _ => None,
+            }),
+        Some(0x0004_0000_0000_0000),
+        "subnormal underflow bits"
+    );
+    let query_bytes = encode_viewport_query(ViewportQuery {
+        sheet_id: output,
+        start: CellCoord::new(0, 0),
+        rows: DEPENDENCY_CHAIN_LENGTH as u32,
+        columns: 3,
+        max_cells: 192,
+        max_bytes: 256 * 1024,
+    })
+    .expect("formula query");
+    let projection = query(&after_incremental, &query_bytes).expect("formula projection");
 
     FormulaFixture {
         namespace,
@@ -175,6 +267,8 @@ fn formula_fixture() -> FormulaFixture {
         initial,
         after_initial,
         after_incremental,
+        query: query_bytes,
+        projection,
     }
 }
 
@@ -199,6 +293,21 @@ fn assert_formula_fixture(workbook: &Workbook, output: StableId, aggregates: [f6
         assert_eq!(
             sheet.cell(CellCoord::new(row, 0)).map(Cell::value),
             Some(&CellValue::Error(FormulaError::DivideByZero))
+        );
+    }
+    assert_eq!(
+        sheet
+            .cell(CellCoord::new((DEPENDENCY_CHAIN_LENGTH - 1) as u32, 2))
+            .map(Cell::value),
+        Some(&CellValue::Number(
+            Number::new(DEPENDENCY_CHAIN_LENGTH as f64).expect("finite chain result")
+        ))
+    );
+    for row in [22, 25, 27, 31, 32, 34, 37] {
+        assert_eq!(
+            sheet.cell(CellCoord::new(row, 0)).map(Cell::value),
+            Some(&CellValue::Error(FormulaError::Number)),
+            "numeric error row {row}"
         );
     }
 }

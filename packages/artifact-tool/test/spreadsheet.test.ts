@@ -61,6 +61,47 @@ describe("spreadsheet formulas", () => {
     expect(sheet.getRange("D1").values).toEqual([["#CYCLE!"]]);
   });
 
+  test("matches the current deterministic numeric profile and bit goldens", () => {
+    const workbook = Workbook.create();
+    const sheet = workbook.worksheets.add("Math");
+    sheet.getRange("A1:A15").formulas = [
+      ["=1/(1+0.1)^4"],
+      ["=POWER(1.1,-4)"],
+      ["=POWER(2,-1024)"],
+      ["=POWER(-2,3)"],
+      ["=POWER(-2,0.5)"],
+      ["=POWER(-0,3)"],
+      ["=POWER(0,-1)"],
+      ["=POWER(5E-324,1)"],
+      ["=POWER(1E308,2)"],
+      ["=ROUND(2.55,1)"],
+      ["=ROUNDUP(-1.21,1)"],
+      ["=ROUNDDOWN(-1.29,1)"],
+      ["=SQRT(9)"],
+      ["=SQRT(-1)"],
+      ["=-0"],
+    ];
+
+    const values = sheet.getRange("A1:A15").values.flat();
+    expect(float64Bits(values[0] as number)).toBe(0x3fe5_db3f_08b0_ab7dn);
+    expect(float64Bits(values[1] as number)).toBe(0x3fe5_db3f_08b0_ab7dn);
+    expect(float64Bits(values[2] as number)).toBe(0x0004_0000_0000_0000n);
+    expect(values.slice(3, 14)).toEqual([
+      -8,
+      "#NUM!",
+      0,
+      "#NUM!",
+      5e-324,
+      "#NUM!",
+      2.6,
+      -1.3,
+      -1.2,
+      3,
+      "#NUM!",
+    ]);
+    expect(float64Bits(values[14] as number)).toBe(0n);
+  });
+
   test("finds and translates only real A1 references", () => {
     expect(
       referencesInFormula("=SUM(A1:B2,\"C3\",'Inputs Q1'!$D$4,LOG10(E5),'O''Brien'!F6)"),
@@ -120,6 +161,13 @@ describe("spreadsheet formulas", () => {
     );
   });
 });
+
+function float64Bits(value: number): bigint {
+  const bytes = new ArrayBuffer(8);
+  const view = new DataView(bytes);
+  view.setFloat64(0, value, false);
+  return view.getBigUint64(0, false);
+}
 
 describe("spreadsheet range mutations", () => {
   test("fills formulas with relative and absolute references in one transaction", () => {

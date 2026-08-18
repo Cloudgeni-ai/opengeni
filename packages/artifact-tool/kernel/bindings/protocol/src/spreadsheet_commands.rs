@@ -7,19 +7,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use opengeni_artifact_kernel::{
-    Cell, CellBlock, CellCoord, CellRange, DateValue, FormulaError, Number, OperationId,
-    SheetGeneration, StableId, MAX_CELLS_PER_TRANSACTION, MAX_OPERATIONS_PER_TRANSACTION,
+    AuthoredCellContent, CellBlock, CellCoord, CellRange, DateValue, FormulaError, Number,
+    OperationId, SheetGeneration, StableId, MAX_CELLS_PER_TRANSACTION,
+    MAX_OPERATIONS_PER_TRANSACTION,
 };
 
 use super::{checksum, read_u16, read_u32, read_u64, BindingError};
 
-pub const SPREADSHEET_COMMAND_VERSION: u16 = 1;
+pub const SPREADSHEET_COMMAND_VERSION: u16 = 2;
 pub const MAX_SPREADSHEET_COMMAND_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_SPREADSHEET_COMMANDS: usize = MAX_OPERATIONS_PER_TRANSACTION;
 pub const MAX_SPREADSHEET_COMMAND_CELLS: usize = MAX_CELLS_PER_TRANSACTION;
 pub const MAX_SPREADSHEET_COMMAND_STRING_BYTES: usize = 1024 * 1024;
 
-const MAGIC: [u8; 8] = *b"OGASC001";
+const MAGIC: [u8; 8] = *b"OGASC002";
 const HEADER_BYTES: usize = 8 + 2 + 2 + 4 + 8;
 const CHECKSUM_BYTES: usize = 8;
 
@@ -67,13 +68,13 @@ pub(crate) fn decode_spreadsheet_commands(
     bytes: &[u8],
 ) -> Result<SpreadsheetCommandBatch, BindingError> {
     if bytes.len() > MAX_SPREADSHEET_COMMAND_BYTES {
-        return Err(BindingError::Limit("OGASC001 spreadsheet commands"));
+        return Err(BindingError::Limit("OGASC002 spreadsheet commands"));
     }
     if bytes.len() < HEADER_BYTES + CHECKSUM_BYTES {
         return Err(BindingError::Truncated);
     }
     if bytes[..8] != MAGIC {
-        return Err(BindingError::BadMagic("OGASC001 spreadsheet command"));
+        return Err(BindingError::BadMagic("OGASC002 spreadsheet command"));
     }
     let version = read_u16(&bytes[8..10])?;
     if version != SPREADSHEET_COMMAND_VERSION {
@@ -81,22 +82,22 @@ pub(crate) fn decode_spreadsheet_commands(
     }
     if read_u16(&bytes[10..12])? != 0 {
         return Err(BindingError::NonCanonical(
-            "reserved OGASC001 header bits are set",
+            "reserved OGASC002 header bits are set",
         ));
     }
     let command_count = usize::try_from(read_u32(&bytes[12..16])?)
-        .map_err(|_| BindingError::Limit("OGASC001 command count"))?;
+        .map_err(|_| BindingError::Limit("OGASC002 command count"))?;
     if command_count == 0 || command_count > MAX_SPREADSHEET_COMMANDS {
-        return Err(BindingError::Limit("OGASC001 command count"));
+        return Err(BindingError::Limit("OGASC002 command count"));
     }
     let payload_len = usize::try_from(read_u64(&bytes[16..24])?)
-        .map_err(|_| BindingError::Limit("OGASC001 payload"))?;
+        .map_err(|_| BindingError::Limit("OGASC002 payload"))?;
     let payload_end = HEADER_BYTES
         .checked_add(payload_len)
-        .ok_or(BindingError::Limit("OGASC001 payload"))?;
+        .ok_or(BindingError::Limit("OGASC002 payload"))?;
     let expected = payload_end
         .checked_add(CHECKSUM_BYTES)
-        .ok_or(BindingError::Limit("OGASC001 envelope"))?;
+        .ok_or(BindingError::Limit("OGASC002 envelope"))?;
     if bytes.len() != expected {
         return Err(if bytes.len() < expected {
             BindingError::Truncated
@@ -116,7 +117,7 @@ pub(crate) fn decode_spreadsheet_commands(
     let mut commands = Vec::new();
     commands
         .try_reserve_exact(command_count)
-        .map_err(|_| BindingError::Limit("OGASC001 command count"))?;
+        .map_err(|_| BindingError::Limit("OGASC002 command count"))?;
     let mut created = BTreeMap::new();
     let mut created_sheet_ids = BTreeSet::new();
     let mut total_cells = 0usize;
@@ -134,7 +135,7 @@ pub(crate) fn decode_spreadsheet_commands(
                     || !created_sheet_ids.insert(sheet_id)
                 {
                     return Err(BindingError::NonCanonical(
-                        "OGASC001 creates a sheet id more than once",
+                        "OGASC002 creates a sheet id more than once",
                     ));
                 }
                 SpreadsheetCommand::CreateSheet {
@@ -162,18 +163,18 @@ pub(crate) fn decode_spreadsheet_commands(
                             .ok()
                             .and_then(|columns| rows.checked_mul(columns))
                     })
-                    .ok_or(BindingError::Limit("OGASC001 cell block"))?;
+                    .ok_or(BindingError::Limit("OGASC002 cell block"))?;
                 total_cells = total_cells
                     .checked_add(count)
-                    .ok_or(BindingError::Limit("OGASC001 cells"))?;
+                    .ok_or(BindingError::Limit("OGASC002 cells"))?;
                 if count == 0 || total_cells > MAX_SPREADSHEET_COMMAND_CELLS {
-                    return Err(BindingError::Limit("OGASC001 cells"));
+                    return Err(BindingError::Limit("OGASC002 cells"));
                 }
                 if anchor.row.checked_add(rows - 1).is_none()
                     || anchor.column.checked_add(columns - 1).is_none()
                 {
                     return Err(BindingError::NonCanonical(
-                        "OGASC001 cell block extent exceeds uint32 coordinates",
+                        "OGASC002 cell block extent exceeds uint32 coordinates",
                     ));
                 }
                 if count > reader.remaining() / 2 {
@@ -182,7 +183,7 @@ pub(crate) fn decode_spreadsheet_commands(
                 let mut cells = Vec::new();
                 cells
                     .try_reserve_exact(count)
-                    .map_err(|_| BindingError::Limit("OGASC001 cells"))?;
+                    .map_err(|_| BindingError::Limit("OGASC002 cells"))?;
                 for _ in 0..count {
                     cells.push(reader.cell()?);
                 }
@@ -190,7 +191,7 @@ pub(crate) fn decode_spreadsheet_commands(
                     sheet,
                     anchor,
                     cells: CellBlock::new(rows, columns, cells).map_err(|error| {
-                        BindingError::Kernel(format!("invalid OGASC001 cell block: {error:?}"))
+                        BindingError::Kernel(format!("invalid OGASC002 cell block: {error:?}"))
                     })?,
                 }
             }
@@ -200,7 +201,7 @@ pub(crate) fn decode_spreadsheet_commands(
                 let end = CellCoord::new(reader.u32()?, reader.u32()?);
                 if start.row > end.row || start.column > end.column {
                     return Err(BindingError::NonCanonical(
-                        "OGASC001 clear range endpoints are not ordered",
+                        "OGASC002 clear range endpoints are not ordered",
                     ));
                 }
                 SpreadsheetCommand::ClearRange {
@@ -234,12 +235,12 @@ pub(crate) fn encode_spreadsheet_commands(
     output.extend_from_slice(&0u16.to_le_bytes());
     output.extend_from_slice(
         &u32::try_from(commands.len())
-            .map_err(|_| BindingError::Limit("OGASC001 command count"))?
+            .map_err(|_| BindingError::Limit("OGASC002 command count"))?
             .to_le_bytes(),
     );
     output.extend_from_slice(
         &u64::try_from(payload.len())
-            .map_err(|_| BindingError::Limit("OGASC001 payload"))?
+            .map_err(|_| BindingError::Limit("OGASC002 payload"))?
             .to_le_bytes(),
     );
     output.extend_from_slice(&payload);
@@ -248,7 +249,7 @@ pub(crate) fn encode_spreadsheet_commands(
         || commands.len() > MAX_SPREADSHEET_COMMANDS
         || output.len() > MAX_SPREADSHEET_COMMAND_BYTES
     {
-        return Err(BindingError::Limit("OGASC001 envelope"));
+        return Err(BindingError::Limit("OGASC002 envelope"));
     }
     Ok(output)
 }
@@ -271,7 +272,7 @@ impl<'a> Reader<'a> {
         let end = self
             .offset
             .checked_add(length)
-            .ok_or(BindingError::Limit("OGASC001 payload"))?;
+            .ok_or(BindingError::Limit("OGASC002 payload"))?;
         let value = self
             .bytes
             .get(self.offset..end)
@@ -299,7 +300,7 @@ impl<'a> Reader<'a> {
                 .map_err(|_| BindingError::Truncated)?,
         );
         if id.is_zero() {
-            return Err(BindingError::NonCanonical("OGASC001 stable id is all-zero"));
+            return Err(BindingError::NonCanonical("OGASC002 stable id is all-zero"));
         }
         Ok(id)
     }
@@ -308,7 +309,7 @@ impl<'a> Reader<'a> {
         let id = self.generic_id()?;
         if id.namespace() == 0 || id.counter() == 0 {
             return Err(BindingError::NonCanonical(
-                "OGASC001 sheet id requires nonzero namespace and counter",
+                "OGASC002 sheet id requires nonzero namespace and counter",
             ));
         }
         Ok(id)
@@ -316,9 +317,9 @@ impl<'a> Reader<'a> {
 
     fn string(&mut self) -> Result<String, BindingError> {
         let length =
-            usize::try_from(self.u32()?).map_err(|_| BindingError::Limit("OGASC001 string"))?;
+            usize::try_from(self.u32()?).map_err(|_| BindingError::Limit("OGASC002 string"))?;
         if length > MAX_SPREADSHEET_COMMAND_STRING_BYTES {
-            return Err(BindingError::Limit("OGASC001 string"));
+            return Err(BindingError::Limit("OGASC002 string"));
         }
         let value =
             std::str::from_utf8(self.take(length)?).map_err(|_| BindingError::InvalidUtf8)?;
@@ -336,7 +337,7 @@ impl<'a> Reader<'a> {
             })
         {
             return Err(BindingError::InvalidIntent(format!(
-                "OGASC001 command {command_index} sheet name does not match the public spreadsheet model"
+                "OGASC002 command {command_index} sheet name does not match the public spreadsheet model"
             )));
         }
         Ok(value)
@@ -356,10 +357,10 @@ impl<'a> Reader<'a> {
                 let sheet_id = self.sheet_id()?;
                 let create_command_index = self.u32()?;
                 let prior_index = usize::try_from(create_command_index)
-                    .map_err(|_| BindingError::Limit("OGASC001 prior-create index"))?;
+                    .map_err(|_| BindingError::Limit("OGASC002 prior-create index"))?;
                 if prior_index >= command_index || created.get(&prior_index) != Some(&sheet_id) {
                     return Err(BindingError::NonCanonical(
-                        "OGASC001 prior-create reference is not an earlier matching create",
+                        "OGASC002 prior-create reference is not an earlier matching create",
                     ));
                 }
                 Ok(SheetPrecondition::CreatedInBatch {
@@ -371,21 +372,24 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn cell(&mut self) -> Result<Cell, BindingError> {
-        let formula = match self.u8()? {
-            0 => None,
+    fn cell(&mut self) -> Result<AuthoredCellContent, BindingError> {
+        match self.u8()? {
+            0 => self.value().map(AuthoredCellContent::from_value),
             1 => {
-                let value = self.string()?;
-                if value.is_empty() {
+                let source = self.string()?;
+                if source.is_empty() {
                     return Err(BindingError::NonCanonical(
-                        "OGASC001 formula source is empty",
+                        "OGASC002 formula source is empty",
                     ));
                 }
-                Some(value)
+                AuthoredCellContent::formula(source).map_err(BindingError::InvalidCellValue)
             }
-            tag => return Err(BindingError::InvalidTag(tag)),
-        };
-        let value = match self.u8()? {
+            tag => Err(BindingError::InvalidTag(tag)),
+        }
+    }
+
+    fn value(&mut self) -> Result<opengeni_artifact_kernel::CellValue, BindingError> {
+        Ok(match self.u8()? {
             0 => opengeni_artifact_kernel::CellValue::Empty,
             1 => opengeni_artifact_kernel::CellValue::Boolean(false),
             2 => opengeni_artifact_kernel::CellValue::Boolean(true),
@@ -393,7 +397,7 @@ impl<'a> Reader<'a> {
                 let bits = self.u64()?;
                 if bits == (-0.0f64).to_bits() {
                     return Err(BindingError::NonCanonical(
-                        "OGASC001 cell number uses negative zero",
+                        "OGASC002 cell number uses negative zero",
                     ));
                 }
                 opengeni_artifact_kernel::CellValue::Number(
@@ -406,11 +410,7 @@ impl<'a> Reader<'a> {
                 DateValue::new(self.u64()? as i64).map_err(BindingError::InvalidCellValue)?,
             ),
             tag => return Err(BindingError::InvalidTag(tag)),
-        };
-        match formula {
-            Some(source) => Cell::formula(source, value).map_err(BindingError::InvalidCellValue),
-            None => Ok(Cell::from_value(value)),
-        }
+        })
     }
 
     fn formula_error(&mut self) -> Result<FormulaError, BindingError> {
@@ -455,7 +455,7 @@ impl Writer {
 
     fn bytes(&mut self, value: &[u8]) -> Result<(), BindingError> {
         if value.len() > self.maximum.saturating_sub(self.bytes.len()) {
-            return Err(BindingError::Limit("OGASC001 payload"));
+            return Err(BindingError::Limit("OGASC002 payload"));
         }
         self.bytes.extend_from_slice(value);
         Ok(())
@@ -479,9 +479,9 @@ impl Writer {
 
     fn string(&mut self, value: &str) -> Result<(), BindingError> {
         if value.len() > MAX_SPREADSHEET_COMMAND_STRING_BYTES {
-            return Err(BindingError::Limit("OGASC001 string"));
+            return Err(BindingError::Limit("OGASC002 string"));
         }
-        self.u32(u32::try_from(value.len()).map_err(|_| BindingError::Limit("OGASC001 string"))?)?;
+        self.u32(u32::try_from(value.len()).map_err(|_| BindingError::Limit("OGASC002 string"))?)?;
         self.bytes(value.as_bytes())
     }
 
@@ -557,15 +557,25 @@ impl Writer {
         }
     }
 
-    fn cell(&mut self, cell: &Cell) -> Result<(), BindingError> {
+    fn cell(&mut self, cell: &AuthoredCellContent) -> Result<(), BindingError> {
         match cell.formula_source() {
-            None => self.u8(0)?,
+            None => {
+                self.u8(0)?;
+                self.value(
+                    cell.literal_value()
+                        .expect("non-formula authored cells have a literal"),
+                )?;
+            }
             Some(source) => {
                 self.u8(1)?;
                 self.string(source)?;
             }
         }
-        match cell.value() {
+        Ok(())
+    }
+
+    fn value(&mut self, value: &opengeni_artifact_kernel::CellValue) -> Result<(), BindingError> {
+        match value {
             opengeni_artifact_kernel::CellValue::Empty => self.u8(0),
             opengeni_artifact_kernel::CellValue::Boolean(false) => self.u8(1),
             opengeni_artifact_kernel::CellValue::Boolean(true) => self.u8(2),

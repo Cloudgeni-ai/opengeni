@@ -40,9 +40,10 @@ authority.
   Submitted version vectors must be causally closed: observing a dot also
   requires every dependency that dot observed, preventing impossible authored
   histories from weakening preconditions.
-- Collaboration snapshots (`OGACRD01`) contain the full retained transaction,
-  causal, tombstone, undo, and materialized state. Decode deterministically
-  reconstructs and verifies both the frontier and ordinary workbook snapshot.
+- Collaboration snapshots (`OGACRD02`) contain the retained transaction,
+  causal, tombstone, and undo state. Decode reconstructs the visible workbook
+  from that single authority and verifies the frontier; it does not persist or
+  compare a redundant materialized workbook.
 - `retention_metadata()` exposes retained causal floors, pending bases,
   tombstones, and undo links so the persistence layer can combine them with
   pinned versions and replica leases before removing external operation
@@ -67,8 +68,10 @@ snapshots at the edge instead of exposing Rust layout.
 
 ## Spreadsheet calculation profile
 
-Formula source is authoritative: command and snapshot boundaries discard
-untrusted cached results and derive them again. The engine parses each formula
+Formula source is authored state: commands, snapshots, collaboration history,
+authored/retained admission, and state hashes never contain calculated values. Query,
+render, and export paths expose calculated projections rebuilt from that source.
+The engine parses each formula
 once, interns equivalent expression trees, and keeps forward/reverse edges by
 stable sheet id and cell coordinate. An input edit recalculates only its dirty
 reverse-dependency closure in deterministic topological levels. Sheet renames
@@ -98,7 +101,9 @@ Hard ceilings cover source bytes, tokens, nesting, arguments, referenced range
 area, reads and operations per formula and recalculation, dependency depth,
 formula/cell/edge/AST/range counts, result length, retained values, and aggregate
 interned UTF-8. Callers may tighten but never relax them. Failed edits and
-recalculations commit neither authored nor derived state.
+recalculations commit neither authored nor projected state. Integer powers use
+exact exponentiation by squaring; non-integral powers use the pinned
+deterministic math implementation shared by native and Wasm.
 
 ## Shared text layout and retained rendering
 

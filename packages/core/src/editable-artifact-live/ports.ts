@@ -40,7 +40,6 @@ export type EditableArtifactLiveBootstrapRead = Readonly<{
   scope: EditableArtifactScope;
   artifactId: EditableArtifactId;
   resume: EditableArtifactLiveResume;
-  protocolVersion: number;
 }>;
 
 export type EditableArtifactLiveTransactionPage = Readonly<{

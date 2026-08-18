@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import fixture from "./fixtures/editable-artifact-live-v1.json";
+import fixture from "./fixtures/editable-artifact-live-current.json";
 import {
   decodeEditableArtifactLiveClientWireFrame,
   decodeEditableArtifactLiveServerWireFrame,
@@ -8,14 +8,15 @@ import {
   encodeEditableArtifactLiveServerWireFrame,
 } from "../src/editable-artifact-live";
 
-describe("OGALV001 shared live wire", () => {
+describe("OGALV002 shared live wire", () => {
   test("matches fixed client and server byte vectors exactly", () => {
     const open = encodeEditableArtifactLiveOpenWireFrame({
       type: "open",
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId: fixture.artifactId,
       token: "fixture_ticket",
       resume: {
+        modality: "spreadsheet",
         localCursor: 3,
         localStateHash: fixture.stateHash,
         localCausalFrontier: [{ replicaId: fixture.replicaId, counter: 3 }],
@@ -24,7 +25,7 @@ describe("OGALV001 shared live wire", () => {
     });
     const applied = encodeEditableArtifactLiveAppliedWireFrame({
       type: "applied",
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId: fixture.artifactId,
       streamEpoch: fixture.streamEpoch,
       sequence: 3,
@@ -32,7 +33,7 @@ describe("OGALV001 shared live wire", () => {
     });
     const watermark = encodeEditableArtifactLiveServerWireFrame({
       type: "watermark",
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId: fixture.artifactId,
       streamEpoch: fixture.streamEpoch,
       headSequence: 4,
@@ -47,7 +48,7 @@ describe("OGALV001 shared live wire", () => {
     });
     expect(decodeEditableArtifactLiveServerWireFrame(fromHex(fixture.watermarkHex))).toEqual({
       type: "watermark",
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId: fixture.artifactId,
       streamEpoch: fixture.streamEpoch,
       headSequence: 4,
@@ -56,7 +57,7 @@ describe("OGALV001 shared live wire", () => {
 
   test("strictly round-trips every metadata-only server frame", () => {
     const base = {
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId: fixture.artifactId,
       streamEpoch: fixture.streamEpoch,
     } as const;
@@ -64,6 +65,7 @@ describe("OGALV001 shared live wire", () => {
       {
         type: "open",
         ...base,
+        modality: "spreadsheet",
         writable: true,
         headSequence: 4,
         minimumReplaySequence: 1,
@@ -108,7 +110,7 @@ describe("OGALV001 shared live wire", () => {
   test("round-trips explicit serialized modality, native revisions, and exact OGAST bytes", () => {
     const open = {
       type: "open" as const,
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId: fixture.artifactId,
       token: "fixture_ticket",
       resume: {
@@ -124,7 +126,7 @@ describe("OGALV001 shared live wire", () => {
     ).toEqual(open);
 
     const base = {
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId: fixture.artifactId,
       streamEpoch: fixture.streamEpoch,
     } as const;
@@ -201,16 +203,18 @@ describe("OGALV001 shared live wire", () => {
     const bytes = new Uint8Array([1, 2, 3]);
     const encoded = encodeEditableArtifactLiveServerWireFrame({
       type: "snapshot",
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId: fixture.artifactId,
       streamEpoch: fixture.streamEpoch,
       modality: "spreadsheet",
       sequence: 4,
       stateHash: fixture.stateHash,
       causalFrontier: [{ replicaId: fixture.replicaId, counter: 4 }],
+      operationProtocolVersion: 2,
+      snapshotVersion: 2,
       digest: fixture.stateHash,
       kernelVersion: "fixture-kernel-1",
-      modelSchemaVersion: 1,
+      modelSchemaVersion: 2,
       offset: 0,
       totalBytes: bytes.byteLength,
       final: true,
@@ -219,15 +223,18 @@ describe("OGALV001 shared live wire", () => {
 
     expect(decodeEditableArtifactLiveServerWireFrame(encoded)).toEqual({
       type: "snapshot",
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId: fixture.artifactId,
       streamEpoch: fixture.streamEpoch,
+      modality: "spreadsheet",
       sequence: 4,
       stateHash: fixture.stateHash,
       causalFrontier: [{ replicaId: fixture.replicaId, counter: 4 }],
+      operationProtocolVersion: 2,
+      snapshotVersion: 2,
       digest: fixture.stateHash,
       kernelVersion: "fixture-kernel-1",
-      modelSchemaVersion: 1,
+      modelSchemaVersion: 2,
       offset: 0,
       totalBytes: bytes.byteLength,
       final: true,
@@ -243,6 +250,12 @@ describe("OGALV001 shared live wire", () => {
     const trailing = new Uint8Array(watermark.byteLength + 1);
     trailing.set(watermark);
     expect(() => decodeEditableArtifactLiveServerWireFrame(trailing)).toThrow(/length mismatch/u);
+  });
+
+  test("rejects the previous live wire magic without a legacy decoder", () => {
+    const previous = fromHex(fixture.openHex);
+    previous.set(new TextEncoder().encode("OGALV001"), 0);
+    expect(() => decodeEditableArtifactLiveClientWireFrame(previous)).toThrow(/magic/u);
   });
 });
 

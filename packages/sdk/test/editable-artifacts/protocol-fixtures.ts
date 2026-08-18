@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION,
   EDITABLE_ARTIFACT_INTENT_VERSION,
   SPREADSHEET_ARTIFACT_COMMAND_VERSION,
   decodeSpreadsheetArtifactCommandBatch,
@@ -75,9 +76,9 @@ export function testPending(input: {
   createdAt?: number;
 }): EditableArtifactSpreadsheetPendingTransaction {
   const commandBytes = input.commandBytes ?? testCommand(input.replicaCounter & 0xff);
-  const protocolVersion = input.protocolVersion ?? 1;
-  const modelSchemaVersion = input.modelSchemaVersion ?? 1;
-  const commandVersion = input.commandVersion ?? 1;
+  const protocolVersion = input.protocolVersion ?? EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION;
+  const modelSchemaVersion = input.modelSchemaVersion ?? 2;
+  const commandVersion = input.commandVersion ?? 2;
   const causalBase = input.causalBase ?? [];
   const selectiveUndoTargets = input.selectiveUndoTargets ?? [];
   const previousLocalTransactionId = input.previousLocalTransactionId ?? null;
@@ -127,7 +128,7 @@ export function testCommitted(input: {
   causalFrontier: EditableArtifactCausalFrontier;
   dot?: Readonly<{ replicaId: string; counter: number }>;
   resolvedCausalBase?: EditableArtifactCausalFrontier;
-  protocolVersion?: number;
+  operationProtocolVersion?: number;
 }): EditableArtifactSpreadsheetCommittedTransaction {
   const transactionId =
     input.transactionId && /^(?!0{32}$)[a-f0-9]{32}$/u.test(input.transactionId)
@@ -154,7 +155,7 @@ export function testCommitted(input: {
     priorStateHash: input.priorStateHash,
     stateHash: input.stateHash,
     causalFrontier: input.causalFrontier.map((entry) => ({ ...entry })),
-    protocolVersion: input.protocolVersion ?? 1,
+    operationProtocolVersion: input.operationProtocolVersion ?? 2,
     committedTransactionBytes,
   };
 }
@@ -169,7 +170,7 @@ type TestCommittedTransactionInput = Readonly<{
   stateHash: string;
 }>;
 
-/** Test-only OGACO encoder. Production authors these bytes only in Rust. */
+/** Test-only current committed-transaction encoder. Production authors these bytes only in Rust. */
 export function encodeTestCommittedTransaction(input: TestCommittedTransactionInput): Uint8Array {
   const payload = new TestCommittedWriter()
     .stableId(input.transactionId)
@@ -183,8 +184,8 @@ export function encodeTestCommittedTransaction(input: TestCommittedTransactionIn
   payload.frontier(input.resultingCausalFrontier).hash(input.stateHash);
   const payloadBytes = payload.finish();
   const envelope = new TestCommittedWriter()
-    .raw(encoder.encode("OGACO001"))
-    .u16(1)
+    .raw(encoder.encode("OGACO002"))
+    .u16(2)
     .u16(0)
     .u32(input.operationIds.length)
     .u64(BigInt(payloadBytes.byteLength))

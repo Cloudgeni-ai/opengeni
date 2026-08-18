@@ -1,6 +1,16 @@
 import { createHash } from "node:crypto";
 import { decodeEditableArtifactCausalFrontier } from "@opengeni/contracts/editable-artifact-causal-frontier";
-import { EDITABLE_ARTIFACT_PRODUCT_MAX_SNAPSHOT_BYTES } from "@opengeni/contracts/editable-artifacts";
+import {
+  EDITABLE_ARTIFACT_PRODUCT_MAX_SNAPSHOT_BYTES,
+  currentEditableArtifactCompatibility,
+} from "@opengeni/contracts/editable-artifacts";
+import {
+  COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+  DOCUMENT_ARTIFACT_MODEL_SCHEMA_VERSION,
+  PRESENTATION_ARTIFACT_MODEL_SCHEMA_VERSION,
+  SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
+  SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
+} from "@opengeni/contracts/editable-artifact-versions";
 import type { ArtifactSnapshot } from "./snapshot";
 
 export type ArtifactOfficeModality = "spreadsheet" | "document" | "presentation";
@@ -23,19 +33,29 @@ export type PreparedArtifactOfficeImport = Readonly<{
         byteSize: number;
         contentHash: `sha256:${string}`;
         stateHash: `sha256:${string}`;
-        modelSchemaVersion: 1;
+        modelSchemaVersion: typeof SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION;
         kernelVersion: string;
         coveredCausalFrontier: readonly Readonly<{ replicaId: string; counter: number }>[];
-        operationProtocolVersion: 1;
-        crdtStateVersion: 1;
+        operationProtocolVersion: typeof COMMITTED_TRANSACTION_PROTOCOL_VERSION;
+        crdtStateVersion: typeof SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION;
       }>
     | Readonly<{
-        modality: "document" | "presentation";
+        modality: "document";
         bytes: Uint8Array;
         byteSize: number;
         contentHash: `sha256:${string}`;
         stateHash: `sha256:${string}`;
-        modelSchemaVersion: 1;
+        modelSchemaVersion: typeof DOCUMENT_ARTIFACT_MODEL_SCHEMA_VERSION;
+        kernelVersion: string;
+        nativeRevision: number;
+      }>
+    | Readonly<{
+        modality: "presentation";
+        bytes: Uint8Array;
+        byteSize: number;
+        contentHash: `sha256:${string}`;
+        stateHash: `sha256:${string}`;
+        modelSchemaVersion: typeof PRESENTATION_ARTIFACT_MODEL_SCHEMA_VERSION;
         kernelVersion: string;
         nativeRevision: number;
       }>;
@@ -119,13 +139,14 @@ function validateSnapshot(
   expectedKernelVersion: string,
 ): PreparedArtifactOfficeImport["snapshot"] {
   const snapshot = exactNamespace(value, "artifact snapshot") as unknown as ArtifactSnapshot;
+  const current = currentEditableArtifactCompatibility(modality);
   if (
     snapshot.schemaVersion !== 1 ||
     snapshot.modality !== modality ||
     snapshot.runtimeTarget !== expectedRuntimeTarget ||
     snapshot.kernelVersion !== expectedKernelVersion ||
-    snapshot.modelSchemaVersion !== 1 ||
-    snapshot.snapshotVersion !== 1 ||
+    snapshot.modelSchemaVersion !== current.modelSchemaVersion ||
+    snapshot.snapshotVersion !== current.snapshotVersion ||
     !/^sha256:[0-9a-f]{64}$/u.test(snapshot.stateHash)
   ) {
     throw new TypeError("Imported snapshot differs from the verified native runtime boundary");
@@ -143,35 +164,43 @@ function validateSnapshot(
     byteSize: bytes.byteLength,
     contentHash: sha256(bytes),
     stateHash: snapshot.stateHash as `sha256:${string}`,
-    modelSchemaVersion: 1 as const,
     kernelVersion: snapshot.kernelVersion,
   };
   if (snapshot.modality === "spreadsheet") {
     if (
       !(snapshot.coveredCausalFrontierBytes instanceof Uint8Array) ||
-      snapshot.operationProtocolVersion !== 1 ||
-      snapshot.crdtStateVersion !== 1
+      snapshot.operationProtocolVersion !== COMMITTED_TRANSACTION_PROTOCOL_VERSION ||
+      snapshot.crdtStateVersion !== SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION
     ) {
       throw new TypeError("Imported spreadsheet snapshot coverage is invalid");
     }
     return Object.freeze({
       ...common,
       modality: "spreadsheet" as const,
+      modelSchemaVersion: SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
       coveredCausalFrontier: decodeEditableArtifactCausalFrontier(
         snapshot.coveredCausalFrontierBytes,
       ),
-      operationProtocolVersion: 1 as const,
-      crdtStateVersion: 1 as const,
+      operationProtocolVersion: COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+      crdtStateVersion: SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
     });
   }
   if (!Number.isSafeInteger(snapshot.nativeRevision) || snapshot.nativeRevision < 0) {
     throw new TypeError("Imported serialized snapshot revision is invalid");
   }
-  return Object.freeze({
-    ...common,
-    modality: snapshot.modality,
-    nativeRevision: snapshot.nativeRevision,
-  });
+  return snapshot.modality === "document"
+    ? Object.freeze({
+        ...common,
+        modality: "document" as const,
+        modelSchemaVersion: DOCUMENT_ARTIFACT_MODEL_SCHEMA_VERSION,
+        nativeRevision: snapshot.nativeRevision,
+      })
+    : Object.freeze({
+        ...common,
+        modality: "presentation" as const,
+        modelSchemaVersion: PRESENTATION_ARTIFACT_MODEL_SCHEMA_VERSION,
+        nativeRevision: snapshot.nativeRevision,
+      });
 }
 
 function officeImporter(

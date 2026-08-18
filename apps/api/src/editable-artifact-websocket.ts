@@ -16,7 +16,7 @@ import type {
 } from "./api-websocket";
 
 export const EDITABLE_ARTIFACT_LIVE_WEBSOCKET_PATH = "/v1/editable-artifacts/live";
-export const EDITABLE_ARTIFACT_LIVE_WEBSOCKET_PROTOCOL = "opengeni-artifact-v1";
+export const EDITABLE_ARTIFACT_LIVE_WEBSOCKET_PROTOCOL = "opengeni-artifact-v2";
 export const EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES = 8 * 1024 * 1024 + 64 * 1024;
 
 const MAX_QUEUED_MESSAGES = 64;

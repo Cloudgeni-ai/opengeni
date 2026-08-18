@@ -45,7 +45,7 @@ describe("editable artifact public exports", () => {
       ],
     };
 
-    expect(batch.version).toBe(1);
+    expect(batch.version).toBe(2);
     expect(batch.commands).toHaveLength(1);
   });
 

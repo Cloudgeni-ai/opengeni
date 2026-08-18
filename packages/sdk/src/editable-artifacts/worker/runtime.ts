@@ -5,9 +5,13 @@ import {
   decodeEditableArtifactMutationIntent,
   hashEditableArtifactMutationIntent,
 } from "@opengeni/contracts/editable-artifacts";
-import { decodeCommittedTransactionSummary } from "@opengeni/contracts/editable-artifact-committed-transaction";
+import {
+  COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+  decodeCommittedTransactionSummary,
+} from "@opengeni/contracts/editable-artifact-committed-transaction";
 import { editableArtifactCodecFor } from "@opengeni/contracts/editable-artifact-codec-registry";
 import { decodeEditableArtifactSerializedCommit } from "@opengeni/contracts/editable-artifact-serialized-commit";
+import { SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION } from "@opengeni/contracts/editable-artifact-versions";
 import type {
   EditableArtifactBlockedPending,
   EditableArtifactCausalFrontier,
@@ -269,18 +273,20 @@ export class ArtifactWorkerRuntime {
       snapshot.modality !== initialization.modality ||
       snapshot.modality !== adapter.modality ||
       (snapshot.modality === "spreadsheet" &&
-        snapshot.protocolVersion !== adapter.protocolVersion) ||
-      snapshot.kernelVersion !== adapter.kernelVersion ||
+        (snapshot.operationProtocolVersion !== COMMITTED_TRANSACTION_PROTOCOL_VERSION ||
+          snapshot.snapshotVersion !== SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION)) ||
       snapshot.modelSchemaVersion !== adapter.modelSchemaVersion
     ) {
       throw runtimeError(
         "unsupported_protocol",
-        "snapshot protocol/kernel/schema is incompatible with the loaded collaboration kernel",
+        "snapshot protocol/schema is incompatible with the loaded collaboration kernel",
       );
     }
     const digest = await sha256Hex(ownedBytes);
     this.throwIfCancelled(frame.requestId);
-    requireMatchingHash(digest, snapshot.digest, "snapshot digest");
+    if (digest !== snapshot.digest) {
+      throw runtimeError("byte_corruption", "snapshot digest does not match its bytes");
+    }
     const canonical = requireBytesWithin(
       adapter.canonicalizeSnapshot(ownedBytes),
       initialization.maximumSnapshotBytes,
@@ -298,7 +304,12 @@ export class ArtifactWorkerRuntime {
     try {
       stateHash = await nextConfirmed.stateHash();
       this.throwIfCancelled(frame.requestId);
-      requireMatchingHash(stateHash, snapshot.stateHash, "snapshot state");
+      if (stateHash !== snapshot.stateHash) {
+        throw runtimeError(
+          "authored_causal_mismatch",
+          "snapshot authored state does not match its state hash",
+        );
+      }
       if (
         snapshot.modality !== "spreadsheet" &&
         nextConfirmed.nativeRevision() !== snapshot.nativeRevision
@@ -324,7 +335,7 @@ export class ArtifactWorkerRuntime {
             artifactId: snapshot.artifactId,
             modality: "spreadsheet",
             sequence: snapshot.sequence,
-            protocolVersion: snapshot.protocolVersion,
+            protocolVersion: adapter.protocolVersion,
             kernelVersion: snapshot.kernelVersion,
             modelSchemaVersion: snapshot.modelSchemaVersion,
             stateHash,
@@ -566,7 +577,7 @@ export class ArtifactWorkerRuntime {
     }
     if (
       transaction.modality === "spreadsheet" &&
-      transaction.protocolVersion !== installed.protocolVersion
+      transaction.operationProtocolVersion !== COMMITTED_TRANSACTION_PROTOCOL_VERSION
     )
       throw runtimeError("unsupported_protocol", "committed transaction protocol is incompatible");
     if (transaction.startSequence !== installed.sequence + 1) {
@@ -1046,12 +1057,12 @@ function assertCommittedEnvelopeMatchesOuter(
   } catch (error) {
     throw new ArtifactWorkerProtocolError(
       "invalid_committed_transaction",
-      "committed transaction is not canonical OGACO001",
+      "committed transaction is not canonical OGACO002",
       { cause: error },
     );
   }
   if (
-    summary.operationProtocolVersion !== transaction.protocolVersion ||
+    summary.operationProtocolVersion !== transaction.operationProtocolVersion ||
     summary.transactionId !== transaction.transactionId ||
     summary.priorStateHash !== transaction.priorStateHash ||
     summary.stateHash !== transaction.stateHash ||
@@ -1059,7 +1070,7 @@ function assertCommittedEnvelopeMatchesOuter(
   ) {
     throw runtimeError(
       "committed_metadata_mismatch",
-      "outer committed metadata disagrees with its exact OGACO001 envelope",
+      "outer committed metadata disagrees with its exact OGACO002 envelope",
     );
   }
 }
@@ -1156,8 +1167,9 @@ function asWorkerFailure(error: unknown): WorkerFailure {
     };
   }
   if (error instanceof Error) {
+    const rawCode = (error as Error & { code?: unknown }).code;
     return {
-      code: "kernel_failed",
+      code: typeof rawCode === "string" ? normalizeErrorCode(rawCode) : "kernel_failed",
       message: sanitizeErrorMessage(error.message || "artifact kernel failed"),
       retryable: false,
     };
@@ -1175,7 +1187,8 @@ function asProtocolError(error: unknown): ArtifactWorkerProtocolError {
 }
 
 function normalizeErrorCode(value: string): string {
-  return /^[a-z][a-z0-9_]{0,127}$/.test(value) ? value : "kernel_failed";
+  const normalized = value.toLowerCase();
+  return /^[a-z][a-z0-9_]{0,127}$/.test(normalized) ? normalized : "kernel_failed";
 }
 
 function sanitizeErrorMessage(value: string): string {

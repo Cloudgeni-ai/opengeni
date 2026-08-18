@@ -7,11 +7,12 @@
 use std::str::FromStr;
 
 use opengeni_artifact_kernel::{
-    decode_collaboration_snapshot, encode_collaboration_snapshot, CausalDot, CausalFrontier, Cell,
-    CellBlock, CellCoord, CellRange, CellValue, CollaborationCommand, CollaborationOperation,
-    CollaborationTransaction, CollaborativeWorkbook, DateValue, FormulaError, Number, OperationId,
-    ReplicaId, SheetGeneration, StableId, TransactionDisposition, TransactionId,
-    MAX_CAUSAL_REPLICAS, MAX_CELLS_PER_TRANSACTION, MAX_OPERATIONS_PER_TRANSACTION,
+    decode_collaboration_snapshot, encode_collaboration_snapshot, AuthoredCellContent, CausalDot,
+    CausalFrontier, CellBlock, CellCoord, CellRange, CellValue, CollaborationCommand,
+    CollaborationOperation, CollaborationTransaction, CollaborativeWorkbook, DateValue,
+    FormulaError, Number, OperationId, ReplicaId, SheetGeneration, StableId,
+    TransactionDisposition, TransactionId, MAX_CAUSAL_REPLICAS, MAX_CELLS_PER_TRANSACTION,
+    MAX_OPERATIONS_PER_TRANSACTION,
 };
 use sha2::{Digest, Sha256};
 
@@ -25,12 +26,14 @@ use super::{
 };
 
 pub const EDITABLE_ARTIFACT_INTENT_VERSION: u16 = 1;
-pub const COLLABORATION_OPERATION_VERSION: u16 = 1;
+pub const SPREADSHEET_MODEL_SCHEMA_VERSION: u16 = 2;
+pub const COLLABORATION_OPERATION_VERSION: u16 = 2;
+const CAUSAL_FRONTIER_VERSION: u16 = 1;
 pub const MAX_COMMITTED_TRANSACTION_BYTES: usize = 8 * 1024 * 1024;
 
 const INTENT_MAGIC: [u8; 8] = *b"OGATX001";
 const FRONTIER_MAGIC: [u8; 8] = *b"OGACF001";
-const OPERATION_MAGIC: [u8; 8] = *b"OGACO001";
+const OPERATION_MAGIC: [u8; 8] = *b"OGACO002";
 pub const MAX_INTENT_BYTES: usize = 5 * 1024 * 1024;
 const MAX_INTENT_COMMAND_BYTES: usize = 4 * 1024 * 1024;
 const MAX_INTENT_CAUSAL_ACTORS: usize = 1_024;
@@ -69,7 +72,7 @@ struct CommittedOperation {
 }
 
 /// Derives collision-resistant CRDT identities solely from exact canonical
-/// OGATX001 bytes and the pure OGASC001 command batch nested inside them.
+/// OGATX001 bytes and the pure OGASC002 command batch nested inside them.
 pub fn derive_intent_identities(
     intent_bytes: &[u8],
 ) -> Result<DerivedIntentIdentities, BindingError> {
@@ -118,7 +121,7 @@ pub fn encode_causal_frontier(frontier: &CausalFrontier) -> Result<Vec<u8>, Bind
             .ok_or(BindingError::Limit("causal frontier"))?,
     );
     output.extend_from_slice(&FRONTIER_MAGIC);
-    output.extend_from_slice(&COLLABORATION_OPERATION_VERSION.to_le_bytes());
+    output.extend_from_slice(&CAUSAL_FRONTIER_VERSION.to_le_bytes());
     output.extend_from_slice(&0u16.to_le_bytes());
     output.extend_from_slice(
         &u32::try_from(frontier.len())
@@ -140,7 +143,7 @@ pub fn decode_causal_frontier(bytes: &[u8]) -> Result<CausalFrontier, BindingErr
     if bytes[..8] != FRONTIER_MAGIC {
         return Err(BindingError::BadMagic("causal frontier"));
     }
-    if read_u16(&bytes[8..10])? != COLLABORATION_OPERATION_VERSION {
+    if read_u16(&bytes[8..10])? != CAUSAL_FRONTIER_VERSION {
         return Err(BindingError::UnsupportedVersion(read_u16(&bytes[8..10])?));
     }
     if read_u16(&bytes[10..12])? != 0 {
@@ -256,7 +259,7 @@ impl CollaborationBindingSession {
     }
 
     /// Authors and atomically applies one canonical one-dot CRDT transaction.
-    /// `intent_bytes` are exact OGATX001 bytes. The pure OGASC001 commands
+    /// `intent_bytes` are exact OGATX001 bytes. The pure OGASC002 commands
     /// nested inside are the only mutation input; no second lowering envelope
     /// or caller-supplied operation count exists. `resolved_base` is an
     /// OGACF001 authority-resolved frontier that must dominate the authored
@@ -275,7 +278,7 @@ impl CollaborationBindingSession {
                 .max_cells_per_batch
                 .min(MAX_CELLS_PER_TRANSACTION)
         {
-            return Err(BindingError::Limit("OGASC001 cells"));
+            return Err(BindingError::Limit("OGASC002 cells"));
         }
         let resolved_base = decode_causal_frontier(resolved_base)?;
         if !resolved_base.dominates(&intent.causal_base) {
@@ -571,7 +574,7 @@ fn resolve_precondition(
             create_command_index,
         } => {
             let index = usize::try_from(create_command_index)
-                .map_err(|_| BindingError::Limit("OGASC001 prior-create index"))?;
+                .map_err(|_| BindingError::Limit("OGASC002 prior-create index"))?;
             if !matches!(
                 commands.get(index),
                 Some(SpreadsheetCommand::CreateSheet {
@@ -580,7 +583,7 @@ fn resolve_precondition(
                 }) if *created_id == sheet_id
             ) {
                 return Err(BindingError::InvalidIntent(
-                    "OGASC001 prior-create reference does not match its create command".into(),
+                    "OGASC002 prior-create reference does not match its create command".into(),
                 ));
             }
             let operation_id = operation_ids.get(command_offset + index).copied().ok_or(
@@ -608,12 +611,15 @@ fn decode_intent(bytes: &[u8]) -> Result<DecodedIntent<'_>, BindingError> {
     if reader.u16()? != EDITABLE_ARTIFACT_INTENT_VERSION {
         return Err(BindingError::UnsupportedVersion(read_u16(&bytes[8..10])?));
     }
-    for label in ["protocol", "model schema"] {
-        if reader.u16()? != 1 {
-            return Err(BindingError::InvalidIntent(format!(
-                "OGATX001 {label} version must be 1"
-            )));
-        }
+    if reader.u16()? != EDITABLE_ARTIFACT_INTENT_VERSION {
+        return Err(BindingError::InvalidIntent(format!(
+            "OGATX001 protocol version must be {EDITABLE_ARTIFACT_INTENT_VERSION}"
+        )));
+    }
+    if reader.u16()? != SPREADSHEET_MODEL_SCHEMA_VERSION {
+        return Err(BindingError::InvalidIntent(format!(
+            "OGATX001 model schema version must be {SPREADSHEET_MODEL_SCHEMA_VERSION}"
+        )));
     }
     if reader.u16()? != SPREADSHEET_COMMAND_VERSION {
         return Err(BindingError::InvalidIntent(format!(
@@ -1010,15 +1016,25 @@ impl Writer {
         }
     }
 
-    fn cell(&mut self, cell: &Cell) -> Result<(), BindingError> {
+    fn cell(&mut self, cell: &AuthoredCellContent) -> Result<(), BindingError> {
         match cell.formula_source() {
-            None => self.u8(0)?,
+            None => {
+                self.u8(0)?;
+                self.value(
+                    cell.literal_value()
+                        .expect("non-formula authored cells have a literal"),
+                )?;
+            }
             Some(formula) => {
                 self.u8(1)?;
                 self.string(formula)?;
             }
         }
-        match cell.value() {
+        Ok(())
+    }
+
+    fn value(&mut self, value: &CellValue) -> Result<(), BindingError> {
+        match value {
             CellValue::Empty => self.u8(0),
             CellValue::Boolean(false) => self.u8(1),
             CellValue::Boolean(true) => self.u8(2),
@@ -1279,19 +1295,22 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn cell(&mut self) -> Result<Cell, BindingError> {
-        let formula = match self.u8()? {
-            0 => None,
+    fn cell(&mut self) -> Result<AuthoredCellContent, BindingError> {
+        match self.u8()? {
+            0 => self.value().map(AuthoredCellContent::from_value),
             1 => {
                 let formula = self.operation_string()?;
                 if formula.is_empty() {
                     return Err(BindingError::NonCanonical("formula must not be empty"));
                 }
-                Some(formula)
+                AuthoredCellContent::formula(formula).map_err(BindingError::InvalidCellValue)
             }
-            tag => return Err(BindingError::InvalidTag(tag)),
-        };
-        let value = match self.u8()? {
+            tag => Err(BindingError::InvalidTag(tag)),
+        }
+    }
+
+    fn value(&mut self) -> Result<CellValue, BindingError> {
+        Ok(match self.u8()? {
             0 => CellValue::Empty,
             1 => CellValue::Boolean(false),
             2 => CellValue::Boolean(true),
@@ -1312,11 +1331,7 @@ impl<'a> Reader<'a> {
                 DateValue::new(self.u64()? as i64).map_err(BindingError::InvalidCellValue)?,
             ),
             tag => return Err(BindingError::InvalidTag(tag)),
-        };
-        match formula {
-            Some(formula) => Cell::formula(formula, value).map_err(BindingError::InvalidCellValue),
-            None => Ok(Cell::from_value(value)),
-        }
+        })
     }
 
     fn formula_error(&mut self) -> Result<FormulaError, BindingError> {
@@ -1452,8 +1467,8 @@ mod tests {
         bytes.extend_from_slice(b"OGATX001");
         bytes.extend_from_slice(&1u16.to_le_bytes());
         bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&SPREADSHEET_MODEL_SCHEMA_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&SPREADSHEET_COMMAND_VERSION.to_le_bytes());
         intent_string(&mut bytes, "11111111111111111111111111111111");
         intent_string(&mut bytes, &format!("offline.{replica_counter}"));
         intent_string(&mut bytes, "2222222222222222");
@@ -1500,7 +1515,7 @@ mod tests {
 
     fn shared_fixture() -> Value {
         serde_json::from_str(include_str!(
-            "../../../../../contracts/test/fixtures/editable-artifact-spreadsheet-v1.json"
+            "../../../../../contracts/test/fixtures/editable-artifact-spreadsheet-current.json"
         ))
         .expect("shared OGASC/OGATX/OGACO fixture")
     }

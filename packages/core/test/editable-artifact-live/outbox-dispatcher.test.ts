@@ -52,7 +52,7 @@ describe("editable artifact live outbox dispatcher", () => {
       artifactId,
       headSequence: 1,
       stateHash: hash(1),
-      operationProtocolVersion: 1,
+      operationProtocolVersion: 2,
     });
     expect(JSON.stringify(payload)).not.toContain("causalFrontier");
     expect(JSON.stringify(payload)).not.toContain("operationBytes");
@@ -240,7 +240,7 @@ describe("editable artifact live outbox dispatcher", () => {
       headSequence: 1,
       stateHash: hash(1),
       snapshotId: editableArtifactSnapshotId("00000000000000030000000000000001"),
-      operationProtocolVersion: 1,
+      operationProtocolVersion: 2,
     });
     expect(() => encodeEditableArtifactBrokerHint(snapshotRecord(1), 32)).toThrow(
       EditableArtifactHintEncodingError,
@@ -538,7 +538,7 @@ function transactionRecord(value: number): EditableArtifactLiveOutboxRecord {
       sequenceStart: value,
       sequenceEnd: value,
       stateHash: hash(value),
-      operationProtocolVersion: 1,
+      operationProtocolVersion: 2,
       committedAt: "2026-08-08T12:00:00.000Z",
     }),
     state: "pending",
@@ -564,7 +564,7 @@ function snapshotRecord(value: number): EditableArtifactLiveOutboxRecord {
       ),
       coveredHeadSequence: value,
       stateHash: hash(value),
-      operationProtocolVersion: 1,
+      operationProtocolVersion: 2,
       publishedAt: "2026-08-08T12:00:00.000Z",
     }),
   });

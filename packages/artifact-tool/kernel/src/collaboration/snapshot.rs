@@ -7,12 +7,12 @@ use super::{
     MAX_CELLS_PER_TRANSACTION, MAX_OPERATIONS_PER_TRANSACTION, MAX_RETAINED_TRANSACTIONS,
 };
 use crate::{
-    decode_snapshot, encode_snapshot, Cell, CellBlock, CellCoord, CellRange, CellValue, DateValue,
-    FormulaError, Number, StableId, ValueError,
+    AuthoredCellContent, CellBlock, CellCoord, CellRange, CellValue, DateValue, FormulaError,
+    Number, StableId, ValueError,
 };
 
-const MAGIC: [u8; 8] = *b"OGACRD01";
-pub const COLLABORATION_SNAPSHOT_VERSION: u16 = 1;
+const MAGIC: [u8; 8] = *b"OGACRD02";
+pub const COLLABORATION_SNAPSHOT_VERSION: u16 = 2;
 const HEADER_BYTES: usize = 8 + 2 + 2 + 8;
 const CHECKSUM_BYTES: usize = 8;
 const MAX_SNAPSHOT_BYTES: usize = 512 * 1024 * 1024;
@@ -21,7 +21,7 @@ const MIN_TRANSACTION_BYTES: usize = 1 + 16 + 8 + 8 + 4 + 4;
 const MIN_OPERATION_BYTES: usize = 16 + 1 + 16;
 const MIN_CELL_BYTES: usize = 2;
 
-/// Exact number of bytes one retained transaction occupies in the v1 payload,
+/// Exact number of bytes one retained transaction occupies in the current payload,
 /// including its applied/deferred status byte. This intentionally runs the
 /// canonical encoder in count-only mode: admission control and persistence can
 /// therefore never drift onto subtly different size calculations.
@@ -47,10 +47,6 @@ pub fn encode_collaboration_snapshot(
     let mut payload = Encoder::default();
     payload.u64(workbook.model_namespace);
     payload.frontier(&workbook.frontier)?;
-
-    let materialized = encode_snapshot(&workbook.workbook)
-        .map_err(|_| CollaborationSnapshotError::InvalidModel("materialized snapshot failed"))?;
-    payload.bytes(&materialized)?;
 
     if workbook.dot_owners.len() > MAX_RETAINED_TRANSACTIONS {
         return Err(CollaborationSnapshotError::SizeLimit);
@@ -166,20 +162,6 @@ pub fn decode_collaboration_snapshot(
     let mut decoder = Decoder::new(payload);
     let model_namespace = decoder.u64()?;
     let expected_frontier = decoder.frontier()?;
-    let materialized_bytes = decoder.bytes(MAX_SNAPSHOT_BYTES)?;
-    let expected_materialized = decode_snapshot(materialized_bytes).map_err(|_| {
-        CollaborationSnapshotError::InvalidModel("embedded materialized snapshot is invalid")
-    })?;
-    let canonical_materialized = encode_snapshot(&expected_materialized).map_err(|_| {
-        CollaborationSnapshotError::InvalidModel("embedded materialized snapshot failed to encode")
-    })?;
-    if canonical_materialized != materialized_bytes {
-        return Err(CollaborationSnapshotError::NonCanonical(
-            "embedded materialized snapshot is not canonical",
-        ));
-    }
-    drop(canonical_materialized);
-    drop(expected_materialized);
     let transaction_count = decoder.count(MAX_RETAINED_TRANSACTIONS)?;
     if transaction_count > decoder.remaining() / MIN_TRANSACTION_BYTES {
         return Err(CollaborationSnapshotError::Truncated);
@@ -212,14 +194,6 @@ pub fn decode_collaboration_snapshot(
     if workbook.frontier != expected_frontier {
         return Err(CollaborationSnapshotError::InvalidModel(
             "causal frontier does not reconstruct",
-        ));
-    }
-    let actual_materialized = encode_snapshot(&workbook.workbook).map_err(|_| {
-        CollaborationSnapshotError::InvalidModel("reconstructed materialized snapshot failed")
-    })?;
-    if actual_materialized != materialized_bytes {
-        return Err(CollaborationSnapshotError::InvalidModel(
-            "materialized model does not reconstruct",
         ));
     }
     Ok(workbook)
@@ -611,15 +585,25 @@ impl Encoder {
         Ok(())
     }
 
-    fn cell(&mut self, cell: &Cell) -> Result<(), CollaborationSnapshotError> {
+    fn cell(&mut self, cell: &AuthoredCellContent) -> Result<(), CollaborationSnapshotError> {
         match cell.formula_source() {
-            None => self.u8(0),
+            None => {
+                self.u8(0);
+                self.value(
+                    cell.literal_value()
+                        .expect("non-formula authored cells have a literal"),
+                )?;
+            }
             Some(formula) => {
                 self.u8(1);
                 self.string(formula)?;
             }
         }
-        match cell.value() {
+        Ok(())
+    }
+
+    fn value(&mut self, value: &CellValue) -> Result<(), CollaborationSnapshotError> {
+        match value {
             CellValue::Empty => self.u8(0),
             CellValue::Boolean(false) => self.u8(1),
             CellValue::Boolean(true) => self.u8(2),
@@ -874,9 +858,9 @@ impl<'a> Decoder<'a> {
         Ok(CollaborationTransaction::new(id, dot, base, operations))
     }
 
-    fn cell(&mut self) -> Result<Cell, CollaborationSnapshotError> {
-        let formula = match self.u8()? {
-            0 => None,
+    fn cell(&mut self) -> Result<AuthoredCellContent, CollaborationSnapshotError> {
+        match self.u8()? {
+            0 => self.value().map(AuthoredCellContent::from_value),
             1 => {
                 let source = self.string()?;
                 if source.is_empty() {
@@ -884,11 +868,16 @@ impl<'a> Decoder<'a> {
                         "formula must not be empty",
                     ));
                 }
-                Some(source)
+                AuthoredCellContent::formula(source).map_err(|_| {
+                    CollaborationSnapshotError::NonCanonical("formula must not be empty")
+                })
             }
-            tag => return Err(CollaborationSnapshotError::InvalidTag(tag)),
-        };
-        let value = match self.u8()? {
+            tag => Err(CollaborationSnapshotError::InvalidTag(tag)),
+        }
+    }
+
+    fn value(&mut self) -> Result<CellValue, CollaborationSnapshotError> {
+        Ok(match self.u8()? {
             0 => CellValue::Empty,
             1 => CellValue::Boolean(false),
             2 => CellValue::Boolean(true),
@@ -911,8 +900,7 @@ impl<'a> Decoder<'a> {
                     .map_err(CollaborationSnapshotError::InvalidDate)?,
             ),
             tag => return Err(CollaborationSnapshotError::InvalidTag(tag)),
-        };
-        Ok(Cell::from_snapshot(value, formula))
+        })
     }
 
     fn formula_error(&mut self) -> Result<FormulaError, CollaborationSnapshotError> {
@@ -946,14 +934,14 @@ mod tests {
     use super::{
         checksum, decode_collaboration_snapshot, encode_collaboration_snapshot,
         retained_transaction_wire_bytes, CollaborationSnapshotError, Decoder, Encoder,
-        CHECKSUM_BYTES, HEADER_BYTES, MAX_CAUSAL_REPLICAS,
+        CHECKSUM_BYTES, COLLABORATION_SNAPSHOT_VERSION, HEADER_BYTES, MAGIC, MAX_CAUSAL_REPLICAS,
     };
     use crate::collaboration::{
         CausalDot, CausalFrontier, CollaborationCommand, CollaborationError,
         CollaborationOperation, CollaborationTransaction, CollaborativeWorkbook, OperationId,
         ReplicaId, SheetGeneration, TransactionId,
     };
-    use crate::{encode_snapshot, StableId};
+    use crate::StableId;
 
     fn replica(value: u64) -> ReplicaId {
         ReplicaId::new(value).expect("replica")
@@ -993,8 +981,8 @@ mod tests {
     fn finish_payload(payload: Encoder) -> Vec<u8> {
         assert!(!payload.overflowed);
         let mut output = Vec::new();
-        output.extend_from_slice(b"OGACRD01");
-        output.extend_from_slice(&1u16.to_le_bytes());
+        output.extend_from_slice(&MAGIC);
+        output.extend_from_slice(&COLLABORATION_SNAPSHOT_VERSION.to_le_bytes());
         output.extend_from_slice(&0u16.to_le_bytes());
         output.extend_from_slice(&(payload.bytes.len() as u64).to_le_bytes());
         output.extend_from_slice(&payload.bytes);
@@ -1008,19 +996,15 @@ mod tests {
         bytes[payload_end..].copy_from_slice(&replacement);
     }
 
-    fn decode_hex(value: &str) -> Vec<u8> {
-        value
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                let digit = |byte: u8| match byte {
-                    b'0'..=b'9' => byte - b'0',
-                    b'a'..=b'f' => byte - b'a' + 10,
-                    _ => panic!("invalid fixture hex"),
-                };
-                (digit(pair[0]) << 4) | digit(pair[1])
-            })
-            .collect()
+    #[test]
+    fn previous_collaboration_snapshot_magic_is_rejected_without_a_legacy_reader() {
+        let workbook = CollaborativeWorkbook::new(77).expect("workbook");
+        let mut bytes = encode_collaboration_snapshot(&workbook).expect("snapshot");
+        bytes[..8].copy_from_slice(b"OGACRD01");
+        assert_eq!(
+            decode_collaboration_snapshot(&bytes),
+            Err(CollaborationSnapshotError::BadMagic)
+        );
     }
 
     #[test]
@@ -1049,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_size_preflight_is_the_exact_v1_encoder_size() {
+    fn retained_size_preflight_is_the_exact_current_encoder_size() {
         let sheet_id = StableId::from_parts(77, 10);
         let transaction = transaction(
             1,
@@ -1068,25 +1052,6 @@ mod tests {
         assert_eq!(
             retained_transaction_wire_bytes(&transaction).expect("size"),
             encoder.encoded_len - start
-        );
-    }
-
-    #[test]
-    fn pre_budget_v1_empty_snapshot_fixture_remains_byte_compatible() {
-        // Produced by the original OGACRD01 v1 layout before retained-byte
-        // admission accounting existed. Accounting is derived state and must
-        // never leak into or perturb the persisted v1 representation.
-        let fixture = decode_hex(concat!(
-            "4f47414352443031010000005d00000000000000010000000000000000000000",
-            "490000004f474152544b3031010000002d000000000000000100000000000000",
-            "0100000000000000000000000000000001000000000000000200000000000000",
-            "0000000000b284ef8e6ba5686900000000af725e74dae1bffa"
-        ));
-        let workbook = decode_collaboration_snapshot(&fixture).expect("legacy v1 fixture");
-        assert_eq!(workbook.retained_history_bytes(), 0);
-        assert_eq!(
-            encode_collaboration_snapshot(&workbook).expect("re-encode"),
-            fixture
         );
     }
 
@@ -1111,7 +1076,6 @@ mod tests {
         let mut decoder = Decoder::new(&bytes[HEADER_BYTES..payload_end]);
         decoder.u64().expect("namespace");
         decoder.frontier().expect("frontier");
-        decoder.bytes(super::MAX_SNAPSHOT_BYTES).expect("model");
         assert_eq!(decoder.u32().expect("transaction count"), 1);
         let status_offset = HEADER_BYTES + decoder.offset;
         assert_eq!(bytes[status_offset], 1);
@@ -1162,14 +1126,11 @@ mod tests {
             },
         );
 
-        let empty = CollaborativeWorkbook::new(77).expect("empty workbook");
-        let materialized = encode_snapshot(empty.workbook()).expect("materialized");
         let mut payload = Encoder::default();
         payload.u64(77);
         payload
             .frontier(&frontier(&[(1, 1), (2, 1), (3, 1)]))
             .expect("frontier");
-        payload.bytes(&materialized).expect("model");
         payload.count(3).expect("count");
         for transaction in [&create, &rename, &invalid] {
             payload.u8(1);

@@ -272,7 +272,6 @@ export const editableArtifactTransactions = pgTable(
         and ${table.intentHash} = ${table.requestHash}
         and ${table.intentEnvelopeVersion} = 1
         and ${table.intentProtocolVersion} = 1
-        and ${table.commandProtocolVersion} > 0
         and ${table.intentByteSize} between 8 and 5242880
         and octet_length(${table.intentBytes}) = ${table.intentByteSize}
         and substring(${table.intentBytes} from 1 for 8) = convert_to('OGATX001', 'UTF8')
@@ -288,6 +287,8 @@ export const editableArtifactTransactions = pgTable(
           'sha256:' || encode(sha256(${table.committedTransactionBytes}), 'hex')
         and (
           (${table.modality} = 'spreadsheet'
+            and ${table.modelSchemaVersion} = 2
+            and ${table.commandProtocolVersion} = 2
             and ${table.operationCount} between 1 and 4096
             and ${table.sequenceEnd} = ${table.sequenceStart} + ${table.operationCount} - 1
             and jsonb_typeof(${table.causalBase}) = 'array'
@@ -296,7 +297,7 @@ export const editableArtifactTransactions = pgTable(
             and jsonb_typeof(${table.selectiveUndoTargets}) = 'array'
             and jsonb_typeof(${table.operationIds}) = 'array'
             and jsonb_array_length(${table.operationIds}) = ${table.operationCount}
-            and ${table.operationProtocolVersion} = 1
+            and ${table.operationProtocolVersion} = 2
             and ${table.commitProtocolVersion} is null
             and ${table.priorNativeRevision} is null
             and ${table.nativeRevision} is null
@@ -304,9 +305,11 @@ export const editableArtifactTransactions = pgTable(
             and ${table.nativeReceiptByteSize} is null
             and ${table.nativeReceiptHash} is null
             and ${table.nativeReceiptBytes} is null
-            and substring(${table.committedTransactionBytes} from 1 for 8) = convert_to('OGACO001', 'UTF8'))
+            and substring(${table.committedTransactionBytes} from 1 for 8) = convert_to('OGACO002', 'UTF8'))
           or
           (${table.modality} in ('document', 'presentation')
+            and ${table.modelSchemaVersion} = 1
+            and ${table.commandProtocolVersion} = 1
             and ${table.sequenceEnd} = ${table.sequenceStart}
             and ${table.causalBase} is null
             and ${table.resolvedCausalBase} is null
@@ -635,11 +638,13 @@ export const editableArtifactSnapshots = pgTable(
       sql`${stableIdSql(table.id)} and ${sha256Sql(table.contentHash)} and ${sha256Sql(table.stateHash)}
         and (
           (${table.modality} = 'spreadsheet'
+            and ${table.modelSchemaVersion} = 2
             and jsonb_typeof(${table.coveredCausalFrontier}) = 'array'
-            and ${table.operationProtocolVersion} = 1
-            and ${table.crdtStateVersion} > 0
+            and ${table.operationProtocolVersion} = 2
+            and ${table.crdtStateVersion} = 2
             and ${table.nativeRevision} is null)
           or (${table.modality} in ('document', 'presentation')
+            and ${table.modelSchemaVersion} = 1
             and ${table.coveredCausalFrontier} is null
             and ${table.operationProtocolVersion} is null
             and ${table.crdtStateVersion} is null

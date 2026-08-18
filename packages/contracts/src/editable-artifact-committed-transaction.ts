@@ -1,5 +1,5 @@
 /**
- * Strict, allocation-bounded inspection of canonical OGACO001 transactions.
+ * Strict, allocation-bounded inspection of canonical OGACO002 transactions.
  *
  * The Rust kernel remains the authority for applying operations. This decoder
  * validates the complete envelope and every typed operation so metadata after
@@ -15,7 +15,7 @@ export const MAX_COMMITTED_TRANSACTION_OPERATIONS = 4_096;
 export const MAX_COMMITTED_TRANSACTION_CAUSAL_REPLICAS = 100_000;
 export const MAX_COMMITTED_TRANSACTION_CELLS = 1_000_000;
 
-const MAGIC = new Uint8Array([0x4f, 0x47, 0x41, 0x43, 0x4f, 0x30, 0x30, 0x31]); // OGACO001
+const MAGIC = new Uint8Array([0x4f, 0x47, 0x41, 0x43, 0x4f, 0x30, 0x30, 0x32]); // OGACO002
 const HEADER_BYTES = 24;
 const CHECKSUM_BYTES = 8;
 const HASH_BYTES = 32;
@@ -24,6 +24,7 @@ const MAX_OPERATION_STRING_BYTES = 4 * 1024 * 1024;
 const MAX_SAFE_U64_HIGH = 0x1f_ffff;
 const U32_SIZE = 0x1_0000_0000;
 const U32_MAX = 0xffff_ffff;
+const MAX_DATE_MILLISECONDS = 8_640_000_000_000_000n;
 const FNV_OFFSET_LOW = 0x8422_2325;
 const FNV_OFFSET_HIGH = 0xcbf2_9ce4;
 const FNV_PRIME_LOW = 0x01b3;
@@ -47,7 +48,7 @@ export type CommittedTransactionSummary = Readonly<{
 }>;
 
 /**
- * Decodes only the metadata of one exact canonical OGACO001 byte envelope.
+ * Decodes only the metadata of one exact canonical OGACO002 byte envelope.
  *
  * This function is synchronous and never mutates or retains `bytes`. The
  * caller remains the owner of the exact canonical envelope.
@@ -55,38 +56,38 @@ export type CommittedTransactionSummary = Readonly<{
 export function decodeCommittedTransactionSummary(bytes: Uint8Array): CommittedTransactionSummary {
   assertInput(bytes);
   if (bytes.byteLength > MAX_COMMITTED_TRANSACTION_BYTES) {
-    throw new RangeError("OGACO001 envelope exceeds its byte limit");
+    throw new RangeError("OGACO002 envelope exceeds its byte limit");
   }
   if (bytes.byteLength < HEADER_BYTES + CHECKSUM_BYTES) {
-    throw new TypeError("truncated OGACO001 envelope");
+    throw new TypeError("truncated OGACO002 envelope");
   }
 
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   for (let index = 0; index < MAGIC.byteLength; index += 1) {
-    if (bytes[index] !== MAGIC[index]) throw new TypeError("invalid OGACO001 magic");
+    if (bytes[index] !== MAGIC[index]) throw new TypeError("invalid OGACO002 magic");
   }
 
   const version = view.getUint16(8, true);
   if (version !== COMMITTED_TRANSACTION_PROTOCOL_VERSION) {
-    throw new TypeError(`unsupported OGACO001 version: ${version}`);
+    throw new TypeError(`unsupported OGACO002 version: ${version}`);
   }
   if (view.getUint16(10, true) !== 0) {
-    throw new TypeError("reserved OGACO001 header bits are set");
+    throw new TypeError("reserved OGACO002 header bits are set");
   }
 
   const operationCount = view.getUint32(12, true);
   if (operationCount === 0 || operationCount > MAX_COMMITTED_TRANSACTION_OPERATIONS) {
-    throw new RangeError("OGACO001 operation count is outside its canonical bounds");
+    throw new RangeError("OGACO002 operation count is outside its canonical bounds");
   }
 
-  const payloadLength = safeU64At(view, 16, "OGACO001 payload length", false);
-  const payloadEnd = checkedAdd(HEADER_BYTES, payloadLength, "OGACO001 payload length");
-  const expectedLength = checkedAdd(payloadEnd, CHECKSUM_BYTES, "OGACO001 envelope length");
+  const payloadLength = safeU64At(view, 16, "OGACO002 payload length", false);
+  const payloadEnd = checkedAdd(HEADER_BYTES, payloadLength, "OGACO002 payload length");
+  const expectedLength = checkedAdd(payloadEnd, CHECKSUM_BYTES, "OGACO002 envelope length");
   if (bytes.byteLength !== expectedLength) {
     throw new TypeError(
       bytes.byteLength < expectedLength
-        ? "truncated OGACO001 payload"
-        : "trailing bytes after OGACO001 envelope",
+        ? "truncated OGACO002 payload"
+        : "trailing bytes after OGACO002 envelope",
     );
   }
 
@@ -95,7 +96,7 @@ export function decodeCommittedTransactionSummary(bytes: Uint8Array): CommittedT
     view.getUint32(payloadEnd, true) !== checksumLow ||
     view.getUint32(payloadEnd + 4, true) !== checksumHigh
   ) {
-    throw new TypeError("OGACO001 checksum mismatch");
+    throw new TypeError("OGACO002 checksum mismatch");
   }
 
   const reader = new Reader(bytes, HEADER_BYTES, payloadEnd);
@@ -113,7 +114,7 @@ export function decodeCommittedTransactionSummary(bytes: Uint8Array): CommittedT
   for (let index = 0; index < operationCount; index += 1) {
     const operationId = reader.stableId(`operation ${index} id`);
     if (seenOperationIds.has(operationId)) {
-      throw new TypeError("OGACO001 operation ids must be unique");
+      throw new TypeError("OGACO002 operation ids must be unique");
     }
     seenOperationIds.add(operationId);
     operationIds.push(operationId);
@@ -273,7 +274,7 @@ class Reader {
         const endRow = this.u32("clear range end row");
         const endColumn = this.u32("clear range end column");
         if (startRow > endRow || startColumn > endColumn) {
-          throw new TypeError("OGACO001 clear range is not normalized");
+          throw new TypeError("OGACO002 clear range is not normalized");
         }
         return totalCells;
       }
@@ -281,7 +282,7 @@ class Reader {
         this.stableId("selective undo target");
         return totalCells;
       default:
-        throw new TypeError(`invalid OGACO001 collaboration command tag: ${tag}`);
+        throw new TypeError(`invalid OGACO002 collaboration command tag: ${tag}`);
     }
   }
 
@@ -292,18 +293,18 @@ class Reader {
     const rows = this.u32("cell block rows");
     const columns = this.u32("cell block columns");
     if (rows === 0 || columns === 0) {
-      throw new TypeError("OGACO001 cell block dimensions must be nonzero");
+      throw new TypeError("OGACO002 cell block dimensions must be nonzero");
     }
     if (anchorRow > U32_MAX - (rows - 1) || anchorColumn > U32_MAX - (columns - 1)) {
-      throw new RangeError("OGACO001 cell block coordinates overflow u32");
+      throw new RangeError("OGACO002 cell block coordinates overflow u32");
     }
     if (rows > Math.floor(MAX_COMMITTED_TRANSACTION_CELLS / columns)) {
-      throw new RangeError("OGACO001 cell block exceeds its cell limit");
+      throw new RangeError("OGACO002 cell block exceeds its cell limit");
     }
     const cellCount = rows * columns;
     const nextTotal = totalCells + cellCount;
     if (nextTotal > MAX_COMMITTED_TRANSACTION_CELLS) {
-      throw new RangeError("OGACO001 transaction exceeds its cell limit");
+      throw new RangeError("OGACO002 transaction exceeds its cell limit");
     }
     for (let index = 0; index < cellCount; index += 1) this.skipCell();
     return nextTotal;
@@ -313,10 +314,11 @@ class Reader {
     const formulaTag = this.u8("cell formula tag");
     if (formulaTag === 1) {
       if (this.skipString("cell formula") === 0) {
-        throw new TypeError("OGACO001 formula must not be empty");
+        throw new TypeError("OGACO002 formula must not be empty");
       }
+      return;
     } else if (formulaTag !== 0) {
-      throw new TypeError(`invalid OGACO001 cell formula tag: ${formulaTag}`);
+      throw new TypeError(`invalid OGACO002 cell formula tag: ${formulaTag}`);
     }
 
     const valueTag = this.u8("cell value tag");
@@ -334,8 +336,11 @@ class Reader {
       case 5:
         this.skipFormulaError();
         return;
+      case 6:
+        this.skipDate();
+        return;
       default:
-        throw new TypeError(`invalid OGACO001 cell value tag: ${valueTag}`);
+        throw new TypeError(`invalid OGACO002 cell value tag: ${valueTag}`);
     }
   }
 
@@ -344,10 +349,18 @@ class Reader {
     const low = this.#view.getUint32(offset, true);
     const high = this.#view.getUint32(offset + 4, true);
     if (low === 0 && high === 0x8000_0000) {
-      throw new TypeError("OGACO001 cell number uses negative zero");
+      throw new TypeError("OGACO002 cell number uses negative zero");
     }
     if ((high & 0x7ff0_0000) === 0x7ff0_0000) {
-      throw new TypeError("OGACO001 cell numbers must be finite");
+      throw new TypeError("OGACO002 cell numbers must be finite");
+    }
+  }
+
+  skipDate(): void {
+    const offset = this.reserve(8, "cell date");
+    const milliseconds = this.#view.getBigInt64(offset, true);
+    if (milliseconds < -MAX_DATE_MILLISECONDS || milliseconds > MAX_DATE_MILLISECONDS) {
+      throw new TypeError("OGACO002 cell date is outside the ECMAScript range");
     }
   }
 
@@ -358,7 +371,7 @@ class Reader {
       this.skipString("custom formula error");
       return;
     }
-    throw new TypeError(`invalid OGACO001 formula error tag: ${tag}`);
+    throw new TypeError(`invalid OGACO002 formula error tag: ${tag}`);
   }
 
   skipGeneration(label: string): void {
@@ -377,16 +390,16 @@ class Reader {
   }
 
   done(): void {
-    if (this.#offset !== this.#end) throw new TypeError("trailing bytes in OGACO001 payload");
+    if (this.#offset !== this.#end) throw new TypeError("trailing bytes in OGACO002 payload");
   }
 }
 
 function assertInput(bytes: Uint8Array): void {
   if (!(bytes instanceof Uint8Array)) {
-    throw new TypeError("OGACO001 bytes must be a Uint8Array");
+    throw new TypeError("OGACO002 bytes must be a Uint8Array");
   }
   if (typeof SharedArrayBuffer !== "undefined" && bytes.buffer instanceof SharedArrayBuffer) {
-    throw new TypeError("OGACO001 bytes must not use shared mutable memory");
+    throw new TypeError("OGACO002 bytes must not use shared mutable memory");
   }
 }
 

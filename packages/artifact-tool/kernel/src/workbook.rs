@@ -146,8 +146,8 @@ impl Workbook {
 
     /// Rebuilds all derived formula state from authored workbook cells and
     /// projects the deterministic results back without changing the authored
-    /// revision. Formula source is authoritative; incoming cached values are
-    /// never trusted.
+    /// revision. Formula source is authoritative; projected values are always
+    /// recalculated.
     pub(crate) fn rebuild_formula_engine(&mut self) -> Result<(), FormulaEngineError> {
         let engine = FormulaEngine::from_workbook(self)?;
         let keys = engine.formula_keys();

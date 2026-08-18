@@ -755,7 +755,7 @@ function bootstrap(
   return {
     artifactId: ARTIFACT_ID,
     modality,
-    protocolVersion: adapter.protocolVersion,
+    liveProtocolVersion: 2,
     headSequence,
     headStateHash,
     headNativeRevision,
@@ -792,7 +792,7 @@ class SerializedTransport implements EditableArtifactSyncTransport {
       replicaId: input.replicaId,
       token: "one-use-test-ticket",
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      protocolVersion: this.configuredBootstrap.protocolVersion,
+      protocolVersion: this.configuredBootstrap.liveProtocolVersion,
     };
   }
 

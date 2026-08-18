@@ -622,7 +622,7 @@ if (existsSync(contractsDistDir)) {
   if (!contractRuntime.includes("OGATX001")) {
     failures.push("The built editable-artifact contract entry does not contain the OGATX codec.");
   }
-  if (!contractRuntime.includes("OGALV001")) {
+  if (!contractRuntime.includes("OGALV002")) {
     failures.push(
       "The built editable-artifact live contract entry does not contain the OGALV codec.",
     );

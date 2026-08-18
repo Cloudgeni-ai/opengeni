@@ -5,11 +5,13 @@ mod types;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use register::{CausalRegister, RegisterContribution};
+use register::{happens_after, CausalRegister, RegisterContribution};
 
+use crate::formula::{rewrite_deleted_sheet_references, rewrite_sheet_references};
 use crate::workbook::MAX_SHEET_NAME_BYTES;
 use crate::{
-    AtomicBatch, Cell, CellBlock, CellCoord, CellValue, Command, Sheet, StableId, Workbook,
+    AtomicBatch, AuthoredCellContent, CellBlock, CellCoord, CellValue, Command, Sheet, StableId,
+    Workbook,
 };
 
 pub use snapshot::{
@@ -29,6 +31,9 @@ struct CellKey {
     sheet_id: StableId,
     coord: CellCoord,
 }
+
+type FormulaRewritePlan = Vec<(String, Option<String>)>;
+type FormulaRewritePlans = BTreeMap<(CausalDot, u32), FormulaRewritePlan>;
 
 #[derive(Clone, Debug, PartialEq)]
 struct SheetCreation {
@@ -155,7 +160,7 @@ pub struct CollaborativeWorkbook {
     ready: BTreeSet<CausalDot>,
     pending_dependency_edges: usize,
     sheets: BTreeMap<StableId, SheetHistory>,
-    cells: BTreeMap<CellKey, CausalRegister<Cell>>,
+    cells: BTreeMap<CellKey, CausalRegister<AuthoredCellContent>>,
     range_clears: BTreeMap<OperationId, RangeClearRecord>,
     operations: BTreeMap<OperationId, OperationRecord>,
     undone: BTreeSet<OperationId>,
@@ -163,9 +168,9 @@ pub struct CollaborativeWorkbook {
 }
 
 impl CollaborativeWorkbook {
-    /// Retained v1 transaction bytes are bounded below the full snapshot limit,
-    /// leaving deterministic headroom for the materialized workbook and causal
-    /// metadata. Crossing this boundary requires an authority-directed
+    /// Retained current transaction bytes are bounded below the full snapshot limit,
+    /// leaving deterministic headroom for the causal frontier, envelope, and
+    /// transaction-status metadata. Crossing this boundary requires an authority-directed
     /// checkpoint/compaction; the kernel never guesses a safe GC frontier.
     pub const MAX_RETAINED_HISTORY_BYTES: usize = 256 * 1024 * 1024;
 
@@ -379,7 +384,14 @@ impl CollaborativeWorkbook {
         );
         self.retained_history_bytes = next_retained_bytes;
 
-        let drain = self.drain_ready(initially_prepared, materialize)?;
+        let mut drain = self.drain_ready(initially_prepared, materialize)?;
+        if let Some(index) = drain
+            .rejected
+            .iter()
+            .position(|rejected| rejected.transaction_id == id)
+        {
+            return Err(drain.rejected.remove(index).error);
+        }
         let disposition = if drain.applied.contains(&id) {
             TransactionDisposition::Applied
         } else {
@@ -590,25 +602,7 @@ impl CollaborativeWorkbook {
             let prepared = match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
-                    self.pending.remove(&dot);
-                    self.pending_waits.remove(&dot);
-                    self.dot_owners.remove(&dot);
-                    self.retained_history_bytes = self
-                        .retained_history_bytes
-                        .checked_sub(known.retained_bytes)
-                        .ok_or(CollaborationError::InternalInvariant(
-                            "retained history byte accounting underflow",
-                        ))?;
-                    if !self
-                        .dot_owners
-                        .keys()
-                        .any(|candidate| candidate.replica() == dot.replica())
-                    {
-                        self.known_replicas.remove(&dot.replica());
-                    }
-                    for operation in known.transaction.operations() {
-                        self.operation_owners.remove(&operation.id());
-                    }
+                    self.reject_ready_transaction(dot, &known)?;
                     outcome.rejected.push(RejectedTransaction {
                         transaction_id: id,
                         error,
@@ -616,7 +610,14 @@ impl CollaborativeWorkbook {
                     continue;
                 }
             };
-            self.apply_ready(&known.transaction, prepared, materialize)?;
+            if let Err(error) = self.apply_ready(&known.transaction, prepared, materialize) {
+                self.reject_ready_transaction(dot, &known)?;
+                outcome.rejected.push(RejectedTransaction {
+                    transaction_id: id,
+                    error,
+                });
+                continue;
+            }
             self.frontier.advance(dot)?;
             self.pending.remove(&dot);
             self.pending_waits.remove(&dot);
@@ -626,6 +627,33 @@ impl CollaborativeWorkbook {
             outcome.applied.push(id);
         }
         Ok(outcome)
+    }
+
+    fn reject_ready_transaction(
+        &mut self,
+        dot: CausalDot,
+        known: &KnownTransaction,
+    ) -> Result<(), CollaborationError> {
+        self.pending.remove(&dot);
+        self.pending_waits.remove(&dot);
+        self.dot_owners.remove(&dot);
+        self.retained_history_bytes = self
+            .retained_history_bytes
+            .checked_sub(known.retained_bytes)
+            .ok_or(CollaborationError::InternalInvariant(
+                "retained history byte accounting underflow",
+            ))?;
+        if !self
+            .dot_owners
+            .keys()
+            .any(|candidate| candidate.replica() == dot.replica())
+        {
+            self.known_replicas.remove(&dot.replica());
+        }
+        for operation in known.transaction.operations() {
+            self.operation_owners.remove(&operation.id());
+        }
+        Ok(())
     }
 
     fn missing_dependencies(
@@ -934,6 +962,23 @@ impl CollaborativeWorkbook {
         prepared: PreparedTransaction,
         materialize: bool,
     ) -> Result<(), CollaborationError> {
+        let mut journal = AppliedTransactionJournal::default();
+        match self.apply_ready_inner(transaction, prepared, materialize, &mut journal) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.rollback_applied_transaction(journal);
+                Err(error)
+            }
+        }
+    }
+
+    fn apply_ready_inner(
+        &mut self,
+        transaction: &CollaborationTransaction,
+        prepared: PreparedTransaction,
+        materialize: bool,
+        journal: &mut AppliedTransactionJournal,
+    ) -> Result<(), CollaborationError> {
         let next_revision = self
             .workbook
             .revision()
@@ -983,6 +1028,7 @@ impl CollaborativeWorkbook {
                             deletions: BTreeMap::new(),
                         },
                     );
+                    journal.created_sheets.push(*sheet_id);
                     structural_change = true;
                     (
                         OperationKind::CreateSheet,
@@ -1006,6 +1052,9 @@ impl CollaborativeWorkbook {
                             },
                             &self.undone,
                         );
+                    journal
+                        .inserted_sheet_names
+                        .push((sheet.sheet_id(), operation.id()));
                     structural_change = true;
                     (
                         OperationKind::RenameSheet,
@@ -1028,6 +1077,9 @@ impl CollaborativeWorkbook {
                                 base: Arc::clone(&shared_base),
                             },
                         );
+                    journal
+                        .inserted_sheet_deletions
+                        .push((sheet.sheet_id(), operation.id()));
                     structural_change = true;
                     (
                         OperationKind::DeleteSheet,
@@ -1041,8 +1093,8 @@ impl CollaborativeWorkbook {
                         ));
                     };
                     for (key, cell) in keys.iter().copied().zip(cells.cells()) {
-                        let register = self.cells.entry(key).or_default();
-                        register.insert(
+                        self.insert_cell_contribution(
+                            key,
                             RegisterContribution {
                                 operation_id: operation.id(),
                                 dot: transaction.dot(),
@@ -1050,20 +1102,27 @@ impl CollaborativeWorkbook {
                                 base: Arc::clone(&shared_base),
                                 value: cell.clone(),
                             },
-                            &self.undone,
+                            journal,
                         );
-                        for clear in self.range_clears.values().filter(|clear| {
-                            clear.sheet == *sheet && clear.range.contains(key.coord)
-                        }) {
-                            register.insert(
+                        let matching_clears: Vec<_> = self
+                            .range_clears
+                            .values()
+                            .filter(|clear| {
+                                clear.sheet == *sheet && clear.range.contains(key.coord)
+                            })
+                            .cloned()
+                            .collect();
+                        for clear in matching_clears {
+                            self.insert_cell_contribution(
+                                key,
                                 RegisterContribution {
                                     operation_id: clear.operation_id,
                                     dot: clear.dot,
                                     operation_index: clear.operation_index,
-                                    base: Arc::clone(&clear.base),
-                                    value: Cell::empty(),
+                                    base: clear.base,
+                                    value: AuthoredCellContent::empty(),
                                 },
-                                &self.undone,
+                                journal,
                             );
                         }
                         affected_cells.insert(key);
@@ -1085,19 +1144,21 @@ impl CollaborativeWorkbook {
                         range: *range,
                     };
                     for key in &keys {
-                        self.cells.entry(*key).or_default().insert(
+                        self.insert_cell_contribution(
+                            *key,
                             RegisterContribution {
                                 operation_id: operation.id(),
                                 dot: transaction.dot(),
                                 operation_index,
                                 base: Arc::clone(&shared_base),
-                                value: Cell::empty(),
+                                value: AuthoredCellContent::empty(),
                             },
-                            &self.undone,
+                            journal,
                         );
                         affected_cells.insert(*key);
                     }
                     self.range_clears.insert(operation.id(), clear);
+                    journal.inserted_range_clears.push(operation.id());
                     (
                         OperationKind::ClearRange,
                         OperationEffect::Range {
@@ -1107,8 +1168,11 @@ impl CollaborativeWorkbook {
                     )
                 }
                 CollaborationCommand::Undo { target } => {
-                    self.undone.insert(*target);
+                    if self.undone.insert(*target) {
+                        journal.inserted_undone_targets.push(*target);
+                    }
                     self.undo_links.insert(operation.id(), *target);
+                    journal.inserted_undo_links.push(operation.id());
                     let target_record = self.operations.get(target).ok_or(
                         CollaborationError::InternalInvariant("validated undo target disappeared"),
                     )?;
@@ -1120,6 +1184,7 @@ impl CollaborativeWorkbook {
                                 if let Some(history) = self.sheets.get_mut(&sheet_id) {
                                     history.names.recompute_maximal(&self.undone);
                                 }
+                                journal.recompute_sheet_names.insert(sheet_id);
                             }
                             structural_change = true;
                         }
@@ -1128,6 +1193,7 @@ impl CollaborativeWorkbook {
                                 if let Some(register) = self.cells.get_mut(&key) {
                                     register.recompute_maximal(&self.undone);
                                 }
+                                journal.recompute_cells.insert(key);
                                 affected_cells.insert(key);
                             }
                         }
@@ -1142,6 +1208,7 @@ impl CollaborativeWorkbook {
                                 if let Some(register) = self.cells.get_mut(&key) {
                                     register.recompute_maximal(&self.undone);
                                 }
+                                journal.recompute_cells.insert(key);
                                 affected_cells.insert(key);
                             }
                         }
@@ -1166,6 +1233,7 @@ impl CollaborativeWorkbook {
                     effect,
                 },
             );
+            journal.inserted_operations.push(operation.id());
         }
 
         if materialize {
@@ -1182,19 +1250,93 @@ impl CollaborativeWorkbook {
         Ok(())
     }
 
+    fn insert_cell_contribution(
+        &mut self,
+        key: CellKey,
+        contribution: RegisterContribution<AuthoredCellContent>,
+        journal: &mut AppliedTransactionJournal,
+    ) {
+        let operation_id = contribution.operation_id;
+        let register = self.cells.entry(key).or_default();
+        if register.contains(operation_id) {
+            return;
+        }
+        register.insert(contribution, &self.undone);
+        journal
+            .inserted_cell_contributions
+            .insert((key, operation_id));
+    }
+
+    fn rollback_applied_transaction(&mut self, journal: AppliedTransactionJournal) {
+        for undo_operation_id in journal.inserted_undo_links.into_iter().rev() {
+            self.undo_links.remove(&undo_operation_id);
+        }
+        for target in journal.inserted_undone_targets.into_iter().rev() {
+            self.undone.remove(&target);
+        }
+        for operation_id in journal.inserted_operations.into_iter().rev() {
+            self.operations.remove(&operation_id);
+        }
+        for operation_id in journal.inserted_range_clears.into_iter().rev() {
+            self.range_clears.remove(&operation_id);
+        }
+        for (key, operation_id) in journal.inserted_cell_contributions.into_iter().rev() {
+            let remove_key = self.cells.get_mut(&key).is_some_and(|register| {
+                register.remove(operation_id, &self.undone);
+                register.is_empty()
+            });
+            if remove_key {
+                self.cells.remove(&key);
+            }
+        }
+        for (sheet_id, operation_id) in journal.inserted_sheet_deletions.into_iter().rev() {
+            if let Some(history) = self.sheets.get_mut(&sheet_id) {
+                history.deletions.remove(&operation_id);
+            }
+        }
+        for (sheet_id, operation_id) in journal.inserted_sheet_names.into_iter().rev() {
+            if let Some(history) = self.sheets.get_mut(&sheet_id) {
+                history.names.remove(operation_id, &self.undone);
+            }
+        }
+        for sheet_id in journal.created_sheets.into_iter().rev() {
+            self.sheets.remove(&sheet_id);
+        }
+        for sheet_id in journal.recompute_sheet_names {
+            if let Some(history) = self.sheets.get_mut(&sheet_id) {
+                history.names.recompute_maximal(&self.undone);
+            }
+        }
+        for key in journal.recompute_cells {
+            if let Some(register) = self.cells.get_mut(&key) {
+                register.recompute_maximal(&self.undone);
+            }
+        }
+    }
+
     fn refresh_materialized_cells(
         &mut self,
         keys: &BTreeSet<CellKey>,
         revision: u64,
     ) -> Result<(), CollaborationError> {
         let mut commands = Vec::with_capacity(keys.len());
+        let final_names = self
+            .workbook
+            .sheets
+            .iter()
+            .map(|(sheet_id, sheet)| (*sheet_id, sheet.name().to_owned()))
+            .collect();
+        let mut rewrite_plans = BTreeMap::new();
         for key in keys {
             let visible = self
                 .cells
                 .get(key)
                 .and_then(CausalRegister::visible)
-                .map(|contribution| contribution.value.clone())
-                .unwrap_or_else(Cell::empty);
+                .map(|contribution| {
+                    self.materialized_cell_content(contribution, &final_names, &mut rewrite_plans)
+                })
+                .transpose()?
+                .unwrap_or_else(AuthoredCellContent::empty);
             if self.workbook.sheets.contains_key(&key.sheet_id) {
                 commands.push(Command::SetCells {
                     sheet_id: key.sheet_id,
@@ -1252,10 +1394,17 @@ impl CollaborativeWorkbook {
             sheet_order.push(sheet_id);
             sheets.insert(sheet_id, Sheet::new(sheet_id, name));
         }
+        let final_names: BTreeMap<_, _> = sheets
+            .iter()
+            .map(|(sheet_id, sheet)| (*sheet_id, sheet.name().to_owned()))
+            .collect();
+        let mut rewrite_plans = BTreeMap::new();
         for (key, register) in &self.cells {
-            if let Some(sheet) = sheets.get_mut(&key.sheet_id) {
-                if let Some(visible) = register.visible() {
-                    sheet.set_cell(key.coord, visible.value.clone());
+            if let Some(visible) = register.visible() {
+                let content =
+                    self.materialized_cell_content(visible, &final_names, &mut rewrite_plans)?;
+                if let Some(sheet) = sheets.get_mut(&key.sheet_id) {
+                    sheet.set_cell(key.coord, content.materialize());
                 }
             }
         }
@@ -1267,6 +1416,151 @@ impl CollaborativeWorkbook {
                     )
                 })?;
         Ok(())
+    }
+
+    /// Formula source is authored in the sheet-name context observed by its
+    /// causal operation. Materialization deterministically projects those
+    /// qualifiers onto the currently visible sheet names. This preserves
+    /// rename/delete/undo semantics without persisting a calculated value or a
+    /// second formula representation.
+    fn materialized_cell_content(
+        &self,
+        contribution: &RegisterContribution<AuthoredCellContent>,
+        final_names: &BTreeMap<StableId, String>,
+        rewrite_plans: &mut FormulaRewritePlans,
+    ) -> Result<AuthoredCellContent, CollaborationError> {
+        let Some(original_source) = contribution.value.formula_source() else {
+            return Ok(contribution.value.clone());
+        };
+        let context_key = (contribution.dot, contribution.operation_index);
+        let rewrite_plan = rewrite_plans.entry(context_key).or_insert_with(|| {
+            self.sheet_names_at(contribution)
+                .into_iter()
+                .filter_map(|(sheet_id, previous_name)| {
+                    let final_name = final_names.get(&sheet_id).cloned();
+                    (!final_name
+                        .as_ref()
+                        .is_some_and(|name| name == &previous_name))
+                    .then_some((previous_name, final_name))
+                })
+                .collect()
+        });
+        let mut source = original_source.to_owned();
+        let mut unavailable_names: BTreeSet<String> = rewrite_plan
+            .iter()
+            .flat_map(|(previous_name, final_name)| {
+                core::iter::once(previous_name).chain(final_name.iter())
+            })
+            .chain(final_names.values())
+            .map(|name| normalize_sheet_name(name))
+            .collect();
+        let mut active_rewrites = Vec::new();
+        for (index, (previous_name, final_name)) in rewrite_plan.iter().enumerate() {
+            let placeholder = formula_rewrite_placeholder(index, &source, &mut unavailable_names);
+            if let Some(rewritten) = rewrite_sheet_references(&source, previous_name, &placeholder)
+            {
+                source = rewritten;
+                active_rewrites.push((placeholder, final_name.clone()));
+            }
+        }
+        for (placeholder, final_name) in active_rewrites {
+            let rewritten = match final_name {
+                Some(name) => rewrite_sheet_references(&source, &placeholder, &name),
+                None => rewrite_deleted_sheet_references(&source, &placeholder),
+            };
+            if let Some(rewritten) = rewritten {
+                source = rewritten;
+            }
+        }
+        AuthoredCellContent::formula(source).map_err(|_| {
+            CollaborationError::InternalInvariant("materialized formula source is invalid")
+        })
+    }
+
+    fn sheet_names_at(
+        &self,
+        context: &RegisterContribution<AuthoredCellContent>,
+    ) -> BTreeMap<StableId, String> {
+        let mut names = BTreeMap::new();
+        let mut used = BTreeSet::new();
+        for sheet_id in self.ordered_sheet_ids() {
+            let Some(history) = self.sheets.get(&sheet_id) else {
+                continue;
+            };
+            if !self.sheet_live_in_context(history, context) {
+                continue;
+            }
+            let Some(desired) = self.sheet_name_in_context(history, context) else {
+                continue;
+            };
+            names.insert(sheet_id, unique_sheet_name(desired, sheet_id, &mut used));
+        }
+        names
+    }
+
+    fn sheet_live_in_context(
+        &self,
+        history: &SheetHistory,
+        context: &RegisterContribution<AuthoredCellContent>,
+    ) -> bool {
+        if !context_observes(
+            context,
+            history.creation.dot,
+            history.creation.operation_index,
+        ) || self.operation_undone_in_context(history.creation.operation_id, context)
+        {
+            return false;
+        }
+        !history.deletions.values().any(|deletion| {
+            context_observes(context, deletion.dot, deletion.operation_index)
+                && !self.operation_undone_in_context(deletion.operation_id, context)
+        })
+    }
+
+    fn sheet_name_in_context<'a>(
+        &self,
+        history: &'a SheetHistory,
+        context: &RegisterContribution<AuthoredCellContent>,
+    ) -> Option<&'a str> {
+        let candidates: Vec<_> = history
+            .names
+            .contributions()
+            .filter(|candidate| {
+                context_observes(context, candidate.dot, candidate.operation_index)
+                    && !self.operation_undone_in_context(candidate.operation_id, context)
+            })
+            .collect();
+        candidates
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                !candidates.iter().copied().any(|other| {
+                    other.operation_id != candidate.operation_id && happens_after(other, candidate)
+                })
+            })
+            .max_by_key(|candidate| {
+                (
+                    candidate.dot.replica(),
+                    candidate.dot.counter(),
+                    candidate.operation_index,
+                    candidate.operation_id,
+                )
+            })
+            .map(|candidate| candidate.value.as_str())
+    }
+
+    fn operation_undone_in_context(
+        &self,
+        target: OperationId,
+        context: &RegisterContribution<AuthoredCellContent>,
+    ) -> bool {
+        self.undo_links.iter().any(|(undo_id, candidate_target)| {
+            *candidate_target == target
+                && self
+                    .operations
+                    .get(undo_id)
+                    .is_some_and(|undo| context_observes(context, undo.dot, undo.operation_index))
+        })
     }
 
     fn sheet_live_current(&self, history: &SheetHistory) -> bool {
@@ -1316,6 +1610,20 @@ struct PreparedTransaction {
     next_ids: crate::IdGenerator,
 }
 
+#[derive(Debug, Default)]
+struct AppliedTransactionJournal {
+    created_sheets: Vec<StableId>,
+    inserted_sheet_names: Vec<(StableId, OperationId)>,
+    inserted_sheet_deletions: Vec<(StableId, OperationId)>,
+    inserted_cell_contributions: BTreeSet<(CellKey, OperationId)>,
+    inserted_range_clears: Vec<OperationId>,
+    inserted_operations: Vec<OperationId>,
+    inserted_undone_targets: Vec<OperationId>,
+    inserted_undo_links: Vec<OperationId>,
+    recompute_sheet_names: BTreeSet<StableId>,
+    recompute_cells: BTreeSet<CellKey>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct DrainOutcome {
     applied: Vec<TransactionId>,
@@ -1363,19 +1671,19 @@ fn checked_text_bytes(current: usize, additional: usize) -> Result<usize, Collab
     Ok(total)
 }
 
-fn cell_text_bytes(cell: &Cell) -> Result<usize, CollaborationError> {
+fn cell_text_bytes(cell: &AuthoredCellContent) -> Result<usize, CollaborationError> {
     let formula = cell.formula_source().map_or(0, str::len);
     if formula > 8 * 1024 {
         return Err(CollaborationError::TransactionTextLimit);
     }
-    let value = match cell.value() {
-        CellValue::Text(text) => {
+    let value = match cell.literal_value() {
+        Some(CellValue::Text(text)) => {
             if text.len() > 16 * 1024 * 1024 {
                 return Err(CollaborationError::TransactionTextLimit);
             }
             text.len()
         }
-        CellValue::Error(crate::FormulaError::Custom(text)) => {
+        Some(CellValue::Error(crate::FormulaError::Custom(text))) => {
             if text.len() > 16 * 1024 * 1024 {
                 return Err(CollaborationError::TransactionTextLimit);
             }
@@ -1388,8 +1696,34 @@ fn cell_text_bytes(cell: &Cell) -> Result<usize, CollaborationError> {
         .ok_or(CollaborationError::TransactionTextLimit)
 }
 
+fn context_observes<T>(
+    context: &RegisterContribution<T>,
+    candidate_dot: CausalDot,
+    candidate_operation_index: u32,
+) -> bool {
+    context.base.observes(candidate_dot)
+        || (context.dot == candidate_dot && candidate_operation_index < context.operation_index)
+}
+
+fn formula_rewrite_placeholder(
+    rewrite_index: usize,
+    source: &str,
+    unavailable_names: &mut BTreeSet<String>,
+) -> String {
+    let normalized_source = normalize_sheet_name(source);
+    let mut ordinal = 0u64;
+    loop {
+        let candidate = format!("\u{e000}opengeni-{rewrite_index}-{ordinal}");
+        let normalized = normalize_sheet_name(&candidate);
+        if !normalized_source.contains(&normalized) && unavailable_names.insert(normalized) {
+            return candidate;
+        }
+        ordinal = ordinal.saturating_add(1);
+    }
+}
+
 fn unique_sheet_name(desired: &str, sheet_id: StableId, used: &mut BTreeSet<String>) -> String {
-    if used.insert(desired.to_owned()) {
+    if used.insert(normalize_sheet_name(desired)) {
         return desired.to_owned();
     }
     let suffix = format!("~{:08x}", sheet_id.counter() as u32);
@@ -1399,7 +1733,7 @@ fn unique_sheet_name(desired: &str, sheet_id: StableId, used: &mut BTreeSet<Stri
         boundary -= 1;
     }
     let candidate = format!("{}{}", &desired[..boundary], suffix);
-    if used.insert(candidate.clone()) {
+    if used.insert(normalize_sheet_name(&candidate)) {
         return candidate;
     }
     // An authored name can imitate a derived suffix. The full stable id plus
@@ -1417,11 +1751,15 @@ fn unique_sheet_name(desired: &str, sheet_id: StableId, used: &mut BTreeSet<Stri
             boundary -= 1;
         }
         let candidate = format!("{}{}", &desired[..boundary], suffix);
-        if used.insert(candidate.clone()) {
+        if used.insert(normalize_sheet_name(&candidate)) {
             return candidate;
         }
         ordinal = ordinal.saturating_add(1);
     }
+}
+
+fn normalize_sheet_name(name: &str) -> String {
+    name.chars().flat_map(char::to_lowercase).collect()
 }
 
 #[cfg(test)]

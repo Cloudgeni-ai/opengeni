@@ -28,9 +28,11 @@ import { hashEditableArtifactCreateRequest, hashEditableArtifactImportRequest } 
 import {
   EDITABLE_ARTIFACT_COMMAND_MAX_BYTES,
   EDITABLE_ARTIFACT_INTENT_MAX_BYTES,
+  EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION,
   EDITABLE_ARTIFACT_INTENT_MAX_UNDO_TARGETS,
   EDITABLE_ARTIFACT_INTENT_VERSION,
   EDITABLE_ARTIFACT_KERNEL_VERSION_MAX_BYTES,
+  EDITABLE_ARTIFACT_CODEC_REGISTRY,
 } from "@opengeni/contracts/editable-artifacts";
 import {
   COMMITTED_TRANSACTION_PROTOCOL_VERSION,
@@ -111,7 +113,6 @@ export const EDITABLE_ARTIFACT_MAX_COMMAND_BYTES_PER_TRANSACTION =
   EDITABLE_ARTIFACT_COMMAND_MAX_BYTES;
 export const EDITABLE_ARTIFACT_MAX_INTENT_BYTES_PER_TRANSACTION =
   EDITABLE_ARTIFACT_INTENT_MAX_BYTES;
-export const EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION = 1;
 export const EDITABLE_ARTIFACT_MAX_OPERATION_BYTES_PER_TRANSACTION =
   MAX_COMMITTED_TRANSACTION_BYTES;
 /** Canonical OGACO envelope bound. Kept as an alias for existing consumers. */
@@ -2266,6 +2267,10 @@ function validateSnapshotRequest(
   assertNonnegativeSafeInteger(rawCoveredHeadSequence, "snapshot covered head sequence");
   const stateHash = editableArtifactStateHash(rawStateHash);
   assertPositiveSafeInteger(rawModelSchemaVersion, "snapshot model schema version");
+  const currentCodec = EDITABLE_ARTIFACT_CODEC_REGISTRY[rawModality];
+  if (rawModelSchemaVersion !== currentCodec.modelSchemaVersion) {
+    throw new TypeError("Snapshot model schema version is unsupported");
+  }
   assertBoundedKernelVersion(rawKernelVersion);
   assertIsoTimestamp(rawVerifiedAt, "snapshot verified timestamp");
   const common = {
@@ -2294,6 +2299,12 @@ function validateSnapshotRequest(
     }
     assertPositiveSafeInteger(rawOperationProtocolVersion, "snapshot operation protocol version");
     assertPositiveSafeInteger(rawCrdtStateVersion, "snapshot CRDT state version");
+    if (
+      rawOperationProtocolVersion !== COMMITTED_TRANSACTION_PROTOCOL_VERSION ||
+      rawCrdtStateVersion !== currentCodec.snapshotVersion
+    ) {
+      throw new TypeError("Spreadsheet snapshot version is unsupported");
+    }
     return Object.freeze({
       ...common,
       modality: "spreadsheet",

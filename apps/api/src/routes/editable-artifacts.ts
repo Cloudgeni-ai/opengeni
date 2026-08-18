@@ -78,9 +78,13 @@ const ListEditableArtifactsQuery = z
 const MintEditableArtifactLiveTicketRequest = z
   .object({
     replicaId: ReplicaId,
-    protocolVersion: PositiveProtocolVersion,
+    modality: z.enum(["document", "spreadsheet", "presentation"]),
+    liveProtocolVersion: PositiveProtocolVersion,
     kernelVersion: VersionName,
     modelSchemaVersion: PositiveModelSchemaVersion,
+    snapshotVersion: PositiveProtocolVersion,
+    commandProtocolVersion: PositiveProtocolVersion,
+    committedTransactionProtocolVersion: PositiveProtocolVersion,
   })
   .strict();
 
@@ -482,9 +486,13 @@ export function registerEditableArtifactRoutes(
         scope,
         actor,
         artifactId,
-        protocolVersion: body.protocolVersion,
+        modality: body.modality,
+        liveProtocolVersion: body.liveProtocolVersion,
         kernelVersion: body.kernelVersion,
         modelSchemaVersion: body.modelSchemaVersion,
+        snapshotVersion: body.snapshotVersion,
+        commandProtocolVersion: body.commandProtocolVersion,
+        committedTransactionProtocolVersion: body.committedTransactionProtocolVersion,
         allowEdit: hasPermission(grant.permissions, "artifacts:publish"),
       });
     } catch (error) {
@@ -496,7 +504,7 @@ export function registerEditableArtifactRoutes(
       !parsedTicket.success ||
       parsedTicket.data.artifactId !== artifactId ||
       parsedTicket.data.replicaId !== actor.replicaId ||
-      parsedTicket.data.protocolVersion !== body.protocolVersion ||
+      parsedTicket.data.protocolVersion !== body.liveProtocolVersion ||
       Date.parse(parsedTicket.data.expiresAt) <= Date.now()
     ) {
       throw new Error("Editable artifact application returned an invalid live ticket");

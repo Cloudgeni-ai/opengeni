@@ -35,6 +35,7 @@ codegen-units = 1
 lto = "thin"
 
 [dependencies]
+libm = "=0.2.16"
 rustybuzz = "0.20.1"
 sha2 = "0.10.9"
 unicode-bidi = "0.3.18"

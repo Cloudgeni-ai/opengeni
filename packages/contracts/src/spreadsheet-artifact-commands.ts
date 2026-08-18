@@ -2,6 +2,7 @@ import {
   canonicalSpreadsheetDateFromMilliseconds,
   canonicalSpreadsheetDateMilliseconds,
 } from "./spreadsheet-artifact-date";
+import { SPREADSHEET_ARTIFACT_COMMAND_VERSION } from "./editable-artifact-versions";
 
 /**
  * Canonical, identity-free spreadsheet mutation commands nested inside
@@ -10,14 +11,14 @@ import {
  * authority.
  */
 
-export const SPREADSHEET_ARTIFACT_COMMAND_VERSION = 1 as const;
+export { SPREADSHEET_ARTIFACT_COMMAND_VERSION } from "./editable-artifact-versions";
 export const SPREADSHEET_ARTIFACT_COMMAND_MAX_BYTES = 4 * 1024 * 1024;
 export const SPREADSHEET_ARTIFACT_COMMAND_MAX_COMMANDS = 4_096;
 export const SPREADSHEET_ARTIFACT_COMMAND_MAX_CELLS = 1_000_000;
 export const SPREADSHEET_ARTIFACT_COMMAND_MAX_STRING_BYTES = 1 * 1024 * 1024;
 export const SPREADSHEET_ARTIFACT_SHEET_NAME_MAX_UTF16_UNITS = 31;
 
-const MAGIC = new TextEncoder().encode("OGASC001");
+const MAGIC = new TextEncoder().encode("OGASC002");
 const HEADER_BYTES = 8 + 2 + 2 + 4 + 8;
 const CHECKSUM_BYTES = 8;
 const textEncoder = new TextEncoder();
@@ -78,7 +79,6 @@ export type SpreadsheetCellScalar =
   | SpreadsheetFormulaError;
 export type SpreadsheetFormulaCell = Readonly<{
   formula: string;
-  cached: SpreadsheetCellScalar;
 }>;
 export type SpreadsheetCellInput = SpreadsheetCellScalar | SpreadsheetFormulaCell;
 
@@ -491,7 +491,7 @@ function batchRecord(input: unknown): SpreadsheetArtifactCommandBatch {
   const batch = plainRecord(input, "spreadsheet command batch");
   exactKeys(batch, ["commands", "version"], "spreadsheet command batch");
   if (batch.version !== SPREADSHEET_ARTIFACT_COMMAND_VERSION) {
-    throw new TypeError("spreadsheet command batch version must be 1");
+    throw new TypeError("spreadsheet command batch version must be 2");
   }
   if (!Array.isArray(batch.commands)) throw new TypeError("commands must be an array");
   if (
@@ -770,13 +770,12 @@ class BinaryWriter {
   cell(value: unknown): void {
     if (isFormulaCell(value)) {
       const cell = plainRecord(value, "formula cell");
-      exactKeys(cell, ["cached", "formula"], "formula cell");
+      exactKeys(cell, ["formula"], "formula cell");
       if (typeof cell.formula !== "string" || cell.formula.length === 0) {
         throw new TypeError("formula source must be a nonempty string");
       }
       this.u8(1);
       this.string(cell.formula, SPREADSHEET_ARTIFACT_COMMAND_MAX_STRING_BYTES);
-      this.scalar(cell.cached);
       return;
     }
     this.u8(0);
@@ -902,12 +901,12 @@ class BinaryReader {
   cell(): SpreadsheetCellInput {
     const formulaTag = this.u8();
     if (formulaTag > 1) throw new TypeError("spreadsheet formula presence tag is invalid");
-    const formula =
-      formulaTag === 1
-        ? this.nonemptyFormula(this.string(SPREADSHEET_ARTIFACT_COMMAND_MAX_STRING_BYTES))
-        : null;
-    const cached = this.scalar();
-    return formula === null ? cached : Object.freeze({ formula, cached });
+    if (formulaTag === 1) {
+      return Object.freeze({
+        formula: this.nonemptyFormula(this.string(SPREADSHEET_ARTIFACT_COMMAND_MAX_STRING_BYTES)),
+      });
+    }
+    return this.scalar();
   }
 
   done(message: string): void {
@@ -981,7 +980,7 @@ function isFormulaError(value: unknown): value is SpreadsheetFormulaError {
     typeof value === "object" &&
     value !== null &&
     !Array.isArray(value) &&
-    typeof (value as Record<string, unknown>).error === "string"
+    Object.hasOwn(value, "error")
   );
 }
 

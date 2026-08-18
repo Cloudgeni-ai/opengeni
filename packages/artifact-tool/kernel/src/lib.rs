@@ -32,5 +32,7 @@ pub use sheet::{
     CellBlock, CellBlockError, CellCoord, CellRange, Sheet, TileCoord, TILE_CELL_COUNT, TILE_EDGE,
 };
 pub use snapshot::{decode_snapshot, encode_snapshot, SnapshotError, SNAPSHOT_VERSION};
-pub use value::{Cell, CellValue, DateValue, FormulaError, Number, ValueError};
+pub use value::{
+    AuthoredCellContent, Cell, CellValue, DateValue, FormulaError, Number, ValueError,
+};
 pub use workbook::{Workbook, WorkbookError};

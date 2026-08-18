@@ -49,7 +49,7 @@ describe("authoritative editable artifact transactions", () => {
       sequenceStart: 1,
       sequenceEnd: 2,
       operationCount: 2,
-      operationProtocolVersion: 1,
+      operationProtocolVersion: 2,
     });
     const afterFirst = (await store.getArtifact(scope, artifactId))!;
     expect(afterFirst.headSequence).toBe(2);

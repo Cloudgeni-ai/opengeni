@@ -8,8 +8,8 @@ use crate::{
     Workbook, WorkbookError,
 };
 
-const MAGIC: [u8; 8] = *b"OGARTK01";
-pub const SNAPSHOT_VERSION: u16 = 1;
+const MAGIC: [u8; 8] = *b"OGARTK02";
+pub const SNAPSHOT_VERSION: u16 = 2;
 const HEADER_BYTES: usize = 8 + 2 + 2 + 8;
 const CHECKSUM_BYTES: usize = 8;
 const MAX_SNAPSHOT_BYTES: usize = 512 * 1024 * 1024;
@@ -310,9 +310,12 @@ impl Encoder {
                 self.u8(1);
                 self.string(formula)?;
             }
-            None => self.u8(0),
+            None => {
+                self.u8(0);
+                self.value(cell.value())?;
+            }
         }
-        self.value(cell.value())
+        Ok(())
     }
 
     fn value(&mut self, value: &CellValue) -> Result<(), SnapshotError> {
@@ -445,19 +448,18 @@ impl<'a> Decoder<'a> {
     }
 
     fn cell(&mut self) -> Result<Cell, SnapshotError> {
-        let formula = match self.u8()? {
-            0 => None,
+        match self.u8()? {
+            0 => self.value().map(Cell::from_value),
             1 => {
                 let formula = self.string()?;
                 if formula.is_empty() {
                     return Err(SnapshotError::NonCanonical("formula must not be empty"));
                 }
-                Some(formula)
+                Cell::formula(formula)
+                    .map_err(|_| SnapshotError::NonCanonical("formula must not be empty"))
             }
-            tag => return Err(SnapshotError::InvalidTag(tag)),
-        };
-        let value = self.value()?;
-        Ok(Cell::from_snapshot(value, formula))
+            tag => Err(SnapshotError::InvalidTag(tag)),
+        }
     }
 
     fn value(&mut self) -> Result<CellValue, SnapshotError> {
@@ -520,7 +522,7 @@ mod tests {
     fn populated_workbook() -> Workbook {
         let mut workbook = Workbook::new(55).expect("workbook");
         let sheet_id = StableId::from_parts(55, 100);
-        let formula = Cell::formula(
+        let formula = Cell::from_formula_projection(
             "=SUM(A1:A2)",
             CellValue::Number(Number::new(3.0).expect("number")),
         )
@@ -587,6 +589,41 @@ mod tests {
         let decoded = decode_snapshot(&first).expect("decode");
         assert_eq!(decoded, workbook);
         assert_eq!(encode_snapshot(&decoded).expect("re-encode"), first);
+    }
+
+    #[test]
+    fn snapshot_bytes_ignore_formula_projection_values() {
+        let mut workbook = populated_workbook();
+        let authored = encode_snapshot(&workbook).expect("authored snapshot");
+        workbook
+            .sheets
+            .get_mut(&StableId::from_parts(55, 100))
+            .expect("sheet")
+            .set_cell(
+                CellCoord::new(255, 257),
+                Cell::from_formula_projection(
+                    "=SUM(A1:A2)",
+                    CellValue::Text("projection must not persist".repeat(64)),
+                )
+                .expect("formula projection"),
+            );
+
+        assert_eq!(
+            encode_snapshot(&workbook).expect("perturbed snapshot"),
+            authored
+        );
+        assert_eq!(
+            encode_snapshot(&decode_snapshot(&authored).expect("restore"))
+                .expect("restored snapshot"),
+            authored
+        );
+    }
+
+    #[test]
+    fn previous_snapshot_magic_is_rejected_without_a_legacy_reader() {
+        let mut bytes = encode_snapshot(&populated_workbook()).expect("encode");
+        bytes[..8].copy_from_slice(b"OGARTK01");
+        assert_eq!(decode_snapshot(&bytes), Err(super::SnapshotError::BadMagic));
     }
 
     #[test]

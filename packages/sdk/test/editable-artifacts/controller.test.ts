@@ -40,7 +40,7 @@ import { testCommand, testCommitted, testPending } from "./protocol-fixtures";
 const ARTIFACT_ID = "0123456789abcdef0123456789abcdef";
 const NOW = 2_000_000_000_000;
 const KERNEL_VERSION = "kernel-1";
-const MODEL_SCHEMA_VERSION = 1;
+const MODEL_SCHEMA_VERSION = 2;
 const STORAGE_SCOPE = {
   namespace: JSON.stringify([
     "https://host.test",
@@ -69,7 +69,8 @@ function snapshot(sequence: number, byte = sequence + 1): EditableArtifactSpread
     stateHash: sha(100 + sequence),
     causalFrontier: frontier(sequence),
     digest: sha(byte),
-    protocolVersion: 1,
+    operationProtocolVersion: 2,
+    snapshotVersion: 2,
     kernelVersion: KERNEL_VERSION,
     modelSchemaVersion: MODEL_SCHEMA_VERSION,
     bytes: new Uint8Array([byte]),
@@ -93,7 +94,7 @@ function committed(
     priorStateHash: sha(99 + sequence),
     stateHash: sha(100 + sequence),
     causalFrontier: frontier(sequence),
-    protocolVersion: 1,
+    operationProtocolVersion: 2,
   });
   return options.committedTransactionBytes === undefined
     ? transaction
@@ -124,7 +125,7 @@ function bootstrap(
   return {
     modality: "spreadsheet",
     artifactId: ARTIFACT_ID,
-    protocolVersion: 1,
+    liveProtocolVersion: 2,
     headSequence,
     headStateHash: sha(100 + headSequence),
     headCausalFrontier: frontier(headSequence),
@@ -260,7 +261,7 @@ class ScriptedTransport implements EditableArtifactSyncTransport {
       replicaId: input.replicaId,
       token: `ticket-${this.tickets.length}`,
       expiresAt: new Date(NOW + 60_000).toISOString(),
-      protocolVersion: 1,
+      protocolVersion: 2,
     };
   }
 
@@ -416,7 +417,8 @@ function controllerOptions(
     storage,
     kernelVersion: KERNEL_VERSION,
     modelSchemaVersion: MODEL_SCHEMA_VERSION,
-    commandVersion: 1,
+    protocolVersion: 1,
+    commandVersion: 2,
     writerReplicaIdFactory: () => "2222222222222222",
     scheduler,
     reconnectDelayMs: 0,
@@ -473,7 +475,7 @@ function retainedPending(input: {
     clientTransactionId: input.clientTransactionId,
     protocolVersion: input.protocolVersion ?? 1,
     modelSchemaVersion: input.modelSchemaVersion ?? MODEL_SCHEMA_VERSION,
-    commandVersion: input.commandVersion ?? 1,
+    commandVersion: input.commandVersion ?? 2,
     replicaId: input.replicaId,
     replicaCounter,
     previousLocalTransactionId: input.previousLocalTransactionId ?? null,
@@ -1027,15 +1029,18 @@ describe("editable artifact sync controller", () => {
       { bootstrap: bootstrap(0, { snapshot: snapshot(0), resyncRequired: true }) },
     ]);
     const kernel = new MockKernel();
+    const openFailures: unknown[] = [];
     const controller = createEditableArtifactSyncController(
       controllerOptions(transport, kernel, new MemoryEditableArtifactStorage(), {
         maxReconnectAttempts: 1,
+        onOpenFailure: (event) => openFailures.push(event),
       }),
     );
     await controller.whenLive();
     expect(kernel.loadedSnapshotBytes).toEqual([9, 1]);
     expect(transport.connections).toHaveLength(2);
     expect(transport.connections[0]?.closeReasons).toContain("client_reconnect");
+    expect(openFailures).toEqual([{ category: "byte_corruption", code: "byte_corruption" }]);
     await controller.close();
   });
 
@@ -1070,7 +1075,7 @@ describe("editable artifact sync controller", () => {
       replicaId: input.replicaId,
       token: "expired",
       expiresAt: new Date(NOW - 1).toISOString(),
-      protocolVersion: 1,
+      protocolVersion: 2,
     });
     const controller = createEditableArtifactSyncController(
       controllerOptions(transport, new MockKernel(), new MemoryEditableArtifactStorage(), {

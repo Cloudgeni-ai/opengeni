@@ -18,6 +18,13 @@ import {
 import { decodeEditableArtifactSerializedCommit } from "@opengeni/contracts/editable-artifact-serialized-commit";
 import { decodeEditableArtifactMutationIntent } from "@opengeni/contracts/editable-artifacts";
 import {
+  COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+  DOCUMENT_ARTIFACT_MODEL_SCHEMA_VERSION,
+  PRESENTATION_ARTIFACT_MODEL_SCHEMA_VERSION,
+  SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
+  SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
+} from "@opengeni/contracts/editable-artifact-versions";
+import {
   MAX_EDITABLE_ARTIFACT_SNAPSHOT_BYTES,
   causalFrontiersEqual,
   editableArtifactCausalFrontier,
@@ -39,9 +46,6 @@ import {
 } from "@opengeni/core";
 import type { BoundedObjectReadPort } from "@opengeni/storage";
 
-const MODEL_SCHEMA_VERSION = 1;
-const OPERATION_PROTOCOL_VERSION = 1;
-const CRDT_STATE_VERSION = 1;
 const SNAPSHOT_CHUNK_BYTES = 1024 * 1024;
 
 type RuntimeFacadeModule = Readonly<{
@@ -104,7 +108,7 @@ export class NativeEditableArtifactKernelAdapter
           modality: "spreadsheet" as const,
           committedTransactionBytes,
           kernelVersion: this.runtime.buildIdentity,
-          modelSchemaVersion: MODEL_SCHEMA_VERSION,
+          modelSchemaVersion: SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
         });
       }
       if (session.modality !== request.modality) {
@@ -116,7 +120,7 @@ export class NativeEditableArtifactKernelAdapter
         nativeReceiptBytes,
         resultingStateHash: editableArtifactStateHash(session.stateHash()),
         kernelVersion: this.runtime.buildIdentity,
-        modelSchemaVersion: MODEL_SCHEMA_VERSION,
+        modelSchemaVersion: modelSchemaVersionFor(request.modality),
       });
     } finally {
       session.dispose();
@@ -188,7 +192,7 @@ export class NativeEditableArtifactKernelAdapter
         ),
         stateHash: editableArtifactStateHash(session.stateHash()),
         coveredHeadSequence: 0 as const,
-        modelSchemaVersion: MODEL_SCHEMA_VERSION,
+        modelSchemaVersion: modelSchemaVersionFor(input.modality),
         kernelVersion: this.runtime.buildIdentity,
       };
       if (session.modality === "spreadsheet") {
@@ -196,8 +200,8 @@ export class NativeEditableArtifactKernelAdapter
           ...common,
           modality: "spreadsheet" as const,
           coveredCausalFrontier: domainFrontier(session.frontier()),
-          operationProtocolVersion: OPERATION_PROTOCOL_VERSION,
-          crdtStateVersion: CRDT_STATE_VERSION,
+          operationProtocolVersion: COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+          crdtStateVersion: SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
         });
       }
       return Object.freeze({
@@ -239,7 +243,7 @@ export class NativeEditableArtifactKernelAdapter
         ),
         stateHash: editableArtifactStateHash(session.stateHash()),
         coveredHeadSequence: input.state.artifact.headSequence,
-        modelSchemaVersion: MODEL_SCHEMA_VERSION,
+        modelSchemaVersion: modelSchemaVersionFor(input.state.modality),
         kernelVersion: this.runtime.buildIdentity,
       } as const;
       if (session.modality === "spreadsheet") {
@@ -248,8 +252,8 @@ export class NativeEditableArtifactKernelAdapter
           ...common,
           modality: session.modality,
           coveredCausalFrontier: domainFrontier(session.frontier()),
-          operationProtocolVersion: OPERATION_PROTOCOL_VERSION,
-          crdtStateVersion: CRDT_STATE_VERSION,
+          operationProtocolVersion: COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+          crdtStateVersion: SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
         });
       }
       if (session.modality !== input.state.modality) throw new Error("Native modality mismatch");
@@ -310,12 +314,12 @@ export class NativeEditableArtifactKernelAdapter
           canonicalContentHash,
           coveredHeadSequence,
           stateHash,
-          modelSchemaVersion: MODEL_SCHEMA_VERSION,
+          modelSchemaVersion: SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
           kernelVersion: this.runtime.buildIdentity,
           fullCrdtStateVerified: true as const,
           coveredCausalFrontier,
-          operationProtocolVersion: OPERATION_PROTOCOL_VERSION,
-          crdtStateVersion: CRDT_STATE_VERSION,
+          operationProtocolVersion: COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+          crdtStateVersion: SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
           ...(replayedTarget ? { replayedTarget } : {}),
         });
       }
@@ -339,7 +343,7 @@ export class NativeEditableArtifactKernelAdapter
         canonicalContentHash,
         coveredHeadSequence,
         stateHash,
-        modelSchemaVersion: MODEL_SCHEMA_VERSION,
+        modelSchemaVersion: modelSchemaVersionFor(session.modality),
         kernelVersion: this.runtime.buildIdentity,
         nativeRevision,
         ...(replayedTarget ? { replayedTarget } : {}),
@@ -348,6 +352,13 @@ export class NativeEditableArtifactKernelAdapter
       session.dispose();
     }
   }
+}
+
+function modelSchemaVersionFor(modality: "spreadsheet" | "document" | "presentation"): 1 | 2 {
+  if (modality === "spreadsheet") return SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION;
+  return modality === "document"
+    ? DOCUMENT_ARTIFACT_MODEL_SCHEMA_VERSION
+    : PRESENTATION_ARTIFACT_MODEL_SCHEMA_VERSION;
 }
 
 function assertRuntime(

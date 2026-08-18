@@ -130,7 +130,7 @@ describe("editable artifact live server", () => {
     const opening = harness.server.openLive({
       token: ticket.token,
       artifactId,
-      protocolVersion: 1,
+      protocolVersion: 2,
       resume: resumeAtZero(),
       sink: harness.sink,
     });
@@ -171,7 +171,7 @@ describe("editable artifact live server", () => {
     const opening = harness.server.openLive({
       token: ticket.token,
       artifactId,
-      protocolVersion: 1,
+      protocolVersion: 2,
       resume: resumeAtZero(),
       sink: harness.sink,
       signal: abort.signal,
@@ -241,7 +241,7 @@ describe("editable artifact live server", () => {
       expired.server.openLive({
         token: ticket.token,
         artifactId,
-        protocolVersion: 1,
+        protocolVersion: 2,
         resume: resumeAtZero(),
         sink: expired.sink,
       }),
@@ -261,14 +261,14 @@ describe("editable artifact live server", () => {
       concurrent.server.openLive({
         token: shared.token,
         artifactId,
-        protocolVersion: 1,
+        protocolVersion: 2,
         resume: resumeAtZero(),
         sink: firstSink,
       }),
       concurrent.server.openLive({
         token: shared.token,
         artifactId,
-        protocolVersion: 1,
+        protocolVersion: 2,
         resume: resumeAtZero(),
         sink: secondSink,
       }),
@@ -336,7 +336,7 @@ describe("editable artifact live server", () => {
     await session.receive(
       encodeClient({
         type: "applied",
-        protocolVersion: 1,
+        protocolVersion: 2,
         artifactId,
         streamEpoch: session.streamEpoch,
         sequence: 1,
@@ -369,7 +369,7 @@ describe("editable artifact live server", () => {
     await genesisSession.receive(
       encodeClient({
         type: "applied",
-        protocolVersion: 1,
+        protocolVersion: 2,
         artifactId,
         streamEpoch: genesisSession.streamEpoch,
         sequence: 0,
@@ -389,7 +389,7 @@ describe("editable artifact live server", () => {
     await mismatchedSession.receive(
       encodeClient({
         type: "applied",
-        protocolVersion: 1,
+        protocolVersion: 2,
         artifactId,
         streamEpoch: mismatchedSession.streamEpoch,
         sequence: 0,
@@ -406,7 +406,7 @@ describe("editable artifact live server", () => {
     await retainedSession.receive(
       encodeClient({
         type: "applied",
-        protocolVersion: 1,
+        protocolVersion: 2,
         artifactId,
         streamEpoch: retainedSession.streamEpoch,
         sequence: 1,
@@ -443,7 +443,7 @@ describe("editable artifact live server", () => {
     const second = await harness.open();
     const bytes = encodeClient({
       type: "applied",
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId,
       streamEpoch: oldEpoch,
       sequence: 0,
@@ -516,7 +516,7 @@ describe("editable artifact live server", () => {
     const intentBytes = new Uint8Array([0x4f, 0x47, 0x41, 0x54, 1, 2, 3]);
 
     const receipt = await session.submitIntent({
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId,
       streamEpoch: session.streamEpoch,
       requestHash: transaction.requestHash,
@@ -544,7 +544,7 @@ describe("editable artifact live server", () => {
     harness.authorization.deny("edit");
     await expect(
       session.submitIntent({
-        protocolVersion: 1,
+        protocolVersion: 2,
         artifactId,
         streamEpoch: session.streamEpoch,
         requestHash: editableArtifactRequestHash(`sha256:${"f".repeat(64)}`),
@@ -583,7 +583,7 @@ describe("editable artifact live server", () => {
       } as never;
     };
     const first = session.submitIntent({
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId,
       streamEpoch: session.streamEpoch,
       requestHash: transaction.requestHash,
@@ -591,7 +591,7 @@ describe("editable artifact live server", () => {
     });
     await until(() => harness.domainCalls.length === 1);
     const second = session.submitIntent({
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId,
       streamEpoch: session.streamEpoch,
       requestHash: editableArtifactRequestHash(`sha256:${"e".repeat(64)}`),
@@ -619,7 +619,7 @@ describe("editable artifact live server", () => {
 
     await expect(
       session.submitIntent({
-        protocolVersion: 1,
+        protocolVersion: 2,
         artifactId,
         streamEpoch: session.streamEpoch,
         requestHash: editableArtifactRequestHash(`sha256:${"d".repeat(64)}`),
@@ -717,7 +717,7 @@ function liveHarness(
       return server.openLive({
         token: ticket.token,
         artifactId,
-        protocolVersion: 1,
+        protocolVersion: 2,
         resume: resumeAtZero(modality),
         sink,
       });
@@ -951,7 +951,7 @@ class TestReader implements EditableArtifactLiveReadPort {
       priorStateHash: prior,
       stateHash,
       causalFrontier: emptyFrontier,
-      operationProtocolVersion: 1,
+      operationProtocolVersion: 2,
       committedTransactionBytes:
         operationByteLength === 2
           ? encodeTestCommittedTransaction({
@@ -1053,10 +1053,11 @@ class TestReader implements EditableArtifactLiveReadPort {
               sequence: snapshotSequence,
               stateHash: this.hashes.get(snapshotSequence)!,
               causalFrontier: emptyFrontier,
-              operationProtocolVersion: 1,
+              operationProtocolVersion: 2,
+              snapshotVersion: 2,
               digest: `sha256:${"a".repeat(64)}` as const,
               kernelVersion: "test-kernel",
-              modelSchemaVersion: 1,
+              modelSchemaVersion: 2,
               bytes: new Uint8Array([1]),
             }
           : {
@@ -1167,6 +1168,7 @@ function resumeAtZero(modality: "document" | "spreadsheet" | "presentation" = "s
   return Object.freeze(
     modality === "spreadsheet"
       ? {
+          modality,
           localCursor: 0,
           localStateHash: hash(0),
           localCausalFrontier: emptyFrontier,

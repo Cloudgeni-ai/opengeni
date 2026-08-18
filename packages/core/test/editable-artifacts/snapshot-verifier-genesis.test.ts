@@ -47,10 +47,10 @@ describe("trusted editable-artifact genesis pipeline", () => {
       coveredHeadSequence: 0,
       coveredCausalFrontier: [],
       stateHash,
-      modelSchemaVersion: 1,
-      operationProtocolVersion: 1,
+      modelSchemaVersion: 2,
+      operationProtocolVersion: 2,
       kernelVersion: "native-kernel/1",
-      crdtStateVersion: 1,
+      crdtStateVersion: 2,
       verifiedAt: "2026-08-08T10:00:00.000Z",
     });
     expect(fixture.genesisCalls).toBe(1);
@@ -186,7 +186,7 @@ function genesisFixture(
         canonicalContentHash: digest(bytes),
         stateHash,
         coveredHeadSequence: 0,
-        modelSchemaVersion: 1,
+        modelSchemaVersion: input.modality === "spreadsheet" ? 2 : 1,
         kernelVersion: "native-kernel/1",
       } as const;
       return input.modality === "spreadsheet"
@@ -194,8 +194,8 @@ function genesisFixture(
             ...common,
             modality: "spreadsheet",
             coveredCausalFrontier: editableArtifactCausalFrontier([]),
-            operationProtocolVersion: 1,
-            crdtStateVersion: 1,
+            operationProtocolVersion: 2,
+            crdtStateVersion: 2,
             ...generatedOverride,
           } as never)
         : ({
@@ -220,7 +220,7 @@ function genesisFixture(
         canonicalContentHash: digest(bytes),
         coveredHeadSequence: 0,
         stateHash,
-        modelSchemaVersion: 1,
+        modelSchemaVersion: input.modality === "spreadsheet" ? 2 : 1,
         kernelVersion: "native-kernel/1",
       } as const;
       return input.modality === "spreadsheet"
@@ -229,8 +229,8 @@ function genesisFixture(
             modality: "spreadsheet" as const,
             fullCrdtStateVerified: true as const,
             coveredCausalFrontier: editableArtifactCausalFrontier([]),
-            operationProtocolVersion: 1,
-            crdtStateVersion: 1,
+            operationProtocolVersion: 2,
+            crdtStateVersion: 2,
           }
         : {
             ...common,

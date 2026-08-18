@@ -1,14 +1,12 @@
 import { createHash } from "node:crypto";
 
 import {
-  COMMITTED_TRANSACTION_PROTOCOL_VERSION,
-  EDITABLE_ARTIFACT_MODEL_SCHEMA_VERSION,
-} from "@opengeni/contracts/editable-artifact-versions";
-import {
   DOCUMENT_ARTIFACT_COMMAND_VERSION,
+  EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION,
   EDITABLE_ARTIFACT_INTENT_VERSION,
   PRESENTATION_ARTIFACT_COMMAND_VERSION,
   SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+  currentEditableArtifactCompatibility,
   decodeEditableArtifactMutationIntent,
   decodeDocumentArtifactQueryResponse,
   decodePresentationArtifactQueryResponse,
@@ -364,8 +362,9 @@ export class EditableArtifactAgentApplication {
     }
     const authored = hashEditableArtifactMutationIntent({
       envelopeVersion: EDITABLE_ARTIFACT_INTENT_VERSION,
-      protocolVersion: COMMITTED_TRANSACTION_PROTOCOL_VERSION,
-      modelSchemaVersion: EDITABLE_ARTIFACT_MODEL_SCHEMA_VERSION,
+      protocolVersion: EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION,
+      modelSchemaVersion: currentEditableArtifactCompatibility(input.batch.modality)
+        .modelSchemaVersion,
       commandProtocolVersion: commandProtocolVersion(input.batch.modality),
       artifactId,
       clientTransactionId,
@@ -564,12 +563,21 @@ function agentContext(input: EditableArtifactAgentContext): EditableArtifactAgen
 
 function encodeCommands(batch: EditableArtifactAgentCommandBatch): Uint8Array {
   if (batch.modality === "spreadsheet") {
-    return encodeSpreadsheetArtifactCommandBatch({ version: 1, commands: batch.commands });
+    return encodeSpreadsheetArtifactCommandBatch({
+      version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+      commands: batch.commands,
+    });
   }
   if (batch.modality === "document") {
-    return encodeDocumentArtifactCommandBatch({ version: 1, commands: batch.commands });
+    return encodeDocumentArtifactCommandBatch({
+      version: DOCUMENT_ARTIFACT_COMMAND_VERSION,
+      commands: batch.commands,
+    });
   }
-  return encodePresentationArtifactCommandBatch({ version: 1, commands: batch.commands });
+  return encodePresentationArtifactCommandBatch({
+    version: PRESENTATION_ARTIFACT_COMMAND_VERSION,
+    commands: batch.commands,
+  });
 }
 
 function encodeQuery(request: EditableArtifactAgentQuery): Uint8Array {

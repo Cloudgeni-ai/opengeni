@@ -135,7 +135,7 @@ export class MemoryEditableArtifactStorage implements EditableArtifactStoragePor
         stateHash: replica.head.stateHash,
         modality: replica.head.modality,
         ...(replica.head.snapshot.modality === "spreadsheet"
-          ? { protocolVersion: replica.head.snapshot.protocolVersion }
+          ? { operationProtocolVersion: replica.head.snapshot.operationProtocolVersion }
           : {}),
       },
       input,
@@ -227,10 +227,9 @@ type MemoryStoredReplica = {
 
 type IndexedDbStoredReplicaHead = Omit<StoredReplicaHead, "snapshot"> & {
   namespace: string;
-  /** Absent only on legacy spreadsheet records. */
-  modality?: EditableArtifactModality;
+  modality: EditableArtifactModality;
   /** Spreadsheet-only; absent for serialized modalities. */
-  protocolVersion?: number;
+  operationProtocolVersion?: number;
   tailCount: number;
   tailBytes: number;
 };
@@ -240,10 +239,10 @@ type IndexedDbCommittedTransaction = EditableArtifactCommittedTransaction & {
 };
 type IndexedDbPendingTransaction = EditableArtifactPendingTransaction & {
   namespace: string;
-  /** V3 IndexedDB key-path alias; always exactly clientTransactionId. */
+  /** IndexedDB key-path alias; always exactly clientTransactionId. */
   transactionId: string;
 };
-const DATABASE_VERSION = 3;
+const DATABASE_VERSION = 4;
 const REPLICA_HEAD_STORE = "replicas";
 const SNAPSHOT_STORE = "snapshots";
 const COMMITTED_STORE = "committedTransactions";
@@ -352,7 +351,7 @@ export class IndexedDbEditableArtifactStorage implements EditableArtifactStorage
     assertStoredHeadAccounting(head, tail.length, retainedTailBytes);
     const {
       namespace: _headNamespace,
-      protocolVersion: retainedProtocolVersion,
+      operationProtocolVersion: retainedOperationProtocolVersion,
       tailCount: _tailCount,
       tailBytes: _tailBytes,
       ...storedHead
@@ -364,13 +363,12 @@ export class IndexedDbEditableArtifactStorage implements EditableArtifactStorage
         normalizeStoredCommitted(value, ownedScope.modality),
       )
       .sort(compareCommittedTransactions);
-    const headModality = head.modality ?? "spreadsheet";
-    if (headModality !== ownedScope.modality) {
+    if (head.modality !== ownedScope.modality) {
       throw new TypeError("retained head modality does not match its storage scope");
     }
     if (
       storedSnapshot.modality === "spreadsheet" &&
-      retainedProtocolVersion !== storedSnapshot.protocolVersion
+      retainedOperationProtocolVersion !== storedSnapshot.operationProtocolVersion
     )
       throw new TypeError("retained head protocol does not match its snapshot");
     const replica: EditableArtifactStoredReplica = {
@@ -643,7 +641,11 @@ function assertStoredReplica(replica: EditableArtifactStoredReplica): void {
   assertSha256(replica.snapshot.digest, "snapshot.digest");
   if (replica.snapshot.modality === "spreadsheet") {
     assertFrontier(replica.snapshot.causalFrontier, "snapshot.causalFrontier");
-    assertPositiveInteger(replica.snapshot.protocolVersion, "snapshot.protocolVersion");
+    assertPositiveInteger(
+      replica.snapshot.operationProtocolVersion,
+      "snapshot.operationProtocolVersion",
+    );
+    assertPositiveInteger(replica.snapshot.snapshotVersion, "snapshot.snapshotVersion");
   } else {
     assertSequence(replica.snapshot.nativeRevision, "snapshot.nativeRevision");
   }
@@ -676,7 +678,7 @@ function assertStoredReplica(replica: EditableArtifactStoredReplica): void {
     if (
       transaction.modality === "spreadsheet" &&
       replica.snapshot.modality === "spreadsheet" &&
-      transaction.protocolVersion !== replica.snapshot.protocolVersion
+      transaction.operationProtocolVersion !== replica.snapshot.operationProtocolVersion
     )
       throw new TypeError("stored committed tail protocol does not match its snapshot");
     if (transaction.modality !== "spreadsheet") {
@@ -805,11 +807,11 @@ function assertCommittedTransaction(
   }
   if (transaction.modality === "spreadsheet") {
     assertFrontier(transaction.causalFrontier, "causalFrontier");
-    assertPositiveInteger(transaction.protocolVersion, "protocolVersion");
+    assertPositiveInteger(transaction.operationProtocolVersion, "operationProtocolVersion");
     const summary = decodeCommittedTransactionSummary(transaction.committedTransactionBytes);
     if (
       summary.transactionId !== transaction.transactionId ||
-      summary.operationProtocolVersion !== transaction.protocolVersion ||
+      summary.operationProtocolVersion !== transaction.operationProtocolVersion ||
       summary.priorStateHash !== transaction.priorStateHash ||
       summary.stateHash !== transaction.stateHash ||
       !frontiersEqual(summary.resultingCausalFrontier, transaction.causalFrontier)
@@ -907,8 +909,8 @@ function assertPendingTransaction(transaction: EditableArtifactPendingTransactio
 
 function assertAppendCanApply(
   head: Pick<StoredReplicaHead, "cursor" | "stateHash"> & {
-    modality?: EditableArtifactModality;
-    protocolVersion?: number;
+    modality: EditableArtifactModality;
+    operationProtocolVersion?: number;
   },
   input: EditableArtifactAppendCommittedInput,
 ): void {
@@ -917,15 +919,14 @@ function assertAppendCanApply(
       `artifact ${input.artifactId} retained head no longer matches append expectation`,
     );
   }
-  const headModality = head.modality ?? "spreadsheet";
-  if (input.transaction.modality !== headModality) {
+  if (input.transaction.modality !== head.modality) {
     throw new EditableArtifactStorageConflictError(
       `artifact ${input.artifactId} append modality does not match retained snapshot`,
     );
   }
   if (
     input.transaction.modality === "spreadsheet" &&
-    input.transaction.protocolVersion !== head.protocolVersion
+    input.transaction.operationProtocolVersion !== head.operationProtocolVersion
   ) {
     throw new EditableArtifactStorageConflictError(
       `artifact ${input.artifactId} append protocol does not match retained snapshot`,
@@ -936,7 +937,7 @@ function assertAppendCanApply(
 function assertReplacementCanApply(
   head:
     | (Pick<StoredReplicaHead, "cursor" | "stateHash"> & {
-        protocolVersion?: number;
+        operationProtocolVersion?: number;
       })
     | undefined,
   expectedHead: EditableArtifactExpectedStoredHead,
@@ -1028,7 +1029,7 @@ function committedTransactionsEqual(
     left.priorStateHash === right.priorStateHash &&
     left.stateHash === right.stateHash &&
     (left.modality === "spreadsheet" && right.modality === "spreadsheet"
-      ? left.protocolVersion === right.protocolVersion &&
+      ? left.operationProtocolVersion === right.operationProtocolVersion &&
         frontiersEqual(left.causalFrontier, right.causalFrontier)
       : left.modality !== "spreadsheet" &&
         right.modality !== "spreadsheet" &&
@@ -1107,9 +1108,7 @@ function normalizeStoredSnapshot(
   snapshot: Omit<IndexedDbStoredSnapshot, "namespace">,
   modality: EditableArtifactModality,
 ): EditableArtifactSnapshot {
-  const retainedModality =
-    (snapshot as { modality?: EditableArtifactModality }).modality ?? "spreadsheet";
-  if (retainedModality !== modality) {
+  if (snapshot.modality !== modality) {
     throw new TypeError("retained snapshot modality does not match its storage scope");
   }
   return { ...snapshot, modality } as EditableArtifactSnapshot;
@@ -1119,9 +1118,7 @@ function normalizeStoredCommitted(
   transaction: Omit<IndexedDbCommittedTransaction, "namespace">,
   modality: EditableArtifactModality,
 ): EditableArtifactCommittedTransaction {
-  const retainedModality =
-    (transaction as { modality?: EditableArtifactModality }).modality ?? "spreadsheet";
-  if (retainedModality !== modality) {
+  if (transaction.modality !== modality) {
     throw new TypeError("retained transaction modality does not match its storage scope");
   }
   return { ...transaction, modality } as EditableArtifactCommittedTransaction;
@@ -1131,9 +1128,7 @@ function normalizeStoredPending(
   transaction: Omit<IndexedDbPendingTransaction, "namespace" | "transactionId">,
   modality: EditableArtifactModality,
 ): EditableArtifactPendingTransaction {
-  const retainedModality =
-    (transaction as { modality?: EditableArtifactModality }).modality ?? "spreadsheet";
-  if (retainedModality !== modality) {
+  if (transaction.modality !== modality) {
     throw new TypeError("retained pending modality does not match its storage scope");
   }
   return { ...transaction, modality } as EditableArtifactPendingTransaction;
@@ -1269,16 +1264,10 @@ function openDatabase(factory: IDBFactory, databaseName: string): Promise<IDBDat
     };
     request.onupgradeneeded = (event) => {
       const database = request.result;
-      if (event.oldVersion < 2) {
-        // V1 records had no principal partition. They cannot be attributed
-        // safely, so discard this rebuildable cache instead of guessing scope.
+      if (event.oldVersion < DATABASE_VERSION) {
+        // All local artifact state is reconstructible. A format hard cut drops
+        // confirmed state and pending commands instead of interpreting old bytes.
         for (const name of [REPLICA_HEAD_STORE, SNAPSHOT_STORE, PENDING_STORE, COMMITTED_STORE]) {
-          if (database.objectStoreNames.contains(name)) database.deleteObjectStore(name);
-        }
-      } else if (event.oldVersion < 3) {
-        // V2 heads did not retain constant-time journal accounting. Confirmed
-        // state is reconstructible, so rebuild it while preserving the pending WAL.
-        for (const name of [REPLICA_HEAD_STORE, SNAPSHOT_STORE, COMMITTED_STORE]) {
           if (database.objectStoreNames.contains(name)) database.deleteObjectStore(name);
         }
       }
@@ -1373,7 +1362,9 @@ function replaceIndexedDbReplica(
               updatedAt: replica.updatedAt,
               modality: replica.modality,
               ...(replica.snapshot.modality === "spreadsheet"
-                ? { protocolVersion: replica.snapshot.protocolVersion }
+                ? {
+                    operationProtocolVersion: replica.snapshot.operationProtocolVersion,
+                  }
                 : {}),
               tailCount: replica.tail.length,
               tailBytes: committedTailBytes(replica.tail),

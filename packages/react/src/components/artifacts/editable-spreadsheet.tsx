@@ -651,7 +651,7 @@ function spreadsheetCellInput(
   input: string,
   kind: SpreadsheetCommit["kind"],
 ): SpreadsheetCellInput {
-  if (kind === "formula") return { formula: input, cached: null };
+  if (kind === "formula") return { formula: input };
   if (input === "") return null;
   const normalized = input.trim();
   if (/^(?:true|false)$/i.test(normalized)) return normalized.toLowerCase() === "true";

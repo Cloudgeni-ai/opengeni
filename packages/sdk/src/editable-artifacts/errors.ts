@@ -3,6 +3,8 @@ export type EditableArtifactSyncErrorCode =
   | "invalid_bootstrap"
   | "invalid_sequence"
   | "kernel_diverged"
+  | "byte_corruption"
+  | "authored_causal_mismatch"
   | "queue_overflow"
   | "resync_required"
   | "permission_changed"

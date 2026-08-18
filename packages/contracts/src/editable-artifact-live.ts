@@ -3,8 +3,9 @@ import {
   hashEditableArtifactMutationIntentBytes,
   type EditableArtifactCausalEntry,
 } from "./editable-artifacts";
+import { EDITABLE_ARTIFACT_LIVE_WIRE_VERSION } from "./editable-artifact-versions";
 
-const MAGIC = new TextEncoder().encode("OGALV001");
+const MAGIC = new TextEncoder().encode("OGALV002");
 const HEADER_BYTES = 20;
 const MAX_METADATA_BYTES = 64 * 1024;
 const MAX_TOKEN_BYTES = 4_096;
@@ -42,7 +43,7 @@ const MUTATION_REJECTION_CODES = new Set([
   "unavailable",
 ]);
 
-export const EDITABLE_ARTIFACT_LIVE_WIRE_VERSION = 1;
+export { EDITABLE_ARTIFACT_LIVE_WIRE_VERSION } from "./editable-artifact-versions";
 
 export type EditableArtifactId = string;
 export type EditableArtifactRequestHash = string;
@@ -101,8 +102,7 @@ type EditableArtifactLiveResumeCommon = Readonly<{
 export type EditableArtifactLiveResume =
   | (EditableArtifactLiveResumeCommon &
       Readonly<{
-        /** Omitted on OGALV001 for byte-compatible spreadsheet sessions. */
-        modality?: "spreadsheet";
+        modality: "spreadsheet";
         localCausalFrontier: EditableArtifactCausalFrontier;
       }>)
   | (EditableArtifactLiveResumeCommon &
@@ -133,9 +133,10 @@ type EditableArtifactLiveSnapshotCommon = Readonly<{
 export type EditableArtifactLiveSnapshot =
   | (EditableArtifactLiveSnapshotCommon &
       Readonly<{
-        modality?: "spreadsheet";
+        modality: "spreadsheet";
         causalFrontier: EditableArtifactCausalFrontier;
-        protocolVersion: number;
+        operationProtocolVersion: number;
+        snapshotVersion: number;
       }>)
   | (EditableArtifactLiveSnapshotCommon &
       Readonly<{
@@ -157,9 +158,9 @@ type EditableArtifactLiveCommittedTransactionCommon = Readonly<{
 export type EditableArtifactLiveCommittedTransaction =
   | (EditableArtifactLiveCommittedTransactionCommon &
       Readonly<{
-        modality?: "spreadsheet";
+        modality: "spreadsheet";
         causalFrontier: EditableArtifactCausalFrontier;
-        protocolVersion: number;
+        operationProtocolVersion: number;
         /** Exact canonical whole OGACO transaction envelope. */
         committedTransactionBytes: Uint8Array;
       }>)
@@ -252,8 +253,7 @@ export type EditableArtifactLiveServerFrame =
       protocolVersion: number;
       artifactId: EditableArtifactId;
       streamEpoch: string;
-      /** Omitted on the wire for spreadsheet compatibility. */
-      modality?: EditableArtifactLiveModality;
+      modality: EditableArtifactLiveModality;
       writable: boolean;
       headSequence: number;
       minimumReplaySequence: number;
@@ -282,9 +282,10 @@ export type EditableArtifactLiveServerFrame =
     }> &
       (
         | Readonly<{
-            /** Omitted on the wire for spreadsheet compatibility. */
-            modality?: "spreadsheet";
+            modality: "spreadsheet";
             causalFrontier: EditableArtifactCausalFrontier;
+            operationProtocolVersion: number;
+            snapshotVersion: number;
           }>
         | Readonly<{
             modality: "document" | "presentation";
@@ -439,6 +440,7 @@ export function encodeEditableArtifactLiveOpenWireFrame(
       protocolVersion,
       artifactId,
       token,
+      modality: resume.modality,
       localCursor: resume.localCursor,
       localStateHash: resume.localStateHash,
       localCausalFrontier: resume.localCausalFrontier,
@@ -491,28 +493,22 @@ export function encodeEditableArtifactLiveServerWireFrame(
 ): Uint8Array {
   switch (frame.type) {
     case "open": {
-      const { modality, ...metadata } = frame;
       return encodeEnvelope(
         SERVER_OPEN,
-        modality === "document" || modality === "presentation"
-          ? {
-              type: metadata.type,
-              protocolVersion: metadata.protocolVersion,
-              artifactId: metadata.artifactId,
-              streamEpoch: metadata.streamEpoch,
-              modality,
-              writable: metadata.writable,
-              headSequence: metadata.headSequence,
-              minimumReplaySequence: metadata.minimumReplaySequence,
-              maxClientFrameBytes: metadata.maxClientFrameBytes,
-              maxCommandBytes: metadata.maxCommandBytes,
-              maxIntentBytes: metadata.maxIntentBytes,
-              maxCommittedTransactionBytes: metadata.maxCommittedTransactionBytes,
-              maxSnapshotBytes: metadata.maxSnapshotBytes,
-              maxInFlightTransactions: metadata.maxInFlightTransactions,
-              maxInFlightBytes: metadata.maxInFlightBytes,
-            }
-          : metadata,
+        {
+          ...serverFrameIdentity(frame),
+          modality: frame.modality,
+          writable: frame.writable,
+          headSequence: frame.headSequence,
+          minimumReplaySequence: frame.minimumReplaySequence,
+          maxClientFrameBytes: frame.maxClientFrameBytes,
+          maxCommandBytes: frame.maxCommandBytes,
+          maxIntentBytes: frame.maxIntentBytes,
+          maxCommittedTransactionBytes: frame.maxCommittedTransactionBytes,
+          maxSnapshotBytes: frame.maxSnapshotBytes,
+          maxInFlightTransactions: frame.maxInFlightTransactions,
+          maxInFlightBytes: frame.maxInFlightBytes,
+        },
         EMPTY_BYTES,
       );
     }
@@ -555,10 +551,14 @@ export function encodeEditableArtifactLiveServerWireFrame(
               protocolVersion: metadata.protocolVersion,
               artifactId: metadata.artifactId,
               streamEpoch: metadata.streamEpoch,
+              modality,
               sequence: metadata.sequence,
               stateHash: metadata.stateHash,
               causalFrontier: (metadata as { causalFrontier: EditableArtifactCausalFrontier })
                 .causalFrontier,
+              operationProtocolVersion: (metadata as { operationProtocolVersion: number })
+                .operationProtocolVersion,
+              snapshotVersion: (metadata as { snapshotVersion: number }).snapshotVersion,
               digest: metadata.digest,
               kernelVersion: metadata.kernelVersion,
               modelSchemaVersion: metadata.modelSchemaVersion,
@@ -576,9 +576,10 @@ export function encodeEditableArtifactLiveServerWireFrame(
         { modality: "document" | "presentation" }
       >;
       const transactionMetadata =
-        transaction.modality === undefined || transaction.modality === "spreadsheet"
+        transaction.modality === "spreadsheet"
           ? {
               artifactId: transaction.artifactId,
+              modality: transaction.modality,
               transactionId: transaction.transactionId,
               requestHash: transaction.requestHash,
               startSequence: transaction.startSequence,
@@ -586,7 +587,7 @@ export function encodeEditableArtifactLiveServerWireFrame(
               priorStateHash: transaction.priorStateHash,
               stateHash: transaction.stateHash,
               causalFrontier: transaction.causalFrontier,
-              protocolVersion: transaction.protocolVersion,
+              operationProtocolVersion: transaction.operationProtocolVersion,
             }
           : {
               artifactId: serializedTransaction.artifactId,
@@ -603,25 +604,80 @@ export function encodeEditableArtifactLiveServerWireFrame(
             };
       return encodeEnvelope(
         SERVER_TRANSACTION,
-        { ...frame, transaction: transactionMetadata },
+        { ...serverFrameIdentity(frame), transaction: transactionMetadata },
         committedTransactionBytes,
       );
     }
     case "barrier":
-      return encodeEnvelope(SERVER_BARRIER, { ...frame }, EMPTY_BYTES);
+      return encodeEnvelope(
+        SERVER_BARRIER,
+        { ...serverFrameIdentity(frame), sequence: frame.sequence, stateHash: frame.stateHash },
+        EMPTY_BYTES,
+      );
     case "watermark":
-      return encodeEnvelope(SERVER_WATERMARK, { ...frame }, EMPTY_BYTES);
+      return encodeEnvelope(
+        SERVER_WATERMARK,
+        { ...serverFrameIdentity(frame), headSequence: frame.headSequence },
+        EMPTY_BYTES,
+      );
     case "resyncRequired":
-      return encodeEnvelope(SERVER_RESYNC_REQUIRED, { ...frame }, EMPTY_BYTES);
+      return encodeEnvelope(
+        SERVER_RESYNC_REQUIRED,
+        { ...serverFrameIdentity(frame), reason: frame.reason, headSequence: frame.headSequence },
+        EMPTY_BYTES,
+      );
     case "applied":
-      return encodeEnvelope(SERVER_APPLIED, { ...frame }, EMPTY_BYTES);
+      return encodeEnvelope(
+        SERVER_APPLIED,
+        { ...serverFrameIdentity(frame), sequence: frame.sequence, stateHash: frame.stateHash },
+        EMPTY_BYTES,
+      );
     case "authorizationChanged":
-      return encodeEnvelope(SERVER_AUTHORIZATION_CHANGED, { ...frame }, EMPTY_BYTES);
+      return encodeEnvelope(
+        SERVER_AUTHORIZATION_CHANGED,
+        { ...serverFrameIdentity(frame), writable: frame.writable },
+        EMPTY_BYTES,
+      );
     case "mutationAccepted":
-      return encodeEnvelope(SERVER_MUTATION_ACCEPTED, { ...frame }, EMPTY_BYTES);
+      return encodeEnvelope(
+        SERVER_MUTATION_ACCEPTED,
+        {
+          ...serverFrameIdentity(frame),
+          requestHash: frame.requestHash,
+          clientTransactionId: frame.clientTransactionId,
+          transactionId: frame.transactionId,
+          startSequence: frame.startSequence,
+          endSequence: frame.endSequence,
+          stateHash: frame.stateHash,
+        },
+        EMPTY_BYTES,
+      );
     case "mutationRejected":
-      return encodeEnvelope(SERVER_MUTATION_REJECTED, { ...frame }, EMPTY_BYTES);
+      return encodeEnvelope(
+        SERVER_MUTATION_REJECTED,
+        {
+          ...serverFrameIdentity(frame),
+          requestHash: frame.requestHash,
+          code: frame.code,
+          retryable: frame.retryable,
+        },
+        EMPTY_BYTES,
+      );
   }
+}
+
+function serverFrameIdentity(frame: EditableArtifactLiveServerFrame): Readonly<{
+  type: EditableArtifactLiveServerFrame["type"];
+  protocolVersion: number;
+  artifactId: EditableArtifactId;
+  streamEpoch: string;
+}> {
+  return {
+    type: frame.type,
+    protocolVersion: frame.protocolVersion,
+    artifactId: frame.artifactId,
+    streamEpoch: frame.streamEpoch,
+  };
 }
 
 /** Strict inverse used by browser/desktop SDK transports. */
@@ -635,7 +691,7 @@ export function decodeEditableArtifactLiveServerWireFrame(
       requireNoPayload(decoded.payload);
       const modality = serverModality(metadata);
       requireServerKeys(metadata, "open", [
-        ...(modality === "spreadsheet" ? [] : ["modality"]),
+        "modality",
         "writable",
         "headSequence",
         "minimumReplaySequence",
@@ -669,15 +725,18 @@ export function decodeEditableArtifactLiveServerWireFrame(
         ),
         maxInFlightBytes: positiveInteger(metadata.maxInFlightBytes, "maxInFlightBytes"),
       } as const;
-      return Object.freeze(modality === "spreadsheet" ? common : { ...common, modality });
+      return Object.freeze({ ...common, modality });
     }
     case SERVER_SNAPSHOT: {
       const modality = serverModality(metadata);
       requireServerKeys(metadata, "snapshot", [
-        ...(modality === "spreadsheet" ? [] : ["modality"]),
+        "modality",
         "sequence",
         "stateHash",
         modality === "spreadsheet" ? "causalFrontier" : "nativeRevision",
+        ...(modality === "spreadsheet"
+          ? (["operationProtocolVersion", "snapshotVersion"] as const)
+          : []),
         "digest",
         "kernelVersion",
         "modelSchemaVersion",
@@ -714,7 +773,13 @@ export function decodeEditableArtifactLiveServerWireFrame(
         modality === "spreadsheet"
           ? {
               ...common,
+              modality,
               causalFrontier: requiredFrontier(metadata.causalFrontier),
+              operationProtocolVersion: positiveInteger(
+                metadata.operationProtocolVersion,
+                "operationProtocolVersion",
+              ),
+              snapshotVersion: positiveInteger(metadata.snapshotVersion, "snapshotVersion"),
             }
           : {
               ...common,
@@ -732,6 +797,7 @@ export function decodeEditableArtifactLiveServerWireFrame(
         modality === "spreadsheet"
           ? [
               "artifactId",
+              "modality",
               "transactionId",
               "requestHash",
               "startSequence",
@@ -739,7 +805,7 @@ export function decodeEditableArtifactLiveServerWireFrame(
               "priorStateHash",
               "stateHash",
               "causalFrontier",
-              "protocolVersion",
+              "operationProtocolVersion",
             ]
           : [
               "artifactId",
@@ -787,8 +853,12 @@ export function decodeEditableArtifactLiveServerWireFrame(
           modality === "spreadsheet"
             ? {
                 ...common.transaction,
+                modality,
                 causalFrontier: requiredFrontier(transaction.causalFrontier),
-                protocolVersion: positiveInteger(transaction.protocolVersion, "protocolVersion"),
+                operationProtocolVersion: positiveInteger(
+                  transaction.operationProtocolVersion,
+                  "operationProtocolVersion",
+                ),
               }
             : {
                 ...common.transaction,
@@ -923,6 +993,7 @@ function decodeOpen(
           "protocolVersion",
           "artifactId",
           "token",
+          "modality",
           "localCursor",
           "localStateHash",
           "localCausalFrontier",
@@ -1125,12 +1196,13 @@ function normalizeResume(resume: EditableArtifactLiveResume): EditableArtifactLi
   if ((localCursor === null) !== (localStateHash === null)) {
     throw invalidFrame("resume cursor and state hash must both be null or both be present");
   }
-  const modality = resume.modality ?? "spreadsheet";
+  const modality = editableArtifactLiveModality(resume.modality);
   if (modality === "spreadsheet") {
     if (!("localCausalFrontier" in resume)) {
       throw invalidFrame("spreadsheet resume requires a causal frontier");
     }
     return Object.freeze({
+      modality,
       localCursor,
       localStateHash,
       localCausalFrontier: requiredFrontier(resume.localCausalFrontier),
@@ -1176,23 +1248,17 @@ function editableArtifactLiveModality(value: unknown): EditableArtifactLiveModal
 function clientOpenModality(
   metadata: Readonly<Record<string, unknown>>,
 ): EditableArtifactLiveModality {
-  return metadata.modality === undefined
-    ? "spreadsheet"
-    : editableArtifactLiveModality(metadata.modality);
+  return editableArtifactLiveModality(metadata.modality);
 }
 
 function serverModality(metadata: Readonly<Record<string, unknown>>): EditableArtifactLiveModality {
-  return metadata.modality === undefined
-    ? "spreadsheet"
-    : editableArtifactLiveModality(metadata.modality);
+  return editableArtifactLiveModality(metadata.modality);
 }
 
 function transactionModality(
   transaction: Readonly<Record<string, unknown>>,
 ): EditableArtifactLiveModality {
-  return transaction.modality === undefined
-    ? "spreadsheet"
-    : editableArtifactLiveModality(transaction.modality);
+  return editableArtifactLiveModality(transaction.modality);
 }
 
 function requireExactKeys(

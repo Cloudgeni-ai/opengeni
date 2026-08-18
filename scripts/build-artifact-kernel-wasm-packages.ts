@@ -25,7 +25,9 @@ export const artifactKernelWasmPackageSizeBudgets: Readonly<
   spreadsheet: Object.freeze({
     wasmBytes: 768 * 1024,
     wasmGzipBytes: 240 * 1024,
-    glueBytes: 32 * 1024,
+    // Spreadsheet exposes both the current collaboration session and the
+    // current direct/stateless kernel API from one lazy-loaded module.
+    glueBytes: 36 * 1024,
   }),
   document: Object.freeze({
     wasmBytes: 384 * 1024,

@@ -533,7 +533,7 @@ describe("Postgres editable artifact authority", () => {
         generation: 3,
       },
       allowEdit: true,
-      protocolVersion: 1,
+      protocolVersion: 2,
       issuedAt,
       expiresAt,
     };
@@ -879,7 +879,6 @@ describe("Postgres editable artifact authority", () => {
       const bootstrap = await liveRead.readBootstrap({
         scope,
         artifactId,
-        protocolVersion: 1,
         resume: {
           modality,
           localCursor: null,
@@ -956,7 +955,6 @@ describe("Postgres editable artifact authority", () => {
       const resumed = await liveRead.readBootstrap({
         scope,
         artifactId,
-        protocolVersion: 1,
         resume: {
           modality,
           localCursor: 1,
@@ -976,8 +974,8 @@ describe("Postgres editable artifact authority", () => {
         liveRead.readBootstrap({
           scope,
           artifactId,
-          protocolVersion: 1,
           resume: {
+            modality: "spreadsheet",
             localCursor: null,
             localStateHash: null,
             localCausalFrontier: [],
@@ -1174,7 +1172,7 @@ describe("Postgres editable artifact authority", () => {
     30_000,
   );
 
-  test("reads and ACKs legacy spreadsheet live history without changing OGACO semantics", async () => {
+  test("reads and ACKs current spreadsheet live history without changing OGACO semantics", async () => {
     if (!available || !shared || !client) return;
     const scope = { accountId, workspaceId };
     const actorKey = JSON.stringify(["human", "user:alice"]);
@@ -1217,8 +1215,8 @@ describe("Postgres editable artifact authority", () => {
     const bootstrap = await liveRead.readBootstrap({
       scope,
       artifactId,
-      protocolVersion: 1,
       resume: {
+        modality: "spreadsheet",
         localCursor: null,
         localStateHash: null,
         localCausalFrontier: [],
@@ -1258,15 +1256,15 @@ describe("Postgres editable artifact authority", () => {
       priorStateHash: initialStateHash,
       stateHash: nextStateHash,
       causalFrontier: receipt.resultingCausalFrontier,
-      operationProtocolVersion: 1,
+      operationProtocolVersion: 2,
     });
     expect("nativeRevision" in page.transactions[0]!).toBe(false);
     expect(
       await liveRead.readBootstrap({
         scope,
         artifactId,
-        protocolVersion: 1,
         resume: {
+          modality: "spreadsheet",
           localCursor: 1,
           localStateHash: nextStateHash,
           localCausalFrontier: receipt.resultingCausalFrontier,
@@ -1313,8 +1311,8 @@ describe("Postgres editable artifact authority", () => {
       corruptSnapshotReader.readBootstrap({
         scope,
         artifactId,
-        protocolVersion: 1,
         resume: {
+          modality: "spreadsheet",
           localCursor: null,
           localStateHash: null,
           localCausalFrontier: [],
@@ -2066,7 +2064,7 @@ describe("Postgres editable artifact authority", () => {
       modelSchemaVersion: receipt.modelSchemaVersion,
       operationProtocolVersion: receipt.operationProtocolVersion,
       kernelVersion: receipt.kernelVersion,
-      crdtStateVersion: 1,
+      crdtStateVersion: 2,
       verifiedAt: publishedAt,
       publishedAt,
     };
@@ -2210,10 +2208,10 @@ describe("Postgres editable artifact authority", () => {
       selectiveUndoOperationIds: [],
       intentEnvelopeVersion: 1,
       intentProtocolVersion: 1,
-      commandProtocolVersion: 1,
+      commandProtocolVersion: 2,
       kernelVersion: "test-kernel-1",
-      modelSchemaVersion: 1,
-      operationProtocolVersion: 1,
+      modelSchemaVersion: 2,
+      operationProtocolVersion: 2,
       committedAt,
     };
     const result = await store.tryCommitAppliedTransaction({
@@ -2244,8 +2242,8 @@ describe("Postgres editable artifact authority", () => {
         resolvedCausalBase: [],
         resultingCausalFrontier,
         operationIds,
-        operationProtocolVersion: 1,
-        modelSchemaVersion: 1,
+        operationProtocolVersion: 2,
+        modelSchemaVersion: 2,
         kernelVersion: "test-kernel-1",
         committedTransactionBytes,
         committedAt,
@@ -2272,7 +2270,7 @@ describe("Postgres editable artifact authority", () => {
           sequenceStart: 1,
           sequenceEnd: operationCount,
           stateHash,
-          operationProtocolVersion: 1,
+          operationProtocolVersion: 2,
           committedAt,
         },
         state: "pending",
@@ -2742,10 +2740,10 @@ function transactionFixture(input: {
     selectiveUndoOperationIds: input.selectiveUndoOperationIds ?? [],
     intentEnvelopeVersion: 1,
     intentProtocolVersion: 1,
-    commandProtocolVersion: 1,
+    commandProtocolVersion: 2,
     kernelVersion: "test-kernel-1",
-    modelSchemaVersion: 1,
-    operationProtocolVersion: 1,
+    modelSchemaVersion: 2,
+    operationProtocolVersion: 2,
     committedAt,
   };
   const operations = [
@@ -2789,8 +2787,8 @@ function transactionFixture(input: {
         resolvedCausalBase,
         resultingCausalFrontier,
         operationIds: [input.operationId],
-        operationProtocolVersion: 1,
-        modelSchemaVersion: 1,
+        operationProtocolVersion: 2,
+        modelSchemaVersion: 2,
         kernelVersion: "test-kernel-1",
         committedTransactionBytes,
         committedAt,
@@ -2808,7 +2806,7 @@ function transactionFixture(input: {
           sequenceStart: receipt.sequenceStart,
           sequenceEnd: receipt.sequenceEnd,
           stateHash: input.stateHash,
-          operationProtocolVersion: 1,
+          operationProtocolVersion: 2,
           committedAt,
         },
         state: "pending" as const,
@@ -3065,7 +3063,7 @@ function creationFixture(input: {
     mimeType: "application/vnd.opengeni.editable-artifact-snapshot" as const,
     coveredHeadSequence: 0,
     stateHash: input.stateHash,
-    modelSchemaVersion: 1,
+    modelSchemaVersion: input.modality === "spreadsheet" ? 2 : 1,
     kernelVersion: "test-kernel-1",
     verifiedAt: publishedAt,
     publishedAt,
@@ -3078,8 +3076,8 @@ function creationFixture(input: {
           ...snapshotCommon,
           modality: "spreadsheet",
           coveredCausalFrontier: [],
-          operationProtocolVersion: 1,
-          crdtStateVersion: 1,
+          operationProtocolVersion: 2,
+          crdtStateVersion: 2,
         }
       : {
           ...snapshotCommon,
@@ -3097,7 +3095,7 @@ function creationFixture(input: {
           snapshotId,
           coveredHeadSequence: 0,
           stateHash: input.stateHash,
-          operationProtocolVersion: 1,
+          operationProtocolVersion: 2,
           publishedAt,
         }
       : {
@@ -3213,15 +3211,15 @@ function encodeCommittedTransaction(input: {
     .frontier(input.resolvedCausalBase)
     .raw(hashBytes(input.priorStateHash));
   for (const operationId of input.operationIds) {
-    // Selective-undo is the smallest typed OGACO operation. The persistence
+    // Selective undo is the smallest typed committed operation. The persistence
     // suite exercises the envelope/authority boundary, not kernel semantics.
     payload.stableId(operationId).u8(5).stableId(operationId);
   }
   payload.frontier(input.resultingCausalFrontier).raw(hashBytes(input.stateHash));
   const payloadBytes = payload.finish();
   const bytes = new OgacoFixtureWriter()
-    .raw(new TextEncoder().encode("OGACO001"))
-    .u16(1)
+    .raw(new TextEncoder().encode("OGACO002"))
+    .u16(2)
     .u16(0)
     .u32(input.operationIds.length)
     .u64(BigInt(payloadBytes.byteLength))

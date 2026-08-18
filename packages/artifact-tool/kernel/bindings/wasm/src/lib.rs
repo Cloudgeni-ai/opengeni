@@ -23,7 +23,7 @@ pub use text_layout::*;
 
 use opengeni_artifact_kernel_binding_protocol as protocol;
 use wasm_bindgen::prelude::wasm_bindgen;
-#[cfg(any(feature = "spreadsheet", feature = "legacy-spreadsheet", test))]
+#[cfg(any(feature = "spreadsheet", test))]
 use wasm_bindgen::JsError;
 
 /// Returns the canonical encoded capability envelope.
@@ -60,7 +60,7 @@ pub fn build_identity() -> Vec<u8> {
 /// `Uint8Array`. Invalid or non-canonical inputs throw a JavaScript `Error`
 /// whose message retains the protocol's stable error code.
 #[wasm_bindgen(js_name = createWorkbook)]
-#[cfg(feature = "legacy-spreadsheet")]
+#[cfg(feature = "spreadsheet")]
 pub fn create_workbook(namespace_envelope: &[u8]) -> Result<Vec<u8>, JsError> {
     create_workbook_bytes(namespace_envelope).map_err(to_js_error)
 }
@@ -70,26 +70,26 @@ pub fn create_workbook(namespace_envelope: &[u8]) -> Result<Vec<u8>, JsError> {
 /// Neither input is mutated. A rejected command leaves the supplied snapshot
 /// untouched and is surfaced as a JavaScript `Error`.
 #[wasm_bindgen(js_name = applyCommands)]
-#[cfg(feature = "legacy-spreadsheet")]
+#[cfg(feature = "spreadsheet")]
 pub fn apply_commands(snapshot: &[u8], command_envelope: &[u8]) -> Result<Vec<u8>, JsError> {
     apply_commands_bytes(snapshot, command_envelope).map_err(to_js_error)
 }
 
 /// Executes one bounded OGAKQ001 read against a canonical snapshot.
 #[wasm_bindgen(js_name = query)]
-#[cfg(feature = "legacy-spreadsheet")]
+#[cfg(feature = "spreadsheet")]
 pub fn query(snapshot: &[u8], query_envelope: &[u8]) -> Result<Vec<u8>, JsError> {
     query_bytes(snapshot, query_envelope).map_err(to_js_error)
 }
 
 /// Strictly validates and re-encodes a snapshot in canonical form.
 #[wasm_bindgen(js_name = canonicalizeSnapshot)]
-#[cfg(feature = "legacy-spreadsheet")]
+#[cfg(feature = "spreadsheet")]
 pub fn canonicalize_snapshot(snapshot: &[u8]) -> Result<Vec<u8>, JsError> {
     canonicalize_snapshot_bytes(snapshot).map_err(to_js_error)
 }
 
-/// Strictly validates and re-encodes a full OGACRD01 collaboration snapshot.
+/// Strictly validates and re-encodes a full OGACRD02 collaboration snapshot.
 #[wasm_bindgen(js_name = canonicalizeCollaborationSnapshot)]
 #[cfg(feature = "spreadsheet")]
 pub fn canonicalize_collaboration_snapshot(snapshot: &[u8]) -> Result<Vec<u8>, JsError> {
@@ -104,13 +104,13 @@ pub fn canonicalize_collaboration_snapshot(snapshot: &[u8]) -> Result<Vec<u8>, J
 /// It remains synchronous so one Web Worker observes mutations in program
 /// order without locks or asynchronous re-entrancy.
 #[wasm_bindgen]
-#[cfg(feature = "legacy-spreadsheet")]
+#[cfg(feature = "spreadsheet")]
 pub struct ArtifactKernelSession {
     inner: protocol::BindingSession,
 }
 
 #[wasm_bindgen]
-#[cfg(feature = "legacy-spreadsheet")]
+#[cfg(feature = "spreadsheet")]
 impl ArtifactKernelSession {
     /// Creates an empty in-memory workbook from a canonical namespace envelope.
     #[wasm_bindgen(js_name = create)]
@@ -210,7 +210,7 @@ impl ArtifactCollaborationSession {
         .map_err(to_js_error)
     }
 
-    /// Opens one canonical OGACRD01 full-state snapshot.
+    /// Opens one canonical OGACRD02 full-state snapshot.
     #[wasm_bindgen(js_name = open)]
     pub fn open(snapshot: &[u8]) -> Result<ArtifactCollaborationSession, JsError> {
         protocol::CollaborationBindingSession::open_with_limits(snapshot, protocol::WASM_LIMITS)
@@ -243,7 +243,7 @@ impl ArtifactCollaborationSession {
         self.inner.query(query_envelope).map_err(to_js_error)
     }
 
-    /// Returns the full canonical OGACRD01 snapshot.
+    /// Returns the full canonical OGACRD02 snapshot.
     pub fn snapshot(&self) -> Result<Vec<u8>, JsError> {
         self.inner.snapshot().map_err(to_js_error)
     }
@@ -253,7 +253,7 @@ impl ArtifactCollaborationSession {
         self.inner.frontier().map_err(to_js_error)
     }
 
-    /// Returns SHA-256 of the exact canonical OGACRD01 snapshot.
+    /// Returns SHA-256 of the exact canonical OGACRD02 snapshot.
     #[wasm_bindgen(js_name = stateHash)]
     pub fn state_hash(&self) -> Result<String, JsError> {
         self.inner.state_hash().map_err(to_js_error)
@@ -289,12 +289,12 @@ impl ArtifactCollaborationSession {
     }
 }
 
-#[cfg(any(feature = "legacy-spreadsheet", test))]
+#[cfg(any(feature = "spreadsheet", test))]
 fn create_workbook_bytes(namespace_envelope: &[u8]) -> Result<Vec<u8>, protocol::BindingError> {
     protocol::create_workbook_with_limits(namespace_envelope, protocol::WASM_LIMITS)
 }
 
-#[cfg(any(feature = "legacy-spreadsheet", test))]
+#[cfg(any(feature = "spreadsheet", test))]
 fn apply_commands_bytes(
     snapshot: &[u8],
     command_envelope: &[u8],
@@ -302,22 +302,22 @@ fn apply_commands_bytes(
     protocol::apply_commands_with_limits(snapshot, command_envelope, protocol::WASM_LIMITS)
 }
 
-#[cfg(any(feature = "legacy-spreadsheet", test))]
+#[cfg(any(feature = "spreadsheet", test))]
 fn canonicalize_snapshot_bytes(snapshot: &[u8]) -> Result<Vec<u8>, protocol::BindingError> {
     protocol::canonicalize_snapshot_with_limits(snapshot, protocol::WASM_LIMITS)
 }
 
-#[cfg(any(feature = "legacy-spreadsheet", test))]
+#[cfg(any(feature = "spreadsheet", test))]
 fn query_bytes(snapshot: &[u8], query_envelope: &[u8]) -> Result<Vec<u8>, protocol::BindingError> {
     protocol::query_with_limits(snapshot, query_envelope, protocol::WASM_LIMITS)
 }
 
-#[cfg(any(feature = "spreadsheet", feature = "legacy-spreadsheet", test))]
+#[cfg(any(feature = "spreadsheet", test))]
 fn to_js_error(error: protocol::BindingError) -> JsError {
     JsError::new(&error_message(&error))
 }
 
-#[cfg(any(feature = "spreadsheet", feature = "legacy-spreadsheet", test))]
+#[cfg(any(feature = "spreadsheet", test))]
 fn error_message(error: &protocol::BindingError) -> String {
     // Match the native adapter exactly so diagnostics remain comparable.
     format!("[{}] {error}", error.code())
@@ -334,7 +334,7 @@ mod tests {
         decode_snapshot, AtomicBatch, Cell, CellBlock, CellCoord, Command, StableId,
     };
 
-    const COLLABORATION_PARITY_INTENT: &str = "4f47415458303031010001000100010020003131313131313131313131313131313131313131313131313131313131313131110062696e64696e672e7061726974792e76311000303030303030303030303030343534350100000000000000000000000000000000000000003c0000004f4741534330303101000000010000001c0000000000000000020000000000000045450000000000000600000050617269747900d2d2aa22ef1d9d0a";
+    const COLLABORATION_PARITY_INTENT: &str = "4f47415458303031010001000200020020003131313131313131313131313131313131313131313131313131313131313131160062696e64696e672e7061726974792e63757272656e741000303030303030303030303030343534350100000000000000000000000000000000000000003c0000004f4741534330303202000000010000001c0000000000000000020000000000000045450000000000000600000050617269747900e0e621d2780145b7";
     const EMPTY_FRONTIER: &str = "4f4741434630303101000000000000003fb3b04f29ccf857";
 
     fn unhex(value: &str) -> Vec<u8> {

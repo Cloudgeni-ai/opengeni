@@ -18,9 +18,9 @@ use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 
 use opengeni_artifact_kernel::{
-    decode_snapshot, encode_snapshot, AtomicBatch, BatchError, BatchReceipt, Cell, CellBlock,
-    CellCoord, CellRange, CellValue, Command, DateValue, FormulaError, Number, SnapshotError,
-    StableId, ValueError, Workbook, WorkbookError, TILE_EDGE,
+    decode_snapshot, encode_snapshot, AtomicBatch, AuthoredCellContent, BatchError, BatchReceipt,
+    CellBlock, CellCoord, CellRange, CellValue, Command, DateValue, FormulaError, Number,
+    SnapshotError, StableId, ValueError, Workbook, WorkbookError, TILE_EDGE,
 };
 use sha2::{Digest, Sha256};
 
@@ -29,6 +29,7 @@ pub use collaboration::{
     decode_causal_frontier, derive_intent_identities, encode_causal_frontier,
     CollaborationBindingSession, DerivedIntentIdentities, COLLABORATION_OPERATION_VERSION,
     EDITABLE_ARTIFACT_INTENT_VERSION, MAX_COMMITTED_TRANSACTION_BYTES, MAX_INTENT_BYTES,
+    SPREADSHEET_MODEL_SCHEMA_VERSION,
 };
 pub use document::{
     apply_document_commands, apply_document_commands_with_limits, canonicalize_document_snapshot,
@@ -78,7 +79,7 @@ pub use text_layout::{
 };
 
 pub const ABI_VERSION: u16 = 1;
-pub const COMMAND_SCHEMA_VERSION: u16 = 1;
+pub const COMMAND_SCHEMA_VERSION: u16 = 2;
 pub const MAX_COMMAND_ENVELOPE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_SNAPSHOT_ENVELOPE_BYTES: usize = 512 * 1024 * 1024 + 28;
 pub const MAX_COMMANDS: usize = 10_000;
@@ -114,18 +115,18 @@ pub const WASM_LIMITS: BindingLimits = BindingLimits {
     allow_boundary_probe: false,
 };
 
-const COMMAND_MAGIC: [u8; 8] = *b"OGAKC001";
+const COMMAND_MAGIC: [u8; 8] = *b"OGAKC002";
 const NAMESPACE_MAGIC: [u8; 8] = *b"OGAKN001";
 const RECEIPT_MAGIC: [u8; 8] = *b"OGAKR001";
 const HEADER_BYTES: usize = 8 + 2 + 2 + 4 + 8;
 const CHECKSUM_BYTES: usize = 8;
 const NAMESPACE_BYTES: usize = 8 + 2 + 2 + 8 + CHECKSUM_BYTES;
 
-const CAPABILITIES: &[u8] = br#"{"abiVersion":1,"buildIdentityFormat":"utf8","canonicalStateHash":"sha256:canonical-snapshot","collaboration":true,"collaborationSnapshotVersion":1,"commandSchemaVersion":1,"committedTransactionVersion":1,"document":true,"documentCommandVersion":1,"documentQueryResponseVersion":1,"documentQueryVersion":1,"documentReceiptVersion":1,"documentSnapshotVersion":1,"documentStatefulSessions":true,"editableArtifactIntentVersion":1,"kernelSnapshotVersion":1,"maxCellsPerBatch":4000000,"maxCommandBytes":67108864,"maxCommands":10000,"maxCommittedTransactionBytes":8388608,"maxDocumentCommandBytes":67108864,"maxDocumentCommands":4096,"maxDocumentQueryBytes":256,"maxDocumentQueryResponseBytes":8388608,"maxDocumentSnapshotBytes":268435508,"maxIntentBytes":5242880,"maxMetadataScannedCells":4000000,"maxMetadataSheets":10000,"maxPresentationCommandBytes":4194304,"maxPresentationQueryBytes":96,"maxPresentationResponseBytes":8388608,"maxPresentationSnapshotBytes":268435456,"maxQueryBytes":68,"maxQueryResponseBytes":8388608,"maxSnapshotBytes":536870940,"maxSpreadsheetCommandBytes":4194304,"maxTextLayoutFontBundleBytes":536870912,"maxTextLayoutRequestBytes":8388608,"maxTextLayoutResponseBytes":67108864,"maxViewportArea":1048576,"maxViewportCells":262144,"presentation":true,"presentationCommandVersion":1,"presentationQueryResponseVersion":1,"presentationQueryVersion":1,"presentationSnapshotVersion":1,"presentationStatefulSessions":true,"queryResponseVersion":1,"queryVersion":1,"receiptSchemaVersion":1,"retainedRenderPatchVersion":1,"retainedRenderTileVersion":1,"safeRust":true,"sessionForks":true,"spreadsheetCommandVersion":1,"statefulSessions":true,"textLayout":true,"textLayoutFontBundleVersion":1,"textLayoutRequestVersion":1,"textLayoutResponseVersion":1,"textLayoutStatefulSessions":true,"transport":"bounded-uint8array","workbookMetadataQueries":true}"#;
+const CAPABILITIES: &[u8] = br#"{"abiVersion":1,"buildIdentityFormat":"utf8","canonicalStateHash":"sha256:canonical-snapshot","collaboration":true,"collaborationSnapshotVersion":2,"commandSchemaVersion":2,"committedTransactionVersion":2,"document":true,"documentCommandVersion":1,"documentQueryResponseVersion":1,"documentQueryVersion":1,"documentReceiptVersion":1,"documentSnapshotVersion":1,"documentStatefulSessions":true,"editableArtifactIntentVersion":1,"kernelSnapshotVersion":2,"maxCellsPerBatch":4000000,"maxCommandBytes":67108864,"maxCommands":10000,"maxCommittedTransactionBytes":8388608,"maxDocumentCommandBytes":67108864,"maxDocumentCommands":4096,"maxDocumentQueryBytes":256,"maxDocumentQueryResponseBytes":8388608,"maxDocumentSnapshotBytes":268435508,"maxIntentBytes":5242880,"maxMetadataScannedCells":4000000,"maxMetadataSheets":10000,"maxPresentationCommandBytes":4194304,"maxPresentationQueryBytes":96,"maxPresentationResponseBytes":8388608,"maxPresentationSnapshotBytes":268435456,"maxQueryBytes":68,"maxQueryResponseBytes":8388608,"maxSnapshotBytes":536870940,"maxSpreadsheetCommandBytes":4194304,"maxTextLayoutFontBundleBytes":536870912,"maxTextLayoutRequestBytes":8388608,"maxTextLayoutResponseBytes":67108864,"maxViewportArea":1048576,"maxViewportCells":262144,"presentation":true,"presentationCommandVersion":1,"presentationQueryResponseVersion":1,"presentationQueryVersion":1,"presentationSnapshotVersion":1,"presentationStatefulSessions":true,"queryResponseVersion":1,"queryVersion":1,"receiptSchemaVersion":1,"retainedRenderPatchVersion":1,"retainedRenderTileVersion":1,"safeRust":true,"sessionForks":true,"spreadsheetCommandVersion":2,"spreadsheetModelSchemaVersion":2,"statefulSessions":true,"textLayout":true,"textLayoutFontBundleVersion":1,"textLayoutRequestVersion":1,"textLayoutResponseVersion":1,"textLayoutStatefulSessions":true,"transport":"bounded-uint8array","workbookMetadataQueries":true}"#;
 const BUILD_IDENTITY: &[u8] = concat!(
     "opengeni-artifact-kernel/",
     env!("CARGO_PKG_VERSION"),
-    ";abi=1;command=1;query=1;snapshot=1;document-snapshot=1;document-command=1;document-query=1;presentation-snapshot=1;presentation-command=1;presentation-query=1;text-layout-fonts=1;text-layout-request=1;text-layout-response=1;render-tile=1;render-patch=1;source=",
+    ";abi=1;command=2;query=1;snapshot=2;collaboration-snapshot=2;committed-transaction=2;spreadsheet-model=2;document-snapshot=1;document-command=1;document-query=1;presentation-snapshot=1;presentation-command=1;presentation-query=1;text-layout-fonts=1;text-layout-request=1;text-layout-response=1;render-tile=1;render-patch=1;source=",
     env!("OPENGENI_ARTIFACT_KERNEL_SOURCE_ID"),
     ";toolchain=",
     env!("OPENGENI_ARTIFACT_KERNEL_TOOLCHAIN_ID"),
@@ -155,7 +156,7 @@ pub struct BindingFeatures {
     pub text_layout: bool,
 }
 
-/// Complete feature set used by native and backwards-compatible bindings.
+/// Complete current feature set used by the native binding.
 pub const ALL_BINDING_FEATURES: BindingFeatures = BindingFeatures {
     spreadsheet: true,
     document: true,
@@ -189,7 +190,7 @@ pub fn capabilities_for_features(limits: BindingLimits, features: BindingFeature
         NATIVE_TEXT_LAYOUT_LIMITS
     };
     format!(
-        "{{\"abiVersion\":1,\"buildIdentityFormat\":\"utf8\",\"canonicalStateHash\":\"sha256:canonical-snapshot\",\"collaboration\":{},\"collaborationSnapshotVersion\":1,\"commandSchemaVersion\":1,\"committedTransactionVersion\":1,\"document\":{},\"documentCommandVersion\":1,\"documentQueryResponseVersion\":1,\"documentQueryVersion\":1,\"documentReceiptVersion\":1,\"documentSnapshotVersion\":1,\"documentStatefulSessions\":{},\"editableArtifactIntentVersion\":1,\"kernelSnapshotVersion\":1,\"maxCellsPerBatch\":{},\"maxCommandBytes\":{},\"maxCommands\":10000,\"maxCommittedTransactionBytes\":8388608,\"maxDocumentCommandBytes\":{},\"maxDocumentCommands\":4096,\"maxDocumentQueryBytes\":256,\"maxDocumentQueryResponseBytes\":8388608,\"maxDocumentSnapshotBytes\":{},\"maxIntentBytes\":5242880,\"maxMetadataScannedCells\":4000000,\"maxMetadataSheets\":10000,\"maxPresentationCommandBytes\":{},\"maxPresentationQueryBytes\":96,\"maxPresentationResponseBytes\":{},\"maxPresentationSnapshotBytes\":{},\"maxQueryBytes\":68,\"maxQueryResponseBytes\":8388608,\"maxSnapshotBytes\":{},\"maxSpreadsheetCommandBytes\":4194304,\"maxTextLayoutFontBundleBytes\":{},\"maxTextLayoutRequestBytes\":{},\"maxTextLayoutResponseBytes\":{},\"maxViewportArea\":1048576,\"maxViewportCells\":262144,\"presentation\":{},\"presentationCommandVersion\":1,\"presentationQueryResponseVersion\":1,\"presentationQueryVersion\":1,\"presentationSnapshotVersion\":1,\"presentationStatefulSessions\":{},\"queryResponseVersion\":1,\"queryVersion\":1,\"receiptSchemaVersion\":1,\"retainedRenderPatchVersion\":1,\"retainedRenderTileVersion\":1,\"safeRust\":true,\"sessionForks\":{},\"spreadsheetCommandVersion\":1,\"statefulSessions\":{},\"textLayout\":{},\"textLayoutFontBundleVersion\":1,\"textLayoutRequestVersion\":1,\"textLayoutResponseVersion\":1,\"textLayoutStatefulSessions\":{},\"transport\":\"bounded-uint8array\",\"workbookMetadataQueries\":{}}}",
+        "{{\"abiVersion\":1,\"buildIdentityFormat\":\"utf8\",\"canonicalStateHash\":\"sha256:canonical-snapshot\",\"collaboration\":{},\"collaborationSnapshotVersion\":2,\"commandSchemaVersion\":2,\"committedTransactionVersion\":2,\"document\":{},\"documentCommandVersion\":1,\"documentQueryResponseVersion\":1,\"documentQueryVersion\":1,\"documentReceiptVersion\":1,\"documentSnapshotVersion\":1,\"documentStatefulSessions\":{},\"editableArtifactIntentVersion\":1,\"kernelSnapshotVersion\":2,\"maxCellsPerBatch\":{},\"maxCommandBytes\":{},\"maxCommands\":10000,\"maxCommittedTransactionBytes\":8388608,\"maxDocumentCommandBytes\":{},\"maxDocumentCommands\":4096,\"maxDocumentQueryBytes\":256,\"maxDocumentQueryResponseBytes\":8388608,\"maxDocumentSnapshotBytes\":{},\"maxIntentBytes\":5242880,\"maxMetadataScannedCells\":4000000,\"maxMetadataSheets\":10000,\"maxPresentationCommandBytes\":{},\"maxPresentationQueryBytes\":96,\"maxPresentationResponseBytes\":{},\"maxPresentationSnapshotBytes\":{},\"maxQueryBytes\":68,\"maxQueryResponseBytes\":8388608,\"maxSnapshotBytes\":{},\"maxSpreadsheetCommandBytes\":4194304,\"maxTextLayoutFontBundleBytes\":{},\"maxTextLayoutRequestBytes\":{},\"maxTextLayoutResponseBytes\":{},\"maxViewportArea\":1048576,\"maxViewportCells\":262144,\"presentation\":{},\"presentationCommandVersion\":1,\"presentationQueryResponseVersion\":1,\"presentationQueryVersion\":1,\"presentationSnapshotVersion\":1,\"presentationStatefulSessions\":{},\"queryResponseVersion\":1,\"queryVersion\":1,\"receiptSchemaVersion\":1,\"retainedRenderPatchVersion\":1,\"retainedRenderTileVersion\":1,\"safeRust\":true,\"sessionForks\":{},\"spreadsheetCommandVersion\":2,\"spreadsheetModelSchemaVersion\":2,\"statefulSessions\":{},\"textLayout\":{},\"textLayoutFontBundleVersion\":1,\"textLayoutRequestVersion\":1,\"textLayoutResponseVersion\":1,\"textLayoutStatefulSessions\":{},\"transport\":\"bounded-uint8array\",\"workbookMetadataQueries\":{}}}",
         features.spreadsheet,
         features.document,
         features.document,
@@ -771,7 +772,7 @@ fn decode_namespace(bytes: &[u8]) -> Result<u64, BindingError> {
 }
 
 fn validate_replica_namespace(snapshot: &[u8], workbook: &Workbook) -> Result<(), BindingError> {
-    // Snapshot v1 starts with a 20-byte header, then the little-endian root id,
+    // The current snapshot starts with a 20-byte header, then the little-endian root id,
     // revision, and persisted allocator namespace. The kernel decoder has
     // already validated the complete envelope before this invariant check.
     let root_namespace = read_u64(snapshot.get(28..36).ok_or(BindingError::Truncated)?)?;
@@ -1107,15 +1108,21 @@ impl Encoder {
         self.bytes(value.as_bytes())
     }
 
-    fn cell(&mut self, cell: &Cell) -> Result<(), BindingError> {
+    fn cell(&mut self, cell: &AuthoredCellContent) -> Result<(), BindingError> {
         match cell.formula_source() {
             Some(formula) => {
                 self.u8(1)?;
                 self.string(formula)?;
             }
-            None => self.u8(0)?,
+            None => {
+                self.u8(0)?;
+                self.value(
+                    cell.literal_value()
+                        .expect("non-formula authored cells have a literal"),
+                )?;
+            }
         }
-        self.value(cell.value())
+        Ok(())
     }
 
     fn value(&mut self, value: &CellValue) -> Result<(), BindingError> {
@@ -1226,16 +1233,14 @@ impl<'a> Decoder<'a> {
         Ok(text.to_owned())
     }
 
-    fn cell(&mut self) -> Result<Cell, BindingError> {
-        let formula = match self.u8()? {
-            0 => None,
-            1 => Some(self.string()?),
-            tag => return Err(BindingError::InvalidTag(tag)),
-        };
-        let value = self.value()?;
-        match formula {
-            Some(formula) => Cell::formula(formula, value).map_err(BindingError::InvalidCellValue),
-            None => Ok(Cell::from_value(value)),
+    fn cell(&mut self) -> Result<AuthoredCellContent, BindingError> {
+        match self.u8()? {
+            0 => self.value().map(AuthoredCellContent::from_value),
+            1 => {
+                let source = self.string()?;
+                AuthoredCellContent::formula(source).map_err(BindingError::InvalidCellValue)
+            }
+            tag => Err(BindingError::InvalidTag(tag)),
         }
     }
 
@@ -1341,11 +1346,7 @@ mod tests {
                         Cell::from("Revenue"),
                         Cell::from_value(CellValue::Number(Number::new(12.5).expect("number"))),
                         Cell::from(true),
-                        Cell::formula(
-                            "=B1*2",
-                            CellValue::Number(Number::new(25.0).expect("number")),
-                        )
-                        .expect("formula"),
+                        Cell::formula("=B1*2").expect("formula"),
                     ],
                 )
                 .expect("block"),
@@ -1438,6 +1439,25 @@ mod tests {
         ]);
         let encoded = encode_command_batch(&batch).expect("encode");
         assert_eq!(decode_command_batch(&encoded).expect("decode"), batch);
+    }
+
+    #[test]
+    fn previous_command_magic_is_rejected_before_mutation() {
+        let namespace = 7;
+        let mut command = encode_command_batch(&example_batch(namespace)).expect("encode");
+        command[..8].copy_from_slice(b"OGAKC001");
+        assert!(matches!(
+            decode_command_batch(&command),
+            Err(BindingError::BadMagic("command"))
+        ));
+
+        let mut session = BindingSession::create(&encode_namespace(namespace)).expect("session");
+        let before = session.snapshot().expect("before");
+        assert!(matches!(
+            session.apply_commands(&command),
+            Err(BindingError::BadMagic("command"))
+        ));
+        assert_eq!(session.snapshot().expect("after"), before);
     }
 
     #[test]

@@ -264,11 +264,11 @@ function prepared(): PreparedArtifactOfficeImport {
       byteSize: snapshotBytes.byteLength,
       contentHash: snapshotHash,
       stateHash: `sha256:${"c".repeat(64)}`,
-      modelSchemaVersion: 1,
+      modelSchemaVersion: 2,
       kernelVersion: "kernel/1",
       coveredCausalFrontier: [],
-      operationProtocolVersion: 1,
-      crdtStateVersion: 1,
+      operationProtocolVersion: 2,
+      crdtStateVersion: 2,
     },
   };
 }

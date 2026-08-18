@@ -568,17 +568,17 @@ fn canonical_snapshot_is_deterministic_strict_and_lossless() {
 }
 
 #[test]
-fn legacy_default_page_snapshot_bytes_remain_exact() {
+fn current_default_page_snapshot_bytes_remain_exact() {
     let document = Document::new(NS).expect("document");
-    let bytes = encode_document_snapshot(&document).expect("legacy snapshot");
+    let bytes = encode_document_snapshot(&document).expect("current snapshot");
     assert_eq!(u16::from_le_bytes([bytes[10], bytes[11]]), 0);
     assert_eq!(
         format!("{:x}", Sha256::digest(&bytes)),
         "b28976606c81dc5fe0944a5381e9af9258d0a018de5118156e5ad44cc422fed3"
     );
-    let restored = decode_document_snapshot(&bytes).expect("legacy decode");
+    let restored = decode_document_snapshot(&bytes).expect("current decode");
     assert_eq!(
-        encode_document_snapshot(&restored).expect("legacy re-encode"),
+        encode_document_snapshot(&restored).expect("current re-encode"),
         bytes
     );
 

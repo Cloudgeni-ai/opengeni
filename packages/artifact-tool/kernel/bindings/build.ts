@@ -32,7 +32,6 @@ if (!installedTargets.split(/\s+/).includes("wasm32-unknown-unknown")) {
   );
 }
 
-await run(["bun", "test", join(root, "spreadsheet-adapter.test.ts")]);
 await run([
   "bun",
   "x",
@@ -51,8 +50,6 @@ await run([
   join(root, "build.ts"),
   join(root, "verify.ts"),
   join(root, "package-receipt.ts"),
-  join(root, "spreadsheet-adapter.ts"),
-  join(root, "spreadsheet-adapter.test.ts"),
   join(wasm, "scripts", "smoke.ts"),
   join(wasm, "scripts", "smoke-modality.ts"),
   join(wasm, "scripts", "benchmark.ts"),

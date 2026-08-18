@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{Cell, StableId};
+use crate::{AuthoredCellContent, Cell, StableId};
 
 pub const TILE_EDGE: u32 = 256;
 pub const TILE_CELL_COUNT: u32 = TILE_EDGE * TILE_EDGE;
@@ -139,11 +139,14 @@ impl CellRange {
 pub struct CellBlock {
     rows: u32,
     columns: u32,
-    cells: Vec<Cell>,
+    cells: Vec<AuthoredCellContent>,
 }
 
 impl CellBlock {
-    pub fn new(rows: u32, columns: u32, cells: Vec<Cell>) -> Result<Self, CellBlockError> {
+    pub fn new<T>(rows: u32, columns: u32, cells: Vec<T>) -> Result<Self, CellBlockError>
+    where
+        T: Into<AuthoredCellContent>,
+    {
         if rows == 0 || columns == 0 {
             return Err(CellBlockError::EmptyDimensions);
         }
@@ -159,7 +162,7 @@ impl CellBlock {
         Ok(Self {
             rows,
             columns,
-            cells,
+            cells: cells.into_iter().map(Into::into).collect(),
         })
     }
 
@@ -174,7 +177,7 @@ impl CellBlock {
     }
 
     #[must_use]
-    pub fn cells(&self) -> &[Cell] {
+    pub fn cells(&self) -> &[AuthoredCellContent] {
         &self.cells
     }
 
@@ -355,7 +358,7 @@ impl Sheet {
             for column in 0..block.columns {
                 let index = row as usize * block.columns as usize + column as usize;
                 let coord = CellCoord::new(anchor.row + row, anchor.column + column);
-                self.set_cell(coord, block.cells[index].clone());
+                self.set_cell(coord, block.cells[index].materialize());
             }
         }
     }

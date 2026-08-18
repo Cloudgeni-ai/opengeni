@@ -126,7 +126,10 @@ export function encodeSnapshotMetadata(snapshot: EditableArtifactSnapshot): Uint
   if (snapshot.modality === "spreadsheet") {
     writer
       .frontier(snapshot.causalFrontier)
-      .u32(positiveSafeInteger(snapshot.protocolVersion, "snapshot.protocolVersion"));
+      .u32(
+        positiveSafeInteger(snapshot.operationProtocolVersion, "snapshot.operationProtocolVersion"),
+      )
+      .u32(positiveSafeInteger(snapshot.snapshotVersion, "snapshot.snapshotVersion"));
   } else {
     writer.safeUint(nonNegativeSafeInteger(snapshot.nativeRevision, "snapshot.nativeRevision"));
   }
@@ -154,7 +157,11 @@ export function decodeSnapshotMetadata(
           ...common,
           modality,
           causalFrontier: reader.frontier(),
-          protocolVersion: positiveSafeInteger(reader.u32(), "snapshot.protocolVersion"),
+          operationProtocolVersion: positiveSafeInteger(
+            reader.u32(),
+            "snapshot.operationProtocolVersion",
+          ),
+          snapshotVersion: positiveSafeInteger(reader.u32(), "snapshot.snapshotVersion"),
         }
       : {
           ...common,
@@ -195,7 +202,10 @@ export function decodeCommittedMetadata(
           ...common,
           modality,
           causalFrontier: reader.frontier(),
-          protocolVersion: positiveSafeInteger(reader.u32(), "transaction.protocolVersion"),
+          operationProtocolVersion: positiveSafeInteger(
+            reader.u32(),
+            "transaction.operationProtocolVersion",
+          ),
         }
       : {
           ...common,
@@ -427,7 +437,12 @@ function encodeCommittedFields(
   if (transaction.modality === "spreadsheet") {
     writer
       .frontier(transaction.causalFrontier)
-      .u32(positiveSafeInteger(transaction.protocolVersion, "transaction.protocolVersion"));
+      .u32(
+        positiveSafeInteger(
+          transaction.operationProtocolVersion,
+          "transaction.operationProtocolVersion",
+        ),
+      );
   } else {
     writer
       .safeUint(
@@ -461,7 +476,10 @@ function decodeCommittedFields(
           ...common,
           modality,
           causalFrontier: reader.frontier(),
-          protocolVersion: positiveSafeInteger(reader.u32(), "transaction.protocolVersion"),
+          operationProtocolVersion: positiveSafeInteger(
+            reader.u32(),
+            "transaction.operationProtocolVersion",
+          ),
         }
       : {
           ...common,

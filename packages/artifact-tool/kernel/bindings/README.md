@@ -34,30 +34,22 @@ network I/O.
 
 ## ABI layering
 
-These binding commands are **not** the package's public
-`ArtifactCommandBatchCodec` wire format.
-
 ```text
-public OGAR operation
-  (artifact/transaction/actor/base sequence/causal vector/preconditions)
+public OGATX001 intent containing OGASC002 authored operations
                          |
-  prepareSpreadsheetKernelTransaction (strict canonical validation,
-        authorization-bound `sha256:` request identity, operation lowering)
+        Rust authorization and collaboration session
                          |
-internal OGAKC001 kernel command
-  (create/rename/delete sheet, set cells, clear range)
+        OGACO002 committed causal transaction
                          |
           N-API or WASM BindingSession
                          |
-             canonical OGARTK01 snapshot
+      OGACRD02 collaboration snapshot / OGARTK02 model snapshot
 ```
 
-The public operation log is durable collaboration intent. The private binding
-command is a compact, trusted model mutation after authority/preconditions are
-validated. `spreadsheet-adapter.ts` implements the current explicit OGAR to
-OGAKC mapping and binds the exact public bytes, lowered bytes, and SHA-256
-request identity into one prepared transaction. The formats are intentionally
-not interchangeable.
+Formula operations carry source only. Calculated values cross only query and
+render projection boundaries. `OGAKC002` is the compact internal model command
+used by stateless/stateful binding conformance; it is not a second public
+spreadsheet operation format.
 
 `runtime.ts` normalizes the native and browser module shapes. It owns namespace
 encoding, capability negotiation, exact `bigint` revisions, session
@@ -105,8 +97,10 @@ coexist in a 32-bit Wasm process.
 Native bindings and the complete browser build matrix ship through
 receipt-pinned generated target packages. Browser editors load the narrower
 publishable packages `@opengeni/artifact-kernel-wasm-{spreadsheet,document,presentation}`.
-Each contains only one verified capability-scoped runtime and exposes its exact
+Each target build is admitted only by the current v2 receipt protocol. Each
+package contains one verified capability-scoped runtime and exposes its exact
 asset URLs plus typed runtime identity. The SDK Worker compares that identity
 with the executable before accepting state. A complete native release manifest
-still requires every supported target with one build identity. Resolvers never
-download, guess, or silently substitute a runtime.
+still requires every supported target with one build identity and one executed
+`spreadsheetFormulaProjectionCorpusSha256` digest shared with browser WASM.
+Resolvers never download, guess, or silently substitute a runtime.

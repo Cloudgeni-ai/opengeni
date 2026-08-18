@@ -39,7 +39,8 @@ type EditableArtifactSnapshotCommon = {
 export type EditableArtifactSpreadsheetSnapshot = EditableArtifactSnapshotCommon & {
   modality: "spreadsheet";
   causalFrontier: EditableArtifactCausalFrontier;
-  protocolVersion: number;
+  operationProtocolVersion: number;
+  snapshotVersion: number;
 };
 
 export type EditableArtifactSerializedSnapshot = EditableArtifactSnapshotCommon & {
@@ -67,7 +68,7 @@ export type EditableArtifactSpreadsheetCommittedTransaction =
   EditableArtifactCommittedTransactionCommon & {
     modality: "spreadsheet";
     causalFrontier: EditableArtifactCausalFrontier;
-    protocolVersion: number;
+    operationProtocolVersion: number;
     /** Exact whole canonical OGACO committed-transaction envelope. */
     committedTransactionBytes: Uint8Array;
   };
@@ -236,7 +237,7 @@ export type EditableArtifactStoredReplica = {
 
 type EditableArtifactBootstrapCommon = {
   artifactId: EditableArtifactId;
-  protocolVersion: number;
+  liveProtocolVersion: number;
   headSequence: number;
   headStateHash: string;
   kernelVersion: string;

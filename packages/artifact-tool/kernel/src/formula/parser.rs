@@ -209,7 +209,7 @@ fn sequence(first: ParsedExpr, rest: Vec<(ParsedBinaryOperator, ParsedExpr)>) ->
 
 /// Rewrites only syntactic sheet qualifiers, never string literals or names.
 /// The replacement is always quoted so spaces and punctuation remain valid.
-pub(super) fn rewrite_sheet_references(
+pub(crate) fn rewrite_sheet_references(
     source: &str,
     previous_name: &str,
     next_name: &str,
@@ -218,7 +218,7 @@ pub(super) fn rewrite_sheet_references(
     rewrite_sheet_qualifiers(source, previous_name, &replacement)
 }
 
-pub(super) fn rewrite_deleted_sheet_references(source: &str, deleted_name: &str) -> Option<String> {
+pub(crate) fn rewrite_deleted_sheet_references(source: &str, deleted_name: &str) -> Option<String> {
     rewrite_sheet_qualifiers(source, deleted_name, "#REF!")
 }
 
