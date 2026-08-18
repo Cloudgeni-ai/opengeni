@@ -416,6 +416,10 @@ or widens anything, and no reported mismatch is resolved toward user authority
 bun run db:check-tenancy-parity --organization-id <uuid>
 ```
 
+Point it at a **writable primary** - it cannot run against a read replica,
+because it claims and releases its own transaction-local capability row
+(`25006: cannot execute DELETE in a read-only transaction`).
+
 GitHub endpoints:
 
 - `GET /v1/workspaces/:workspaceId/github/app`

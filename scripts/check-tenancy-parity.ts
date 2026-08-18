@@ -10,6 +10,11 @@
 //   bun run db:check-tenancy-parity --organization-id <uuid>
 //     [--evidence-limit <0-50>] [--observation-window-days <1-365>] [--quiet]
 //
+// Point it at a WRITABLE PRIMARY: it cannot run against a read replica. The
+// seam claims and releases its own transaction-local capability row, so a
+// read-only standby fails with `25006: cannot execute DELETE in a read-only
+// transaction`. It is still read-only with respect to every inspected table.
+//
 // Exit codes: 0 = every gate passed; 1 = at least one gate failed; 2 = the
 // command could not run (bad input or database error).
 import { dbSearchPath, getSettings } from "@opengeni/config";

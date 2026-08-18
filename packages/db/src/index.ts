@@ -17801,19 +17801,28 @@ export const TENANCY_PARITY_GATES: readonly TenancyParityGateDefinition[] = [
  */
 export const TENANCY_PARITY_LANES: readonly TenancyParityLaneDefinition[] = [
   {
+    // NOT bounded today: 0256's guard_connection_authority_write still actively
+    // mints `legacy_user` for any NEW connection whose subject has no active
+    // organization membership, and no migration upgrades an existing
+    // `legacy_user` row to `user`. It becomes drainable only once the
+    // membership backfill lands and stops the mint.
     id: "connectionsLegacyUser",
-    title: "Connections still on the bounded legacy_user authority lane",
+    title:
+      "Connections on the legacy_user authority lane (drainable after the membership backfill)",
     kind: "drainable",
+    owner: "organization-membership backfill",
   },
   {
-    id: "workspaceWriterAdmissionsLegacyUnattributed",
-    title: "Workspace writer admissions with legacy_unattributed authority",
-    kind: "drainable",
+    id: "workspaceWriterAdmissionsLegacyUnattributedInWindow",
+    title:
+      "Workspace writer admissions with legacy_unattributed authority in the observation window",
+    kind: "observation",
   },
   {
-    id: "workspaceWriterProcessesLegacyUnattributed",
-    title: "Retained workspace processes with legacy_unattributed authority",
-    kind: "drainable",
+    id: "workspaceWriterProcessesLegacyUnattributedInWindow",
+    title:
+      "Retained workspace processes with legacy_unattributed authority in the observation window",
+    kind: "observation",
   },
   {
     id: "documentsLegacyPersonalNullAuthority",

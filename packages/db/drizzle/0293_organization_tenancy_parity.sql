@@ -490,15 +490,29 @@ BEGIN
         WHERE connection_row.account_id = p_organization_id
           AND connection_row.authority_scope = 'legacy_user'
       ),
-      'workspaceWriterAdmissionsLegacyUnattributed', (
+      -- Workspace-writer admissions and retained processes are immutable
+      -- history: they are settled by UPDATE, nothing in the tree DELETEs them,
+      -- and 0277's one-shot backfill only reached rows whose actor was a turn
+      -- (`actor_kind`/`owner_actor_kind` = 'turn'), so every pre-0277 `direct:`
+      -- or `process:` admission keeps the legacy_unattributed sentinel
+      -- permanently. An all-time count of them therefore can never drain, and
+      -- marking it drainable would make cutoverReady structurally unreachable
+      -- for any deployment carrying one. Same treatment as the connection-use
+      -- lane below: report the bounded recent window, where zero IS reachable
+      -- and the honest signal is "the lane stopped being exercised".
+      'workspaceWriterAdmissionsLegacyUnattributedInWindow', (
         SELECT count(*)::int FROM sandbox_workspace_mutation_admissions admission
         WHERE admission.account_id = p_organization_id
           AND admission.initiator_kind = 'legacy_unattributed'
+          AND admission.admitted_at
+            >= pg_catalog.now() - pg_catalog.make_interval(days => window_days)
       ),
-      'workspaceWriterProcessesLegacyUnattributed', (
+      'workspaceWriterProcessesLegacyUnattributedInWindow', (
         SELECT count(*)::int FROM sandbox_retained_processes retained_process
         WHERE retained_process.account_id = p_organization_id
           AND retained_process.initiator_kind = 'legacy_unattributed'
+          AND retained_process.started_at
+            >= pg_catalog.now() - pg_catalog.make_interval(days => window_days)
       ),
       'documentsLegacyPersonalNullAuthority', (
         SELECT count(*)::int FROM documents document

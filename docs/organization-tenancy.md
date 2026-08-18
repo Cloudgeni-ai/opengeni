@@ -502,15 +502,47 @@ and an explicit `truncated` flag.
   user resolution - it must fall back to workspace or deny.
 
 **Lanes** are legacy populations, not corruption: a non-zero lane blocks a
-cutover (`cutoverReady`) without failing the invariants. They are the 0285
-inventory populations plus two refinements. `sessionsAttributableButUnattributed`
-is the *drainable* subset of ownerless sessions - those whose creating subject
-today's `guard_session_authority_write` fence would attribute. And because
-`connection_use_audit_facts` is immutable history whose all-time count can never
-drain, the pre-snapshot/legacy connection-resolution lane is reported over a
-bounded recent observation window, where zero *is* reachable. Documents and
-Codex credentials are consumed as gate inputs only; their repair is owned
-elsewhere and this program never writes a second reclassification for either.
+cutover (`cutoverReady`) without failing the invariants. Every lane must
+therefore have a *reachable* zero, or the cutover gate is structurally
+unreachable rather than merely unmet. A lane is `drainable` only when a backfill
+can actually take it to zero; a lane over immutable history is `observation`
+and is reported over a bounded recent window, where the honest signal is "the
+lane stopped being exercised".
+
+They are the 0285 inventory populations plus these refinements.
+`sessionsAttributableButUnattributed` is the *drainable* subset of ownerless
+sessions - those whose creating subject today's `guard_session_authority_write`
+fence would attribute. Three lanes are `observation` because their tables are
+immutable history whose all-time count can never drain:
+
+- `connectionUseLegacyResolutionsInWindow` - `connection_use_audit_facts` are
+  append-only audit rows.
+- `workspaceWriterAdmissionsLegacyUnattributedInWindow` and
+  `workspaceWriterProcessesLegacyUnattributedInWindow` -
+  `sandbox_workspace_mutation_admissions` and `sandbox_retained_processes` are
+  settled by `UPDATE` and never deleted, and 0277's one-shot attribution
+  backfill only reached rows whose actor was a turn (`actor_kind` /
+  `owner_actor_kind` = `'turn'`). Every pre-0277 `direct:` or `process:`
+  admission therefore keeps the `legacy_unattributed` sentinel permanently, so
+  a single such row would otherwise pin `cutoverReady` to false forever.
+
+`connectionsLegacyUser` is the opposite case and is deliberately *not* bounded
+today: 0256's `guard_connection_authority_write` still actively mints
+`legacy_user` for any **new** connection whose subject holds no active
+organization membership, and no migration upgrades an existing `legacy_user`
+row to `user`. It is drainable only *after* the organization-membership
+backfill lands and stops the mint, which is why it names that owner.
+
+Documents and Codex credentials are consumed as gate inputs only; their repair
+is owned elsewhere and this program never writes a second reclassification for
+either.
+
+The checker **cannot run against a read replica.** Its capability row is
+claimed and released with `INSERT`/`DELETE` inside the calling transaction, so
+a read-only standby (or an explicit `SET TRANSACTION READ ONLY`) fails with
+`25006: cannot execute DELETE in a read-only transaction`. Point it at a
+writable primary; it is still read-only with respect to every table it
+inspects.
 
 **Unverifiable** properties are named explicitly rather than emitted as a
 counter that could never reach zero:

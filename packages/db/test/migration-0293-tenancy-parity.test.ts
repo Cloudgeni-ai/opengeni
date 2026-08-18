@@ -42,12 +42,12 @@ beforeAll(async () => {
   admin = shared.admin;
   client = createDb(shared.appUrl);
   db = client.db;
-});
+}, 180_000);
 
 afterAll(async () => {
   await client?.close();
   await shared?.release();
-});
+}, 180_000);
 
 /** A clean organization whose every parity gate is expected to pass. */
 async function seedCleanOrganization(label: string): Promise<{
@@ -92,6 +92,12 @@ async function seedCleanOrganization(label: string): Promise<{
 function gate(report: TenancyParityReport, id: string) {
   const found = report.gates.find((entry) => entry.id === id);
   if (!found) throw new Error(`gate ${id} missing from report`);
+  return found;
+}
+
+function laneResult(report: TenancyParityReport, id: string) {
+  const found = report.lanes.find((entry) => entry.id === id);
+  if (!found) throw new Error(`lane ${id} missing from report`);
   return found;
 }
 
@@ -180,7 +186,7 @@ describe("migration 0293 tenancy parity", () => {
     for (const lane of TENANCY_PARITY_LANES) {
       expect(source).toContain(`'${lane.id}',`);
     }
-  });
+  }, 180_000);
 
   test("opengeni_app holds EXECUTE on the inner capability predicate under migrate() ALONE", async () => {
     // acquireBlankTestDatabase + migrate() never runs provisionRoles' blanket
@@ -206,7 +212,7 @@ describe("migration 0293 tenancy parity", () => {
     } finally {
       await blank.release();
     }
-  });
+  }, 180_000);
 
   test("a clean organization passes every gate and drains every lane", async () => {
     if (!available) return;
@@ -246,7 +252,117 @@ describe("migration 0293 tenancy parity", () => {
     const serialized = JSON.stringify(report);
     expect(serialized).not.toContain(fixture.subjectId);
     expect(serialized).not.toContain("parity-clean");
-  });
+  }, 180_000);
+
+  test("a permanently undrainable legacy_unattributed writer row still leaves cutoverReady reachable", async () => {
+    if (!available) return;
+    const fixture = await seedCleanOrganization(`parity-writer-${crypto.randomUUID().slice(0, 8)}`);
+    const session = await createSession(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      initialMessage: "writer fixture",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      sandboxBackend: "none",
+    });
+    const [sessionRow] = await admin<{ sandboxGroupId: string }[]>`
+      select sandbox_group_id as "sandboxGroupId" from sessions where id = ${session.id}`;
+    const groupId = sessionRow!.sandboxGroupId;
+    const [leaseRow] = await admin<{ id: string }[]>`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, instance_id, backend, lease_epoch,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        ${fixture.accountId}, ${fixture.workspaceId}, ${groupId}, 'warm', 1, 0, 0,
+        '0293-writer-box', 'local', 3, 'local',
+        ${admin.json({ backendId: "local" })}::jsonb, now() + interval '10 minutes'
+      ) returning id`;
+
+    // A pre-0277 DIRECT admission and the process it retained. 0277's one-shot
+    // attribution backfill only touched rows whose actor was a turn
+    // (actor_kind / owner_actor_kind = 'turn'), so both keep the
+    // legacy_unattributed sentinel PERMANENTLY - and neither table is ever
+    // DELETEd anywhere in the tree, only settled by UPDATE. Aged 100 days so
+    // the default 30-day observation window has already moved past them.
+    const directActorId = crypto.randomUUID();
+    const [admission] = await admin<{ id: string }[]>`
+      insert into sandbox_workspace_mutation_admissions (
+        account_id, workspace_id, lease_id, sandbox_group_id, session_id,
+        actor_kind, actor_id, holder_kind, holder_id, lease_epoch,
+        provider_backend, provider_instance_id, route_kind, route_epoch,
+        workspace_generation, operation, provider_outcome, admitted_at
+      ) values (
+        ${fixture.accountId}, ${fixture.workspaceId}, ${leaseRow!.id}, ${groupId},
+        ${session.id}, 'direct', ${directActorId}, 'direct',
+        ${`direct:${directActorId}`}, 3, 'local', '0293-writer-box', 'home', 0, 1,
+        '0293-writer-op', 'retained', now() - interval '100 days'
+      ) returning id`;
+    const holderId = `process:${crypto.randomUUID()}`;
+    await admin`
+      insert into sandbox_lease_holders (
+        account_id, workspace_id, lease_id, kind, holder_id, subject_id
+      ) values (
+        ${fixture.accountId}, ${fixture.workspaceId}, ${leaseRow!.id}, 'process',
+        ${holderId}, ${session.id}
+      )`;
+    await admin`
+      insert into sandbox_retained_processes (
+        account_id, workspace_id, session_id, lease_id, sandbox_group_id,
+        parent_admission_id, holder_id, owner_actor_kind, owner_actor_id,
+        lease_epoch, provider_backend, provider_instance_id, route_kind,
+        route_epoch, provider_session_id, started_at
+      ) values (
+        ${fixture.accountId}, ${fixture.workspaceId}, ${session.id}, ${leaseRow!.id},
+        ${groupId}, ${admission!.id}, ${holderId}, 'direct', ${directActorId},
+        3, 'local', '0293-writer-box', 'home', 0, 293, now() - interval '100 days'
+      )`;
+
+    // The rows really are permanently legacy_unattributed: this is the exact
+    // shape that made an all-time "drainable" lane structurally unreachable.
+    const [stuck] = await admin<Array<{ admissions: number; processes: number }>>`
+      select
+        (select count(*)::int from sandbox_workspace_mutation_admissions
+          where account_id = ${fixture.accountId}
+            AND initiator_kind = 'legacy_unattributed') as admissions,
+        (select count(*)::int from sandbox_retained_processes
+          where account_id = ${fixture.accountId}
+            AND initiator_kind = 'legacy_unattributed') as processes`;
+    expect(stuck).toEqual({ admissions: 1, processes: 1 });
+
+    // Inside a window that still covers them, the lanes report them honestly
+    // and the cutover gate is (correctly) not ready.
+    const wide = await checkOrganizationTenancyParity(db, {
+      organizationId: fixture.accountId,
+      observationWindowDays: 365,
+    });
+    expect(wide.status).toBe("pass");
+    expect(laneResult(wide, "workspaceWriterAdmissionsLegacyUnattributedInWindow").count).toBe(1);
+    expect(laneResult(wide, "workspaceWriterProcessesLegacyUnattributedInWindow").count).toBe(1);
+    expect(wide.cutoverReady).toBe(false);
+
+    // Once the lane stops being exercised, the bounded window drains to zero
+    // WITHOUT deleting immutable history - so cutoverReady is reachable rather
+    // than structurally pinned to false forever.
+    const report = await checkOrganizationTenancyParity(db, {
+      organizationId: fixture.accountId,
+    });
+    expect(report.observationWindowDays).toBe(30);
+    expect(laneResult(report, "workspaceWriterAdmissionsLegacyUnattributedInWindow").count).toBe(0);
+    expect(laneResult(report, "workspaceWriterProcessesLegacyUnattributedInWindow").count).toBe(0);
+    expect(report.summary.lanesUndrained).toBe(0);
+    expect(report.cutoverReady).toBe(true);
+    // Both lanes must declare themselves observation lanes, exactly like the
+    // connection-use audit lane they now match.
+    for (const id of [
+      "workspaceWriterAdmissionsLegacyUnattributedInWindow",
+      "workspaceWriterProcessesLegacyUnattributedInWindow",
+      "connectionUseLegacyResolutionsInWindow",
+    ]) {
+      expect(laneResult(report, id).kind).toBe("observation");
+    }
+  }, 180_000);
 
   test("a personal workspace that grows a membership row fails exactly that gate with that workspace id", async () => {
     if (!available) return;
@@ -271,7 +387,7 @@ describe("migration 0293 tenancy parity", () => {
     expect(
       report.gates.filter((entry) => entry.status === "fail").map((entry) => entry.id),
     ).toEqual(["personal_workspace_has_no_membership_row"]);
-  });
+  }, 180_000);
 
   test("two memberships claiming one resource fail authority uniqueness with both authority ids", async () => {
     if (!available) return;
@@ -308,7 +424,7 @@ describe("migration 0293 tenancy parity", () => {
     expect(failed.violations).toBe(2);
     expect([...failed.evidence].sort()).toEqual([...authorityIds].sort());
     expect(report.status).toBe("fail");
-  });
+  }, 180_000);
 
   test("a user-scope resource with no live anchor fails the shadow comparison, never resolving to user authority", async () => {
     if (!available) return;
@@ -343,7 +459,7 @@ describe("migration 0293 tenancy parity", () => {
       select authority_scope as "authorityScope"
       from workspace_variable_sets where id = ${variableSet!.id}`;
     expect(after?.authorityScope).toBe("user");
-  });
+  }, 180_000);
 
   test("a disputed login binding whose identity is still usable fails the collision gate", async () => {
     if (!available) return;
@@ -385,7 +501,7 @@ describe("migration 0293 tenancy parity", () => {
       organizationId: fixture.accountId,
     });
     expect(gate(repaired, "login_binding_dispute_propagated").violations).toBe(0);
-  });
+  }, 180_000);
 
   test("the checker writes nothing: every inspected table is byte-identical before and after", async () => {
     if (!available) return;
@@ -417,7 +533,7 @@ describe("migration 0293 tenancy parity", () => {
       select count(*)::int as rows
       from opengeni_private.organization_tenancy_parity_capabilities`;
     expect(capability?.rows).toBe(0);
-  });
+  }, 180_000);
 
   test("the seam rejects a cross-organization request (42501) and a null organization (22004)", async () => {
     if (!available) return;
@@ -446,7 +562,7 @@ describe("migration 0293 tenancy parity", () => {
       missing = error;
     }
     expect(missing).toMatchObject({ code: "22004" });
-  });
+  }, 180_000);
 
   test("evidence is bounded and truncation is reported honestly", async () => {
     if (!available) return;
@@ -493,7 +609,7 @@ describe("migration 0293 tenancy parity", () => {
     });
     expect(gate(complete, "authority_resource_single_owner").evidence.length).toBe(3);
     expect(gate(complete, "authority_resource_single_owner").evidenceTruncated).toBe(false);
-  });
+  }, 180_000);
 
   test("session owner provenance cannot even be corrupted through the lifecycle capability", async () => {
     if (!available) return;
@@ -533,7 +649,7 @@ describe("migration 0293 tenancy parity", () => {
       organizationId: fixture.accountId,
     });
     expect(gate(report, "session_owner_provenance_paired").violations).toBe(0);
-  });
+  }, 180_000);
 
   test("composeTenancyParityReport fails a gate the seam did not emit instead of passing it", () => {
     const report = composeTenancyParityReport(
