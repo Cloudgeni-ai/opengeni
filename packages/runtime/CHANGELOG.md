@@ -1,5 +1,26 @@
 # @opengeni/runtime
 
+## 1.1.2
+
+### Patch Changes
+
+- f4afa19: Expose computer-use as ordinary `computer_*` function tools on every proven visual route. Stop advertising OpenAI's hosted computer tool.
+- f4afa19: Resume requires_action only from the open suffix plus paired history. Pause stores the sentinel instead of a leftover SDK RunState heap.
+- 994a743: Stage connected-machine browser-control request files inside the placement-private path accepted by the self-hosted agent, restoring browser and computer-use session creation without weakening the private filesystem boundary.
+- 51123b4: Bind a remembered authorized tool name through one Agents SDK `resolveMissingFunctionTool` hook instead of a fake client `tool_search` inject. Codex/OpenAI native raw calls and generic `tool_invoke` share that path; unknown or revoked names return a typed model error instead of killing the turn.
+- 8583779: Resume `requires_action` from paired history plus a bounded open suffix instead of materializing an oversized SDK RunState blob.
+- Updated dependencies [1c78ed0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [8583779]
+- Updated dependencies [79ee99b]
+- Updated dependencies [f4afa19]
+- Updated dependencies [4541ab2]
+- Updated dependencies [6d22ab5]
+  - @opengeni/contracts@1.5.0
+  - @opengeni/sdk@1.3.0
+  - @opengeni/config@0.17.0
+  - @opengeni/codemode@0.4.9
+
 ## 1.1.1
 
 ### Patch Changes
