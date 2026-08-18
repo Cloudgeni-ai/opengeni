@@ -17,12 +17,15 @@ import {
 } from "@opengeni/contracts";
 import {
   type Database,
+  WorkspaceInstructionPolicyOnboardingProposalStaleError,
   activateHumanConfirmedLearningDecision,
+  archiveTaskNote,
   confirmRememberKnowledgeClaim,
   createTaskNote,
   getWorkspaceInstructionPolicyBaseline,
   getWorkspaceKnowledgeChangeProposalSummary,
   getWorkspaceKnowledgeClaimInitiatingHuman,
+  nestedPostgresSqlState,
 } from "@opengeni/db";
 import { createHash } from "node:crypto";
 import {
@@ -37,17 +40,57 @@ export class RememberError extends Error {
     readonly code:
       | "proposal_unavailable"
       | "proposal_not_confirmable"
-      | "human_confirmation_unavailable",
+      | "human_confirmation_unavailable"
+      | "baseline_stale",
     message: string,
   ) {
     super(message);
   }
 }
 
+// The database layer collapses several SQLSTATEs into one typed conflict, so
+// the exact diagnostic lives on the preserved `cause` chain rather than the
+// outermost message.
+function mentionsStaleInstructionBaseline(error: unknown): boolean {
+  for (let current = error, depth = 0; current instanceof Error && depth < 8; depth += 1) {
+    if (current.message.includes("instruction-policy proposal baseline is stale")) return true;
+    current = current.cause;
+  }
+  return false;
+}
+
+/**
+ * A moved instruction-policy head is an ordinary, recoverable race: the agent
+ * read a baseline, someone activated a policy, and the compare-and-set caught
+ * it. It surfaced as an untyped Error (propose side) or a raw SQLSTATE 40001
+ * (confirm side) with nothing telling the caller what to do about it. Convert
+ * both into one typed, actionable failure and leave every other error exactly
+ * as it was.
+ */
+function asRememberFailure(error: unknown): unknown {
+  if (error instanceof WorkspaceInstructionPolicyOnboardingProposalStaleError) {
+    return new RememberError(
+      "baseline_stale",
+      "The workspace instruction policy changed while this rule was being prepared. " +
+        "Call remember again to rebuild it against the current policy.",
+    );
+  }
+  if (nestedPostgresSqlState(error) === "40001" && mentionsStaleInstructionBaseline(error)) {
+    return new RememberError(
+      "baseline_stale",
+      "The workspace instruction policy changed after this rule was proposed, so the " +
+        "confirmation no longer applies to the current policy. Call remember again to " +
+        "rebuild it against the current policy and ask for confirmation once more.",
+    );
+  }
+  return error;
+}
+
 export type RememberRouterOptions = {
   db: Database;
   learningRouter?: Pick<ReturnType<typeof createCompanyBrainLearningPolicyRouter>, "write">;
   createNote?: typeof createTaskNote;
+  archiveNote?: typeof archiveTaskNote;
   activateHumanConfirmed?: typeof activateHumanConfirmedLearningDecision;
   confirmKnowledgeClaim?: typeof confirmRememberKnowledgeClaim;
   proposalSummary?: typeof getWorkspaceKnowledgeChangeProposalSummary;
@@ -64,7 +107,7 @@ export type RememberRouterOptions = {
 /** Deterministic UUID-shaped id derived from the caller's remember operation id. */
 export function derivedRememberOperationId(
   operationId: string,
-  stage: "note" | "promotion" | "evaluation" | "activation",
+  stage: "note" | "note-archive" | "promotion" | "evaluation" | "activation",
 ): string {
   const bytes = Buffer.from(
     createHash("sha256")
@@ -198,6 +241,7 @@ export function createRememberRouter(options: RememberRouterOptions): {
   const learningRouter =
     options.learningRouter ?? createCompanyBrainLearningPolicyRouter({ db: options.db });
   const createNote = options.createNote ?? createTaskNote;
+  const archiveNote = options.archiveNote ?? archiveTaskNote;
   const activateHumanConfirmed =
     options.activateHumanConfirmed ?? activateHumanConfirmedLearningDecision;
   const confirmKnowledgeClaim = options.confirmKnowledgeClaim ?? confirmRememberKnowledgeClaim;
@@ -240,10 +284,26 @@ export function createRememberRouter(options: RememberRouterOptions): {
               target: request.target,
             })
           : { expectedCurrentRevisionId: null, expectedActivationVersion: 0 };
-      const route: CompanyBrainLearningPolicyRouteReceipt = await learningRouter.write({
-        attempt,
-        request: promotionRequest(request, note.note.id, instructionBaseline),
-      });
+      // The evidence note has to exist before the governed write (the write
+      // promotes it), so a failed write would otherwise strand a live note for
+      // its full lifetime with nothing pointing at it. Archive it on the way
+      // out, then surface the original failure.
+      let route: CompanyBrainLearningPolicyRouteReceipt;
+      try {
+        route = await learningRouter.write({
+          attempt,
+          request: promotionRequest(request, note.note.id, instructionBaseline),
+        });
+      } catch (error) {
+        await archiveNote(options.db, {
+          ...attempt,
+          operationId: derivedRememberOperationId(request.operationId, "note-archive"),
+          noteId: note.note.id,
+          expectedVersion: note.note.version,
+          reason: "The remember write this note was created for did not complete.",
+        }).catch(() => undefined);
+        throw asRememberFailure(error);
+      }
       const base = {
         operationId: request.operationId,
         lane: request.lane,
@@ -358,14 +418,22 @@ export function createRememberRouter(options: RememberRouterOptions): {
       }
       // The database capability proves the exact human answered the bound
       // question with `save` on this session/turn generation before writing.
-      const activation = await activateHumanConfirmed(options.db, {
-        caller: { workspaceId: attempt.workspaceId, subjectId: proposal.initiatingHumanSubjectId },
-        request: {
-          operationId: derivedGovernedLearningOperationId(request.operationId, "activation"),
-          decisionReceiptId: request.decisionReceiptId,
-          humanInputRequestId: request.humanInputRequestId,
-        },
-      });
+      let activation: GovernedLearningActivationReceipt;
+      try {
+        activation = await activateHumanConfirmed(options.db, {
+          caller: {
+            workspaceId: attempt.workspaceId,
+            subjectId: proposal.initiatingHumanSubjectId,
+          },
+          request: {
+            operationId: derivedGovernedLearningOperationId(request.operationId, "activation"),
+            decisionReceiptId: request.decisionReceiptId,
+            humanInputRequestId: request.humanInputRequestId,
+          },
+        });
+      } catch (error) {
+        throw asRememberFailure(error);
+      }
       try {
         await notifyActivation({
           db: options.db,

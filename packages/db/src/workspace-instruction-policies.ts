@@ -283,6 +283,14 @@ function activeRevisionRequestFingerprint(input: ActiveRevisionInput): string {
   ]);
 }
 
+// The activation baseline is deliberately NOT part of either fingerprint. Its
+// job is compare-and-set staleness detection at write time, not the identity of
+// the request: two calls that ask for the same rule on the same target are the
+// same operation even if the head moved between them. Hashing a live-read value
+// into the identity made an ordinary turn-recovery replay of the same
+// operationId fail as an operation-reuse conflict once a confirm advanced the
+// head. Staleness is still enforced - by the compare-and-set below and by the
+// activation function - it is just no longer conflated with request identity.
 function onboardingProposalRequestFingerprint(input: OnboardingProposalRequestInput): string {
   return operationRequestFingerprint("create_onboarding_proposal", [
     ["accountId", true, input.accountId],
@@ -294,8 +302,6 @@ function onboardingProposalRequestFingerprint(input: OnboardingProposalRequestIn
     ["sourceId", true, input.sourceId],
     ["sourceVersion", true, input.sourceVersion],
     ["confidenceBps", true, input.confidenceBps],
-    ["expectedCurrentRevisionId", true, input.expectedCurrentRevisionId],
-    ["expectedActivationVersion", true, input.expectedActivationVersion],
     ["createdBySubjectId", true, input.createdBySubjectId],
   ]);
 }
@@ -311,8 +317,6 @@ function knowledgeProposalRequestFingerprint(input: OnboardingProposalRequestInp
     ["knowledgeProposalId", true, input.sourceId],
     ["knowledgeProposalContentHash", true, input.sourceVersion],
     ["confidenceBps", true, input.confidenceBps],
-    ["expectedCurrentRevisionId", true, input.expectedCurrentRevisionId],
-    ["expectedActivationVersion", true, input.expectedActivationVersion],
     ["createdBySubjectId", true, input.createdBySubjectId],
   ]);
 }
