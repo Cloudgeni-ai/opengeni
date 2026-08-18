@@ -1,5 +1,13 @@
 # @opengeni/sdk
 
+## 1.1.1
+
+### Patch Changes
+
+- Updated dependencies [4c2d958]
+- Updated dependencies [4c2d958]
+  - @opengeni/contracts@1.3.0
+
 ## 1.1.0
 
 ### Minor Changes
