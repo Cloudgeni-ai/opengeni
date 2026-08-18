@@ -66,6 +66,10 @@ export default function PlatformActivityRow({
     icon: j(BotIcon, { className: "size-3.5" }),
     iconTone: failed ? "failed" : running ? "running" : "muted",
     title: startupPhaseTitle(item.phase, item.status, item.outcome),
+    preview:
+      item.phase === "model_preparation"
+        ? "Includes overlapping sandbox, rig, repository, and runtime setup shown below."
+        : undefined,
     running,
     failed,
     cancelled: item.status === "cancelled",
@@ -174,10 +178,10 @@ const STARTUP_PHASE_TITLES: Record<
     "Tools ready",
   ],
   model_preparation: [
-    "Preparing model request",
-    "Model request preparation failed",
-    "Model request preparation interrupted",
-    "Model request ready",
+    "Preparing runtime and model request",
+    "Runtime/model preparation failed",
+    "Runtime/model preparation interrupted",
+    "Model request dispatched",
   ],
   provider_first_byte: [
     "Waiting for model",

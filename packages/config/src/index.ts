@@ -325,7 +325,7 @@ const SettingsSchema = z.object({
   agentStableVersion: z
     .string()
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
-    .default("0.1.15"),
+    .default("0.1.16"),
   // Optional independent beta-channel pointer. When unset, the beta update
   // manifest route is unavailable rather than silently serving stable.
   agentBetaVersion: z
