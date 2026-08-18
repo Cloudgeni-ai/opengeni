@@ -1,4 +1,4 @@
-// Migration 0293: the read-only organization tenancy PARITY seam (phase E)
+// Migration 0298: the read-only organization tenancy PARITY seam (phase E)
 // verifies the structural tenancy invariants, reports the compatibility lanes,
 // and never writes, repairs, or widens anything.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -23,7 +23,7 @@ import {
   type TenancyParityReport,
 } from "../src";
 
-const migrationUrl = new URL("../drizzle/0293_organization_tenancy_parity.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0298_organization_tenancy_parity.sql", import.meta.url);
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let available = true;
@@ -33,7 +33,7 @@ let client: DbClient;
 let db: Database;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0293-tenancy-parity");
+  shared = await acquireSharedTestDatabase("migration-0298-tenancy-parity");
   if (!shared) {
     available = false;
     if (requireRealDatabase) throw new Error("OPENGENI_REQUIRE_REAL_DB=1 but no database");
@@ -143,7 +143,7 @@ async function snapshotInspectedTables(): Promise<Record<string, string>> {
   return snapshot;
 }
 
-describe("migration 0293 tenancy parity", () => {
+describe("migration 0298 tenancy parity", () => {
   test("declares one read-only rolling seam whose only writes are its own capability row", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");

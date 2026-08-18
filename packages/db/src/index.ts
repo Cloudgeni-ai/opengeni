@@ -17678,7 +17678,7 @@ export interface TenancyParityReport {
 /**
  * Ordered catalog of the organization-tenancy parity gates (phase E). Every id
  * matches a key emitted by `check_organization_tenancy_parity` (migration
- * 0293); a gate present here but absent from the seam is reported as a
+ * 0298); a gate present here but absent from the seam is reported as a
  * structural mismatch rather than silently passing.
  */
 export const TENANCY_PARITY_GATES: readonly TenancyParityGateDefinition[] = [
@@ -17978,7 +17978,7 @@ export function composeTenancyParityReport(
 }
 
 /**
- * Read-only organization tenancy parity check (0293, phase E). Verifies the
+ * Read-only organization tenancy parity check (0298, phase E). Verifies the
  * structural tenancy invariants, reports the compatibility lanes, and names the
  * properties that are currently unverifiable. It never writes, repairs, or
  * widens anything, and no reported mismatch is resolved toward user authority.

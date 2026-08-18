@@ -617,7 +617,7 @@ rules, session ownership, and zero partial delegations. Add read-only shadow
 comparisons between legacy and proposed effective scopes. No mismatch may fall
 back to user authority.
 
-The phase's executable gate is the read-only parity seam (migration 0293):
+The phase's executable gate is the read-only parity seam (migration 0298):
 
 ```bash
 bun run db:check-tenancy-parity --organization-id <uuid>

@@ -521,10 +521,10 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0293_organization_tenancy_parity.sql")) {
+      if (migrations.has("0298_organization_tenancy_parity.sql")) {
         return includesActivation
-          ? "fa753559839c513148950d24c84ba164bfd48425253ded67d0f3f9bc1af0112b"
-          : "a4e8d994391d060a9d44af997f578a713bd9312dd765e2014c69fcfa886693b8";
+          ? "107e18549f14def8cf0b1c93b45c55b738f7cb56912158a05f75a15f7c740672"
+          : "1534eb5eafd7f95eff25a2892d8c01ef4c984c4b26a0d7a0d731cdf0c60bb3c5";
       }
       if (migrations.has("0294_preference_activation_authority.sql")) {
         return includesActivation
@@ -1054,7 +1054,7 @@ describe("release schema contract", () => {
         (migrations.has("0287_open_suffix_pending_tool_calls.sql") ? 1 : 0) +
         (migrations.has("0288_attached_browser_reenrollment.sql") ? 1 : 0) +
         (migrations.has("0292_truthful_tenancy_inventory_counters.sql") ? 1 : 0) +
-        (migrations.has("0293_organization_tenancy_parity.sql") ? 1 : 0) +
+        (migrations.has("0298_organization_tenancy_parity.sql") ? 1 : 0) +
         (migrations.has("0293_confirm_time_rule_rebaseline.sql") ? 1 : 0) +
         (migrations.has("0294_preference_activation_authority.sql") ? 1 : 0),
     );
@@ -1091,10 +1091,10 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0294_preference_activation_authority.sql")
-        ? "0294_preference_activation_authority.sql"
-        : migrations.has("0293_organization_tenancy_parity.sql")
-          ? "0293_organization_tenancy_parity.sql"
+      migrations.has("0298_organization_tenancy_parity.sql")
+        ? "0298_organization_tenancy_parity.sql"
+        : migrations.has("0294_preference_activation_authority.sql")
+          ? "0294_preference_activation_authority.sql"
           : migrations.has("0293_confirm_time_rule_rebaseline.sql")
             ? "0293_confirm_time_rule_rebaseline.sql"
             : migrations.has("0292_truthful_tenancy_inventory_counters.sql")
@@ -1221,8 +1221,8 @@ describe("release schema contract", () => {
       sha256: "b746e4ef7738f755cd8578faccf54582433d69987f155b1c57896e07f92e63eb",
       deploymentMode: "maintenance",
     });
-    expect(migrations.get("0293_organization_tenancy_parity.sql")).toMatchObject({
-      sha256: "f771c2e96f9a3d3423759ea4802ea6682cb921dc8b5d5d468b17cdc07167be8c",
+    expect(migrations.get("0298_organization_tenancy_parity.sql")).toMatchObject({
+      sha256: "e325dbbaf0c265d369da08e5a211af0f7ec866dde51be47e3c0d7db452867d20",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0263_organization_membership_lifecycle.sql")).toMatchObject({

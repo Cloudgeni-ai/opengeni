@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Migration 0293: read-only organization tenancy PARITY seam (phase E).
+-- Migration 0298: read-only organization tenancy PARITY seam (phase E).
 --
 -- Phase D shipped `inventory_organization_tenancy` (migration 0285): content-
 -- free counts of every legacy-attribution population. Phase E needs the next
