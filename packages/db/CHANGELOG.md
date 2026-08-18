@@ -1,5 +1,21 @@
 # @opengeni/db
 
+## 1.3.0
+
+### Minor Changes
+
+- 8140b97: Google Drive publication freezes its exact output destination on the accepted delegation, so a later connection-settings change fails an already-accepted turn's publication closed instead of silently redirecting it. Every publication sits behind exactly one durable execute-once connector fence (the attempt connector-action wrapper for model callers, the tool's own registration for Codemode callers): a failure before the first mutating provider request settles not_executed with a retry-safe message, while a failure after it settles uncertain and surfaces the unknown outcome.
+- d73376c: Scoped stream tokens (`ogs_`, 120 s TTL unchanged) now carry the authenticated viewer subject and the session's live authority epoch (migration 0281). The viewer lease holder records the same pair monotonically, the API re-verifies a human viewer's current workspace membership at every mint and degrades the stream to `transport:null` when membership is gone, and the selfhosted relay fences an attach whose authority claim is below the channel's recorded floor. Pre-0281 tokens keep working during the rolling window and enforce nothing new.
+
+### Patch Changes
+
+- 4156077: `remember` with `lane: instruction_policy` no longer fails after a governed-learning rule activation: the onboarding-proposal insert now copies the head's `activated_at` baseline in SQL instead of round-tripping it through a millisecond JS `Date`, so the draft trigger's exact comparison holds against the microsecond `clock_timestamp()` value the governed-learning controller writes.
+- Updated dependencies [8140b97]
+- Updated dependencies [d73376c]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/codemode@0.4.7
+  - @opengeni/config@0.16.7
+
 ## 1.2.0
 
 ### Minor Changes

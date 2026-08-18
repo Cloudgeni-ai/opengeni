@@ -1,5 +1,25 @@
 # @opengeni/core
 
+## 1.3.0
+
+### Minor Changes
+
+- 8140b97: Google Drive publication freezes its exact output destination on the accepted delegation, so a later connection-settings change fails an already-accepted turn's publication closed instead of silently redirecting it. Every publication sits behind exactly one durable execute-once connector fence (the attempt connector-action wrapper for model callers, the tool's own registration for Codemode callers): a failure before the first mutating provider request settles not_executed with a retry-safe message, while a failure after it settles uncertain and surfaces the unknown outcome.
+
+### Patch Changes
+
+- Updated dependencies [8140b97]
+- Updated dependencies [4156077]
+- Updated dependencies [d73376c]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/db@1.3.0
+  - @opengeni/runtime@1.1.0
+  - @opengeni/config@0.16.7
+  - @opengeni/documents@0.6.2
+  - @opengeni/events@0.3.116
+  - @opengeni/observability@0.7.10
+  - @opengeni/storage@0.2.99
+
 ## 1.2.1
 
 ### Patch Changes
