@@ -430,7 +430,7 @@ or current access. Provision personal workspaces for active memberships through
 an idempotent lifecycle operation. Record backfill receipts and unresolved rows
 without widening access.
 
-The phase's data source is the read-only inventory seam (migration 0283):
+The phase's data source is the read-only inventory seam (migration 0285):
 `bun run db:inventory-tenancy --organization-id <uuid>` reports content-free
 counts of every legacy-attribution population - ownerless sessions, resources
 without an explicit authority classification (variable sets, rigs, machines),

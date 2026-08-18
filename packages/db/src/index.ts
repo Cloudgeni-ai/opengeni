@@ -17577,7 +17577,7 @@ export async function subjectHasLiveWorkspaceAuthority(
 }
 
 /**
- * Read-only organization tenancy inventory (0283): content-free counts of
+ * Read-only organization tenancy inventory (0285): content-free counts of
  * every legacy-attribution population the backfill/parity program gates on.
  * Integers only - no identities, names, keys, or values.
  */

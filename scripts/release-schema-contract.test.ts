@@ -521,10 +521,10 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0283_organization_tenancy_inventory.sql")) {
+      if (migrations.has("0285_organization_tenancy_inventory.sql")) {
         return includesActivation
-          ? "4e42f41c86e057584176170dc17d1ed5fd5999fc7a90c4e4b680d3a35361c9dd"
-          : "78965ffd9478cc0abe735fc1ece639542789a7a4c971c64c7864a0cb4ea650cb";
+          ? "f9e724ec3bbec05c9d4229666273425c1acd5e7f79a459000cafecb42725d666"
+          : "c3baf3b1b59aa21e301aa0d43dd84f59b8029cf45b52c8a7aacf9773531641e7";
       }
       if (migrations.has("0282_variable_set_session_attach_attribution.sql")) {
         return includesActivation
@@ -996,7 +996,7 @@ describe("release schema contract", () => {
         (migrations.has("0280_connection_and_variable_set_audit_attribution.sql") ? 1 : 0) +
         (migrations.has("0281_viewer_holder_authority_claims.sql") ? 1 : 0) +
         (migrations.has("0282_variable_set_session_attach_attribution.sql") ? 1 : 0) +
-        (migrations.has("0283_organization_tenancy_inventory.sql") ? 1 : 0),
+        (migrations.has("0285_organization_tenancy_inventory.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -1031,8 +1031,8 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0283_organization_tenancy_inventory.sql")
-        ? "0283_organization_tenancy_inventory.sql"
+      migrations.has("0285_organization_tenancy_inventory.sql")
+        ? "0285_organization_tenancy_inventory.sql"
         : migrations.has("0282_variable_set_session_attach_attribution.sql")
           ? "0282_variable_set_session_attach_attribution.sql"
           : migrations.has("0281_viewer_holder_authority_claims.sql")
@@ -1105,8 +1105,8 @@ describe("release schema contract", () => {
       sha256: "1119554dc06a768c92f7189a97b438ebdc011747a6c8d7cefc992962f2293593",
       deploymentMode: "rolling",
     });
-    expect(migrations.get("0283_organization_tenancy_inventory.sql")).toMatchObject({
-      sha256: "93b158e9d6493c76a326d0064e73895b7168ecf6725add7476d93f1888f11c71",
+    expect(migrations.get("0285_organization_tenancy_inventory.sql")).toMatchObject({
+      sha256: "942c606d0d85064f427d2374aba9851c5c3087a49764b9f61bef76d3b8dac0f7",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0282_variable_set_session_attach_attribution.sql")).toMatchObject({

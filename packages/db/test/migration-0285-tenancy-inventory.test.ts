@@ -1,4 +1,4 @@
-// Migration 0283: the read-only organization tenancy inventory seam counts
+// Migration 0285: the read-only organization tenancy inventory seam counts
 // every legacy-attribution population the backfill/parity program gates on -
 // integers only, exact-organization scoped, application-role executable.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -18,7 +18,7 @@ import {
   type DbClient,
 } from "../src";
 
-const migrationUrl = new URL("../drizzle/0283_organization_tenancy_inventory.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0285_organization_tenancy_inventory.sql", import.meta.url);
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let available = true;
@@ -28,7 +28,7 @@ let client: DbClient;
 let db: Database;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0283-tenancy-inventory");
+  shared = await acquireSharedTestDatabase("migration-0285-tenancy-inventory");
   if (!shared) {
     available = false;
     if (requireRealDatabase) throw new Error("OPENGENI_REQUIRE_REAL_DB=1 but no database");
@@ -44,7 +44,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-describe("migration 0283 tenancy inventory", () => {
+describe("migration 0285 tenancy inventory", () => {
   test("declares one read-only rolling seam that returns integers only", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");

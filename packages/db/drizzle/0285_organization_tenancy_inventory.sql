@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Migration 0283: read-only organization tenancy inventory seam.
+-- Migration 0285: read-only organization tenancy inventory seam.
 --
 -- The tenancy backfill/parity program needs one authoritative, content-free
 -- count of every legacy-attribution population before any backfill or cutover
