@@ -135,6 +135,21 @@ export function ComputerViewer({
   const createInFlightRef = useRef(false);
   const autoCreateSessionRef = useRef<string | null>(null);
   const emptyCatalogConfirmationRef = useRef<string | null>(null);
+  const endedGenerationLossRef = useRef(new Set<string>());
+  const [suppressGenericCreate, setSuppressGenericCreate] = useState(false);
+  const endStaleComputer = registry.end;
+  useEffect(() => {
+    if (!enabled) return;
+    for (const session of registry.sessions) {
+      if (!isAttachedChromeGenerationLoss(session)) continue;
+      setSuppressGenericCreate(true);
+      if (endedGenerationLossRef.current.has(session.id)) continue;
+      endedGenerationLossRef.current.add(session.id);
+      void endStaleComputer(session.id).catch(() => {
+        endedGenerationLossRef.current.delete(session.id);
+      });
+    }
+  }, [enabled, endStaleComputer, registry.sessions]);
 
   const notifyError = useCallback(
     (cause: unknown, fallback: string) => {
@@ -152,6 +167,7 @@ export function ComputerViewer({
     handledRequestRef.current = null;
     autoCreateSessionRef.current = null;
     emptyCatalogConfirmationRef.current = null;
+    setSuppressGenericCreate(false);
     setCreateError(null);
     setSelection(
       initialComputerSessionId ? { sessionId: initialComputerSessionId, pinned: true } : null,
@@ -340,6 +356,7 @@ export function ComputerViewer({
       registry.refreshing ||
       registry.error ||
       relevant.length > 0 ||
+      suppressGenericCreate ||
       autoCreateSessionRef.current === sessionId
     ) {
       return;
@@ -365,6 +382,7 @@ export function ComputerViewer({
     registry.refreshing,
     relevant.length,
     sessionId,
+    suppressGenericCreate,
   ]);
 
   const perform = useCallback(
@@ -416,6 +434,12 @@ export function ComputerViewer({
     [computer, notifyError, perform, rfbStream],
   );
 
+  const hideGenericCreate =
+    suppressGenericCreate && liveRelevant.length === 0;
+  const generationLossSelected =
+    selectedRegistrySession !== null && isAttachedChromeGenerationLoss(selectedRegistrySession);
+  const generationLossFrames = isAttachedChromeGenerationLossError(frames.error);
+
   if (!enabled) return null;
   if (registry.loading && liveSessions.length === 0) {
     return (
@@ -427,6 +451,22 @@ export function ComputerViewer({
     );
   }
   if (liveSessions.length === 0) {
+    if (hideGenericCreate) {
+      return (
+        <div className={cn("grid h-full place-items-center bg-og-bg p-6", className)}>
+          <div className="max-w-sm text-center">
+            <CircleAlertIcon className="mx-auto size-5 text-og-status-error" />
+            <p className="mt-3 text-og-menu font-medium text-og-fg">
+              Chrome reconnected—open a fresh browser/desktop.
+            </p>
+            <p className="mt-1 text-og-control leading-5 text-og-muted">
+              This Chrome profile is live again, but the previous desktop cannot move to the new
+              connection. Use Browser → New browser → Connected Chrome.
+            </p>
+          </div>
+        </div>
+      );
+    }
     if (renderEmpty) return renderEmpty(createComputer, creating);
     const error = createError ?? registry.error;
     return (
@@ -480,7 +520,7 @@ export function ComputerViewer({
         onFollow={() => {
           if (relevant[0]) selectComputerSession({ sessionId: relevant[0].id, pinned: false });
         }}
-        onCreate={createComputer}
+        onCreate={hideGenericCreate ? undefined : createComputer}
         onRefresh={() => void Promise.all([refreshRegistry(), refreshComputer()])}
       />
       <InteractionInterventionBanner
@@ -499,6 +539,7 @@ export function ComputerViewer({
           peerCount={liveSessions.length}
           creating={creating}
           error={createError}
+          generationLoss={suppressGenericCreate}
           onCreate={createComputer}
         />
       ) : !controllerReady ? (
@@ -546,7 +587,9 @@ export function ComputerViewer({
                 clipboardEnabled={computer.session?.capabilities?.clipboard === true}
                 onAction={perform}
                 onReadClipboard={computer.readClipboard}
-                onReconnect={frames.reconnect}
+                onReconnect={
+                  generationLossSelected || generationLossFrames ? () => undefined : frames.reconnect
+                }
                 onError={(cause) => notifyError(cause, "Desktop input failed.")}
               />
             )}
@@ -581,28 +624,35 @@ function ComputerUnselectedPanel(props: {
   peerCount: number;
   creating: boolean;
   error: Error | null;
+  generationLoss: boolean;
   onCreate: () => void;
 }) {
   return (
     <div className="grid min-h-0 flex-1 place-items-center bg-og-bg p-6 text-center">
       <div className="max-w-sm">
         <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-muted">
-          {props.error ? (
+          {props.error || props.generationLoss ? (
             <CircleAlertIcon className="size-4.5 text-og-status-error" />
           ) : (
             <LoaderCircleIcon className="size-4.5 animate-spin" />
           )}
         </span>
         <p className="mt-3 text-og-menu font-medium text-og-fg">
-          {props.error ? "Desktop didn’t open" : "Opening desktop…"}
+          {props.generationLoss
+            ? "Chrome reconnected—open a fresh browser/desktop."
+            : props.error
+              ? "Desktop didn’t open"
+              : "Opening desktop…"}
         </p>
         <p className="mt-1 text-og-control leading-5 text-og-muted">
-          {props.error?.message ??
-            (props.peerCount === 1
-              ? "Preparing this agent’s desktop. One peer desktop remains available from the menu."
-              : `Preparing this agent’s desktop. ${props.peerCount} peer desktops remain available from the menu.`)}
+          {props.generationLoss
+            ? "This Chrome profile is live again, but the previous desktop cannot move to the new connection. Use Browser → New browser → Connected Chrome."
+            : (props.error?.message ??
+              (props.peerCount === 1
+                ? "Preparing this agent’s desktop. One peer desktop remains available from the menu."
+                : `Preparing this agent’s desktop. ${props.peerCount} peer desktops remain available from the menu.`))}
         </p>
-        {props.error ? (
+        {props.error && !props.generationLoss ? (
           <button
             type="button"
             disabled={props.creating}
@@ -631,7 +681,7 @@ function ComputerToolbar(props: {
   interventionCounts: Map<string, number>;
   onSelect: (id: string) => void;
   onFollow: () => void;
-  onCreate: () => void;
+  onCreate?: (() => void) | undefined;
   onRefresh: () => void;
 }) {
   const detailsRef = useRef<HTMLDetailsElement | null>(null);
@@ -674,9 +724,11 @@ function ComputerToolbar(props: {
             {current.length > 0 ? (
               <MenuButton onClick={props.onFollow}>Follow agent</MenuButton>
             ) : null}
-            <MenuButton onClick={props.onCreate} disabled={props.creating}>
-              <PlusIcon className="size-3.5" /> New desktop
-            </MenuButton>
+            {props.onCreate ? (
+              <MenuButton onClick={props.onCreate} disabled={props.creating}>
+                <PlusIcon className="size-3.5" /> New desktop
+              </MenuButton>
+            ) : null}
           </div>
         </div>
       </details>
@@ -691,19 +743,21 @@ function ComputerToolbar(props: {
       >
         <RefreshCwIcon className={cn("size-3.5", props.refreshing && "animate-spin")} />
       </button>
-      <button
-        type="button"
-        onClick={props.onCreate}
-        disabled={props.creating}
-        className="grid size-7 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
-        aria-label="Open a new desktop"
-      >
-        {props.creating ? (
-          <LoaderCircleIcon className="size-3.5 animate-spin" />
-        ) : (
-          <PlusIcon className="size-3.5" />
-        )}
-      </button>
+      {props.onCreate ? (
+        <button
+          type="button"
+          onClick={props.onCreate}
+          disabled={props.creating}
+          className="grid size-7 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
+          aria-label="Open a new desktop"
+        >
+          {props.creating ? (
+            <LoaderCircleIcon className="size-3.5 animate-spin" />
+          ) : (
+            <PlusIcon className="size-3.5" />
+          )}
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -838,6 +892,7 @@ function ComputerLifecyclePanel(props: {
   onRefresh: () => Promise<void>;
   onRetry: () => void;
 }) {
+  const generationLoss = isAttachedChromeGenerationLoss(props.session);
   const failed = ["failed", "lost", "repair_required"].includes(props.session.lifecycle);
   const retryCreatesSession = ["failed", "lost"].includes(props.session.lifecycle);
   return (
@@ -849,13 +904,19 @@ function ComputerLifecyclePanel(props: {
           <LoaderCircleIcon className="mx-auto size-5 animate-spin text-og-muted" />
         )}
         <p className="mt-3 text-og-menu font-medium text-og-fg">
-          {failed ? "Desktop needs attention" : lifecycleLabel(props.session.lifecycle)}
+          {generationLoss
+            ? "Chrome reconnected—open a fresh browser/desktop."
+            : failed
+              ? "Desktop needs attention"
+              : lifecycleLabel(props.session.lifecycle)}
         </p>
         <p className="mt-1 text-og-control leading-5 text-og-muted">
-          {computerFailureMessage(props.session) ??
-            "The desktop is being prepared on its placement. It will appear here when ready."}
+          {generationLoss
+            ? "This Chrome profile is live again, but the previous desktop cannot move to the new connection. Use Browser → New browser → Connected Chrome."
+            : (computerFailureMessage(props.session) ??
+              "The desktop is being prepared on its placement. It will appear here when ready.")}
         </p>
-        {failed ? (
+        {failed && !generationLoss ? (
           <button
             type="button"
             onClick={() => (retryCreatesSession ? props.onRetry() : void props.onRefresh())}
@@ -1345,14 +1406,18 @@ function ComputerViewportFallback(props: {
             <LoaderCircleIcon className="size-4 animate-spin text-og-muted" />
           )}
           <p className="text-og-menu font-medium text-og-fg">
-            {props.error
-              ? "Live view disconnected"
-              : computerConnectionLabel(props.connectionState)}
+            {isAttachedChromeGenerationLossError(props.error)
+              ? "Chrome reconnected—open a fresh browser/desktop."
+              : props.error
+                ? "Live view disconnected"
+                : computerConnectionLabel(props.connectionState)}
           </p>
         </div>
         {props.error ? (
           <p className="mt-2 text-og-control leading-5 text-og-muted">
-            {controlFailure?.message ?? props.error.message}
+            {isAttachedChromeGenerationLossError(props.error)
+              ? "Chrome reconnected—open a fresh browser/desktop. Use Browser → New browser → Connected Chrome."
+              : (controlFailure?.message ?? props.error.message)}
           </p>
         ) : null}
         {interactive.length > 0 ? (
@@ -1375,7 +1440,7 @@ function ComputerViewportFallback(props: {
             </div>
           </div>
         ) : null}
-        {props.error ? (
+        {props.error && !isAttachedChromeGenerationLossError(props.error) ? (
           <button
             type="button"
             onClick={props.onReconnect}
@@ -1669,11 +1734,28 @@ function computerFailureMessage(session: ComputerSession): string | null {
       return "Unlock the connected Mac, then try again.";
     case "controller_heartbeat_expired":
       return "The desktop connection was lost. Try opening it again.";
+    case "controller_transition_expired":
+      return session.placement.kind === "attached_device"
+        ? "Chrome reconnected—open a fresh browser/desktop. Use Browser → New browser → Connected Chrome."
+        : "The desktop connection expired. Open a new desktop.";
     case null:
       return null;
     default:
       return "The desktop could not be opened. Try again.";
   }
+}
+
+function isAttachedChromeGenerationLoss(session: ComputerSession): boolean {
+  return (
+    session.lifecycle === "lost" &&
+    session.failureCode === "controller_transition_expired" &&
+    session.placement.kind === "attached_device"
+  );
+}
+
+function isAttachedChromeGenerationLossError(error: Error | null): boolean {
+  if (!error) return false;
+  return /placement instance changed|controller authority changed/i.test(error.message);
 }
 
 function countInterventions(
