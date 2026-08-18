@@ -12,7 +12,7 @@ import {
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
-import { signDelegatedAccessToken } from "@opengeni/contracts";
+import { OPEN_SUFFIX_RUN_STATE_BLOB, signDelegatedAccessToken } from "@opengeni/contracts";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -141,7 +141,7 @@ async function frozenFixture() {
     sessionStatus: "requires_action",
     activeTurnId: claimed.turn.id,
     runState: {
-      serializedRunState: "{}",
+      serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
       pendingApprovals: [],
       humanInputRequests: [
         {
