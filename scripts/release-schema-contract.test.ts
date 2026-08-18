@@ -522,7 +522,9 @@ describe("release schema contract", () => {
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0294_preference_activation_authority.sql")) {
-        return includesActivation ? "58c45453138334cfc41526850177381fa446e6f73f5576e32cc97ccb570903d6" : "d60ef212e05de44b89f4bcac106d703a0e1e4ec45b6fb1103e12fb31622e82b3";
+        return includesActivation
+          ? "58c45453138334cfc41526850177381fa446e6f73f5576e32cc97ccb570903d6"
+          : "d60ef212e05de44b89f4bcac106d703a0e1e4ec45b6fb1103e12fb31622e82b3";
       }
       if (migrations.has("0293_confirm_time_rule_rebaseline.sql")) {
         return includesActivation
