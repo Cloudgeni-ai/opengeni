@@ -522,6 +522,62 @@ human, both owned by their own issues and only counted here). Integers only;
 the seam never returns identities, names, keys, or values, and it rejects a
 cross-organization request.
 
+<<<<<<< HEAD
+#### Variable Sets, Rigs, and Connected Machines need no data rewrite
+
+These three families are already terminally classified, and the phase D
+deliverable for them is an assertion plus a receipt rather than an `UPDATE`.
+`authority_scope` is `text NOT NULL DEFAULT 'workspace'` on all three tables
+(0230 for `workspace_variable_sets` and `rigs`, 0262 for `enrollments`), so
+every pre-existing row already carries an explicit workspace classification.
+Each `*_authority_shape_check` requires `authority_id IS NULL` and
+`owner_organization_membership_id IS NULL` for organization/workspace scope and
+was `VALIDATE`d at creation, so PostgreSQL has already proven the shape of every
+row. A legacy unmigrated row and a deliberately workspace-scoped row are
+therefore byte-identical, and 0262 records the reviewed decision in its own
+header: "Existing rows remain workspace-owned."
+
+`origin_workspace_id` is provenance, not classification, and does not supply a
+missing discriminator: no shape check constrains it for these three families
+(unlike `connections`, whose 0256 workspace branch requires
+`origin_workspace_id = workspace_id`), and every read of it is gated behind
+`authority_scope = 'user'`, which the lifecycle functions always populate. Its
+NULL polarity is also inconsistent across the families, so it means different
+things in each. Do not backfill it as if it were a classification, and never
+resurrect a NULL origin on a user-scoped row - the `ON DELETE SET NULL` foreign
+key erased that origin deliberately.
+
+Migration 0256 remains the one sibling family with a genuine discriminator:
+`connections.subject_id` plus an active `organization_memberships` row. None of
+these three tables has a `subject_id`, so the same shape does not transfer.
+
+Migration 0291 is the resulting assertion seam:
+`bun run db:verify-resource-classification --organization-id <uuid>
+[--run-key <key>]` proves per row that each Variable Set, Rig, and Connected
+Machine already carries an explicit terminal authority classification, and
+records what it cannot prove. It covers the only genuinely unenforced parts of
+the classification, which no constraint catches: that a row claiming user
+ownership points at an authority row of the matching `resource_kind` and
+`resource_id`, that the authority and its owning organization membership are
+both live, and that the delegation still has an origin workspace. Every failure
+becomes an unresolved obligation with a fixed reason code - never a guess, and
+never a rewrite. Supplying `--run-key` records the verdicts durably through the
+backfill ledger as one receipt per family; the report's `ledgerAvailable` field
+states plainly whether that happened.
+
+The seam is `SECURITY DEFINER` and claims a transaction-scoped capability
+rather than running as plain migration SQL, and this is structural rather than
+stylistic. All three tables are FORCE ROW LEVEL SECURITY behind
+`workspace_rls_visible(account_id, workspace_id)`, which is false while the
+`opengeni.workspace_id` GUC is unset - as it is during migration. FORCE RLS
+applies to the table owner, and the documented deployment posture
+([`deployment.md`](deployment.md)) is a non-superuser migration principal
+without `BYPASSRLS`. A bare `UPDATE ... WHERE ...` in a migration body therefore
+matches zero rows and reports success on such a deployment, and only appears to
+work in the test harness, which migrates as a superuser for whom FORCE RLS never
+engages. Any future classification work on these tables must run behind the same
+kind of capability-claiming seam.
+=======
 **There is no "unclassified" count for Variable Sets, Rigs, or Connected
 Machines, and one must not be reintroduced without new schema.** 0285 reported
 one, defined as `authority_id IS NULL`; 0292 removed it. The authority shape
@@ -556,6 +612,7 @@ tables - contrast the documents gate, whose
 `authority_kind = 'personal' AND authority_id IS NULL` names a genuine
 post-migration invariant violation (`documents_authority_chk`, 0258) and is
 therefore truthful and drainable.
+>>>>>>> origin/main
 
 ### E. Validate
 
