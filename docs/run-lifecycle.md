@@ -234,8 +234,9 @@ availability. Before decoding model-facing JSONB, PostgreSQL rejects a complete
 active transcript above any of four materialization limits: 15 MiB UTF-8 JSON,
 8,192 rows, 131,072 decoded JSON nodes, or 65,536 object properties. It never
 silently trims conversation truth; normal proactive compaction keeps long
-sessions under the boundary. Approval `RunState` retains its distinct 3 MiB,
-65,536-node, and 32,768-property serving envelope before SDK decoding. A missing or malformed Temporal task-queue stats
+sessions under the boundary. Pause stores only the open-suffix sentinel; the
+approval/run-state serving envelope still rejects leftover SDK heaps above 3 MiB,
+65,536 nodes, or 32,768 properties so they cannot enter a serving worker. A missing or malformed Temporal task-queue stats
 object is a failed read and makes the capacity sample stale; it is never
 normalized into a fresh zero backlog. The release target remains at most
 50 MiB incremental RSS per active turn. A production read-only forensic
