@@ -13,6 +13,8 @@ import {
 import {
   RetainedScreenshotQuotaExceededError,
   getRetainedScreenshotArtifact,
+  isDatabasePersistenceFailure,
+  isSessionEventPersistenceError,
   prepareRetainedScreenshotArtifact,
   recordRetainedScreenshotArtifactError,
   settleRetainedScreenshotArtifactReady,
@@ -587,6 +589,9 @@ export async function retainComputerScreenshot(input: {
   } catch (error) {
     if (error instanceof RetainedScreenshotQuotaExceededError) {
       return unavailable(identity.artifactId, "quota_exceeded");
+    }
+    if (isSessionEventPersistenceError(error) || isDatabasePersistenceFailure(error)) {
+      return unavailable(identity.artifactId, "pending");
     }
     throw error;
   }

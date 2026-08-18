@@ -590,7 +590,9 @@ Claim, interruption, and event-writing settlement share one lock order:
 the actual `workspaces` row `FOR KEY SHARE`, UUID-ordered sessions `FOR NO KEY UPDATE`,
 UUID-ordered exact turns `FOR UPDATE`, and UUID-ordered exact attempts
 `FOR UPDATE`. Generic audit/title appends skip the control row but use the same
-workspace-key-share prefix. Event inserts also touch the workspace through their
+workspace-key-share prefix. Retained-screenshot prepare takes that same prefix
+before insert so its turn/attempt FK checks cannot invert against event writers;
+retry only that idempotent prepare transaction on `40P01`/`40001`. Event inserts also touch the workspace through their
 foreign keys, so acquiring it later would reintroduce a claim/preemption
 deadlock; the session lock excludes competing mutation while remaining compatible
 with FK key-share checks. Start, requires-action, ordinary terminal, recoverable interruption,

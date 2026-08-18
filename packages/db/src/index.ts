@@ -5137,11 +5137,28 @@ export async function prepareRetainedScreenshotArtifact(
   db: Database,
   input: PrepareRetainedScreenshotArtifactInput,
 ): Promise<{ artifact: RetainedScreenshotArtifact; created: boolean }> {
-  return await withRlsContext(
+  return await retryRlsPersistence(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
+    {
+      stage: "retained_screenshot_prepare",
+      correlationId: input.settlementKey,
+    },
     async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const locks = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "none",
+          sessionIds: [input.sessionId],
+          turnIds: [input.turnId],
+          attemptIds: [input.attemptId],
+        });
+        if (!locks.sessions[0] || !locks.turns[0] || !locks.attempts[0]) {
+          throw new Error(
+            `Retained screenshot parent rows missing: ${input.sessionId}/${input.turnId}/${input.attemptId}`,
+          );
+        }
         await tx
           .insert(schema.workspaceScreenshotQuotas)
           .values({
