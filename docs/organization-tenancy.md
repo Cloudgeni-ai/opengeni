@@ -357,14 +357,91 @@ compatibility boundary to accepted attempts. It backfills an immutable
 authority snapshot on existing attempts and fills omitted legacy-writer
 inserts from the exact workspace and session rows under lock. Accepted
 attempts now retain epoch, visibility, and owner-membership provenance, and
-activity writes fail closed when that snapshot is stale. Create-time
-visibility mutation, visibility-aware read authorization, and independent fork
-copying remain future activation work; this migration does not activate those
-runtime paths.
+activity writes fail closed when that snapshot is stale. 0222 itself activates
+no visibility mutation, read authorization, or fork path; its successor
+`0225_session_visibility_fork_activation.sql` does, and the next section states
+exactly which parts of that successor are live and which remain inert.
+
+Note that owner membership is null only as a *column default*. Since 0225 the
+`guard_session_authority_write` trigger derives
+`owner_organization_membership_id` and `owner_subject_id` on every subject-created
+session insert - from the parent session for children, otherwise from the
+creator's active organization membership when that subject also holds a
+`workspace_memberships` row for the target workspace. Ordinary session creation
+for a managed human therefore produces an owned, `workspace_shared`,
+epoch-1 session; only pre-0225 rows and sessions created without a resolvable
+membership stay ownerless.
 
 Null owner/authority/grant fields are non-authority. Contract parsing likewise
 defaults omitted resource scope to `workspace`; `user` scope requires one
 complete opaque delegation.
+
+## Session-visibility and fork surfaces: shipped, deliberately inert
+
+`0225_session_visibility_fork_activation.sql` is rolling, and it is the one
+place in this document where the schema is ahead of the product. Read this
+section before concluding either that session visibility "does not exist yet"
+or that it is a usable feature. Both are wrong.
+
+**Active today.** These parts of 0225 run in production on every deployment:
+
+- `guard_session_authority_write`, a `BEFORE INSERT OR UPDATE` trigger on
+  `sessions`. It derives the owner pair described above, rejects incomplete
+  owner provenance, rejects `user_private` without an owner, and rejects any
+  direct write of visibility, owner, authority epoch, or fork provenance that
+  does not hold a transaction-local row in the FORCE-RLS
+  `session_visibility_write_capabilities` table. Ordinary application code can
+  therefore never set those columns itself.
+- `session_private_actor_visible` (SECURITY DEFINER) and
+  `session_reference_visible` (SECURITY INVOKER), the two read predicates.
+- The RESTRICTIVE `session_visibility_isolation` policy, installed on
+  `sessions` and on every FORCE-RLS table that carries `account_id`,
+  `workspace_id`, and a foreign key to `sessions.id`, plus a seven-table manual
+  list. Later migrations add it to their own new tables. **Visibility-aware
+  reads are live, not future work**; 70 tables carry the policy.
+- The `authority_change` interruption kind and the runtime `EXECUTE` grants on
+  both lifecycle functions.
+
+**Inert today.** `transition_session_visibility` and `fork_session_content`
+exist, are SECURITY DEFINER, are granted to the runtime role, are listed in
+`RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES`, and have a first-class adapter at
+`@opengeni/db/session-tenancy`. Nothing in `apps/api`, `apps/worker`,
+`apps/web`, `@opengeni/core`, `@opengeni/runtime`, `@opengeni/sdk`, or
+`@opengeni/react` calls either one. Their only invocations are the
+`packages/db` test lane, which uses them both to prove 0225's own fences and as
+the only way to manufacture a `user_private` session for later migrations' RLS
+coverage. The matching `SessionAuthorizationOperation` literals
+`session.visibility.write` and `session.fork.create` are declared in
+`@opengeni/contracts` and authorized nowhere, and the
+`session.visibility.changed` event type has no TypeScript emitter - only the
+SQL function writes it.
+
+The practical consequence: **every production session is `workspace_shared`**,
+so the restrictive policy always takes its `visibility = 'workspace_shared'`
+branch and the private lane is exercised only by tests.
+
+**This is a decision, not an oversight.** The functions stay in place because
+dropping a shipped SECURITY DEFINER surface is its own migration risk, and
+because the db test lane depends on them. They stay unwired because a
+user-facing private toggle is not yet safe:
+
+- `session_list_snapshots` caches a paginated result as a bare `uuid[]` of
+  session ids with no foreign key to `sessions`, so it receives none of the
+  restrictive policies. A snapshot captured before a transition keeps returning
+  a now-private session id to other members until its TTL expires. This is the
+  "cache/pin stripping" item below.
+- `session_pins` *is* covered by the policy, which means a non-owner's existing
+  pin row for a newly private session becomes both invisible and undeletable to
+  them rather than being stripped.
+- `fork_session_content` copies durable history into another workspace and has
+  no destination-selection contract, permission check, or UI.
+- Owner-only grants and cancellation semantics for personal attachment to
+  shared sessions are still unbuilt.
+
+`test/session-visibility-contract-surface.test.ts` pins this boundary: it fails
+if any product package starts naming either entry point or authorizing either
+operation. The first real caller must land together with an update to this
+section and to that test.
 
 ## Referential integrity
 
@@ -407,11 +484,12 @@ Managed-human membership and personal-workspace lifecycle metadata now use the
 narrow provisioning seam described above. The first disjoint activation adds
 only the authenticated owner's personal workspace to the managed-human access
 projection after lifecycle convergence; it does not add a durable workspace
-membership or change the legacy default. Resource authority/grant dual-write,
-new-session owner/visibility writes, and other read-path changes remain future
-work; old writers remain accepted. Migration 0222 separately delivers the
-accepted-attempt authority snapshot and stale activity-write fence described in
-the Legacy behavior section.
+membership or change the legacy default. Resource authority/grant dual-write
+remains future work at this phase; old writers remain accepted. Migration 0222
+separately delivers the accepted-attempt authority snapshot and stale
+activity-write fence described in the Legacy behavior section, and migration
+0225 subsequently activates new-session owner derivation and visibility-aware
+reads while leaving visibility mutation and fork without a caller.
 
 ### C. Membership lifecycle (0263 current)
 
@@ -455,10 +533,22 @@ back to user authority.
 Add exact organization+subject+workspace RLS policies and narrowly scoped
 security-definer lifecycle functions. Switch one subsystem at a time to
 authority ids and immutable accepted-work delegations. Accepted-attempt epoch
-fencing is delivered by migration 0222; remaining activation work includes
-session visibility mutation, visibility-aware reads, sharing/fork copying,
-cancellation, cache/pin stripping, and owner-only grants before enabling
-personal attachment to shared sessions.
+fencing is delivered by migration 0222.
+
+Migration 0225 then delivered the database half: the owner-derivation and
+direct-write fence trigger, visibility-aware read authorization, and the
+`transition_session_visibility` / `fork_session_content` lifecycle functions.
+Those two functions are shipped with runtime grants but have no caller outside
+the `packages/db` test lane, so no production session leaves
+`workspace_shared`. See "Session-visibility and fork surfaces: shipped,
+deliberately inert" for exactly what is live and why the rest is held back.
+
+Remaining activation work is therefore the *product* half plus its
+prerequisites: an authorized API/SDK/UI surface for visibility mutation and
+independent fork, cancellation semantics, cache/pin stripping (notably
+`session_list_snapshots`, whose bare `uuid[]` cache is not covered by the
+restrictive policies), and owner-only grants before enabling personal
+attachment to shared sessions.
 
 ### G. Retire
 
@@ -473,9 +563,11 @@ rewritten in the same release that first activates user authority.
 - a personal `workspace_memberships` row or delegated personal-workspace access;
 - user-resource authority/grant writes, discovery, or sharing;
 - resource CRUD or discovery changes;
-- session sharing/fork runtime;
-- session visibility mutation, visibility-aware reads, or independent fork
-  runtime;
+- a caller for the shipped `transition_session_visibility` and
+  `fork_session_content` lifecycle functions: no API, SDK, worker, MCP, or UI
+  surface for session visibility mutation, session sharing, or independent
+  fork. Visibility-aware reads are *not* a non-goal - they are active (see
+  "Session-visibility and fork surfaces: shipped, deliberately inert");
 - Connected Machine, rig, variable-set, connection, Codex, or Document
   materialization changes;
 - an always-on retention deletion worker (0263 exposes a supported bounded

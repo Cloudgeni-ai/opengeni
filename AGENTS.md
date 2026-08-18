@@ -93,8 +93,17 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   The four authority/grant tables remain FORCE-RLS with zero direct app DML;
   scoped Variable Sets are the activated exception with explicit
   organization/workspace/user ownership and common personal-resource grants.
-  All remaining APIs, resources, sessions, lists, and RLS behavior remain
-  workspace-owned/workspace-shared. See `docs/organization-tenancy.md`.
+  All remaining APIs, resources, sessions, and lists remain
+  workspace-owned/workspace-shared. Session RLS is the one place where the
+  schema is ahead of the product: migration 0225 activated owner derivation, the
+  capability-fenced direct-write trigger, and visibility-aware reads, but its
+  `transition_session_visibility` and `fork_session_content` lifecycle functions
+  are deliberately uncalled outside the `packages/db` test lane, so every
+  production session stays `workspace_shared`. Do not add the first caller
+  without the activation prerequisites (cache/pin stripping, cancellation,
+  owner-only grants) and an update to
+  `test/session-visibility-contract-surface.test.ts`. See
+  `docs/organization-tenancy.md`.
 - Domain/access/billing helpers now live in `@opengeni/core` under `packages/core/src`; `apps/api` routes are HTTP adapters over them.
 - Browser streaming uses `GET /v1/workspaces/:workspaceId/sessions/:id/events/stream` with SSE.
 - Session goals support `GET`, `PATCH(status paused|active)`, and idempotent `DELETE` clear on `/v1/workspaces/:workspaceId/sessions/:id/goal`; clearing removes the goal row and emits `goal.cleared`.
