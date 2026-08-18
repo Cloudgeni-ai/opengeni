@@ -522,7 +522,9 @@ describe("release schema contract", () => {
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0295_retire_legacy_standing_memory_mode.sql")) {
-        return includesActivation ? "e2a51c5f1db43733e568fc3fd1e56b54405f302c1bb9c747507671a37321f8ef" : "c3ba02863de74d590128f111dc3014f9dfafe3a1747c2ad52bcb6a297c77ea69";
+        return includesActivation
+          ? "e2a51c5f1db43733e568fc3fd1e56b54405f302c1bb9c747507671a37321f8ef"
+          : "c3ba02863de74d590128f111dc3014f9dfafe3a1747c2ad52bcb6a297c77ea69";
       }
       if (migrations.has("0294_preference_activation_authority.sql")) {
         return includesActivation
