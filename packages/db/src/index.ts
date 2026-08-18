@@ -30269,10 +30269,7 @@ export async function recordPendingSessionToolCallResult(
   );
 }
 
-export type OpenSuffixInterruptionKind =
-  | "human_input"
-  | "approval"
-  | "interaction_intervention";
+export type OpenSuffixInterruptionKind = "human_input" | "approval" | "interaction_intervention";
 
 export type OpenSuffixPendingToolCall = {
   callId: string;
