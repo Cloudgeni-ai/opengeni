@@ -430,6 +430,18 @@ or current access. Provision personal workspaces for active memberships through
 an idempotent lifecycle operation. Record backfill receipts and unresolved rows
 without widening access.
 
+The phase's data source is the read-only inventory seam (migration 0283):
+`bun run db:inventory-tenancy --organization-id <uuid>` reports content-free
+counts of every legacy-attribution population - ownerless sessions, resources
+without an explicit authority classification (variable sets, rigs, machines),
+connections per authority lane, humans with workspace access but no
+organization-membership anchor, active memberships per lifecycle status,
+unattributed workspace writers, and the two linked-input gates (documents
+without common authority; Codex credentials without a recorded connecting
+human, both owned by their own issues and only counted here). Integers only;
+the seam never returns identities, names, keys, or values, and it rejects a
+cross-organization request.
+
 ### E. Validate
 
 Verify organization/membership/workspace consistency, one personal workspace
