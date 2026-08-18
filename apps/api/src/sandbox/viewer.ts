@@ -144,6 +144,9 @@ export async function sessionAttachEnvironment(
   services: ViewerServices,
   workspaceId: string,
   session: Session,
+  /** The authenticated route subject driving this attach (0282); recorded on
+   *  the materialization audit fact. Null records the legacy service sentinel. */
+  attachSubjectId: string | null,
 ): Promise<Record<string, string>> {
   const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
     services.db,
@@ -152,7 +155,7 @@ export async function sessionAttachEnvironment(
       accountId: session.accountId,
       workspaceId,
       variableSetId: session.environmentId,
-      authority: { kind: "session_attach", sessionId: session.id },
+      authority: { kind: "session_attach", sessionId: session.id, subjectId: attachSubjectId },
     },
   );
   // Build the env with the SESSION's backend, not the deployment default: the
@@ -293,7 +296,12 @@ export async function attachViewer(
       // so the next turn's agent-manifest apply finds an EMPTY environment delta in
       // the SDK's validateNoEnvironmentDelta (otherwise: "Live sandbox sessions
       // cannot change manifest environment variables").
-      const environment = await sessionAttachEnvironment(services, workspaceId, session);
+      const environment = await sessionAttachEnvironment(
+        services,
+        workspaceId,
+        session,
+        input.viewerSubjectId ?? null,
+      );
       const providerSettings = await providerSettingsForSessionSandboxRuntime(
         sandboxRuntime,
         session.sandboxBackend,
@@ -380,7 +388,12 @@ export async function attachViewer(
         message: `sandbox is ${live.recovery.restore.status} at epoch ${live.leaseEpoch}`,
       });
     }
-    const environment = await sessionAttachEnvironment(services, workspaceId, session);
+    const environment = await sessionAttachEnvironment(
+      services,
+      workspaceId,
+      session,
+      input.viewerSubjectId ?? null,
+    );
     let observed: EstablishedSandboxSession | undefined;
     try {
       const establish = services.establishSandboxSession ?? establishSandboxSessionFromEnvelope;
@@ -457,13 +470,26 @@ export type SessionGroupReadinessHold = {
  * it. */
 export async function ensureSessionGroupReady(
   services: ViewerServices,
-  input: { accountId: string; workspaceId: string; session: Session },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    session: Session;
+    /** The authenticated subject driving the fleet attach/swap (0282): recorded
+     *  on the viewer holder and the materialization audit fact. Omitting it
+     *  records the explicit service sentinel, so forward the route subject. */
+    subjectId?: string | null;
+  },
 ): Promise<SessionGroupReadinessHold> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let release: (() => Promise<void>) | undefined;
     try {
-      const attached = await attachViewer(services, input);
+      const attached = await attachViewer(services, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        session: input.session,
+        ...(input.subjectId ? { viewerSubjectId: input.subjectId } : {}),
+      });
       let releasePromise: Promise<void> | undefined;
       release = () =>
         (releasePromise ??= detachViewer(services, {
@@ -873,7 +899,12 @@ export async function mintDesktopStream(
   try {
     // On a cold-restore (the lease's box is gone) this create() must carry the
     // SAME stable run-env the turn declares, so a later turn finds no env delta.
-    const environment = await sessionAttachEnvironment(services, workspaceId, session);
+    const environment = await sessionAttachEnvironment(
+      services,
+      workspaceId,
+      session,
+      input.resourceSubjectId ?? null,
+    );
     try {
       const establish = () =>
         (services.establishSandboxSession ?? establishSandboxSessionFromEnvelope)(
@@ -1134,7 +1165,12 @@ export async function mintTerminalStream(
   try {
     // On a cold-restore this create() must carry the SAME stable run-env the turn
     // declares, so a later turn finds no manifest-env delta.
-    const environment = await sessionAttachEnvironment(services, workspaceId, session);
+    const environment = await sessionAttachEnvironment(
+      services,
+      workspaceId,
+      session,
+      input.resourceSubjectId ?? null,
+    );
     try {
       const establish = () =>
         (services.establishSandboxSession ?? establishSandboxSessionFromEnvelope)(

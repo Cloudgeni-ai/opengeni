@@ -539,7 +539,7 @@ async function withChannelAOperation<T>(
     accountId,
     workspaceId,
     variableSetId: session.environmentId,
-    authority: { kind: "session_attach", sessionId: session.id },
+    authority: { kind: "session_attach", sessionId: session.id, subjectId: ctx.subjectId },
   });
   const settingsForSession =
     session.sandboxBackend !== settings.sandboxBackend

@@ -3535,7 +3535,12 @@ function registerFleetTools(
       const session = await requireSession(deps.db, ctx.workspaceId, ctx.sessionId);
       return await ensureViewerSessionGroupReady(
         { db: deps.db, settings: deps.settings, bus: deps.bus },
-        { accountId: ctx.accountId, workspaceId: ctx.workspaceId, session },
+        {
+          accountId: ctx.accountId,
+          workspaceId: ctx.workspaceId,
+          session,
+          subjectId: ctx.subjectId ?? null,
+        },
       );
     },
   };

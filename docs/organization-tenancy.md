@@ -255,7 +255,13 @@ variable-set materialization/secret-read audits carry the causal human,
 attempt authority triple, and owner authority identity. Variable-set denials
 raise and roll their transaction back by design; the application records the
 metadata-only denial fact in a fresh transaction instead of weakening the
-fail-closed seam. `retain`
+fail-closed seam. Since migration 0282 the API-direct session-attach
+materialization lane records the same fact: the seam reads the request
+subject and causal human from the standard context GUCs, writes a
+`variable_set.materialized` audit event with actor kind `session_attach` and
+the live session authority tuple from the exact locked session row, and an
+old image that sets no subject records the explicit `service:session`
+sentinel rather than nothing. `retain`
 has no deletion deadline;
 `delete_after` accepts the initial 30–90 day policy window and stamps a bounded
 future deadline. Destructive expiry is an explicit operator lifecycle, not an
