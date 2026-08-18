@@ -430,6 +430,24 @@ or current access. Provision personal workspaces for active memberships through
 an idempotent lifecycle operation. Record backfill receipts and unresolved rows
 without widening access.
 
+The receipt/unresolved ledger is migration 0286: `tenancy_backfill_receipts`
+(one idempotent row per organization, resource family, and run key, carrying
+classified/skipped/unresolved counts) and `tenancy_backfill_unresolved_rows`
+(one append-only row per resource that could not be classified deterministically,
+carrying only the resource id and a fixed reason code). Both are FORCE RLS with
+no direct `opengeni_app` DML; the only write path is the `tenancy_backfill_ledger`
+lifecycle seam - `open_tenancy_backfill_receipt`,
+`record_tenancy_backfill_unresolved`, and `complete_tenancy_backfill_receipt`.
+
+Two properties of that seam are load-bearing. The append function takes exactly
+receipt, resource, and reason: an unresolved row records a *refusal* to infer
+authority, so the ledger has no column and no argument able to express the
+inference it declined to make. And the unresolved count is owned by the append
+path rather than supplied at completion, so a sweep cannot settle its own
+receipt while understating its outstanding obligations. Settled receipts are
+evidence: they accept no further rows, cannot be re-opened, and cannot be
+settled twice.
+
 The phase's data source is the read-only inventory seam (migration 0285):
 `bun run db:inventory-tenancy --organization-id <uuid>` reports content-free
 counts of every legacy-attribution population - ownerless sessions, resources
