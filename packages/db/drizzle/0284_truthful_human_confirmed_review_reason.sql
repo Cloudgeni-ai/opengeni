@@ -893,7 +893,7 @@ BEGIN
   -- The guard trigger resolves the 9-arg signature's owner as the
   -- governed-learning capability writer, but the review INSERT now runs inside
   -- the new 10-arg overload. Align its owner with the preserved 9-arg owner so
-  -- a deployment whose 0277 migration role differs from the 0269 role cannot
+  -- a deployment whose 0284 migration role differs from the 0269 role cannot
   -- fail every service Knowledge review with 42501.
   SELECT pg_catalog.pg_get_userbyid(procedure_row.proowner) INTO capability_owner
   FROM pg_catalog.pg_proc procedure_row

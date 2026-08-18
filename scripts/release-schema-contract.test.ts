@@ -521,10 +521,10 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0277_truthful_human_confirmed_review_reason.sql")) {
+      if (migrations.has("0284_truthful_human_confirmed_review_reason.sql")) {
         return includesActivation
-          ? "d9b1345ca249ef06ccbc48f695c75d55cb466488e17270c588b930f8b45c7574"
-          : "2bb7ba1ad36178718d7de1a5277e95461d4476713cbfb25c93d3c99f692e53ab";
+          ? "4262a58d1ed74b46391714e3d1f6686754d373ab44d231a63bf7f30e401f520e"
+          : "c3323776f7dbf33307cfcc3db4e7b3616e6bf28655115b134cc2832a4145390d";
       }
       if (migrations.has("0276_onboarding_proposal_initiating_human_guc.sql")) {
         return includesActivation
@@ -960,7 +960,7 @@ describe("release schema contract", () => {
         (migrations.has("0263_organization_membership_lifecycle.sql") ? 1 : 0) +
         (migrations.has("0275_scheduled_connection_authority.sql") ? 1 : 0) +
         (migrations.has("0276_onboarding_proposal_initiating_human_guc.sql") ? 1 : 0) +
-        (migrations.has("0277_truthful_human_confirmed_review_reason.sql") ? 1 : 0),
+        (migrations.has("0284_truthful_human_confirmed_review_reason.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -995,8 +995,8 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0277_truthful_human_confirmed_review_reason.sql")
-        ? "0277_truthful_human_confirmed_review_reason.sql"
+      migrations.has("0284_truthful_human_confirmed_review_reason.sql")
+        ? "0284_truthful_human_confirmed_review_reason.sql"
         : migrations.has("0276_onboarding_proposal_initiating_human_guc.sql")
           ? "0276_onboarding_proposal_initiating_human_guc.sql"
           : migrations.has("0275_scheduled_connection_authority.sql")

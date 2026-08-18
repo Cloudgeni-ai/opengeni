@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 
 const migrationUrl = new URL(
-  "../drizzle/0277_truthful_human_confirmed_review_reason.sql",
+  "../drizzle/0284_truthful_human_confirmed_review_reason.sql",
   import.meta.url,
 );
 
-describe("migration 0277 truthful human-confirmed review reason", () => {
+describe("migration 0284 truthful human-confirmed review reason", () => {
   test("adds a reason-carrying review overload and truthful human-confirmed callers", async () => {
     const sql = await readFile(migrationUrl, "utf8");
     expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
@@ -45,7 +45,7 @@ describe("migration 0277 truthful human-confirmed review reason", () => {
     );
     expect(sql).toContain("SET search_path = pg_catalog, %I, pg_temp");
     // The 10-arg overload must share the guard-resolved 9-arg owner even when
-    // the 0277 migration role differs from the 0269 role.
+    // the 0284 migration role differs from the 0269 role.
     expect(sql).toContain("|| 'uuid,uuid,uuid,uuid,uuid,bigint,text,text,text,text) OWNER TO %I'");
   });
 });
