@@ -7,6 +7,7 @@ import {
 import {
   computerCallNormalizingFetch,
   elideSupersededViewImagePairs,
+  extractOpenSuffixMembers,
   normalizeComputerCallActions,
   projectRejectedProviderArtifactsFromSerializedRunState,
   rewriteComputerCallsToActionsOnly,
@@ -126,6 +127,30 @@ describe("sanitizeHistoryItemsForModel", () => {
     // The dangling call is dropped, and the reasoning item that produced it is
     // dropped with it (Responses API ties reasoning to its following call).
     expect(result).toEqual([items[0]]);
+  });
+
+  test("extracts a dangling call and its tied reasoning as the open suffix", () => {
+    const items = [userMessage("hi"), reasoning("rs_1"), functionCall("call_dangling")];
+    expect(extractOpenSuffixMembers(items)).toEqual([
+      {
+        callId: "call_dangling",
+        callType: "function_call",
+        callItem: items[2],
+        reasoningItems: [items[1]],
+      },
+    ]);
+    expect(sanitizeHistoryItemsForModel(items)).toEqual([items[0]]);
+  });
+
+  test("paired history yields an empty open suffix", () => {
+    const items = [
+      userMessage("hi"),
+      reasoning("rs_keep"),
+      functionCall("call_ok"),
+      functionResult("call_ok"),
+    ];
+    expect(extractOpenSuffixMembers(items)).toEqual([]);
+    expect(sanitizeHistoryItemsForModel(items)).toEqual(items);
   });
 
   test("keeps reasoning when its following call is well-formed", () => {
