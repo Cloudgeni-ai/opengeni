@@ -128,7 +128,8 @@ describe("migration 0285 tenancy inventory", () => {
     } finally {
       await blank.release();
     }
-  });
+    // A blank database plus a full `migrate()` is far past bun's 5s default.
+  }, 180_000);
 
   test("counts the legacy populations for exactly the requested organization", async () => {
     if (!available) return;
