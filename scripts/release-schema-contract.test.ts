@@ -521,10 +521,10 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0293_preference_activation_authority.sql")) {
+      if (migrations.has("0294_preference_activation_authority.sql")) {
         return includesActivation
-          ? "ba2954df29eaaef0c04a54270bf184243b4fc1d49d15468d26d2ba99f5ffdd3a"
-          : "0a80932f21589968c1f259887d436c35eda00781653bee46a3c9a8fc04e79305";
+          ? "f2171704da7c1b790660b872a1bfb605c860ede902583c151257a34a4c65560a"
+          : "e562b679d6cd29d810df398ecf9505eecf9b3a56bdd8b310720632e08ef4224c";
       }
       if (migrations.has("0292_truthful_tenancy_inventory_counters.sql")) {
         return includesActivation
@@ -1038,7 +1038,7 @@ describe("release schema contract", () => {
         (migrations.has("0287_open_suffix_pending_tool_calls.sql") ? 1 : 0) +
         (migrations.has("0288_attached_browser_reenrollment.sql") ? 1 : 0) +
         (migrations.has("0292_truthful_tenancy_inventory_counters.sql") ? 1 : 0) +
-        (migrations.has("0293_preference_activation_authority.sql") ? 1 : 0),
+        (migrations.has("0294_preference_activation_authority.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -1073,8 +1073,8 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0293_preference_activation_authority.sql")
-        ? "0293_preference_activation_authority.sql"
+      migrations.has("0294_preference_activation_authority.sql")
+        ? "0294_preference_activation_authority.sql"
         : migrations.has("0292_truthful_tenancy_inventory_counters.sql")
           ? "0292_truthful_tenancy_inventory_counters.sql"
           : migrations.has("0288_attached_browser_reenrollment.sql")
