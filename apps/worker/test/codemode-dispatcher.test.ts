@@ -164,7 +164,6 @@ describe("CodemodeAttemptDispatcher", () => {
         arguments: { query: "hello" },
         caller: { kind: "codemode", subjectId: "sandbox:test" },
       },
-      callLimit: 10,
     });
     const bus = new MemoryEventBus();
     const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
@@ -243,7 +242,6 @@ describe("CodemodeAttemptDispatcher", () => {
         arguments: {},
         caller: { kind: "codemode", subjectId: "sandbox:test" },
       },
-      callLimit: 10,
     });
     const bus = new MemoryEventBus();
     const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
@@ -304,7 +302,6 @@ describe("CodemodeAttemptDispatcher", () => {
           arguments: {},
           caller: { kind: "codemode", subjectId: "sandbox:test" },
         },
-        callLimit: 10,
       });
     }
     const bus = new MemoryEventBus();
