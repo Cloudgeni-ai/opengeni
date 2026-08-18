@@ -334,10 +334,24 @@ exclusive `managed_accounts` lock across workspace-row acquisition - for example
 by taking organization-level mutual exclusion through an advisory lock and
 downgrading the row lock to `FOR KEY SHARE` - which requires a migration.
 
-Until then, `updateOrganizationMember()` replays that exact transaction on
-`40P01` (bounded, same operation id and CAS revisions, and a deadlock abort
-leaves nothing durable), so the inversion is not visible to callers. `40001`
-remains the authoritative stale-revision conflict and is never replayed.
+Until then, `updateOrganizationMember()` and `acceptOrganizationInvitation()`
+replay that exact transaction on `40P01` (bounded, same operation id and CAS
+revisions, and a deadlock abort leaves nothing durable). Those are exactly the
+lifecycle commands that acquire workspace rows - `suspend`/`offboard` take the
+account's `workspaces` rows `FOR KEY SHARE`, and `accept` inserts the invited
+human's personal workspace - so they are the only ones that can be inside the
+cycle at all. `40001` remains the authoritative stale-revision conflict and is
+never replayed.
+
+That replay covers the lifecycle side of the cycle and nothing else. PostgreSQL
+aborts exactly ONE of the two transactions and may pick the ordinary workspace
+writer instead, which is a plain caller of an unrelated module and is replayed
+by nothing - so **the inversion is still visible to callers**, as a `40P01` on
+the workspace-writer side. The mitigation narrows the window; it does not close
+it, and it deliberately does not try to: wrapping every ordinary workspace
+writer in a deadlock retry would be a much larger and much worse change than
+removing the inversion. The SQL fix (OPE-275) is what closes it, and this whole
+section goes away with it.
 
 ## Canonical human identity and login bindings
 

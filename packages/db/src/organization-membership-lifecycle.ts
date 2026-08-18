@@ -58,8 +58,27 @@ import * as schema from "./schema";
  * stale-revision / stale-epoch conflict and must reach the caller unchanged,
  * and the original failure is rethrown untouched once the budget is spent.
  *
- * This is a caller-side mitigation, not the fix: the lock-order inversion lives
- * in the SQL seam and can only be removed by a migration.
+ * SCOPE - read this before assuming a deadlock cannot escape. PostgreSQL picks
+ * ONE of the two transactions in the cycle as the victim, and it may pick the
+ * ordinary workspace writer instead of the lifecycle command. That writer is a
+ * plain caller of an unrelated module (`transitionSessionVisibility`, a session
+ * event/goal/system-update insert, ...); nothing here can replay it, and
+ * wrapping every ordinary workspace writer in a deadlock retry would be a far
+ * larger change than removing the inversion. So this covers exactly the
+ * lifecycle side of the cycle: it is a partial, caller-side mitigation, NOT the
+ * fix. The inversion lives in the SQL seam and only a migration removes it -
+ * the lifecycle seam must stop holding an exclusive `managed_accounts` lock
+ * across workspace-row acquisition.
+ *
+ * Every lifecycle entry point whose command acquires workspace rows - and so
+ * can be inside the cycle at all - is wrapped: `accept` (it inserts the
+ * personal workspace) and `suspend`/`offboard` (they take the account's
+ * `workspaces` rows `FOR KEY SHARE`). The remaining actions never reach a
+ * workspace row, so they can block an ordinary writer but cannot close a cycle
+ * with one.
+ *
+ * The wrapper must stay OUTSIDE any transaction it replays: retrying inside an
+ * already-aborted transaction is not a retry.
  */
 async function withOrganizationLifecycleDeadlockReplay<T>(operation: () => Promise<T>): Promise<T> {
   const maxAttempts = 3;
@@ -500,7 +519,12 @@ export async function acceptOrganizationInvitation(
   invitation: OrganizationInvitationType;
   membership: OrganizationMemberType;
 }> {
-  const result = await runCommand(db, { action: "accept", ...input });
+  // `accept` inserts the invited human's personal workspace while the command
+  // already holds `managed_accounts FOR UPDATE`, so it carries the identical
+  // lock-order inversion as suspend/offboard and needs the identical replay.
+  const result = await withOrganizationLifecycleDeadlockReplay(async () =>
+    runCommand(db, { action: "accept", ...input }),
+  );
   return {
     invitation: OrganizationInvitation.parse((result as { invitation?: unknown }).invitation),
     membership: OrganizationMember.parse((result as { membership?: unknown }).membership),
