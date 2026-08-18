@@ -1,4 +1,4 @@
-// Migration 0294 (OPE-276): `FORCE ROW LEVEL SECURITY` binds the TABLE OWNER,
+// Migration 0296 (OPE-276): `FORCE ROW LEVEL SECURITY` binds the TABLE OWNER,
 // and OpenGeni migrates as a NON-superuser owner without BYPASSRLS. No tenant
 // GUC is set during a migration, so 0256's and 0262's `origin_workspace_id`
 // backfills matched ZERO rows and reported success on every real deployment.
@@ -20,7 +20,7 @@ import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
-const REPAIR_MIGRATION = "0294_force_rls_backfill_noop_repair.sql";
+const REPAIR_MIGRATION = "0296_force_rls_backfill_noop_repair.sql";
 
 const ACCOUNT = "11111111-1111-4111-8111-111111111111";
 const WORKSPACE = "22222222-2222-4222-8222-222222222222";
@@ -57,18 +57,18 @@ async function applyBelow(url: string, upperBound: string): Promise<void> {
   }
 }
 
-describe("migration 0294 repairs the FORCE-RLS backfill no-ops", () => {
+describe("migration 0296 repairs the FORCE-RLS backfill no-ops", () => {
   let owned: OwnerMigratedTestDatabase | null = null;
 
   beforeAll(async () => {
-    owned = await acquireOwnerMigratedTestDatabase("migration-0294-force-rls-repair");
+    owned = await acquireOwnerMigratedTestDatabase("migration-0296-force-rls-repair");
   }, 600_000);
 
   afterAll(async () => {
     await owned?.release();
   }, 120_000);
 
-  test("a NOSUPERUSER NOBYPASSRLS owner silently loses the backfill, and 0294 restores it", async () => {
+  test("a NOSUPERUSER NOBYPASSRLS owner silently loses the backfill, and 0296 restores it", async () => {
     if (!owned) return;
     const { admin, ownerUrl, ownerRole } = owned;
 
@@ -137,7 +137,7 @@ describe("migration 0294 repairs the FORCE-RLS backfill no-ops", () => {
       membershipRole: "member",
     });
 
-    // ---- apply 0294 -------------------------------------------------------
+    // ---- apply 0296 -------------------------------------------------------
     await migrate(ownerUrl);
 
     expect(await observe()).toEqual({
@@ -165,7 +165,7 @@ describe("migration 0294 repairs the FORCE-RLS backfill no-ops", () => {
     expect(trigger!.enabled).toBe("O");
   }, 900_000);
 
-  test("re-running 0294 converges and never widens authority", async () => {
+  test("re-running 0296 converges and never widens authority", async () => {
     if (!owned) return;
     const { admin, ownerUrl } = owned;
 

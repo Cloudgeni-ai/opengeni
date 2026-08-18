@@ -199,7 +199,7 @@ describe("the shipped migration ledger", () => {
     expect(staleAllowlistEntries(migrationsDir)).toEqual([]);
   });
 
-  test("still recognises the three statements 0294 repairs", () => {
+  test("still recognises the three statements 0296 repairs", () => {
     const findings = analyzeMigrationRlsBackfills(migrationsDir).filter(
       (finding) => finding.kind === "write",
     );
@@ -213,7 +213,7 @@ describe("the shipped migration ledger", () => {
   });
 
   test("the repair migration itself is protected, not grandfathered", () => {
-    const repair = "0294_force_rls_backfill_noop_repair.sql";
+    const repair = "0296_force_rls_backfill_noop_repair.sql";
     expect(GRANDFATHERED_MIGRATIONS).not.toContain(repair);
     expect(GRANDFATHERED_VACUOUS_GUARDS).not.toContain(repair);
     expect(

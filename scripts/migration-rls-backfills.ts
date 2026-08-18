@@ -34,7 +34,7 @@ export const MIGRATIONS_DIR = "packages/db/drizzle";
 /**
  * Migrations that shipped before OPE-276 identified this class. Their bytes are
  * frozen by the release schema-contract hash ladder and cannot be rewritten, so
- * they are recorded here instead. `0294_force_rls_backfill_noop_repair.sql`
+ * they are recorded here instead. `0296_force_rls_backfill_noop_repair.sql`
  * repairs the instances that genuinely lost data; the rest are classified in
  * `docs/force-rls-migration-backfills.md`.
  *
@@ -146,7 +146,7 @@ export const GRANDFATHERED_VACUOUS_GUARDS: readonly string[] = [
 ];
 
 export type BackfillFinding = {
-  /** Migration file name, e.g. `0294_...sql`. */
+  /** Migration file name, e.g. `0296_...sql`. */
   file: string;
   /** 1-based index of the offending top-level statement within the file. */
   statement: number;

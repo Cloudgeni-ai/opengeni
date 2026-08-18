@@ -97,13 +97,13 @@ assertion *inside* the window so a silent no-op fails loudly.
 - `acquireOwnerMigratedTestDatabase` (`packages/testing/src/shared-pg.ts`) hands
   out a database owned by a `NOSUPERUSER NOBYPASSRLS` login role, so a test can
   drive `migrate()` through the real production boundary.
-  `packages/db/test/migration-0294-force-rls-backfill-repair.test.ts` is the
+  `packages/db/test/migration-0296-force-rls-backfill-repair.test.ts` is the
   worked example: it demonstrates the no-op before the repair and convergence
   after, in one run.
 
-## Repair: migration 0294
+## Repair: migration 0296
 
-`packages/db/drizzle/0294_force_rls_backfill_noop_repair.sql` (rolling) repairs
+`packages/db/drizzle/0296_force_rls_backfill_noop_repair.sql` (rolling) repairs
 the three statements whose no-op neither aborts its own migration nor is
 recomputed by any runtime path:
 
@@ -136,7 +136,7 @@ so no concurrent writer ever observes the table without its binding trigger.
 
 ### Operator procedure
 
-Rolling. `bun run db:migrate` (or the Helm migration Job) applies 0294 with no
+Rolling. `bun run db:migrate` (or the Helm migration Job) applies 0296 with no
 drain. The migration's own verification block raises SQLSTATE `55000` and rolls
 the whole file back if the repair did not converge.
 
@@ -157,7 +157,7 @@ contain a preflight guard that can never fire. The complete machine-checked
 inventory is `GRANDFATHERED_MIGRATIONS` / `GRANDFATHERED_VACUOUS_GUARDS` in
 `scripts/migration-rls-backfills.ts`. Their dispositions:
 
-### Repaired by 0294
+### Repaired by 0296
 
 `0256` (`connections.origin_workspace_id`), `0262` (`enrollments`), `0263`
 (`organization_memberships.role`).
