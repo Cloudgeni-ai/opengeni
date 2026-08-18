@@ -77,6 +77,20 @@ ScreenCaptureKit/CGEvent desktop feature as the release build. This is the suppo
 an agent binary next to arbitrary helpers can create a protocol-skewed runtime
 that production installation and managed updates deliberately forbid.
 
+Attached Chrome profiles are a separate physical placement. Inventory reports a
+`connectionGeneration` that becomes the BrowserSession/ComputerSession
+`placementInstanceId`. When that generation changes, OpenGeni marks the exact
+device's still-live sessions `lost` with `controller_transition_expired` and
+never rebinds the old controller token. In-flight `/end` (`ending`) is left
+to finish physical teardown instead of being rewritten to `lost`. Heartbeats
+must prove the live generation before they pulse. `/end` still talks to the
+live agent with that original fence so the Mac helper can `stopCapture` and
+exit; otherwise ScreenCaptureKit leaves `replayd` and multiple
+`opengeni-computer-native` processes running. A new shared-seat
+ComputerSession displaces the previous helper. Open a replacement through
+**Browser → New browser → Connected Chrome**; generic New desktop does not
+infer the Chrome device.
+
 Machine availability is also not a turn-admission dependency. A text-only turn
 can start while the selected machine is offline. If the model invokes a machine
 operation, the typed offline/timeout result returns to the model in-band so it

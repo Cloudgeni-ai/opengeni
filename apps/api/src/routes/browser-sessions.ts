@@ -2636,7 +2636,11 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
         throw new BrowserSessionStateError("Attached browser machine is unavailable");
       }
-      assertPlacementInstance(expectedPlacementInstanceId, device.connectionGeneration);
+      const placementInstanceId = attachedEndPlacementInstanceId(
+        operation,
+        expectedPlacementInstanceId,
+        device.connectionGeneration,
+      );
       const built = await buildSelfhostedBackendSession({
         workspaceId: sourceSession.workspaceId,
         agentId: device.enrollmentId,
@@ -2669,13 +2673,13 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       return await callback({
         placement: expectedPlacement,
         controllerHostSandboxGroupId: null,
-        placementInstanceId: device.connectionGeneration,
+        placementInstanceId,
         session: built.session as unknown as BrowserControlPlacementSession,
         lease: null,
         transport: {
           kind: "attached_chrome",
           deviceId: device.id,
-          connectionGeneration: device.connectionGeneration,
+          connectionGeneration: placementInstanceId,
           browserName: device.browserName,
           browserVersion: device.browserVersion,
         },
@@ -4024,6 +4028,20 @@ function assertPlacementInstance(expected: string | null, actual: string): void 
   if (expected !== null && expected !== actual) {
     throw new BrowserSessionStateError("BrowserSession placement instance changed");
   }
+}
+
+/** End keeps the original controller token fence so a later Chrome generation
+ *  can still dispose the stale browserd session. */
+function attachedEndPlacementInstanceId(
+  operation: ChannelAOperation,
+  expectedPlacementInstanceId: string | null,
+  liveGeneration: string,
+): string {
+  if (operation === "browser.end" && expectedPlacementInstanceId) {
+    return expectedPlacementInstanceId;
+  }
+  assertPlacementInstance(expectedPlacementInstanceId, liveGeneration);
+  return liveGeneration;
 }
 
 function isTerminalOperation(state: string): boolean {

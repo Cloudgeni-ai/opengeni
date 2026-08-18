@@ -429,6 +429,22 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     return group.sourceClient;
   }
 
+  private async stopCapturesOnClient(client: ComputerNativeTransport): Promise<void> {
+    await Promise.allSettled(
+      [...this.frameStreams.entries()].map(async ([targetId, group]) => {
+        await group.sourceTransition.catch(() => undefined);
+        if (group.sourceClient !== client) return;
+        try {
+          await client.stopCapture(targetId);
+        } catch {
+          // Closing/replacing the helper is the remaining teardown fence.
+        }
+        group.sourceClient = null;
+        group.sourceKey = null;
+      }),
+    );
+  }
+
   private beginStopFrameGroup(targetId: string, group: TargetFrameGroup): void {
     if (group.stopping) return;
     group.stopping = true;
@@ -500,6 +516,9 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
       throw new Error("native computer helper recovery is unavailable");
     }
     const recovery = (async () => {
+      // EOF/SIGKILL without StopCapture leaves ScreenCaptureKit streams in
+      // replayd. Stop every live producer on this incarnation first.
+      await this.stopCapturesOnClient(failedClient);
       await failedClient.close().catch(() => undefined);
       const replacement = await this.clientFactory!();
       if (
