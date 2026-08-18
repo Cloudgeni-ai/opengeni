@@ -438,6 +438,27 @@ rules, session ownership, and zero partial delegations. Add read-only shadow
 comparisons between legacy and proposed effective scopes. No mismatch may fall
 back to user authority.
 
+`packages/db/test/organization-isolation-evidence.test.ts` is the executed
+cross-organization evidence suite for this phase. Against a real PostgreSQL
+database, driven as the genuine non-superuser `NOBYPASSRLS` `opengeni_app`
+login, it proves - each denial paired with a positive control under the owning
+organization - that no seeded resource family (session, session event, Variable
+Set, Rig, Connected Machine, enrollment, connection, file, Document base,
+Document, knowledge memory, scheduled task, API key) crosses an organization
+boundary by read, forged workspace id, sibling workspace, insert, update, or
+delete; that a missing account or workspace context denies rather than widens;
+that forging `opengeni.organization_tenancy_lifecycle` opens no authority table
+because the runtime role holds no privilege on any table gated only by a
+caller-settable GUC; that every account-carrying table the runtime role can
+touch enforces FORCE RLS apart from the reviewed `workspaces` /
+`workspace_memberships` / `auth_identities` directory exceptions whose boundary
+is enforced in `@opengeni/core`; that an active membership in another
+organization is not authority in this one and revoking one membership stops
+access on the very next transaction while leaving the other organization and
+the retained rows intact; and that FORCE RLS still binds a non-superuser
+`SECURITY DEFINER` owner, which is the property every capability seam here
+depends on.
+
 ### F. Activate
 
 Add exact organization+subject+workspace RLS policies and narrowly scoped
