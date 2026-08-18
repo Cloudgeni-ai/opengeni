@@ -521,6 +521,11 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
+      if (migrations.has("0294_session_ownership_classification_and_backfill.sql")) {
+        return includesActivation
+          ? "3bbc2244f4c443d83a3e18d7dd696e9a04bc99cddf1cca0649db119fd96d5728"
+          : "f283998e6d97aac309b9a8bf531dd6eb93c1075fab7979466a61c98179c94ded";
+      }
       if (migrations.has("0287_open_suffix_pending_tool_calls.sql")) {
         return includesActivation
           ? "af2db2108cf92384fbb58a843f6171c78afb47f20c8197f43e080451dfc4218b"
@@ -1020,7 +1025,8 @@ describe("release schema contract", () => {
         (migrations.has("0284_truthful_human_confirmed_review_reason.sql") ? 1 : 0) +
         (migrations.has("0285_organization_tenancy_inventory.sql") ? 1 : 0) +
         (migrations.has("0286_widen_task_note_expiry_ceiling.sql") ? 1 : 0) +
-        (migrations.has("0287_open_suffix_pending_tool_calls.sql") ? 1 : 0),
+        (migrations.has("0287_open_suffix_pending_tool_calls.sql") ? 1 : 0) +
+        (migrations.has("0294_session_ownership_classification_and_backfill.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -1055,7 +1061,9 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0287_open_suffix_pending_tool_calls.sql")
+      migrations.has("0294_session_ownership_classification_and_backfill.sql")
+        ? "0294_session_ownership_classification_and_backfill.sql"
+        : migrations.has("0287_open_suffix_pending_tool_calls.sql")
         ? "0287_open_suffix_pending_tool_calls.sql"
         : migrations.has("0286_widen_task_note_expiry_ceiling.sql")
         ? "0286_widen_task_note_expiry_ceiling.sql"
