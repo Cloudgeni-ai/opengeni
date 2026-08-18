@@ -261,7 +261,22 @@ subject and causal human from the standard context GUCs, writes a
 `variable_set.materialized` audit event with actor kind `session_attach` and
 the live session authority tuple from the exact locked session row, and an
 old image that sets no subject records the explicit `service:session`
-sentinel rather than nothing. `retain`
+sentinel rather than nothing.
+
+Signed object-storage URLs are the remaining deliberately-bounded bearer
+surface: provider-native signing has no revocation, so revocation prevents
+NEW mints immediately (every mint is route-time authorized against live
+grants), every principal-facing issuance - file download/upload mints, video
+playback sources, document originals, the files-MCP download tool, and the
+workspace-capture manifest/file serves - records a metadata-only
+`file.signed_url.issued`/`file.signed_upload.issued` audit fact (subject,
+target, expiry; never the URL or object key) awaited before the URL leaves
+the platform, and an already-issued URL stays valid only for its short
+default TTL (download 300 s, upload 900 s - pinned in the storage tests).
+Worker- and provider-internal signed URLs (sandbox materialization,
+server-side capture-manifest loads, browser-session provider plumbing) stay
+on their attempt/session-scoped authority and are not double-recorded.
+Retention policy: `retain`
 has no deletion deadline;
 `delete_after` accepts the initial 30–90 day policy window and stamps a bounded
 future deadline. Destructive expiry is an explicit operator lifecycle, not an

@@ -17,6 +17,7 @@ import {
   WorkspaceMemorySearchResponse,
 } from "@opengeni/contracts";
 import {
+  recordAuditEvent,
   completeFileUpload,
   createFileUpload,
   createKnowledgeMemory,
@@ -215,6 +216,19 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         throw new HTTPException(409, { message: `file is ${file.status}` });
       }
       const signed = await objectStorage.createGetUrl({ key: file.objectKey });
+      await recordAuditEvent(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        action: "file.signed_url.issued",
+        targetType: "workspace_document",
+        targetId: c.req.param("documentId"),
+        metadata: {
+          fileId: file.id,
+          kind: "document_original",
+          expiresAt: signed.expiresAt.toISOString(),
+        },
+      });
       return c.json(
         FileDownloadUrlResponse.parse({
           url: signed.url,

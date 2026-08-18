@@ -23,6 +23,7 @@ import {
   createFileUpload,
   getFileUpload,
   getGeneratedImageArtifact,
+  recordAuditEvent,
   getGeneratedVideoArtifact,
   getFilesForSubject,
   getRetainedFileArtifact,
@@ -99,6 +100,23 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       bucket: objectStorage.bucket,
       objectKey,
       expiresAt: signed.expiresAt,
+    });
+    // Every principal-facing signed URL issuance is a
+    // metadata-only audit fact. Awaited before the URL leaves the platform:
+    // no recorded fact, no bearer capability. Never the URL or object key.
+    await recordAuditEvent(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      action: "file.signed_upload.issued",
+      targetType: "workspace_file",
+      targetId: fileId,
+      metadata: {
+        fileId,
+        contentType: payload.contentType,
+        sizeBytes: payload.sizeBytes,
+        expiresAt: signed.expiresAt.toISOString(),
+      },
     });
     return c.json(
       CreateFileUploadResponse.parse({
@@ -324,7 +342,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/artifacts/:artifactId/playback-source", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
     if (!objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
@@ -341,6 +359,19 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(410, { message: "generated video bytes are unavailable" });
     }
     const signed = await objectStorage.createGetUrl({ key: file.objectKey });
+    await recordAuditEvent(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      action: "file.signed_url.issued",
+      targetType: "retained_artifact",
+      targetId: artifactId,
+      metadata: {
+        artifactId,
+        kind: "video_playback",
+        expiresAt: signed.expiresAt.toISOString(),
+      },
+    });
     return c.json(
       VideoArtifactPlaybackSource.parse({
         schemaVersion: 1,
@@ -417,6 +448,19 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(409, { message: `file is ${file.status}` });
     }
     const signed = await objectStorage.createGetUrl({ key: file.objectKey });
+    await recordAuditEvent(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      action: "file.signed_url.issued",
+      targetType: "workspace_file",
+      targetId: file.id,
+      metadata: {
+        fileId: file.id,
+        kind: "download",
+        expiresAt: signed.expiresAt.toISOString(),
+      },
+    });
     return c.json(
       FileDownloadUrlResponse.parse({
         url: signed.url,

@@ -77,6 +77,7 @@ import {
 } from "@opengeni/contracts";
 import { streamTokenDegraded } from "@opengeni/config";
 import {
+  recordAuditEvent,
   acceptSessionApprovalDecision,
   acceptSessionHumanInputResponse,
   clearSessionGoal,
@@ -3303,7 +3304,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // the live/wake path — the feature degrades to today's behavior, never worse.
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/workspace/capture", async (c) => {
     const workspaceId = c.req.param("workspaceId") ?? "";
-    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
     const sessionId = c.req.param("sessionId") ?? "";
     const lookup = await sessionLatestWorkspaceCapture(db, workspaceId, sessionId);
     if (!lookup.sessionExists) {
@@ -3314,13 +3315,27 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       return c.json({ available: false });
     }
     return c.json(
-      await serveWorkspaceCapture(lookup.capture, objectStorage, workspaceCaptureManifestCache),
+      await serveWorkspaceCapture(
+        lookup.capture,
+        objectStorage,
+        workspaceCaptureManifestCache,
+        (fact) =>
+          recordAuditEvent(db, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            action: "file.signed_url.issued",
+            targetType: "workspace_capture",
+            targetId: sessionId,
+            metadata: { sessionId, ...fact },
+          }),
+      ),
     );
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/workspace/capture/file", async (c) => {
     const workspaceId = c.req.param("workspaceId") ?? "";
-    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
     const sessionId = c.req.param("sessionId") ?? "";
     const path = c.req.query("path");
     if (!path) {
@@ -3349,7 +3364,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     } else {
       row = await latestWorkspaceCapture(db, workspaceId, sessionId);
     }
-    return c.json(await serveWorkspaceCaptureFile(row, path, objectStorage));
+    return c.json(
+      await serveWorkspaceCaptureFile(row, path, objectStorage, (fact) =>
+        recordAuditEvent(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          action: "file.signed_url.issued",
+          targetType: "workspace_capture",
+          targetId: sessionId,
+          // The captured PATH is workspace-file identity (like a filename),
+          // not content; the signed URL and object key are never recorded.
+          metadata: { sessionId, path, ...fact },
+        }),
+      ),
+    );
   });
 
   // ── Terminal: synchronous exec ────────────────────────────────────────────

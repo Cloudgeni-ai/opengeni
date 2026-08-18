@@ -215,10 +215,20 @@ async function loadManifest(
  * manifest blob has been GC'd (all graceful cold-fallback states — never errors).
  * Inline manifest for ≤2MB, signed URL above.
  */
+/** Awaited before a signed capture URL is returned to the caller: the route
+ *  records the metadata-only issuance audit fact. A throwing recorder fails
+ *  the serve closed - no recorded fact, no bearer capability. */
+export type CaptureSignedUrlIssuanceRecorder = (fact: {
+  kind: "capture_manifest" | "capture_file";
+  revision: number;
+  expiresAt: string;
+}) => Promise<void>;
+
 export async function serveWorkspaceCapture(
   row: WorkspaceCaptureRow | null,
   storage: CaptureStoragePort,
   cache?: WorkspaceCaptureManifestCache,
+  onSignedUrlIssued?: CaptureSignedUrlIssuanceRecorder,
 ): Promise<GetWorkspaceCaptureResponse> {
   if (!row) {
     return { available: false };
@@ -274,6 +284,11 @@ export async function serveWorkspaceCapture(
     key: row.manifestKey,
     expiresInSeconds: CAPTURE_SIGNED_URL_TTL_SECONDS,
   });
+  await onSignedUrlIssued?.({
+    kind: "capture_manifest",
+    revision: row.revision,
+    expiresAt: signed.expiresAt.toISOString(),
+  });
   return GetWorkspaceCaptureResponse.parse({
     ...meta,
     manifest: null,
@@ -293,6 +308,7 @@ export async function serveWorkspaceCaptureFile(
   row: WorkspaceCaptureRow | null,
   path: string,
   storage: CaptureStoragePort,
+  onSignedUrlIssued?: CaptureSignedUrlIssuanceRecorder,
 ): Promise<GetWorkspaceCaptureFileResponse> {
   const loaded = row ? await loadManifest(row, storage) : null;
   if (!loaded) {
@@ -346,6 +362,11 @@ export async function serveWorkspaceCaptureFile(
   const signed = await storage.createGetUrl({
     key: file.contentRef,
     expiresInSeconds: CAPTURE_SIGNED_URL_TTL_SECONDS,
+  });
+  await onSignedUrlIssued?.({
+    kind: "capture_file",
+    revision: row!.revision,
+    expiresAt: signed.expiresAt.toISOString(),
   });
   return GetWorkspaceCaptureFileResponse.parse({
     ...base,
