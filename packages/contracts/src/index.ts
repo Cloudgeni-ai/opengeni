@@ -12296,7 +12296,10 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
     // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
     // today's behavior (a context-dependent default resolved server-side: from
-    // inside a session → "shared" with the creator's box, top-level → "new").
+    // inside a session → "shared" with the creator's box, top-level → "new"),
+    // except a named targetSandboxId is always an own-box create ("new") because
+    // a machine target is a different compute home. Explicit "shared"/{groupId}
+    // plus a machine target is a 422.
     //   - "shared":  join the CREATOR's box. Requires a parent session (inferred
     //                from the worker-signed sessionId claim, never caller-supplied);
     //                top-level "shared" is a 422.

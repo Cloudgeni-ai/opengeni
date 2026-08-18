@@ -1757,7 +1757,12 @@ export async function createSessionForRequestWithOutcome(
   // spawned FROM INSIDE a session (parentSessionId present ⇒ a worker-signed
   // sessionId claim) defaults to "shared" (join the creator's box); a top-level
   // create (no parent) defaults to "new" (a private singleton box). Explicit
-  // values always win.
+  // values always win — except a named `targetSandboxId` is a different compute
+  // home, not a share of the creator's box. Omission plus a machine target
+  // therefore defaults to "new" so the honest-label selfhosted home can fire
+  // (a backend:"none" parent has no box to share; inheriting "none" then 422s
+  // at seed). Explicit shared/{groupId} plus a machine target is contradictory
+  // and 422s rather than silently dropping the target.
   //
   // null sandboxGroupId ⇒ createSession seeds the new row's own id (singleton,
   // today's 1:1 behavior). A shared/{groupId} spawn inherits the box's backend
@@ -1766,7 +1771,18 @@ export async function createSessionForRequestWithOutcome(
   // getAnySessionInGroup are RLS-workspace-scoped, so a foreign parent/group
   // returns null → 404; the group uuid is NOT an access boundary, the workspace
   // filter is (stress (e)).
-  const sandboxChoice = payload.sandbox ?? (parentSessionId ? "shared" : "new");
+  if (
+    payload.targetSandboxId &&
+    payload.sandbox !== undefined &&
+    payload.sandbox !== "new"
+  ) {
+    throw new HTTPException(422, {
+      message:
+        "targetSandboxId requires an own sandbox (omit sandbox or pass 'new'); it cannot join a shared group",
+    });
+  }
+  const sandboxChoice =
+    payload.sandbox ?? (payload.targetSandboxId ? "new" : parentSessionId ? "shared" : "new");
   let sandboxGroupId: string | null = null;
   let inheritedBackend: Session["sandboxBackend"] | undefined;
   // ENV-AWARE GROUPING: under the CURRENT mechanics the workspace VariableSet is
@@ -1904,14 +1920,16 @@ export async function createSessionForRequestWithOutcome(
         "workingDir requires targetSandboxId (it is the targeted machine's working directory)",
     });
   }
-  // Honest-label (Stage-D closure): a top-level session TARGETED at a Connected
+  // Honest-label (Stage-D closure): a session TARGETED at a Connected
   // Machine (a selfhosted sandbox) runs machine-primary every turn, so its HOME
   // sandbox_backend must read "selfhosted" — not the deployment cloud default —
   // so the session row + first turn honestly reflect where the agent runs (the
   // Machines dashboard, the turn's warm-metering, and the file-download plane all
-  // key off this). GUARDS: (1) only at a TOP-LEVEL create (inheritedBackend
-  // undefined) — a shared/{groupId} spawn is literally the creator's box and must
-  // NOT be relabeled; (2) only when the target's kind is actually "selfhosted" —
+  // key off this). GUARDS: (1) only when not inheriting a shared box
+  // (inheritedBackend undefined) — a shared/{groupId} spawn is literally the
+  // creator's box and must NOT be relabeled; a named targetSandboxId already
+  // forced an own-box default above, so child machine targets take this path
+  // too; (2) only when the target's kind is actually "selfhosted" —
   // targetSandboxId also accepts a first-class MODAL sandbox id (resolveTarget),
   // which must never be mislabeled. A not-found / non-selfhosted / modal target
   // falls through to the default; the seed swap in createAndStartSession still
@@ -1991,14 +2009,13 @@ export async function createSessionForRequestWithOutcome(
       turnExecutionPolicy,
       // A shared spawn inherits the box's backend; a caller-supplied
       // sandboxBackend on a shared spawn is ignored (it is the same box). A
-      // machine-targeted top-level create labels the home "selfhosted"
-      // (machineHomeBackend), overriding the caller/deployment default so the row
-      // matches where the session actually runs.
+      // machine-targeted create (top-level or own-box child) labels the home
+      // "selfhosted" (machineHomeBackend), overriding the caller/deployment
+      // default so the row matches where the session actually runs.
       sandboxBackend:
         inheritedBackend ?? machineHomeBackend ?? payload.sandboxBackend ?? settings.sandboxBackend,
-      // Mirror the backend relabel on the OS axis: only a machine-targeted
-      // top-level create carries a derived OS; everything else is omitted and the
-      // "linux" default holds (shared spawns keep the parent-box behavior).
+      // Mirror the backend relabel on the OS axis: a machine-targeted own-box
+      // create carries a derived OS; shared spawns keep the parent-box behavior.
       ...(machineHomeOs ? { sandboxOs: machineHomeOs } : {}),
       sandboxGroupId,
       metadata: payload.metadata,
