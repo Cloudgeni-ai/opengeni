@@ -181,6 +181,23 @@ export function IntegrationStateIndicator({
 }
 
 /**
+ * The row body's accessible name. `aria-label` replaces the button's contents,
+ * so the description line inside it is never announced: a caller with a fact
+ * that must be heard (a Bundle's kind and provenance) supplies it as
+ * `accessibleDetail` and it is spoken between the name and the state.
+ */
+function rowAccessibleName(model: {
+  name: string;
+  chip: IntegrationChip;
+  accessibleDetail?: string;
+}): string {
+  const detail = model.accessibleDetail?.trim();
+  return detail
+    ? `${model.name}. ${detail}. ${model.chip.label}`
+    : `${model.name}. ${model.chip.label}`;
+}
+
+/**
  * One identical row per integration: mark, name, one-line description, a
  * compact connection-state indicator, chevron. Two real sibling buttons, never
  * nested: the large body opens detail, the small trailing indicator is the
@@ -192,7 +209,10 @@ export function IntegrationRow({
   onQuickConnect,
   busy = false,
 }: {
-  model: Pick<IntegrationViewModel, "id" | "name" | "description" | "mark" | "chip">;
+  model: Pick<
+    IntegrationViewModel,
+    "id" | "name" | "description" | "mark" | "chip" | "accessibleDetail"
+  >;
   onOpen: () => void;
   /** Only passed when a fast one-click/one-dialog connect action exists for the current state. */
   onQuickConnect?: () => void;
@@ -210,7 +230,7 @@ export function IntegrationRow({
       <button
         type="button"
         onClick={onOpen}
-        aria-label={`${model.name}. ${model.chip.label}`}
+        aria-label={rowAccessibleName(model)}
         className={cn(
           "flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left",
           "hover:bg-accent",
